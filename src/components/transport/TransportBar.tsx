@@ -20,6 +20,7 @@ export function TransportBar() {
         <div className="flex items-center gap-1">
           <Button
             variant="ghost"
+            disabled
             className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label="Undo"
           >
@@ -28,6 +29,7 @@ export function TransportBar() {
           </Button>
           <Button
             variant="ghost"
+            disabled
             className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label="Redo"
           >
@@ -42,6 +44,7 @@ export function TransportBar() {
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
+            disabled
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
             aria-label="Mark In Point"
           >
@@ -54,18 +57,22 @@ export function TransportBar() {
 
           <Button
             variant="outline"
+            disabled
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
-            aria-label="Mark Out Point"
+            aria-label="Mark Out Point (Exclusive)"
           >
             <ArrowLeftToLine className="size-4 text-muted-foreground" />
             <div className="flex flex-col items-start leading-tight">
-              <span className="text-xs font-semibold">Out</span>
-              <span className="text-[10px] text-muted-foreground">Mark Out</span>
+              <span className="text-xs font-semibold">Out (Exclusive)</span>
+              <span className="text-[10px] text-muted-foreground">
+                Mark Out (Exclusive)
+              </span>
             </div>
           </Button>
 
           <Button
             variant="outline"
+            disabled
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
             aria-label="Split Segment"
           >
@@ -85,6 +92,7 @@ export function TransportBar() {
             <TooltipTrigger asChild>
               <Button
                 size="icon"
+                disabled
                 className="size-11 rounded-lg bg-primary text-primary-foreground shadow-xs hover:bg-primary-hover active:bg-primary-active"
                 aria-label="Play"
               >
@@ -99,6 +107,7 @@ export function TransportBar() {
               <Button
                 variant="ghost"
                 size="icon"
+                disabled
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label="Previous Frame"
               >
@@ -113,6 +122,7 @@ export function TransportBar() {
               <Button
                 variant="ghost"
                 size="icon"
+                disabled
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label="Next Frame"
               >

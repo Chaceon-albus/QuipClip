@@ -37,22 +37,23 @@ export function TitleBar() {
 
   return (
     <header
-      data-tauri-drag-region
+      data-tauri-drag-region="deep"
       className={cn(
-        "flex h-10 shrink-0 items-center justify-between border-b border-border bg-sidebar text-xs select-none",
+        "relative flex h-10 shrink-0 items-center justify-between border-b border-border bg-sidebar text-xs select-none",
         isMac ? "pr-3 pl-[78px]" : "pr-0 pl-3",
       )}
     >
       {/* Left: App icon, title, separator, File menu */}
-      <div data-tauri-drag-region className="flex items-center gap-2.5">
-        <img src={appIcon} alt="QuipClip" className="size-[22px] shrink-0" />
+      <div className="flex items-center gap-2.5">
+        <img src={appIcon} alt="" className="size-[22px] shrink-0" />
         <span className="text-sm font-medium text-sidebar-foreground">QuipClip</span>
         <Separator orientation="vertical" className="h-4 bg-sidebar-border" />
         <DropdownMenu>
-          <DropdownMenuTrigger asChild>
+          <DropdownMenuTrigger asChild disabled>
             <Button
               variant="ghost"
               size="xs"
+              disabled
               className="h-6 gap-1 px-1.5 text-xs text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
             >
               File
@@ -70,17 +71,14 @@ export function TitleBar() {
       </div>
 
       {/* Center: Project title and save state */}
-      <div
-        data-tauri-drag-region
-        className="flex items-center gap-1.5 text-xs text-muted-foreground"
-      >
+      <div className="absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5 text-xs text-muted-foreground">
         <span>Untitled Project</span>
         <span>·</span>
         <span>Saved</span>
       </div>
 
       {/* Right: Window Controls for non-macOS platforms */}
-      <div data-tauri-drag-region className="flex items-center">
+      <div className="flex items-center">
         {!isMac && (
           <div className="flex h-10 items-center">
             <button
@@ -94,7 +92,7 @@ export function TitleBar() {
             <button
               type="button"
               onClick={handleMaximize}
-              aria-label="Maximize"
+              aria-label="Toggle maximize/restore"
               className="inline-flex h-10 w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               <Square className="size-3" />

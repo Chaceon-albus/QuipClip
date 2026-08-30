@@ -407,4 +407,22 @@
   html {
     @apply font-sans;
   }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 }

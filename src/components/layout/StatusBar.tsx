@@ -18,6 +18,7 @@ export function StatusBar() {
             <Button
               variant="ghost"
               size="icon-xs"
+              disabled
               className="size-5 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
               aria-label="Settings"
             >

@@ -28,10 +28,11 @@ export function PreviewPane() {
 
         <div className="flex items-center gap-1.5">
           <DropdownMenu>
-            <DropdownMenuTrigger asChild>
+            <DropdownMenuTrigger asChild disabled>
               <Button
                 variant="ghost"
                 size="xs"
+                disabled
                 className="h-6 gap-1 px-2 text-xs text-preview-muted hover:bg-preview-surface hover:text-preview-foreground"
               >
                 Fit
@@ -51,6 +52,7 @@ export function PreviewPane() {
               <Button
                 variant="ghost"
                 size="icon-xs"
+                disabled
                 className="size-6 text-preview-muted hover:bg-preview-surface hover:text-preview-foreground"
                 aria-label="Toggle Fullscreen"
               >

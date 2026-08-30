@@ -5,10 +5,11 @@ import { Eye, Film, Lock } from "lucide-react";
  */
 const RULER_MARKERS = [
   { time: "00:00:00:00", left: "2%", active: false },
-  { time: "00:00:05:00", left: "20%", active: true },
-  { time: "00:00:10:00", left: "40%", active: false },
-  { time: "00:00:15:00", left: "60%", active: false },
-  { time: "00:00:20:00", left: "80%", active: false },
+  { time: "00:00:05:00", left: "18%", active: true },
+  { time: "00:00:10:00", left: "34%", active: false },
+  { time: "00:00:15:00", left: "50%", active: false },
+  { time: "00:00:20:00", left: "66%", active: false },
+  { time: "00:00:25:00", left: "82%", active: false },
   { time: "00:00:30:00", left: "98%", active: false },
 ];
 
@@ -25,7 +26,7 @@ export function TimelinePanel() {
             {/* Ruler track with time markers and tick marks */}
             <div className="relative flex-1 bg-timeline-ruler">
               {/* Playhead handle at top of ruler */}
-              <div className="pointer-events-none absolute top-0 bottom-0 left-[22%] z-30 flex -translate-x-1/2 flex-col items-center">
+              <div className="pointer-events-none absolute top-0 bottom-0 left-[18%] z-30 flex -translate-x-1/2 flex-col items-center">
                 <div className="h-3.5 w-3 rounded-b-xs bg-timeline-playhead shadow-xs" />
                 <div className="w-0.5 flex-1 bg-timeline-playhead" />
               </div>
@@ -60,15 +61,15 @@ export function TimelinePanel() {
             <div className="sticky left-0 z-20 flex w-24 shrink-0 items-center justify-between border-r border-timeline-divider bg-sidebar px-3">
               <span className="text-xs font-semibold text-sidebar-foreground">V1</span>
               <div className="flex items-center gap-1.5 text-muted-foreground">
-                <Eye className="size-3.5 cursor-pointer hover:text-sidebar-foreground" />
-                <Lock className="size-3.5 cursor-pointer hover:text-sidebar-foreground" />
+                <Eye className="size-3.5" aria-hidden="true" />
+                <Lock className="size-3.5" aria-hidden="true" />
               </div>
             </div>
 
             {/* Track lane */}
             <div className="relative flex flex-1 items-center bg-timeline-track p-2">
               {/* Playhead vertical line continuing across track */}
-              <div className="pointer-events-none absolute top-0 bottom-0 left-[22%] z-30 w-0.5 -translate-x-1/2 bg-timeline-playhead" />
+              <div className="pointer-events-none absolute top-0 bottom-0 left-[18%] z-30 w-0.5 -translate-x-1/2 bg-timeline-playhead" />
 
               {/* Clips container */}
               <div className="relative h-full w-full rounded-md">
@@ -88,7 +89,7 @@ export function TimelinePanel() {
                     <Film className="size-3.5" />
                   </div>
                   <span className="truncate text-xs font-medium">
-                    pavilion_temple.mp4
+                    lake_morning_fog.mp4
                   </span>
                 </div>
 
@@ -98,7 +99,7 @@ export function TimelinePanel() {
                     <Film className="size-3.5" />
                   </div>
                   <span className="truncate text-xs font-medium">
-                    ink_landscape.mp4
+                    lake_morning_fog.mp4
                   </span>
                 </div>
               </div>
