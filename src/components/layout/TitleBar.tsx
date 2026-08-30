@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
+import { openMediaFileDialog, useMediaStore } from "@/features/media";
 import { cn } from "@/lib/utils";
 
 /**
@@ -24,6 +25,13 @@ function isMacOS(): boolean {
 export function TitleBar() {
   const { t } = useTranslation();
   const isMac = isMacOS();
+  const media = useMediaStore((state) => state.media);
+
+  const handleOpenMedia = () => {
+    void openMediaFileDialog({
+      filterName: t("dialog.videoFilter"),
+    });
+  };
 
   const handleMinimize = () => {
     void getCurrentWindow().minimize();
@@ -53,11 +61,10 @@ export function TitleBar() {
         </span>
         <Separator orientation="vertical" className="h-4 bg-sidebar-border" />
         <DropdownMenu>
-          <DropdownMenuTrigger asChild disabled>
+          <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
               size="xs"
-              disabled
               className="h-6 gap-1 px-1.5 text-xs text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
             >
               {t("titleBar.menu.file")}
@@ -65,8 +72,16 @@ export function TitleBar() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
-            <DropdownMenuItem>{t("titleBar.menu.newProject")}</DropdownMenuItem>
-            <DropdownMenuItem>{t("titleBar.menu.openProject")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={handleOpenMedia}>
+              {t("titleBar.menu.openMedia")}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem disabled>
+              {t("titleBar.menu.newProject")}
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled>
+              {t("titleBar.menu.openProject")}
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem disabled>{t("titleBar.menu.save")}</DropdownMenuItem>
             <DropdownMenuItem disabled>{t("titleBar.menu.export")}</DropdownMenuItem>
@@ -74,11 +89,15 @@ export function TitleBar() {
         </DropdownMenu>
       </div>
 
-      {/* Center: Project title and save state */}
+      {/* Center: Real filename when loaded, or Untitled */}
       <div className="absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5 text-xs text-muted-foreground">
-        <span>{t("titleBar.project.untitled")}</span>
-        <span>·</span>
-        <span>{t("titleBar.project.saved")}</span>
+        {media ? (
+          <span className="max-w-[320px] truncate font-medium text-sidebar-foreground">
+            {media.fileName}
+          </span>
+        ) : (
+          <span>{t("titleBar.project.untitled")}</span>
+        )}
       </div>
 
       {/* Right: Window Controls for non-macOS platforms */}

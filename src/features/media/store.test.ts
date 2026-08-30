@@ -403,6 +403,66 @@ describe("Media Store", () => {
     });
   });
 
+  describe("Report Error Action", () => {
+    it("reports an error while preserving existing media", () => {
+      const initialMedia = createFakeMediaResult("initial.mp4");
+      const store = createMediaStore(
+        {},
+        {
+          status: "ready",
+          media: initialMedia,
+          error: null,
+        },
+      );
+
+      store.getState().reportError(
+        new ImportMediaError({
+          code: "dialogFailed",
+          detail: "Dialog cancelled abnormally",
+        }),
+      );
+
+      expect(store.getState().status).toBe("error");
+      expect(store.getState().media).toEqual(initialMedia);
+      expect(store.getState().error?.code).toBe("dialogFailed");
+      expect(store.getState().error?.detail).toBe("Dialog cancelled abnormally");
+    });
+
+    it("normalizes unknown errors passed to reportError", () => {
+      const store = createMediaStore();
+
+      store.getState().reportError("Unknown failure");
+
+      expect(store.getState().status).toBe("error");
+      expect(store.getState().media).toBeNull();
+      expect(store.getState().error?.code).toBe("unknown");
+      expect(store.getState().error?.detail).toBe("Unknown failure");
+    });
+
+    it("invalidates in-flight requests so late completions do not overwrite the error state", async () => {
+      const deferred = createDeferred<ImportMediaResult>();
+      const store = createMediaStore({
+        importMedia: () => deferred.promise,
+      });
+
+      const importPromise = store.getState().importPath("/media/test.mp4");
+      expect(store.getState().status).toBe("loading");
+
+      store.getState().reportError(new ImportMediaError({ code: "dialogFailed" }));
+      expect(store.getState().status).toBe("error");
+      expect(store.getState().error?.code).toBe("dialogFailed");
+
+      // Late resolution of earlier in-flight import
+      deferred.resolve(createFakeMediaResult("test.mp4"));
+      const result = await importPromise;
+
+      expect(result).toBeNull();
+      expect(store.getState().status).toBe("error");
+      expect(store.getState().media).toBeNull();
+      expect(store.getState().error?.code).toBe("dialogFailed");
+    });
+  });
+
   describe("Default Store Singleton", () => {
     it("provides a default singleton store instance in idle state", () => {
       const state = mediaStore.getState();
@@ -410,6 +470,7 @@ describe("Media Store", () => {
       expect(state.media).toBeNull();
       expect(state.error).toBeNull();
       expect(typeof state.importPath).toBe("function");
+      expect(typeof state.reportError).toBe("function");
       expect(typeof state.reset).toBe("function");
     });
   });

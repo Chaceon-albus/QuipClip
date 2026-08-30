@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BACKEND_IMPORT_MEDIA_ERROR_CODES,
+  FRONTEND_IMPORT_MEDIA_ERROR_CODES,
   IMPORT_MEDIA_ERROR_CODES,
   ImportMediaError,
   type BackendImportMediaErrorCode,
@@ -65,6 +66,13 @@ describe("Media Validation & Normalization", () => {
     it("recognizes all valid backend error codes", () => {
       for (const code of BACKEND_IMPORT_MEDIA_ERROR_CODES) {
         expect(isBackendImportMediaErrorCode(code)).toBe(true);
+        expect(isImportMediaErrorCode(code)).toBe(true);
+      }
+    });
+
+    it("recognizes all valid frontend error codes", () => {
+      for (const code of FRONTEND_IMPORT_MEDIA_ERROR_CODES) {
+        expect(isBackendImportMediaErrorCode(code)).toBe(false);
         expect(isImportMediaErrorCode(code)).toBe(true);
       }
     });

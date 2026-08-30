@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useMediaStore } from "@/features/media";
 import {
   getLanguagePreference,
   getResolvedLanguage,
@@ -21,6 +22,7 @@ import { createLanguageMenuController } from "./languageMenuController";
 
 export function StatusBar() {
   const { t, i18n } = useTranslation();
+  const media = useMediaStore((state) => state.media);
   const [preference, setPreference] = useState<LanguagePreference>(() =>
     getLanguagePreference(),
   );
@@ -55,13 +57,22 @@ export function StatusBar() {
   const resolvedLanguage = getResolvedLanguage(i18n);
 
   const numberFormatter = useMemo(
-    () => new Intl.NumberFormat(resolvedLanguage),
+    () =>
+      new Intl.NumberFormat(resolvedLanguage, {
+        maximumFractionDigits: 3,
+      }),
     [resolvedLanguage],
   );
 
-  const formattedWidth = numberFormatter.format(1920);
-  const formattedHeight = numberFormatter.format(1080);
-  const formattedFps = numberFormatter.format(25);
+  const width = media ? media.probe.width : 1920;
+  const height = media ? media.probe.height : 1080;
+  const fpsNumber = media
+    ? media.probe.avgFrameRate.n / media.probe.avgFrameRate.d
+    : 25;
+
+  const formattedWidth = numberFormatter.format(width);
+  const formattedHeight = numberFormatter.format(height);
+  const formattedFps = numberFormatter.format(fpsNumber);
 
   return (
     <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-sidebar px-3 text-xs text-muted-foreground select-none">

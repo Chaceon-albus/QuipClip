@@ -1,5 +1,7 @@
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronDown, Maximize2 } from "lucide-react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { AlertCircle, ChevronDown, Loader2, Maximize2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -8,25 +10,264 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useMediaStore } from "@/features/media";
+import {
+  calculateFrameFromCurrentTime,
+  calculateFrameFromMediaTime,
+  createSourceLifecycleGuard,
+  formatDisplayTimecode,
+  formatTotalTimecode,
+  getMediaSourceIdentity,
+} from "./previewFrame";
 
 export function PreviewPane() {
   const { t } = useTranslation();
+  const { status, media, error } = useMediaStore();
+
+  const sourceIdentity = getMediaSourceIdentity(media);
+  const [prevSourceIdentity, setPrevSourceIdentity] = useState(sourceIdentity);
+  const [currentFrame, setCurrentFrame] = useState(0);
+  const [videoError, setVideoError] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [sourceGuard] = useState(() => createSourceLifecycleGuard());
+
+  // Reset local frame and decode error state synchronously when source identity changes
+  if (prevSourceIdentity !== sourceIdentity) {
+    setPrevSourceIdentity(sourceIdentity);
+    setCurrentFrame(0);
+    setVideoError(false);
+  }
+
+  // Synchronously activate / deactivate source identity before browser paint (ADR-003)
+  useLayoutEffect(() => {
+    sourceGuard.activate(sourceIdentity);
+    return () => {
+      sourceGuard.deactivate(sourceIdentity);
+    };
+  }, [sourceIdentity, sourceGuard]);
+
+  // Register requestVideoFrameCallback lifecycle loop (ADR-003)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !media || videoError) {
+      return;
+    }
+
+    const expectedSourceId = sourceIdentity;
+    let cancelled = false;
+    let handle: number | null = null;
+
+    const hasRvfc =
+      "requestVideoFrameCallback" in video &&
+      typeof (
+        video as HTMLVideoElement & {
+          requestVideoFrameCallback?: (
+            callback: (
+              now: DOMHighResTimeStamp,
+              metadata: { mediaTime: number },
+            ) => void,
+          ) => number;
+          cancelVideoFrameCallback?: (handle: number) => void;
+        }
+      ).requestVideoFrameCallback === "function";
+
+    if (hasRvfc) {
+      const onFrame = (_now: DOMHighResTimeStamp, metadata: { mediaTime: number }) => {
+        // Guard against late callbacks from unmounted or replaced sources
+        if (cancelled || !sourceGuard.isActive(expectedSourceId)) {
+          return;
+        }
+
+        const frame = calculateFrameFromMediaTime(
+          metadata.mediaTime,
+          media.probe.startTime,
+          media.probe.avgFrameRate,
+          media.probe.frameCount,
+        );
+        setCurrentFrame(frame);
+
+        // Re-register the one-shot callback while the video remains active
+        const videoElement = video as HTMLVideoElement & {
+          requestVideoFrameCallback: (
+            callback: (
+              now: DOMHighResTimeStamp,
+              metadata: { mediaTime: number },
+            ) => void,
+          ) => number;
+        };
+        handle = videoElement.requestVideoFrameCallback(onFrame);
+      };
+
+      const videoElement = video as HTMLVideoElement & {
+        requestVideoFrameCallback: (
+          callback: (now: DOMHighResTimeStamp, metadata: { mediaTime: number }) => void,
+        ) => number;
+      };
+      handle = videoElement.requestVideoFrameCallback(onFrame);
+    }
+
+    return () => {
+      cancelled = true;
+      if (handle !== null) {
+        const videoElement = video as HTMLVideoElement & {
+          cancelVideoFrameCallback?: (handle: number) => void;
+        };
+        if (typeof videoElement.cancelVideoFrameCallback === "function") {
+          videoElement.cancelVideoFrameCallback(handle);
+        }
+      }
+    };
+  }, [sourceIdentity, media, videoError, sourceGuard]);
+
+  const supportsRvfc =
+    typeof HTMLVideoElement !== "undefined" &&
+    "requestVideoFrameCallback" in HTMLVideoElement.prototype;
+
+  // Fallback handler used strictly when requestVideoFrameCallback is unsupported
+  const handleTimeUpdateFallback = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    if (!sourceGuard.isActive(sourceIdentity) || !media) {
+      return;
+    }
+    if (!supportsRvfc) {
+      const frame = calculateFrameFromCurrentTime(
+        e.currentTarget.currentTime,
+        media.probe.avgFrameRate,
+        media.probe.frameCount,
+      );
+      setCurrentFrame(frame);
+    }
+  };
+
+  const handleVideoError = () => {
+    if (!sourceGuard.isActive(sourceIdentity)) {
+      return;
+    }
+    setVideoError(true);
+  };
+
+  // Compute timecodes: total is exclusive frameCount, display is clamped [0, frameCount - 1]
+  const totalTimecode = media
+    ? formatTotalTimecode(media.probe.frameCount, media.probe.avgFrameRate)
+    : "00:00:00:00";
+
+  const currentTimecode = media
+    ? formatDisplayTimecode(currentFrame, media.probe.avgFrameRate)
+    : "00:00:00:00";
 
   return (
     <section className="flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground select-none">
       {/* 16:9 Video Canvas Surface */}
       <div className="relative flex min-h-0 flex-1 items-center justify-center">
-        <div className="relative flex aspect-video h-full max-h-full w-auto max-w-full items-center justify-center rounded-lg border border-preview-border bg-preview-surface shadow-xs">
-          <span className="text-xs text-preview-muted">{t("preview.noMedia")}</span>
+        <div className="relative flex aspect-video h-full max-h-full w-auto max-w-full items-center justify-center overflow-hidden rounded-lg border border-preview-border bg-preview-surface shadow-xs">
+          {media ? (
+            <>
+              {/* Loaded Video Surface: Preserved during replacements or error states */}
+              {videoError ? (
+                <div
+                  className="flex max-w-md flex-col items-center justify-center gap-2 p-4 text-center"
+                  aria-live="polite"
+                >
+                  <AlertCircle className="size-6 shrink-0 text-amber-500" />
+                  <p className="text-xs font-medium text-amber-400">
+                    {t("preview.decodeError")}
+                  </p>
+                </div>
+              ) : (
+                <video
+                  ref={videoRef}
+                  key={sourceIdentity}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  src={convertFileSrc(media.path)}
+                  aria-label={t("preview.videoPlayerLabel", {
+                    fileName: media.fileName,
+                  })}
+                  className="h-full w-full object-contain"
+                  onTimeUpdate={handleTimeUpdateFallback}
+                  onSeeked={handleTimeUpdateFallback}
+                  onLoadedMetadata={handleTimeUpdateFallback}
+                  onError={handleVideoError}
+                />
+              )}
+
+              {/* Restrained Overlay when replacement media is loading */}
+              {status === "loading" && (
+                <div
+                  className="absolute top-3 left-3 z-10 flex items-center gap-2 rounded-md border border-border/80 bg-background/90 px-2.5 py-1 text-xs text-foreground shadow-md backdrop-blur-xs"
+                  aria-live="polite"
+                >
+                  <Loader2 className="size-3.5 animate-spin text-primary" />
+                  <span>{t("preview.loading")}</span>
+                </div>
+              )}
+
+              {/* Restrained Overlay when a replacement or dialog error occurs */}
+              {status === "error" && error && (
+                <div
+                  className="absolute top-3 right-3 left-3 z-10 flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/90 px-3 py-1.5 text-xs text-destructive-foreground shadow-md backdrop-blur-xs"
+                  aria-live="polite"
+                >
+                  <div className="flex items-center gap-2 truncate">
+                    <AlertCircle className="size-4 shrink-0" />
+                    <span className="truncate font-medium">
+                      {t(`mediaError.${error.code}`, {
+                        defaultValue: t("mediaError.unknown"),
+                      })}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            /* Full Empty / Loading / Error State when no media is loaded */
+            <>
+              {status === "loading" && (
+                <div
+                  className="flex flex-col items-center justify-center gap-2 text-xs text-preview-muted"
+                  aria-live="polite"
+                >
+                  <Loader2 className="size-6 animate-spin text-primary" />
+                  <span>{t("preview.loading")}</span>
+                </div>
+              )}
+
+              {status === "error" && error && (
+                <div
+                  className="flex max-w-md flex-col items-center justify-center gap-2 p-4 text-center"
+                  aria-live="polite"
+                >
+                  <AlertCircle className="size-6 shrink-0 text-destructive" />
+                  <p className="text-xs font-medium text-destructive-foreground">
+                    {t(`mediaError.${error.code}`, {
+                      defaultValue: t("mediaError.unknown"),
+                    })}
+                  </p>
+                  {error.detail && (
+                    <p className="max-h-24 w-full overflow-y-auto rounded border border-border bg-background/60 p-2 text-left font-mono text-[11px] break-all text-muted-foreground select-text">
+                      {error.detail}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {status === "idle" && (
+                <span className="text-xs text-preview-muted">
+                  {t("preview.noMedia")}
+                </span>
+              )}
+            </>
+          )}
         </div>
       </div>
 
       {/* Preview Bottom Row: Timecode and View Controls */}
       <div className="flex shrink-0 items-center justify-between px-1 pt-2">
         <div className="flex items-center gap-1.5 font-mono text-xs">
-          <span className="font-medium text-primary">00:00:00:00</span>
+          <span className="font-medium text-primary">{currentTimecode}</span>
           <span className="text-preview-muted">/</span>
-          <span className="text-preview-muted">00:00:00:00</span>
+          <span className="text-preview-muted">{totalTimecode}</span>
         </div>
 
         <div className="flex items-center gap-1.5">

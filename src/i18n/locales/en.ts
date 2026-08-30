@@ -16,6 +16,7 @@ export const en = {
   titleBar: {
     menu: {
       file: "File",
+      openMedia: "Open Media...",
       newProject: "New Project",
       openProject: "Open Project...",
       save: "Save",
@@ -27,8 +28,14 @@ export const en = {
       edited: "Edited",
     },
   },
+  dialog: {
+    videoFilter: "Video Files",
+  },
   preview: {
     noMedia: "No media loaded",
+    loading: "Loading media...",
+    videoPlayerLabel: "Video preview for {{fileName}}",
+    decodeError: "Native playback failed. A proxy is required to preview this format.",
     zoom: {
       fit: "Fit",
       zoom50: "50%",
@@ -60,12 +67,26 @@ export const en = {
     },
   },
   timeline: {
-    track: {
-      videoTrack: "V1",
-      toggleVisibility: "Toggle Track Visibility",
-      toggleLock: "Toggle Track Lock",
-    },
+    emptyPrompt: "Open a video file to view the timeline",
+    sourceLane: "Source Media",
     playhead: "Playhead",
+  },
+  mediaError: {
+    invalidPath: "The selected file path is invalid.",
+    pathNotFound: "The selected file was not found.",
+    pathNotFile: "The selected path is not a regular file.",
+    pathNotUnicode: "The file path contains invalid Unicode characters.",
+    metadataFailed: "Failed to read file metadata.",
+    unsafeMetadata: "The file metadata exceeds safe limits.",
+    appDataUnavailable: "The application data directory is unavailable.",
+    ffmpegPairMissing: "Required FFmpeg or FFprobe executable was not found.",
+    ffprobeSpawnFailed: "Failed to start the ffprobe process.",
+    ffprobeProcessFailed: "ffprobe failed to inspect the media file.",
+    ffprobeParseFailed: "Failed to parse media probe output.",
+    assetScopeDenied: "Access to the media file was denied by the asset protocol.",
+    commandExecutionFailed: "The media import command failed to execute.",
+    dialogFailed: "Failed to open the file selection dialog.",
+    unknown: "An unknown error occurred while importing media.",
   },
   statusBar: {
     projectResolution: "Project Resolution: {{width}} × {{height}}",

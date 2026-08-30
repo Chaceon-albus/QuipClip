@@ -118,11 +118,9 @@ export function normalizeImportMediaError(error: unknown): ImportMediaError {
   if (typeof error === "object" && error !== null) {
     const candidate = error as Record<string, unknown>;
 
-    const code: ImportMediaErrorCode = isBackendImportMediaErrorCode(candidate.code)
+    const code: ImportMediaErrorCode = isImportMediaErrorCode(candidate.code)
       ? candidate.code
-      : candidate.code === "unknown"
-        ? "unknown"
-        : "unknown";
+      : "unknown";
 
     const detail = typeof candidate.detail === "string" ? candidate.detail : undefined;
 

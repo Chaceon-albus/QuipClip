@@ -116,8 +116,6 @@ describe("ADR 011 key normalization and plural parity validator", () => {
   });
 
   it("preserves technical identifiers in both catalogs", () => {
-    expect(en.timeline.track.videoTrack).toBe("V1");
-    expect(zhCN.timeline.track.videoTrack).toBe("V1");
     expect(en.app.name).toBe("QuipClip");
     expect(zhCN.app.name).toBe("QuipClip");
   });
@@ -1224,8 +1222,11 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.previousFrame")).toBe("Previous Frame");
     expect(instance.t("transport.action.nextFrame")).toBe("Next Frame");
 
+    // Dialog
+    expect(instance.t("dialog.videoFilter")).toBe("Video Files");
+
     // TimelinePanel
-    expect(instance.t("timeline.track.videoTrack")).toBe("V1");
+    expect(instance.t("timeline.sourceLane")).toBe("Source Media");
 
     // Switch to Simplified Chinese
     await instance.changeLanguage("zh-CN");
@@ -1268,8 +1269,11 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.previousFrame")).toBe("上一帧");
     expect(instance.t("transport.action.nextFrame")).toBe("下一帧");
 
+    // Dialog
+    expect(instance.t("dialog.videoFilter")).toBe("视频文件");
+
     // TimelinePanel
-    expect(instance.t("timeline.track.videoTrack")).toBe("V1");
+    expect(instance.t("timeline.sourceLane")).toBe("源媒体");
   });
 
   it("formats resolution and frame rate numbers with Intl under resolved locale", async () => {

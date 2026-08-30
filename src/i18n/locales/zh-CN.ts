@@ -19,6 +19,7 @@ export const zhCN: TranslationCatalog = {
   titleBar: {
     menu: {
       file: "文件",
+      openMedia: "打开媒体...",
       newProject: "新建项目",
       openProject: "打开项目...",
       save: "保存",
@@ -30,8 +31,14 @@ export const zhCN: TranslationCatalog = {
       edited: "已编辑",
     },
   },
+  dialog: {
+    videoFilter: "视频文件",
+  },
   preview: {
     noMedia: "未加载媒体",
+    loading: "正在加载媒体...",
+    videoPlayerLabel: "视频预览：{{fileName}}",
+    decodeError: "原生播放失败，预览此格式需要生成代理文件。",
     zoom: {
       fit: "适应窗口",
       zoom50: "50%",
@@ -63,12 +70,26 @@ export const zhCN: TranslationCatalog = {
     },
   },
   timeline: {
-    track: {
-      videoTrack: "V1",
-      toggleVisibility: "切换轨道可见性",
-      toggleLock: "切换轨道锁定",
-    },
+    emptyPrompt: "打开视频文件以查看时间轴",
+    sourceLane: "源媒体",
     playhead: "播放头",
+  },
+  mediaError: {
+    invalidPath: "所选文件路径无效。",
+    pathNotFound: "未找到所选文件。",
+    pathNotFile: "所选路径不是常规文件。",
+    pathNotUnicode: "文件路径包含无效的 Unicode 字符。",
+    metadataFailed: "读取文件元数据失败。",
+    unsafeMetadata: "文件元数据超出安全限制。",
+    appDataUnavailable: "应用程序数据目录不可用。",
+    ffmpegPairMissing: "未找到所需的 FFmpeg 或 FFprobe 可执行文件。",
+    ffprobeSpawnFailed: "启动 ffprobe 进程失败。",
+    ffprobeProcessFailed: "ffprobe 检测媒体文件失败。",
+    ffprobeParseFailed: "解析媒体检测输出失败。",
+    assetScopeDenied: "资源协议拒绝访问该媒体文件。",
+    commandExecutionFailed: "媒体导入命令执行失败。",
+    dialogFailed: "打开文件选择对话框失败。",
+    unknown: "导入媒体时发生未知错误。",
   },
   statusBar: {
     projectResolution: "项目分辨率：{{width}} × {{height}}",

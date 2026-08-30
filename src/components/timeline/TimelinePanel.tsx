@@ -1,21 +1,15 @@
 import { useTranslation } from "react-i18next";
-import { Eye, Film, Lock } from "lucide-react";
-
-/**
- * Static time markers along the ruler.
- */
-const RULER_MARKERS = [
-  { time: "00:00:00:00", left: "2%", active: false },
-  { time: "00:00:05:00", left: "18%", active: true },
-  { time: "00:00:10:00", left: "34%", active: false },
-  { time: "00:00:15:00", left: "50%", active: false },
-  { time: "00:00:20:00", left: "66%", active: false },
-  { time: "00:00:25:00", left: "82%", active: false },
-  { time: "00:00:30:00", left: "98%", active: false },
-];
+import { Film } from "lucide-react";
+import { useMediaStore } from "@/features/media";
+import { generateRulerMarkers } from "./timelineMarkers";
 
 export function TimelinePanel() {
   const { t } = useTranslation();
+  const media = useMediaStore((state) => state.media);
+
+  const markers = media
+    ? generateRulerMarkers(media.probe.frameCount, media.probe.avgFrameRate)
+    : [];
 
   return (
     <section className="flex h-[180px] shrink-0 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
@@ -28,29 +22,15 @@ export function TimelinePanel() {
 
             {/* Ruler track with time markers and tick marks */}
             <div className="relative flex-1 bg-timeline-ruler">
-              {/* Playhead handle at top of ruler */}
-              <div className="pointer-events-none absolute top-0 bottom-0 left-[18%] z-30 flex -translate-x-1/2 flex-col items-center">
-                <div className="h-3.5 w-3 rounded-b-xs bg-timeline-playhead shadow-xs" />
-                <div className="w-0.5 flex-1 bg-timeline-playhead" />
-              </div>
-
               {/* Timecode labels and ticks */}
               <div className="relative h-full w-full font-mono text-[10px]">
-                {RULER_MARKERS.map((marker) => (
+                {markers.map((marker) => (
                   <div
-                    key={marker.time}
+                    key={`${marker.frame}-${marker.left}`}
                     className="absolute bottom-0 flex -translate-x-1/2 flex-col items-center gap-0.5"
                     style={{ left: marker.left }}
                   >
-                    <span
-                      className={
-                        marker.active
-                          ? "font-medium text-primary"
-                          : "text-muted-foreground"
-                      }
-                    >
-                      {marker.time}
-                    </span>
+                    <span className="text-muted-foreground">{marker.timecode}</span>
                     <div className="h-1.5 w-px bg-timeline-divider" />
                   </div>
                 ))}
@@ -58,56 +38,35 @@ export function TimelinePanel() {
             </div>
           </div>
 
-          {/* Single Track Row */}
+          {/* Single-Source Overview Track Row */}
           <div className="flex min-h-0 flex-1">
-            {/* Left gutter (~96px wide) */}
-            <div className="sticky left-0 z-20 flex w-24 shrink-0 items-center justify-between border-r border-timeline-divider bg-sidebar px-3">
-              <span className="text-xs font-semibold text-sidebar-foreground">
-                {t("timeline.track.videoTrack")}
+            {/* Left gutter (~96px wide) displaying Source Media lane header */}
+            <div className="sticky left-0 z-20 flex w-24 shrink-0 items-center border-r border-timeline-divider bg-sidebar px-3">
+              <span className="truncate text-xs font-semibold text-sidebar-foreground">
+                {t("timeline.sourceLane")}
               </span>
-              <div className="flex items-center gap-1.5 text-muted-foreground">
-                <Eye className="size-3.5" aria-hidden="true" />
-                <Lock className="size-3.5" aria-hidden="true" />
-              </div>
             </div>
 
             {/* Track lane */}
             <div className="relative flex flex-1 items-center bg-timeline-track p-2">
-              {/* Playhead vertical line continuing across track */}
-              <div className="pointer-events-none absolute top-0 bottom-0 left-[18%] z-30 w-0.5 -translate-x-1/2 bg-timeline-playhead" />
-
-              {/* Clips container */}
-              <div className="relative h-full w-full rounded-md">
-                {/* Segment 1 */}
-                <div className="absolute top-1 bottom-1 left-[2%] flex w-[26%] items-center gap-2 overflow-hidden rounded-lg bg-clip-video p-2 text-clip-foreground shadow-xs">
-                  <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-preview-surface text-preview-muted">
-                    <Film className="size-3.5" />
+              {media ? (
+                /* Single-source overview lane spanning the full source extent */
+                <div className="relative h-full w-full">
+                  <div className="absolute inset-0 flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-clip-video p-2 text-clip-foreground shadow-xs">
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-preview-surface text-preview-muted">
+                      <Film className="size-3.5" />
+                    </div>
+                    <span className="truncate text-xs font-medium">
+                      {media.fileName}
+                    </span>
                   </div>
-                  <span className="truncate text-xs font-medium">
-                    lake_morning_fog.mp4
-                  </span>
                 </div>
-
-                {/* Segment 2 (Selected) */}
-                <div className="absolute top-1 bottom-1 left-[30%] flex w-[32%] items-center gap-2 overflow-hidden rounded-lg border border-clip-video-selected-border bg-clip-video-selected p-2 text-clip-foreground shadow-xs">
-                  <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-preview-surface text-preview-muted">
-                    <Film className="size-3.5" />
-                  </div>
-                  <span className="truncate text-xs font-medium">
-                    lake_morning_fog.mp4
-                  </span>
+              ) : (
+                /* Localized empty prompt */
+                <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+                  <span className="italic">{t("timeline.emptyPrompt")}</span>
                 </div>
-
-                {/* Segment 3 */}
-                <div className="absolute top-1 bottom-1 left-[64%] flex w-[28%] items-center gap-2 overflow-hidden rounded-lg bg-clip-video p-2 text-clip-foreground shadow-xs">
-                  <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-preview-surface text-preview-muted">
-                    <Film className="size-3.5" />
-                  </div>
-                  <span className="truncate text-xs font-medium">
-                    lake_morning_fog.mp4
-                  </span>
-                </div>
-              </div>
+              )}
             </div>
           </div>
         </div>

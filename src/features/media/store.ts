@@ -49,6 +49,17 @@ export function createMediaStore(
       });
     },
 
+    reportError: (error: unknown) => {
+      // Invalidate in-flight requests so late completions do not overwrite the error state
+      latestRequestId++;
+      const normalized = normalizeImportMediaError(error);
+      set((state) => ({
+        status: "error",
+        media: state.media,
+        error: normalized,
+      }));
+    },
+
     importPath: async (path: string): Promise<ImportMediaResult | null> => {
       const requestId = ++latestRequestId;
 
