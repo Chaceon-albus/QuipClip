@@ -27,11 +27,9 @@ export type Rational = {
 };
 
 /**
- * Represents an imported media source file and its identity metadata.
- * Path is stored both as absolute and relative to allow project portability
- * across directories and volumes (ADR 010).
+ * Internal shared metadata properties for media sources across persisted and runtime contexts.
  */
-export type Source = {
+type SourceMetadata = {
   /** Unique identifier for the source within the project. */
   id: string;
   /** Absolute path to the source media file on disk. */
@@ -46,8 +44,43 @@ export type Source = {
   timebase: Rational;
   /** Total number of frames in the source media stream from ffprobe. */
   frameCount: number;
-  /** Optional path to a generated ffmpeg proxy video for formats unsupported by native playback. */
-  proxy?: string;
+};
+
+/**
+ * Persisted media source entry stored in a .qcproj project file (ADR 010).
+ * Holds durable source identity and timing metadata without machine-specific
+ * caches or proxy paths. Explicitly rejects runtime proxy state.
+ */
+export type PersistedSource = SourceMetadata & {
+  /**
+   * Proxies are machine-specific caches and must not be persisted to project files (ADR 010).
+   */
+  proxy?: never;
+};
+
+/**
+ * State of the background ffmpeg proxy generation for a source (ADR 003, ADR 007).
+ */
+export type SourceProxyState = "none" | "building" | "ready" | "failed";
+
+/**
+ * In-memory proxy information associated with a source (ADR 003, ADR 007).
+ * Machine-specific and not persisted to .qcproj project files (ADR 010).
+ */
+export type SourceProxy = {
+  /** Path to the generated proxy video file on disk. */
+  path: string;
+  /** Current state of the proxy media file. */
+  state: SourceProxyState;
+};
+
+/**
+ * In-memory runtime representation of an imported media source (ADR 007).
+ * Extends source metadata with transient runtime state such as proxy status (ADR 003).
+ */
+export type Source = SourceMetadata & {
+  /** Optional runtime proxy information for playback when native decoding is unavailable. */
+  proxy?: SourceProxy;
 };
 
 /**
@@ -84,8 +117,8 @@ export type Project = {
     /** Canvas height in pixels. */
     h: number;
   };
-  /** List of imported media sources. */
-  sources: Source[];
+  /** List of imported media sources in their persisted document shape (ADR 010). */
+  sources: PersistedSource[];
   /** Ordered list of timeline segments; array order determines export sequence. */
   segments: Segment[];
   /** Identifier of the source currently selected and displayed on the source ruler. */
