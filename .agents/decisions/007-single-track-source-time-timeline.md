@@ -29,6 +29,10 @@ Use one timeline whose horizontal axis is **source time**, spanning the whole ac
 source. The segments paint on top of that axis. The timeline zooms and pans, so the user
 can work on a small part of a long file.
 
+This is the **in-memory** model. ADR 010 defines what reaches the disk, and the two differ:
+the runtime model carries the proxy state, and the project file does not, because a proxy is
+a machine-specific cache.
+
 The data model already carries a source key on every segment:
 
 ```ts

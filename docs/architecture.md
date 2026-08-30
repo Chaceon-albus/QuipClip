@@ -144,6 +144,9 @@ version, size, and mtime.
 
 See ADR 007.
 
+The types below are the **in-memory** model. ADR 010 defines the persisted shape, which
+drops the proxy state because a proxy is a machine-specific cache.
+
 ```ts
 type Rational = { n: number; d: number };
 
