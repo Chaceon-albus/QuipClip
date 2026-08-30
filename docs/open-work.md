@@ -1,124 +1,102 @@
 # Open work
 
-State at the end of the initialization session, 2026-08-29.
+The initialization session ended on 2026-08-29. At that checkpoint, the repository
+reported a successful full gate. The gate included `pnpm test` with 35 tests and
+`cargo test` with 27 tests.
 
-The repository builds, runs, and passes its full gate: `pnpm lint`, `pnpm typecheck`,
-`pnpm format:check`, `pnpm test` (35), `pnpm build`, `cargo fmt --check`,
-`cargo clippy --all-targets -- -D warnings`, and `cargo test` (27). The application shell
-opens and renders in both themes.
+Agents resolved the implementation work in sections A through D on 2026-08-29. The
+combined full gate passed. The gate included `pnpm lint`, `pnpm typecheck`,
+`pnpm format:check`, `pnpm test` with 98 tests, and `pnpm build`. It also included
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` with
+44 tests.
 
-Nothing below is a blocker for the checkpoint, because no feature code calls the modules
-that carry the defects. Sections A, B, and C must close before anything is built on top of
-them.
+## A. Rust `Rational` — completed on 2026-08-29
 
-## A. Rust `Rational` — `src-tauri/src/time.rs`
+The Rust writer completed the `Rational` corrections in `src-tauri/src/time.rs`.
 
-An independent review found these and reproduced every one. None is fixed.
+- Private fields and validated deserialization now protect every `Rational` invariant.
+- The type has a decimal-string constructor for ffprobe duration values.
+- Each fps operation rejects a non-positive frame rate.
+- Frame counts cannot be negative.
+- The formatting API uses the nine-decimal ffmpeg precision constant.
+- The timecode parser accepts only the format that the formatter emits.
+- The updated documentation matches the implementation.
+- New tests cover deserialization, ordering, formatting, parsing, and arithmetic boundaries.
 
-1. **The derived `Deserialize` bypasses `Rational::new`.** `{"n":1,"d":0}` deserializes to
-   `Ok(Rational { num: 1, den: 0 })`. `timecode` and `frame_from_timecode` then panic with
-   "attempt to divide by zero" inside `ceil_div_i128`, and `format_seconds` trips its
-   `debug_assert`. ADR 002 rule 5 says the type never panics. ADR 010 puts these values in
-   a project file the user can edit, so this is a file-corruption crash.
-   Fix: `#[serde(try_from = "RationalWire")]` over a private wire struct, make `num` and
-   `den` private, and add `num()` and `den()` accessors.
-2. **`Ord` breaks its contract for any value that did not come through `new`.**
-   `{"n":2,"d":4}` and `{"n":1,"d":2}`: `cmp` returns `Equal` while `==` returns `false`.
-   A `BTreeSet` of the two has length 1 and a `HashSet` has length 2. With a negative
-   denominator the order is also intransitive: `{"n":1,"d":-1}`, `{"n":0,"d":1}`,
-   `{"n":-1,"d":-1}` sort to `[-1, 0, 1]` in the wrong order. Fixed by item 1.
-3. **No decimal-string constructor.** ffprobe reports `format.duration` as `"14.014000"`,
-   and `from_ffprobe` returns `None` for it. `frame_count_for_duration` therefore has no
-   reachable caller, and ADR 010 needs a `frameCount` per source. Add `from_decimal_str`
-   that builds `num = digits`, `den = 10^fraction_length`, exactly.
-4. **A zero timebase is accepted and the module disagrees with itself.**
-   `Rational::new(0, 1)` succeeds. As an fps, `frame_at_seconds` returns `Some(0)` for
-   every input and `timecode` prints `FF` stuck at `00`, while `seconds_at_frame` correctly
-   returns `None`. Make all four fps-taking methods return `None` when `num <= 0`.
-5. **`frame_count_for_duration` returns a negative count** for a negative duration.
-   `Rational::new(25,1).frame_count_for_duration(Rational::new(-2,5))` gives `Some(-10)`.
-6. **`format_seconds` prints a wrong, plausible number for `decimals >= 20`**, because
-   `saturating_pow` clamps and the result is then divided as if exact. Nine decimals, which
-   is what ADR 004 uses, is always exact, so there is no live bug. Add
-   `pub const FFMPEG_DECIMALS: u32 = 9;`, which a doc comment already claims exists.
-7. **`frame_from_timecode` accepts input the formatter cannot emit.** `"+5:00:00:00"`,
-   `"00:00:00:+5"`, and `"1:2:3:4"` all parse.
-8. Quality: `&self` on four methods and `self` on the rest of a `Copy` type, no
-   `#[must_use]` anywhere, and three doc comments that state something false. One of them
-   argues for the public fields that cause item 1.
+The independent high-reasoning reviewer approved these changes. The Rust checks passed
+independently. They included `cargo fmt --check`, 44 tests, Clippy with warnings denied,
+and the diff check.
 
-Test gaps worth closing: rejection of `{"num":..,"den":..}`; deserialization of an
-invariant-breaking document; `Ord`/`Eq` agreement plus a `BTreeSet`/`HashSet` length test;
-`format_seconds` at 0 decimals and the `-0` suppression branch; strictly increasing
-9-decimal strings over a run of NTSC frames; a midpoint test that asserts the value and not
-only the ordering; negative operands for the four arithmetic methods; 24000/1001 and
-60000/1001.
+## B. Frontend time functions — completed on 2026-08-29
 
-## B. Frontend `src/lib/time.ts`
+Gemini 3.7 Flash High corrected `src/lib/time.ts` and its tests.
 
-The same defect class as A.4, confirmed by probe:
+- `parseFrameRate` rejects a non-positive frame rate.
+- Each fps function throws `RangeError` for an invalid frame-rate object.
+- The tests cover invalid signs, invalid denominators, fractional values, and unsafe integers.
 
-```
-parseFrameRate("0/1")                  -> {"n":0,"d":1}       should be null
-parseFrameRate("-25/1")                -> {"n":-25,"d":1}     should be null
-secondsAtFrame(5, {n:0,d:1})           -> Infinity            would set currentTime=Infinity
-formatTimecode(5, {n:0,d:1})           -> "00:00:05:00"       silently wrong
-formatTimecode(5, {n:-25,d:1})         -> "00:00:05:00"       silently wrong
-```
+The independent high-reasoning reviewer approved these changes.
 
-Fix symmetrically with the Rust side. Reject a non-positive rate in `parseFrameRate`, and
-make the fps-taking functions throw a `RangeError`, since after that the only producer
-cannot emit an invalid rate.
+## C. Project source types — completed on 2026-08-29
 
-The rest of the module was cross-checked against exact rational arithmetic computed in
-Python. All 12 cases agree byte for byte, including frame 3,600,000 at 30000/1001 and
-negative frames.
+Gemini 3.7 Flash High separated the persisted source type from the runtime source type.
+The persisted type cannot contain proxy state. The runtime type can contain the proxy path
+and status. A compile-time test prevents accidental assignment of a runtime source to the
+persisted type.
 
-## C. `src/types/project.ts`
+The independent high-reasoning reviewer approved these changes. The targeted frontend
+checks for sections B and C passed. They included 98 tests, TypeScript, ESLint, Prettier,
+and the diff check.
 
-`Source` carries `proxy?: string`. ADR 010 says the project file holds no cache, and ADR
-007's runtime `Source` uses `proxy?: { path, state }`. The file conflates the persisted
-shape and the runtime shape. Split them: a persisted type with no proxy, and a runtime type
-that adds it.
+## D. The application shell — implementation completed on 2026-08-29
 
-## D. The application shell
+Gemini 3.7 Flash High completed the shell corrections from the independent review.
 
-Its independent review was interrupted and never reported, so the code is unreviewed.
+- The application now follows the system theme.
+- The timeline scrollbar uses the palette and has a transparent track.
+- The Out control identifies the boundary as exclusive.
+- The timeline sample uses one source and a linear ruler.
+- Unimplemented controls are disabled.
+- The title bar and decorative icons have clearer accessibility behavior.
+- Each platform-specific `app.windows` entry repeats all common fields from the base window.
+- The macOS window keeps `Overlay` and `hiddenTitle`. The Windows window keeps
+  `decorations: false`.
 
-One known defect: in the dark theme the timeline's horizontal scrollbar renders as a bright
-light bar above the status bar. Add `::-webkit-scrollbar` rules to `src/styles/globals.css`
-using `--border-strong` for the thumb. Use the pseudo-elements and not `scrollbar-color`,
-because `scrollbar-color` needs Safari 18.2 and ADR 003 sets the floor at macOS 12.3.
+The independent high-reasoning reviewer approved the changes in the third review. The
+review reported zero blocking and zero non-blocking findings.
 
 ## E. Undecided
 
-The interface labels are English. The design reference is Chinese, and no i18n is set up.
-Decide before the interface grows.
+The interface labels are English. The design reference is Chinese, and the project has no
+i18n system. Make an i18n decision before the interface grows.
 
 ## F. Not started
 
-All of it is feature work, and all of it has a decision record already.
+Implementation has not started for the features in this section. The follow-up task after
+initialization on 2026-08-29 did not advance these features. Existing decision records
+define their designs.
 
-- `src-tauri/src/ffmpeg/`: locate, download, probe, capabilities, export. ADR 005, ADR 006.
-- `src-tauri/resources/ffmpeg-manifest.json` and `scripts/update-ffmpeg-manifest.ts`.
-  ADR 005 records the two download sources and the fact that both publish checksums.
-- `src-tauri/src/project/`: read and write `.qcproj`, with the temporary-file-then-rename
-  step. ADR 010.
-- The Rust side that widens the asset-protocol scope for each opened file. ADR 003. The
-  configuration is in place, the runtime call is not.
+- `src-tauri/src/ffmpeg/`: locate, download, probe, capabilities, and export. See ADR 005
+  and ADR 006.
+- `src-tauri/resources/ffmpeg-manifest.json` and `scripts/update-ffmpeg-manifest.ts`. ADR 005
+  records the two download sources and their checksum support.
+- `src-tauri/src/project/`: read and write `.qcproj` files. Use a temporary file and then
+  rename it. See ADR 010.
+- The Rust command that widens the asset-protocol scope for each open file. ADR 003 defines
+  this command. The configuration exists, but the runtime command does not.
 - Zustand stores and the undo and redo command stack.
 
-Empty module skeletons for `ffmpeg/` and `project/` were deliberately not committed. An
-empty module is noise, and the ADRs already hold the design.
+The repository does not contain empty module skeletons for `ffmpeg/` or `project/`. The
+decision records contain the current design.
 
-## G. Not verified
+## G. Partially verified
 
-`pnpm tauri build` has never run. Only `pnpm tauri dev` was exercised, and only on macOS.
-Nothing has been built or run on Windows.
+`pnpm tauri build` passed outside the sandbox on macOS. The build generated `QuipClip.app`
+and `QuipClip_0.1.0_aarch64.dmg`. No agent built or ran the application on Windows.
 
 ## H. Environment note, outside this repository
 
-This machine has `core.autocrlf=true` in the global git configuration. That is the Windows
-setting, and on macOS it makes git write CRLF into files that have no `.gitattributes`
-entry. This repository now names those files, so it is safe. Other repositories on the same
-machine are not.
+This machine has `core.autocrlf=true` in the global git configuration. This setting is for
+Windows. On macOS, it writes CRLF into files that have no `.gitattributes` entry. This
+repository now names those files, so the setting is safe for this repository. The setting
+can still affect other repositories on this machine.
