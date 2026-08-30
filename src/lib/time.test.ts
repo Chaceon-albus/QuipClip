@@ -12,10 +12,9 @@ import {
   rationalToNumber,
   secondsAtFrame,
 } from "@/lib/time";
-import { type Rational } from "@/types/project";
 
-const NTSC: Rational = { n: 30000, d: 1001 };
-const FPS25: Rational = { n: 25, d: 1 };
+const NTSC = { n: 30000, d: 1001 };
+const FPS25 = { n: 25, d: 1 };
 
 describe("time helpers", () => {
   describe("rationalToNumber", () => {
@@ -56,10 +55,18 @@ describe("time helpers", () => {
       expect(parseFrameRate("/1001")).toBeNull();
     });
 
-    it("handles zero numerator and negative rates consistently", () => {
-      expect(parseFrameRate("0/1")).toEqual({ n: 0, d: 1 });
-      expect(parseFrameRate("-25/1")).toEqual({ n: -25, d: 1 });
-      expect(parseFrameRate("25/-1")).toEqual({ n: -25, d: 1 });
+    it("returns null for zero numerator and negative rates", () => {
+      expect(parseFrameRate("0/1")).toBeNull();
+      expect(parseFrameRate("0")).toBeNull();
+      expect(parseFrameRate("0/1001")).toBeNull();
+      expect(parseFrameRate("-25/1")).toBeNull();
+      expect(parseFrameRate("-25")).toBeNull();
+      expect(parseFrameRate("25/-1")).toBeNull();
+      expect(parseFrameRate("-30000/1001")).toBeNull();
+      expect(parseFrameRate("30000/-1001")).toBeNull();
+    });
+
+    it("parses double negative rates as positive", () => {
       expect(parseFrameRate("-25/-1")).toEqual({ n: 25, d: 1 });
     });
   });
@@ -77,7 +84,7 @@ describe("time helpers", () => {
     });
 
     it("correctly compares rationals whose cross-product exceeds Number.MAX_SAFE_INTEGER", () => {
-      const huge: Rational = { n: Number.MAX_SAFE_INTEGER, d: 2 };
+      const huge = { n: Number.MAX_SAFE_INTEGER, d: 2 };
       // MAX_SAFE_INTEGER * 2 exceeds Number.MAX_SAFE_INTEGER
       expect(rationalsEqual(huge, { n: Number.MAX_SAFE_INTEGER, d: 2 })).toBe(true);
       expect(rationalsEqual(huge, { n: Number.MAX_SAFE_INTEGER, d: 3 })).toBe(false);
@@ -96,6 +103,14 @@ describe("time helpers", () => {
       expect(secondsAtFrame(25, FPS25)).toBe(1);
       expect(secondsAtFrame(100, FPS25)).toBe(4);
       expect(secondsAtFrame(-25, FPS25)).toBe(-1);
+    });
+
+    it("throws RangeError for zero or negative fps", () => {
+      expect(() => secondsAtFrame(5, { n: 0, d: 1 })).toThrow(RangeError);
+      expect(() => secondsAtFrame(5, { n: -25, d: 1 })).toThrow(RangeError);
+      expect(() => secondsAtFrame(5, { n: -30000, d: 1001 })).toThrow(RangeError);
+      expect(() => secondsAtFrame(5, { n: 25, d: 0 })).toThrow(RangeError);
+      expect(() => secondsAtFrame(5, { n: 25, d: -1 })).toThrow(RangeError);
     });
   });
 
@@ -118,6 +133,16 @@ describe("time helpers", () => {
         expect(start).toBeLessThan(mid);
         expect(mid).toBeLessThan(next);
       }
+    });
+
+    it("throws RangeError for zero or negative fps", () => {
+      expect(() => midpointSecondsAtFrame(5, { n: 0, d: 1 })).toThrow(RangeError);
+      expect(() => midpointSecondsAtFrame(5, { n: -25, d: 1 })).toThrow(RangeError);
+      expect(() => midpointSecondsAtFrame(5, { n: -30000, d: 1001 })).toThrow(
+        RangeError,
+      );
+      expect(() => midpointSecondsAtFrame(5, { n: 25, d: 0 })).toThrow(RangeError);
+      expect(() => midpointSecondsAtFrame(5, { n: 25, d: -1 })).toThrow(RangeError);
     });
   });
 
@@ -167,6 +192,14 @@ describe("time helpers", () => {
       const justBelow25 = exactSec25 - 1e-15;
       expect(frameAtSeconds(justBelow25, FPS25)).toBe(100);
     });
+
+    it("throws RangeError for zero or negative fps", () => {
+      expect(() => frameAtSeconds(1.0, { n: 0, d: 1 })).toThrow(RangeError);
+      expect(() => frameAtSeconds(1.0, { n: -25, d: 1 })).toThrow(RangeError);
+      expect(() => frameAtSeconds(1.0, { n: -30000, d: 1001 })).toThrow(RangeError);
+      expect(() => frameAtSeconds(1.0, { n: 25, d: 0 })).toThrow(RangeError);
+      expect(() => frameAtSeconds(1.0, { n: 25, d: -1 })).toThrow(RangeError);
+    });
   });
 
   describe("frameAtMediaTime", () => {
@@ -187,6 +220,16 @@ describe("time helpers", () => {
     it("handles negative relative offsets correctly", () => {
       expect(frameAtMediaTime(0.5, 1.0, FPS25)).toBe(-13);
     });
+
+    it("throws RangeError for zero or negative fps", () => {
+      expect(() => frameAtMediaTime(2.0, 1.0, { n: 0, d: 1 })).toThrow(RangeError);
+      expect(() => frameAtMediaTime(2.0, 1.0, { n: -25, d: 1 })).toThrow(RangeError);
+      expect(() => frameAtMediaTime(2.0, 1.0, { n: -30000, d: 1001 })).toThrow(
+        RangeError,
+      );
+      expect(() => frameAtMediaTime(2.0, 1.0, { n: 25, d: 0 })).toThrow(RangeError);
+      expect(() => frameAtMediaTime(2.0, 1.0, { n: 25, d: -1 })).toThrow(RangeError);
+    });
   });
 
   describe("framesPerSecondCeil", () => {
@@ -200,6 +243,14 @@ describe("time helpers", () => {
 
     it("computes ceil for 24000/1001 (23.976 -> 24)", () => {
       expect(framesPerSecondCeil({ n: 24000, d: 1001 })).toBe(24);
+    });
+
+    it("throws RangeError for zero or negative fps", () => {
+      expect(() => framesPerSecondCeil({ n: 0, d: 1 })).toThrow(RangeError);
+      expect(() => framesPerSecondCeil({ n: -25, d: 1 })).toThrow(RangeError);
+      expect(() => framesPerSecondCeil({ n: -30000, d: 1001 })).toThrow(RangeError);
+      expect(() => framesPerSecondCeil({ n: 25, d: 0 })).toThrow(RangeError);
+      expect(() => framesPerSecondCeil({ n: 25, d: -1 })).toThrow(RangeError);
     });
   });
 
@@ -228,6 +279,14 @@ describe("time helpers", () => {
     it("does not clamp hours to 24", () => {
       const hours100At25 = 100 * 3600 * 25;
       expect(formatTimecode(hours100At25, FPS25)).toBe("100:00:00:00");
+    });
+
+    it("throws RangeError for zero or negative fps", () => {
+      expect(() => formatTimecode(5, { n: 0, d: 1 })).toThrow(RangeError);
+      expect(() => formatTimecode(5, { n: -25, d: 1 })).toThrow(RangeError);
+      expect(() => formatTimecode(5, { n: -30000, d: 1001 })).toThrow(RangeError);
+      expect(() => formatTimecode(5, { n: 25, d: 0 })).toThrow(RangeError);
+      expect(() => formatTimecode(5, { n: 25, d: -1 })).toThrow(RangeError);
     });
   });
 
@@ -287,6 +346,16 @@ describe("time helpers", () => {
       expect(parseTimecode("00:00:60:00", FPS25)).toBeNull();
       expect(parseTimecode("00:-01:00:00", FPS25)).toBeNull();
     });
+
+    it("throws RangeError for zero or negative fps", () => {
+      expect(() => parseTimecode("00:00:01:00", { n: 0, d: 1 })).toThrow(RangeError);
+      expect(() => parseTimecode("00:00:01:00", { n: -25, d: 1 })).toThrow(RangeError);
+      expect(() => parseTimecode("00:00:01:00", { n: -30000, d: 1001 })).toThrow(
+        RangeError,
+      );
+      expect(() => parseTimecode("00:00:01:00", { n: 25, d: 0 })).toThrow(RangeError);
+      expect(() => parseTimecode("00:00:01:00", { n: 25, d: -1 })).toThrow(RangeError);
+    });
   });
 
   describe("formatSecondsForFfmpeg", () => {
@@ -310,5 +379,55 @@ describe("time helpers", () => {
       expect(formatSecondsForFfmpeg(3_600_000, NTSC)).toBe("120120.000000000");
       expect(formatSecondsForFfmpeg(3_600_000, FPS25)).toBe("144000.000000000");
     });
+
+    it("returns 0.000000000 for non-safe-integer frame values", () => {
+      expect(formatSecondsForFfmpeg(NaN, FPS25)).toBe("0.000000000");
+      expect(formatSecondsForFfmpeg(Infinity, FPS25)).toBe("0.000000000");
+    });
+
+    it("throws RangeError for zero or negative fps", () => {
+      expect(() => formatSecondsForFfmpeg(5, { n: 0, d: 1 })).toThrow(RangeError);
+      expect(() => formatSecondsForFfmpeg(5, { n: -25, d: 1 })).toThrow(RangeError);
+      expect(() => formatSecondsForFfmpeg(5, { n: -30000, d: 1001 })).toThrow(
+        RangeError,
+      );
+      expect(() => formatSecondsForFfmpeg(5, { n: 25, d: 0 })).toThrow(RangeError);
+      expect(() => formatSecondsForFfmpeg(5, { n: 25, d: -1 })).toThrow(RangeError);
+    });
+  });
+
+  describe("assertPositiveFps parameter validation across all fps-taking functions", () => {
+    const invalidFpsCases: Array<[string, { n: number; d: number }]> = [
+      ["non-finite fps", { n: NaN, d: 1 }],
+      ["fractional fps", { n: 29.97, d: 1 }],
+      ["unsafe integer fps", { n: Number.MAX_SAFE_INTEGER + 1, d: 1 }],
+      ["non-finite denominator fps", { n: 25, d: NaN }],
+      ["fractional denominator fps", { n: 25, d: 1.5 }],
+      ["unsafe integer denominator fps", { n: 25, d: Number.MAX_SAFE_INTEGER + 1 }],
+    ];
+
+    const fpsTakingFunctions: Array<[string, (fps: { n: number; d: number }) => void]> =
+      [
+        ["secondsAtFrame", (fps) => secondsAtFrame(5, fps)],
+        ["midpointSecondsAtFrame", (fps) => midpointSecondsAtFrame(5, fps)],
+        ["frameAtSeconds", (fps) => frameAtSeconds(1.0, fps)],
+        ["frameAtMediaTime", (fps) => frameAtMediaTime(2.0, 1.0, fps)],
+        ["framesPerSecondCeil", (fps) => framesPerSecondCeil(fps)],
+        ["formatTimecode", (fps) => formatTimecode(5, fps)],
+        ["parseTimecode", (fps) => parseTimecode("00:00:01:00", fps)],
+        ["formatSecondsForFfmpeg", (fps) => formatSecondsForFfmpeg(5, fps)],
+      ];
+
+    describe.each(fpsTakingFunctions)(
+      "%s invalid fps validation",
+      (_fnName, invoke) => {
+        it.each(invalidFpsCases)(
+          "throws RangeError before arithmetic for %s",
+          (_label, fps) => {
+            expect(() => invoke(fps)).toThrow(RangeError);
+          },
+        );
+      },
+    );
   });
 });

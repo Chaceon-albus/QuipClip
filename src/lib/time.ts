@@ -27,6 +27,24 @@ function gcd(a: number, b: number): number {
 }
 
 /**
+ * Asserts that a Rational represents a strictly positive frame rate with safe integer components.
+ * Throws RangeError before any arithmetic is performed if the frame rate is non-positive,
+ * non-finite, fractional, or has unsafe integer components.
+ */
+function assertPositiveFps(fps: Rational): void {
+  if (
+    fps.n <= 0 ||
+    fps.d <= 0 ||
+    !Number.isSafeInteger(fps.n) ||
+    !Number.isSafeInteger(fps.d)
+  ) {
+    throw new RangeError(
+      `Frame rate must be positive with safe integer components, got ${fps.n}/${fps.d}`,
+    );
+  }
+}
+
+/**
  * Converts a Rational to a floating-point number.
  * Used for approximate UI presentation and layout percentages where IEEE 754 precision is sufficient.
  */
@@ -36,7 +54,7 @@ export function rationalToNumber(r: Rational): number {
 
 /**
  * Parses a frame rate string into a reduced Rational timebase.
- * Parses "30000/1001" and "25" while rejecting "0/0" and malformed inputs.
+ * Parses "30000/1001" and "25" while rejecting "0/0", non-positive rates, and malformed inputs.
  * Reduces by GCD so equivalent rates (e.g. 50/2 and 25/1) compare equal after JSON serialization.
  */
 export function parseFrameRate(text: string): Rational | null {
@@ -60,6 +78,10 @@ export function parseFrameRate(text: string): Rational | null {
   if (den < 0) {
     num = -num;
     den = -den;
+  }
+
+  if (num <= 0) {
+    return null;
   }
 
   return { n: num, d: den };
@@ -95,6 +117,7 @@ export function rationalsEqual(a: Rational, b: Rational): boolean {
  * Used when setting HTML5 video.currentTime or calculating playback offsets.
  */
 export function secondsAtFrame(frame: number, fps: Rational): number {
+  assertPositiveFps(fps);
   return (frame * fps.d) / fps.n;
 }
 
@@ -106,6 +129,7 @@ export function secondsAtFrame(frame: number, fps: Rational): number {
  * unambiguously within the target frame's duration.
  */
 export function midpointSecondsAtFrame(frame: number, fps: Rational): number {
+  assertPositiveFps(fps);
   return ((frame + 0.5) * fps.d) / fps.n;
 }
 
@@ -116,6 +140,7 @@ export function midpointSecondsAtFrame(frame: number, fps: Rational): number {
  * value landing one ULP below a boundary would incorrectly floor to the preceding frame.
  */
 export function frameAtSeconds(seconds: number, fps: Rational): number {
+  assertPositiveFps(fps);
   const rawFrames = (seconds * fps.n) / fps.d;
   const nearest = Math.round(rawFrames);
   const snapped = Math.abs(rawFrames - nearest) < 1e-6 ? nearest : rawFrames;
@@ -131,6 +156,7 @@ export function frameAtMediaTime(
   startTime: number,
   fps: Rational,
 ): number {
+  assertPositiveFps(fps);
   return frameAtSeconds(mediaTime - startTime, fps);
 }
 
@@ -140,7 +166,8 @@ export function frameAtMediaTime(
  * second contains a fixed integer count of frame indices (00..FF-1).
  */
 export function framesPerSecondCeil(fps: Rational): number {
-  return Math.max(1, Math.ceil(fps.n / fps.d));
+  assertPositiveFps(fps);
+  return Math.ceil(fps.n / fps.d);
 }
 
 /**
@@ -149,6 +176,7 @@ export function framesPerSecondCeil(fps: Rational): number {
  * The FF field counts `framesPerSecondCeil` slots (e.g. 00..29 for 30000/1001 fps).
  */
 export function formatTimecode(frame: number, fps: Rational): string {
+  assertPositiveFps(fps);
   const fpsCeil = framesPerSecondCeil(fps);
   const negative = frame < 0;
   const absFrame = Math.abs(Math.trunc(frame));
@@ -169,6 +197,7 @@ export function formatTimecode(frame: number, fps: Rational): string {
  * to ensure that invalid or out-of-range timecodes do not produce corrupt edit points.
  */
 export function parseTimecode(text: string, fps: Rational): number | null {
+  assertPositiveFps(fps);
   const trimmed = text.trim();
   const negative = trimmed.startsWith("-");
   const rest = negative ? trimmed.slice(1) : trimmed;
@@ -224,7 +253,8 @@ export function parseTimecode(text: string, fps: Rational): number | null {
  * floating-point precision loss on large frame numbers.
  */
 export function formatSecondsForFfmpeg(frame: number, fps: Rational): string {
-  if (fps.n === 0 || fps.d === 0 || !Number.isSafeInteger(frame)) {
+  assertPositiveFps(fps);
+  if (!Number.isSafeInteger(frame)) {
     return "0.000000000";
   }
 
