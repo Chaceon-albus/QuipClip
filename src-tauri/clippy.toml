@@ -1,0 +1,3 @@
+# Keep the bar high on a small codebase. Raise these only with a reason.
+too-many-arguments-threshold = 8
+type-complexity-threshold = 350
