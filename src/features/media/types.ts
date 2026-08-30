@@ -1,0 +1,170 @@
+/**
+ * Domain and wire types for media import and probing in QuipClip.
+ *
+ * See ADR 002, ADR 003, and ADR 007.
+ */
+
+import type { Rational } from "@/types/project";
+
+/**
+ * Backend error codes returned by the Rust `import_media` command.
+ */
+export const BACKEND_IMPORT_MEDIA_ERROR_CODES = [
+  "invalidPath",
+  "pathNotFound",
+  "pathNotFile",
+  "pathNotUnicode",
+  "metadataFailed",
+  "unsafeMetadata",
+  "appDataUnavailable",
+  "ffmpegPairMissing",
+  "ffprobeSpawnFailed",
+  "ffprobeProcessFailed",
+  "ffprobeParseFailed",
+  "assetScopeDenied",
+  "commandExecutionFailed",
+] as const;
+
+export type BackendImportMediaErrorCode =
+  (typeof BACKEND_IMPORT_MEDIA_ERROR_CODES)[number];
+
+/**
+ * Complete set of import media error codes supported by the frontend,
+ * including the fallback code "unknown".
+ */
+export const IMPORT_MEDIA_ERROR_CODES = [
+  ...BACKEND_IMPORT_MEDIA_ERROR_CODES,
+  "unknown",
+] as const;
+
+export type ImportMediaErrorCode = (typeof IMPORT_MEDIA_ERROR_CODES)[number];
+
+/**
+ * Normalized error structure returned when a media import fails.
+ */
+export class ImportMediaError extends Error {
+  /** Stable semantic error code for localization and error classification. */
+  readonly code: ImportMediaErrorCode;
+  /** Optional raw diagnostic text from the operating system or ffprobe stderr. */
+  readonly detail?: string;
+  /** Optional integer process exit code when ffprobe execution fails. */
+  readonly exitCode?: number;
+
+  constructor(options: {
+    code: ImportMediaErrorCode;
+    detail?: string;
+    exitCode?: number;
+  }) {
+    super(options.detail ? `${options.code}: ${options.detail}` : options.code);
+    this.name = "ImportMediaError";
+    this.code = options.code;
+    if (options.detail !== undefined) {
+      this.detail = options.detail;
+    }
+    if (options.exitCode !== undefined) {
+      this.exitCode = options.exitCode;
+    }
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Metadata for the primary audio stream extracted during media probing.
+ */
+export type AudioProbe = {
+  /** Audio codec name (e.g. "aac", "opus", "pcm_s16le"), or null if unspecified. */
+  codec: string | null;
+  /** Audio sampling rate in Hertz (e.g. 44100, 48000, 1..=4_294_967_295), or null if unspecified. */
+  sampleRate: number | null;
+  /** Number of audio channels (e.g. 1 for mono, 2 for stereo, 1..=4_294_967_295), or null if unspecified. */
+  channels: number | null;
+};
+
+/**
+ * Normalized container and stream metadata extracted by ffprobe.
+ */
+export type MediaProbe = {
+  /** Container format short names (e.g. ["mov", "mp4", "m4a"]). */
+  formatNames: string[];
+  /** Descriptive long name for the container format, or null if unspecified. */
+  formatLongName: string | null;
+  /** Primary video codec identifier (e.g. "h264", "hevc", "prores", "vp9"). */
+  videoCodec: string;
+  /** Profile name of the video stream (e.g. "High", "Main 10"), or null if unstated. */
+  videoProfile: string | null;
+  /** Pixel format string (e.g. "yuv420p", "yuv422p10le"), or null if unstated. */
+  pixelFormat: string | null;
+  /** Color bit depth per component (e.g. 8, 10, 1..=4_294_967_295), or null if unstated. */
+  bitDepth: number | null;
+  /** Video frame width in pixels (1..=4_294_967_295). */
+  width: number;
+  /** Video frame height in pixels (1..=4_294_967_295). */
+  height: number;
+  /** Average frame rate as an exact positive rational fraction (ADR 002). */
+  avgFrameRate: Rational;
+  /** Real base frame rate from container timebase as an exact positive rational fraction. */
+  rFrameRate: Rational;
+  /** Presentation start timestamp as an exact signed rational fraction. */
+  startTime: Rational;
+  /** Stream duration as an exact non-negative rational fraction, or null if indeterminate. */
+  duration: Rational | null;
+  /** Total frame count in the video stream (safe non-negative integer). */
+  frameCount: number;
+  /** Audio stream metadata, or null if the media file has no audio. */
+  audio: AudioProbe | null;
+  /** True when ffprobe reports differing average and real frame rates (ADR 002). */
+  isVfr: boolean;
+};
+
+/**
+ * Result payload returned from a successful `import_media` backend invocation.
+ */
+export type ImportMediaResult = {
+  /** Canonical absolute path to the validated media file on disk. */
+  path: string;
+  /** Base filename with extension. */
+  fileName: string;
+  /** File size in bytes. */
+  size: number;
+  /** Modification timestamp in integer seconds since the Unix epoch. */
+  mtime: number;
+  /** Detailed container and stream probe facts. */
+  probe: MediaProbe;
+};
+
+/**
+ * Media store lifecycle states.
+ */
+export type MediaStatus = "idle" | "loading" | "ready" | "error";
+
+/**
+ * State exposed by the media store.
+ */
+export type MediaState = {
+  /** Current status of the media store. */
+  status: MediaStatus;
+  /** Current successfully loaded media facts, or null if none loaded. */
+  media: ImportMediaResult | null;
+  /** Last error encountered during media import, or null if idle or ready. */
+  error: ImportMediaError | null;
+};
+
+/**
+ * Actions provided by the media store.
+ */
+export type MediaActions = {
+  /**
+   * Imports media at the given path with latest-selection-wins concurrency.
+   * Resolves with the imported media on success, or null on error/superseded request.
+   */
+  importPath: (path: string) => Promise<ImportMediaResult | null>;
+  /**
+   * Resets the store back to its initial idle state.
+   */
+  reset: () => void;
+};
+
+/**
+ * Combined type of the media store state and actions.
+ */
+export type MediaStoreState = MediaState & MediaActions;
