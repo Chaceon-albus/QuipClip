@@ -32,17 +32,20 @@ The real problems are these:
 Define one canonical time type on both sides of the application.
 
 ```rust
-pub struct Rational { pub num: i64, pub den: i64 }   // Rust
+pub struct Rational { num: i64, den: i64 }           // Rust
 ```
 
 ```ts
 type Rational = { n: number; d: number };            // TypeScript
 ```
 
-**The JSON wire format is `{"n": ..., "d": ...}`.** The Rust struct carries
-`#[serde(rename = "n")]` and `#[serde(rename = "d")]`, so both sides read the same
-document. This contract is part of the decision. A change to it breaks every Tauri command
-that carries a time.
+**The JSON wire format is `{"n": ..., "d": ...}`.** Rust serializes an already valid
+`Rational` through a private wire type. Rust deserializes through a validated conversion.
+The conversion rejects a zero denominator. It also reduces the fraction and moves the sign
+to the numerator. TypeScript shares the `n` and `d` field names. Its structural type does
+not validate an arbitrary object. TypeScript parsers must validate external values before
+they create a `Rational`. This wire contract is part of the decision. A change to it breaks
+every Tauri command that carries a time.
 
 Rules:
 
@@ -51,11 +54,15 @@ Rules:
 2. Every edit point is an **integer frame index** on the project frame grid. No edit point
    is stored in seconds.
 3. **Out points are exclusive.** A segment `[in, out)` holds `out - in` frames.
-4. The code converts a frame index to seconds once. It converts when it builds an ffmpeg
-   command line. It converts when it sets `video.currentTime`. The formula is
-   `seconds = frame * den / num`, computed as an exact rational, then printed as a decimal.
+4. The code converts a frame index to seconds only at a boundary. Rust computes
+   `frame * den / num` as an exact rational and formats a fixed-precision decimal for
+   ffmpeg. The frontend evaluates the same formula as a JavaScript number for
+   `video.currentTime`, because the DOM API requires a number.
 5. Rational arithmetic runs in `i128` and returns `None` on overflow. It never panics.
    Comparison uses cross-multiplication, not `to_f64`.
+6. A rational can be zero or negative. A frame rate cannot. A Rust frame-rate operation
+   returns `None` for a non-positive rate. A TypeScript frame-rate function throws
+   `RangeError` for a non-positive rate. `parseFrameRate` returns `null` for that input.
 
 **Timecode is non-drop-frame.** The display format is `HH:MM:SS:FF`, and `FF` counts
 `ceil(fps)` frames per second. At 30000/1001 that means `FF` runs from 00 to 29. A
@@ -75,4 +82,6 @@ at `avg_frame_rate`. See ADR 003 and ADR 004 for how a proxy makes such a source
 - The exclusive out point must appear in every doc comment and every user-facing label. A
   reader who assumes an inclusive out point writes an off-by-one error.
 - The `{n, d}` wire shape is a contract between two languages. A test must hold it.
+- Rust fields are private. Constructors and deserialization must preserve the normalized
+  representation.
 - A non-drop-frame label is not a clock time. The user interface must not present it as one.
