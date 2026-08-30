@@ -1,0 +1,57 @@
+# 008. Delegate code writing, and review it with a different agent
+
+- Status: Accepted
+- Date: 2026-08-29
+- Deciders: capric98
+
+## Context
+
+The user set the working method for this repository. The main agent orchestrates and
+reviews. Other agents write the code. Frontend code goes to `agy` with the
+`gemini-3.7-flash-high` model when that command works. The user can name a different
+command-line agent for a task.
+
+An agent that reviews its own work finds fewer faults than a second agent. The first
+agent already accepted every choice it made.
+
+## Decision
+
+**Routing.**
+
+| Work                                                | First choice                        | Fallback                       |
+| --------------------------------------------------- | ----------------------------------- | ------------------------------ |
+| Frontend (`.ts`, `.tsx`, `.css`)                    | `agy --model gemini-3.7-flash-high` | a subagent at medium reasoning |
+| Rust and backend                                    | a subagent at medium reasoning      | —                              |
+| A command the user named (`codex`, `claude`, `agy`) | that command                        | a subagent at medium reasoning |
+
+A run has failed when the command is missing, when it exits non-zero, **or when
+`git status --porcelain` shows no change**. The third case matters. A command-line agent
+can exit zero and write nothing. On any failure, use the fallback. Say which fallback ran.
+
+**The loop.** brief, write, review, apply, verify, commit.
+
+- The writing agent receives the file paths, the ADR numbers that constrain the work, and
+  the English-comment rule. It must not touch `.agents/private/`. It must not write an ADR.
+- The reviewing agent is never the writing agent. It runs at a higher reasoning level. It
+  reads the diff against the ADRs and against the acceptance criteria.
+- The main agent owns orchestration, the ADRs, `docs/architecture.md`, the verification
+  gate, and every commit. A writing subagent never runs `git commit`.
+
+**Gate.** `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm test`. Then
+`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` inside `src-tauri/`.
+Run the strictest part of the gate that the current tree supports.
+
+The operating detail lives in the `dev-workflow` skill at
+`.agents/skills/dev-workflow/SKILL.md`, not in `AGENTS.md`. `AGENTS.md` loads on every
+turn. The routing detail only matters when an agent writes code, so it belongs in a skill
+that loads on demand.
+
+## Consequences
+
+- The review is independent, so it catches faults the writer accepted.
+- Each unit costs at least two agent runs. That is the price of the independent review.
+- The skill file must stay in step with this ADR. The ADR states the decision. The skill
+  states the commands.
+- Claude Code reads skills from `.claude/skills/`. The repository keeps its skills in
+  `.agents/skills/`, so that other agent tools can read them too. Symlinks in
+  `.claude/skills/` connect the two.
