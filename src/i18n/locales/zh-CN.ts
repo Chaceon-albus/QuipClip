@@ -73,6 +73,7 @@ export const zhCN: TranslationCatalog = {
     emptyPrompt: "打开视频文件以查看时间轴",
     sourceLane: "源媒体",
     playhead: "播放头",
+    seekSlider: "时间轴定位",
   },
   mediaError: {
     invalidPath: "所选文件路径无效。",

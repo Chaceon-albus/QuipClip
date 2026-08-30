@@ -15,18 +15,53 @@ import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useMediaStore } from "@/features/media";
 import { usePlaybackStore } from "@/features/playback";
+import {
+  canMarkIn,
+  canMarkOut,
+  canSplitAtFrame,
+  useTimelineStore,
+} from "@/features/timeline";
 
 export function TransportBar() {
   const { t } = useTranslation();
   const media = useMediaStore((s) => s.media);
+  const currentFrame = usePlaybackStore((s) => s.currentFrame);
   const isPlaying = usePlaybackStore((s) => s.isPlaying);
   const isAttached = usePlaybackStore((s) => s.isAttached);
   const isReady = usePlaybackStore((s) => s.isReady);
   const togglePlayback = usePlaybackStore((s) => s.togglePlayback);
   const stepFrames = usePlaybackStore((s) => s.stepFrames);
 
+  const canUndo = useTimelineStore((s) => s.canUndo);
+  const canRedo = useTimelineStore((s) => s.canRedo);
+  const pendingInFrame = useTimelineStore((s) => s.pendingInFrame);
+  const segments = useTimelineStore((s) => s.segments);
+  const markIn = useTimelineStore((s) => s.markIn);
+  const markOut = useTimelineStore((s) => s.markOut);
+  const split = useTimelineStore((s) => s.split);
+  const undo = useTimelineStore((s) => s.undo);
+  const redo = useTimelineStore((s) => s.redo);
+
   const frameCount = media?.probe.frameCount ?? 0;
   const canControl = media !== null && isAttached && isReady && frameCount > 0;
+
+  const isUndoDisabled = !canControl || !canUndo;
+  const isRedoDisabled = !canControl || !canRedo;
+  const isMarkInDisabled = !canMarkIn(isAttached, isReady, frameCount, currentFrame);
+  const isMarkOutDisabled = !canMarkOut(
+    isAttached,
+    isReady,
+    frameCount,
+    currentFrame,
+    pendingInFrame,
+  );
+  const isSplitDisabled = !canSplitAtFrame(
+    segments,
+    currentFrame,
+    isAttached,
+    isReady,
+    frameCount,
+  );
 
   return (
     <section className="flex h-[72px] shrink-0 items-center justify-center border-y border-border bg-card px-4 select-none">
@@ -35,7 +70,8 @@ export function TransportBar() {
         <div className="flex items-center gap-1">
           <Button
             variant="ghost"
-            disabled
+            disabled={isUndoDisabled}
+            onClick={undo}
             className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label={t("transport.action.undo")}
           >
@@ -46,7 +82,8 @@ export function TransportBar() {
           </Button>
           <Button
             variant="ghost"
-            disabled
+            disabled={isRedoDisabled}
+            onClick={redo}
             className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label={t("transport.action.redo")}
           >
@@ -63,7 +100,8 @@ export function TransportBar() {
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
-            disabled
+            disabled={isMarkInDisabled}
+            onClick={() => markIn(currentFrame)}
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
             aria-label={t("transport.action.markInAria")}
           >
@@ -80,7 +118,8 @@ export function TransportBar() {
 
           <Button
             variant="outline"
-            disabled
+            disabled={isMarkOutDisabled}
+            onClick={() => markOut(currentFrame)}
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
             aria-label={t("transport.action.markOutAria")}
           >
@@ -97,7 +136,8 @@ export function TransportBar() {
 
           <Button
             variant="outline"
-            disabled
+            disabled={isSplitDisabled}
+            onClick={() => split(currentFrame)}
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
             aria-label={t("transport.action.splitAria")}
           >

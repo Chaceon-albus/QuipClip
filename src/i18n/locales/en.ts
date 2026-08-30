@@ -70,6 +70,7 @@ export const en = {
     emptyPrompt: "Open a video file to view the timeline",
     sourceLane: "Source Media",
     playhead: "Playhead",
+    seekSlider: "Timeline seek",
   },
   mediaError: {
     invalidPath: "The selected file path is invalid.",
