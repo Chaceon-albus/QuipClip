@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -63,15 +63,30 @@ impl fmt::Display for LocateError {
 
 impl Error for LocateError {}
 
-/// Discover executables using the current process `PATH`.
+/// Discover executables using the current process `PATH` and platform search directories.
 pub fn discover(
     configured: Option<&Path>,
     app_data_directory: &Path,
 ) -> Result<FfmpegPaths, LocateError> {
-    let path_directories: Vec<PathBuf> = env::var_os("PATH")
-        .map(|path| env::split_paths(&path).collect())
-        .unwrap_or_default();
+    let path_directories = search_directories(env::var_os("PATH"));
     discover_with_path(configured, &path_directories, app_data_directory)
+}
+
+fn search_directories(path: Option<OsString>) -> Vec<PathBuf> {
+    let mut directories: Vec<PathBuf> = path
+        .as_deref()
+        .map(|path| env::split_paths(path).collect())
+        .unwrap_or_default();
+
+    #[cfg(target_os = "macos")]
+    directories.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]);
+
+    let mut seen = HashSet::new();
+    directories.retain(|directory| seen.insert(directory.clone()));
+    directories
 }
 
 /// Discover executables using a deterministic list of `PATH` directories.
@@ -413,6 +428,28 @@ mod tests {
         let LocateError::NotFound { inspected } = error;
         assert_eq!(inspected.len(), 1);
         assert_eq!(inspected[0].origin, ExecutableOrigin::Configured);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_search_directories_follow_path_and_are_stably_deduplicated() {
+        let inherited = env::join_paths([
+            Path::new("/custom/bin"),
+            Path::new("/opt/homebrew/bin"),
+            Path::new("/custom/bin"),
+        ])
+        .unwrap();
+
+        let directories = search_directories(Some(inherited));
+
+        assert_eq!(
+            directories,
+            [
+                PathBuf::from("/custom/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin"),
+            ]
+        );
     }
 
     fn create_pair(directory: &Path) {
