@@ -31,6 +31,7 @@ document summarizes them and shows how the parts fit together.
 | [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)   | Delegated writing, independent review                           |
 | [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                 | One reviewed unit, one commit, no push                          |
 | [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                             | A versioned JSON project file, with two stored paths per source |
+| [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                             | English and Simplified Chinese interface with a saved setting   |
 
 ## Shape
 
@@ -60,6 +61,34 @@ document summarizes them and shows how the parts fit together.
 
 Rust owns every operation that touches the file system, starts a process, or downloads a
 file. The frontend owns presentation and the edit state.
+
+## Localization
+
+See ADR 011.
+
+ADR 011 requires the localization feature to support English and Simplified Chinese. The
+feature must bundle `en` and `zh-CN` message catalogs with the application. It must use
+`i18next` for message lookup and formatting, and `react-i18next` for React integration.
+
+The feature must persist an application setting with the value `system`, `en`, or
+`zh-CN`. The setting must not be part of a `.qcproj` file. The default value is `system`.
+When the setting is `system`, the frontend must examine `navigator.languages` in order. It
+must select `zh-CN` when the first supported primary subtag is `zh`. It must select `en`
+when that subtag is `en`. It must use `en` when no entry matches. A change to the language
+setting must update the interface without an application restart.
+
+React must translate application text from stable semantic keys. Rust and Tauri commands
+must return stable error codes and named values instead of user-facing sentences. The
+frontend must translate these application errors. It may append unchanged operating-system
+or `ffmpeg` diagnostic text to a localized error.
+
+Number, date, and list formatting must use `Intl` with the resolved locale. Media timecode,
+file paths, technical identifiers, and raw `ffmpeg` output must keep their original format.
+
+English must be the source and fallback language. New messages must use named placeholders.
+Components must not assemble sentences from translated fragments. When `agy` is available,
+Gemini must check and polish new or changed English and Simplified Chinese text. This
+language review is additional to the independent review that ADR 008 requires.
 
 ## Time
 
