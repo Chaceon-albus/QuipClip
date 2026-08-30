@@ -65,9 +65,12 @@ file. The frontend owns presentation and the edit state.
 
 See ADR 002. This is the foundation. Everything else depends on it.
 
-`Rational { num, den }` is the canonical time type. It crosses the IPC boundary as
-`{"n": ..., "d": ...}`, which is what `lib/time.ts` reads. Floating-point seconds appear at
-two places only: `video.currentTime`, and the ffmpeg command line.
+`Rational { num, den }` is the canonical Rust time type. Its fields are private, and its
+constructors keep the fraction reduced with a positive denominator. It crosses the IPC
+boundary as `{"n": ..., "d": ...}`, which is what `lib/time.ts` reads. Edit points remain
+integer frame indices, and stored timebases remain rationals. The frontend uses JavaScript
+numbers for DOM media timestamps, media-time readbacks, and approximate UI calculations.
+Rust gives ffmpeg a fixed-precision decimal string that it formats from an exact rational.
 
 - The project timebase is the output frame rate, as a rational.
 - Every edit point is an integer frame index on that grid.
@@ -144,16 +147,29 @@ version, size, and mtime.
 
 See ADR 007.
 
-The types below are the **in-memory** model. ADR 010 defines the persisted shape, which
-drops the proxy state because a proxy is a machine-specific cache.
+The types below show the runtime source and the persisted project document. ADR 010 omits
+the proxy state from the persisted source. A proxy is a machine-specific cache.
 
 ```ts
 type Rational = { n: number; d: number };
 
+type PersistedSource = {
+  id: string;
+  path: string;
+  relPath: string;
+  size: number;
+  mtime: number;
+  timebase: Rational;
+  frameCount: number;
+  proxy?: never;
+};
+
 type Source = {
   id: string;
   path: string;
-  probe: ProbeResult;
+  relPath: string;
+  size: number;
+  mtime: number;
   timebase: Rational;
   frameCount: number;
   proxy?: { path: string; state: "none" | "building" | "ready" | "failed" };
@@ -167,9 +183,10 @@ type Segment = {
 };
 
 type Project = {
+  schemaVersion: number;
   timebase: Rational;
   resolution: { w: number; h: number };
-  sources: Source[];
+  sources: PersistedSource[];
   segments: Segment[]; // export order is array order
   activeSourceId: string;
 };
