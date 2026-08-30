@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { Eye, Film, Lock } from "lucide-react";
 
 /**
@@ -14,6 +15,8 @@ const RULER_MARKERS = [
 ];
 
 export function TimelinePanel() {
+  const { t } = useTranslation();
+
   return (
     <section className="flex h-[180px] shrink-0 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
       <div className="flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
@@ -59,7 +62,9 @@ export function TimelinePanel() {
           <div className="flex min-h-0 flex-1">
             {/* Left gutter (~96px wide) */}
             <div className="sticky left-0 z-20 flex w-24 shrink-0 items-center justify-between border-r border-timeline-divider bg-sidebar px-3">
-              <span className="text-xs font-semibold text-sidebar-foreground">V1</span>
+              <span className="text-xs font-semibold text-sidebar-foreground">
+                {t("timeline.track.videoTrack")}
+              </span>
               <div className="flex items-center gap-1.5 text-muted-foreground">
                 <Eye className="size-3.5" aria-hidden="true" />
                 <Lock className="size-3.5" aria-hidden="true" />

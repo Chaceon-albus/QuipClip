@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ChevronDown, Minus, Square, X } from "lucide-react";
 import appIcon from "@/assets/brand/app-icon.svg";
@@ -21,6 +22,7 @@ function isMacOS(): boolean {
 }
 
 export function TitleBar() {
+  const { t } = useTranslation();
   const isMac = isMacOS();
 
   const handleMinimize = () => {
@@ -46,7 +48,9 @@ export function TitleBar() {
       {/* Left: App icon, title, separator, File menu */}
       <div className="flex items-center gap-2.5">
         <img src={appIcon} alt="" className="size-[22px] shrink-0" />
-        <span className="text-sm font-medium text-sidebar-foreground">QuipClip</span>
+        <span className="text-sm font-medium text-sidebar-foreground">
+          {t("app.name")}
+        </span>
         <Separator orientation="vertical" className="h-4 bg-sidebar-border" />
         <DropdownMenu>
           <DropdownMenuTrigger asChild disabled>
@@ -56,25 +60,25 @@ export function TitleBar() {
               disabled
               className="h-6 gap-1 px-1.5 text-xs text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
             >
-              File
+              {t("titleBar.menu.file")}
               <ChevronDown className="size-3" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
-            <DropdownMenuItem>New Project</DropdownMenuItem>
-            <DropdownMenuItem>Open Project...</DropdownMenuItem>
+            <DropdownMenuItem>{t("titleBar.menu.newProject")}</DropdownMenuItem>
+            <DropdownMenuItem>{t("titleBar.menu.openProject")}</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem disabled>Save</DropdownMenuItem>
-            <DropdownMenuItem disabled>Export...</DropdownMenuItem>
+            <DropdownMenuItem disabled>{t("titleBar.menu.save")}</DropdownMenuItem>
+            <DropdownMenuItem disabled>{t("titleBar.menu.export")}</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
 
       {/* Center: Project title and save state */}
       <div className="absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5 text-xs text-muted-foreground">
-        <span>Untitled Project</span>
+        <span>{t("titleBar.project.untitled")}</span>
         <span>·</span>
-        <span>Saved</span>
+        <span>{t("titleBar.project.saved")}</span>
       </div>
 
       {/* Right: Window Controls for non-macOS platforms */}
@@ -84,7 +88,7 @@ export function TitleBar() {
             <button
               type="button"
               onClick={handleMinimize}
-              aria-label="Minimize"
+              aria-label={t("window.minimize")}
               className="inline-flex h-10 w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               <Minus className="size-3.5" />
@@ -92,7 +96,7 @@ export function TitleBar() {
             <button
               type="button"
               onClick={handleMaximize}
-              aria-label="Toggle maximize/restore"
+              aria-label={t("window.toggleMaximize")}
               className="inline-flex h-10 w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               <Square className="size-3" />
@@ -100,7 +104,7 @@ export function TitleBar() {
             <button
               type="button"
               onClick={handleClose}
-              aria-label="Close"
+              aria-label={t("window.close")}
               className="inline-flex h-10 w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-destructive hover:text-destructive-foreground"
             >
               <X className="size-4" />

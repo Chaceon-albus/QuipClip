@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import {
   ArrowLeftToLine,
   ArrowRightToLine,
@@ -13,6 +14,8 @@ import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 export function TransportBar() {
+  const { t } = useTranslation();
+
   return (
     <section className="flex h-[72px] shrink-0 items-center justify-center border-y border-border bg-card px-4 select-none">
       <div className="flex items-center gap-4">
@@ -22,19 +25,23 @@ export function TransportBar() {
             variant="ghost"
             disabled
             className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="Undo"
+            aria-label={t("transport.action.undo")}
           >
             <Undo2 className="size-4" />
-            <span className="text-[10px] leading-none font-medium">Undo</span>
+            <span className="text-[10px] leading-none font-medium">
+              {t("transport.action.undo")}
+            </span>
           </Button>
           <Button
             variant="ghost"
             disabled
             className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="Redo"
+            aria-label={t("transport.action.redo")}
           >
             <Redo2 className="size-4" />
-            <span className="text-[10px] leading-none font-medium">Redo</span>
+            <span className="text-[10px] leading-none font-medium">
+              {t("transport.action.redo")}
+            </span>
           </Button>
         </div>
 
@@ -46,26 +53,15 @@ export function TransportBar() {
             variant="outline"
             disabled
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
-            aria-label="Mark In Point"
+            aria-label={t("transport.action.markInAria")}
           >
             <ArrowRightToLine className="size-4 text-muted-foreground" />
             <div className="flex flex-col items-start leading-tight">
-              <span className="text-xs font-semibold">In</span>
-              <span className="text-[10px] text-muted-foreground">Mark In</span>
-            </div>
-          </Button>
-
-          <Button
-            variant="outline"
-            disabled
-            className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
-            aria-label="Mark Out Point (Exclusive)"
-          >
-            <ArrowLeftToLine className="size-4 text-muted-foreground" />
-            <div className="flex flex-col items-start leading-tight">
-              <span className="text-xs font-semibold">Out (Exclusive)</span>
+              <span className="text-xs font-semibold">
+                {t("transport.action.markIn")}
+              </span>
               <span className="text-[10px] text-muted-foreground">
-                Mark Out (Exclusive)
+                {t("transport.action.markInDetail")}
               </span>
             </div>
           </Button>
@@ -74,12 +70,33 @@ export function TransportBar() {
             variant="outline"
             disabled
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
-            aria-label="Split Segment"
+            aria-label={t("transport.action.markOutAria")}
+          >
+            <ArrowLeftToLine className="size-4 text-muted-foreground" />
+            <div className="flex flex-col items-start leading-tight">
+              <span className="text-xs font-semibold">
+                {t("transport.action.markOut")}
+              </span>
+              <span className="text-[10px] text-muted-foreground">
+                {t("transport.action.markOutDetail")}
+              </span>
+            </div>
+          </Button>
+
+          <Button
+            variant="outline"
+            disabled
+            className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
+            aria-label={t("transport.action.splitAria")}
           >
             <Scissors className="size-4 text-muted-foreground" />
             <div className="flex flex-col items-start leading-tight">
-              <span className="text-xs font-semibold">Split</span>
-              <span className="text-[10px] text-muted-foreground">Cut Clip</span>
+              <span className="text-xs font-semibold">
+                {t("transport.action.split")}
+              </span>
+              <span className="text-[10px] text-muted-foreground">
+                {t("transport.action.splitDetail")}
+              </span>
             </div>
           </Button>
         </div>
@@ -94,12 +111,12 @@ export function TransportBar() {
                 size="icon"
                 disabled
                 className="size-11 rounded-lg bg-primary text-primary-foreground shadow-xs hover:bg-primary-hover active:bg-primary-active"
-                aria-label="Play"
+                aria-label={t("transport.action.play")}
               >
                 <Play className="size-5 fill-current" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Play</TooltipContent>
+            <TooltipContent>{t("transport.action.play")}</TooltipContent>
           </Tooltip>
 
           <Tooltip>
@@ -109,12 +126,12 @@ export function TransportBar() {
                 size="icon"
                 disabled
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
-                aria-label="Previous Frame"
+                aria-label={t("transport.action.previousFrame")}
               >
                 <SkipBack className="size-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Previous Frame</TooltipContent>
+            <TooltipContent>{t("transport.action.previousFrame")}</TooltipContent>
           </Tooltip>
 
           <Tooltip>
@@ -124,12 +141,12 @@ export function TransportBar() {
                 size="icon"
                 disabled
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
-                aria-label="Next Frame"
+                aria-label={t("transport.action.nextFrame")}
               >
                 <SkipForward className="size-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Next Frame</TooltipContent>
+            <TooltipContent>{t("transport.action.nextFrame")}</TooltipContent>
           </Tooltip>
         </div>
       </div>

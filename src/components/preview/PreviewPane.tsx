@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { ChevronDown, Maximize2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,12 +10,14 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 export function PreviewPane() {
+  const { t } = useTranslation();
+
   return (
     <section className="flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground select-none">
       {/* 16:9 Video Canvas Surface */}
       <div className="relative flex min-h-0 flex-1 items-center justify-center">
         <div className="relative flex aspect-video h-full max-h-full w-auto max-w-full items-center justify-center rounded-lg border border-preview-border bg-preview-surface shadow-xs">
-          <span className="text-xs text-preview-muted">No media loaded</span>
+          <span className="text-xs text-preview-muted">{t("preview.noMedia")}</span>
         </div>
       </div>
 
@@ -35,15 +38,15 @@ export function PreviewPane() {
                 disabled
                 className="h-6 gap-1 px-2 text-xs text-preview-muted hover:bg-preview-surface hover:text-preview-foreground"
               >
-                Fit
+                {t("preview.zoom.fit")}
                 <ChevronDown className="size-3" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem>Fit</DropdownMenuItem>
-              <DropdownMenuItem>50%</DropdownMenuItem>
-              <DropdownMenuItem>100%</DropdownMenuItem>
-              <DropdownMenuItem>200%</DropdownMenuItem>
+              <DropdownMenuItem>{t("preview.zoom.fit")}</DropdownMenuItem>
+              <DropdownMenuItem>{t("preview.zoom.zoom50")}</DropdownMenuItem>
+              <DropdownMenuItem>{t("preview.zoom.zoom100")}</DropdownMenuItem>
+              <DropdownMenuItem>{t("preview.zoom.zoom200")}</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
 
@@ -54,12 +57,12 @@ export function PreviewPane() {
                 size="icon-xs"
                 disabled
                 className="size-6 text-preview-muted hover:bg-preview-surface hover:text-preview-foreground"
-                aria-label="Toggle Fullscreen"
+                aria-label={t("preview.action.toggleFullscreen")}
               >
                 <Maximize2 className="size-3.5" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Fullscreen</TooltipContent>
+            <TooltipContent>{t("preview.action.fullscreen")}</TooltipContent>
           </Tooltip>
         </div>
       </div>

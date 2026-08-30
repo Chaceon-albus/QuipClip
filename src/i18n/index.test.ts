@@ -1176,3 +1176,136 @@ describe("global singleton runtime initI18n concurrency and retry safety", () =>
     }
   });
 });
+
+describe("application shell localization and status bar formatting", () => {
+  it("translates all shell interface semantic keys in both English and Simplified Chinese", async () => {
+    const instance = await createI18nInstance({
+      initialPreference: "en",
+      systemLanguages: [],
+    });
+
+    // TitleBar
+    expect(instance.t("app.name")).toBe("QuipClip");
+    expect(instance.t("titleBar.menu.file")).toBe("File");
+    expect(instance.t("titleBar.menu.newProject")).toBe("New Project");
+    expect(instance.t("titleBar.menu.openProject")).toBe("Open Project...");
+    expect(instance.t("titleBar.menu.save")).toBe("Save");
+    expect(instance.t("titleBar.menu.export")).toBe("Export...");
+    expect(instance.t("titleBar.project.untitled")).toBe("Untitled Project");
+    expect(instance.t("titleBar.project.saved")).toBe("Saved");
+    expect(instance.t("window.minimize")).toBe("Minimize");
+    expect(instance.t("window.toggleMaximize")).toBe("Toggle maximize/restore");
+    expect(instance.t("window.close")).toBe("Close");
+
+    // PreviewPane
+    expect(instance.t("preview.noMedia")).toBe("No media loaded");
+    expect(instance.t("preview.zoom.fit")).toBe("Fit");
+    expect(instance.t("preview.zoom.zoom50")).toBe("50%");
+    expect(instance.t("preview.zoom.zoom100")).toBe("100%");
+    expect(instance.t("preview.zoom.zoom200")).toBe("200%");
+    expect(instance.t("preview.action.toggleFullscreen")).toBe("Toggle Fullscreen");
+    expect(instance.t("preview.action.fullscreen")).toBe("Fullscreen");
+
+    // TransportBar
+    expect(instance.t("transport.action.undo")).toBe("Undo");
+    expect(instance.t("transport.action.redo")).toBe("Redo");
+    expect(instance.t("transport.action.markIn")).toBe("In");
+    expect(instance.t("transport.action.markInDetail")).toBe("Mark In");
+    expect(instance.t("transport.action.markInAria")).toBe("Mark In Point");
+    expect(instance.t("transport.action.markOut")).toBe("Out (Exclusive)");
+    expect(instance.t("transport.action.markOutDetail")).toBe("Mark Out (Exclusive)");
+    expect(instance.t("transport.action.markOutAria")).toBe(
+      "Mark Out Point (Exclusive)",
+    );
+    expect(instance.t("transport.action.split")).toBe("Split");
+    expect(instance.t("transport.action.splitDetail")).toBe("Cut Clip");
+    expect(instance.t("transport.action.splitAria")).toBe("Split Segment");
+    expect(instance.t("transport.action.play")).toBe("Play");
+    expect(instance.t("transport.action.previousFrame")).toBe("Previous Frame");
+    expect(instance.t("transport.action.nextFrame")).toBe("Next Frame");
+
+    // TimelinePanel
+    expect(instance.t("timeline.track.videoTrack")).toBe("V1");
+
+    // Switch to Simplified Chinese
+    await instance.changeLanguage("zh-CN");
+
+    // TitleBar
+    expect(instance.t("app.name")).toBe("QuipClip");
+    expect(instance.t("titleBar.menu.file")).toBe("文件");
+    expect(instance.t("titleBar.menu.newProject")).toBe("新建项目");
+    expect(instance.t("titleBar.menu.openProject")).toBe("打开项目...");
+    expect(instance.t("titleBar.menu.save")).toBe("保存");
+    expect(instance.t("titleBar.menu.export")).toBe("导出...");
+    expect(instance.t("titleBar.project.untitled")).toBe("未命名项目");
+    expect(instance.t("titleBar.project.saved")).toBe("已保存");
+    expect(instance.t("window.minimize")).toBe("最小化");
+    expect(instance.t("window.toggleMaximize")).toBe("切换最大化/还原");
+    expect(instance.t("window.close")).toBe("关闭");
+
+    // PreviewPane
+    expect(instance.t("preview.noMedia")).toBe("未加载媒体");
+    expect(instance.t("preview.zoom.fit")).toBe("适应窗口");
+    expect(instance.t("preview.zoom.zoom50")).toBe("50%");
+    expect(instance.t("preview.zoom.zoom100")).toBe("100%");
+    expect(instance.t("preview.zoom.zoom200")).toBe("200%");
+    expect(instance.t("preview.action.toggleFullscreen")).toBe("切换全屏");
+    expect(instance.t("preview.action.fullscreen")).toBe("全屏");
+
+    // TransportBar
+    expect(instance.t("transport.action.undo")).toBe("撤销");
+    expect(instance.t("transport.action.redo")).toBe("重做");
+    expect(instance.t("transport.action.markIn")).toBe("入点");
+    expect(instance.t("transport.action.markInDetail")).toBe("标记入点");
+    expect(instance.t("transport.action.markInAria")).toBe("标记入点");
+    expect(instance.t("transport.action.markOut")).toBe("出点（不含）");
+    expect(instance.t("transport.action.markOutDetail")).toBe("标记出点（不含）");
+    expect(instance.t("transport.action.markOutAria")).toBe("标记出点（不含）");
+    expect(instance.t("transport.action.split")).toBe("分割");
+    expect(instance.t("transport.action.splitDetail")).toBe("裁剪片段");
+    expect(instance.t("transport.action.splitAria")).toBe("分割片段");
+    expect(instance.t("transport.action.play")).toBe("播放");
+    expect(instance.t("transport.action.previousFrame")).toBe("上一帧");
+    expect(instance.t("transport.action.nextFrame")).toBe("下一帧");
+
+    // TimelinePanel
+    expect(instance.t("timeline.track.videoTrack")).toBe("V1");
+  });
+
+  it("formats resolution and frame rate numbers with Intl under resolved locale", async () => {
+    const instance = await createI18nInstance({
+      initialPreference: "en",
+      systemLanguages: [],
+    });
+
+    const enFormatter = new Intl.NumberFormat("en");
+    expect(
+      instance.t("statusBar.projectResolution", {
+        width: enFormatter.format(1920),
+        height: enFormatter.format(1080),
+      }),
+    ).toBe("Project Resolution: 1,920 × 1,080");
+
+    expect(
+      instance.t("statusBar.frameRate", {
+        fps: enFormatter.format(25),
+      }),
+    ).toBe("Frame Rate: 25 fps");
+
+    await instance.changeLanguage("zh-CN");
+    const zhFormatter = new Intl.NumberFormat("zh-CN");
+
+    expect(
+      instance.t("statusBar.projectResolution", {
+        width: zhFormatter.format(1920),
+        height: zhFormatter.format(1080),
+      }),
+    ).toBe("项目分辨率：1,920 × 1,080");
+
+    expect(
+      instance.t("statusBar.frameRate", {
+        fps: zhFormatter.format(25),
+      }),
+    ).toBe("帧率：25 fps");
+  });
+});
