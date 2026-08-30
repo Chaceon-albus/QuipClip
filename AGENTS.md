@@ -1,0 +1,107 @@
+# QuipClip — agent rules
+
+QuipClip is a video editor for Windows and macOS. The user opens a video, marks several
+In and Out pairs on one timeline, and exports those segments joined in order. A
+command-line `ffmpeg` does the export. The application never bundles `ffmpeg`.
+
+Version 1 edits one source. Several sources come later. Multi-track is out of scope and
+stays out of scope.
+
+## Stack
+
+| Part            | Choice                                      |
+| --------------- | ------------------------------------------- |
+| Shell           | Tauri v2, Rust backend                      |
+| Frontend        | React 19, TypeScript, Vite 8                |
+| Styles          | Tailwind CSS 4, shadcn/ui on the radix base |
+| State           | Zustand                                     |
+| Package manager | pnpm                                        |
+
+Hold TypeScript at 5.9. `typescript-eslint` caps its peer range below 6.1.
+
+## Layout
+
+```
+src/            React frontend
+  components/ui/    shadcn output. Generated code.
+  components/       layout, preview, timeline, transport
+  features/         media, timeline, ffmpeg, export, project
+  lib/              rational math, timecode, Tauri bindings
+  stores/           Zustand slices
+  styles/           globals.css holds the palette
+  assets/brand/     the icon master
+src-tauri/      Rust backend
+  src/ffmpeg/       locate, download, probe, capabilities, export
+  src/project/      the project file
+  src/time.rs       the Rational type
+docs/           architecture.md
+.agents/        decisions, skills, private
+```
+
+## Commands
+
+```bash
+pnpm install
+pnpm tauri dev            # run the application
+pnpm lint                 # eslint
+pnpm typecheck            # tsc --noEmit
+pnpm build                # tsc and vite build
+pnpm test                 # vitest
+pnpm format               # prettier
+pnpm icons                # regenerate src-tauri/icons from the brand PNG
+
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+```
+
+## Rules
+
+### Language
+
+- Write every code comment in English.
+- Write every document in English.
+- Run an English document through the `asd-ste100` skill before you finish it.
+
+### Architecture decisions
+
+- Record a decision in `.agents/decisions/NNN-title.md`. Use the next free number.
+- State context, decision, and consequences.
+- Name the new file in `docs/architecture.md`.
+- Only the main agent writes an ADR.
+
+Read the ADRs before you change the time model, the preview, the export pipeline, or the
+ffmpeg lifecycle. Those four parts carry the accuracy requirement of the product.
+
+### The private directory
+
+`.agents/private/` holds files the user and the agents exchange, such as screenshots.
+
+- Never commit anything under that path.
+- Never name that path in a shipped file.
+- Delete the intermediate files you created there.
+
+### Writing code
+
+Read the `dev-workflow` skill. It gives the routing rules, the review loop, the gate, and
+the commit rules.
+
+Short form: the main agent orchestrates and reviews. `agy` on `gemini-3.7-flash-high`
+writes the frontend. A subagent writes the Rust. A different agent reviews. The main agent
+commits.
+
+### Commits
+
+- One reviewed unit, one commit, with a Conventional Commits message.
+- Commit to the branch that is checked out. Never create, switch, or delete a branch.
+- Never push.
+- Stage the paths by name. Never run `git add -A`.
+
+`.agents/decisions/009-incremental-commit-policy.md` holds the full rules.
+
+### Code style
+
+- TypeScript is strict. `any` is a lint error.
+- Rust must pass `cargo clippy -- -D warnings`.
+- Prettier sorts the Tailwind classes. Do not sort them by hand.
+- Prettier does not read `.agents/`. Two skills there are git submodules.
