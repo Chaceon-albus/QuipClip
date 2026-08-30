@@ -16,7 +16,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             greet,
-            commands::media::import_media
+            commands::media::import_media,
+            commands::project::load_project,
+            commands::project::save_project
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
