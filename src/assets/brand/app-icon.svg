@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#182327" />
+      <stop offset="40%" stop-color="#11181b" />
+      <stop offset="100%" stop-color="#0a0e10" />
+    </linearGradient>
+
+    <!-- Border Gradient -->
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3e5963" stop-opacity="0.7" />
+      <stop offset="50%" stop-color="#1e2f35" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#0e1618" stop-opacity="0.8" />
+    </linearGradient>
+
+    <!-- Q Ring & Upper Stem Gradient -->
+    <linearGradient id="qGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#68faf0" />
+      <stop offset="35%" stop-color="#2dd4bf" />
+      <stop offset="100%" stop-color="#11998e" />
+    </linearGradient>
+
+    <!-- Craft Blade Bevel (Silver / Cyan Metallic Edge) -->
+    <linearGradient id="bladeFacetGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#e0fdfa" />
+      <stop offset="30%" stop-color="#99f6ec" />
+      <stop offset="70%" stop-color="#38d9cb" />
+      <stop offset="100%" stop-color="#128c82" />
+    </linearGradient>
+
+    <!-- Lower Stem Gradient -->
+    <linearGradient id="lowerStemGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#20c4b5" />
+      <stop offset="60%" stop-color="#16a89c" />
+      <stop offset="100%" stop-color="#0e7b73" />
+    </linearGradient>
+
+    <!-- Active Video Clip Gradient -->
+    <linearGradient id="activeClipGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1c807b" />
+      <stop offset="100%" stop-color="#2dd4bf" />
+    </linearGradient>
+
+    <!-- Clean Glow Filter -->
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="16" result="blur" />
+      <feColorMatrix type="matrix" values="0 0 0 0 0.18   0 0 0 0 0.83   0 0 0 0 0.75  0 0 0 0.4 0"/>
+      <feMerge>
+        <feMergeNode />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Squircle Drop Shadow -->
+    <filter id="tileShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="24" stdDeviation="32" flood-color="#000000" flood-opacity="0.65" />
+    </filter>
+  </defs>
+
+  <!-- Squircle Base -->
+  <g filter="url(#tileShadow)">
+    <rect x="80" y="80" width="864" height="864" rx="196" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="4" />
+  </g>
+
+  <!-- Timeline Track Clips -->
+  <g id="timeline-clips">
+    <rect x="172" y="652" width="44" height="68" rx="10" fill="#203036" stroke="#2e4650" stroke-width="1.5" />
+    <rect x="228" y="652" width="110" height="68" rx="10" fill="#253a42" stroke="#375560" stroke-width="1.5" />
+    <rect x="350" y="652" width="82" height="68" rx="10" fill="#2b444d" stroke="#416674" stroke-width="1.5" />
+    
+    <!-- Active Clips across the Cut -->
+    <rect x="444" y="652" width="104" height="68" rx="10" fill="url(#activeClipGrad)" stroke="#4eeadc" stroke-width="1.5" />
+    <rect x="618" y="652" width="82" height="68" rx="10" fill="url(#activeClipGrad)" stroke="#4eeadc" stroke-width="1.5" />
+    
+    <rect x="712" y="652" width="76" height="68" rx="10" fill="#2b444d" stroke="#416674" stroke-width="1.5" />
+    <rect x="800" y="652" width="48" height="68" rx="10" fill="#203036" stroke="#2e4650" stroke-width="1.5" />
+  </g>
+
+  <!-- Main Q Glyph & Slicing Blade (Pure Uniform Stroke 48px, No Pinching, No Lines/Dots) -->
+  <g filter="url(#softGlow)">
+    <!-- Upper Q Shape: Perfect Outer Arc + Straight Stem, Perfect Inner Hole -->
+    <path fill-rule="evenodd" fill="url(#qGrad)" d="
+      M 608 400
+      A 144 144 0 1 0 560 507.33
+      L 560 610
+      L 608 580
+      L 608 400
+      Z
+      M 464 304
+      A 96 96 0 1 1 464 496
+      A 96 96 0 1 1 464 304
+      Z
+    " />
+
+    <!-- Craft Blade Slicing Bevel (Clean Metallic Facet at Cut Interface, No Extra White Lines) -->
+    <path fill="url(#bladeFacetGrad)" d="
+      M 560 610
+      L 608 580
+      L 608 610
+      L 560 640
+      Z
+    " />
+
+    <!-- Lower Playhead Stem: Sliced Top, Uniform 48px Width, Smooth Pill Cap Bottom (No White Lines) -->
+    <path fill="url(#lowerStemGrad)" d="
+      M 560 660
+      L 608 630
+      L 608 776
+      A 24 24 0 0 1 560 776
+      Z
+    " />
+  </g>
+</svg>

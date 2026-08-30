@@ -13,7 +13,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "icons": "tauri icon src/assets/brand/app-icon.png"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
