@@ -3,6 +3,14 @@
     "windows": [
       {
         "label": "main",
+        "title": "QuipClip",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true,
+        "dragDropEnabled": true,
         "decorations": false
       }
     ]
