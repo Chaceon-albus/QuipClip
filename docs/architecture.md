@@ -32,6 +32,7 @@ document summarizes them and shows how the parts fit together.
 | [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                 | One reviewed unit, one commit, no push                          |
 | [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                             | A versioned JSON project file, with two stored paths per source |
 | [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                             | English and Simplified Chinese interface with a saved setting   |
+| [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)         | Homebrew path fallback for macOS GUI applications               |
 
 ## Shape
 
@@ -158,11 +159,15 @@ the same frame in both.
 
 ## ffmpeg lifecycle
 
-See ADR 005 and ADR 006.
+See ADR 005, ADR 006, and ADR 012.
 
 Resolution order: the configured path, then `PATH`, then `<app_data>/bin`, then a download
 the user agreed to. `app_data_dir()` from the Tauri path API already follows the Windows and
 the macOS convention, so no code builds those paths by hand.
+
+On macOS, the `PATH` lookup appends `/opt/homebrew/bin` and `/usr/local/bin` after the
+directories from the process `PATH`. This rule lets GUI applications find a standard
+Homebrew installation without starting a login shell.
 
 The download manifest pins a URL and a SHA-256 per target. Windows and macOS need different
 sources, because the Windows build server publishes no macOS asset.
