@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import {
   ArrowLeftToLine,
   ArrowRightToLine,
+  Pause,
   Play,
   Redo2,
   Scissors,
@@ -12,9 +13,20 @@ import {
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useMediaStore } from "@/features/media";
+import { usePlaybackStore } from "@/features/playback";
 
 export function TransportBar() {
   const { t } = useTranslation();
+  const media = useMediaStore((s) => s.media);
+  const isPlaying = usePlaybackStore((s) => s.isPlaying);
+  const isAttached = usePlaybackStore((s) => s.isAttached);
+  const isReady = usePlaybackStore((s) => s.isReady);
+  const togglePlayback = usePlaybackStore((s) => s.togglePlayback);
+  const stepFrames = usePlaybackStore((s) => s.stepFrames);
+
+  const frameCount = media?.probe.frameCount ?? 0;
+  const canControl = media !== null && isAttached && isReady && frameCount > 0;
 
   return (
     <section className="flex h-[72px] shrink-0 items-center justify-center border-y border-border bg-card px-4 select-none">
@@ -103,28 +115,15 @@ export function TransportBar() {
 
         <Separator orientation="vertical" className="h-8 bg-border" />
 
-        {/* Group 3: Playback Controls */}
+        {/* Group 3: Playback Controls (Coherent central order: Previous Frame, Play/Pause, Next Frame) */}
         <div className="flex items-center gap-2">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                size="icon"
-                disabled
-                className="size-11 rounded-lg bg-primary text-primary-foreground shadow-xs hover:bg-primary-hover active:bg-primary-active"
-                aria-label={t("transport.action.play")}
-              >
-                <Play className="size-5 fill-current" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t("transport.action.play")}</TooltipContent>
-          </Tooltip>
-
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon"
-                disabled
+                disabled={!canControl}
+                onClick={() => stepFrames(-1)}
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label={t("transport.action.previousFrame")}
               >
@@ -137,9 +136,33 @@ export function TransportBar() {
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
+                size="icon"
+                disabled={!canControl}
+                onClick={togglePlayback}
+                className="size-11 rounded-lg bg-primary text-primary-foreground shadow-xs hover:bg-primary-hover active:bg-primary-active"
+                aria-label={
+                  isPlaying ? t("transport.action.pause") : t("transport.action.play")
+                }
+              >
+                {isPlaying ? (
+                  <Pause className="size-5 fill-current" />
+                ) : (
+                  <Play className="size-5 fill-current" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {isPlaying ? t("transport.action.pause") : t("transport.action.play")}
+            </TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
                 variant="ghost"
                 size="icon"
-                disabled
+                disabled={!canControl}
+                onClick={() => stepFrames(1)}
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label={t("transport.action.nextFrame")}
               >

@@ -6,7 +6,6 @@ import {
   createSourceLifecycleGuard,
   formatDisplayTimecode,
   formatTotalTimecode,
-  getMediaSourceIdentity,
   SourceLifecycleController,
 } from "./previewFrame";
 
@@ -14,56 +13,6 @@ describe("Preview Frame Helpers & ADR-003 Math", () => {
   const fps30 = { n: 30, d: 1 };
   const fps25 = { n: 25, d: 1 };
   const fpsNtsc = { n: 30000, d: 1001 }; // ~29.97002997... fps
-
-  describe("getMediaSourceIdentity", () => {
-    it("returns empty string for null or undefined media", () => {
-      expect(getMediaSourceIdentity(null)).toBe("");
-      expect(getMediaSourceIdentity(undefined)).toBe("");
-    });
-
-    it("generates deterministic identity token from canonical path, size, and mtime", () => {
-      const media = {
-        path: "/videos/sample.mp4",
-        size: 1048576,
-        mtime: 1724976000,
-      };
-      expect(getMediaSourceIdentity(media)).toBe(
-        "/videos/sample.mp4:1048576:1724976000",
-      );
-    });
-
-    it("produces distinct identity when file is modified at the same path (mtime changed)", () => {
-      const original = {
-        path: "/videos/sample.mp4",
-        size: 1048576,
-        mtime: 1724976000,
-      };
-      const modified = {
-        path: "/videos/sample.mp4",
-        size: 1048576,
-        mtime: 1724976500,
-      };
-      expect(getMediaSourceIdentity(original)).not.toBe(
-        getMediaSourceIdentity(modified),
-      );
-    });
-
-    it("produces distinct identity when file size changes at the same path", () => {
-      const original = {
-        path: "/videos/sample.mp4",
-        size: 1048576,
-        mtime: 1724976000,
-      };
-      const modified = {
-        path: "/videos/sample.mp4",
-        size: 2097152,
-        mtime: 1724976000,
-      };
-      expect(getMediaSourceIdentity(original)).not.toBe(
-        getMediaSourceIdentity(modified),
-      );
-    });
-  });
 
   describe("clampDisplayFrame", () => {
     it("preserves valid frame indices within [0, frameCount - 1]", () => {

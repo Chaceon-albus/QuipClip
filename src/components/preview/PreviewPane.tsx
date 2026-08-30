@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { AlertCircle, ChevronDown, Loader2, Maximize2 } from "lucide-react";
@@ -10,34 +10,51 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useMediaStore } from "@/features/media";
+import { getMediaSourceIdentity, useMediaStore } from "@/features/media";
+import { createVideoRefCallback, usePlaybackStore } from "@/features/playback";
 import {
   calculateFrameFromCurrentTime,
   calculateFrameFromMediaTime,
   createSourceLifecycleGuard,
   formatDisplayTimecode,
   formatTotalTimecode,
-  getMediaSourceIdentity,
 } from "./previewFrame";
 
 export function PreviewPane() {
   const { t } = useTranslation();
   const { status, media, error } = useMediaStore();
 
+  const currentFrame = usePlaybackStore((s) => s.currentFrame);
+  const playbackError = usePlaybackStore((s) => s.error);
+  const attach = usePlaybackStore((s) => s.attach);
+  const detach = usePlaybackStore((s) => s.detach);
+  const syncReady = usePlaybackStore((s) => s.syncReady);
+  const syncUnready = usePlaybackStore((s) => s.syncUnready);
+  const syncRenderedFrame = usePlaybackStore((s) => s.syncRenderedFrame);
+  const syncPlay = usePlaybackStore((s) => s.syncPlay);
+  const syncPause = usePlaybackStore((s) => s.syncPause);
+  const syncEnded = usePlaybackStore((s) => s.syncEnded);
+  const resetPlayback = usePlaybackStore((s) => s.reset);
+
   const sourceIdentity = getMediaSourceIdentity(media);
   const [prevSourceIdentity, setPrevSourceIdentity] = useState(sourceIdentity);
-  const [currentFrame, setCurrentFrame] = useState(0);
   const [videoError, setVideoError] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [sourceGuard] = useState(() => createSourceLifecycleGuard());
 
-  // Reset local frame and decode error state synchronously when source identity changes
+  // Reset decode error state synchronously when source identity changes
   if (prevSourceIdentity !== sourceIdentity) {
     setPrevSourceIdentity(sourceIdentity);
-    setCurrentFrame(0);
     setVideoError(false);
   }
+
+  // Reset playback store if media disappears
+  useEffect(() => {
+    if (!media) {
+      resetPlayback();
+    }
+  }, [media, resetPlayback]);
 
   // Synchronously activate / deactivate source identity before browser paint (ADR-003)
   useLayoutEffect(() => {
@@ -46,6 +63,48 @@ export function PreviewPane() {
       sourceGuard.deactivate(sourceIdentity);
     };
   }, [sourceIdentity, sourceGuard]);
+
+  const mediaPath = media?.path;
+  const mediaSize = media?.size;
+  const mediaMtime = media?.mtime;
+  const avgFrameRateN = media?.probe.avgFrameRate.n;
+  const avgFrameRateD = media?.probe.avgFrameRate.d;
+  const frameCount = media?.probe.frameCount;
+
+  // Stable ref callback for registering and unregistering video element in playback store with exact ownership
+  const videoRefCallback = useMemo(
+    () =>
+      createVideoRefCallback<HTMLVideoElement>({
+        videoRef,
+        getSource: () =>
+          mediaPath !== undefined &&
+          mediaSize !== undefined &&
+          mediaMtime !== undefined &&
+          avgFrameRateN !== undefined &&
+          avgFrameRateD !== undefined &&
+          frameCount !== undefined
+            ? {
+                path: mediaPath,
+                size: mediaSize,
+                mtime: mediaMtime,
+                avgFrameRate: { n: avgFrameRateN, d: avgFrameRateD },
+                frameCount,
+              }
+            : null,
+        attach,
+        detach,
+      }),
+    [
+      mediaPath,
+      mediaSize,
+      mediaMtime,
+      avgFrameRateN,
+      avgFrameRateD,
+      frameCount,
+      attach,
+      detach,
+    ],
+  );
 
   // Register requestVideoFrameCallback lifecycle loop (ADR-003)
   useEffect(() => {
@@ -85,7 +144,7 @@ export function PreviewPane() {
           media.probe.avgFrameRate,
           media.probe.frameCount,
         );
-        setCurrentFrame(frame);
+        syncRenderedFrame(expectedSourceId, frame, video);
 
         // Re-register the one-shot callback while the video remains active
         const videoElement = video as HTMLVideoElement & {
@@ -118,7 +177,7 @@ export function PreviewPane() {
         }
       }
     };
-  }, [sourceIdentity, media, videoError, sourceGuard]);
+  }, [sourceIdentity, media, videoError, sourceGuard, syncRenderedFrame]);
 
   const supportsRvfc =
     typeof HTMLVideoElement !== "undefined" &&
@@ -135,7 +194,7 @@ export function PreviewPane() {
         media.probe.avgFrameRate,
         media.probe.frameCount,
       );
-      setCurrentFrame(frame);
+      syncRenderedFrame(sourceIdentity, frame, e.currentTarget);
     }
   };
 
@@ -175,9 +234,8 @@ export function PreviewPane() {
                 </div>
               ) : (
                 <video
-                  ref={videoRef}
+                  ref={videoRefCallback}
                   key={sourceIdentity}
-                  controls
                   playsInline
                   preload="metadata"
                   src={convertFileSrc(media.path)}
@@ -185,10 +243,35 @@ export function PreviewPane() {
                     fileName: media.fileName,
                   })}
                   className="h-full w-full object-contain"
+                  onPlay={(e) => {
+                    if (sourceGuard.isActive(sourceIdentity)) {
+                      syncPlay(sourceIdentity, e.currentTarget);
+                    }
+                  }}
+                  onPause={(e) => {
+                    if (sourceGuard.isActive(sourceIdentity)) {
+                      syncPause(sourceIdentity, e.currentTarget);
+                    }
+                  }}
+                  onEnded={(e) => {
+                    if (sourceGuard.isActive(sourceIdentity)) {
+                      syncEnded(sourceIdentity, e.currentTarget);
+                    }
+                  }}
                   onTimeUpdate={handleTimeUpdateFallback}
                   onSeeked={handleTimeUpdateFallback}
-                  onLoadedMetadata={handleTimeUpdateFallback}
-                  onError={handleVideoError}
+                  onLoadedMetadata={(e) => {
+                    if (sourceGuard.isActive(sourceIdentity)) {
+                      syncReady(sourceIdentity, e.currentTarget);
+                      handleTimeUpdateFallback(e);
+                    }
+                  }}
+                  onError={(e) => {
+                    if (sourceGuard.isActive(sourceIdentity)) {
+                      syncUnready(sourceIdentity, e.currentTarget);
+                      handleVideoError();
+                    }
+                  }}
                 />
               )}
 
@@ -214,6 +297,23 @@ export function PreviewPane() {
                     <span className="truncate font-medium">
                       {t(`mediaError.${error.code}`, {
                         defaultValue: t("mediaError.unknown"),
+                      })}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Restrained Overlay when local playback start fails */}
+              {playbackError && !videoError && (
+                <div
+                  className="absolute top-3 right-3 left-3 z-10 flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/90 px-3 py-1.5 text-xs text-destructive-foreground shadow-md backdrop-blur-xs"
+                  aria-live="polite"
+                >
+                  <div className="flex items-center gap-2 truncate">
+                    <AlertCircle className="size-4 shrink-0" />
+                    <span className="truncate font-medium">
+                      {t(`playbackError.${playbackError}`, {
+                        defaultValue: t("playbackError.playbackFailed"),
                       })}
                     </span>
                   </div>

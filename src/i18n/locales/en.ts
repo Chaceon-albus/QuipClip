@@ -88,6 +88,10 @@ export const en = {
     dialogFailed: "Failed to open the file selection dialog.",
     unknown: "An unknown error occurred while importing media.",
   },
+  playbackError: {
+    playbackFailed: "Failed to start playback.",
+    seekFailed: "Failed to seek to the requested frame.",
+  },
   statusBar: {
     projectResolution: "Project Resolution: {{width}} × {{height}}",
     projectResolutionDefault: "Project Resolution: 1920 × 1080",

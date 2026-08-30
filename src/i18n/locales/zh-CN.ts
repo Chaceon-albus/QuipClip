@@ -91,6 +91,10 @@ export const zhCN: TranslationCatalog = {
     dialogFailed: "打开文件选择对话框失败。",
     unknown: "导入媒体时发生未知错误。",
   },
+  playbackError: {
+    playbackFailed: "播放启动失败。",
+    seekFailed: "跳转到指定帧失败。",
+  },
   statusBar: {
     projectResolution: "项目分辨率：{{width}} × {{height}}",
     projectResolutionDefault: "项目分辨率：1920 × 1080",

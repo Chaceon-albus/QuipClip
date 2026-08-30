@@ -1,8 +1,8 @@
 /**
- * Pure helper functions for video preview frame conversion, source identity, and timecode calculations.
+ * Pure helper functions for video preview frame conversion and timecode calculations.
  *
  * Implements ADR-003 preview readback math, RVFC metadata conversions, fallback currentTime conversions,
- * display frame clamping, and robust source identity tokens.
+ * display frame clamping, and source lifecycle concurrency guards.
  */
 
 import {
@@ -12,31 +12,6 @@ import {
   rationalToNumber,
 } from "@/lib/time";
 import type { Rational } from "@/types/project";
-
-/**
- * Minimal media descriptor required to construct a unique source identity token.
- */
-export interface MediaSourceDescriptor {
-  path: string;
-  size: number;
-  mtime: number;
-}
-
-/**
- * Computes a unique source identity string based on canonical path, file size, and modification time.
- * If media is reimported at the same path after modification (size or mtime changed), the identity token changes.
- *
- * @param media Media descriptor or null if no media is loaded.
- * @returns Canonical identity token string, or empty string when media is null.
- */
-export function getMediaSourceIdentity(
-  media: MediaSourceDescriptor | null | undefined,
-): string {
-  if (!media || typeof media.path !== "string") {
-    return "";
-  }
-  return `${media.path}:${media.size}:${media.mtime}`;
-}
 
 /**
  * Clamps an integer frame index to the valid display frame range [0, frameCount - 1].
