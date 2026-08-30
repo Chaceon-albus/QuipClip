@@ -24,3 +24,20 @@
 *.exe   binary
 *.dll   binary
 *.zip   binary
+
+# Files with no extension, or with an extension the list above does not cover.
+# Without these lines a clone with core.autocrlf=true writes CRLF into them.
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+.editorconfig   text eol=lf
+.prettierignore text eol=lf
+LICENSE         text eol=lf
+
+*.lock  text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.svg   text eol=lf
+
+*.icns  binary
+*.woff  binary
+*.woff2 binary
