@@ -52,16 +52,10 @@
       </feMerge>
     </filter>
 
-    <!-- Squircle Drop Shadow -->
-    <filter id="tileShadow" x="-10%" y="-10%" width="120%" height="120%">
-      <feDropShadow dx="0" dy="24" stdDeviation="32" flood-color="#000000" flood-opacity="0.65" />
-    </filter>
   </defs>
 
   <!-- Squircle Base -->
-  <g filter="url(#tileShadow)">
-    <rect x="80" y="80" width="864" height="864" rx="196" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="4" />
-  </g>
+  <rect x="80" y="80" width="864" height="864" rx="196" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="4" />
 
   <!-- Timeline Track Clips -->
   <g id="timeline-clips">

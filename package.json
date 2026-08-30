@@ -14,7 +14,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "icons": "tauri icon src/assets/brand/app-icon.png",
+    "icons": "tauri icon src/assets/brand/app-icon.svg",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

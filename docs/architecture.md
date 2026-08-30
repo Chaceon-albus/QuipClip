@@ -213,9 +213,9 @@ src/                   React frontend
 src-tauri/             Rust backend
 ```
 
-Assets live in fixed places. The icon master is `src/assets/brand/app-icon.svg`, and
-`pnpm icons` regenerates `src-tauri/icons/` from the PNG beside it. The palette is
-`src/styles/globals.css`.
+Assets live in fixed places. The icon master is `src/assets/brand/app-icon.svg`. The
+`pnpm icons` command regenerates the desktop icon files in `src-tauri/icons/` from that
+SVG. The palette is `src/styles/globals.css`.
 
 ## Build and check
 

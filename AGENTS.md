@@ -48,7 +48,7 @@ pnpm typecheck            # tsc --noEmit
 pnpm build                # tsc and vite build
 pnpm test                 # vitest
 pnpm format               # prettier
-pnpm icons                # regenerate src-tauri/icons from the brand PNG
+pnpm icons                # regenerate src-tauri/icons from the brand SVG
 
 cd src-tauri
 cargo fmt --check
