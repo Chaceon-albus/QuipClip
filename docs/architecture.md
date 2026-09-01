@@ -6,8 +6,8 @@ command-line `ffmpeg` does the export.
 
 Two requirements shape everything below.
 
-1. **The preview is frame accurate.** The user steps one frame at a time, and the export
-   starts and ends on the frames the preview showed.
+1. **Edit boundaries preserve source presentation timing.** The project stores source
+   video PTS values instead of positions on a generated frame grid.
 2. **The application does not bundle `ffmpeg`.** It finds the programs, or it asks the user
    and downloads them.
 
@@ -22,15 +22,15 @@ document summarizes them and shows how the parts fit together.
 | Record                                                                                                      | Subject                                                         |
 | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | [`001-tauri-react-typescript-shell.md`](../.agents/decisions/001-tauri-react-typescript-shell.md)           | Tauri v2, React 19, TypeScript, Vite, Tailwind 4, shadcn/ui     |
-| [`002-rational-time-model.md`](../.agents/decisions/002-rational-time-model.md)                             | Rational timebase, integer frame grid, exclusive out points     |
-| [`003-hybrid-preview-decoding.md`](../.agents/decisions/003-hybrid-preview-decoding.md)                     | Native playback first, ffmpeg proxy as the fallback             |
-| [`004-single-pass-filter-complex-export.md`](../.agents/decisions/004-single-pass-filter-complex-export.md) | Normalize, trim, and concatenate in one ffmpeg run              |
+| [`002-rational-time-model.md`](../.agents/decisions/002-rational-time-model.md)                             | Source video PTS, exact time bases, half-open segments           |
+| [`003-hybrid-preview-decoding.md`](../.agents/decisions/003-hybrid-preview-decoding.md)                     | Native preview, proxy fallback, calibrated PTS inference        |
+| [`004-single-pass-filter-complex-export.md`](../.agents/decisions/004-single-pass-filter-complex-export.md) | Accurate source seek, timestamp resolution, normalization       |
 | [`005-ffmpeg-acquisition.md`](../.agents/decisions/005-ffmpeg-acquisition.md)                               | PATH, then app data, then a download the user agreed to         |
 | [`006-encoder-capability-probing.md`](../.agents/decisions/006-encoder-capability-probing.md)               | List the encoders, then smoke-test them, then cache             |
-| [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md) | One timeline in source time, segments painted on it             |
+| [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md) | One source-PTS timeline with ordered half-open segments         |
 | [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)   | Delegated writing, independent review                           |
 | [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                 | One reviewed unit, one commit, no push                          |
-| [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                             | A versioned JSON project file, with two stored paths per source |
+| [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                             | Version 1 JSON with exact source-PTS boundaries                 |
 | [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                             | English and Simplified Chinese interface with a saved setting   |
 | [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)         | Homebrew path fallback for macOS GUI applications               |
 
@@ -44,7 +44,7 @@ document summarizes them and shows how the parts fit together.
 |                  |          |                    |          |
 |  Zustand stores: media, timeline, playback, ffmpeg, export  |
 |                  |                                          |
-|  lib/time.ts  (Rational, timecode)                          |
+|  lib/time.ts  (Rational, PTS, checked browser conversions) |
 +------------------|------------------------------------------+
                    |  Tauri commands and events
 +------------------|------------------------------------------+
@@ -53,7 +53,7 @@ document summarizes them and shows how the parts fit together.
 |  commands/   the IPC surface                                |
 |  ffmpeg/     locate, download, probe, capabilities, export  |
 |  project/    the .qcproj file                               |
-|  time.rs     Rational, shared shape with lib/time.ts        |
+|  time.rs     Rational and decimal-string timestamp types    |
 +------------------|------------------------------------------+
                    |  process
                    v
@@ -83,8 +83,8 @@ must return stable error codes and named values instead of user-facing sentences
 frontend must translate these application errors. It may append unchanged operating-system
 or `ffmpeg` diagnostic text to a localized error.
 
-Number, date, and list formatting must use `Intl` with the resolved locale. Media timecode,
-file paths, technical identifiers, and raw `ffmpeg` output must keep their original format.
+Number, date, and list formatting must use `Intl` with the resolved locale. Media elapsed
+time, file paths, technical identifiers, and raw `ffmpeg` output keep their defined format.
 
 English must be the source and fallback language. New messages must use named placeholders.
 Components must not assemble sentences from translated fragments. When `agy` is available,
@@ -95,21 +95,32 @@ language review is additional to the independent review that ADR 008 requires.
 
 See ADR 002. This is the foundation. Everything else depends on it.
 
-`Rational { num, den }` is the canonical Rust time type. Its fields are private, and its
-constructors keep the fraction reduced with a positive denominator. It crosses the IPC
-boundary as `{"n": ..., "d": ...}`, which is what `lib/time.ts` reads. Edit points remain
-integer frame indices, and stored timebases remain rationals. The frontend uses JavaScript
-numbers for DOM media timestamps, media-time readbacks, and approximate UI calculations.
-Rust gives ffmpeg a fixed-precision decimal string that it formats from an exact rational.
+`Rational { num, den }` is the canonical Rust rational type. It crosses the IPC boundary
+as `{"n": ..., "d": ...}`. A video time base gives seconds per stream tick.
 
-- The project timebase is the output frame rate, as a rational.
-- Every edit point is an integer frame index on that grid.
-- Out points are exclusive. `[in, out)` holds `out - in` frames.
-- `HH:MM:SS:FF` is the display format.
+Rust defines distinct `Pts`, `TickCount`, and `FrameCount` types. TypeScript defines the
+corresponding branded types. These integer values cross JSON as canonical decimal strings.
+This rule preserves the full signed `i64` PTS range.
 
-A variable frame rate source has no single frame grid. QuipClip flags it and edits it as if
-it ran at `avg_frame_rate`. A proxy repairs it, because the proxy resamples with the `fps`
-filter. This is a known limitation of version 1.
+Each segment stores `[inPts, outPts)` in the video stream named by `sourceId`. `inPts` is
+inclusive. `outPts` is the PTS of the first excluded presented frame. The exact duration is
+`(outPts - inPts) * videoTimeBase`.
+
+`videoDurationTicks` is source-extent metadata. It is not the end boundary of the final
+presented frame. `approximateDurationSeconds` can support UI layout and browser seek
+requests only. Neither duration value can create an edit boundary.
+
+TypeScript uses `BigInt` and exact rationals for canonical calculations. It converts to a
+JavaScript number only for browser APIs and pixel layout. Checked conversion helpers reject
+non-finite values, unsafe integer conversions, and invalid media times.
+
+Raw PTS values from different sources are unrelated. Multi-source cumulative output
+positions use exact rational durations or exact rescaling to a runtime common time base.
+QuipClip does not persist a project timeline time base or segment timeline starts.
+
+The output frame rate is `renderSettings.frameRate`. It is a future render setting. It
+does not define edit positions. The UI shows source-relative elapsed time as
+`HH:MM:SS.mmm`.
 
 ## Preview
 
@@ -122,40 +133,53 @@ The asset protocol is off by default. It needs an entry in `tauri.conf.json`, a 
 entry in the CSP, and a scope that Rust extends for each file the user opens, and for that
 file only.
 
-The two target web views decode different codec sets. When ffprobe reports a format the web
-view cannot decode, ffmpeg writes a normalized proxy into the application data directory,
-and the preview plays that instead. The proxy uses a one-second keyframe interval, so a
-seek decodes at most one second of frames.
+The two target web views decode different codec sets. The planned proxy fallback will use
+probe metadata, `canPlayType()`, and the media error event to detect unsupported native
+decoding. FFmpeg will then create a compatible proxy in the application data directory.
 
-Frame stepping seeks to the middle of the target frame, because a seek to a frame boundary
-can land on either side of it. `requestVideoFrameCallback` reports the frame the browser
-painted, so drift is visible instead of silent. That callback needs macOS 12.3 or later,
-which sets the minimum macOS version for QuipClip.
+A proxy must preserve the source timing mapping or supply an explicit map to source PTS.
+Proxy state and paths are runtime cache data. They do not enter the project file.
 
-The preview has two modes. _Source_ plays the whole file. _Program_ plays only the
-segments, so the user watches what the export will contain.
+The first `requestVideoFrameCallback` after source load supplies a browser `mediaTime`
+anchor. QuipClip associates that value with `videoStartPts`. Later callbacks confirm the
+browser-presented frame and its `mediaTime`. QuipClip infers source PTS through the
+calibrated mapping. RVFC does not report raw FFmpeg PTS.
 
-## Export
+Version 1 precise editing assumes a continuous, linear, slope-one mapping between the
+browser timeline and source PTS. It also assumes that separately editable presented frames
+have distinguishable timestamps. A detected duplicate inferred PTS disables precise
+editing for that source.
+
+Media without `start_pts` can still play. Missing `start_pts`, missing RVFC support, or an
+invalid conversion disables precise edit actions. Browser `currentTime` then supplies an
+explicitly approximate display and seek fallback. QuipClip does not use
+`seekable.start(0)` as the source timestamp origin.
+
+V1 navigation buttons request a nominal frame interval. They use `avg_frame_rate`, then
+`r_frame_rate`. RVFC reports the frame that the browser actually presented. Exact adjacent
+frame stepping needs future frame-boundary discovery or another decoder.
+
+The current _Source_ preview plays the whole file. A future _Program_ preview will play
+only the segments, so the user can watch what the export will contain.
+
+## Future export
 
 See ADR 004.
 
-One ffmpeg run, with `-filter_complex`. Per input the order is normalize, split, trim, reset
-the timestamps, concatenate. Normalizing first puts the trim boundaries on the output frame
-grid, so no segment rounds on its own.
+Export is not implemented yet. The stored model supports a future renderer with these
+semantic steps for each segment:
 
-The `split` step is not optional. A filter output pad feeds exactly one input pad, so
-without it every segment after the first would bypass the normalize block and reach
-`concat` unnormalized.
+1. Resolve `sourceId` to the original media.
+2. Seek before `inPts` as an optimization.
+3. Decode accurately through the selected interval.
+4. Resolve source PTS boundaries into FFmpeg's actual post-seek timestamp domain.
+5. Keep the half-open interval and derive the matching audio interval.
+6. Reset local timestamps and normalize the streams.
+7. Concatenate segments in project array order.
 
-Progress comes from `-progress pipe:1`. The total output frame count is `sum(out - in)`,
-which is exact and known before the run starts.
-
-The export always re-encodes. A keyframe-aligned stream copy would be faster and would move
-the cut points, so QuipClip does not offer one.
-
-The export reads the original file, never the proxy. When the user marked frames on a proxy
-grid, the export applies the same `fps` resampling to the original, so a frame index means
-the same frame in both.
+ADR 004 does not select a raw `trim` expression or a fixed placement for input `-ss`.
+Output frame-rate conversion, scaling, codec conversion, and audio resampling belong only
+to this future render layer. They never change stored source edit points.
 
 ## ffmpeg lifecycle
 
@@ -186,6 +210,9 @@ the proxy state from the persisted source. A proxy is a machine-specific cache.
 
 ```ts
 type Rational = { n: number; d: number };
+type Pts = string & { readonly __brand: "Pts" };
+type TickCount = string & { readonly __brand: "TickCount" };
+type FrameCount = string & { readonly __brand: "FrameCount" };
 
 type PersistedSource = {
   id: string;
@@ -193,45 +220,66 @@ type PersistedSource = {
   relPath: string;
   size: number;
   mtime: number;
-  timebase: Rational;
-  frameCount: number;
+  videoStreamIndex: number;
+  videoTimeBase: Rational;
+  videoStartPts: Pts | null;
+  videoDurationTicks: TickCount | null;
+  approximateDurationSeconds: number | null;
+  avgFrameRate: Rational | null;
+  rFrameRate: Rational | null;
+  reportedFrameCount: FrameCount | null;
   proxy?: never;
 };
 
-type Source = {
-  id: string;
-  path: string;
-  relPath: string;
-  size: number;
-  mtime: number;
-  timebase: Rational;
-  frameCount: number;
+type Source = Omit<PersistedSource, "proxy"> & {
   proxy?: { path: string; state: "none" | "building" | "ready" | "failed" };
 };
 
 type Segment = {
   id: string;
   sourceId: string;
-  inFrame: number; // inclusive
-  outFrame: number; // exclusive
+  inPts: Pts; // inclusive
+  outPts: Pts; // exclusive
 };
 
 type Project = {
-  schemaVersion: number;
-  timebase: Rational;
-  resolution: { w: number; h: number };
+  schemaVersion: 1;
+  renderSettings: {
+    frameRate: Rational;
+    resolution: { w: number; h: number };
+  };
   sources: PersistedSource[];
   segments: Segment[]; // export order is array order
   activeSourceId: string;
 };
 ```
 
-The timeline axis is source time and spans the whole active source. Segments paint on top of
-it. The timeline zooms and pans. The source is never trimmed.
+The timeline axis is the active source's elapsed presentation time. It paints only segments
+that reference that source. The global segment array keeps the future export order.
 
-The project file is `.qcproj`, which is versioned JSON. See ADR 010. It stores an absolute
-and a relative path per source, so a project survives a move. Any change to the schema is a
-breaking change, and it needs a `schemaVersion` bump and a footer in the commit message.
+The ruler uses `videoDurationTicks` first. It then uses a valid approximate probe duration,
+then a finite browser duration. If none exists, the ruler is indeterminate and disables
+absolute click seeking. Approximate seeking never creates project state.
+
+Mark In stores the inferred PTS of the displayed frame. Mark Out stores the current PTS as
+the first excluded frame. Split creates adjacent half-open segments. Exact inclusion of the
+final source frame needs discovery of its following boundary.
+
+`Source.id` is stable project identity. A separate revision key uses path, size, and
+modification time for runtime invalidation and replacement warnings. Source or revision
+changes do not erase canonical segments.
+
+The frontend explicitly projects each runtime `Source` into `PersistedSource`. The
+projection lists each persisted field. It does not use object spread as a serialization
+filter.
+
+The project file is `.qcproj`, which is versioned JSON. See ADR 010. It stores absolute and
+relative source paths. It also stores `activeSourceId`. Runtime proxy and browser state do
+not enter the file.
+
+The unreleased schema remains version 1 after this direct replacement. Old frame-grid
+version 1 files fail normal structural validation. QuipClip has no migration or legacy
+shape detector for them.
 
 ## Repository layout
 
@@ -241,7 +289,6 @@ CLAUDE.md              imports AGENTS.md
 docs/architecture.md   this file
 .agents/decisions/     one record per decision
 .agents/skills/        dev-workflow, and two skills as git submodules
-.agents/private/       exchange with the user. Never committed.
 .claude/skills/        symlinks into .agents/skills, so Claude Code finds them
 src/                   React frontend
 src-tauri/             Rust backend
@@ -257,7 +304,7 @@ SVG. The palette is `src/styles/globals.css`.
 pnpm install
 pnpm tauri dev
 pnpm lint && pnpm typecheck && pnpm build && pnpm test
-cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings
+cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
 TypeScript is held at 5.9, because `typescript-eslint` caps its peer range below 6.1.
