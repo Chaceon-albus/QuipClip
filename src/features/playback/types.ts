@@ -4,7 +4,7 @@
  * See ADR 002, ADR 003, and ADR 007.
  */
 
-import type { Pts, Rational, TickCount } from "@/types/project";
+import type { FrameCount, Pts, Rational, TickCount } from "@/types/project";
 
 /**
  * Timing and revision descriptor required to model a playback source attachment.
@@ -19,7 +19,7 @@ export interface PlaybackSource {
   readonly approximateDurationSeconds?: number | null;
   readonly avgFrameRate?: Rational | null;
   readonly rFrameRate?: Rational | null;
-  readonly reportedFrameCount?: TickCount | null;
+  readonly reportedFrameCount?: FrameCount | null;
 }
 
 /**

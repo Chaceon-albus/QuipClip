@@ -2,17 +2,21 @@ import { describe, expect, it } from "vitest";
 import {
   assertPositiveTimeBase,
   elapsedSecondsToPts,
+  frameCountFromBigInt,
+  frameCountToBigInt,
   formatSecondsForFfmpeg,
   gcd,
   I64_MAX,
   I64_MIN,
   isPtsString,
+  isFrameCountString,
   isTickCountString,
   isValidApproximateDuration,
   isValidSegmentRange,
   isPtsInsideSegment,
   mediaTimeToPts,
   parseFrameRate,
+  parseFrameCount,
   parsePts,
   parseTickCount,
   ptsDifference,
@@ -30,7 +34,7 @@ import {
   ticksToSeconds,
   validateApproximateDuration,
 } from "@/lib/time";
-import type { Pts, Rational, TickCount } from "@/types/project";
+import type { FrameCount, Pts, Rational, TickCount } from "@/types/project";
 
 const NTSC: Rational = { n: 30000, d: 1001 };
 const FPS25: Rational = { n: 25, d: 1 };
@@ -154,6 +158,27 @@ describe("time helpers and PTS arithmetic", () => {
 
       expect(() => tickCountToBigInt("-1" as TickCount)).toThrow(TypeError);
       expect(() => tickCountToBigInt("bad" as TickCount)).toThrow(TypeError);
+    });
+  });
+
+  describe("canonical FrameCount string validation", () => {
+    it("returns the distinct FrameCount brand for canonical non-negative i64 strings", () => {
+      expect(isFrameCountString("0")).toBe(true);
+      expect(isFrameCountString(I64_MAX.toString())).toBe(true);
+      expect(parseFrameCount("300")).toBe("300");
+      expect(frameCountFromBigInt(300n)).toBe("300");
+      expect(frameCountToBigInt("300" as FrameCount)).toBe(300n);
+    });
+
+    it("rejects malformed, negative, and out-of-range frame counts", () => {
+      for (const value of ["-1", "+1", "01", " 1", "1 ", "1.0", "abc"]) {
+        expect(isFrameCountString(value)).toBe(false);
+      }
+      expect(isFrameCountString("9223372036854775808")).toBe(false);
+      expect(parseFrameCount("-1")).toBeNull();
+      expect(() => frameCountFromBigInt(-1n)).toThrow(RangeError);
+      expect(() => frameCountFromBigInt(I64_MAX + 1n)).toThrow(RangeError);
+      expect(() => frameCountToBigInt("invalid" as FrameCount)).toThrow(TypeError);
     });
   });
 

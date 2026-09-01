@@ -4,7 +4,7 @@
  * See ADR 002, ADR 003, ADR 007, and ADR 010.
  */
 
-import type { Pts, Rational, TickCount } from "@/types/project";
+import type { FrameCount, Pts, Rational, TickCount } from "@/types/project";
 
 /**
  * Backend error codes returned by the Rust `import_media` command.
@@ -121,10 +121,10 @@ export type MediaProbe = {
   approximateDurationSeconds: number | null;
   /** Average frame rate as an exact positive rational fraction, or null if unstated. */
   avgFrameRate: Rational | null;
-  /** Real base frame rate from container timebase as an exact positive rational fraction, or null if unstated. */
+  /** Real or nominal container frame rate as an exact positive rational, or null if unstated. */
   rFrameRate: Rational | null;
   /** Total reported frame count from stream metadata, or null if unstated. */
-  reportedFrameCount: TickCount | null;
+  reportedFrameCount: FrameCount | null;
   /** Audio stream metadata, or null if the media file has no audio. */
   audio: AudioProbe | null;
 };

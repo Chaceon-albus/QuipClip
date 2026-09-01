@@ -4,6 +4,7 @@
 
 import {
   isPtsString,
+  isFrameCountString,
   isTickCountString,
   isValidApproximateDuration,
   validateApproximateDuration,
@@ -232,7 +233,7 @@ export function isMediaProbe(value: unknown): value is MediaProbe {
   if (p.rFrameRate !== null && !isPositiveRational(p.rFrameRate)) {
     return false;
   }
-  if (p.reportedFrameCount !== null && !isTickCountString(p.reportedFrameCount)) {
+  if (p.reportedFrameCount !== null && !isFrameCountString(p.reportedFrameCount)) {
     return false;
   }
   if (p.audio !== null && !isAudioProbe(p.audio)) {

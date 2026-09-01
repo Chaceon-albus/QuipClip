@@ -35,6 +35,9 @@ export type Pts = string & { readonly __brand: "Pts" };
  */
 export type TickCount = string & { readonly __brand: "TickCount" };
 
+/** Reported frame count as a canonical non-negative decimal i64 string. */
+export type FrameCount = string & { readonly __brand: "FrameCount" };
+
 /**
  * Output video dimensions in pixels.
  */
@@ -49,7 +52,7 @@ export type Resolution = {
  * Project render settings defining output frame rate and canvas dimensions (ADR 010).
  */
 export type RenderSettings = {
-  /** Output / timeline frame rate as an exact rational timebase. */
+  /** Output render frame rate as an exact rational. */
   frameRate: Rational;
   /** Output video dimensions in pixels. */
   resolution: Resolution;
@@ -86,7 +89,7 @@ export type PersistedSource = {
   /** Real / nominal container frame rate as an exact rational, or null if unavailable. */
   rFrameRate: Rational | null;
   /** Total reported frame count from stream metadata, or null if unstated. */
-  reportedFrameCount: TickCount | null;
+  reportedFrameCount: FrameCount | null;
   /**
    * Proxies are machine-specific caches and must not be persisted to project files (ADR 010).
    */
@@ -126,7 +129,7 @@ export type Source = {
   approximateDurationSeconds: number | null;
   avgFrameRate: Rational | null;
   rFrameRate: Rational | null;
-  reportedFrameCount: TickCount | null;
+  reportedFrameCount: FrameCount | null;
   /** Optional runtime proxy information for playback when native decoding is unavailable. */
   proxy?: SourceProxy;
 };

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { openMediaFileDialog, VIDEO_FILE_EXTENSIONS } from "./dialog";
 import { ImportMediaError, type ImportMediaResult } from "./types";
-import type { Pts, TickCount } from "@/types/project";
+import type { FrameCount, Pts, TickCount } from "@/types/project";
 
 function createFakeMediaResult(fileName: string): ImportMediaResult {
   return {
@@ -25,7 +25,7 @@ function createFakeMediaResult(fileName: string): ImportMediaResult {
       approximateDurationSeconds: 10,
       avgFrameRate: { n: 30, d: 1 },
       rFrameRate: { n: 30, d: 1 },
-      reportedFrameCount: "300" as TickCount,
+      reportedFrameCount: "300" as FrameCount,
       audio: null,
     },
   };

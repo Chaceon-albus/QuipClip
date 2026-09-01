@@ -24,7 +24,7 @@ import {
   U32_MAX,
   validateImportMediaResult,
 } from "./validation";
-import type { Pts, TickCount } from "@/types/project";
+import type { FrameCount, Pts, TickCount } from "@/types/project";
 
 function createValidProbe(): ImportMediaResult["probe"] {
   return {
@@ -43,7 +43,7 @@ function createValidProbe(): ImportMediaResult["probe"] {
     approximateDurationSeconds: 10.0,
     avgFrameRate: { n: 30000, d: 1001 },
     rFrameRate: { n: 30000, d: 1001 },
-    reportedFrameCount: "300" as TickCount,
+    reportedFrameCount: "300" as FrameCount,
     audio: {
       codec: "aac",
       sampleRate: 48000,
@@ -387,7 +387,7 @@ describe("Media Validation & Normalization", () => {
           createValidImportResult({
             probe: {
               ...createValidProbe(),
-              reportedFrameCount: "invalid" as TickCount,
+              reportedFrameCount: "invalid" as FrameCount,
             },
           }),
         ),

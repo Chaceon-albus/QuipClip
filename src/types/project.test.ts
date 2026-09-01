@@ -3,6 +3,7 @@ import {
   PROJECT_SCHEMA_VERSION,
   toPersistedSource,
   type PersistedSource,
+  type FrameCount,
   type Project,
   type Pts,
   type Rational,
@@ -84,7 +85,7 @@ describe("project type definitions and schema", () => {
       approximateDurationSeconds: 1.0,
       avgFrameRate: { n: 30, d: 1 },
       rFrameRate: { n: 30, d: 1 },
-      reportedFrameCount: "30" as TickCount,
+      reportedFrameCount: "30" as FrameCount,
       proxy,
     };
     expect(runtime.proxy?.state).toBe("ready");
@@ -117,7 +118,7 @@ describe("project type definitions and schema", () => {
         approximateDurationSeconds: 359.666667,
         avgFrameRate: { n: 30000, d: 1001 },
         rFrameRate: { n: 30000, d: 1001 },
-        reportedFrameCount: "10790" as TickCount,
+        reportedFrameCount: "10790" as FrameCount,
         proxy: {
           path: "/cache/s1.mp4",
           state: "ready",
@@ -205,7 +206,7 @@ describe("project type definitions and schema", () => {
       approximateDurationSeconds: number | null;
       avgFrameRate: Rational | null;
       rFrameRate: Rational | null;
-      reportedFrameCount: TickCount | null;
+      reportedFrameCount: FrameCount | null;
     };
 
     type Extends<A, B> = [A] extends [B] ? true : false;

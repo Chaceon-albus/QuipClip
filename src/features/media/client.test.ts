@@ -8,7 +8,7 @@ import {
   type BackendImportMediaErrorCode,
   type ImportMediaResult,
 } from "./types";
-import type { Pts, TickCount } from "@/types/project";
+import type { FrameCount, Pts, TickCount } from "@/types/project";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -36,7 +36,7 @@ function createValidImportResult(): ImportMediaResult {
       approximateDurationSeconds: 10.0,
       avgFrameRate: { n: 30000, d: 1001 },
       rFrameRate: { n: 30000, d: 1001 },
-      reportedFrameCount: "300" as TickCount,
+      reportedFrameCount: "300" as FrameCount,
       audio: {
         codec: "aac",
         sampleRate: 48000,

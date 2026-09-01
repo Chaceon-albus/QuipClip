@@ -7,7 +7,7 @@
  * floating-point numbers and ticks are checked to prevent precision loss and invalid state.
  */
 
-import type { Pts, Rational, TickCount } from "@/types/project";
+import type { FrameCount, Pts, Rational, TickCount } from "@/types/project";
 
 /**
  * Minimum signed 64-bit integer (-2^63).
@@ -107,6 +107,10 @@ export function ptsToBigInt(pts: Pts): bigint {
  * - Must represent an integer within non-negative 64-bit range [0, 9223372036854775807].
  */
 export function isTickCountString(value: unknown): value is TickCount {
+  return isCanonicalNonNegativeI64String(value);
+}
+
+function isCanonicalNonNegativeI64String(value: unknown): value is string {
   if (typeof value !== "string" || !/^(0|[1-9]\d*)$/.test(value)) {
     return false;
   }
@@ -116,6 +120,34 @@ export function isTickCountString(value: unknown): value is TickCount {
   } catch {
     return false;
   }
+}
+
+/** Validates a canonical non-negative i64 frame-count string. */
+export function isFrameCountString(value: unknown): value is FrameCount {
+  return isCanonicalNonNegativeI64String(value);
+}
+
+/** Parses a canonical non-negative i64 frame-count string. */
+export function parseFrameCount(text: string): FrameCount | null {
+  return isFrameCountString(text) ? text : null;
+}
+
+/** Converts a non-negative i64 BigInt to a canonical FrameCount string. */
+export function frameCountFromBigInt(value: bigint): FrameCount {
+  if (value < 0n || value > I64_MAX) {
+    throw new RangeError(
+      `FrameCount value out of non-negative i64 range: ${value.toString()}`,
+    );
+  }
+  return value.toString() as FrameCount;
+}
+
+/** Converts a canonical FrameCount string to BigInt. */
+export function frameCountToBigInt(value: FrameCount): bigint {
+  if (!isFrameCountString(value)) {
+    throw new TypeError(`Invalid canonical FrameCount string: ${String(value)}`);
+  }
+  return BigInt(value);
 }
 
 /**
