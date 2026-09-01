@@ -15,12 +15,7 @@ import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useMediaStore } from "@/features/media";
 import { usePlaybackStore } from "@/features/playback";
-import {
-  canMarkIn,
-  canMarkOut,
-  canSplit,
-  useTimelineStore,
-} from "@/features/timeline";
+import { canMarkIn, canMarkOut, canSplit, useTimelineStore } from "@/features/timeline";
 import { assertPositiveTimeBase } from "@/lib/time";
 import type { Rational } from "@/types/project";
 

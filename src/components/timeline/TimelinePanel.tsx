@@ -61,9 +61,7 @@ export function TimelinePanel({
   const setSource = useTimelineStore((state) => state.setSource);
 
   const sourceRevisionKey = getSourceRevisionKey(media);
-  const sourceId = media
-    ? (activeSourceId ?? getGeneratedSourceId(media.path))
-    : null;
+  const sourceId = media ? (activeSourceId ?? getGeneratedSourceId(media.path)) : null;
 
   // Synchronize active media source with the timeline store
   useLayoutEffect(() => {
@@ -128,11 +126,7 @@ export function TimelinePanel({
       return;
     }
     const rect = e.currentTarget.getBoundingClientRect();
-    if (
-      canUsePreciseSeek &&
-      media?.probe.videoStartPts &&
-      media.probe.videoTimeBase
-    ) {
+    if (canUsePreciseSeek && media?.probe.videoStartPts && media.probe.videoTimeBase) {
       const targetPts = calculatePtsFromClientX(
         e.clientX,
         rect.left,
@@ -173,10 +167,7 @@ export function TimelinePanel({
     }
   };
 
-  const playhead = calculatePlayheadLayout(
-    currentElapsedSeconds,
-    totalDurationSeconds,
-  );
+  const playhead = calculatePlayheadLayout(currentElapsedSeconds, totalDurationSeconds);
 
   const activeSourceSegments = useMemo(
     () => getActiveSourceSegmentEntries(segments, sourceId),
@@ -261,9 +252,7 @@ export function TimelinePanel({
                   aria-label={t("timeline.seekSlider")}
                   aria-disabled={!canSeek}
                   aria-valuemin={0}
-                  aria-valuemax={
-                    isIndeterminate ? undefined : totalDurationSeconds
-                  }
+                  aria-valuemax={isIndeterminate ? undefined : totalDurationSeconds}
                   aria-valuenow={
                     isIndeterminate || !Number.isFinite(currentElapsedSeconds)
                       ? undefined

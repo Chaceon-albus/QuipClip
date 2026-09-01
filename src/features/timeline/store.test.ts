@@ -131,7 +131,9 @@ describe("timeline store half-open editing", () => {
     store.getState().markIn(pts("10"));
     store.getState().markOut(pts("30"));
     store.getState().split(pts("18"));
-    expect(store.getState().segments.map(({ id, inPts, outPts }) => ({ id, inPts, outPts }))).toEqual([
+    expect(
+      store.getState().segments.map(({ id, inPts, outPts }) => ({ id, inPts, outPts })),
+    ).toEqual([
       { id: "segment-1", inPts: pts("10"), outPts: pts("18") },
       { id: "segment-2", inPts: pts("18"), outPts: pts("30") },
     ]);

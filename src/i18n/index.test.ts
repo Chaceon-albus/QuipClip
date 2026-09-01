@@ -1316,8 +1316,6 @@ describe("application shell localization and status bar formatting", () => {
         fps: zhFormatter.format(25),
       }),
     ).toBe("源标称帧率：25 fps");
-    expect(instance.t("statusBar.sourceNominalRateUnavailable")).toBe(
-      "源标称帧率：—",
-    );
+    expect(instance.t("statusBar.sourceNominalRateUnavailable")).toBe("源标称帧率：—");
   });
 });

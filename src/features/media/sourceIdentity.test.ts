@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  generateSourceId,
-  getSourceRevisionKey,
-} from "./sourceIdentity";
+import { generateSourceId, getSourceRevisionKey } from "./sourceIdentity";
 
 describe("Media Source Identity and Revision Helpers", () => {
   describe("generateSourceId", () => {
@@ -97,5 +94,4 @@ describe("Media Source Identity and Revision Helpers", () => {
       expect(getSourceRevisionKey(original)).not.toBe(getSourceRevisionKey(renamed));
     });
   });
-
 });

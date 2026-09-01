@@ -450,16 +450,8 @@ export function calculateSegmentLayout(
     return { leftPercent: 0, widthPercent: 0, left: "0%", width: "0%" };
   }
 
-  const inElapsed = ptsElapsedSeconds(
-    segment.inPts,
-    videoStartPts,
-    videoTimeBase,
-  );
-  const outElapsed = ptsElapsedSeconds(
-    segment.outPts,
-    videoStartPts,
-    videoTimeBase,
-  );
+  const inElapsed = ptsElapsedSeconds(segment.inPts, videoStartPts, videoTimeBase);
+  const outElapsed = ptsElapsedSeconds(segment.outPts, videoStartPts, videoTimeBase);
 
   if (inElapsed === null || outElapsed === null) {
     return { leftPercent: 0, widthPercent: 0, left: "0%", width: "0%" };
@@ -520,11 +512,7 @@ export function calculatePendingInRegionLayout(
     return null;
   }
 
-  const inElapsed = ptsElapsedSeconds(
-    pendingInPts,
-    videoStartPts,
-    videoTimeBase,
-  );
+  const inElapsed = ptsElapsedSeconds(pendingInPts, videoStartPts, videoTimeBase);
   if (inElapsed === null) {
     return null;
   }
@@ -546,11 +534,7 @@ export function calculatePendingInRegionLayout(
     };
   }
 
-  const outElapsed = ptsElapsedSeconds(
-    currentPts,
-    videoStartPts,
-    videoTimeBase,
-  );
+  const outElapsed = ptsElapsedSeconds(currentPts, videoStartPts, videoTimeBase);
   if (outElapsed === null) {
     return {
       isVisible: false,

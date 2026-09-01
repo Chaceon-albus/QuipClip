@@ -200,20 +200,13 @@ describe("single-source ruler layout", () => {
   });
 
   it("maps finite clicks to seek-request PTS and rejects unsafe conversions", () => {
-    expect(calculatePtsFromClientX(50, 0, 100, 2, pts("-1000"), timeBase)).toBe(
-      "0",
-    );
+    expect(calculatePtsFromClientX(50, 0, 100, 2, pts("-1000"), timeBase)).toBe("0");
     expect(
-      calculatePtsFromClientX(
-        50,
-        0,
-        100,
-        Number.MAX_VALUE,
-        pts("-1000"),
-        timeBase,
-      ),
+      calculatePtsFromClientX(50, 0, 100, Number.MAX_VALUE, pts("-1000"), timeBase),
     ).toBeNull();
-    expect(calculatePtsFromClientX(Number.NaN, 0, 100, 2, pts("0"), timeBase)).toBeNull();
+    expect(
+      calculatePtsFromClientX(Number.NaN, 0, 100, 2, pts("0"), timeBase),
+    ).toBeNull();
   });
 
   it("clamps the playhead to the finite UI extent", () => {

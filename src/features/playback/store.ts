@@ -72,8 +72,7 @@ export function createPlaybackStore(
   return createStore<PlaybackStoreState>()((set, get) => ({
     presentedFrame: initialState?.presentedFrame ?? null,
     calibrationStatus: initialState?.calibrationStatus ?? "unavailable",
-    runtimeBrowserDurationSeconds:
-      initialState?.runtimeBrowserDurationSeconds ?? null,
+    runtimeBrowserDurationSeconds: initialState?.runtimeBrowserDurationSeconds ?? null,
     isPlaying: initialState?.isPlaying ?? false,
     isAttached: initialState?.isAttached ?? false,
     isReady: initialState?.isReady ?? false,
@@ -595,10 +594,7 @@ export function createPlaybackStore(
       set({ calibrationStatus: "unavailable", presentedFrame: null });
     },
 
-    syncBrowserDuration: (
-      sourceRevisionKey: string,
-      element: PlaybackMediaElement,
-    ) => {
+    syncBrowserDuration: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
       if (
         !attachedSource ||
         attachedElement !== element ||

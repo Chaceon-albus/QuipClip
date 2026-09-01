@@ -19,20 +19,20 @@ source key that makes that possible. Multi-track is out of scope and stays out o
 Each record states context, decision, and consequences. They are the source of truth. This
 document summarizes them and shows how the parts fit together.
 
-| Record                                                                                                      | Subject                                                         |
-| ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| [`001-tauri-react-typescript-shell.md`](../.agents/decisions/001-tauri-react-typescript-shell.md)           | Tauri v2, React 19, TypeScript, Vite, Tailwind 4, shadcn/ui     |
-| [`002-rational-time-model.md`](../.agents/decisions/002-rational-time-model.md)                             | Source video PTS, exact time bases, half-open segments           |
-| [`003-hybrid-preview-decoding.md`](../.agents/decisions/003-hybrid-preview-decoding.md)                     | Native preview, proxy fallback, calibrated PTS inference        |
-| [`004-single-pass-filter-complex-export.md`](../.agents/decisions/004-single-pass-filter-complex-export.md) | Accurate source seek, timestamp resolution, normalization       |
-| [`005-ffmpeg-acquisition.md`](../.agents/decisions/005-ffmpeg-acquisition.md)                               | PATH, then app data, then a download the user agreed to         |
-| [`006-encoder-capability-probing.md`](../.agents/decisions/006-encoder-capability-probing.md)               | List the encoders, then smoke-test them, then cache             |
-| [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md) | One source-PTS timeline with ordered half-open segments         |
-| [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)   | Delegated writing, independent review                           |
-| [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                 | One reviewed unit, one commit, no push                          |
-| [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                             | Version 1 JSON with exact source-PTS boundaries                 |
-| [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                             | English and Simplified Chinese interface with a saved setting   |
-| [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)         | Homebrew path fallback for macOS GUI applications               |
+| Record                                                                                                      | Subject                                                       |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| [`001-tauri-react-typescript-shell.md`](../.agents/decisions/001-tauri-react-typescript-shell.md)           | Tauri v2, React 19, TypeScript, Vite, Tailwind 4, shadcn/ui   |
+| [`002-rational-time-model.md`](../.agents/decisions/002-rational-time-model.md)                             | Source video PTS, exact time bases, half-open segments        |
+| [`003-hybrid-preview-decoding.md`](../.agents/decisions/003-hybrid-preview-decoding.md)                     | Native preview, proxy fallback, calibrated PTS inference      |
+| [`004-single-pass-filter-complex-export.md`](../.agents/decisions/004-single-pass-filter-complex-export.md) | Accurate source seek, timestamp resolution, normalization     |
+| [`005-ffmpeg-acquisition.md`](../.agents/decisions/005-ffmpeg-acquisition.md)                               | PATH, then app data, then a download the user agreed to       |
+| [`006-encoder-capability-probing.md`](../.agents/decisions/006-encoder-capability-probing.md)               | List the encoders, then smoke-test them, then cache           |
+| [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md) | One source-PTS timeline with ordered half-open segments       |
+| [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)   | Delegated writing, independent review                         |
+| [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                 | One reviewed unit, one commit, no push                        |
+| [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                             | Version 1 JSON with exact source-PTS boundaries               |
+| [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                             | English and Simplified Chinese interface with a saved setting |
+| [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)         | Homebrew path fallback for macOS GUI applications             |
 
 ## Shape
 

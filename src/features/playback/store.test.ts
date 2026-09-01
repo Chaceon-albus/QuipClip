@@ -505,7 +505,9 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().syncPresentedFrame(identityA, 0, undefined, video);
       expect(store.getState().calibrationStatus).toBe("ready");
 
-      store.getState().syncPresentedFrame(identityA, Number.MAX_VALUE, undefined, video);
+      store
+        .getState()
+        .syncPresentedFrame(identityA, Number.MAX_VALUE, undefined, video);
       expect(store.getState().calibrationStatus).toBe("unavailable");
       expect(store.getState().presentedFrame).toBeNull();
     });

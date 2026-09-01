@@ -315,18 +315,18 @@ describe("time helpers and PTS arithmetic", () => {
 
     it("rejects unsafe deltas and invalid time bases", () => {
       expect(
-        ptsElapsedSeconds(I64_MAX.toString() as Pts, I64_MIN.toString() as Pts, TIMEBASE_90K),
+        ptsElapsedSeconds(
+          I64_MAX.toString() as Pts,
+          I64_MIN.toString() as Pts,
+          TIMEBASE_90K,
+        ),
       ).toBeNull();
       expect(ptsElapsedSeconds("1" as Pts, "0" as Pts, { n: 0, d: 1 })).toBeNull();
     });
 
     it("converts checked elapsed seconds back to source PTS", () => {
       expect(
-        elapsedSecondsToPts(
-          0.001,
-          "9223372036854775000" as Pts,
-          TIMEBASE_90K,
-        ),
+        elapsedSecondsToPts(0.001, "9223372036854775000" as Pts, TIMEBASE_90K),
       ).toBe("9223372036854775090");
       expect(elapsedSecondsToPts(Number.NaN, "0" as Pts, TIMEBASE_90K)).toBeNull();
       expect(elapsedSecondsToPts(-1, "0" as Pts, TIMEBASE_90K)).toBeNull();

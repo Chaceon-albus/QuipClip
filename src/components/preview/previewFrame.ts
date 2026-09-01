@@ -6,10 +6,7 @@
  * for calibrated source PTS presentation and approximate browser time fallback.
  */
 
-import {
-  ptsElapsedSeconds,
-  ticksToSeconds,
-} from "@/lib/time";
+import { ptsElapsedSeconds, ticksToSeconds } from "@/lib/time";
 import type { Pts, Rational, TickCount } from "@/types/project";
 import type { CalibrationStatus, PresentedFrame } from "@/features/playback";
 
@@ -60,11 +57,7 @@ export function formatSourceRelativeTime(
   videoStartPts: Pts,
   videoTimeBase: Rational,
 ): string {
-  const deltaSeconds = ptsElapsedSeconds(
-    inferredPts,
-    videoStartPts,
-    videoTimeBase,
-  );
+  const deltaSeconds = ptsElapsedSeconds(inferredPts, videoStartPts, videoTimeBase);
   if (deltaSeconds === null) {
     return "00:00:00.000";
   }
