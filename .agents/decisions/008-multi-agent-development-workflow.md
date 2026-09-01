@@ -37,9 +37,10 @@ can exit zero and write nothing. On any failure, use the fallback. Say which fal
 - The main agent owns orchestration, the ADRs, `docs/architecture.md`, the verification
   gate, and every commit. A writing subagent never runs `git commit`.
 
-**Gate.** `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm test`. Then
-`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` inside `src-tauri/`.
-Run the strictest part of the gate that the current tree supports.
+**Gate.** Run `pnpm format:check` from the repository root. Then run `pnpm lint`,
+`pnpm typecheck`, `pnpm build`, and `pnpm test`. Run `cargo fmt --check` and
+`cargo clippy --all-targets -- -D warnings` inside `src-tauri/`. Run the strictest part of
+the gate that the current tree supports.
 
 The operating detail lives in the `dev-workflow` skill at
 `.agents/skills/dev-workflow/SKILL.md`, not in `AGENTS.md`. `AGENTS.md` loads on every
