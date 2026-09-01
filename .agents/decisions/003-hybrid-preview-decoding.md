@@ -1,31 +1,26 @@
-# 003. Preview with the native video element, and use an ffmpeg proxy when it cannot decode
+# 003. Preview with the native video element and infer source PTS from RVFC
 
 - Status: Accepted
-- Date: 2026-08-29
+- Date: 2026-08-31
 - Deciders: capric98
 
 ## Context
 
-The preview must play with audio, seek to an exact frame, and step one frame at a time.
-Tauri uses the operating system web view. The two web views decode different codecs.
-WebView2 decodes what Media Foundation decodes. WKWebView decodes what AVFoundation
-decodes. Neither decodes ProRes, most 10-bit formats, or many camera codecs.
+Tauri uses the operating system web view. WebView2 and WKWebView support different media
+formats. The native `<video>` element supplies audio playback and synchronization, but it
+does not expose FFmpeg's raw source PTS.
 
-Three options exist:
+`requestVideoFrameCallback` reports that the browser presented a frame. Its `mediaTime`
+belongs to the browser media timeline. The browser can normalize or linearize the source
+timeline. A callback can also be late or skipped.
 
-- **The native `<video>` element only.** It is the least work. It gives audio and sound
-  synchronization for free. It fails on any file the web view cannot decode.
-- **Decode every frame in Rust and paint a canvas.** It is exact. The application must then
-  also buffer and synchronize audio by hand.
-- **A hybrid.** Play with `<video>` when the web view can decode the file. Build a
-  normalized proxy with ffmpeg when it cannot.
-
-A second problem is independent of the codec. A seek to an exact frame boundary can land on
-either neighbouring frame, because the boundary instant touches both.
+QuipClip needs a defined mapping from a browser-presented frame to the source video PTS.
+It must also support playback when ffprobe does not report `start_pts`.
 
 ## Decision
 
-Use the hybrid.
+Use the native `<video>` element when the web view can decode the source. Use an FFmpeg
+proxy when the web view cannot decode it.
 
 ### Playback
 
@@ -45,76 +40,88 @@ opens the scope to a directory.
 
 ### Decode check
 
-After import, the ffprobe result decides whether the web view can decode the file:
-container, video codec, profile, pixel format, and bit depth. `canPlayType()` and the
-`video.error` event confirm the decision at run time.
+The ffprobe result supplies the container, video codec, profile, pixel format, and bit
+depth for a native-decode preflight. `canPlayType()` and the `video.error` event check the
+decision at runtime.
 
-### Proxy
+### PTS calibration
 
-When the web view cannot decode the file, ffmpeg writes a proxy to
-`<app_data>/proxies/<hash>.mp4`:
+QuipClip calibrates each preview source when it loads:
 
-```
--vf fps=<project timebase>,format=yuv420p
--c:v libx264 -preset veryfast -crf 20 -g <round(fps)> -sc_threshold 0
--c:a aac -movflags +faststart
-```
+1. Load the source at its beginning.
+2. Disable edit actions during calibration.
+3. Register `requestVideoFrameCallback` before a user can seek.
+4. Use the first presented callback as the browser calibration anchor.
+5. Associate its `mediaTime` with the source's `videoStartPts`.
 
-`-g` counts frames, so `-g round(fps)` is a **one-second** keyframe interval. Measured on
-ffmpeg 9.0.1 with a 600-frame 30000/1001 clip: `-g 30` gives 19 keyframes, and a seek
-therefore decodes at most one second of frames. An all-intra proxy, `-g 1`, gives 599
-keyframes of 600 and a file 10 times larger. The one-second interval is the better trade,
-and the GOP length is the knob to turn if scrubbing feels slow.
+For a later callback, infer the source PTS with this formula:
 
-Do not pass `-keyint_min 1`. It does nothing here, because `-sc_threshold 0` already
-disables scene-cut keyframes, and `keyint_min` only constrains those.
-
-A sidecar JSON file records the source path, size, mtime, and hash, so the cache can tell a
-stale proxy from a good one.
-
-### Frame stepping
-
-Seek to the middle of the target frame:
-
-```
-currentTime = (frame + 0.5) * den / num
+```text
+videoStartPts + round((mediaTime - calibratedMediaTime) / videoTimeBase)
 ```
 
-Frame `k` covers `[k/fps, (k+1)/fps)`. The midpoint is inside exactly one frame, so the
-seek cannot land on a neighbour.
+RVFC confirms the presented browser frame and its `mediaTime`. RVFC does not confirm the
+raw source PTS. QuipClip infers the source PTS through the calibrated mapping.
 
-### Readback
+V1 precise PTS editing supports a source only under these assumptions:
 
-`requestVideoFrameCallback` reports `mediaTime` for the frame the browser painted. Convert
-it back with
+- The browser timeline and source PTS timeline have a continuous, linear, slope-one
+  mapping.
+- The first calibration callback represents the frame identified by `videoStartPts`.
+- Separately editable presented frames have distinguishable presentation timestamps.
 
-```
-frame = floor((mediaTime - startTime) * num / den)
-```
+If distinct RVFC-presented frames infer the same source PTS, QuipClip disables precise
+editing for that source. It does not synthesize a frame ordinal.
 
-computed as a rational. `startTime` is the first presentation timestamp of the source,
-which is not always zero. Show the resulting index, and log a warning when it differs from
-the requested index. Drift then becomes visible instead of silent.
+Calibration has three states: `calibrating`, `ready`, and `unavailable`. Missing RVFC
+support, missing `videoStartPts`, invalid timing metadata, an unsafe numeric conversion,
+or indistinguishable timestamps makes calibration unavailable. Playback remains
+available. Browser `currentTime` can drive an approximate clock, but it cannot create an
+edit point.
 
-`requestVideoFrameCallback` needs Chromium 83 or later, and Safari 15.4 or later. Safari
-15.4 means **macOS 12.3**, which is therefore the minimum macOS version for QuipClip.
-WKWebView follows the system WebKit, so an older macOS cannot get the callback. Guard the
-call anyway. Without it, the fallback is the `seeked` event plus `video.currentTime`, which
-is coarser and cannot confirm which frame was painted.
+QuipClip does not use `seekable.start(0)` as a source timestamp origin.
 
-### Two preview modes
+### Seeking and nominal navigation
 
-*Source* plays the whole file. *Program* plays only the segments and moves `currentTime`
-across the gaps, so the user watches what the export will contain.
+To seek to a stored PTS, QuipClip applies the inverse calibrated mapping. It requests the
+browser time and waits for RVFC. The callback identifies the browser-presented frame.
+QuipClip then infers the displayed source PTS.
+
+All browser-number and PTS conversions use the checked helpers from ADR 002. A failed
+conversion disables precise seeking. Code must not update an inferred PTS optimistically
+after it assigns `currentTime`.
+
+V1 does not promise exact adjacent-frame stepping. The navigation buttons request a
+nominal frame interval. They use valid `avg_frame_rate` first and valid `r_frame_rate`
+second. They disable the hint when neither rate is valid. RVFC then reports the frame that
+the browser presented. A future frame index, WebCodecs decoder, or native decoder can add
+exact neighboring-frame navigation.
+
+### Proxy timing
+
+A proxy is a runtime cache. Its path and generation state do not enter the project file.
+The proxy must preserve the source timeline mapping or provide an explicit mapping back
+to source PTS. Proxy PTS values cannot silently replace source PTS values.
+
+FFmpeg writes a proxy under the application data proxy directory. The cache key includes
+the source path, size, modification time, and generation settings. A sidecar records the
+same source revision and any source-to-proxy timing map. QuipClip rejects a proxy when the
+sidecar or source revision does not match.
+
+The cache needs a size limit and a clear-cache action. Proxy generation can use H.264,
+YUV 4:2:0, AAC, fast-start metadata, and a bounded keyframe interval for browser
+compatibility. It must not restore the obsolete CFR project-frame-grid conversion.
+
+### Preview modes
+
+Source preview plays the active source. Program preview plays the ordered segments and
+seeks across excluded source ranges.
 
 ## Consequences
 
-- Most files play with no wait and no disk cost.
-- A file the web view cannot decode needs a proxy build before the user can edit it. The
-  interface must show that state and must not block on it.
-- The proxy directory grows. The application needs a size limit and a command to clear it.
-- Seeking a large file over the asset protocol is a known risk in Tauri. If range requests
-  prove unusable, the fallback is to serve the media from a local HTTP server that the
-  application starts and binds to the loopback address.
-- ADR 004 states which file the export reads. The preview and the export must read the same
-  file, or the frame indices do not mean the same thing.
+- Most supported files play without a proxy build.
+- Media without `start_pts` can play, but precise PTS editing stays unavailable.
+- Browser presentation and inferred source PTS remain separate runtime concepts.
+- Exact frame adjacency and final-frame boundary discovery remain future work.
+- Proxy generation must preserve or explicitly map source timing.
+- The UI must identify approximate playback state and disable edit actions in that state.
