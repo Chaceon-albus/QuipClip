@@ -1,87 +1,88 @@
-# 002. Represent all edit time as rationals on an integer frame grid
+# 002. Store edit points as source video presentation timestamps
 
 - Status: Accepted
-- Date: 2026-08-29
+- Date: 2026-08-31
 - Deciders: capric98
 
 ## Context
 
-The user must step one frame at a time. The exported file must start and end on the frames
-the preview showed. Frame rates are frequently not integers. NTSC video runs at 30000/1001
-frames per second, which is 29.97002997... in decimal.
+The old model stored edit points as integer indices on a synthetic frame grid. It built
+that grid from `avg_frame_rate`. This model cannot represent the actual presentation times
+of variable-frame-rate video. It also does not match FFmpeg's timestamp model.
 
-A 64-bit float can hold a timeline of this length without visible drift. Measurement shows
-that 107 892 additions of `1001.0/30000.0`, which is one hour at that rate, produce an
-error near 1.9e-9 seconds. That is 5.6e-8 of one frame. Accumulated float error is
-therefore not the problem.
+Each video stream has a `time_base`. A presentation timestamp, or PTS, is an integer in
+that time base. A source can start at a positive or negative PTS. Two sources can use
+different time bases and unrelated PTS origins.
 
-The real problems are these:
-
-1. **Equality and ordering.** Two float values that name the same frame can compare
-   unequal. An edit point is a key in a set and a sort key in a list, so it must compare
-   exactly.
-2. **The boundary is ambiguous.** The instant `k/fps` belongs to frame `k` and touches
-   frame `k-1`. A float time gives no rule for which frame the user marked.
-3. **Two languages must agree.** Rust and TypeScript both build strings that reach ffmpeg.
-   Integer frame indices produce the same string on both sides. Float formatting does not.
-4. **ffmpeg speaks rationals.** ffmpeg holds time in `AVRational`. A rational on our side
-   converts with no rounding step.
+JavaScript cannot represent every signed 64-bit integer as a `number`. The project format
+and the Tauri interface must not lose timestamp precision.
 
 ## Decision
 
-Define one canonical time type on both sides of the application.
+Store each edit boundary as a source video PTS. The boundary belongs to the video stream
+named by the segment's `sourceId`.
 
 ```rust
-pub struct Rational { num: i64, den: i64 }           // Rust
+pub struct Pts(i64);
+pub struct TickCount(i64);
 ```
 
 ```ts
-type Rational = { n: number; d: number };            // TypeScript
+type Pts = string & { readonly __brand: "Pts" }
+type TickCount = string & { readonly __brand: "TickCount" }
 ```
 
-**The JSON wire format is `{"n": ..., "d": ...}`.** Rust serializes an already valid
-`Rational` through a private wire type. Rust deserializes through a validated conversion.
-The conversion rejects a zero denominator. It also reduces the fraction and moves the sign
-to the numerator. TypeScript shares the `n` and `d` field names. Its structural type does
-not validate an arbitrary object. TypeScript parsers must validate external values before
-they create a `Rational`. This wire contract is part of the decision. A change to it breaks
-every Tauri command that carries a time.
+The JSON representation is a canonical decimal string. `Pts` accepts the full signed
+`i64` range. `TickCount` accepts the non-negative `i64` range. Parsers reject whitespace,
+leading plus signs, non-decimal text, and values outside these ranges.
 
-Rules:
+Each persisted source stores this timing metadata:
 
-1. A **project timebase** holds the output frame rate as a rational. On the first import it
-   copies `avg_frame_rate` from ffprobe. The user can change it.
-2. Every edit point is an **integer frame index** on the project frame grid. No edit point
-   is stored in seconds.
-3. **Out points are exclusive.** A segment `[in, out)` holds `out - in` frames.
-4. The code converts a frame index to seconds only at a boundary. Rust computes
-   `frame * den / num` as an exact rational and formats a fixed-precision decimal for
-   ffmpeg. The frontend evaluates the same formula as a JavaScript number for
-   `video.currentTime`, because the DOM API requires a number.
-5. Rational arithmetic runs in `i128` and returns `None` on overflow. It never panics.
-   Comparison uses cross-multiplication, not `to_f64`.
-6. A rational can be zero or negative. A frame rate cannot. A Rust frame-rate operation
-   returns `None` for a non-positive rate. A TypeScript frame-rate function throws
-   `RangeError` for a non-positive rate. `parseFrameRate` returns `null` for that input.
+- `videoTimeBase`, as the rational number of seconds per video tick
+- `videoStartPts`, which can be null when ffprobe does not report `start_pts`
+- `videoDurationTicks`, which can be null when ffprobe does not report `duration_ts`
+- `approximateDurationSeconds`, for UI layout and browser seek estimates only
+- optional reported frame-rate and frame-count metadata
 
-**Timecode is non-drop-frame.** The display format is `HH:MM:SS:FF`, and `FF` counts
-`ceil(fps)` frames per second. At 30000/1001 that means `FF` runs from 00 to 29. A
-non-drop-frame label drifts from wall-clock time by about 3.6 seconds per hour. QuipClip
-accepts that drift, because the label names a frame and does not claim to name a clock
-time. Drop-frame timecode, which uses a `;` separator, is a broadcast convention that this
-product does not need.
+`videoDurationTicks` describes the reported source extent. It is not an edit boundary. It
+does not identify the end of the final presented frame.
 
-**Variable frame rate** sources have no single frame grid. If ffprobe reports
-`avg_frame_rate != r_frame_rate`, mark the source as VFR. Version 1 treats it as constant
-at `avg_frame_rate`. See ADR 003 and ADR 004 for how a proxy makes such a source exact.
+`approximateDurationSeconds` must be finite and non-negative when it exists. An invalid
+value is unavailable metadata. It cannot affect canonical project state.
+
+A segment is a half-open source interval `[inPts, outPts)`. `inPts` is inclusive.
+`outPts` is the PTS of the first excluded presented frame. A valid segment has
+`inPts < outPts`.
+
+The exact segment duration is `(outPts - inPts) * videoTimeBase`.
+
+QuipClip uses `BigInt` and exact rational arithmetic for internal duration calculations.
+It can instead rescale values to a runtime common time base when the rescaling is exact.
+QuipClip converts exact values to floating-point seconds only at browser and UI
+boundaries. It does not persist a project time base or timeline start.
+
+Raw PTS values from different sources are not comparable. Code must first apply each
+source's time base and compare exact durations or elapsed times.
+
+V1 precise editing requires separately editable presented frames to have distinguishable
+presentation timestamps. QuipClip does not add a frame ordinal to disambiguate equal PTS
+values.
+
+All conversions between browser numbers and PTS ticks use checked helpers. A conversion
+rejects non-finite input and output. A number-to-tick conversion also rejects an unsafe
+integer result. A tick-to-number conversion subtracts the source origin with `BigInt`
+before it checks the safe-integer range. It also rejects a result that is not a valid media
+element time. An approximate conversion cannot create project state.
+
+The project keeps output frame rate in `renderSettings.frameRate`. This rate is a render
+setting. It does not define edit positions.
 
 ## Consequences
 
-- Frame arithmetic is integer arithmetic. Equality, ordering, and hashing are exact.
-- Unit tests must cover the 30000/1001 timebase on both sides.
-- The exclusive out point must appear in every doc comment and every user-facing label. A
-  reader who assumes an inclusive out point writes an off-by-one error.
-- The `{n, d}` wire shape is a contract between two languages. A test must hold it.
-- Rust fields are private. Constructors and deserialization must preserve the normalized
-  representation.
-- A non-drop-frame label is not a clock time. The user interface must not present it as one.
+- VFR edit boundaries preserve the source stream's presentation timing.
+- The project and Tauri interface carry timestamps without JavaScript integer loss.
+- Split at PTS `p` produces adjacent intervals `[inPts, p)` and `[p, outPts)`.
+- Exact inclusion of the final source frame needs discovery of its following boundary.
+- Frame-rate metadata can support diagnostics and nominal navigation only.
+- Tests must cover signed `i64` PTS values, checked browser conversions, and time bases
+  that differ between sources.
