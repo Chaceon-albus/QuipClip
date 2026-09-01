@@ -75,6 +75,7 @@ risk.
 Run the gate from the repository root:
 
 ```bash
+pnpm format:check
 pnpm lint && pnpm typecheck && pnpm build && pnpm test
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```

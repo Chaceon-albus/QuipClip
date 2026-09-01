@@ -47,7 +47,8 @@ pnpm lint                 # eslint
 pnpm typecheck            # tsc --noEmit
 pnpm build                # tsc and vite build
 pnpm test                 # vitest
-pnpm format               # prettier
+pnpm format:check         # verify Prettier formatting
+pnpm format               # apply Prettier formatting
 pnpm icons                # regenerate src-tauri/icons from the brand SVG
 
 cd src-tauri
@@ -103,5 +104,7 @@ commits.
 
 - TypeScript is strict. `any` is a lint error.
 - Rust must pass `cargo clippy -- -D warnings`.
+- Run `pnpm format:check` before each commit.
+- If the check fails, run `pnpm format`. Then run the check again.
 - Prettier sorts the Tailwind classes. Do not sort them by hand.
 - Prettier does not read `.agents/`. Two skills there are git submodules.

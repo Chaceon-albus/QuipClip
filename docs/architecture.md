@@ -303,6 +303,7 @@ SVG. The palette is `src/styles/globals.css`.
 ```bash
 pnpm install
 pnpm tauri dev
+pnpm format:check
 pnpm lint && pnpm typecheck && pnpm build && pnpm test
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
