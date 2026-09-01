@@ -70,8 +70,9 @@ V1 precise PTS editing supports a source only under these assumptions:
 - The first calibration callback represents the frame identified by `videoStartPts`.
 - Separately editable presented frames have distinguishable presentation timestamps.
 
-If distinct RVFC-presented frames infer the same source PTS, QuipClip disables precise
-editing for that source. It does not synthesize a frame ordinal.
+If distinct RVFC `mediaTime` values infer the same source PTS, QuipClip disables precise
+editing for that source. It does not synthesize a frame ordinal. An increased
+`presentedFrames` counter alone does not prove that the presentation timestamp changed.
 
 Calibration has three states: `calibrating`, `ready`, and `unavailable`. Missing RVFC
 support, missing `videoStartPts`, invalid timing metadata, an unsafe numeric conversion,
