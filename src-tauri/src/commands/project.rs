@@ -1,8 +1,6 @@
 //! Tauri commands for loading and saving project files.
 
-use crate::project::{
-    self, ProjectFile, ProjectFileError, ProjectValidationError, CURRENT_SCHEMA_VERSION,
-};
+use crate::project::{self, ProjectFile, ProjectFileError, ProjectValidationError};
 use serde::Serialize;
 use std::fs;
 use std::io;
@@ -25,7 +23,6 @@ pub enum ProjectCommandErrorCode {
     InvalidProject,
     UnsafeProjectValue,
     FutureSchemaVersion,
-    UnsupportedLegacySchemaVersion,
     CommandExecutionFailed,
 }
 
@@ -208,13 +205,6 @@ fn map_project_error(error: ProjectFileError, operation: IoOperation) -> Project
             found,
             supported,
         ),
-        ProjectFileError::UnsupportedLegacySchemaVersion { found } => {
-            ProjectCommandError::with_schema(
-                ProjectCommandErrorCode::UnsupportedLegacySchemaVersion,
-                u64::from(found),
-                CURRENT_SCHEMA_VERSION,
-            )
-        }
     }
 }
 
@@ -243,28 +233,44 @@ fn map_validation_error(error: ProjectValidationError) -> ProjectCommandError {
                 expected,
             )
         }
-        ProjectValidationError::SchemaVersion { found, expected } => {
-            ProjectCommandError::with_schema(
-                ProjectCommandErrorCode::UnsupportedLegacySchemaVersion,
-                u64::from(found),
-                expected,
-            )
+        ProjectValidationError::SchemaVersion { .. } => {
+            ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
         }
         ProjectValidationError::UnsafeInteger { field, value } => ProjectCommandError {
             field: Some(field),
             value: Some(value.to_string()),
             ..ProjectCommandError::new(ProjectCommandErrorCode::UnsafeProjectValue)
         },
-        ProjectValidationError::NonPositiveTimebase { field } => ProjectCommandError {
+        ProjectValidationError::NonPositiveTimebase { field }
+        | ProjectValidationError::InvalidFrameRate { field } => ProjectCommandError {
             field: Some(field),
             ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
         },
-        ProjectValidationError::NegativeFrameValue { field, .. } => ProjectCommandError {
-            field: Some(field),
+        ProjectValidationError::InvalidApproximateDuration { index } => ProjectCommandError {
+            field: Some(format!("sources[{index}].approximateDurationSeconds")),
             ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
         },
         ProjectValidationError::InvalidSegmentRange { index } => ProjectCommandError {
             field: Some(format!("segments[{index}]")),
+            ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
+        },
+        ProjectValidationError::EmptySourceId { index }
+        | ProjectValidationError::DuplicateSourceId { index } => ProjectCommandError {
+            field: Some(format!("sources[{index}].id")),
+            ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
+        },
+        ProjectValidationError::EmptySegmentId { index }
+        | ProjectValidationError::DuplicateSegmentId { index } => ProjectCommandError {
+            field: Some(format!("segments[{index}].id")),
+            ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
+        },
+        ProjectValidationError::UnknownActiveSource { .. } => ProjectCommandError {
+            field: Some("activeSourceId".to_owned()),
+            ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
+        },
+        ProjectValidationError::UnknownSegmentSource { index, .. }
+        | ProjectValidationError::MissingSegmentStartPts { index, .. } => ProjectCommandError {
+            field: Some(format!("segments[{index}].sourceId")),
             ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
         },
     }
@@ -273,8 +279,8 @@ fn map_validation_error(error: ProjectValidationError) -> ProjectCommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{Resolution, Segment, Source};
-    use crate::time::Rational;
+    use crate::project::{RenderSettings, Resolution, Segment, Source};
+    use crate::time::{FrameCount, Pts, Rational, TickCount};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -285,11 +291,11 @@ mod tests {
         let project_value = serde_json::to_value(project).unwrap();
         assert_eq!(project_value["schemaVersion"], 1);
         assert_eq!(
-            project_value["timebase"],
+            project_value["renderSettings"]["frameRate"],
             serde_json::json!({ "n": 30, "d": 1 })
         );
         assert_eq!(project_value["sources"][0]["relPath"], "clip.mp4");
-        assert_eq!(project_value["segments"][0]["outFrame"], 20);
+        assert_eq!(project_value["segments"][0]["outPts"], "20");
         assert!(project_value.get("schema_version").is_none());
 
         let error =
@@ -333,7 +339,7 @@ mod tests {
         let path = directory.path.join("preserve.qcproj");
         fs::write(&path, b"old project contents").unwrap();
         let mut project = example_project();
-        project.segments[0].out_frame = project.segments[0].in_frame;
+        project.segments[0].out_pts = project.segments[0].in_pts;
 
         let error = run(save_project(path.to_str().unwrap().to_owned(), project)).unwrap_err();
 
@@ -389,12 +395,8 @@ mod tests {
         value["schemaVersion"] = serde_json::json!(0);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         let legacy = run(load_project(path.to_str().unwrap().to_owned())).unwrap_err();
-        assert_eq!(
-            legacy.code,
-            ProjectCommandErrorCode::UnsupportedLegacySchemaVersion
-        );
-        assert_eq!(legacy.found_schema_version, Some(0));
-        assert_eq!(legacy.supported_schema_version, Some(1));
+        assert_eq!(legacy.code, ProjectCommandErrorCode::InvalidProject);
+        assert_eq!(legacy.found_schema_version, None);
     }
 
     #[test]
@@ -508,23 +510,31 @@ mod tests {
 
     fn example_project() -> ProjectFile {
         ProjectFile {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            timebase: Rational::new(30, 1).unwrap(),
-            resolution: Resolution { w: 1920, h: 1080 },
+            schema_version: 1,
+            render_settings: RenderSettings {
+                frame_rate: Rational::new(30, 1).unwrap(),
+                resolution: Resolution { w: 1920, h: 1080 },
+            },
             sources: vec![Source {
                 id: "s1".to_owned(),
                 path: "/clips/clip.mp4".to_owned(),
                 rel_path: "clip.mp4".to_owned(),
                 size: 100,
                 mtime: 1_700_000_000,
-                timebase: Rational::new(30, 1).unwrap(),
-                frame_count: 300,
+                video_stream_index: 0,
+                video_time_base: Rational::new(1, 90_000).unwrap(),
+                video_start_pts: Some(Pts::new(0)),
+                video_duration_ticks: Some(TickCount::new(900_000).unwrap()),
+                approximate_duration_seconds: Some(10.0),
+                avg_frame_rate: Some(Rational::new(30, 1).unwrap()),
+                r_frame_rate: Some(Rational::new(30, 1).unwrap()),
+                reported_frame_count: Some(FrameCount::new(300).unwrap()),
             }],
             segments: vec![Segment {
                 id: "g1".to_owned(),
                 source_id: "s1".to_owned(),
-                in_frame: 10,
-                out_frame: 20,
+                in_pts: Pts::new(10),
+                out_pts: Pts::new(20),
             }],
             active_source_id: "s1".to_owned(),
         }

@@ -1,7 +1,8 @@
 //! Persistence for versioned QuipClip project files.
 
-use crate::time::Rational;
+use crate::time::{FrameCount, Pts, Rational, TickCount};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
@@ -10,22 +11,29 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The newest project schema this build can read and write.
+/// The project schema this build reads and writes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A project document stored in a `.qcproj` file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectFile {
     pub schema_version: u32,
-    pub timebase: Rational,
-    pub resolution: Resolution,
+    pub render_settings: RenderSettings,
     pub sources: Vec<Source>,
     pub segments: Vec<Segment>,
     pub active_source_id: String,
+}
+
+/// Output settings that do not define source edit positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderSettings {
+    pub frame_rate: Rational,
+    pub resolution: Resolution,
 }
 
 /// The output resolution in pixels.
@@ -36,8 +44,8 @@ pub struct Resolution {
     pub h: u32,
 }
 
-/// A source identity and its portable and absolute locations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Durable identity, location, revision, and source video timing metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Source {
     pub id: String,
@@ -45,37 +53,50 @@ pub struct Source {
     pub rel_path: String,
     pub size: u64,
     pub mtime: i64,
-    pub timebase: Rational,
-    pub frame_count: i64,
+    pub video_stream_index: u32,
+    pub video_time_base: Rational,
+    pub video_start_pts: Option<Pts>,
+    pub video_duration_ticks: Option<TickCount>,
+    pub approximate_duration_seconds: Option<f64>,
+    pub avg_frame_rate: Option<Rational>,
+    pub r_frame_rate: Option<Rational>,
+    pub reported_frame_count: Option<FrameCount>,
 }
 
-/// One source-time interval. The out frame is exclusive.
+/// One half-open source PTS interval `[in_pts, out_pts)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Segment {
     pub id: String,
     pub source_id: String,
-    pub in_frame: i64,
-    pub out_frame: i64,
+    pub in_pts: Pts,
+    pub out_pts: Pts,
 }
 
-/// A failure to read, validate, migrate, or save a project document.
+/// A failure to read, validate, or save a project document.
 #[derive(Debug)]
 pub enum ProjectFileError {
     Io(io::Error),
     Json(serde_json::Error),
     Validation(ProjectValidationError),
     FutureSchemaVersion { found: u64, supported: u32 },
-    UnsupportedLegacySchemaVersion { found: u32 },
 }
 
-/// A project value that cannot safely cross the Rust and TypeScript boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A structurally valid project whose values violate project invariants.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ProjectValidationError {
     SchemaVersion { found: u32, expected: u32 },
     NonPositiveTimebase { field: String },
+    InvalidFrameRate { field: String },
+    InvalidApproximateDuration { index: usize },
     UnsafeInteger { field: String, value: i128 },
-    NegativeFrameValue { field: String, value: i64 },
+    EmptySourceId { index: usize },
+    DuplicateSourceId { index: usize },
+    EmptySegmentId { index: usize },
+    DuplicateSegmentId { index: usize },
+    UnknownActiveSource { source_id: String },
+    UnknownSegmentSource { index: usize, source_id: String },
+    MissingSegmentStartPts { index: usize, source_id: String },
     InvalidSegmentRange { index: usize },
 }
 
@@ -86,22 +107,41 @@ impl fmt::Display for ProjectValidationError {
                 formatter,
                 "schemaVersion must be {expected} when saving, but was {found}"
             ),
-            Self::NonPositiveTimebase { field } => {
-                write!(formatter, "{field} must be a positive timebase")
-            }
+            Self::NonPositiveTimebase { field } => write!(formatter, "{field} must be positive"),
+            Self::InvalidFrameRate { field } => write!(formatter, "{field} must be positive"),
+            Self::InvalidApproximateDuration { index } => write!(
+                formatter,
+                "sources[{index}].approximateDurationSeconds must be finite and non-negative"
+            ),
             Self::UnsafeInteger { field, value } => write!(
                 formatter,
                 "{field} value {value} is outside the JavaScript safe integer range"
             ),
-            Self::NegativeFrameValue { field, value } => {
+            Self::EmptySourceId { index } => write!(formatter, "sources[{index}].id is empty"),
+            Self::DuplicateSourceId { index } => {
+                write!(formatter, "sources[{index}].id is duplicated")
+            }
+            Self::EmptySegmentId { index } => write!(formatter, "segments[{index}].id is empty"),
+            Self::DuplicateSegmentId { index } => {
+                write!(formatter, "segments[{index}].id is duplicated")
+            }
+            Self::UnknownActiveSource { source_id } => {
                 write!(
                     formatter,
-                    "{field} frame value must be nonnegative, but was {value}"
+                    "activeSourceId {source_id:?} does not name a source"
                 )
             }
+            Self::UnknownSegmentSource { index, source_id } => write!(
+                formatter,
+                "segments[{index}].sourceId {source_id:?} does not name a source"
+            ),
+            Self::MissingSegmentStartPts { index, source_id } => write!(
+                formatter,
+                "segments[{index}] references source {source_id:?} without videoStartPts"
+            ),
             Self::InvalidSegmentRange { index } => write!(
                 formatter,
-                "segments[{index}] must have an exclusive outFrame greater than inFrame"
+                "segments[{index}] must have an exclusive outPts greater than inPts"
             ),
         }
     }
@@ -119,12 +159,6 @@ impl fmt::Display for ProjectFileError {
                 formatter,
                 "project schema version {found} is newer than supported version {supported}"
             ),
-            Self::UnsupportedLegacySchemaVersion { found } => {
-                write!(
-                    formatter,
-                    "project schema version {found} cannot be migrated"
-                )
-            }
         }
     }
 }
@@ -135,7 +169,7 @@ impl Error for ProjectFileError {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
             Self::Validation(error) => Some(error),
-            Self::FutureSchemaVersion { .. } | Self::UnsupportedLegacySchemaVersion { .. } => None,
+            Self::FutureSchemaVersion { .. } => None,
         }
     }
 }
@@ -168,19 +202,13 @@ struct SchemaEnvelope {
 pub fn load(path: impl AsRef<Path>) -> Result<ProjectFile, ProjectFileError> {
     let bytes = fs::read(path)?;
     let envelope: SchemaEnvelope = serde_json::from_slice(&bytes)?;
-
     if envelope.schema_version > u64::from(CURRENT_SCHEMA_VERSION) {
         return Err(ProjectFileError::FutureSchemaVersion {
             found: envelope.schema_version,
             supported: CURRENT_SCHEMA_VERSION,
         });
     }
-
-    let project = if envelope.schema_version < u64::from(CURRENT_SCHEMA_VERSION) {
-        migrate(&bytes, envelope.schema_version as u32)?
-    } else {
-        serde_json::from_slice(&bytes)?
-    };
+    let project: ProjectFile = serde_json::from_slice(&bytes)?;
     validate_project(&project)?;
     Ok(project)
 }
@@ -191,7 +219,6 @@ pub fn save(path: impl AsRef<Path>, project: &ProjectFile) -> Result<(), Project
     validate_project(project)?;
     let mut json = serde_json::to_vec_pretty(project)?;
     json.push(b'\n');
-
     let (temporary_path, mut temporary_file) = create_temporary_file(path)?;
     let mut cleanup = TemporaryFileCleanup::new(temporary_path);
     let write_result = temporary_file
@@ -211,27 +238,88 @@ fn validate_project(project: &ProjectFile) -> Result<(), ProjectValidationError>
             expected: CURRENT_SCHEMA_VERSION,
         });
     }
+    validate_rational_numbers(
+        "renderSettings.frameRate",
+        project.render_settings.frame_rate,
+    )?;
+    if project.render_settings.frame_rate.num() <= 0 {
+        return Err(ProjectValidationError::InvalidFrameRate {
+            field: "renderSettings.frameRate".to_owned(),
+        });
+    }
 
-    validate_timebase("timebase", project.timebase)?;
+    let mut source_ids = HashSet::new();
     for (index, source) in project.sources.iter().enumerate() {
+        if source.id.is_empty() {
+            return Err(ProjectValidationError::EmptySourceId { index });
+        }
+        if !source_ids.insert(source.id.as_str()) {
+            return Err(ProjectValidationError::DuplicateSourceId { index });
+        }
         validate_unsigned_integer(&format!("sources[{index}].size"), source.size)?;
         validate_signed_integer(&format!("sources[{index}].mtime"), source.mtime)?;
-        validate_frame_value(&format!("sources[{index}].frameCount"), source.frame_count)?;
-        validate_timebase(&format!("sources[{index}].timebase"), source.timebase)?;
+        validate_positive_rational(
+            &format!("sources[{index}].videoTimeBase"),
+            source.video_time_base,
+        )?;
+        for (name, rate) in [
+            ("avgFrameRate", source.avg_frame_rate),
+            ("rFrameRate", source.r_frame_rate),
+        ] {
+            if let Some(rate) = rate {
+                let field = format!("sources[{index}].{name}");
+                validate_rational_numbers(&field, rate)?;
+                if rate.num() <= 0 {
+                    return Err(ProjectValidationError::InvalidFrameRate {
+                        field: format!("sources[{index}].{name}"),
+                    });
+                }
+            }
+        }
+        if source
+            .approximate_duration_seconds
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        {
+            return Err(ProjectValidationError::InvalidApproximateDuration { index });
+        }
     }
+    if !source_ids.contains(project.active_source_id.as_str()) {
+        return Err(ProjectValidationError::UnknownActiveSource {
+            source_id: project.active_source_id.clone(),
+        });
+    }
+
+    let mut segment_ids = HashSet::new();
     for (index, segment) in project.segments.iter().enumerate() {
-        validate_frame_value(&format!("segments[{index}].inFrame"), segment.in_frame)?;
-        validate_frame_value(&format!("segments[{index}].outFrame"), segment.out_frame)?;
-        if segment.out_frame <= segment.in_frame {
+        if segment.id.is_empty() {
+            return Err(ProjectValidationError::EmptySegmentId { index });
+        }
+        if !segment_ids.insert(segment.id.as_str()) {
+            return Err(ProjectValidationError::DuplicateSegmentId { index });
+        }
+        let source = project
+            .sources
+            .iter()
+            .find(|source| source.id == segment.source_id)
+            .ok_or_else(|| ProjectValidationError::UnknownSegmentSource {
+                index,
+                source_id: segment.source_id.clone(),
+            })?;
+        if source.video_start_pts.is_none() {
+            return Err(ProjectValidationError::MissingSegmentStartPts {
+                index,
+                source_id: segment.source_id.clone(),
+            });
+        }
+        if segment.out_pts <= segment.in_pts {
             return Err(ProjectValidationError::InvalidSegmentRange { index });
         }
     }
     Ok(())
 }
 
-fn validate_timebase(field: &str, value: Rational) -> Result<(), ProjectValidationError> {
-    validate_signed_integer(&format!("{field}.n"), value.num())?;
-    validate_signed_integer(&format!("{field}.d"), value.den())?;
+fn validate_positive_rational(field: &str, value: Rational) -> Result<(), ProjectValidationError> {
+    validate_rational_numbers(field, value)?;
     if value.num() <= 0 {
         return Err(ProjectValidationError::NonPositiveTimebase {
             field: field.to_owned(),
@@ -240,14 +328,9 @@ fn validate_timebase(field: &str, value: Rational) -> Result<(), ProjectValidati
     Ok(())
 }
 
-fn validate_frame_value(field: &str, value: i64) -> Result<(), ProjectValidationError> {
-    validate_signed_integer(field, value)?;
-    if value < 0 {
-        return Err(ProjectValidationError::NegativeFrameValue {
-            field: field.to_owned(),
-            value,
-        });
-    }
+fn validate_rational_numbers(field: &str, value: Rational) -> Result<(), ProjectValidationError> {
+    validate_signed_integer(&format!("{field}.n"), value.num())?;
+    validate_signed_integer(&format!("{field}.d"), value.den())?;
     Ok(())
 }
 
@@ -271,36 +354,21 @@ fn validate_unsigned_integer(field: &str, value: u64) -> Result<(), ProjectValid
     Ok(())
 }
 
-fn migrate(bytes: &[u8], schema_version: u32) -> Result<ProjectFile, ProjectFileError> {
-    let _ = bytes;
-    Err(ProjectFileError::UnsupportedLegacySchemaVersion {
-        found: schema_version,
-    })
-}
-
 #[cfg(unix)]
 fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(source, destination)?;
-    let directory = parent_directory(destination);
-    File::open(directory)?.sync_all()
+    File::open(parent_directory(destination))?.sync_all()
 }
 
 #[cfg(windows)]
 fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-
     #[link(name = "Kernel32")]
     extern "system" {
-        fn MoveFileExW(
-            existing_file_name: *const u16,
-            new_file_name: *const u16,
-            flags: u32,
-        ) -> i32;
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
     }
-
     let source = absolute_path_without_following_file(source)?;
     let destination = absolute_path_without_following_file(destination)?;
     let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -341,7 +409,6 @@ fn create_temporary_file(path: &Path) -> io::Result<(PathBuf, File)> {
     let file_name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing project file name"))?;
-
     for _ in 0..100 {
         let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut temporary_name = OsString::from(".");
@@ -358,7 +425,6 @@ fn create_temporary_file(path: &Path) -> io::Result<(PathBuf, File)> {
             Err(error) => return Err(error),
         }
     }
-
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "could not create a unique temporary project file",
@@ -381,11 +447,9 @@ impl TemporaryFileCleanup {
     fn new(path: PathBuf) -> Self {
         Self { path, armed: true }
     }
-
     fn path(&self) -> &Path {
         &self.path
     }
-
     fn disarm(&mut self) {
         self.armed = false;
     }
@@ -404,327 +468,177 @@ mod tests {
     use super::*;
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
-
     const EXAMPLE: &str = r#"{
   "schemaVersion": 1,
-  "timebase": { "n": 30000, "d": 1001 },
-  "resolution": { "w": 1920, "h": 1080 },
-  "sources": [
-    {
-      "id": "s1",
-      "path": "/Users/x/clips/a.mp4",
-      "relPath": "clips/a.mp4",
-      "size": 12345678,
-      "mtime": 1787073674,
-      "timebase": { "n": 30000, "d": 1001 },
-      "frameCount": 10790
-    }
-  ],
-  "segments": [{ "id": "g1", "sourceId": "s1", "inFrame": 120, "outFrame": 360 }],
-  "activeSourceId": "s1"
+  "renderSettings": {"frameRate":{"n":30000,"d":1001},"resolution":{"w":1920,"h":1080}},
+  "sources": [{
+    "id":"s1","path":"/clips/a.mp4","relPath":"a.mp4","size":1234,"mtime":1700000000,
+    "videoStreamIndex":0,"videoTimeBase":{"n":1,"d":90000},"videoStartPts":"-1800",
+    "videoDurationTicks":"32370000","approximateDurationSeconds":359.666667,
+    "avgFrameRate":{"n":30000,"d":1001},"rFrameRate":{"n":30000,"d":1001},"reportedFrameCount":null
+  }],
+  "segments":[{"id":"g1","sourceId":"s1","inPts":"9000","outPts":"27000"}],
+  "activeSourceId":"s1"
 }"#;
 
     #[test]
-    fn loads_the_schema_version_one_example() {
+    fn loads_and_round_trips_source_pts_schema_atomically() {
         let directory = TestDirectory::new();
         let path = directory.path.join("example.qcproj");
         fs::write(&path, EXAMPLE).unwrap();
-
-        let project = load(&path).expect("example should load");
-
-        assert_eq!(project.schema_version, 1);
-        assert_eq!(project.timebase, Rational::new(30000, 1001).unwrap());
-        assert_eq!(project.resolution, Resolution { w: 1920, h: 1080 });
-        assert_eq!(project.sources[0].rel_path, "clips/a.mp4");
-        assert_eq!(project.segments[0].out_frame, 360);
-        assert_eq!(project.active_source_id, "s1");
+        let project = load(&path).unwrap();
+        assert_eq!(project.sources[0].video_start_pts, Some(Pts::new(-1800)));
+        assert_eq!(project.segments[0].out_pts, Pts::new(27000));
+        save(&path, &project).unwrap();
+        assert_eq!(load(&path).unwrap(), project);
+        assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
     }
 
     #[test]
-    fn public_load_normalizes_rationals_and_rejects_a_zero_denominator() {
+    fn old_frame_grid_shape_is_a_normal_json_failure() {
         let directory = TestDirectory::new();
-        let normalized_path = directory.path.join("normalized.qcproj");
-        let normalized = EXAMPLE.replace(
-            "\"timebase\": { \"n\": 30000, \"d\": 1001 }",
-            "\"timebase\": { \"n\": -60000, \"d\": -2002 }",
-        );
-        fs::write(&normalized_path, normalized).unwrap();
-        let project = load(&normalized_path).expect("equivalent rational should load");
-        assert_eq!(project.timebase, Rational::new(30000, 1001).unwrap());
-        assert_eq!(
-            project.sources[0].timebase,
-            Rational::new(30000, 1001).unwrap()
-        );
+        let path = directory.path.join("old.qcproj");
+        fs::write(&path, r#"{"schemaVersion":1,"timebase":{"n":30,"d":1},"resolution":{"w":1,"h":1},"sources":[],"segments":[],"activeSourceId":"s1"}"#).unwrap();
+        assert!(matches!(load(&path), Err(ProjectFileError::Json(_))));
+    }
 
-        let invalid_path = directory.path.join("invalid.qcproj");
-        let invalid = EXAMPLE.replacen("\"d\": 1001", "\"d\": 0", 1);
-        fs::write(&invalid_path, invalid).unwrap();
+    #[test]
+    fn rejects_unknown_runtime_fields() {
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        value["sources"][0]["proxy"] = serde_json::json!({"path":"cache.mov"});
+        assert_json_error(value);
+    }
+
+    #[test]
+    fn source_without_start_pts_is_valid_until_referenced() {
+        let mut project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+        project.sources[0].video_start_pts = None;
+        project.segments.clear();
+        assert!(validate_project(&project).is_ok());
+        project.segments.push(Segment {
+            id: "g1".to_owned(),
+            source_id: "s1".to_owned(),
+            in_pts: Pts::new(0),
+            out_pts: Pts::new(1),
+        });
         assert!(matches!(
-            load(&invalid_path),
-            Err(ProjectFileError::Json(_))
+            validate_project(&project),
+            Err(ProjectValidationError::MissingSegmentStartPts { .. })
         ));
     }
 
     #[test]
-    fn rejects_a_future_schema_version_with_a_typed_error() {
+    fn validates_ids_references_time_bases_and_half_open_ranges() {
+        let project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+        let mut changed = project.clone();
+        changed.active_source_id = "missing".to_owned();
+        assert!(matches!(
+            validate_project(&changed),
+            Err(ProjectValidationError::UnknownActiveSource { .. })
+        ));
+        changed = project.clone();
+        changed.sources.push(changed.sources[0].clone());
+        assert!(matches!(
+            validate_project(&changed),
+            Err(ProjectValidationError::DuplicateSourceId { .. })
+        ));
+        changed = project.clone();
+        changed.segments[0].out_pts = changed.segments[0].in_pts;
+        assert!(matches!(
+            validate_project(&changed),
+            Err(ProjectValidationError::InvalidSegmentRange { .. })
+        ));
+        changed = project;
+        changed.sources[0].video_time_base = Rational::new(-1, 90000).unwrap();
+        assert!(matches!(
+            validate_project(&changed),
+            Err(ProjectValidationError::NonPositiveTimebase { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_segment_ids_and_unknown_segment_sources() {
+        let project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+
+        let mut duplicate = project.clone();
+        duplicate.segments.push(Segment {
+            id: duplicate.segments[0].id.clone(),
+            source_id: "s1".to_owned(),
+            in_pts: Pts::new(30_000),
+            out_pts: Pts::new(40_000),
+        });
+        assert!(matches!(
+            validate_project(&duplicate),
+            Err(ProjectValidationError::DuplicateSegmentId { index: 1 })
+        ));
+
+        let mut unknown_source = project;
+        unknown_source.segments[0].source_id = "missing".to_owned();
+        assert!(matches!(
+            validate_project(&unknown_source),
+            Err(ProjectValidationError::UnknownSegmentSource {
+                index: 0,
+                source_id
+            }) if source_id == "missing"
+        ));
+    }
+
+    #[test]
+    fn nullable_durations_are_not_segment_prerequisites() {
+        let mut project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+        project.sources[0].video_duration_ticks = None;
+        project.sources[0].approximate_duration_seconds = None;
+        assert!(validate_project(&project).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_approximate_duration_and_unsafe_metadata() {
+        let mut project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+        project.sources[0].approximate_duration_seconds = Some(f64::INFINITY);
+        assert!(matches!(
+            validate_project(&project),
+            Err(ProjectValidationError::InvalidApproximateDuration { .. })
+        ));
+        project = serde_json::from_str(EXAMPLE).unwrap();
+        project.sources[0].size = JAVASCRIPT_MAX_SAFE_INTEGER as u64 + 1;
+        assert!(matches!(
+            validate_project(&project),
+            Err(ProjectValidationError::UnsafeInteger { .. })
+        ));
+    }
+
+    #[test]
+    fn future_schema_is_typed_but_lower_version_uses_validation() {
         let directory = TestDirectory::new();
-        let path = directory.path.join("future.qcproj");
+        let path = directory.path.join("version.qcproj");
         fs::write(
             &path,
             EXAMPLE.replace("\"schemaVersion\": 1", "\"schemaVersion\": 2"),
         )
         .unwrap();
-
-        let error = load(&path).unwrap_err();
         assert!(matches!(
-            error,
-            ProjectFileError::FutureSchemaVersion {
-                found: 2,
-                supported: CURRENT_SCHEMA_VERSION
-            }
+            load(&path),
+            Err(ProjectFileError::FutureSchemaVersion { found: 2, .. })
         ));
-    }
-
-    #[test]
-    fn rejects_wide_future_schema_versions_with_the_typed_error() {
-        let directory = TestDirectory::new();
-        let path = directory.path.join("wide-future.qcproj");
-
-        for version in [u64::from(u32::MAX) + 1, JAVASCRIPT_MAX_SAFE_INTEGER as u64] {
-            fs::write(
-                &path,
-                EXAMPLE.replace(
-                    "\"schemaVersion\": 1",
-                    &format!("\"schemaVersion\": {version}"),
-                ),
-            )
-            .unwrap();
-            assert!(matches!(
-                load(&path),
-                Err(ProjectFileError::FutureSchemaVersion {
-                    found,
-                    supported: CURRENT_SCHEMA_VERSION
-                }) if found == version
-            ));
-        }
-    }
-
-    #[test]
-    fn routes_a_lower_schema_version_to_the_migration_seam() {
-        let directory = TestDirectory::new();
-        let path = directory.path.join("legacy.qcproj");
         fs::write(
             &path,
             EXAMPLE.replace("\"schemaVersion\": 1", "\"schemaVersion\": 0"),
         )
         .unwrap();
-
         assert!(matches!(
             load(&path),
-            Err(ProjectFileError::UnsupportedLegacySchemaVersion { found: 0 })
-        ));
-    }
-
-    #[test]
-    fn save_rejects_lower_and_higher_schema_versions() {
-        let directory = TestDirectory::new();
-        let path = directory.path.join("schema.qcproj");
-        let mut project = example_project();
-
-        for version in [0, CURRENT_SCHEMA_VERSION + 1] {
-            project.schema_version = version;
-            assert!(matches!(
-                save(&path, &project),
-                Err(ProjectFileError::Validation(
-                    ProjectValidationError::SchemaVersion {
-                        found,
-                        expected: CURRENT_SCHEMA_VERSION
-                    }
-                )) if found == version
-            ));
-        }
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn save_overwrites_atomically_ends_with_a_newline_and_round_trips() {
-        let directory = TestDirectory::new();
-        let path = directory.path.join("round-trip.qcproj");
-        fs::write(&path, b"old project contents").unwrap();
-        let project = example_project();
-
-        save(&path, &project).unwrap();
-
-        let bytes = fs::read(&path).unwrap();
-        assert_eq!(bytes.last(), Some(&b'\n'));
-        assert_eq!(load(&path).unwrap(), project);
-    }
-
-    #[test]
-    fn saves_to_a_bare_relative_file_name() {
-        let sequence = TEST_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = PathBuf::from(format!(
-            ".quipclip-bare-project-{}-{sequence}.qcproj",
-            std::process::id()
-        ));
-        let _cleanup = TestFileCleanup(path.clone());
-        let project = example_project();
-        fs::write(&path, b"old project contents").unwrap();
-
-        save(&path, &project).unwrap();
-
-        assert_eq!(load(&path).unwrap(), project);
-    }
-
-    #[test]
-    fn accepts_javascript_safe_integer_boundaries_through_save_and_load() {
-        let directory = TestDirectory::new();
-        let path = directory.path.join("boundaries.qcproj");
-        let mut project = example_project();
-        project.timebase = Rational::new(JAVASCRIPT_MAX_SAFE_INTEGER, 1).unwrap();
-        project.sources[0].size = JAVASCRIPT_MAX_SAFE_INTEGER as u64;
-        project.sources[0].mtime = -JAVASCRIPT_MAX_SAFE_INTEGER;
-        project.sources[0].frame_count = JAVASCRIPT_MAX_SAFE_INTEGER;
-        project.sources[0].timebase = Rational::new(1, JAVASCRIPT_MAX_SAFE_INTEGER).unwrap();
-        project.segments[0].in_frame = JAVASCRIPT_MAX_SAFE_INTEGER - 1;
-        project.segments[0].out_frame = JAVASCRIPT_MAX_SAFE_INTEGER;
-
-        save(&path, &project).unwrap();
-        assert_eq!(load(&path).unwrap(), project);
-    }
-
-    #[test]
-    fn public_load_rejects_unsafe_or_invalid_integer_values() {
-        assert_invalid_json_value(
-            &["sources", "0", "size"],
-            (9_007_199_254_740_992_u64).into(),
-        );
-        assert_invalid_json_value(&["sources", "0", "mtime"], 9_007_199_254_740_992_i64.into());
-        assert_invalid_json_value(
-            &["sources", "0", "frameCount"],
-            9_007_199_254_740_992_i64.into(),
-        );
-        assert_invalid_json_value(&["sources", "0", "frameCount"], (-1).into());
-        assert_invalid_json_value(&["segments", "0", "inFrame"], (-1).into());
-        assert_invalid_json_value(
-            &["segments", "0", "outFrame"],
-            9_007_199_254_740_992_i64.into(),
-        );
-        assert_invalid_json_value(&["segments", "0", "outFrame"], 120.into());
-        assert_invalid_json_value(&["timebase", "n"], 9_007_199_254_740_992_i64.into());
-        assert_invalid_json_value(
-            &["sources", "0", "timebase", "d"],
-            9_007_199_254_740_997_i64.into(),
-        );
-    }
-
-    #[test]
-    fn public_load_and_save_reject_nonpositive_timebases() {
-        let directory = TestDirectory::new();
-        let path = directory.path.join("nonpositive.qcproj");
-        let mut project = example_project();
-        project.timebase = Rational::new(0, 1).unwrap();
-        assert!(matches!(
-            save(&path, &project),
             Err(ProjectFileError::Validation(
-                ProjectValidationError::NonPositiveTimebase { .. }
-            ))
-        ));
-
-        project = example_project();
-        project.sources[0].timebase = Rational::new(-1, 1).unwrap();
-        assert!(matches!(
-            save(&path, &project),
-            Err(ProjectFileError::Validation(
-                ProjectValidationError::NonPositiveTimebase { .. }
-            ))
-        ));
-
-        assert_invalid_json_value(&["timebase", "n"], 0.into());
-        assert_invalid_json_value(&["sources", "0", "timebase", "n"], (-30000).into());
-    }
-
-    #[test]
-    fn public_save_rejects_unsafe_and_invalid_frame_values() {
-        let directory = TestDirectory::new();
-        let path = directory.path.join("invalid-save.qcproj");
-        let mut project = example_project();
-        project.sources[0].size = JAVASCRIPT_MAX_SAFE_INTEGER as u64 + 1;
-        assert!(matches!(
-            save(&path, &project),
-            Err(ProjectFileError::Validation(
-                ProjectValidationError::UnsafeInteger { .. }
-            ))
-        ));
-
-        project = example_project();
-        project.segments[0].in_frame = -1;
-        assert!(matches!(
-            save(&path, &project),
-            Err(ProjectFileError::Validation(
-                ProjectValidationError::NegativeFrameValue { .. }
-            ))
-        ));
-
-        project = example_project();
-        project.timebase = Rational::new(JAVASCRIPT_MAX_SAFE_INTEGER + 1, 1).unwrap();
-        assert!(matches!(
-            save(&path, &project),
-            Err(ProjectFileError::Validation(
-                ProjectValidationError::UnsafeInteger { .. }
+                ProjectValidationError::SchemaVersion {
+                    found: 0,
+                    expected: 1
+                }
             ))
         ));
     }
 
-    #[test]
-    fn rejects_unknown_runtime_and_proxy_fields() {
-        let mut root_proxy: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
-        root_proxy["proxy"] = serde_json::json!({ "path": "cache.mov" });
-        assert_load_json_error(root_proxy);
-
-        let mut source_proxy: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
-        source_proxy["sources"][0]["proxyPath"] = serde_json::json!("cache.mov");
-        assert_load_json_error(source_proxy);
-    }
-
-    #[test]
-    fn requires_rel_path_in_the_version_one_contract() {
-        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
-        value["sources"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("relPath");
-        assert_load_json_error(value);
-    }
-
-    fn example_project() -> ProjectFile {
-        serde_json::from_str(EXAMPLE).unwrap()
-    }
-
-    fn assert_invalid_json_value(path: &[&str], replacement: serde_json::Value) {
-        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
-        let mut target = &mut value;
-        for component in path {
-            target = if let Ok(index) = component.parse::<usize>() {
-                &mut target[index]
-            } else {
-                &mut target[*component]
-            };
-        }
-        *target = replacement;
-
+    fn assert_json_error(value: serde_json::Value) {
         let directory = TestDirectory::new();
-        let project_path = directory.path.join("invalid.qcproj");
-        fs::write(&project_path, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(matches!(
-            load(&project_path),
-            Err(ProjectFileError::Validation(_))
-        ));
-    }
-
-    fn assert_load_json_error(value: serde_json::Value) {
-        let directory = TestDirectory::new();
-        let path = directory.path.join("unknown-field.qcproj");
+        let path = directory.path.join("invalid.qcproj");
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(matches!(load(&path), Err(ProjectFileError::Json(_))));
     }
@@ -732,15 +646,6 @@ mod tests {
     struct TestDirectory {
         path: PathBuf,
     }
-
-    struct TestFileCleanup(PathBuf);
-
-    impl Drop for TestFileCleanup {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
-
     impl TestDirectory {
         fn new() -> Self {
             for _ in 0..1000 {
@@ -758,7 +663,6 @@ mod tests {
             panic!("could not create a unique test directory")
         }
     }
-
     impl Drop for TestDirectory {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);

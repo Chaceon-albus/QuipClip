@@ -11,7 +11,7 @@ use tauri::Manager;
 const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 /// Facts about one validated media file that the frontend can use immediately.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportMediaResult {
     pub path: String,
@@ -244,7 +244,7 @@ fn diagnostic_text(bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::ffmpeg::{ExecutableOrigin, ProbeParseError};
-    use crate::time::Rational;
+    use crate::time::{FrameCount, Pts, Rational, TickCount};
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
@@ -544,13 +544,15 @@ mod tests {
             bit_depth: Some(8),
             width: 1920,
             height: 1080,
-            avg_frame_rate: Rational::new(30, 1).unwrap(),
-            r_frame_rate: Rational::new(30, 1).unwrap(),
-            start_time: Rational::new(0, 1).unwrap(),
-            duration: Some(Rational::new(10, 1).unwrap()),
-            frame_count: 300,
+            video_stream_index: 0,
+            video_time_base: Rational::new(1, 90_000).unwrap(),
+            video_start_pts: Some(Pts::new(0)),
+            video_duration_ticks: Some(TickCount::new(900_000).unwrap()),
+            approximate_duration_seconds: Some(10.0),
+            avg_frame_rate: Some(Rational::new(30, 1).unwrap()),
+            r_frame_rate: Some(Rational::new(30, 1).unwrap()),
+            reported_frame_count: Some(FrameCount::new(300).unwrap()),
             audio: None,
-            is_vfr: false,
         }
     }
 

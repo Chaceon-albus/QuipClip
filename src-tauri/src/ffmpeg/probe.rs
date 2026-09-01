@@ -1,6 +1,6 @@
 //! ffprobe execution and normalization for imported media.
 
-use crate::time::Rational;
+use crate::time::{FrameCount, Pts, Rational, TickCount};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
@@ -9,10 +9,8 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
-
 /// Normalized media facts needed by the editor and later capability checks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaProbe {
     pub format_names: Vec<String>,
@@ -23,16 +21,18 @@ pub struct MediaProbe {
     pub bit_depth: Option<u32>,
     pub width: u32,
     pub height: u32,
-    pub avg_frame_rate: Rational,
-    pub r_frame_rate: Rational,
-    pub start_time: Rational,
-    pub duration: Option<Rational>,
-    pub frame_count: i64,
+    pub video_stream_index: u32,
+    pub video_time_base: Rational,
+    pub video_start_pts: Option<Pts>,
+    pub video_duration_ticks: Option<TickCount>,
+    pub approximate_duration_seconds: Option<f64>,
+    pub avg_frame_rate: Option<Rational>,
+    pub r_frame_rate: Option<Rational>,
+    pub reported_frame_count: Option<FrameCount>,
     pub audio: Option<AudioProbe>,
-    pub is_vfr: bool,
 }
 
-/// Basic facts about the first audio stream, when one exists.
+/// Basic facts about the preferred audio stream, when one exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioProbe {
@@ -64,18 +64,14 @@ pub enum ProbeParseError {
     Invalid(ProbeDataError),
 }
 
-/// Invalid or incomplete ffprobe data.
+/// Invalid or incomplete ffprobe data required for source identification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeDataError {
     MissingVideo,
     MissingField { field: &'static str },
-    InvalidFrameRate { field: &'static str, value: String },
-    InvalidDecimal { field: &'static str, value: String },
     InvalidInteger { field: &'static str, value: String },
-    UnsafeInteger { field: &'static str, value: i128 },
+    InvalidTimeBase { value: String },
     InvalidDimensions { width: i128, height: i128 },
-    MissingDuration,
-    FrameCountOverflow,
 }
 
 impl fmt::Display for ProbeError {
@@ -126,31 +122,15 @@ impl fmt::Display for ProbeDataError {
         match self {
             Self::MissingVideo => write!(formatter, "no video stream was reported"),
             Self::MissingField { field } => write!(formatter, "required field {field} is missing"),
-            Self::InvalidFrameRate { field, value } => {
-                write!(formatter, "{field} is not a positive frame rate: {value}")
-            }
-            Self::InvalidDecimal { field, value } => {
-                write!(formatter, "{field} is not a valid decimal: {value}")
-            }
             Self::InvalidInteger { field, value } => {
                 write!(formatter, "{field} is not a valid integer: {value}")
             }
-            Self::UnsafeInteger { field, value } => {
-                write!(
-                    formatter,
-                    "{field} is outside the safe integer range: {value}"
-                )
+            Self::InvalidTimeBase { value } => {
+                write!(formatter, "video time_base is not positive: {value}")
             }
             Self::InvalidDimensions { width, height } => {
                 write!(formatter, "video dimensions are invalid: {width}x{height}")
             }
-            Self::MissingDuration => {
-                write!(
-                    formatter,
-                    "duration is required when frame count is unavailable"
-                )
-            }
-            Self::FrameCountOverflow => write!(formatter, "derived frame count overflowed"),
         }
     }
 }
@@ -187,14 +167,12 @@ pub fn probe_media(ffprobe_path: &Path, media_path: &Path) -> Result<MediaProbe,
         .stderr(Stdio::piped())
         .output()
         .map_err(|source| ProbeError::Spawn { source })?;
-
     if !output.status.success() {
         return Err(ProbeError::ProcessFailed {
             code: output.status.code(),
             stderr: output.stderr,
         });
     }
-
     parse_probe_json(&output.stdout).map_err(|source| ProbeError::Parse {
         source,
         stderr: output.stderr,
@@ -216,6 +194,7 @@ struct RawProbe {
 
 #[derive(Deserialize)]
 struct RawStream {
+    index: Option<Value>,
     codec_type: Option<String>,
     codec_name: Option<String>,
     profile: Option<String>,
@@ -224,10 +203,12 @@ struct RawStream {
     bits_per_sample: Option<Value>,
     width: Option<Value>,
     height: Option<Value>,
+    time_base: Option<String>,
+    start_pts: Option<Value>,
+    duration_ts: Option<Value>,
+    duration: Option<String>,
     avg_frame_rate: Option<String>,
     r_frame_rate: Option<String>,
-    start_time: Option<String>,
-    duration: Option<String>,
     nb_frames: Option<String>,
     sample_rate: Option<String>,
     channels: Option<Value>,
@@ -247,7 +228,6 @@ struct RawDisposition {
 struct RawFormat {
     format_name: Option<String>,
     format_long_name: Option<String>,
-    start_time: Option<String>,
     duration: Option<String>,
 }
 
@@ -263,143 +243,124 @@ fn normalize(raw: RawProbe) -> Result<MediaProbe, ProbeDataError> {
         format.and_then(|value| value.format_name.as_deref()),
         "format.format_name",
     )?;
-    let format_names = format_name
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .collect();
     let video_codec =
         required_text(video.codec_name.as_deref(), "streams.video.codec_name")?.to_owned();
-    let width_value = required_json_integer(video.width.as_ref(), "streams.video.width")?;
-    let height_value = required_json_integer(video.height.as_ref(), "streams.video.height")?;
-    if width_value <= 0
-        || height_value <= 0
-        || width_value > i128::from(u32::MAX)
-        || height_value > i128::from(u32::MAX)
-    {
-        return Err(ProbeDataError::InvalidDimensions {
-            width: width_value,
-            height: height_value,
-        });
+    let width = required_json_integer(video.width.as_ref(), "streams.video.width")?;
+    let height = required_json_integer(video.height.as_ref(), "streams.video.height")?;
+    if width <= 0 || height <= 0 || width > i128::from(u32::MAX) || height > i128::from(u32::MAX) {
+        return Err(ProbeDataError::InvalidDimensions { width, height });
     }
 
-    let avg_frame_rate = parse_frame_rate(
-        required_text(
-            video.avg_frame_rate.as_deref(),
-            "streams.video.avg_frame_rate",
-        )?,
-        "streams.video.avg_frame_rate",
-    )?;
-    let r_frame_rate = parse_frame_rate(
-        required_text(video.r_frame_rate.as_deref(), "streams.video.r_frame_rate")?,
-        "streams.video.r_frame_rate",
-    )?;
-    let start_time_text = available_text(video.start_time.as_deref())
-        .or_else(|| available_text(format.and_then(|value| value.start_time.as_deref())));
-    let start_time = parse_optional_decimal(start_time_text, "start_time")?
-        .unwrap_or_else(|| Rational::new(0, 1).expect("zero is a valid rational"));
-    let duration_text = available_text(video.duration.as_deref())
-        .or_else(|| available_text(format.and_then(|value| value.duration.as_deref())));
-    let duration = parse_optional_decimal(duration_text, "duration")?;
-    if duration.is_some_and(|value| value.num() < 0) {
-        return Err(ProbeDataError::InvalidDecimal {
-            field: "duration",
-            value: duration_text.unwrap_or_default().to_owned(),
-        });
-    }
-
-    let frame_count =
-        match parse_optional_text_integer(video.nb_frames.as_deref(), "streams.video.nb_frames")? {
-            Some(value) if value >= 0 => value,
-            Some(value) => {
-                return Err(ProbeDataError::InvalidInteger {
-                    field: "streams.video.nb_frames",
-                    value: value.to_string(),
-                })
-            }
-            None => avg_frame_rate
-                .frame_count_for_duration(duration.ok_or(ProbeDataError::MissingDuration)?)
-                .ok_or(ProbeDataError::FrameCountOverflow)?,
-        };
-    ensure_safe_integer("frame_count", i128::from(frame_count))?;
+    let stream_index = required_json_integer(video.index.as_ref(), "streams.video.index")?;
+    let video_stream_index =
+        u32::try_from(stream_index).map_err(|_| ProbeDataError::InvalidInteger {
+            field: "streams.video.index",
+            value: stream_index.to_string(),
+        })?;
+    let time_base_text = required_text(video.time_base.as_deref(), "streams.video.time_base")?;
+    let video_time_base = Rational::from_ffprobe(time_base_text)
+        .filter(|value| value.num() > 0)
+        .ok_or_else(|| ProbeDataError::InvalidTimeBase {
+            value: time_base_text.to_owned(),
+        })?;
 
     Ok(MediaProbe {
-        format_names,
+        format_names: format_name
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect(),
         format_long_name: format.and_then(|value| value.format_long_name.clone()),
         video_codec,
         video_profile: video.profile.clone(),
         pixel_format: video.pix_fmt.clone(),
         bit_depth: parse_bit_depth(video)?,
-        width: width_value as u32,
-        height: height_value as u32,
-        avg_frame_rate,
-        r_frame_rate,
-        start_time,
-        duration,
-        frame_count,
+        width: width as u32,
+        height: height as u32,
+        video_stream_index,
+        video_time_base,
+        video_start_pts: parse_optional_i64_value(
+            video.start_pts.as_ref(),
+            "streams.video.start_pts",
+        )?
+        .map(Pts::new),
+        video_duration_ticks: parse_optional_i64_value(
+            video.duration_ts.as_ref(),
+            "streams.video.duration_ts",
+        )?
+        .and_then(TickCount::new),
+        approximate_duration_seconds: approximate_duration(
+            video.duration.as_deref(),
+            format.and_then(|value| value.duration.as_deref()),
+        ),
+        avg_frame_rate: optional_positive_rational(video.avg_frame_rate.as_deref()),
+        r_frame_rate: optional_positive_rational(video.r_frame_rate.as_deref()),
+        reported_frame_count: parse_optional_text_i64(
+            video.nb_frames.as_deref(),
+            "streams.video.nb_frames",
+        )?
+        .and_then(FrameCount::new),
         audio: audio.map(normalize_audio).transpose()?,
-        is_vfr: avg_frame_rate != r_frame_rate,
     })
 }
 
+fn preferred_stream<'a, F>(
+    streams: &'a [RawStream],
+    kind: &str,
+    eligible: F,
+) -> Option<&'a RawStream>
+where
+    F: Fn(&RawStream) -> bool,
+{
+    let candidates = streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some(kind) && eligible(stream));
+    candidates
+        .clone()
+        .find(|stream| stream.disposition.default != 0)
+        .or_else(|| candidates.into_iter().next())
+}
+
 fn normalize_audio(raw: &RawStream) -> Result<AudioProbe, ProbeDataError> {
-    let sample_rate =
-        parse_optional_text_integer(raw.sample_rate.as_deref(), "streams.audio.sample_rate")?
-            .map(|value| optional_positive_u32("streams.audio.sample_rate", i128::from(value)))
-            .transpose()?
-            .flatten();
-    let channels = raw
-        .channels
-        .as_ref()
-        .map(|value| json_integer(value, "streams.audio.channels"))
-        .transpose()?;
-    let channels = channels
-        .map(|value| optional_positive_u32("streams.audio.channels", value))
-        .transpose()?
-        .flatten();
     Ok(AudioProbe {
         codec: raw.codec_name.clone(),
-        sample_rate,
-        channels,
+        sample_rate: parse_optional_text_i64(
+            raw.sample_rate.as_deref(),
+            "streams.audio.sample_rate",
+        )?
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0),
+        channels: raw
+            .channels
+            .as_ref()
+            .map(|value| json_integer(value, "streams.audio.channels"))
+            .transpose()?
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0),
     })
 }
 
 fn parse_bit_depth(video: &RawStream) -> Result<Option<u32>, ProbeDataError> {
-    if let Some(value) = parse_optional_text_integer(
+    if let Some(value) = parse_optional_text_i64(
         video.bits_per_raw_sample.as_deref(),
         "streams.video.bits_per_raw_sample",
     )? {
-        if value != 0 {
-            return positive_u32("streams.video.bits_per_raw_sample", i128::from(value)).map(Some);
+        if let Ok(value) = u32::try_from(value) {
+            if value > 0 {
+                return Ok(Some(value));
+            }
         }
     }
     if let Some(value) = video.bits_per_sample.as_ref() {
         let value = json_integer(value, "streams.video.bits_per_sample")?;
-        if value != 0 {
-            return positive_u32("streams.video.bits_per_sample", value).map(Some);
+        if let Ok(value) = u32::try_from(value) {
+            if value > 0 {
+                return Ok(Some(value));
+            }
         }
     }
     Ok(video.pix_fmt.as_deref().and_then(infer_pixel_bit_depth))
-}
-
-fn preferred_stream<'a>(
-    streams: &'a [RawStream],
-    codec_type: &str,
-    eligible: impl Fn(&RawStream) -> bool,
-) -> Option<&'a RawStream> {
-    streams
-        .iter()
-        .find(|stream| {
-            stream.codec_type.as_deref() == Some(codec_type)
-                && eligible(stream)
-                && stream.disposition.default != 0
-        })
-        .or_else(|| {
-            streams
-                .iter()
-                .find(|stream| stream.codec_type.as_deref() == Some(codec_type) && eligible(stream))
-        })
 }
 
 fn infer_pixel_bit_depth(pixel_format: &str) -> Option<u32> {
@@ -441,61 +402,14 @@ fn infer_pixel_bit_depth(pixel_format: &str) -> Option<u32> {
     }
 }
 
-fn parse_frame_rate(value: &str, field: &'static str) -> Result<Rational, ProbeDataError> {
-    let rate = Rational::from_ffprobe(value).ok_or_else(|| ProbeDataError::InvalidFrameRate {
-        field,
-        value: value.to_owned(),
-    })?;
-    if rate.num() <= 0 || !rational_is_javascript_safe(rate) {
-        return Err(ProbeDataError::InvalidFrameRate {
-            field,
-            value: value.to_owned(),
-        });
-    }
-    Ok(rate)
-}
-
-fn parse_optional_decimal(
-    value: Option<&str>,
+fn required_text<'a>(
+    value: Option<&'a str>,
     field: &'static str,
-) -> Result<Option<Rational>, ProbeDataError> {
-    let Some(value) = value.filter(|value| !is_unavailable(value)) else {
-        return Ok(None);
-    };
-    let rational =
-        Rational::from_decimal_str(value).ok_or_else(|| ProbeDataError::InvalidDecimal {
-            field,
-            value: value.to_owned(),
-        })?;
-    if !rational_is_javascript_safe(rational) {
-        return Err(ProbeDataError::InvalidDecimal {
-            field,
-            value: value.to_owned(),
-        });
-    }
-    Ok(Some(rational))
-}
-
-fn parse_optional_text_integer(
-    value: Option<&str>,
-    field: &'static str,
-) -> Result<Option<i64>, ProbeDataError> {
-    let Some(value) = value.filter(|value| !is_unavailable(value)) else {
-        return Ok(None);
-    };
-    let parsed = value
-        .parse::<i128>()
-        .map_err(|_| ProbeDataError::InvalidInteger {
-            field,
-            value: value.to_owned(),
-        })?;
-    ensure_safe_integer(field, parsed)?;
-    i64::try_from(parsed)
-        .map(Some)
-        .map_err(|_| ProbeDataError::UnsafeInteger {
-            field,
-            value: parsed,
-        })
+) -> Result<&'a str, ProbeDataError> {
+    value
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && *text != "N/A")
+        .ok_or(ProbeDataError::MissingField { field })
 }
 
 fn required_json_integer(
@@ -508,415 +422,235 @@ fn required_json_integer(
 }
 
 fn json_integer(value: &Value, field: &'static str) -> Result<i128, ProbeDataError> {
-    let text = value.as_number().map(ToString::to_string).ok_or_else(|| {
-        ProbeDataError::InvalidInteger {
-            field,
-            value: value.to_string(),
-        }
-    })?;
-    let parsed = text
-        .parse::<i128>()
-        .map_err(|_| ProbeDataError::InvalidInteger { field, value: text })?;
-    ensure_safe_integer(field, parsed)?;
-    Ok(parsed)
-}
-
-fn ensure_safe_integer(field: &'static str, value: i128) -> Result<(), ProbeDataError> {
-    if !(-i128::from(JAVASCRIPT_MAX_SAFE_INTEGER)..=i128::from(JAVASCRIPT_MAX_SAFE_INTEGER))
-        .contains(&value)
-    {
-        return Err(ProbeDataError::UnsafeInteger { field, value });
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| number.as_u64().map(i128::from)),
+        Value::String(text) => text.parse().ok(),
+        _ => None,
     }
-    Ok(())
+    .ok_or_else(|| ProbeDataError::InvalidInteger {
+        field,
+        value: value.to_string(),
+    })
 }
 
-fn positive_u32(field: &'static str, value: i128) -> Result<u32, ProbeDataError> {
-    if value <= 0 || value > i128::from(u32::MAX) {
-        return Err(ProbeDataError::InvalidInteger {
-            field,
-            value: value.to_string(),
-        });
-    }
-    Ok(value as u32)
-}
-
-fn optional_positive_u32(field: &'static str, value: i128) -> Result<Option<u32>, ProbeDataError> {
-    if value == 0 {
-        Ok(None)
-    } else {
-        positive_u32(field, value).map(Some)
-    }
-}
-
-fn required_text<'a>(
-    value: Option<&'a str>,
+fn parse_optional_i64_value(
+    value: Option<&Value>,
     field: &'static str,
-) -> Result<&'a str, ProbeDataError> {
+) -> Result<Option<i64>, ProbeDataError> {
+    let Some(value) = value else { return Ok(None) };
+    if matches!(value, Value::String(text) if text.trim().is_empty() || text == "N/A") {
+        return Ok(None);
+    }
+    let integer = json_integer(value, field)?;
+    i64::try_from(integer)
+        .map(Some)
+        .map_err(|_| ProbeDataError::InvalidInteger {
+            field,
+            value: value.to_string(),
+        })
+}
+
+fn parse_optional_text_i64(
+    value: Option<&str>,
+    field: &'static str,
+) -> Result<Option<i64>, ProbeDataError> {
+    let Some(text) = value
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && *text != "N/A")
+    else {
+        return Ok(None);
+    };
+    text.parse()
+        .map(Some)
+        .map_err(|_| ProbeDataError::InvalidInteger {
+            field,
+            value: text.to_owned(),
+        })
+}
+
+fn optional_positive_rational(value: Option<&str>) -> Option<Rational> {
     value
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(ProbeDataError::MissingField { field })
+        .and_then(Rational::from_ffprobe)
+        .filter(|value| value.num() > 0)
 }
 
-fn rational_is_javascript_safe(value: Rational) -> bool {
-    value.num().unsigned_abs() <= JAVASCRIPT_MAX_SAFE_INTEGER as u64
-        && value.den() <= JAVASCRIPT_MAX_SAFE_INTEGER
-}
-
-fn available_text(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !is_unavailable(value))
-}
-
-fn is_unavailable(value: &str) -> bool {
-    value.trim().is_empty() || value.trim().eq_ignore_ascii_case("N/A")
+fn approximate_duration(stream: Option<&str>, format: Option<&str>) -> Option<f64> {
+    stream
+        .into_iter()
+        .chain(format)
+        .filter_map(|text| text.trim().parse::<f64>().ok())
+        .find(|value| value.is_finite() && *value >= 0.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use std::fs;
-    #[cfg(unix)]
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    #[cfg(unix)]
-    static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn parses_ntsc_cfr_with_audio() {
+    fn parses_source_pts_metadata_without_synthesizing_frames() {
         let probe = parse_value(base_probe()).unwrap();
-
-        assert_eq!(probe.format_names, ["mov", "mp4"]);
-        assert_eq!(probe.video_codec, "h264");
-        assert_eq!(probe.bit_depth, Some(10));
-        assert_eq!(probe.avg_frame_rate, Rational::new(30000, 1001).unwrap());
-        assert_eq!(probe.r_frame_rate, Rational::new(30000, 1001).unwrap());
-        assert_eq!(probe.frame_count, 300);
-        assert!(!probe.is_vfr);
+        assert_eq!(probe.video_stream_index, 2);
+        assert_eq!(probe.video_time_base, Rational::new(1, 90_000).unwrap());
+        assert_eq!(probe.video_start_pts, Some(Pts::new(-1800)));
         assert_eq!(
-            probe.audio,
-            Some(AudioProbe {
-                codec: Some("aac".to_owned()),
-                sample_rate: Some(48000),
-                channels: Some(2),
-            })
+            probe.video_duration_ticks,
+            Some(TickCount::new(900_000).unwrap())
         );
+        assert_eq!(probe.reported_frame_count, None);
+        assert_eq!(
+            probe.avg_frame_rate,
+            Some(Rational::new(30_000, 1001).unwrap())
+        );
+        assert_eq!(probe.approximate_duration_seconds, Some(10.01));
     }
 
     #[test]
-    fn serializes_the_normalized_result_with_camel_case_and_rational_wires() {
-        let serialized = serde_json::to_value(parse_value(base_probe()).unwrap()).unwrap();
-
-        assert_eq!(
-            serialized["avgFrameRate"],
-            serde_json::json!({ "n": 30000, "d": 1001 })
-        );
-        assert_eq!(serialized["isVfr"], false);
-        assert!(serialized.get("avg_frame_rate").is_none());
-    }
-
-    #[test]
-    fn detects_vfr_from_different_average_and_real_rates() {
+    fn missing_start_pts_duration_ticks_and_frame_metadata_remain_playable() {
         let mut value = base_probe();
-        value["streams"][0]["r_frame_rate"] = serde_json::json!("30/1");
-
-        assert!(parse_value(value).unwrap().is_vfr);
+        for field in [
+            "start_pts",
+            "duration_ts",
+            "duration",
+            "nb_frames",
+            "avg_frame_rate",
+            "r_frame_rate",
+        ] {
+            value["streams"][0].as_object_mut().unwrap().remove(field);
+        }
+        value["format"].as_object_mut().unwrap().remove("duration");
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.video_start_pts, None);
+        assert_eq!(probe.video_duration_ticks, None);
+        assert_eq!(probe.approximate_duration_seconds, None);
+        assert_eq!(probe.avg_frame_rate, None);
+        assert_eq!(probe.r_frame_rate, None);
+        assert_eq!(probe.reported_frame_count, None);
     }
 
     #[test]
-    fn parses_nonzero_and_negative_start_times_exactly() {
-        for (text, expected) in [
-            ("1.250", Rational::new(5, 4).unwrap()),
-            ("-0.125", Rational::new(-1, 8).unwrap()),
+    fn invalid_optional_rates_and_durations_become_unavailable() {
+        let mut value = base_probe();
+        value["streams"][0]["avg_frame_rate"] = serde_json::json!("0/0");
+        value["streams"][0]["r_frame_rate"] = serde_json::json!("broken");
+        value["streams"][0]["duration"] = serde_json::json!("NaN");
+        value["format"]["duration"] = serde_json::json!("-1");
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.avg_frame_rate, None);
+        assert_eq!(probe.r_frame_rate, None);
+        assert_eq!(probe.approximate_duration_seconds, None);
+    }
+
+    #[test]
+    fn invalid_stream_duration_falls_back_to_valid_format_duration() {
+        let mut value = base_probe();
+        value["streams"][0]["duration"] = serde_json::json!("-1");
+        value["format"]["duration"] = serde_json::json!("10.02");
+        assert_eq!(
+            parse_value(value).unwrap().approximate_duration_seconds,
+            Some(10.02)
+        );
+    }
+
+    #[test]
+    fn infers_bit_depth_from_pixel_format_when_numeric_depth_is_missing_or_zero() {
+        for (numeric_depth, pixel_format, expected) in [
+            (None, "yuv420p10le", Some(10)),
+            (Some("0"), "p012le", Some(12)),
+            (None, "rgb48le", Some(16)),
+            (None, "yuv420p", Some(8)),
+            (None, "unknown", None),
         ] {
             let mut value = base_probe();
-            value["streams"][0]["start_time"] = serde_json::json!(text);
-            assert_eq!(parse_value(value).unwrap().start_time, expected);
+            value["streams"][0]["pix_fmt"] = serde_json::json!(pixel_format);
+            match numeric_depth {
+                Some(depth) => {
+                    value["streams"][0]["bits_per_raw_sample"] = serde_json::json!(depth);
+                }
+                None => {
+                    value["streams"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("bits_per_raw_sample");
+                }
+            }
+            assert_eq!(parse_value(value).unwrap().bit_depth, expected);
         }
     }
 
     #[test]
-    fn unavailable_stream_times_fall_back_to_format_times() {
+    fn explicit_positive_bit_depth_takes_precedence_over_pixel_format() {
         let mut value = base_probe();
-        value["streams"][0]["start_time"] = serde_json::json!("N/A");
-        value["streams"][0]["duration"] = serde_json::json!("");
-        value["format"]["start_time"] = serde_json::json!("-0.500");
-        value["format"]["duration"] = serde_json::json!("2.500");
-
-        let probe = parse_value(value).unwrap();
-
-        assert_eq!(probe.start_time, Rational::new(-1, 2).unwrap());
-        assert_eq!(probe.duration, Rational::new(5, 2));
-    }
-
-    #[test]
-    fn excludes_attached_pictures_and_prefers_default_streams() {
-        let mut value = base_probe();
-        let mut cover = value["streams"][0].clone();
-        cover["codec_name"] = serde_json::json!("mjpeg");
-        cover["disposition"] = serde_json::json!({ "default": 1, "attached_pic": 1 });
-        value["streams"][0]["disposition"] = serde_json::json!({ "default": 0, "attached_pic": 0 });
-        let mut default_video = value["streams"][0].clone();
-        default_video["codec_name"] = serde_json::json!("hevc");
-        default_video["disposition"] = serde_json::json!({ "default": 1, "attached_pic": 0 });
-        value["streams"][1]["disposition"] = serde_json::json!({ "default": 0 });
-        let mut default_audio = value["streams"][1].clone();
-        default_audio["codec_name"] = serde_json::json!("opus");
-        default_audio["disposition"] = serde_json::json!({ "default": 1 });
-        let streams = value["streams"].as_array_mut().unwrap();
-        streams.insert(0, cover);
-        streams.push(default_video);
-        streams.push(default_audio);
-
-        let probe = parse_value(value).unwrap();
-
-        assert_eq!(probe.video_codec, "hevc");
-        assert_eq!(probe.audio.unwrap().codec.as_deref(), Some("opus"));
-    }
-
-    #[test]
-    fn uses_the_first_eligible_stream_when_none_is_default() {
-        let mut value = base_probe();
-        value["streams"][0]["disposition"] = serde_json::json!({ "default": 0 });
-        value["streams"][1]["disposition"] = serde_json::json!({ "default": 0 });
-        let mut second_video = value["streams"][0].clone();
-        second_video["codec_name"] = serde_json::json!("hevc");
-        let mut second_audio = value["streams"][1].clone();
-        second_audio["codec_name"] = serde_json::json!("opus");
-        let streams = value["streams"].as_array_mut().unwrap();
-        streams.push(second_video);
-        streams.push(second_audio);
-
-        let probe = parse_value(value).unwrap();
-
-        assert_eq!(probe.video_codec, "h264");
-        assert_eq!(probe.audio.unwrap().codec.as_deref(), Some("aac"));
-    }
-
-    #[test]
-    fn infers_component_bit_depth_from_real_pixel_formats() {
-        for (pixel_format, expected) in [
-            ("yuv420p10le", 10),
-            ("yuv444p12be", 12),
-            ("gbrp16le", 16),
-            ("gray10le", 10),
-            ("p010le", 10),
-            ("p012be", 12),
-            ("p016le", 16),
-            ("yuv420p", 8),
-            ("rgb24", 8),
-            ("rgb48le", 16),
-        ] {
-            assert_eq!(infer_pixel_bit_depth(pixel_format), Some(expected));
-        }
-    }
-
-    #[test]
-    fn infers_ten_bit_vp9_when_numeric_depth_is_unavailable() {
-        let mut value = base_probe();
-        value["streams"][0]["codec_name"] = serde_json::json!("vp9");
-        value["streams"][0]["profile"] = serde_json::json!("Profile 2");
-        value["streams"][0]["bits_per_raw_sample"] = serde_json::json!("N/A");
-        value["streams"][0]["bits_per_sample"] = serde_json::json!(0);
-
-        assert_eq!(parse_value(value).unwrap().bit_depth, Some(10));
-    }
-
-    #[test]
-    fn zero_numeric_bit_depth_falls_back_to_pixel_format() {
-        let mut value = base_probe();
-        value["streams"][0]["bits_per_raw_sample"] = serde_json::json!("0");
-        value["streams"][0]["bits_per_sample"] = serde_json::json!(0);
-        value["streams"][0]["pix_fmt"] = serde_json::json!("yuv422p12le");
-
+        value["streams"][0]["bits_per_raw_sample"] = serde_json::json!("12");
+        value["streams"][0]["pix_fmt"] = serde_json::json!("yuv420p10le");
         assert_eq!(parse_value(value).unwrap().bit_depth, Some(12));
     }
 
     #[test]
-    fn zero_audio_numbers_are_unknown() {
+    fn accepts_full_i64_pts_range_and_rejects_negative_tick_counts_as_unavailable() {
         let mut value = base_probe();
-        value["streams"][1]["sample_rate"] = serde_json::json!("0");
-        value["streams"][1]["channels"] = serde_json::json!(0);
-
-        let audio = parse_value(value).unwrap().audio.unwrap();
-        assert_eq!(audio.sample_rate, None);
-        assert_eq!(audio.channels, None);
+        value["streams"][0]["start_pts"] = serde_json::json!(i64::MIN.to_string());
+        value["streams"][0]["duration_ts"] = serde_json::json!("-1");
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.video_start_pts, Some(Pts::new(i64::MIN)));
+        assert_eq!(probe.video_duration_ticks, None);
     }
 
     #[test]
-    fn explicit_frame_count_takes_precedence_over_duration() {
+    fn requires_positive_video_time_base_and_stream_index() {
         let mut value = base_probe();
-        value["streams"][0]["nb_frames"] = serde_json::json!("42");
-        value["streams"][0]["duration"] = serde_json::json!("1000.0");
-
-        assert_eq!(parse_value(value).unwrap().frame_count, 42);
-    }
-
-    #[test]
-    fn derives_frame_count_by_ceiling_duration() {
-        let mut value = base_probe();
-        value["streams"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("nb_frames");
-        value["streams"][0]["avg_frame_rate"] = serde_json::json!("25/1");
-        value["streams"][0]["r_frame_rate"] = serde_json::json!("25/1");
-        value["streams"][0]["duration"] = serde_json::json!("4.001");
-
-        assert_eq!(parse_value(value).unwrap().frame_count, 101);
-    }
-
-    #[test]
-    fn audio_is_optional() {
-        let mut value = base_probe();
-        value["streams"].as_array_mut().unwrap().truncate(1);
-
-        assert_eq!(parse_value(value).unwrap().audio, None);
-    }
-
-    #[test]
-    fn rejects_unknown_or_nonpositive_frame_rates() {
-        for rate in ["0/0", "0/1", "-25/1"] {
-            let mut value = base_probe();
-            value["streams"][0]["avg_frame_rate"] = serde_json::json!(rate);
-            assert!(matches!(
-                parse_value(value),
-                Err(ProbeParseError::Invalid(
-                    ProbeDataError::InvalidFrameRate { .. }
-                ))
-            ));
-        }
-    }
-
-    #[test]
-    fn rejects_missing_video() {
-        let mut value = base_probe();
-        value["streams"].as_array_mut().unwrap().remove(0);
-
+        value["streams"][0]["time_base"] = serde_json::json!("0/0");
         assert!(matches!(
             parse_value(value),
-            Err(ProbeParseError::Invalid(ProbeDataError::MissingVideo))
-        ));
-    }
-
-    #[test]
-    fn rejects_malformed_json() {
-        assert!(matches!(
-            parse_probe_json(b"{not json"),
-            Err(ProbeParseError::Json(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_missing_duration_when_frame_count_is_unavailable() {
-        let mut value = base_probe();
-        value["streams"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("nb_frames");
-        value["streams"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("duration");
-        value["format"].as_object_mut().unwrap().remove("duration");
-
-        assert!(matches!(
-            parse_value(value),
-            Err(ProbeParseError::Invalid(ProbeDataError::MissingDuration))
-        ));
-    }
-
-    #[test]
-    fn rejects_unsafe_or_invalid_integers() {
-        let mut unsafe_frames = base_probe();
-        unsafe_frames["streams"][0]["nb_frames"] = serde_json::json!("9007199254740992");
-        assert!(matches!(
-            parse_value(unsafe_frames),
             Err(ProbeParseError::Invalid(
-                ProbeDataError::UnsafeInteger { .. }
+                ProbeDataError::InvalidTimeBase { .. }
             ))
         ));
 
-        let mut invalid_dimensions = base_probe();
-        invalid_dimensions["streams"][0]["width"] = serde_json::json!(0);
+        let mut value = base_probe();
+        value["streams"][0].as_object_mut().unwrap().remove("index");
         assert!(matches!(
-            parse_value(invalid_dimensions),
-            Err(ProbeParseError::Invalid(
-                ProbeDataError::InvalidDimensions { .. }
-            ))
+            parse_value(value),
+            Err(ProbeParseError::Invalid(ProbeDataError::MissingField {
+                field: "streams.video.index"
+            }))
         ));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn reports_process_failure_with_unchanged_stderr() {
-        let directory = TestDirectory::new();
-        let executable = create_fake_ffprobe(
-            &directory.path,
-            "failure-ffprobe",
-            "",
-            "exact diagnostic",
-            23,
-            false,
+    fn selects_default_non_attached_video_and_default_audio() {
+        let mut value = base_probe();
+        let attached = serde_json::json!({
+            "index":0,"codec_type":"video","codec_name":"mjpeg","width":600,"height":600,
+            "time_base":"1/25","disposition":{"default":1,"attached_pic":1}
+        });
+        value["streams"].as_array_mut().unwrap().insert(0, attached);
+        value["streams"].as_array_mut().unwrap().push(serde_json::json!({
+            "index":3,"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2,
+            "disposition":{"default":1,"attached_pic":0}
+        }));
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.video_stream_index, 2);
+        assert_eq!(probe.audio.as_ref().unwrap().sample_rate, Some(48_000));
+    }
+
+    #[test]
+    fn serializes_pts_and_tick_metadata_as_decimal_strings() {
+        let mut raw = base_probe();
+        raw["streams"][0]["nb_frames"] = serde_json::json!("300");
+        let probe = parse_value(raw).unwrap();
+        assert_eq!(
+            probe.reported_frame_count,
+            Some(FrameCount::new(300).unwrap())
         );
-        let error = probe_media(&executable, Path::new("unused-media-path")).unwrap_err();
-
-        assert!(matches!(
-            error,
-            ProbeError::ProcessFailed {
-                code: Some(23),
-                stderr
-            } if stderr == b"exact diagnostic"
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn successful_process_uses_exact_arguments_one_input_and_closed_stdin() {
-        let directory = TestDirectory::new();
-        let stdout = serde_json::to_string(&base_probe()).unwrap();
-        let executable =
-            create_fake_ffprobe(&directory.path, "success-ffprobe", &stdout, "", 0, true);
-
-        let probe = probe_media(&executable, Path::new("-leading-input.mp4")).unwrap();
-
-        assert_eq!(probe.video_codec, "h264");
-        assert_eq!(probe.frame_count, 300);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn successful_process_with_bad_json_preserves_raw_stderr() {
-        let directory = TestDirectory::new();
-        let executable = create_fake_ffprobe(
-            &directory.path,
-            "bad-json-ffprobe",
-            "not json",
-            "parser diagnostic",
-            0,
-            true,
-        );
-
-        let error = probe_media(&executable, Path::new("-leading-input.mp4")).unwrap_err();
-
-        assert!(matches!(
-            error,
-            ProbeError::Parse {
-                source: ProbeParseError::Json(_),
-                stderr
-            } if stderr == b"parser diagnostic"
-        ));
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn reports_process_failure() {
-        let executable = std::env::current_exe().unwrap();
-        let error = probe_media(&executable, Path::new("unused-media-path")).unwrap_err();
-
-        match error {
-            ProbeError::ProcessFailed { stderr, .. } => assert!(!stderr.is_empty()),
-            other => panic!("expected process failure, got {other:?}"),
-        }
+        let value = serde_json::to_value(probe).unwrap();
+        assert_eq!(value["videoStartPts"], "-1800");
+        assert_eq!(value["videoDurationTicks"], "900000");
+        assert_eq!(value["reportedFrameCount"], "300");
+        assert!(value.get("frameCount").is_none());
+        assert!(value.get("isVfr").is_none());
     }
 
     fn parse_value(value: Value) -> Result<MediaProbe, ProbeParseError> {
@@ -925,105 +659,29 @@ mod tests {
 
     fn base_probe() -> Value {
         serde_json::json!({
-            "streams": [
-                {
-                    "codec_type": "video",
-                    "codec_name": "h264",
-                    "profile": "High 10",
-                    "pix_fmt": "yuv420p10le",
-                    "bits_per_raw_sample": "10",
-                    "width": 1920,
-                    "height": 1080,
-                    "avg_frame_rate": "30000/1001",
-                    "r_frame_rate": "30000/1001",
-                    "start_time": "0.000000",
-                    "duration": "10.010000",
-                    "nb_frames": "300",
-                    "disposition": { "default": 1, "attached_pic": 0 }
-                },
-                {
-                    "codec_type": "audio",
-                    "codec_name": "aac",
-                    "sample_rate": "48000",
-                    "channels": 2,
-                    "disposition": { "default": 1, "attached_pic": 0 }
-                }
-            ],
+            "streams": [{
+                "index": 2,
+                "codec_type": "video",
+                "codec_name": "h264",
+                "profile": "High",
+                "pix_fmt": "yuv420p",
+                "bits_per_raw_sample": "8",
+                "width": 1920,
+                "height": 1080,
+                "time_base": "1/90000",
+                "start_pts": "-1800",
+                "duration_ts": "900000",
+                "duration": "10.01",
+                "avg_frame_rate": "30000/1001",
+                "r_frame_rate": "30/1",
+                "nb_frames": "N/A",
+                "disposition": {"default": 1, "attached_pic": 0}
+            }],
             "format": {
-                "format_name": "mov,mp4",
+                "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
                 "format_long_name": "QuickTime / MOV",
-                "start_time": "0.000000",
-                "duration": "10.010000"
+                "duration": "10.02"
             }
         })
-    }
-
-    #[cfg(unix)]
-    fn create_fake_ffprobe(
-        directory: &Path,
-        name: &str,
-        stdout: &str,
-        stderr: &str,
-        exit_code: i32,
-        verify_invocation: bool,
-    ) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        assert!(!stdout.contains('\''));
-        assert!(!stderr.contains('\''));
-        let executable = directory.join(name);
-        let mut script = String::from("#!/bin/sh\n");
-        if verify_invocation {
-            script.push_str(
-                r#"[ "$#" -eq 8 ] || { printf 'wrong argc' >&2; exit 90; }
-[ "$1" = '-v' ] || { printf 'wrong arg 1' >&2; exit 91; }
-[ "$2" = 'error' ] || { printf 'wrong arg 2' >&2; exit 92; }
-[ "$3" = '-of' ] || { printf 'wrong arg 3' >&2; exit 93; }
-[ "$4" = 'json' ] || { printf 'wrong arg 4' >&2; exit 94; }
-[ "$5" = '-show_format' ] || { printf 'wrong arg 5' >&2; exit 95; }
-[ "$6" = '-show_streams' ] || { printf 'wrong arg 6' >&2; exit 96; }
-[ "$7" = '-i' ] || { printf 'wrong arg 7' >&2; exit 97; }
-[ "$8" = '-leading-input.mp4' ] || { printf 'wrong input' >&2; exit 98; }
-if IFS= read -r line; then printf 'stdin was open' >&2; exit 99; fi
-"#,
-            );
-        }
-        script.push_str(&format!("printf '%s' '{stdout}'\n"));
-        script.push_str(&format!("printf '%s' '{stderr}' >&2\n"));
-        script.push_str(&format!("exit {exit_code}\n"));
-        fs::write(&executable, script).unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        executable
-    }
-
-    #[cfg(unix)]
-    struct TestDirectory {
-        path: std::path::PathBuf,
-    }
-
-    #[cfg(unix)]
-    impl TestDirectory {
-        fn new() -> Self {
-            for _ in 0..1000 {
-                let sequence = TEST_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let path = std::env::temp_dir().join(format!(
-                    "quipclip-ffprobe-test-{}-{sequence}",
-                    std::process::id()
-                ));
-                match fs::create_dir(&path) {
-                    Ok(()) => return Self { path },
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(error) => panic!("could not create test directory: {error}"),
-                }
-            }
-            panic!("could not create a unique test directory")
-        }
-    }
-
-    #[cfg(unix)]
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
     }
 }
