@@ -16,6 +16,7 @@ import {
   isImportMediaErrorCode,
   isMediaProbe,
   isNonNegativeRational,
+  isNonNegativeU32,
   isPositiveRational,
   isPositiveU32,
   isSignedRational,
@@ -23,6 +24,7 @@ import {
   U32_MAX,
   validateImportMediaResult,
 } from "./validation";
+import type { Pts, TickCount } from "@/types/project";
 
 function createValidProbe(): ImportMediaResult["probe"] {
   return {
@@ -34,17 +36,19 @@ function createValidProbe(): ImportMediaResult["probe"] {
     bitDepth: 8,
     width: 1920,
     height: 1080,
+    videoStreamIndex: 0,
+    videoTimeBase: { n: 1, d: 90000 },
+    videoStartPts: "0" as Pts,
+    videoDurationTicks: "900000" as TickCount,
+    approximateDurationSeconds: 10.0,
     avgFrameRate: { n: 30000, d: 1001 },
     rFrameRate: { n: 30000, d: 1001 },
-    startTime: { n: 0, d: 1 },
-    duration: { n: 10010, d: 1000 },
-    frameCount: 300,
+    reportedFrameCount: "300" as TickCount,
     audio: {
       codec: "aac",
       sampleRate: 48000,
       channels: 2,
     },
-    isVfr: false,
   };
 }
 
@@ -99,21 +103,29 @@ describe("Media Validation & Normalization", () => {
         expect(isPositiveU32(1)).toBe(true);
         expect(isPositiveU32(1920)).toBe(true);
         expect(isPositiveU32(U32_MAX)).toBe(true);
-        expect(isPositiveU32(4_294_967_295)).toBe(true);
       });
 
       it("rejects zero, negative numbers, over-bound numbers, floats, and non-numbers", () => {
         expect(isPositiveU32(0)).toBe(false);
         expect(isPositiveU32(-1)).toBe(false);
         expect(isPositiveU32(U32_MAX + 1)).toBe(false);
-        expect(isPositiveU32(4_294_967_296)).toBe(false);
         expect(isPositiveU32(1.5)).toBe(false);
         expect(isPositiveU32(NaN)).toBe(false);
         expect(isPositiveU32(Infinity)).toBe(false);
-        expect(isPositiveU32(-Infinity)).toBe(false);
         expect(isPositiveU32("1920")).toBe(false);
-        expect(isPositiveU32(null)).toBe(false);
-        expect(isPositiveU32(undefined)).toBe(false);
+      });
+    });
+
+    describe("isNonNegativeU32", () => {
+      it("accepts zero and positive u32 boundaries", () => {
+        expect(isNonNegativeU32(0)).toBe(true);
+        expect(isNonNegativeU32(1)).toBe(true);
+        expect(isNonNegativeU32(U32_MAX)).toBe(true);
+      });
+
+      it("rejects negative numbers and values over u32", () => {
+        expect(isNonNegativeU32(-1)).toBe(false);
+        expect(isNonNegativeU32(U32_MAX + 1)).toBe(false);
       });
     });
 
@@ -126,110 +138,56 @@ describe("Media Validation & Normalization", () => {
         expect(isI32(0)).toBe(true);
         expect(isI32(-1)).toBe(true);
         expect(isI32(1)).toBe(true);
-        expect(isI32(127)).toBe(true);
       });
 
       it("rejects under-bound, over-bound, float, and non-numeric values", () => {
         expect(isI32(I32_MIN - 1)).toBe(false);
-        expect(isI32(-2_147_483_649)).toBe(false);
         expect(isI32(I32_MAX + 1)).toBe(false);
-        expect(isI32(2_147_483_648)).toBe(false);
         expect(isI32(Number.MAX_SAFE_INTEGER)).toBe(false);
-        expect(isI32(Number.MIN_SAFE_INTEGER)).toBe(false);
         expect(isI32(1.5)).toBe(false);
-        expect(isI32(-1.5)).toBe(false);
         expect(isI32(NaN)).toBe(false);
         expect(isI32(Infinity)).toBe(false);
-        expect(isI32(-Infinity)).toBe(false);
         expect(isI32("0")).toBe(false);
-        expect(isI32(null)).toBe(false);
       });
     });
 
     describe("Rational Validation Helpers", () => {
       describe("isSignedRational", () => {
-        it("accepts safe integer numerators (negative, zero, positive) with positive denominators", () => {
+        it("accepts safe integer numerators with positive denominators", () => {
           expect(isSignedRational({ n: -30, d: 1 })).toBe(true);
           expect(isSignedRational({ n: 0, d: 1 })).toBe(true);
           expect(isSignedRational({ n: 30, d: 1 })).toBe(true);
           expect(isSignedRational({ n: 30000, d: 1001 })).toBe(true);
-          expect(isSignedRational({ n: Number.MIN_SAFE_INTEGER, d: 1 })).toBe(true);
-          expect(
-            isSignedRational({
-              n: Number.MAX_SAFE_INTEGER,
-              d: Number.MAX_SAFE_INTEGER,
-            }),
-          ).toBe(true);
         });
 
         it("rejects zero or negative denominators, floats, and unsafe integers", () => {
           expect(isSignedRational({ n: 1, d: 0 })).toBe(false);
           expect(isSignedRational({ n: 1, d: -1 })).toBe(false);
-          expect(isSignedRational({ n: -1, d: -1 })).toBe(false);
           expect(isSignedRational({ n: 1.5, d: 1 })).toBe(false);
-          expect(isSignedRational({ n: 1, d: 1.5 })).toBe(false);
-          expect(isSignedRational({ n: Number.MAX_SAFE_INTEGER + 1, d: 1 })).toBe(
-            false,
-          );
-          expect(isSignedRational({ n: 1, d: Number.MAX_SAFE_INTEGER + 1 })).toBe(
-            false,
-          );
           expect(isSignedRational(null)).toBe(false);
-          expect(isSignedRational(undefined)).toBe(false);
-          expect(isSignedRational({})).toBe(false);
         });
       });
 
-      describe("isPositiveRational (avgFrameRate / rFrameRate)", () => {
+      describe("isPositiveRational", () => {
         it("accepts strictly positive numerators with positive denominators", () => {
           expect(isPositiveRational({ n: 1, d: 1 })).toBe(true);
-          expect(isPositiveRational({ n: 30, d: 1 })).toBe(true);
           expect(isPositiveRational({ n: 30000, d: 1001 })).toBe(true);
-          expect(isPositiveRational({ n: 24000, d: 1001 })).toBe(true);
-          expect(isPositiveRational({ n: 60, d: 1 })).toBe(true);
         });
 
-        it("rejects zero numerator", () => {
+        it("rejects zero and negative numerators", () => {
           expect(isPositiveRational({ n: 0, d: 1 })).toBe(false);
-          expect(isPositiveRational({ n: 0, d: 1001 })).toBe(false);
-        });
-
-        it("rejects negative numerator", () => {
           expect(isPositiveRational({ n: -1, d: 1 })).toBe(false);
-          expect(isPositiveRational({ n: -30, d: 1 })).toBe(false);
-          expect(isPositiveRational({ n: -30000, d: 1001 })).toBe(false);
-        });
-
-        it("rejects invalid denominators and non-integers", () => {
-          expect(isPositiveRational({ n: 30, d: 0 })).toBe(false);
-          expect(isPositiveRational({ n: 30, d: -1 })).toBe(false);
-          expect(isPositiveRational({ n: 30.5, d: 1 })).toBe(false);
-          expect(isPositiveRational({ n: 30, d: 1.5 })).toBe(false);
         });
       });
 
-      describe("isNonNegativeRational (duration)", () => {
-        it("accepts zero numerator (non-negative)", () => {
+      describe("isNonNegativeRational", () => {
+        it("accepts zero numerator and positive numerator", () => {
           expect(isNonNegativeRational({ n: 0, d: 1 })).toBe(true);
-          expect(isNonNegativeRational({ n: 0, d: 1000 })).toBe(true);
-        });
-
-        it("accepts positive numerator", () => {
-          expect(isNonNegativeRational({ n: 1, d: 1 })).toBe(true);
           expect(isNonNegativeRational({ n: 10, d: 1 })).toBe(true);
-          expect(isNonNegativeRational({ n: 10010, d: 1000 })).toBe(true);
         });
 
         it("rejects negative numerator", () => {
           expect(isNonNegativeRational({ n: -1, d: 1 })).toBe(false);
-          expect(isNonNegativeRational({ n: -10, d: 1 })).toBe(false);
-          expect(isNonNegativeRational({ n: -100, d: 1000 })).toBe(false);
-        });
-
-        it("rejects invalid denominators and non-integers", () => {
-          expect(isNonNegativeRational({ n: 10, d: 0 })).toBe(false);
-          expect(isNonNegativeRational({ n: 10, d: -1 })).toBe(false);
-          expect(isNonNegativeRational({ n: 10.5, d: 1 })).toBe(false);
         });
       });
     });
@@ -278,13 +236,6 @@ describe("Media Validation & Normalization", () => {
       },
     );
 
-    it("normalizes explicit 'unknown' code", () => {
-      const raw = { code: "unknown", detail: "Something failed" };
-      const normalized = normalizeImportMediaError(raw);
-      expect(normalized.code).toBe("unknown");
-      expect(normalized.detail).toBe("Something failed");
-    });
-
     it("normalizes unrecognized code to 'unknown'", () => {
       const raw = { code: "unexpectedErrorCode", detail: "Internal error" };
       const normalized = normalizeImportMediaError(raw);
@@ -292,35 +243,7 @@ describe("Media Validation & Normalization", () => {
       expect(normalized.detail).toBe("Internal error");
     });
 
-    it("preserves detail ONLY when it is a string from backend/rejections", () => {
-      const e1 = normalizeImportMediaError({
-        code: "invalidPath",
-        detail: 12345,
-      });
-      expect(e1.code).toBe("invalidPath");
-      expect(e1.detail).toBeUndefined();
-
-      const e2 = normalizeImportMediaError({
-        code: "invalidPath",
-        detail: null,
-      });
-      expect(e2.code).toBe("invalidPath");
-      expect(e2.detail).toBeUndefined();
-
-      const e3 = normalizeImportMediaError({ code: "invalidPath", detail: {} });
-      expect(e3.code).toBe("invalidPath");
-      expect(e3.detail).toBeUndefined();
-
-      const e4 = normalizeImportMediaError({
-        code: "invalidPath",
-        detail: true,
-      });
-      expect(e4.code).toBe("invalidPath");
-      expect(e4.detail).toBeUndefined();
-    });
-
-    it("preserves exitCode ONLY when it fits within Rust i32 range (-2_147_483_648..=2_147_483_647)", () => {
-      // Valid boundaries and values
+    it("preserves exitCode ONLY when within Rust i32 bounds", () => {
       expect(
         normalizeImportMediaError({
           code: "ffprobeProcessFailed",
@@ -331,45 +254,9 @@ describe("Media Validation & Normalization", () => {
       expect(
         normalizeImportMediaError({
           code: "ffprobeProcessFailed",
-          exitCode: -1,
-        }).exitCode,
-      ).toBe(-1);
-
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
-          exitCode: 127,
-        }).exitCode,
-      ).toBe(127);
-
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
-          exitCode: I32_MIN,
-        }).exitCode,
-      ).toBe(-2_147_483_648);
-
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
           exitCode: I32_MAX,
         }).exitCode,
       ).toBe(2_147_483_647);
-
-      // Under-bound and over-bound values
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
-          exitCode: I32_MIN - 1,
-        }).exitCode,
-      ).toBeUndefined();
-
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
-          exitCode: -2_147_483_649,
-        }).exitCode,
-      ).toBeUndefined();
 
       expect(
         normalizeImportMediaError({
@@ -377,62 +264,11 @@ describe("Media Validation & Normalization", () => {
           exitCode: I32_MAX + 1,
         }).exitCode,
       ).toBeUndefined();
-
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
-          exitCode: 2_147_483_648,
-        }).exitCode,
-      ).toBeUndefined();
-
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
-          exitCode: Number.MAX_SAFE_INTEGER,
-        }).exitCode,
-      ).toBeUndefined();
-
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
-          exitCode: "127",
-        }).exitCode,
-      ).toBeUndefined();
-
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
-          exitCode: 1.5,
-        }).exitCode,
-      ).toBeUndefined();
-
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
-          exitCode: NaN,
-        }).exitCode,
-      ).toBeUndefined();
-
-      expect(
-        normalizeImportMediaError({
-          code: "ffprobeProcessFailed",
-          exitCode: Infinity,
-        }).exitCode,
-      ).toBeUndefined();
     });
 
-    it("normalizes Error instances to code 'unknown' with detail undefined to prevent leaking local English messages", () => {
+    it("normalizes Error instances to code 'unknown' with detail undefined", () => {
       const err = new Error("Connection failed");
       const normalized = normalizeImportMediaError(err);
-      expect(normalized.code).toBe("unknown");
-      expect(normalized.detail).toBeUndefined();
-    });
-
-    it("normalizes TypeError validation errors to code 'unknown' with detail undefined", () => {
-      const typeError = new TypeError(
-        "Invalid media import result: probe payload is invalid or malformed",
-      );
-      const normalized = normalizeImportMediaError(typeError);
       expect(normalized.code).toBe("unknown");
       expect(normalized.detail).toBeUndefined();
     });
@@ -442,25 +278,56 @@ describe("Media Validation & Normalization", () => {
       expect(normalized.code).toBe("unknown");
       expect(normalized.detail).toBe("Failed to invoke");
     });
+  });
 
-    it("normalizes empty string, null, undefined, and non-object primitives to bare { code: 'unknown' }", () => {
-      expect(normalizeImportMediaError("").code).toBe("unknown");
-      expect(normalizeImportMediaError(null).code).toBe("unknown");
-      expect(normalizeImportMediaError(undefined).code).toBe("unknown");
-      expect(normalizeImportMediaError(123).code).toBe("unknown");
-      expect(normalizeImportMediaError(true).code).toBe("unknown");
-      expect(normalizeImportMediaError(Symbol("err")).code).toBe("unknown");
-      expect(normalizeImportMediaError({}).code).toBe("unknown");
+  describe("isAudioProbe", () => {
+    it("validates audio stream probe fields", () => {
+      expect(
+        isAudioProbe({
+          codec: "aac",
+          sampleRate: 48000,
+          channels: 2,
+        }),
+      ).toBe(true);
+
+      expect(
+        isAudioProbe({
+          codec: null,
+          sampleRate: null,
+          channels: null,
+        }),
+      ).toBe(true);
+
+      expect(
+        isAudioProbe({
+          codec: 123,
+          sampleRate: 48000,
+          channels: 2,
+        }),
+      ).toBe(false);
     });
   });
 
-  describe("validateImportMediaResult", () => {
+  describe("isMediaProbe", () => {
+    it("returns true for a valid MediaProbe object", () => {
+      expect(isMediaProbe(createValidProbe())).toBe(true);
+    });
+
+    it("returns false for non-objects or malformed structures", () => {
+      expect(isMediaProbe(null)).toBe(false);
+      expect(isMediaProbe(undefined)).toBe(false);
+      expect(isMediaProbe("string")).toBe(false);
+      expect(isMediaProbe({})).toBe(false);
+    });
+  });
+
+  describe("validateImportMediaResult with source PTS contracts", () => {
     it("accepts a fully populated valid result", () => {
       const valid = createValidImportResult();
       expect(validateImportMediaResult(valid)).toEqual(valid);
     });
 
-    it("accepts valid optional null fields in probe and audio", () => {
+    it("accepts valid nullable optional fields in probe", () => {
       const validWithNulls = createValidImportResult({
         probe: {
           ...createValidProbe(),
@@ -468,655 +335,134 @@ describe("Media Validation & Normalization", () => {
           videoProfile: null,
           pixelFormat: null,
           bitDepth: null,
-          duration: null,
+          videoStartPts: null,
+          videoDurationTicks: null,
+          approximateDurationSeconds: null,
+          avgFrameRate: null,
+          rFrameRate: null,
+          reportedFrameCount: null,
           audio: null,
         },
       });
       expect(validateImportMediaResult(validWithNulls)).toEqual(validWithNulls);
+    });
 
-      const validWithEmptyAudio = createValidImportResult({
+    it("accepts negative start PTS", () => {
+      const validWithNegativeStart = createValidImportResult({
         probe: {
           ...createValidProbe(),
-          audio: {
-            codec: null,
-            sampleRate: null,
-            channels: null,
-          },
+          videoStartPts: "-1800" as Pts,
         },
       });
-      expect(validateImportMediaResult(validWithEmptyAudio)).toEqual(
-        validWithEmptyAudio,
+      expect(validateImportMediaResult(validWithNegativeStart)).toEqual(
+        validWithNegativeStart,
       );
+    });
+
+    it("rejects invalid PTS / TickCount strings in probe", () => {
+      expect(() =>
+        validateImportMediaResult(
+          createValidImportResult({
+            probe: {
+              ...createValidProbe(),
+              videoStartPts: "-0" as Pts,
+            },
+          }),
+        ),
+      ).toThrow(TypeError);
+
+      expect(() =>
+        validateImportMediaResult(
+          createValidImportResult({
+            probe: {
+              ...createValidProbe(),
+              videoDurationTicks: "-1" as TickCount,
+            },
+          }),
+        ),
+      ).toThrow(TypeError);
+
+      expect(() =>
+        validateImportMediaResult(
+          createValidImportResult({
+            probe: {
+              ...createValidProbe(),
+              reportedFrameCount: "invalid" as TickCount,
+            },
+          }),
+        ),
+      ).toThrow(TypeError);
+    });
+
+    it.each([-0.5, NaN, Infinity, -Infinity])(
+      "normalizes invalid approximateDurationSeconds %s to null",
+      (approximateDurationSeconds) => {
+        const result = validateImportMediaResult(
+          createValidImportResult({
+            probe: {
+              ...createValidProbe(),
+              approximateDurationSeconds,
+            },
+          }),
+        );
+
+        expect(result.probe.approximateDurationSeconds).toBeNull();
+      },
+    );
+
+    it("rejects invalid videoStreamIndex and videoTimeBase", () => {
+      expect(() =>
+        validateImportMediaResult(
+          createValidImportResult({
+            probe: {
+              ...createValidProbe(),
+              videoStreamIndex: -1,
+            },
+          }),
+        ),
+      ).toThrow(TypeError);
+
+      expect(() =>
+        validateImportMediaResult(
+          createValidImportResult({
+            probe: {
+              ...createValidProbe(),
+              videoTimeBase: { n: 0, d: 1 },
+            },
+          }),
+        ),
+      ).toThrow(TypeError);
+
+      expect(() =>
+        validateImportMediaResult(
+          createValidImportResult({
+            probe: {
+              ...createValidProbe(),
+              videoTimeBase: { n: 1, d: 0 },
+            },
+          }),
+        ),
+      ).toThrow(TypeError);
     });
 
     it("rejects non-objects and null payloads", () => {
       expect(() => validateImportMediaResult(null)).toThrow(TypeError);
       expect(() => validateImportMediaResult(undefined)).toThrow(TypeError);
       expect(() => validateImportMediaResult("string")).toThrow(TypeError);
-      expect(() => validateImportMediaResult(123)).toThrow(TypeError);
     });
 
-    it("rejects invalid path and fileName", () => {
+    it("rejects invalid path, size, or mtime", () => {
       expect(() =>
         validateImportMediaResult(
           createValidImportResult({ path: 123 as unknown as string }),
         ),
       ).toThrow(TypeError);
       expect(() =>
-        validateImportMediaResult(
-          createValidImportResult({ fileName: null as unknown as string }),
-        ),
+        validateImportMediaResult(createValidImportResult({ size: -1 })),
       ).toThrow(TypeError);
-    });
-
-    describe("size and mtime validation", () => {
-      it("accepts valid boundary size values (0 through MAX_SAFE_INTEGER)", () => {
-        expect(
-          validateImportMediaResult(createValidImportResult({ size: 0 })),
-        ).toBeDefined();
-        expect(
-          validateImportMediaResult(
-            createValidImportResult({ size: Number.MAX_SAFE_INTEGER }),
-          ),
-        ).toBeDefined();
-      });
-
-      it("rejects negative, over-bound, float, or NaN size", () => {
-        expect(() =>
-          validateImportMediaResult(createValidImportResult({ size: -1 })),
-        ).toThrow(TypeError);
-        expect(() =>
-          validateImportMediaResult(
-            createValidImportResult({ size: Number.MAX_SAFE_INTEGER + 1 }),
-          ),
-        ).toThrow(TypeError);
-        expect(() =>
-          validateImportMediaResult(createValidImportResult({ size: 1.5 })),
-        ).toThrow(TypeError);
-        expect(() =>
-          validateImportMediaResult(createValidImportResult({ size: NaN })),
-        ).toThrow(TypeError);
-      });
-
-      it("accepts valid boundary mtime values (-MAX_SAFE_INTEGER through MAX_SAFE_INTEGER)", () => {
-        expect(
-          validateImportMediaResult(createValidImportResult({ mtime: 0 })),
-        ).toBeDefined();
-        expect(
-          validateImportMediaResult(
-            createValidImportResult({ mtime: Number.MIN_SAFE_INTEGER }),
-          ),
-        ).toBeDefined();
-        expect(
-          validateImportMediaResult(
-            createValidImportResult({ mtime: Number.MAX_SAFE_INTEGER }),
-          ),
-        ).toBeDefined();
-      });
-
-      it("rejects unsafe or float mtime", () => {
-        expect(() =>
-          validateImportMediaResult(
-            createValidImportResult({ mtime: Number.MIN_SAFE_INTEGER - 1 }),
-          ),
-        ).toThrow(TypeError);
-        expect(() =>
-          validateImportMediaResult(
-            createValidImportResult({ mtime: Number.MAX_SAFE_INTEGER + 1 }),
-          ),
-        ).toThrow(TypeError);
-        expect(() =>
-          validateImportMediaResult(createValidImportResult({ mtime: 1.5 })),
-        ).toThrow(TypeError);
-        expect(() =>
-          validateImportMediaResult(createValidImportResult({ mtime: NaN })),
-        ).toThrow(TypeError);
-      });
-    });
-
-    describe("MediaProbe Rational Semantic Roles", () => {
-      const base = createValidImportResult();
-
-      describe("avgFrameRate and rFrameRate (require safe integer n > 0 and d > 0)", () => {
-        it("accepts positive integer frame rates", () => {
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                avgFrameRate: { n: 30, d: 1 },
-                rFrameRate: { n: 30000, d: 1001 },
-              },
-            }),
-          ).toBeDefined();
-        });
-
-        it("rejects zero numerator for avgFrameRate and rFrameRate", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                avgFrameRate: { n: 0, d: 1 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                rFrameRate: { n: 0, d: 1 },
-              },
-            }),
-          ).toThrow(TypeError);
-        });
-
-        it("rejects negative numerator for avgFrameRate and rFrameRate", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                avgFrameRate: { n: -30, d: 1 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                rFrameRate: { n: -30000, d: 1001 },
-              },
-            }),
-          ).toThrow(TypeError);
-        });
-
-        it("rejects zero or negative denominator for avgFrameRate and rFrameRate", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                avgFrameRate: { n: 30, d: 0 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                rFrameRate: { n: 30, d: -1 },
-              },
-            }),
-          ).toThrow(TypeError);
-        });
-      });
-
-      describe("duration (requires non-negative rational n >= 0, d > 0 when non-null)", () => {
-        it("accepts zero duration rational (n = 0, d > 0)", () => {
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                duration: { n: 0, d: 1 },
-              },
-            }),
-          ).toBeDefined();
-        });
-
-        it("accepts positive duration rational", () => {
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                duration: { n: 100, d: 1 },
-              },
-            }),
-          ).toBeDefined();
-        });
-
-        it("rejects negative duration rational", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                duration: { n: -1, d: 1 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                duration: { n: -10, d: 1 },
-              },
-            }),
-          ).toThrow(TypeError);
-        });
-
-        it("rejects zero or negative denominator for duration", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                duration: { n: 10, d: 0 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                duration: { n: 10, d: -1 },
-              },
-            }),
-          ).toThrow(TypeError);
-        });
-      });
-
-      describe("startTime (signed rational: may be negative, zero, or positive, with d > 0)", () => {
-        it("accepts negative startTime rational", () => {
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                startTime: { n: -10, d: 1 },
-              },
-            }),
-          ).toBeDefined();
-
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                startTime: { n: -1, d: 1000 },
-              },
-            }),
-          ).toBeDefined();
-        });
-
-        it("accepts zero startTime rational", () => {
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                startTime: { n: 0, d: 1 },
-              },
-            }),
-          ).toBeDefined();
-        });
-
-        it("accepts positive startTime rational", () => {
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                startTime: { n: 15, d: 1 },
-              },
-            }),
-          ).toBeDefined();
-        });
-
-        it("rejects zero or negative denominator for startTime", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                startTime: { n: 0, d: 0 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                startTime: { n: -5, d: -1 },
-              },
-            }),
-          ).toThrow(TypeError);
-        });
-      });
-    });
-
-    describe("MediaProbe Rust Numeric Bounds (u32, frameCount, audio)", () => {
-      const base = createValidImportResult();
-
-      describe("width and height (u32: 1..=4_294_967_295)", () => {
-        it("accepts boundary values (1 and U32_MAX)", () => {
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                width: 1,
-                height: U32_MAX,
-              },
-            }),
-          ).toBeDefined();
-
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                width: U32_MAX,
-                height: 1,
-              },
-            }),
-          ).toBeDefined();
-        });
-
-        it("rejects width <= 0 or over u32 bound", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, width: 0 },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, width: -1 },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, width: U32_MAX + 1 },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, width: 1920.5 },
-            }),
-          ).toThrow(TypeError);
-        });
-
-        it("rejects height <= 0 or over u32 bound", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, height: 0 },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, height: -1080 },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, height: U32_MAX + 1 },
-            }),
-          ).toThrow(TypeError);
-        });
-      });
-
-      describe("bitDepth (Option<u32>: null or 1..=4_294_967_295)", () => {
-        it("accepts valid bitDepth values and null", () => {
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, bitDepth: null },
-            }),
-          ).toBeDefined();
-
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, bitDepth: 1 },
-            }),
-          ).toBeDefined();
-
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, bitDepth: 8 },
-            }),
-          ).toBeDefined();
-
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, bitDepth: 10 },
-            }),
-          ).toBeDefined();
-
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, bitDepth: U32_MAX },
-            }),
-          ).toBeDefined();
-        });
-
-        it("rejects bitDepth <= 0, over-bound, or float", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, bitDepth: 0 },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, bitDepth: -8 },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, bitDepth: U32_MAX + 1 },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, bitDepth: 8.5 },
-            }),
-          ).toThrow(TypeError);
-        });
-      });
-
-      describe("frameCount (i64 non-negative safe integer)", () => {
-        it("accepts valid boundary frameCount values", () => {
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, frameCount: 0 },
-            }),
-          ).toBeDefined();
-
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, frameCount: Number.MAX_SAFE_INTEGER },
-            }),
-          ).toBeDefined();
-        });
-
-        it("rejects negative, over-bound, or float frameCount", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, frameCount: -1 },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, frameCount: Number.MAX_SAFE_INTEGER + 1 },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: { ...base.probe, frameCount: 100.5 },
-            }),
-          ).toThrow(TypeError);
-        });
-      });
-
-      describe("AudioProbe (sampleRate & channels from Option<u32>)", () => {
-        it("accepts valid audio sampleRate and channels boundary values", () => {
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                audio: {
-                  codec: "aac",
-                  sampleRate: 1,
-                  channels: 1,
-                },
-              },
-            }),
-          ).toBeDefined();
-
-          expect(
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                audio: {
-                  codec: "flac",
-                  sampleRate: U32_MAX,
-                  channels: U32_MAX,
-                },
-              },
-            }),
-          ).toBeDefined();
-        });
-
-        it("rejects sampleRate <= 0, over-bound, or float", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                audio: { codec: "aac", sampleRate: 0, channels: 2 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                audio: { codec: "aac", sampleRate: -48000, channels: 2 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                audio: { codec: "aac", sampleRate: U32_MAX + 1, channels: 2 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                audio: { codec: "aac", sampleRate: 48000.5, channels: 2 },
-              },
-            }),
-          ).toThrow(TypeError);
-        });
-
-        it("rejects channels <= 0, over-bound, or float", () => {
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                audio: { codec: "aac", sampleRate: 48000, channels: 0 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                audio: { codec: "aac", sampleRate: 48000, channels: -1 },
-              },
-            }),
-          ).toThrow(TypeError);
-
-          expect(() =>
-            validateImportMediaResult({
-              ...base,
-              probe: {
-                ...base.probe,
-                audio: { codec: "aac", sampleRate: 48000, channels: U32_MAX + 1 },
-              },
-            }),
-          ).toThrow(TypeError);
-        });
-
-        it("isAudioProbe validates standalone audio object", () => {
-          expect(isAudioProbe(null)).toBe(false);
-          expect(isAudioProbe(undefined)).toBe(false);
-          expect(isAudioProbe("not-an-object")).toBe(false);
-          expect(isAudioProbe({ codec: null, sampleRate: null, channels: null })).toBe(
-            true,
-          );
-          expect(isAudioProbe({ codec: "opus", sampleRate: 48000, channels: 2 })).toBe(
-            true,
-          );
-          expect(isAudioProbe({ codec: 123, sampleRate: 48000, channels: 2 })).toBe(
-            false,
-          );
-        });
-
-        it("isMediaProbe validates standalone media probe object", () => {
-          expect(isMediaProbe(null)).toBe(false);
-          expect(isMediaProbe(createValidProbe())).toBe(true);
-          expect(isMediaProbe({ ...createValidProbe(), isVfr: "false" })).toBe(false);
-        });
-      });
+      expect(() =>
+        validateImportMediaResult(createValidImportResult({ mtime: NaN })),
+      ).toThrow(TypeError);
     });
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { getMediaSourceIdentity } from "@/features/media";
+import { getSourceRevisionKey } from "@/features/media";
+import type { Pts } from "@/types/project";
 import { createPlaybackStore } from "./store";
 import { createVideoRefCallback } from "./refOwnership";
 import type { PlaybackMediaElement, PlaybackSource } from "./types";
@@ -23,20 +24,22 @@ describe("Video Ref Ownership & Binding Helper", () => {
     path: "/media/clipA.mp4",
     size: 1048576,
     mtime: 1724976000,
+    videoTimeBase: { n: 1, d: 25 },
+    videoStartPts: "0" as Pts,
     avgFrameRate: { n: 25, d: 1 },
-    frameCount: 250,
   };
 
   const sourceB: PlaybackSource = {
     path: "/media/clipB.mp4",
     size: 2097152,
     mtime: 1724976500,
+    videoTimeBase: { n: 1001, d: 30000 },
+    videoStartPts: "0" as Pts,
     avgFrameRate: { n: 30000, d: 1001 },
-    frameCount: 300,
   };
 
-  const identityA = getMediaSourceIdentity(sourceA);
-  const identityB = getMediaSourceIdentity(sourceB);
+  const identityA = getSourceRevisionKey(sourceA);
+  const identityB = getSourceRevisionKey(sourceB);
 
   it("binds element to videoRef and attaches to playback store on mount", () => {
     const store = createPlaybackStore();
@@ -123,8 +126,8 @@ describe("Video Ref Ownership & Binding Helper", () => {
     expect(store.getState().isReady).toBe(true);
 
     // el2 can still be controlled
-    store.getState().stepFrames(5);
-    expect(store.getState().currentFrame).toBe(5);
+    store.getState().seekNominal(5);
+    expect(el2.currentTime).toBeCloseTo(5 / 25, 9);
   });
 
   it("handles React 19 StrictMode attach -> null -> attach lifecycle ordering correctly", () => {
@@ -224,9 +227,9 @@ describe("Video Ref Ownership & Binding Helper", () => {
     expect(store.getState().isAttached).toBe(true);
     expect(store.getState().isReady).toBe(true); // Synchronously derived from readyState >= HAVE_METADATA
 
-    // Seek / step
-    store.getState().stepFrames(25);
-    expect(store.getState().currentFrame).toBe(25);
+    // Sync presented frame
+    store.getState().syncPresentedFrame(identityA, 0.0, 1, el1);
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
 
     // Step 2: Media re-imported producing equivalent media with new source object & callback2
     const sourceInstance2: PlaybackSource = { ...sourceA };
@@ -248,6 +251,5 @@ describe("Video Ref Ownership & Binding Helper", () => {
     expect(videoRef.current).toBe(el1);
     expect(store.getState().isAttached).toBe(true);
     expect(store.getState().isReady).toBe(true); // Synchronously restored!
-    expect(store.getState().currentFrame).toBe(25); // Frame preserved!
   });
 });

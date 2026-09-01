@@ -18,49 +18,70 @@ import { usePlaybackStore } from "@/features/playback";
 import {
   canMarkIn,
   canMarkOut,
-  canSplitAtFrame,
+  canSplit,
   useTimelineStore,
 } from "@/features/timeline";
+import { assertPositiveTimeBase } from "@/lib/time";
+import type { Rational } from "@/types/project";
+
+function isValidNominalRate(rate: Rational | null | undefined): boolean {
+  if (!rate) {
+    return false;
+  }
+  try {
+    assertPositiveTimeBase(rate);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function TransportBar() {
   const { t } = useTranslation();
   const media = useMediaStore((s) => s.media);
-  const currentFrame = usePlaybackStore((s) => s.currentFrame);
+  const presentedFrame = usePlaybackStore((s) => s.presentedFrame);
+  const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
   const isPlaying = usePlaybackStore((s) => s.isPlaying);
   const isAttached = usePlaybackStore((s) => s.isAttached);
   const isReady = usePlaybackStore((s) => s.isReady);
   const togglePlayback = usePlaybackStore((s) => s.togglePlayback);
-  const stepFrames = usePlaybackStore((s) => s.stepFrames);
+  const seekNominal = usePlaybackStore((s) => s.seekNominal);
 
   const canUndo = useTimelineStore((s) => s.canUndo);
   const canRedo = useTimelineStore((s) => s.canRedo);
-  const pendingInFrame = useTimelineStore((s) => s.pendingInFrame);
+  const pendingInPts = useTimelineStore((s) => s.pendingInPts);
   const segments = useTimelineStore((s) => s.segments);
   const markIn = useTimelineStore((s) => s.markIn);
   const markOut = useTimelineStore((s) => s.markOut);
   const split = useTimelineStore((s) => s.split);
   const undo = useTimelineStore((s) => s.undo);
   const redo = useTimelineStore((s) => s.redo);
+  const sourceId = useTimelineStore((s) => s.sourceId);
 
-  const frameCount = media?.probe.frameCount ?? 0;
-  const canControl = media !== null && isAttached && isReady && frameCount > 0;
+  const hasActiveSource = media !== null && isAttached && isReady;
+  const hasNominalRate =
+    isValidNominalRate(media?.probe.avgFrameRate) ||
+    isValidNominalRate(media?.probe.rFrameRate);
 
-  const isUndoDisabled = !canControl || !canUndo;
-  const isRedoDisabled = !canControl || !canRedo;
-  const isMarkInDisabled = !canMarkIn(isAttached, isReady, frameCount, currentFrame);
-  const isMarkOutDisabled = !canMarkOut(
-    isAttached,
-    isReady,
-    frameCount,
-    currentFrame,
-    pendingInFrame,
+  const isUndoDisabled = !hasActiveSource || !canUndo;
+  const isRedoDisabled = !hasActiveSource || !canRedo;
+  const isMarkInDisabled = !canMarkIn(
+    calibrationStatus,
+    presentedFrame,
+    hasActiveSource,
   );
-  const isSplitDisabled = !canSplitAtFrame(
+  const isMarkOutDisabled = !canMarkOut(
+    calibrationStatus,
+    presentedFrame,
+    pendingInPts,
+    hasActiveSource,
+  );
+  const isSplitDisabled = !canSplit(
     segments,
-    currentFrame,
-    isAttached,
-    isReady,
-    frameCount,
+    calibrationStatus,
+    presentedFrame,
+    hasActiveSource,
+    sourceId ?? undefined,
   );
 
   return (
@@ -101,7 +122,11 @@ export function TransportBar() {
           <Button
             variant="outline"
             disabled={isMarkInDisabled}
-            onClick={() => markIn(currentFrame)}
+            onClick={() => {
+              if (presentedFrame) {
+                markIn(presentedFrame.inferredSourcePts);
+              }
+            }}
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
             aria-label={t("transport.action.markInAria")}
           >
@@ -119,7 +144,11 @@ export function TransportBar() {
           <Button
             variant="outline"
             disabled={isMarkOutDisabled}
-            onClick={() => markOut(currentFrame)}
+            onClick={() => {
+              if (presentedFrame) {
+                markOut(presentedFrame.inferredSourcePts);
+              }
+            }}
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
             aria-label={t("transport.action.markOutAria")}
           >
@@ -137,7 +166,11 @@ export function TransportBar() {
           <Button
             variant="outline"
             disabled={isSplitDisabled}
-            onClick={() => split(currentFrame)}
+            onClick={() => {
+              if (presentedFrame) {
+                split(presentedFrame.inferredSourcePts);
+              }
+            }}
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
             aria-label={t("transport.action.splitAria")}
           >
@@ -155,29 +188,29 @@ export function TransportBar() {
 
         <Separator orientation="vertical" className="h-8 bg-border" />
 
-        {/* Group 3: Playback Controls (Coherent central order: Previous Frame, Play/Pause, Next Frame) */}
+        {/* Group 3: Playback Controls (Previous / Next nominal step, Play/Pause) */}
         <div className="flex items-center gap-2">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={!canControl}
-                onClick={() => stepFrames(-1)}
+                disabled={!hasActiveSource || !hasNominalRate}
+                onClick={() => seekNominal(-1)}
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
-                aria-label={t("transport.action.previousFrame")}
+                aria-label={t("transport.action.previousStep")}
               >
                 <SkipBack className="size-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{t("transport.action.previousFrame")}</TooltipContent>
+            <TooltipContent>{t("transport.action.previousStep")}</TooltipContent>
           </Tooltip>
 
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 size="icon"
-                disabled={!canControl}
+                disabled={!hasActiveSource}
                 onClick={togglePlayback}
                 className="size-11 rounded-lg bg-primary text-primary-foreground shadow-xs hover:bg-primary-hover active:bg-primary-active"
                 aria-label={
@@ -201,15 +234,15 @@ export function TransportBar() {
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={!canControl}
-                onClick={() => stepFrames(1)}
+                disabled={!hasActiveSource || !hasNominalRate}
+                onClick={() => seekNominal(1)}
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
-                aria-label={t("transport.action.nextFrame")}
+                aria-label={t("transport.action.nextStep")}
               >
                 <SkipForward className="size-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{t("transport.action.nextFrame")}</TooltipContent>
+            <TooltipContent>{t("transport.action.nextStep")}</TooltipContent>
           </Tooltip>
         </div>
       </div>

@@ -8,6 +8,7 @@ import {
   type BackendImportMediaErrorCode,
   type ImportMediaResult,
 } from "./types";
+import type { Pts, TickCount } from "@/types/project";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -28,17 +29,19 @@ function createValidImportResult(): ImportMediaResult {
       bitDepth: 8,
       width: 1920,
       height: 1080,
+      videoStreamIndex: 0,
+      videoTimeBase: { n: 1, d: 90000 },
+      videoStartPts: "-1800" as Pts,
+      videoDurationTicks: "900000" as TickCount,
+      approximateDurationSeconds: 10.0,
       avgFrameRate: { n: 30000, d: 1001 },
       rFrameRate: { n: 30000, d: 1001 },
-      startTime: { n: 0, d: 1 },
-      duration: { n: 10010, d: 1000 },
-      frameCount: 300,
+      reportedFrameCount: "300" as TickCount,
       audio: {
         codec: "aac",
         sampleRate: 48000,
         channels: 2,
       },
-      isVfr: false,
     },
   };
 }
@@ -77,7 +80,6 @@ describe("IPC & invokeCommand", () => {
     const validCommand: BackendCommand = BACKEND_COMMANDS.IMPORT_MEDIA;
     expect(validCommand).toBe("import_media");
 
-    // Type-level assertion: verify that arbitrary strings are rejected
     // @ts-expect-error - Arbitrary strings must not be accepted by invokeCommand
     void invokeCommand("arbitrary_unknown_command", {});
   });
@@ -119,7 +121,12 @@ describe("Media Import Client", () => {
         videoProfile: null,
         pixelFormat: null,
         bitDepth: null,
-        duration: null,
+        videoStartPts: null,
+        videoDurationTicks: null,
+        approximateDurationSeconds: null,
+        avgFrameRate: null,
+        rFrameRate: null,
+        reportedFrameCount: null,
         audio: null,
       },
     };

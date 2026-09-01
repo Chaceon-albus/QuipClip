@@ -1,91 +1,207 @@
-import { useLayoutEffect } from "react";
+import { useLayoutEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Film } from "lucide-react";
-import { getMediaSourceIdentity, useMediaStore } from "@/features/media";
+import {
+  generateSourceId,
+  getSourceRevisionKey,
+  useMediaStore,
+} from "@/features/media";
 import { usePlaybackStore } from "@/features/playback";
 import {
-  calculateFrameFromClientX,
-  calculateKeyboardSeekTargetFrame,
-  calculatePercentFromFrame,
-  calculatePlayheadLayout,
   calculatePendingInRegionLayout,
+  calculatePercentFromPts,
+  calculatePlayheadLayout,
+  calculatePtsFromClientX,
   calculateSegmentLayout,
+  calculateTimelineSecondsFromClientX,
+  getActiveSourceSegmentEntries,
+  getTimelineDurationSeconds,
   useTimelineStore,
 } from "@/features/timeline";
+import { ptsElapsedSeconds } from "@/lib/time";
 import { generateRulerMarkers } from "./timelineMarkers";
 
-export function TimelinePanel() {
+export interface TimelinePanelProps {
+  /** Stable project source ID when project state already owns one. */
+  activeSourceId?: string | null;
+  /** Finite HTMLMediaElement.duration supplied by preview runtime state. */
+  runtimeBrowserDurationSeconds?: number | null;
+  /** Browser-time seek request used when calibrated PTS seeking is unavailable. */
+  onApproximateSeek?: (seconds: number) => void;
+}
+
+const generatedSourceIdsByPath = new Map<string, string>();
+
+function getGeneratedSourceId(path: string): string {
+  const existing = generatedSourceIdsByPath.get(path);
+  if (existing) {
+    return existing;
+  }
+  const generated = generateSourceId();
+  generatedSourceIdsByPath.set(path, generated);
+  return generated;
+}
+
+export function TimelinePanel({
+  activeSourceId,
+  runtimeBrowserDurationSeconds = null,
+  onApproximateSeek,
+}: TimelinePanelProps = {}) {
   const { t } = useTranslation();
   const media = useMediaStore((state) => state.media);
-  const currentFrame = usePlaybackStore((state) => state.currentFrame);
+  const presentedFrame = usePlaybackStore((state) => state.presentedFrame);
+  const calibrationStatus = usePlaybackStore((state) => state.calibrationStatus);
   const isAttached = usePlaybackStore((state) => state.isAttached);
   const isReady = usePlaybackStore((state) => state.isReady);
-  const seekToFrame = usePlaybackStore((state) => state.seekToFrame);
+  const seekToPts = usePlaybackStore((state) => state.seekToPts);
+  const seekNominal = usePlaybackStore((state) => state.seekNominal);
 
   const segments = useTimelineStore((state) => state.segments);
-  const pendingInFrame = useTimelineStore((state) => state.pendingInFrame);
+  const pendingInPts = useTimelineStore((state) => state.pendingInPts);
   const setSource = useTimelineStore((state) => state.setSource);
-  const resetTimeline = useTimelineStore((state) => state.reset);
 
-  const sourceIdentity = getMediaSourceIdentity(media);
-  const frameCount = media?.probe.frameCount ?? 0;
-  const canSeek = media !== null && isAttached && isReady && frameCount > 0;
-  const clampedCurrentFrame =
-    frameCount > 0
-      ? Math.max(0, Math.min(frameCount - 1, Math.floor(currentFrame || 0)))
-      : 0;
+  const sourceRevisionKey = getSourceRevisionKey(media);
+  const sourceId = media
+    ? (activeSourceId ?? getGeneratedSourceId(media.path))
+    : null;
 
   // Synchronize active media source with the timeline store
   useLayoutEffect(() => {
-    if (media && sourceIdentity) {
-      setSource(sourceIdentity, media.probe.frameCount);
+    if (sourceId && sourceRevisionKey) {
+      setSource(sourceId, sourceRevisionKey);
     } else {
-      resetTimeline();
+      setSource(null, null);
     }
-  }, [media, sourceIdentity, setSource, resetTimeline]);
+  }, [sourceId, sourceRevisionKey, setSource]);
 
-  const markers = media
-    ? generateRulerMarkers(media.probe.frameCount, media.probe.avgFrameRate)
-    : [];
+  const totalDurationSeconds = useMemo(() => {
+    if (!media) return null;
+    return getTimelineDurationSeconds({
+      videoDurationTicks: media.probe.videoDurationTicks,
+      videoTimeBase: media.probe.videoTimeBase,
+      approximateDurationSeconds: media.probe.approximateDurationSeconds,
+      runtimeBrowserDuration: runtimeBrowserDurationSeconds,
+    });
+  }, [media, runtimeBrowserDurationSeconds]);
+
+  const isIndeterminate = totalDurationSeconds === null || totalDurationSeconds <= 0;
+  const canUsePreciseSeek =
+    media !== null &&
+    isAttached &&
+    isReady &&
+    !isIndeterminate &&
+    calibrationStatus === "ready" &&
+    media.probe.videoStartPts !== null;
+  const canUseApproximateSeek =
+    media !== null &&
+    isAttached &&
+    isReady &&
+    !isIndeterminate &&
+    onApproximateSeek !== undefined;
+  const canSeek = canUsePreciseSeek || canUseApproximateSeek;
+
+  const markers = useMemo(() => {
+    return generateRulerMarkers(totalDurationSeconds);
+  }, [totalDurationSeconds]);
+
+  // Current elapsed presentation seconds relative to videoStartPts
+  const currentElapsedSeconds = useMemo(() => {
+    if (
+      calibrationStatus === "ready" &&
+      presentedFrame !== null &&
+      media?.probe.videoStartPts &&
+      media?.probe.videoTimeBase
+    ) {
+      return (
+        ptsElapsedSeconds(
+          presentedFrame.inferredSourcePts,
+          media.probe.videoStartPts,
+          media.probe.videoTimeBase,
+        ) ?? 0
+      );
+    }
+    return 0;
+  }, [calibrationStatus, presentedFrame, media]);
 
   const handleSeekClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!canSeek) {
+    if (!canSeek || totalDurationSeconds === null) {
       return;
     }
     const rect = e.currentTarget.getBoundingClientRect();
-    const targetFrame = calculateFrameFromClientX(
+    if (
+      canUsePreciseSeek &&
+      media?.probe.videoStartPts &&
+      media.probe.videoTimeBase
+    ) {
+      const targetPts = calculatePtsFromClientX(
+        e.clientX,
+        rect.left,
+        rect.width,
+        totalDurationSeconds,
+        media.probe.videoStartPts,
+        media.probe.videoTimeBase,
+      );
+      if (targetPts !== null) {
+        seekToPts(targetPts);
+      }
+      return;
+    }
+    const targetSeconds = calculateTimelineSecondsFromClientX(
       e.clientX,
       rect.left,
       rect.width,
-      frameCount,
+      totalDurationSeconds,
     );
-    seekToFrame(targetFrame);
+    if (targetSeconds !== null) {
+      onApproximateSeek?.(targetSeconds);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!canSeek) {
+    if (!canUsePreciseSeek) {
       return;
     }
-    const targetFrame = calculateKeyboardSeekTargetFrame(
-      e.key,
-      currentFrame,
-      frameCount,
-    );
-    if (targetFrame !== null) {
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
       e.preventDefault();
-      seekToFrame(targetFrame);
+      seekNominal(-1);
+    } else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+      e.preventDefault();
+      seekNominal(1);
+    } else if (e.key === "Home" && media?.probe.videoStartPts) {
+      e.preventDefault();
+      seekToPts(media.probe.videoStartPts);
     }
   };
 
-  const playhead = calculatePlayheadLayout(currentFrame, frameCount);
-  const pendingRegion = calculatePendingInRegionLayout(
-    pendingInFrame,
-    currentFrame,
-    frameCount,
+  const playhead = calculatePlayheadLayout(
+    currentElapsedSeconds,
+    totalDurationSeconds,
   );
+
+  const activeSourceSegments = useMemo(
+    () => getActiveSourceSegmentEntries(segments, sourceId),
+    [segments, sourceId],
+  );
+  const pendingRegion = calculatePendingInRegionLayout(
+    pendingInPts,
+    presentedFrame?.inferredSourcePts ?? null,
+    media?.probe.videoStartPts,
+    media?.probe.videoTimeBase,
+    totalDurationSeconds,
+  );
+
   const pendingInPercent =
-    pendingInFrame !== null
-      ? calculatePercentFromFrame(pendingInFrame, frameCount)
+    pendingInPts !== null &&
+    media?.probe.videoStartPts &&
+    media?.probe.videoTimeBase &&
+    totalDurationSeconds &&
+    totalDurationSeconds > 0
+      ? calculatePercentFromPts(
+          pendingInPts,
+          media.probe.videoStartPts,
+          media.probe.videoTimeBase,
+          totalDurationSeconds,
+        )
       : null;
 
   return (
@@ -103,7 +219,7 @@ export function TimelinePanel() {
               <div className="relative h-full w-full font-mono text-[10px]">
                 {markers.map((marker) => (
                   <div
-                    key={`${marker.frame}-${marker.left}`}
+                    key={`${marker.seconds}-${marker.left}`}
                     className="pointer-events-none absolute bottom-0 flex -translate-x-1/2 flex-col items-center gap-0.5"
                     style={{ left: marker.left }}
                   >
@@ -114,7 +230,7 @@ export function TimelinePanel() {
               </div>
 
               {/* Playhead marker in ruler */}
-              {media && frameCount > 0 && (
+              {media && !isIndeterminate && (
                 <div
                   className="pointer-events-none absolute top-0 bottom-0 z-30 flex -translate-x-1/2 flex-col items-center"
                   style={{ left: playhead.left }}
@@ -145,8 +261,17 @@ export function TimelinePanel() {
                   aria-label={t("timeline.seekSlider")}
                   aria-disabled={!canSeek}
                   aria-valuemin={0}
-                  aria-valuemax={Math.max(0, frameCount - 1)}
-                  aria-valuenow={clampedCurrentFrame}
+                  aria-valuemax={
+                    isIndeterminate ? undefined : totalDurationSeconds
+                  }
+                  aria-valuenow={
+                    isIndeterminate || !Number.isFinite(currentElapsedSeconds)
+                      ? undefined
+                      : Math.max(
+                          0,
+                          Math.min(totalDurationSeconds, currentElapsedSeconds),
+                        )
+                  }
                   tabIndex={canSeek ? 0 : undefined}
                   onClick={canSeek ? handleSeekClick : undefined}
                   onKeyDown={canSeek ? handleKeyDown : undefined}
@@ -163,8 +288,13 @@ export function TimelinePanel() {
                   </div>
 
                   {/* Completed segment overlays */}
-                  {segments.map((seg, index) => {
-                    const layout = calculateSegmentLayout(seg, frameCount);
+                  {activeSourceSegments.map(({ segment: seg, projectIndex }) => {
+                    const layout = calculateSegmentLayout(
+                      seg,
+                      media.probe.videoStartPts,
+                      media.probe.videoTimeBase,
+                      totalDurationSeconds,
+                    );
                     return (
                       <div
                         key={seg.id}
@@ -175,7 +305,7 @@ export function TimelinePanel() {
                         }}
                       >
                         <span className="truncate font-mono text-[10px] font-semibold text-primary">
-                          #{index + 1}
+                          #{projectIndex + 1}
                         </span>
                       </div>
                     );
@@ -203,7 +333,7 @@ export function TimelinePanel() {
                   )}
 
                   {/* Playhead vertical line spanning the track lane */}
-                  {frameCount > 0 && (
+                  {!isIndeterminate && (
                     <div
                       className="pointer-events-none absolute inset-y-0 z-30 flex -translate-x-1/2 flex-col items-center"
                       style={{ left: playhead.left }}

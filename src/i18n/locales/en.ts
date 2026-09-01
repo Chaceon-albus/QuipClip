@@ -36,6 +36,7 @@ export const en = {
     loading: "Loading media...",
     videoPlayerLabel: "Video preview for {{fileName}}",
     decodeError: "Native playback failed. A proxy is required to preview this format.",
+    approximate: "Approx.",
     zoom: {
       fit: "Fit",
       zoom50: "50%",
@@ -62,8 +63,8 @@ export const en = {
       splitAria: "Split Segment",
       play: "Play",
       pause: "Pause",
-      previousFrame: "Previous Frame",
-      nextFrame: "Next Frame",
+      previousStep: "Nudge Backward",
+      nextStep: "Nudge Forward",
     },
   },
   timeline: {
@@ -91,13 +92,13 @@ export const en = {
   },
   playbackError: {
     playbackFailed: "Failed to start playback.",
-    seekFailed: "Failed to seek to the requested frame.",
+    seekFailed: "Failed to seek to the requested position.",
   },
   statusBar: {
     projectResolution: "Project Resolution: {{width}} × {{height}}",
     projectResolutionDefault: "Project Resolution: 1920 × 1080",
-    frameRate: "Frame Rate: {{fps}} fps",
-    frameRateDefault: "Frame Rate: 25 fps",
+    sourceNominalRate: "Source Nominal Rate: {{fps}} fps",
+    sourceNominalRateUnavailable: "Source Nominal Rate: —",
     settings: "Settings",
   },
   settings: {

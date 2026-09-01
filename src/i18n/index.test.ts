@@ -1219,8 +1219,9 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.splitDetail")).toBe("Cut Clip");
     expect(instance.t("transport.action.splitAria")).toBe("Split Segment");
     expect(instance.t("transport.action.play")).toBe("Play");
-    expect(instance.t("transport.action.previousFrame")).toBe("Previous Frame");
-    expect(instance.t("transport.action.nextFrame")).toBe("Next Frame");
+    expect(instance.t("transport.action.previousStep")).toBe("Nudge Backward");
+    expect(instance.t("transport.action.nextStep")).toBe("Nudge Forward");
+    expect(instance.t("preview.approximate")).toBe("Approx.");
 
     // Dialog
     expect(instance.t("dialog.videoFilter")).toBe("Video Files");
@@ -1266,8 +1267,9 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.splitDetail")).toBe("裁剪片段");
     expect(instance.t("transport.action.splitAria")).toBe("分割片段");
     expect(instance.t("transport.action.play")).toBe("播放");
-    expect(instance.t("transport.action.previousFrame")).toBe("上一帧");
-    expect(instance.t("transport.action.nextFrame")).toBe("下一帧");
+    expect(instance.t("transport.action.previousStep")).toBe("向后微调");
+    expect(instance.t("transport.action.nextStep")).toBe("向前微调");
+    expect(instance.t("preview.approximate")).toBe("约");
 
     // Dialog
     expect(instance.t("dialog.videoFilter")).toBe("视频文件");
@@ -1291,10 +1293,13 @@ describe("application shell localization and status bar formatting", () => {
     ).toBe("Project Resolution: 1,920 × 1,080");
 
     expect(
-      instance.t("statusBar.frameRate", {
+      instance.t("statusBar.sourceNominalRate", {
         fps: enFormatter.format(25),
       }),
-    ).toBe("Frame Rate: 25 fps");
+    ).toBe("Source Nominal Rate: 25 fps");
+    expect(instance.t("statusBar.sourceNominalRateUnavailable")).toBe(
+      "Source Nominal Rate: —",
+    );
 
     await instance.changeLanguage("zh-CN");
     const zhFormatter = new Intl.NumberFormat("zh-CN");
@@ -1307,9 +1312,12 @@ describe("application shell localization and status bar formatting", () => {
     ).toBe("项目分辨率：1,920 × 1,080");
 
     expect(
-      instance.t("statusBar.frameRate", {
+      instance.t("statusBar.sourceNominalRate", {
         fps: zhFormatter.format(25),
       }),
-    ).toBe("帧率：25 fps");
+    ).toBe("源标称帧率：25 fps");
+    expect(instance.t("statusBar.sourceNominalRateUnavailable")).toBe(
+      "源标称帧率：—",
+    );
   });
 });

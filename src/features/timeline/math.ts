@@ -1,315 +1,418 @@
 /**
- * Pure math and layout helpers for single-source timeline editing.
+ * Pure math and layout helpers for single-source and multi-source timeline editing.
  *
- * Implements ADR 002 exclusive out-point math, BigInt overflow safety,
- * source-order segment sorting, strict interior frame splitting,
- * and layout percentage calculations for UI rendering.
+ * Implements ADR 002 (rational time / source PTS / exclusive out points),
+ * ADR 003 (calibrated RVFC PTS presentation / nominal navigation),
+ * ADR 007 (single-track source-time timeline / extent precedence / multi-source duration math),
+ * and ADR 010 (canonical decimal PTS string format).
  */
 
-import type { Segment } from "@/types/project";
+import {
+  assertPositiveTimeBase,
+  elapsedSecondsToPts,
+  isPtsString,
+  isValidSegmentRange,
+  isPtsInsideSegment,
+  ptsElapsedSeconds,
+  segmentDurationTicks,
+  ticksToSeconds,
+} from "@/lib/time";
+import type { Pts, Rational, Segment, TickCount } from "@/types/project";
+import type { CalibrationStatus, PresentedFrame } from "@/features/playback";
 
 /**
- * Calculates the ADR-002 exclusive out frame boundary from the current rendered frame.
- * Formula: `min(currentFrame + 1, frameCount)`
- * Uses BigInt to ensure safety when frame indices approach Number.MAX_SAFE_INTEGER.
- *
- * @param currentFrame Visible rendered frame index (inclusive).
- * @param frameCount Total video stream frame count (exclusive upper bound).
- * @returns Exclusive out frame index, or 0 if inputs are invalid.
- */
-export function calculateExclusiveOutFrame(
-  currentFrame: number,
-  frameCount: number,
-): number {
-  if (
-    !Number.isSafeInteger(currentFrame) ||
-    !Number.isSafeInteger(frameCount) ||
-    currentFrame < 0 ||
-    frameCount <= 0 ||
-    currentFrame >= frameCount
-  ) {
-    return 0;
-  }
-
-  const currentBig = BigInt(currentFrame);
-  const frameCountBig = BigInt(frameCount);
-  const outBig = currentBig + 1n;
-
-  const resultBig = outBig < frameCountBig ? outBig : frameCountBig;
-  return Number(resultBig);
-}
-
-/**
- * Compares two segments for sorting in source order.
- * Primary sort key: inFrame ascending.
- * Secondary sort key: outFrame ascending.
- * Tertiary sort key: id localeCompare.
- */
-export function compareSegmentsInSourceOrder(a: Segment, b: Segment): number {
-  if (a.inFrame !== b.inFrame) {
-    return a.inFrame < b.inFrame ? -1 : 1;
-  }
-  if (a.outFrame !== b.outFrame) {
-    return a.outFrame < b.outFrame ? -1 : 1;
-  }
-  return a.id.localeCompare(b.id);
-}
-
-/**
- * Inserts a new segment into an ordered Segment array while preserving source order.
- */
-export function insertSegmentInSourceOrder(
-  segments: readonly Segment[],
-  newSegment: Segment,
-): Segment[] {
-  const result = [...segments, newSegment];
-  result.sort(compareSegmentsInSourceOrder);
-  return result;
-}
-
-/**
- * Checks whether the Mark In button/action should be enabled.
- */
-export function canMarkIn(
-  isAttached: boolean,
-  isReady: boolean,
-  frameCount: number,
-  currentFrame: number,
-): boolean {
-  return (
-    isAttached &&
-    isReady &&
-    Number.isSafeInteger(frameCount) &&
-    frameCount > 0 &&
-    Number.isSafeInteger(currentFrame) &&
-    currentFrame >= 0 &&
-    currentFrame < frameCount
-  );
-}
-
-/**
- * Checks whether the Mark Out button/action should be enabled.
- * Enabled only when an In mark is pending and the current frame produces a valid
- * exclusive out frame strictly greater than the pending In frame.
- */
-export function canMarkOut(
-  isAttached: boolean,
-  isReady: boolean,
-  frameCount: number,
-  currentFrame: number,
-  pendingInFrame: number | null,
-): boolean {
-  if (
-    !isAttached ||
-    !isReady ||
-    !Number.isSafeInteger(frameCount) ||
-    frameCount <= 0 ||
-    pendingInFrame === null ||
-    !Number.isSafeInteger(pendingInFrame) ||
-    pendingInFrame < 0 ||
-    pendingInFrame >= frameCount ||
-    !Number.isSafeInteger(currentFrame) ||
-    currentFrame < 0 ||
-    currentFrame < pendingInFrame ||
-    currentFrame >= frameCount
-  ) {
-    return false;
-  }
-
-  const outFrame = calculateExclusiveOutFrame(currentFrame, frameCount);
-  return outFrame > pendingInFrame;
-}
-
-/**
- * Finds the index of a completed segment that strictly contains `currentFrame` as an interior frame.
- * Formula: `seg.inFrame < currentFrame && currentFrame < seg.outFrame`
- * Returns -1 if no segment strictly contains `currentFrame`.
+ * Finds the index of a completed segment that strictly contains `pts` as an interior PTS (ADR 007).
+ * Formula: `isPtsInsideSegment(pts, seg.inPts, seg.outPts)` (inPts < pts < outPts).
+ * If `sourceId` is provided, also ensures `seg.sourceId === sourceId`.
+ * Returns -1 if no segment strictly contains `pts`.
  */
 export function findSplittableSegmentIndex(
   segments: readonly Segment[],
-  currentFrame: number,
+  pts: Pts,
+  sourceId?: string,
 ): number {
-  if (!Number.isSafeInteger(currentFrame) || currentFrame < 0) {
+  if (!isPtsString(pts)) {
     return -1;
   }
-  return segments.findIndex(
-    (seg) => currentFrame > seg.inFrame && currentFrame < seg.outFrame,
-  );
+  return segments.findIndex((seg) => {
+    if (sourceId !== undefined && seg.sourceId !== sourceId) {
+      return false;
+    }
+    return isPtsInsideSegment(pts, seg.inPts, seg.outPts);
+  });
 }
 
 /**
- * Checks whether the Split button/action should be enabled.
- * Requires an attached, ready, nonempty source and a current frame strictly inside one segment.
- */
-export function canSplitAtFrame(
-  segments: readonly Segment[],
-  currentFrame: number,
-  isAttached?: boolean,
-  isReady?: boolean,
-  frameCount?: number,
-): boolean {
-  if (isAttached !== undefined && !isAttached) {
-    return false;
-  }
-  if (isReady !== undefined && !isReady) {
-    return false;
-  }
-  if (
-    frameCount !== undefined &&
-    (!Number.isSafeInteger(frameCount) || frameCount <= 0 || currentFrame >= frameCount)
-  ) {
-    return false;
-  }
-  return findSplittableSegmentIndex(segments, currentFrame) !== -1;
-}
-
-/**
- * Splits a segment at an interior frame index, retaining the left ID and assigning a new right ID.
+ * Splits a segment at an interior PTS, retaining the left ID and assigning a new right ID (ADR 002, ADR 007).
+ * Produces adjacent half-open intervals [inPts, pts) and [pts, outPts).
  */
 export function splitSegment(
   seg: Segment,
-  currentFrame: number,
+  pts: Pts,
   newRightId: string,
 ): [Segment, Segment] {
   const leftSeg: Segment = {
     id: seg.id,
     sourceId: seg.sourceId,
-    inFrame: seg.inFrame,
-    outFrame: currentFrame,
+    inPts: seg.inPts,
+    outPts: pts,
   };
   const rightSeg: Segment = {
     id: newRightId,
     sourceId: seg.sourceId,
-    inFrame: currentFrame,
-    outFrame: seg.outFrame,
+    inPts: pts,
+    outPts: seg.outPts,
   };
   return [leftSeg, rightSeg];
 }
 
 /**
- * Maps a click/scrub offset in pixels along a track to a clamped integer frame index.
- * Handles boundary conditions (0, 1, MAX_SAFE_INTEGER, and out-of-bounds offsets).
- *
- * @param offsetX Horizontal pixel offset from the left edge of the track.
- * @param width Total width of the track element in pixels.
- * @param frameCount Total frame count in the source media.
- * @returns Clamped safe integer frame index in [0, frameCount - 1].
+ * Checks whether the Mark In button/action should be enabled.
+ * Enabled only when calibration is ready, a presented frame with valid inferred PTS is present, and an active source exists.
  */
-export function calculateFrameFromOffset(
-  offsetX: number,
-  width: number,
-  frameCount: number,
-): number {
-  if (!Number.isSafeInteger(frameCount) || frameCount <= 0) {
-    return 0;
-  }
-  if (frameCount === 1) {
-    return 0;
-  }
-  if (typeof width !== "number" || !Number.isFinite(width) || width <= 0) {
-    return 0;
-  }
-  if (typeof offsetX !== "number" || !Number.isFinite(offsetX) || offsetX <= 0) {
-    return 0;
-  }
-  if (offsetX >= width) {
-    return frameCount - 1;
-  }
-
-  const ratio = offsetX / width;
-  const rawFrame = Math.floor(ratio * frameCount);
-  return Math.min(frameCount - 1, Math.max(0, rawFrame));
+export function canMarkIn(
+  calibrationStatus: CalibrationStatus,
+  presentedFrame: PresentedFrame | null,
+  hasActiveSource: boolean,
+): boolean {
+  return (
+    hasActiveSource &&
+    calibrationStatus === "ready" &&
+    presentedFrame !== null &&
+    isPtsString(presentedFrame.inferredSourcePts)
+  );
 }
 
 /**
- * Maps a pointer clientX coordinate within a bounding client rect to a clamped integer frame index.
- * Ensures that visible source start (clientX === rectLeft) maps to frame 0 and
- * visible source end (clientX === rectLeft + rectWidth) maps to frameCount - 1.
- *
- * @param clientX Horizontal client coordinate of the pointer event.
- * @param rectLeft Left coordinate of the target element's bounding client rect.
- * @param rectWidth Width of the target element's bounding client rect.
- * @param frameCount Total frame count in the source media.
- * @returns Clamped safe integer frame index in [0, frameCount - 1].
+ * Checks whether the Mark Out button/action should be enabled.
+ * Enabled only when an In mark is pending, calibration is ready, presented frame is present,
+ * and current inferred PTS is strictly greater than pending In PTS (inPts < outPts).
+ * Does not allow equal inPts/outPts (ADR 002).
  */
-export function calculateFrameFromClientX(
-  clientX: number,
-  rectLeft: number,
-  rectWidth: number,
-  frameCount: number,
-): number {
+export function canMarkOut(
+  calibrationStatus: CalibrationStatus,
+  presentedFrame: PresentedFrame | null,
+  pendingInPts: Pts | null,
+  hasActiveSource: boolean,
+): boolean {
   if (
-    typeof clientX !== "number" ||
-    !Number.isFinite(clientX) ||
-    typeof rectLeft !== "number" ||
-    !Number.isFinite(rectLeft)
+    !hasActiveSource ||
+    calibrationStatus !== "ready" ||
+    presentedFrame === null ||
+    pendingInPts === null ||
+    !isPtsString(presentedFrame.inferredSourcePts) ||
+    !isPtsString(pendingInPts)
   ) {
-    return 0;
+    return false;
   }
-  const offsetX = clientX - rectLeft;
-  return calculateFrameFromOffset(offsetX, rectWidth, frameCount);
+  return isValidSegmentRange(pendingInPts, presentedFrame.inferredSourcePts);
 }
 
 /**
- * Computes the target frame index for timeline slider keyboard navigation.
- * Supported keys (WAI-ARIA slider pattern):
- * - "ArrowLeft" / "ArrowDown": step back 1 frame (clamped to 0)
- * - "ArrowRight" / "ArrowUp": step forward 1 frame (clamped to frameCount - 1)
- * - "Home": jump to frame 0
- * - "End": jump to frame frameCount - 1
- *
- * @param key KeyboardEvent key value.
- * @param currentFrame Current frame index.
- * @param frameCount Total frame count.
- * @returns Target clamped integer frame index, or null if key is unhandled or frameCount is invalid.
+ * Checks whether the Split button/action should be enabled.
+ * Enabled only when calibration is ready, a presented frame is present, an active source exists,
+ * and the current inferred PTS is strictly inside an existing segment for the active source (ADR 007).
  */
-export function calculateKeyboardSeekTargetFrame(
-  key: string,
-  currentFrame: number,
-  frameCount: number,
+export function canSplit(
+  segments: readonly Segment[],
+  calibrationStatus: CalibrationStatus,
+  presentedFrame: PresentedFrame | null,
+  hasActiveSource: boolean,
+  activeSourceId?: string,
+): boolean {
+  if (
+    !hasActiveSource ||
+    calibrationStatus !== "ready" ||
+    presentedFrame === null ||
+    !isPtsString(presentedFrame.inferredSourcePts)
+  ) {
+    return false;
+  }
+  return (
+    findSplittableSegmentIndex(
+      segments,
+      presentedFrame.inferredSourcePts,
+      activeSourceId,
+    ) !== -1
+  );
+}
+
+export interface ActiveSourceSegmentEntry {
+  readonly segment: Segment;
+  readonly projectIndex: number;
+}
+
+/** Selects active-source overlays without changing their project array indices or order. */
+export function getActiveSourceSegmentEntries(
+  segments: readonly Segment[],
+  activeSourceId: string | null | undefined,
+): ActiveSourceSegmentEntry[] {
+  if (!activeSourceId) {
+    return [];
+  }
+  const entries: ActiveSourceSegmentEntry[] = [];
+  segments.forEach((segment, projectIndex) => {
+    if (segment.sourceId === activeSourceId) {
+      entries.push({ segment, projectIndex });
+    }
+  });
+  return entries;
+}
+
+/**
+ * Extent descriptor for resolving ruler extent and duration according to ADR 007.
+ */
+export interface SourceTimelineExtentDescriptor {
+  readonly videoDurationTicks?: TickCount | null;
+  readonly videoTimeBase?: Rational | null;
+  readonly approximateDurationSeconds?: number | null;
+  readonly runtimeBrowserDuration?: number | null;
+}
+
+/**
+ * Resolves the timeline ruler extent duration in seconds according to ADR 007 precedence:
+ * 1. `videoDurationTicks` through `videoTimeBase` when present and valid.
+ * 2. Finite non-negative persisted `approximateDurationSeconds`.
+ * 3. Finite non-negative runtime `runtimeBrowserDuration` (HTMLMediaElement.duration).
+ * 4. Otherwise null (indeterminate ruler with click-seeking disabled).
+ */
+export function getTimelineDurationSeconds(
+  descriptor: SourceTimelineExtentDescriptor | null | undefined,
 ): number | null {
-  if (!Number.isSafeInteger(frameCount) || frameCount <= 0 || typeof key !== "string") {
+  if (!descriptor) {
     return null;
   }
 
-  const maxFrame = frameCount - 1;
-  const clampedCurrent =
-    typeof currentFrame === "number" && Number.isFinite(currentFrame)
-      ? Math.max(0, Math.min(maxFrame, Math.floor(currentFrame)))
-      : 0;
-
-  switch (key) {
-    case "ArrowLeft":
-    case "ArrowDown":
-      return Math.max(0, clampedCurrent - 1);
-    case "ArrowRight":
-    case "ArrowUp":
-      return Math.min(maxFrame, clampedCurrent + 1);
-    case "Home":
-      return 0;
-    case "End":
-      return maxFrame;
-    default:
-      return null;
+  // 1. videoDurationTicks with videoTimeBase
+  if (descriptor.videoDurationTicks && descriptor.videoTimeBase) {
+    const sec = ticksToSeconds(descriptor.videoDurationTicks, descriptor.videoTimeBase);
+    if (sec !== null && Number.isFinite(sec) && sec > 0) {
+      return sec;
+    }
   }
+
+  // 2. approximateDurationSeconds
+  if (
+    typeof descriptor.approximateDurationSeconds === "number" &&
+    Number.isFinite(descriptor.approximateDurationSeconds) &&
+    descriptor.approximateDurationSeconds >= 0
+  ) {
+    return descriptor.approximateDurationSeconds;
+  }
+
+  // 3. runtimeBrowserDuration
+  if (
+    typeof descriptor.runtimeBrowserDuration === "number" &&
+    Number.isFinite(descriptor.runtimeBrowserDuration) &&
+    descriptor.runtimeBrowserDuration >= 0
+  ) {
+    return descriptor.runtimeBrowserDuration;
+  }
+
+  // 4. Indeterminate
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Exact multi-source cumulative duration helpers (BigInt rational math)
+// ---------------------------------------------------------------------------
+
+/**
+ * Exact BigInt rational fraction `{ n: bigint, d: bigint }`.
+ */
+export type BigIntRational = {
+  n: bigint;
+  d: bigint;
+};
+
+/**
+ * Calculates greatest common divisor of two BigInt values.
+ */
+export function gcdBigInt(a: bigint, b: bigint): bigint {
+  let x = a < 0n ? -a : a;
+  let y = b < 0n ? -b : b;
+  while (y !== 0n) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x;
 }
 
 /**
- * Converts an integer frame index to a percentage position along the source timeline.
- * Clamps result strictly to [0, 100].
+ * Reduces a BigInt fraction and ensures positive denominator.
  */
-export function calculatePercentFromFrame(frame: number, frameCount: number): number {
-  if (!Number.isSafeInteger(frameCount) || frameCount <= 0) {
-    return 0;
+export function reduceBigIntRational(n: bigint, d: bigint): BigIntRational {
+  if (d === 0n) {
+    throw new RangeError("Denominator cannot be zero in BigIntRational");
   }
-  if (typeof frame !== "number" || !Number.isFinite(frame) || frame <= 0) {
-    return 0;
+  let num = n;
+  let den = d;
+  if (den < 0n) {
+    num = -num;
+    den = -den;
   }
-  if (frame >= frameCount) {
-    return 100;
+  if (num === 0n) {
+    return { n: 0n, d: 1n };
   }
-  return (frame / frameCount) * 100;
+  const g = gcdBigInt(num, den);
+  return { n: num / g, d: den / g };
 }
+
+/**
+ * Adds two BigInt rational fractions exactly.
+ */
+export function addBigIntRationals(
+  a: BigIntRational,
+  b: BigIntRational,
+): BigIntRational {
+  const num = a.n * b.d + b.n * a.d;
+  const den = a.d * b.d;
+  return reduceBigIntRational(num, den);
+}
+
+/**
+ * Converts an exact BigInt rational to a JavaScript floating-point number at UI/browser boundaries.
+ */
+export function bigIntRationalToSeconds(r: BigIntRational): number | null {
+  if (r.d === 0n) {
+    return null;
+  }
+  const sec = Number(r.n) / Number(r.d);
+  return Number.isFinite(sec) ? sec : null;
+}
+
+/**
+ * Calculates the exact duration of a segment as a BigIntRational fraction in seconds:
+ * `(outPts - inPts) * (timeBase.n / timeBase.d)`
+ */
+export function calculateSegmentDurationRational(
+  inPts: Pts,
+  outPts: Pts,
+  videoTimeBase: Rational,
+): BigIntRational | null {
+  if (!isValidSegmentRange(inPts, outPts)) {
+    return null;
+  }
+  try {
+    assertPositiveTimeBase(videoTimeBase);
+  } catch {
+    return null;
+  }
+  const deltaTicks = segmentDurationTicks(inPts, outPts);
+  if (deltaTicks === null) {
+    return null;
+  }
+  const num = deltaTicks * BigInt(videoTimeBase.n);
+  const den = BigInt(videoTimeBase.d);
+  return reduceBigIntRational(num, den);
+}
+
+/**
+ * Source timebase lookup table or resolver function for multi-source calculations.
+ */
+export type TimeBaseResolver =
+  | ReadonlyMap<string, { videoTimeBase: Rational } | Rational>
+  | ((sourceId: string) => Rational | { videoTimeBase: Rational } | null | undefined);
+
+function resolveSourceTimeBase(
+  resolver: TimeBaseResolver,
+  sourceId: string,
+): Rational | null {
+  if (typeof resolver === "function") {
+    const res = resolver(sourceId);
+    if (!res) return null;
+    return "videoTimeBase" in res ? res.videoTimeBase : res;
+  }
+  const val = resolver.get(sourceId);
+  if (!val) return null;
+  return "videoTimeBase" in val ? val.videoTimeBase : val;
+}
+
+/**
+ * Calculates the exact cumulative total duration for an ordered array of segments across multiple sources
+ * using BigInt rational arithmetic (ADR 002, ADR 007).
+ * Preserves project segment array order and never compares raw PTS across sourceIds.
+ */
+export function calculateTotalDurationRational(
+  segments: readonly Segment[],
+  timeBaseResolver: TimeBaseResolver,
+): BigIntRational | null {
+  let total: BigIntRational = { n: 0n, d: 1n };
+  for (const seg of segments) {
+    const tb = resolveSourceTimeBase(timeBaseResolver, seg.sourceId);
+    if (!tb) {
+      return null;
+    }
+    const dur = calculateSegmentDurationRational(seg.inPts, seg.outPts, tb);
+    if (!dur) {
+      return null;
+    }
+    total = addBigIntRationals(total, dur);
+  }
+  return total;
+}
+
+export interface SegmentTimelinePosition {
+  readonly segmentId: string;
+  readonly sourceId: string;
+  readonly startSeconds: number;
+  readonly endSeconds: number;
+  readonly durationSeconds: number;
+  readonly startRational: BigIntRational;
+  readonly endRational: BigIntRational;
+  readonly durationRational: BigIntRational;
+}
+
+/**
+ * Calculates cumulative timeline positions for ordered multi-source segments using exact BigInt rational arithmetic.
+ * Converts to floating-point seconds only at the final boundary.
+ */
+export function calculateSegmentTimelinePositions(
+  segments: readonly Segment[],
+  timeBaseResolver: TimeBaseResolver,
+): SegmentTimelinePosition[] | null {
+  let currentStart: BigIntRational = { n: 0n, d: 1n };
+  const positions: SegmentTimelinePosition[] = [];
+
+  for (const seg of segments) {
+    const tb = resolveSourceTimeBase(timeBaseResolver, seg.sourceId);
+    if (!tb) {
+      return null;
+    }
+    const dur = calculateSegmentDurationRational(seg.inPts, seg.outPts, tb);
+    if (!dur) {
+      return null;
+    }
+    const nextStart = addBigIntRationals(currentStart, dur);
+    const startSec = bigIntRationalToSeconds(currentStart);
+    const endSec = bigIntRationalToSeconds(nextStart);
+    const durSec = bigIntRationalToSeconds(dur);
+
+    if (startSec === null || endSec === null || durSec === null) {
+      return null;
+    }
+
+    positions.push({
+      segmentId: seg.id,
+      sourceId: seg.sourceId,
+      startSeconds: startSec,
+      endSeconds: endSec,
+      durationSeconds: durSec,
+      startRational: currentStart,
+      endRational: nextStart,
+      durationRational: dur,
+    });
+
+    currentStart = nextStart;
+  }
+
+  return positions;
+}
+
+// ---------------------------------------------------------------------------
+// Single-source layout helpers
+// ---------------------------------------------------------------------------
 
 export interface SegmentLayout {
   leftPercent: number;
@@ -319,32 +422,58 @@ export interface SegmentLayout {
 }
 
 /**
- * Calculates CSS percentage layout properties for a completed timeline segment overlay.
+ * Calculates CSS percentage layout properties for a completed timeline segment overlay on single source timeline.
  */
 export function calculateSegmentLayout(
   segment: Segment,
-  frameCount: number,
+  videoStartPts: Pts | null | undefined,
+  videoTimeBase: Rational | null | undefined,
+  totalDurationSeconds: number | null | undefined,
 ): SegmentLayout {
   if (
-    !Number.isSafeInteger(frameCount) ||
-    frameCount <= 0 ||
     !segment ||
-    !Number.isSafeInteger(segment.inFrame) ||
-    !Number.isSafeInteger(segment.outFrame) ||
-    segment.outFrame <= segment.inFrame
+    !videoStartPts ||
+    !videoTimeBase ||
+    !isPtsString(segment.inPts) ||
+    !isPtsString(segment.outPts) ||
+    !isValidSegmentRange(segment.inPts, segment.outPts) ||
+    typeof totalDurationSeconds !== "number" ||
+    !Number.isFinite(totalDurationSeconds) ||
+    totalDurationSeconds <= 0
   ) {
     return { leftPercent: 0, widthPercent: 0, left: "0%", width: "0%" };
   }
 
-  const inClamped = Math.max(0, Math.min(frameCount, segment.inFrame));
-  const outClamped = Math.max(0, Math.min(frameCount, segment.outFrame));
-
-  if (outClamped <= inClamped) {
+  try {
+    assertPositiveTimeBase(videoTimeBase);
+  } catch {
     return { leftPercent: 0, widthPercent: 0, left: "0%", width: "0%" };
   }
 
-  const leftPercent = (inClamped / frameCount) * 100;
-  const widthPercent = ((outClamped - inClamped) / frameCount) * 100;
+  const inElapsed = ptsElapsedSeconds(
+    segment.inPts,
+    videoStartPts,
+    videoTimeBase,
+  );
+  const outElapsed = ptsElapsedSeconds(
+    segment.outPts,
+    videoStartPts,
+    videoTimeBase,
+  );
+
+  if (inElapsed === null || outElapsed === null) {
+    return { leftPercent: 0, widthPercent: 0, left: "0%", width: "0%" };
+  }
+
+  const clampedIn = Math.max(0, Math.min(totalDurationSeconds, inElapsed));
+  const clampedOut = Math.max(0, Math.min(totalDurationSeconds, outElapsed));
+
+  if (clampedOut <= clampedIn) {
+    return { leftPercent: 0, widthPercent: 0, left: "0%", width: "0%" };
+  }
+
+  const leftPercent = (clampedIn / totalDurationSeconds) * 100;
+  const widthPercent = ((clampedOut - clampedIn) / totalDurationSeconds) * 100;
 
   return {
     leftPercent,
@@ -366,28 +495,47 @@ export interface PendingInRegionLayout {
  * Calculates CSS percentage layout properties for a pending In region / preview span.
  */
 export function calculatePendingInRegionLayout(
-  pendingInFrame: number | null,
-  currentFrame: number,
-  frameCount: number,
+  pendingInPts: Pts | null | undefined,
+  currentPts: Pts | null | undefined,
+  videoStartPts: Pts | null | undefined,
+  videoTimeBase: Rational | null | undefined,
+  totalDurationSeconds: number | null | undefined,
 ): PendingInRegionLayout | null {
   if (
-    pendingInFrame === null ||
-    !Number.isSafeInteger(pendingInFrame) ||
-    !Number.isSafeInteger(frameCount) ||
-    frameCount <= 0 ||
-    pendingInFrame < 0 ||
-    pendingInFrame >= frameCount
+    !pendingInPts ||
+    !videoStartPts ||
+    !videoTimeBase ||
+    !isPtsString(pendingInPts) ||
+    !isPtsString(videoStartPts) ||
+    typeof totalDurationSeconds !== "number" ||
+    !Number.isFinite(totalDurationSeconds) ||
+    totalDurationSeconds <= 0
   ) {
     return null;
   }
 
-  const leftPercent = (pendingInFrame / frameCount) * 100;
+  try {
+    assertPositiveTimeBase(videoTimeBase);
+  } catch {
+    return null;
+  }
+
+  const inElapsed = ptsElapsedSeconds(
+    pendingInPts,
+    videoStartPts,
+    videoTimeBase,
+  );
+  if (inElapsed === null) {
+    return null;
+  }
+
+  const clampedIn = Math.max(0, Math.min(totalDurationSeconds, inElapsed));
+  const leftPercent = (clampedIn / totalDurationSeconds) * 100;
 
   if (
-    !Number.isSafeInteger(currentFrame) ||
-    currentFrame < 0 ||
-    currentFrame < pendingInFrame ||
-    currentFrame >= frameCount
+    !currentPts ||
+    !isPtsString(currentPts) ||
+    !isValidSegmentRange(pendingInPts, currentPts)
   ) {
     return {
       isVisible: false,
@@ -398,8 +546,12 @@ export function calculatePendingInRegionLayout(
     };
   }
 
-  const outFrame = calculateExclusiveOutFrame(currentFrame, frameCount);
-  if (outFrame <= pendingInFrame) {
+  const outElapsed = ptsElapsedSeconds(
+    currentPts,
+    videoStartPts,
+    videoTimeBase,
+  );
+  if (outElapsed === null) {
     return {
       isVisible: false,
       leftPercent,
@@ -409,7 +561,18 @@ export function calculatePendingInRegionLayout(
     };
   }
 
-  const widthPercent = ((outFrame - pendingInFrame) / frameCount) * 100;
+  const clampedOut = Math.max(0, Math.min(totalDurationSeconds, outElapsed));
+  if (clampedOut <= clampedIn) {
+    return {
+      isVisible: false,
+      leftPercent,
+      widthPercent: 0,
+      left: `${leftPercent}%`,
+      width: "0%",
+    };
+  }
+
+  const widthPercent = ((clampedOut - clampedIn) / totalDurationSeconds) * 100;
 
   return {
     isVisible: true,
@@ -429,18 +592,128 @@ export interface PlayheadLayout {
  * Calculates CSS percentage position for the playback playhead indicator.
  */
 export function calculatePlayheadLayout(
-  currentFrame: number,
-  frameCount: number,
+  elapsedSeconds: number | null | undefined,
+  totalDurationSeconds: number | null | undefined,
 ): PlayheadLayout {
-  if (!Number.isSafeInteger(frameCount) || frameCount <= 0) {
+  if (
+    typeof elapsedSeconds !== "number" ||
+    !Number.isFinite(elapsedSeconds) ||
+    typeof totalDurationSeconds !== "number" ||
+    !Number.isFinite(totalDurationSeconds) ||
+    totalDurationSeconds <= 0
+  ) {
     return { percent: 0, left: "0%" };
   }
 
-  const clamped = Math.max(0, Math.min(frameCount - 1, Math.floor(currentFrame || 0)));
-  const percent = (clamped / frameCount) * 100;
+  const clamped = Math.max(0, Math.min(totalDurationSeconds, elapsedSeconds));
+  const percent = (clamped / totalDurationSeconds) * 100;
 
   return {
     percent,
     left: percent === 0 ? "0%" : `${percent}%`,
   };
+}
+
+/**
+ * Converts a source PTS to elapsed seconds at the final UI boundary.
+ * Exact PTS subtraction and rational multiplication occur before conversion to a number.
+ */
+/**
+ * Converts a PTS to a percentage along the single-source timeline axis.
+ */
+export function calculatePercentFromPts(
+  pts: Pts,
+  videoStartPts: Pts,
+  videoTimeBase: Rational,
+  totalDurationSeconds: number,
+): number {
+  if (
+    !isPtsString(pts) ||
+    !isPtsString(videoStartPts) ||
+    typeof totalDurationSeconds !== "number" ||
+    !Number.isFinite(totalDurationSeconds) ||
+    totalDurationSeconds <= 0
+  ) {
+    return 0;
+  }
+  try {
+    assertPositiveTimeBase(videoTimeBase);
+  } catch {
+    return 0;
+  }
+  const elapsed = ptsElapsedSeconds(pts, videoStartPts, videoTimeBase);
+  if (elapsed === null || elapsed <= 0) {
+    return 0;
+  }
+  if (elapsed >= totalDurationSeconds) {
+    return 100;
+  }
+  return (elapsed / totalDurationSeconds) * 100;
+}
+
+/** Maps a finite timeline coordinate to approximate elapsed seconds for browser seeking. */
+export function calculateTimelineSecondsFromClientX(
+  clientX: number,
+  rectLeft: number,
+  rectWidth: number,
+  totalDurationSeconds: number,
+): number | null {
+  if (
+    !Number.isFinite(clientX) ||
+    !Number.isFinite(rectLeft) ||
+    !Number.isFinite(rectWidth) ||
+    rectWidth <= 0 ||
+    !Number.isFinite(totalDurationSeconds) ||
+    totalDurationSeconds < 0
+  ) {
+    return null;
+  }
+  const ratio = Math.max(0, Math.min(1, (clientX - rectLeft) / rectWidth));
+  const seconds = ratio * totalDurationSeconds;
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+
+/**
+ * Maps a click/scrub clientX coordinate along a timeline track to a target PTS.
+ */
+export function calculatePtsFromClientX(
+  clientX: number,
+  rectLeft: number,
+  rectWidth: number,
+  totalDurationSeconds: number,
+  videoStartPts: Pts,
+  videoTimeBase: Rational,
+): Pts | null {
+  if (
+    typeof clientX !== "number" ||
+    !Number.isFinite(clientX) ||
+    typeof rectLeft !== "number" ||
+    !Number.isFinite(rectLeft) ||
+    typeof rectWidth !== "number" ||
+    !Number.isFinite(rectWidth) ||
+    rectWidth <= 0 ||
+    typeof totalDurationSeconds !== "number" ||
+    !Number.isFinite(totalDurationSeconds) ||
+    totalDurationSeconds <= 0 ||
+    !isPtsString(videoStartPts)
+  ) {
+    return null;
+  }
+  try {
+    assertPositiveTimeBase(videoTimeBase);
+  } catch {
+    return null;
+  }
+
+  const targetSeconds = calculateTimelineSecondsFromClientX(
+    clientX,
+    rectLeft,
+    rectWidth,
+    totalDurationSeconds,
+  );
+  if (targetSeconds === null) {
+    return null;
+  }
+
+  return elapsedSecondsToPts(targetSeconds, videoStartPts, videoTimeBase);
 }

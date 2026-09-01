@@ -66,17 +66,19 @@ export function StatusBar() {
 
   const width = media ? media.probe.width : 1920;
   const height = media ? media.probe.height : 1080;
-  const fpsNumber = media
+  const fpsNumber = media?.probe.avgFrameRate
     ? media.probe.avgFrameRate.n / media.probe.avgFrameRate.d
-    : 25;
+    : media?.probe.rFrameRate
+      ? media.probe.rFrameRate.n / media.probe.rFrameRate.d
+      : null;
 
   const formattedWidth = numberFormatter.format(width);
   const formattedHeight = numberFormatter.format(height);
-  const formattedFps = numberFormatter.format(fpsNumber);
+  const formattedFps = fpsNumber === null ? null : numberFormatter.format(fpsNumber);
 
   return (
     <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-sidebar px-3 text-xs text-muted-foreground select-none">
-      {/* Left: Project resolution and frame rate */}
+      {/* Left: Project resolution and reported source-rate metadata */}
       <div className="flex items-center gap-4">
         <span>
           {t("statusBar.projectResolution", {
@@ -85,9 +87,9 @@ export function StatusBar() {
           })}
         </span>
         <span>
-          {t("statusBar.frameRate", {
-            fps: formattedFps,
-          })}
+          {formattedFps === null
+            ? t("statusBar.sourceNominalRateUnavailable")
+            : t("statusBar.sourceNominalRate", { fps: formattedFps })}
         </span>
       </div>
 

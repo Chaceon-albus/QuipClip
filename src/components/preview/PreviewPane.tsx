@@ -10,43 +10,49 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { getMediaSourceIdentity, useMediaStore } from "@/features/media";
+import { getSourceRevisionKey, useMediaStore } from "@/features/media";
 import { createVideoRefCallback, usePlaybackStore } from "@/features/playback";
 import {
-  calculateFrameFromCurrentTime,
-  calculateFrameFromMediaTime,
   createSourceLifecycleGuard,
-  formatDisplayTimecode,
-  formatTotalTimecode,
+  formatPreviewCurrentTime,
+  formatPreviewTotalDuration,
+  isPreviewTimeApproximate,
 } from "./previewFrame";
 
 export function PreviewPane() {
   const { t } = useTranslation();
   const { status, media, error } = useMediaStore();
 
-  const currentFrame = usePlaybackStore((s) => s.currentFrame);
+  const presentedFrame = usePlaybackStore((s) => s.presentedFrame);
+  const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
   const playbackError = usePlaybackStore((s) => s.error);
   const attach = usePlaybackStore((s) => s.attach);
   const detach = usePlaybackStore((s) => s.detach);
   const syncReady = usePlaybackStore((s) => s.syncReady);
   const syncUnready = usePlaybackStore((s) => s.syncUnready);
-  const syncRenderedFrame = usePlaybackStore((s) => s.syncRenderedFrame);
+  const syncPresentedFrame = usePlaybackStore((s) => s.syncPresentedFrame);
+  const syncPresentationUnavailable = usePlaybackStore(
+    (s) => s.syncPresentationUnavailable,
+  );
+  const syncBrowserDuration = usePlaybackStore((s) => s.syncBrowserDuration);
   const syncPlay = usePlaybackStore((s) => s.syncPlay);
   const syncPause = usePlaybackStore((s) => s.syncPause);
   const syncEnded = usePlaybackStore((s) => s.syncEnded);
   const resetPlayback = usePlaybackStore((s) => s.reset);
 
-  const sourceIdentity = getMediaSourceIdentity(media);
-  const [prevSourceIdentity, setPrevSourceIdentity] = useState(sourceIdentity);
+  const sourceRevisionKey = getSourceRevisionKey(media);
+  const [previousRevisionKey, setPreviousRevisionKey] = useState(sourceRevisionKey);
   const [videoError, setVideoError] = useState(false);
+  const [approximateBrowserTime, setApproximateBrowserTime] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [sourceGuard] = useState(() => createSourceLifecycleGuard());
 
-  // Reset decode error state synchronously when source identity changes
-  if (prevSourceIdentity !== sourceIdentity) {
-    setPrevSourceIdentity(sourceIdentity);
+  // Reset decode error state and approximate time synchronously when source identity changes
+  if (previousRevisionKey !== sourceRevisionKey) {
+    setPreviousRevisionKey(sourceRevisionKey);
     setVideoError(false);
+    setApproximateBrowserTime(0);
   }
 
   // Reset playback store if media disappears
@@ -56,20 +62,24 @@ export function PreviewPane() {
     }
   }, [media, resetPlayback]);
 
-  // Synchronously activate / deactivate source identity before browser paint (ADR-003)
+  // Synchronously activate / deactivate source identity before browser paint (ADR 003)
   useLayoutEffect(() => {
-    sourceGuard.activate(sourceIdentity);
+    sourceGuard.activate(sourceRevisionKey);
     return () => {
-      sourceGuard.deactivate(sourceIdentity);
+      sourceGuard.deactivate(sourceRevisionKey);
     };
-  }, [sourceIdentity, sourceGuard]);
+  }, [sourceRevisionKey, sourceGuard]);
 
   const mediaPath = media?.path;
   const mediaSize = media?.size;
   const mediaMtime = media?.mtime;
-  const avgFrameRateN = media?.probe.avgFrameRate.n;
-  const avgFrameRateD = media?.probe.avgFrameRate.d;
-  const frameCount = media?.probe.frameCount;
+  const videoTimeBase = media?.probe.videoTimeBase;
+  const videoStartPts = media?.probe.videoStartPts;
+  const videoDurationTicks = media?.probe.videoDurationTicks;
+  const approximateDurationSeconds = media?.probe.approximateDurationSeconds;
+  const avgFrameRate = media?.probe.avgFrameRate;
+  const rFrameRate = media?.probe.rFrameRate;
+  const reportedFrameCount = media?.probe.reportedFrameCount;
 
   // Stable ref callback for registering and unregistering video element in playback store with exact ownership
   const videoRefCallback = useMemo(
@@ -80,15 +90,18 @@ export function PreviewPane() {
           mediaPath !== undefined &&
           mediaSize !== undefined &&
           mediaMtime !== undefined &&
-          avgFrameRateN !== undefined &&
-          avgFrameRateD !== undefined &&
-          frameCount !== undefined
+          videoTimeBase !== undefined
             ? {
                 path: mediaPath,
                 size: mediaSize,
                 mtime: mediaMtime,
-                avgFrameRate: { n: avgFrameRateN, d: avgFrameRateD },
-                frameCount,
+                videoTimeBase,
+                videoStartPts: videoStartPts ?? null,
+                videoDurationTicks,
+                approximateDurationSeconds,
+                avgFrameRate,
+                rFrameRate,
+                reportedFrameCount,
               }
             : null,
         attach,
@@ -98,22 +111,26 @@ export function PreviewPane() {
       mediaPath,
       mediaSize,
       mediaMtime,
-      avgFrameRateN,
-      avgFrameRateD,
-      frameCount,
+      videoTimeBase,
+      videoStartPts,
+      videoDurationTicks,
+      approximateDurationSeconds,
+      avgFrameRate,
+      rFrameRate,
+      reportedFrameCount,
       attach,
       detach,
     ],
   );
 
-  // Register requestVideoFrameCallback lifecycle loop (ADR-003)
+  // Register requestVideoFrameCallback lifecycle loop (ADR 003)
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !media || videoError) {
       return;
     }
 
-    const expectedSourceId = sourceIdentity;
+    const expectedRevisionKey = sourceRevisionKey;
     let cancelled = false;
     let handle: number | null = null;
 
@@ -124,7 +141,7 @@ export function PreviewPane() {
           requestVideoFrameCallback?: (
             callback: (
               now: DOMHighResTimeStamp,
-              metadata: { mediaTime: number },
+              metadata: { mediaTime: number; presentedFrames?: number },
             ) => void,
           ) => number;
           cancelVideoFrameCallback?: (handle: number) => void;
@@ -132,26 +149,28 @@ export function PreviewPane() {
       ).requestVideoFrameCallback === "function";
 
     if (hasRvfc) {
-      const onFrame = (_now: DOMHighResTimeStamp, metadata: { mediaTime: number }) => {
+      const onFrame = (
+        _now: DOMHighResTimeStamp,
+        metadata: { mediaTime: number; presentedFrames?: number },
+      ) => {
         // Guard against late callbacks from unmounted or replaced sources
-        if (cancelled || !sourceGuard.isActive(expectedSourceId)) {
+        if (cancelled || !sourceGuard.isActive(expectedRevisionKey)) {
           return;
         }
 
-        const frame = calculateFrameFromMediaTime(
+        syncPresentedFrame(
+          expectedRevisionKey,
           metadata.mediaTime,
-          media.probe.startTime,
-          media.probe.avgFrameRate,
-          media.probe.frameCount,
+          metadata.presentedFrames,
+          video,
         );
-        syncRenderedFrame(expectedSourceId, frame, video);
 
         // Re-register the one-shot callback while the video remains active
         const videoElement = video as HTMLVideoElement & {
           requestVideoFrameCallback: (
             callback: (
               now: DOMHighResTimeStamp,
-              metadata: { mediaTime: number },
+              metadata: { mediaTime: number; presentedFrames?: number },
             ) => void,
           ) => number;
         };
@@ -160,10 +179,15 @@ export function PreviewPane() {
 
       const videoElement = video as HTMLVideoElement & {
         requestVideoFrameCallback: (
-          callback: (now: DOMHighResTimeStamp, metadata: { mediaTime: number }) => void,
+          callback: (
+            now: DOMHighResTimeStamp,
+            metadata: { mediaTime: number; presentedFrames?: number },
+          ) => void,
         ) => number;
       };
       handle = videoElement.requestVideoFrameCallback(onFrame);
+    } else {
+      syncPresentationUnavailable(expectedRevisionKey, video);
     }
 
     return () => {
@@ -177,42 +201,51 @@ export function PreviewPane() {
         }
       }
     };
-  }, [sourceIdentity, media, videoError, sourceGuard, syncRenderedFrame]);
+  }, [
+    sourceRevisionKey,
+    media,
+    videoError,
+    sourceGuard,
+    syncPresentedFrame,
+    syncPresentationUnavailable,
+  ]);
 
-  const supportsRvfc =
-    typeof HTMLVideoElement !== "undefined" &&
-    "requestVideoFrameCallback" in HTMLVideoElement.prototype;
-
-  // Fallback handler used strictly when requestVideoFrameCallback is unsupported
-  const handleTimeUpdateFallback = (e: React.SyntheticEvent<HTMLVideoElement>) => {
-    if (!sourceGuard.isActive(sourceIdentity) || !media) {
+  const handleTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    if (!sourceGuard.isActive(sourceRevisionKey) || !media) {
       return;
     }
-    if (!supportsRvfc) {
-      const frame = calculateFrameFromCurrentTime(
-        e.currentTarget.currentTime,
-        media.probe.avgFrameRate,
-        media.probe.frameCount,
-      );
-      syncRenderedFrame(sourceIdentity, frame, e.currentTarget);
-    }
+    setApproximateBrowserTime(e.currentTarget.currentTime);
   };
 
   const handleVideoError = () => {
-    if (!sourceGuard.isActive(sourceIdentity)) {
+    if (!sourceGuard.isActive(sourceRevisionKey)) {
       return;
     }
     setVideoError(true);
   };
 
-  // Compute timecodes: total is exclusive frameCount, display is clamped [0, frameCount - 1]
-  const totalTimecode = media
-    ? formatTotalTimecode(media.probe.frameCount, media.probe.avgFrameRate)
-    : "00:00:00:00";
+  // Compute timecodes: source-relative HH:MM:SS.mmm for ready inferred PTS, approximate browser time otherwise
+  const currentTimeDisplay = media
+    ? formatPreviewCurrentTime(
+        presentedFrame,
+        calibrationStatus,
+        media.probe.videoStartPts,
+        media.probe.videoTimeBase,
+        approximateBrowserTime,
+      )
+    : "00:00:00.000";
 
-  const currentTimecode = media
-    ? formatDisplayTimecode(currentFrame, media.probe.avgFrameRate)
-    : "00:00:00:00";
+  const totalTimeDisplay = media
+    ? formatPreviewTotalDuration(
+        media.probe.approximateDurationSeconds,
+        media.probe.videoDurationTicks,
+        media.probe.videoTimeBase,
+      )
+    : "00:00:00.000";
+  const isCurrentTimeApproximate = isPreviewTimeApproximate(
+    calibrationStatus,
+    presentedFrame,
+  );
 
   return (
     <section className="flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground select-none">
@@ -235,7 +268,7 @@ export function PreviewPane() {
               ) : (
                 <video
                   ref={videoRefCallback}
-                  key={sourceIdentity}
+                  key={sourceRevisionKey}
                   playsInline
                   preload="metadata"
                   src={convertFileSrc(media.path)}
@@ -244,31 +277,37 @@ export function PreviewPane() {
                   })}
                   className="h-full w-full object-contain"
                   onPlay={(e) => {
-                    if (sourceGuard.isActive(sourceIdentity)) {
-                      syncPlay(sourceIdentity, e.currentTarget);
+                    if (sourceGuard.isActive(sourceRevisionKey)) {
+                      syncPlay(sourceRevisionKey, e.currentTarget);
                     }
                   }}
                   onPause={(e) => {
-                    if (sourceGuard.isActive(sourceIdentity)) {
-                      syncPause(sourceIdentity, e.currentTarget);
+                    if (sourceGuard.isActive(sourceRevisionKey)) {
+                      syncPause(sourceRevisionKey, e.currentTarget);
                     }
                   }}
                   onEnded={(e) => {
-                    if (sourceGuard.isActive(sourceIdentity)) {
-                      syncEnded(sourceIdentity, e.currentTarget);
+                    if (sourceGuard.isActive(sourceRevisionKey)) {
+                      syncEnded(sourceRevisionKey, e.currentTarget);
                     }
                   }}
-                  onTimeUpdate={handleTimeUpdateFallback}
-                  onSeeked={handleTimeUpdateFallback}
+                  onTimeUpdate={handleTimeUpdate}
+                  onSeeked={handleTimeUpdate}
+                  onDurationChange={(e) => {
+                    if (sourceGuard.isActive(sourceRevisionKey)) {
+                      syncBrowserDuration(sourceRevisionKey, e.currentTarget);
+                    }
+                  }}
                   onLoadedMetadata={(e) => {
-                    if (sourceGuard.isActive(sourceIdentity)) {
-                      syncReady(sourceIdentity, e.currentTarget);
-                      handleTimeUpdateFallback(e);
+                    if (sourceGuard.isActive(sourceRevisionKey)) {
+                      syncReady(sourceRevisionKey, e.currentTarget);
+                      syncBrowserDuration(sourceRevisionKey, e.currentTarget);
+                      handleTimeUpdate(e);
                     }
                   }}
                   onError={(e) => {
-                    if (sourceGuard.isActive(sourceIdentity)) {
-                      syncUnready(sourceIdentity, e.currentTarget);
+                    if (sourceGuard.isActive(sourceRevisionKey)) {
+                      syncUnready(sourceRevisionKey, e.currentTarget);
                       handleVideoError();
                     }
                   }}
@@ -365,9 +404,12 @@ export function PreviewPane() {
       {/* Preview Bottom Row: Timecode and View Controls */}
       <div className="flex shrink-0 items-center justify-between px-1 pt-2">
         <div className="flex items-center gap-1.5 font-mono text-xs">
-          <span className="font-medium text-primary">{currentTimecode}</span>
+          <span className="font-medium text-primary">{currentTimeDisplay}</span>
+          {media && isCurrentTimeApproximate && (
+            <span className="text-preview-muted">{t("preview.approximate")}</span>
+          )}
           <span className="text-preview-muted">/</span>
-          <span className="text-preview-muted">{totalTimecode}</span>
+          <span className="text-preview-muted">{totalTimeDisplay}</span>
         </div>
 
         <div className="flex items-center gap-1.5">

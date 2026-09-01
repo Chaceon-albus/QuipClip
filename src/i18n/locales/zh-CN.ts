@@ -39,6 +39,7 @@ export const zhCN: TranslationCatalog = {
     loading: "正在加载媒体...",
     videoPlayerLabel: "视频预览：{{fileName}}",
     decodeError: "原生播放失败，预览此格式需要生成代理文件。",
+    approximate: "约",
     zoom: {
       fit: "适应窗口",
       zoom50: "50%",
@@ -65,8 +66,8 @@ export const zhCN: TranslationCatalog = {
       splitAria: "分割片段",
       play: "播放",
       pause: "暂停",
-      previousFrame: "上一帧",
-      nextFrame: "下一帧",
+      previousStep: "向后微调",
+      nextStep: "向前微调",
     },
   },
   timeline: {
@@ -94,13 +95,13 @@ export const zhCN: TranslationCatalog = {
   },
   playbackError: {
     playbackFailed: "播放启动失败。",
-    seekFailed: "跳转到指定帧失败。",
+    seekFailed: "跳转到指定位置失败。",
   },
   statusBar: {
     projectResolution: "项目分辨率：{{width}} × {{height}}",
     projectResolutionDefault: "项目分辨率：1920 × 1080",
-    frameRate: "帧率：{{fps}} fps",
-    frameRateDefault: "帧率：25 fps",
+    sourceNominalRate: "源标称帧率：{{fps}} fps",
+    sourceNominalRateUnavailable: "源标称帧率：—",
     settings: "设置",
   },
   settings: {

@@ -1,10 +1,10 @@
 /**
  * Domain and wire types for media import and probing in QuipClip.
  *
- * See ADR 002, ADR 003, and ADR 007.
+ * See ADR 002, ADR 003, ADR 007, and ADR 010.
  */
 
-import type { Rational } from "@/types/project";
+import type { Pts, Rational, TickCount } from "@/types/project";
 
 /**
  * Backend error codes returned by the Rust `import_media` command.
@@ -109,20 +109,24 @@ export type MediaProbe = {
   width: number;
   /** Video frame height in pixels (1..=4_294_967_295). */
   height: number;
-  /** Average frame rate as an exact positive rational fraction (ADR 002). */
-  avgFrameRate: Rational;
-  /** Real base frame rate from container timebase as an exact positive rational fraction. */
-  rFrameRate: Rational;
-  /** Presentation start timestamp as an exact signed rational fraction. */
-  startTime: Rational;
-  /** Stream duration as an exact non-negative rational fraction, or null if indeterminate. */
-  duration: Rational | null;
-  /** Total frame count in the video stream (safe non-negative integer). */
-  frameCount: number;
+  /** Index of the probed video stream within the container (0..=4_294_967_295). */
+  videoStreamIndex: number;
+  /** Rational time base of the video stream (seconds per tick). */
+  videoTimeBase: Rational;
+  /** Presentation timestamp of the initial presented frame, or null if unstated (ADR 002, ADR 003). */
+  videoStartPts: Pts | null;
+  /** Reported stream duration in video time base ticks, or null if indeterminate. */
+  videoDurationTicks: TickCount | null;
+  /** Approximate duration in seconds for UI layout and seek estimates, or null if unavailable. */
+  approximateDurationSeconds: number | null;
+  /** Average frame rate as an exact positive rational fraction, or null if unstated. */
+  avgFrameRate: Rational | null;
+  /** Real base frame rate from container timebase as an exact positive rational fraction, or null if unstated. */
+  rFrameRate: Rational | null;
+  /** Total reported frame count from stream metadata, or null if unstated. */
+  reportedFrameCount: TickCount | null;
   /** Audio stream metadata, or null if the media file has no audio. */
   audio: AudioProbe | null;
-  /** True when ffprobe reports differing average and real frame rates (ADR 002). */
-  isVfr: boolean;
 };
 
 /**

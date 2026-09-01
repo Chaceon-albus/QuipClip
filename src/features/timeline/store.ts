@@ -8,13 +8,9 @@
 
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
-import type { Segment } from "@/types/project";
-import {
-  calculateExclusiveOutFrame,
-  findSplittableSegmentIndex,
-  insertSegmentInSourceOrder,
-  splitSegment,
-} from "./math";
+import { isPtsString, isValidSegmentRange } from "@/lib/time";
+import type { Pts, Segment } from "@/types/project";
+import { findSplittableSegmentIndex, splitSegment } from "./math";
 import type { TimelineState, TimelineStoreState } from "./types";
 
 /**
@@ -22,20 +18,17 @@ import type { TimelineState, TimelineStoreState } from "./types";
  */
 export interface TimelineStoreDependencies {
   /**
-   * Function to generate unique, collision-resistant segment identifiers.
+   * Function to generate segment identifiers.
    * Defaults to `generateSegmentId`.
    */
   generateId?: () => string;
 }
 
 /**
- * Generates a collision-resistant segment ID.
+ * Generates a UUID segment ID.
  */
 export function generateSegmentId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `seg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 11)}`;
+  return crypto.randomUUID();
 }
 
 /**
@@ -58,147 +51,110 @@ export function createTimelineStore(
 
   return createStore<TimelineStoreState>()((set, get) => ({
     sourceId: initialState?.sourceId ?? null,
-    frameCount: initialState?.frameCount ?? 0,
+    sourceRevisionKey: initialState?.sourceRevisionKey ?? null,
     segments: initialState?.segments ? [...initialState.segments] : [],
-    pendingInFrame: initialState?.pendingInFrame ?? null,
+    pendingInPts: initialState?.pendingInPts ?? null,
     canUndo: initialState?.canUndo ?? false,
     canRedo: initialState?.canRedo ?? false,
 
-    setSource: (sourceId: string | null, frameCount: number) => {
-      // 1. Clear / Reset if sourceId is null or empty
-      if (sourceId === null || sourceId === "") {
-        undoStack = [];
-        redoStack = [];
+    setSource: (sourceId: string | null, sourceRevisionKey: string | null) => {
+      // Clearing the source changes only source-view transient state.
+      if (
+        sourceId === null ||
+        sourceId === "" ||
+        sourceRevisionKey === null ||
+        sourceRevisionKey === ""
+      ) {
         set({
           sourceId: null,
-          frameCount: 0,
-          segments: [],
-          pendingInFrame: null,
-          canUndo: false,
-          canRedo: false,
+          sourceRevisionKey: null,
+          pendingInPts: null,
         });
         return;
       }
 
       // 2. Validate inputs
-      if (
-        typeof sourceId !== "string" ||
-        !Number.isSafeInteger(frameCount) ||
-        frameCount < 0
-      ) {
+      if (typeof sourceId !== "string" || typeof sourceRevisionKey !== "string") {
         return;
       }
 
       const current = get();
 
-      // 3. Same source identity AND same frameCount: preserve edits, pendingIn, and history
-      if (current.sourceId === sourceId && current.frameCount === frameCount) {
+      // Preserve the pending mark only while the active source revision is unchanged.
+      if (
+        current.sourceId === sourceId &&
+        current.sourceRevisionKey === sourceRevisionKey
+      ) {
         return;
       }
 
-      // 4. Source changed or frameCount changed (changed edit grid): reset edits and history
-      undoStack = [];
-      redoStack = [];
+      // Canonical segments and edit history belong to the project, not the source view.
       set({
         sourceId,
-        frameCount,
-        segments: [],
-        pendingInFrame: null,
-        canUndo: false,
-        canRedo: false,
+        sourceRevisionKey,
+        pendingInPts: null,
       });
     },
 
-    markIn: (frame: number) => {
+    markIn: (pts: Pts) => {
       const state = get();
-      if (!state.sourceId || state.frameCount <= 0) {
+      if (!state.sourceId || !isPtsString(pts)) {
         return;
       }
 
-      if (
-        typeof frame !== "number" ||
-        !Number.isSafeInteger(frame) ||
-        frame < 0 ||
-        frame >= state.frameCount
-      ) {
-        return;
-      }
-
-      set({ pendingInFrame: frame });
+      set({ pendingInPts: pts });
     },
 
-    markOut: (currentFrame: number) => {
+    markOut: (currentPts: Pts) => {
       const state = get();
-      if (!state.sourceId || state.frameCount <= 0) {
+      if (!state.sourceId || state.pendingInPts === null || !isPtsString(currentPts)) {
         return;
       }
 
-      if (state.pendingInFrame === null) {
+      if (!isValidSegmentRange(state.pendingInPts, currentPts)) {
         return;
       }
 
-      if (
-        typeof currentFrame !== "number" ||
-        !Number.isSafeInteger(currentFrame) ||
-        currentFrame < 0 ||
-        currentFrame >= state.frameCount
-      ) {
-        return;
-      }
-
-      if (currentFrame < state.pendingInFrame) {
-        return;
-      }
-
-      const inFrame = state.pendingInFrame;
-      const outFrame = calculateExclusiveOutFrame(currentFrame, state.frameCount);
-
-      if (outFrame <= inFrame) {
-        return;
-      }
+      const inPts = state.pendingInPts;
+      const outPts = currentPts;
 
       const newSegment: Segment = {
         id: generateId(),
         sourceId: state.sourceId,
-        inFrame,
-        outFrame,
+        inPts,
+        outPts,
       };
 
       undoStack.push(state.segments);
       redoStack = [];
 
-      const nextSegments = insertSegmentInSourceOrder(state.segments, newSegment);
+      const nextSegments = [...state.segments, newSegment];
 
       set({
         segments: nextSegments,
-        pendingInFrame: null,
+        pendingInPts: null,
         canUndo: true,
         canRedo: false,
       });
     },
 
-    split: (currentFrame: number) => {
+    split: (currentPts: Pts) => {
       const state = get();
-      if (!state.sourceId || state.frameCount <= 0) {
+      if (!state.sourceId || !isPtsString(currentPts)) {
         return;
       }
 
-      if (
-        typeof currentFrame !== "number" ||
-        !Number.isSafeInteger(currentFrame) ||
-        currentFrame < 0 ||
-        currentFrame >= state.frameCount
-      ) {
-        return;
-      }
-
-      const targetIndex = findSplittableSegmentIndex(state.segments, currentFrame);
+      const targetIndex = findSplittableSegmentIndex(
+        state.segments,
+        currentPts,
+        state.sourceId,
+      );
       if (targetIndex === -1) {
         return;
       }
 
       const targetSeg = state.segments[targetIndex];
-      const [leftSeg, rightSeg] = splitSegment(targetSeg, currentFrame, generateId());
+      const [leftSeg, rightSeg] = splitSegment(targetSeg, currentPts, generateId());
 
       undoStack.push(state.segments);
       redoStack = [];
@@ -250,7 +206,7 @@ export function createTimelineStore(
     },
 
     clearPendingIn: () => {
-      set({ pendingInFrame: null });
+      set({ pendingInPts: null });
     },
 
     reset: () => {
@@ -258,9 +214,9 @@ export function createTimelineStore(
       redoStack = [];
       set({
         sourceId: null,
-        frameCount: 0,
+        sourceRevisionKey: null,
         segments: [],
-        pendingInFrame: null,
+        pendingInPts: null,
         canUndo: false,
         canRedo: false,
       });

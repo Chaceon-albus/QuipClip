@@ -1,36 +1,37 @@
 /**
  * Domain types, store state, and action signatures for single-source timeline editing.
  *
- * See ADR 002, ADR 007, and ADR 010.
+ * See ADR 002, ADR 003, ADR 007, and ADR 010.
+ * Edit points are represented as presentation timestamps (PTS) in source video stream timebase.
  */
 
-import type { Segment } from "@/types/project";
+import type { Pts, Segment } from "@/types/project";
 
 /**
  * Public, strictly serializable state of the timeline store.
  */
 export interface TimelineState {
   /**
-   * Active media source identity token, or null if no media source is loaded.
+   * Active media source stable identifier, or null if no media source is loaded.
    */
   readonly sourceId: string | null;
 
   /**
-   * Total number of frames in the active media stream (0 if none).
+   * Active media source revision key string (path:size:mtime), or null if no media source is loaded.
    */
-  readonly frameCount: number;
+  readonly sourceRevisionKey: string | null;
 
   /**
-   * Completed timeline segments in source order.
-   * Export order for a single source is array order (ADR 007).
+   * Completed timeline segments in project array order (ADR 007).
+   * Export order is array order.
    */
   readonly segments: Segment[];
 
   /**
-   * Inclusive frame index of a pending In mark awaiting a matching Out mark,
+   * Presentation timestamp (PTS) of a pending In mark awaiting a matching Out mark,
    * or null if no In mark is pending.
    */
-  readonly pendingInFrame: number | null;
+  readonly pendingInPts: Pts | null;
 
   /**
    * True if there is an edit action in history available to undo.
@@ -49,39 +50,40 @@ export interface TimelineState {
 export interface TimelineActions {
   /**
    * Activates a media source on the timeline.
-   * Preserves edits, pending In, and history only when source identity AND frameCount are unchanged;
-   * a changed frameCount or different source identity resets segments, pending In, and undo/redo history.
+   * Canonical ordered segments and undo/redo history are project state and remain unchanged.
+   * A changed source or revision clears the source-view pending In mark.
    *
-   * @param sourceId Canonical source identity token (non-empty string, or null/empty to clear).
-   * @param frameCount Total frame count of the source (nonnegative safe integer).
+   * @param sourceId Canonical stable source identifier (non-empty string, or null to clear).
+   * @param sourceRevisionKey Canonical source revision key string (non-empty string, or null to clear).
    */
-  setSource: (sourceId: string | null, frameCount: number) => void;
+  setSource: (sourceId: string | null, sourceRevisionKey: string | null) => void;
 
   /**
-   * Marks an inclusive In point at the given rendered frame index.
+   * Marks an inclusive In point at the given presentation timestamp (PTS).
    *
-   * @param frame Rendered frame index on the source frame grid (0 <= frame < frameCount).
+   * @param pts Presentation timestamp in source video time base.
    */
-  markIn: (frame: number) => void;
+  markIn: (pts: Pts) => void;
 
   /**
-   * Marks a visible Out point at the current rendered frame, computing the exclusive
-   * boundary as `min(currentFrame + 1, frameCount)` per ADR-002 Rule 3.
-   * Completes a segment if `inFrame < outFrame` and clears the pending In mark.
+   * Marks an exclusive Out point at the current presentation timestamp (PTS) (ADR 002).
+   * Out PTS is stored directly as the first-excluded boundary.
+   * Does NOT add one to Out.
+   * Completes a segment if `inPts < outPts` and clears the pending In mark.
    *
-   * @param currentFrame Visible rendered frame index (0 <= currentFrame < frameCount).
+   * @param currentPts Presentation timestamp in source video time base (must satisfy inPts < currentPts).
    */
-  markOut: (currentFrame: number) => void;
+  markOut: (currentPts: Pts) => void;
 
   /**
-   * Splits a completed segment at the current frame when `currentFrame` is strictly
-   * inside the segment (`inFrame < currentFrame < outFrame`).
-   * Replaces the segment with two adjacent segments, preserving the left segment ID
-   * and assigning a newly generated right segment ID.
+   * Splits a completed segment at the current presentation timestamp (PTS) when `currentPts` is strictly
+   * inside the segment (`inPts < currentPts < outPts`).
+   * Replaces the segment with two adjacent segments [inPts, currentPts) and [currentPts, outPts),
+   * preserving the left segment ID and assigning a newly generated right segment ID.
    *
-   * @param currentFrame Visible rendered frame index strictly inside a segment.
+   * @param currentPts Presentation timestamp strictly inside an existing segment.
    */
-  split: (currentFrame: number) => void;
+  split: (currentPts: Pts) => void;
 
   /**
    * Undoes the last completed mark-out or split edit.

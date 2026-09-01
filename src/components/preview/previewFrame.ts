@@ -1,93 +1,167 @@
 /**
- * Pure helper functions for video preview frame conversion and timecode calculations.
+ * Pure helper functions for video preview timecode formatting, calibration state,
+ * and source lifecycle concurrency guards.
  *
- * Implements ADR-003 preview readback math, RVFC metadata conversions, fallback currentTime conversions,
- * display frame clamping, and source lifecycle concurrency guards.
+ * Implements ADR 002 and ADR 003 source-relative HH:MM:SS.mmm timecode formatting
+ * for calibrated source PTS presentation and approximate browser time fallback.
  */
 
 import {
-  formatTimecode,
-  frameAtMediaTime,
-  frameAtSeconds,
-  rationalToNumber,
+  ptsElapsedSeconds,
+  ticksToSeconds,
 } from "@/lib/time";
-import type { Rational } from "@/types/project";
+import type { Pts, Rational, TickCount } from "@/types/project";
+import type { CalibrationStatus, PresentedFrame } from "@/features/playback";
 
 /**
- * Clamps an integer frame index to the valid display frame range [0, frameCount - 1].
- * If frameCount <= 0, returns 0.
+ * Formats a non-negative floating-point seconds value as `HH:MM:SS.mmm`.
  *
- * @param rawFrame Raw frame index.
- * @param frameCount Total video frame count (exclusive upper bound).
+ * @param seconds Non-negative finite duration in seconds.
  */
-export function clampDisplayFrame(rawFrame: number, frameCount: number): number {
-  const safeCount = Number.isSafeInteger(frameCount) && frameCount > 0 ? frameCount : 0;
-  if (safeCount <= 0) {
-    return 0;
+export function formatMillisecondsTimecode(seconds: number): string {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+    return "00:00:00.000";
   }
-  const maxDisplayFrame = safeCount - 1;
-  const truncated = Number.isFinite(rawFrame) ? Math.trunc(rawFrame) : 0;
-  return Math.max(0, Math.min(maxDisplayFrame, truncated));
+
+  const milliseconds = seconds * 1000;
+  if (!Number.isFinite(milliseconds)) {
+    return "00:00:00.000";
+  }
+  const totalMs = Math.round(milliseconds);
+  if (!Number.isSafeInteger(totalMs)) {
+    return "00:00:00.000";
+  }
+  const ms = totalMs % 1000;
+  const totalSec = Math.floor(totalMs / 1000);
+  const ss = totalSec % 60;
+  const totalMin = Math.floor(totalSec / 60);
+  const mm = totalMin % 60;
+  const hh = Math.floor(totalMin / 60);
+
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  const pad3 = (n: number) => String(n).padStart(3, "0");
+
+  return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}.${pad3(ms)}`;
 }
 
 /**
- * Converts presentation timestamp readback from `requestVideoFrameCallback` to a clamped integer frame index.
- * Uses exact `probe.startTime` converted to seconds and `frameAtMediaTime` so nonzero or negative
- * source PTS is handled correctly (ADR-003).
+ * Formats an inferred source PTS as source-relative `HH:MM:SS.mmm` elapsed time
+ * relative to the source stream's `videoStartPts` (ADR 003).
  *
- * @param mediaTime `mediaTime` in seconds from `requestVideoFrameCallback` metadata.
- * @param startTime Exact stream `probe.startTime` as a Rational fraction.
- * @param fps Average stream frame rate as a positive Rational fraction.
- * @param frameCount Total stream frame count.
+ * Formula:
+ * `elapsedSeconds = (inferredPts - videoStartPts) * videoTimeBase`
+ *
+ * @param inferredPts Inferred presentation timestamp from calibrated RVFC.
+ * @param videoStartPts Presentation timestamp origin of the source video stream.
+ * @param videoTimeBase Rational timebase of the video stream.
  */
-export function calculateFrameFromMediaTime(
-  mediaTime: number,
-  startTime: Rational,
-  fps: Rational,
-  frameCount: number,
-): number {
-  const startTimeSeconds = rationalToNumber(startTime);
-  const rawFrame = frameAtMediaTime(mediaTime, startTimeSeconds, fps);
-  return clampDisplayFrame(rawFrame, frameCount);
+export function formatSourceRelativeTime(
+  inferredPts: Pts,
+  videoStartPts: Pts,
+  videoTimeBase: Rational,
+): string {
+  const deltaSeconds = ptsElapsedSeconds(
+    inferredPts,
+    videoStartPts,
+    videoTimeBase,
+  );
+  if (deltaSeconds === null) {
+    return "00:00:00.000";
+  }
+
+  const isNegative = deltaSeconds < 0;
+  const absSeconds = Math.abs(deltaSeconds);
+  const formatted = formatMillisecondsTimecode(absSeconds);
+  return isNegative ? `-${formatted}` : formatted;
 }
 
 /**
- * Converts DOM `video.currentTime` in seconds to a clamped integer frame index.
- * Used as an explicit fallback when `requestVideoFrameCallback` is unavailable (ADR-003).
+ * Formats approximate browser `currentTime` in seconds as `HH:MM:SS.mmm` (ADR 003).
+ * Used when PTS calibration is calibrating or unavailable.
  *
- * @param currentTime `video.currentTime` in seconds.
- * @param fps Average stream frame rate as a positive Rational fraction.
- * @param frameCount Total stream frame count.
+ * @param seconds Raw browser `currentTime` in seconds.
  */
-export function calculateFrameFromCurrentTime(
-  currentTime: number,
-  fps: Rational,
-  frameCount: number,
-): number {
-  const rawFrame = frameAtSeconds(currentTime, fps);
-  return clampDisplayFrame(rawFrame, frameCount);
+export function formatApproximateTime(seconds: number): string {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
+    return "00:00:00.000";
+  }
+
+  const isNegative = seconds < 0;
+  const absSeconds = Math.abs(seconds);
+  const formatted = formatMillisecondsTimecode(absSeconds);
+  return isNegative ? `-${formatted}` : formatted;
 }
 
 /**
- * Formats a clamped display frame index into a `HH:MM:SS:FF` timecode string.
+ * Formats total source extent for preview display, prioritizing reported `videoDurationTicks`
+ * when available and falling back to `approximateDurationSeconds` (ADR 002, ADR 003).
  *
- * @param frame Current display frame index.
- * @param fps Average stream frame rate as a positive Rational fraction.
+ * @param approximateDurationSeconds Reported approximate duration in seconds.
+ * @param videoDurationTicks Optional stream duration in video time base ticks.
+ * @param videoTimeBase Optional rational time base of the video stream.
  */
-export function formatDisplayTimecode(frame: number, fps: Rational): string {
-  return formatTimecode(frame, fps);
+export function formatPreviewTotalDuration(
+  approximateDurationSeconds: number | null | undefined,
+  videoDurationTicks?: TickCount | null,
+  videoTimeBase?: Rational | null,
+): string {
+  if (videoDurationTicks && videoTimeBase) {
+    const sec = ticksToSeconds(videoDurationTicks, videoTimeBase);
+    if (sec !== null) {
+      return formatMillisecondsTimecode(sec);
+    }
+  }
+
+  if (
+    typeof approximateDurationSeconds === "number" &&
+    Number.isFinite(approximateDurationSeconds) &&
+    approximateDurationSeconds >= 0
+  ) {
+    return formatMillisecondsTimecode(approximateDurationSeconds);
+  }
+
+  return "00:00:00.000";
 }
 
 /**
- * Formats the total stream duration at exclusive `frameCount` into a `HH:MM:SS:FF` timecode string.
+ * Formats the current preview timecode, displaying source-relative `HH:MM:SS.mmm`
+ * when calibrated and ready, and approximate browser time otherwise (ADR 003).
  *
- * @param frameCount Total stream frame count (exclusive upper bound).
- * @param fps Average stream frame rate as a positive Rational fraction.
+ * @param presentedFrame Last confirmed presented frame from RVFC, or null.
+ * @param calibrationStatus Calibration status of the active source.
+ * @param videoStartPts Source video start PTS.
+ * @param videoTimeBase Source video time base.
+ * @param approximateBrowserTime Fallback browser currentTime in seconds.
  */
-export function formatTotalTimecode(frameCount: number, fps: Rational): string {
-  const safeFrameCount =
-    Number.isSafeInteger(frameCount) && frameCount > 0 ? frameCount : 0;
-  return formatTimecode(safeFrameCount, fps);
+export function formatPreviewCurrentTime(
+  presentedFrame: PresentedFrame | null,
+  calibrationStatus: CalibrationStatus,
+  videoStartPts: Pts | null | undefined,
+  videoTimeBase: Rational | null | undefined,
+  approximateBrowserTime: number,
+): string {
+  if (
+    calibrationStatus === "ready" &&
+    presentedFrame !== null &&
+    videoStartPts &&
+    videoTimeBase
+  ) {
+    return formatSourceRelativeTime(
+      presentedFrame.inferredSourcePts,
+      videoStartPts,
+      videoTimeBase,
+    );
+  }
+
+  return formatApproximateTime(approximateBrowserTime);
+}
+
+/** Returns true when the preview clock is using browser time instead of inferred source PTS. */
+export function isPreviewTimeApproximate(
+  calibrationStatus: CalibrationStatus,
+  presentedFrame: PresentedFrame | null,
+): boolean {
+  return calibrationStatus !== "ready" || presentedFrame === null;
 }
 
 /**

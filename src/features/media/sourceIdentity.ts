@@ -1,28 +1,39 @@
 /**
- * Media source identity helpers for QuipClip.
+ * Media source identity and revision helpers for QuipClip.
  *
- * Computes canonical identity tokens used across the preview layer, playback store,
- * and ref-ownership bindings to detect source changes and guard against stale events.
+ * See ADR 007 and ADR 010.
+ * Separates stable project source IDs from machine-specific source revision keys based on
+ * canonical path, file size, and modification timestamp.
  */
 
 /**
- * Minimal media descriptor required to construct a unique source identity token.
+ * Descriptor of media file revision attributes.
  */
-export interface MediaSourceDescriptor {
+export interface MediaSourceRevisionDescriptor {
   path: string;
   size: number;
   mtime: number;
 }
 
 /**
- * Computes a unique source identity string based on canonical path, file size, and modification time.
- * If media is reimported at the same path after modification (size or mtime changed), the identity token changes.
+ * Generates a stable source identifier within a project document (ADR 010).
+ * Stable IDs do not depend on file path, size, or modification time.
  *
- * @param media Media descriptor or null if no media is loaded.
- * @returns Canonical identity token string, or empty string when media is null.
+ * @param prefix Optional prefix for the generated identifier. Defaults to "s".
  */
-export function getMediaSourceIdentity(
-  media: MediaSourceDescriptor | null | undefined,
+export function generateSourceId(prefix = "s"): string {
+  return `${prefix}${globalThis.crypto.randomUUID()}`;
+}
+
+/**
+ * Computes a unique source revision key string based on path, size, and modification time (ADR 010).
+ * Used to detect when a file has been replaced or modified on disk independently of its stable ID.
+ *
+ * @param media Media revision descriptor or null/undefined.
+ * @returns Canonical revision key string, or empty string when media is unavailable.
+ */
+export function getSourceRevisionKey(
+  media: MediaSourceRevisionDescriptor | null | undefined,
 ): string {
   if (!media || typeof media.path !== "string") {
     return "";

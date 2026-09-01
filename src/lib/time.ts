@@ -1,21 +1,28 @@
 /**
- * Exact rational time helpers and frame grid conversions for the frontend.
+ * Exact rational time helpers, BigInt PTS arithmetic, and checked conversions for QuipClip.
  *
- * This module is deliberately smaller than the Rust `time.rs` module.
- * JavaScript numbers are IEEE-754 64-bit floating point numbers (doubles),
- * so exact rational arithmetic would require BigInt throughout. The frontend
- * needs exactness only where it performs integer frame arithmetic (such as
- * timecodes and segment boundaries). Where it converts to seconds for
- * `video.currentTime` and preview seeks, a double is already the native
- * destination type expected by DOM media elements.
+ * See ADR 002, ADR 003, ADR 007, and ADR 010.
+ * Presentation timestamps (PTS) and tick counts are represented as branded canonical decimal strings.
+ * Internal calculations use exact BigInt and rational arithmetic. Conversions between browser
+ * floating-point numbers and ticks are checked to prevent precision loss and invalid state.
  */
 
-import { type Rational } from "@/types/project";
+import type { Pts, Rational, TickCount } from "@/types/project";
+
+/**
+ * Minimum signed 64-bit integer (-2^63).
+ */
+export const I64_MIN = -9_223_372_036_854_775_808n;
+
+/**
+ * Maximum signed 64-bit integer (2^63 - 1).
+ */
+export const I64_MAX = 9_223_372_036_854_775_807n;
 
 /**
  * Calculates the greatest common divisor of two integers using Euclid's algorithm.
  */
-function gcd(a: number, b: number): number {
+export function gcd(a: number, b: number): number {
   let x = Math.abs(a);
   let y = Math.abs(b);
   while (y !== 0) {
@@ -27,35 +34,155 @@ function gcd(a: number, b: number): number {
 }
 
 /**
- * Asserts that a Rational represents a strictly positive frame rate with safe integer components.
- * Throws RangeError before any arithmetic is performed if the frame rate is non-positive,
- * non-finite, fractional, or has unsafe integer components.
+ * Asserts that a Rational represents a strictly positive timebase or frame rate with safe integer components.
+ * Throws RangeError if non-positive, non-finite, fractional, or having unsafe integer components.
  */
-function assertPositiveFps(fps: Rational): void {
+export function assertPositiveTimeBase(timeBase: Rational): void {
   if (
-    fps.n <= 0 ||
-    fps.d <= 0 ||
-    !Number.isSafeInteger(fps.n) ||
-    !Number.isSafeInteger(fps.d)
+    timeBase.n <= 0 ||
+    timeBase.d <= 0 ||
+    !Number.isSafeInteger(timeBase.n) ||
+    !Number.isSafeInteger(timeBase.d)
   ) {
     throw new RangeError(
-      `Frame rate must be positive with safe integer components, got ${fps.n}/${fps.d}`,
+      `Time base must be positive with safe integer components, got ${timeBase.n}/${timeBase.d}`,
     );
   }
 }
 
 /**
- * Converts a Rational to a floating-point number.
- * Used for approximate UI presentation and layout percentages where IEEE 754 precision is sufficient.
+ * Validates whether an unknown value is a canonical decimal string representation of a signed i64 PTS (ADR 002).
+ *
+ * Requirements:
+ * - Must be a string matching `/^(0|-?[1-9]\d*)$/` (rejects "-0", "+123", "01", leading/trailing whitespace).
+ * - Must represent an integer within signed 64-bit range [-9223372036854775808, 9223372036854775807].
  */
-export function rationalToNumber(r: Rational): number {
-  return r.n / r.d;
+export function isPtsString(value: unknown): value is Pts {
+  if (typeof value !== "string" || !/^(0|-?[1-9]\d*)$/.test(value)) {
+    return false;
+  }
+  try {
+    const val = BigInt(value);
+    return val >= I64_MIN && val <= I64_MAX;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Parses a frame rate string into a reduced Rational timebase.
+ * Parses and validates a canonical signed i64 PTS decimal string.
+ * Returns the branded Pts or null if malformed or out of range.
+ */
+export function parsePts(text: string): Pts | null {
+  return isPtsString(text) ? text : null;
+}
+
+/**
+ * Converts a BigInt into a branded canonical PTS string.
+ * Throws RangeError if the value exceeds signed i64 bounds.
+ */
+export function ptsFromBigInt(val: bigint): Pts {
+  if (val < I64_MIN || val > I64_MAX) {
+    throw new RangeError(`PTS value out of signed i64 range: ${val.toString()}`);
+  }
+  return val.toString() as Pts;
+}
+
+/**
+ * Converts a branded PTS string into an exact BigInt value.
+ * Throws TypeError if the input is not a valid canonical PTS string.
+ */
+export function ptsToBigInt(pts: Pts): bigint {
+  if (!isPtsString(pts)) {
+    throw new TypeError(`Invalid canonical PTS string: ${String(pts)}`);
+  }
+  return BigInt(pts);
+}
+
+/**
+ * Validates whether an unknown value is a canonical decimal string representation of a non-negative i64 tick count (ADR 002).
+ *
+ * Requirements:
+ * - Must be a string matching `/^(0|[1-9]\d*)$/` (rejects negative, "+123", "01", whitespace).
+ * - Must represent an integer within non-negative 64-bit range [0, 9223372036854775807].
+ */
+export function isTickCountString(value: unknown): value is TickCount {
+  if (typeof value !== "string" || !/^(0|[1-9]\d*)$/.test(value)) {
+    return false;
+  }
+  try {
+    const val = BigInt(value);
+    return val >= 0n && val <= I64_MAX;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Parses and validates a canonical non-negative i64 tick count decimal string.
+ * Returns the branded TickCount or null if malformed or out of range.
+ */
+export function parseTickCount(text: string): TickCount | null {
+  return isTickCountString(text) ? text : null;
+}
+
+/**
+ * Converts a non-negative BigInt into a branded canonical TickCount string.
+ * Throws RangeError if negative or exceeds i64::MAX.
+ */
+export function tickCountFromBigInt(val: bigint): TickCount {
+  if (val < 0n || val > I64_MAX) {
+    throw new RangeError(
+      `TickCount value out of non-negative i64 range: ${val.toString()}`,
+    );
+  }
+  return val.toString() as TickCount;
+}
+
+/**
+ * Converts a branded TickCount string into an exact BigInt value.
+ * Throws TypeError if the input is not a valid canonical TickCount string.
+ */
+export function tickCountToBigInt(ticks: TickCount): bigint {
+  if (!isTickCountString(ticks)) {
+    throw new TypeError(`Invalid canonical TickCount string: ${String(ticks)}`);
+  }
+  return BigInt(ticks);
+}
+
+/**
+ * Validates whether a value is a valid finite, non-negative approximate duration in seconds (ADR 002).
+ */
+export function isValidApproximateDuration(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * Normalizes approximate duration metadata, returning null if invalid or non-finite.
+ */
+export function validateApproximateDuration(value: unknown): number | null {
+  return isValidApproximateDuration(value) ? value : null;
+}
+
+/**
+ * Converts a Rational to a floating-point number.
+ * Used only for UI presentation and layout percentages where IEEE 754 precision is sufficient.
+ */
+export function rationalToNumber(r: Rational): number {
+  assertPositiveTimeBase(r);
+  const result = r.n / r.d;
+  if (!Number.isFinite(result)) {
+    throw new RangeError(
+      `Rational conversion produced non-finite number: ${r.n}/${r.d}`,
+    );
+  }
+  return result;
+}
+
+/**
+ * Parses a frame rate or timebase string into a reduced Rational.
  * Parses "30000/1001" and "25" while rejecting "0/0", non-positive rates, and malformed inputs.
- * Reduces by GCD so equivalent rates (e.g. 50/2 and 25/1) compare equal after JSON serialization.
+ * Reduces by GCD so equivalent rates (e.g. 50/2 and 25/1) compare equal.
  */
 export function parseFrameRate(text: string): Rational | null {
   const trimmed = text.trim();
@@ -89,8 +216,7 @@ export function parseFrameRate(text: string): Rational | null {
 
 /**
  * Compares two Rational values for exact equality via cross-multiplication.
- * Avoids division which would introduce floating-point inaccuracies, and falls
- * back to BigInt arithmetic if either cross-product exceeds Number.MAX_SAFE_INTEGER.
+ * Falls back to BigInt arithmetic if either cross-product exceeds Number.MAX_SAFE_INTEGER.
  */
 export function rationalsEqual(a: Rational, b: Rational): boolean {
   if (a.d === 0 || b.d === 0) {
@@ -113,147 +239,285 @@ export function rationalsEqual(a: Rational, b: Rational): boolean {
 }
 
 /**
- * Calculates the exact start time in seconds for a given integer frame index.
- * Used when setting HTML5 video.currentTime or calculating playback offsets.
+ * Infers a source presentation timestamp (PTS) from a presented browser frame callback (ADR 003).
+ *
+ * Formula:
+ * `videoStartPts + round((mediaTime - calibratedMediaTime) / videoTimeBase)`
+ *
+ * Checked conversion:
+ * - Rejects non-finite or negative mediaTime / calibratedMediaTime.
+ * - Rejects unsafe integer tick deltas.
+ * - Rejects results outside signed i64 range.
+ * - Returns null on any validation or numeric safety failure.
  */
-export function secondsAtFrame(frame: number, fps: Rational): number {
-  assertPositiveFps(fps);
-  return (frame * fps.d) / fps.n;
-}
-
-/**
- * Calculates the midpoint timestamp in seconds for a given frame index.
- * Used as the seek target for video elements (ADR 003) because seeking to the
- * exact frame boundary instant (PTS = k / fps) touches both frame k-1 and frame k,
- * risking landing on the wrong frame due to decoder rounding. The midpoint is
- * unambiguously within the target frame's duration.
- */
-export function midpointSecondsAtFrame(frame: number, fps: Rational): number {
-  assertPositiveFps(fps);
-  return ((frame + 0.5) * fps.d) / fps.n;
-}
-
-/**
- * Converts a timestamp in seconds to the containing frame index on the project grid.
- * Floors the result to find the active frame (including for negative timestamps).
- * Snaps results within 1e-6 of an integer to prevent precision loss where a float
- * value landing one ULP below a boundary would incorrectly floor to the preceding frame.
- */
-export function frameAtSeconds(seconds: number, fps: Rational): number {
-  assertPositiveFps(fps);
-  const rawFrames = (seconds * fps.n) / fps.d;
-  const nearest = Math.round(rawFrames);
-  const snapped = Math.abs(rawFrames - nearest) < 1e-6 ? nearest : rawFrames;
-  return Math.floor(snapped);
-}
-
-/**
- * Converts presentation timestamp readbacks from `requestVideoFrameCallback` to an integer frame index.
- * Accounts for non-zero container start times (ADR 003) to verify which frame was rendered on screen.
- */
-export function frameAtMediaTime(
+export function mediaTimeToPts(
   mediaTime: number,
-  startTime: number,
-  fps: Rational,
-): number {
-  assertPositiveFps(fps);
-  return frameAtSeconds(mediaTime - startTime, fps);
-}
-
-/**
- * Calculates the ceiling of frames per second for non-drop-frame timecode display.
- * Determines the width of the FF field (e.g., 30 slots for 30000/1001 fps) so each
- * second contains a fixed integer count of frame indices (00..FF-1).
- */
-export function framesPerSecondCeil(fps: Rational): number {
-  assertPositiveFps(fps);
-  return Math.ceil(fps.n / fps.d);
-}
-
-/**
- * Formats an integer frame index as a non-drop-frame `HH:MM:SS:FF` timecode.
- * Uses integer math with unconstrained hours and a single leading '-' for negative frames.
- * The FF field counts `framesPerSecondCeil` slots (e.g. 00..29 for 30000/1001 fps).
- */
-export function formatTimecode(frame: number, fps: Rational): string {
-  assertPositiveFps(fps);
-  const fpsCeil = framesPerSecondCeil(fps);
-  const negative = frame < 0;
-  const absFrame = Math.abs(Math.trunc(frame));
-  const totalSeconds = Math.floor(absFrame / fpsCeil);
-  const ff = absFrame % fpsCeil;
-  const hh = Math.floor(totalSeconds / 3600);
-  const mm = Math.floor(totalSeconds / 60) % 60;
-  const ss = totalSeconds % 60;
-  const sign = negative ? "-" : "";
-
-  const pad = (val: number) => String(val).padStart(2, "0");
-  return `${sign}${pad(hh)}:${pad(mm)}:${pad(ss)}:${pad(ff)}`;
-}
-
-/**
- * Parses a `HH:MM:SS:FF` timecode string into an integer frame index.
- * Rejects malformed strings, minutes/seconds >= 60, and FF fields >= framesPerSecondCeil
- * to ensure that invalid or out-of-range timecodes do not produce corrupt edit points.
- */
-export function parseTimecode(text: string, fps: Rational): number | null {
-  assertPositiveFps(fps);
-  const trimmed = text.trim();
-  const negative = trimmed.startsWith("-");
-  const rest = negative ? trimmed.slice(1) : trimmed;
-  const parts = rest.split(":");
-
-  if (parts.length !== 4) {
-    return null;
-  }
-
-  if (!parts.every((p) => /^\d+$/.test(p))) {
-    return null;
-  }
-
-  const [hhStr, mmStr, ssStr, ffStr] = parts;
-  const hh = Number(hhStr);
-  const mm = Number(mmStr);
-  const ss = Number(ssStr);
-  const ff = Number(ffStr);
-
+  calibratedMediaTime: number,
+  videoStartPts: Pts,
+  videoTimeBase: Rational,
+): Pts | null {
   if (
-    !Number.isSafeInteger(hh) ||
-    !Number.isSafeInteger(mm) ||
-    !Number.isSafeInteger(ss) ||
-    !Number.isSafeInteger(ff)
+    typeof mediaTime !== "number" ||
+    !Number.isFinite(mediaTime) ||
+    mediaTime < 0 ||
+    typeof calibratedMediaTime !== "number" ||
+    !Number.isFinite(calibratedMediaTime) ||
+    calibratedMediaTime < 0
   ) {
     return null;
   }
 
-  if (hh < 0 || mm < 0 || mm >= 60 || ss < 0 || ss >= 60 || ff < 0) {
+  try {
+    assertPositiveTimeBase(videoTimeBase);
+  } catch {
     return null;
   }
 
-  const fpsCeil = framesPerSecondCeil(fps);
-  if (ff >= fpsCeil) {
+  if (!isPtsString(videoStartPts)) {
     return null;
   }
 
-  const totalSeconds = hh * 3600 + mm * 60 + ss;
-  const magnitude = totalSeconds * fpsCeil + ff;
-  const result = negative ? -magnitude : magnitude;
-
-  if (!Number.isSafeInteger(result)) {
+  const deltaSeconds = mediaTime - calibratedMediaTime;
+  if (!Number.isFinite(deltaSeconds)) {
     return null;
   }
 
-  return result;
+  const rawDeltaTicks = (deltaSeconds * videoTimeBase.d) / videoTimeBase.n;
+  const deltaTicks = Math.round(rawDeltaTicks);
+
+  if (!Number.isSafeInteger(deltaTicks)) {
+    return null;
+  }
+
+  const startBig = ptsToBigInt(videoStartPts);
+  const targetBig = startBig + BigInt(deltaTicks);
+
+  if (targetBig < I64_MIN || targetBig > I64_MAX) {
+    return null;
+  }
+
+  return ptsFromBigInt(targetBig);
 }
 
 /**
- * Formats a frame timestamp into a fixed-point decimal string with 9 decimal places.
- * Required for ffmpeg command line arguments (ADR 004) where sub-frame trim precision
- * is needed. Computes the integer and fractional parts using BigInt to prevent
- * floating-point precision loss on large frame numbers.
+ * Applies the inverse calibrated mapping to determine the browser mediaTime to seek to for a target PTS (ADR 003).
+ *
+ * Formula:
+ * `calibratedMediaTime + (targetPts - videoStartPts) * videoTimeBase`
+ *
+ * Checked conversion:
+ * - Subtracts source origin with BigInt before checking safe-integer range.
+ * - Rejects unsafe BigInt-to-number tick deltas.
+ * - Rejects results that are not finite or not valid non-negative media times.
+ */
+export function ptsToMediaTime(
+  targetPts: Pts,
+  videoStartPts: Pts,
+  calibratedMediaTime: number,
+  videoTimeBase: Rational,
+): number | null {
+  if (
+    typeof calibratedMediaTime !== "number" ||
+    !Number.isFinite(calibratedMediaTime) ||
+    calibratedMediaTime < 0
+  ) {
+    return null;
+  }
+
+  try {
+    assertPositiveTimeBase(videoTimeBase);
+  } catch {
+    return null;
+  }
+
+  if (!isPtsString(targetPts) || !isPtsString(videoStartPts)) {
+    return null;
+  }
+
+  const deltaTicksBig = ptsToBigInt(targetPts) - ptsToBigInt(videoStartPts);
+
+  if (
+    deltaTicksBig < BigInt(Number.MIN_SAFE_INTEGER) ||
+    deltaTicksBig > BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
+    return null;
+  }
+
+  const deltaSeconds = (Number(deltaTicksBig) * videoTimeBase.n) / videoTimeBase.d;
+  const mediaTime = calibratedMediaTime + deltaSeconds;
+
+  if (!Number.isFinite(mediaTime) || mediaTime < 0) {
+    return null;
+  }
+
+  return mediaTime;
+}
+
+/**
+ * Converts a source PTS to elapsed seconds from the source start with checked arithmetic.
+ * Returns null when the PTS delta cannot be represented safely at a browser or UI boundary.
+ */
+export function ptsElapsedSeconds(
+  pts: Pts,
+  videoStartPts: Pts,
+  videoTimeBase: Rational,
+): number | null {
+  if (!isPtsString(pts) || !isPtsString(videoStartPts)) {
+    return null;
+  }
+  try {
+    assertPositiveTimeBase(videoTimeBase);
+  } catch {
+    return null;
+  }
+
+  const deltaTicks = ptsToBigInt(pts) - ptsToBigInt(videoStartPts);
+  if (
+    deltaTicks < BigInt(Number.MIN_SAFE_INTEGER) ||
+    deltaTicks > BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
+    return null;
+  }
+  const seconds = (Number(deltaTicks) * videoTimeBase.n) / videoTimeBase.d;
+  return Number.isFinite(seconds) ? seconds : null;
+}
+
+/**
+ * Converts finite, non-negative source elapsed seconds to a source PTS.
+ * The rounded tick delta must be a safe integer before it enters BigInt arithmetic.
+ */
+export function elapsedSecondsToPts(
+  elapsedSeconds: number,
+  videoStartPts: Pts,
+  videoTimeBase: Rational,
+): Pts | null {
+  return mediaTimeToPts(elapsedSeconds, 0, videoStartPts, videoTimeBase);
+}
+
+/**
+ * Checked conversion of a TickCount to seconds.
+ * Rejects values exceeding Number.MAX_SAFE_INTEGER or non-finite results.
+ */
+export function ticksToSeconds(ticks: TickCount, timeBase: Rational): number | null {
+  try {
+    assertPositiveTimeBase(timeBase);
+  } catch {
+    return null;
+  }
+
+  if (!isTickCountString(ticks)) {
+    return null;
+  }
+
+  const ticksBig = tickCountToBigInt(ticks);
+  if (ticksBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return null;
+  }
+
+  const sec = (Number(ticksBig) * timeBase.n) / timeBase.d;
+  if (!Number.isFinite(sec) || sec < 0) {
+    return null;
+  }
+
+  return sec;
+}
+
+/**
+ * Checked conversion of seconds to a non-negative TickCount.
+ * Rejects non-finite, negative, or unsafe integer inputs.
+ */
+export function secondsToTicks(seconds: number, timeBase: Rational): TickCount | null {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+    return null;
+  }
+
+  try {
+    assertPositiveTimeBase(timeBase);
+  } catch {
+    return null;
+  }
+
+  const rawTicks = (seconds * timeBase.d) / timeBase.n;
+  const ticks = Math.round(rawTicks);
+
+  if (!Number.isSafeInteger(ticks) || ticks < 0) {
+    return null;
+  }
+
+  const ticksBig = BigInt(ticks);
+  if (ticksBig > I64_MAX) {
+    return null;
+  }
+
+  return tickCountFromBigInt(ticksBig);
+}
+
+/**
+ * Checks whether a half-open segment interval [inPts, outPts) is strictly valid (inPts < outPts) (ADR 002).
+ */
+export function isValidSegmentRange(inPts: Pts, outPts: Pts): boolean {
+  if (!isPtsString(inPts) || !isPtsString(outPts)) {
+    return false;
+  }
+  return ptsToBigInt(inPts) < ptsToBigInt(outPts);
+}
+
+/**
+ * Calculates the exact signed difference between two PTS values as a BigInt (`a - b`).
+ */
+export function ptsDifference(a: Pts, b: Pts): bigint {
+  return ptsToBigInt(a) - ptsToBigInt(b);
+}
+
+/**
+ * Checks whether a candidate PTS is strictly inside a half-open segment interval (inPts < pts < outPts) (ADR 007).
+ */
+export function isPtsInsideSegment(pts: Pts, inPts: Pts, outPts: Pts): boolean {
+  if (!isPtsString(pts) || !isPtsString(inPts) || !isPtsString(outPts)) {
+    return false;
+  }
+  const p = ptsToBigInt(pts);
+  return ptsToBigInt(inPts) < p && p < ptsToBigInt(outPts);
+}
+
+/**
+ * Calculates the exact duration in ticks for a valid half-open segment interval [inPts, outPts).
+ * The difference can be as large as I64_MAX - I64_MIN and is therefore not a TickCount.
+ */
+export function segmentDurationTicks(inPts: Pts, outPts: Pts): bigint | null {
+  if (!isValidSegmentRange(inPts, outPts)) {
+    return null;
+  }
+  return ptsToBigInt(outPts) - ptsToBigInt(inPts);
+}
+
+/**
+ * Calculates the exact duration in seconds for a segment interval [inPts, outPts).
+ * Returns null if invalid or unsafe.
+ */
+export function segmentDurationSeconds(
+  inPts: Pts,
+  outPts: Pts,
+  timeBase: Rational,
+): number | null {
+  const ticks = segmentDurationTicks(inPts, outPts);
+  if (ticks === null || ticks > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return null;
+  }
+  try {
+    assertPositiveTimeBase(timeBase);
+  } catch {
+    return null;
+  }
+  const seconds = (Number(ticks) * timeBase.n) / timeBase.d;
+  return Number.isFinite(seconds) ? seconds : null;
+}
+
+/**
+ * Formats a frame timestamp into fixed 9 decimal places for FFmpeg (transitional).
  */
 export function formatSecondsForFfmpeg(frame: number, fps: Rational): string {
-  assertPositiveFps(fps);
+  assertPositiveTimeBase(fps);
   if (!Number.isSafeInteger(frame)) {
     return "0.000000000";
   }
@@ -274,7 +538,6 @@ export function formatSecondsForFfmpeg(frame: number, fps: Rational): string {
   const quotient = scaled / denMag;
   const remainder = scaled % denMag;
 
-  // Round half away from zero to match Rust's format_seconds and ffmpeg expectation
   const rounded = remainder * 2n >= denMag ? quotient + 1n : quotient;
 
   const digits = rounded.toString();

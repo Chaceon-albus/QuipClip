@@ -2,6 +2,12 @@
  * Validation and normalization utilities for media import payloads and error responses.
  */
 
+import {
+  isPtsString,
+  isTickCountString,
+  isValidApproximateDuration,
+  validateApproximateDuration,
+} from "@/lib/time";
 import type { Rational } from "@/types/project";
 import {
   BACKEND_IMPORT_MEDIA_ERROR_CODES,
@@ -56,6 +62,18 @@ export function isPositiveU32(value: unknown): value is number {
 }
 
 /**
+ * Validates whether a value is a non-negative integer fitting within a Rust u32 (0..=4_294_967_295).
+ */
+export function isNonNegativeU32(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= U32_MAX
+  );
+}
+
+/**
  * Validates whether a value is a signed 32-bit integer fitting within a Rust i32 (-2_147_483_648..=2_147_483_647).
  */
 export function isI32(value: unknown): value is number {
@@ -69,7 +87,6 @@ export function isI32(value: unknown): value is number {
 
 /**
  * Validates whether a value is a valid signed Rational fraction with a positive denominator.
- * Used for timestamps like startTime which may be negative, zero, or positive.
  */
 export function isSignedRational(value: unknown): value is Rational {
   if (typeof value !== "object" || value === null) {
@@ -87,7 +104,7 @@ export function isSignedRational(value: unknown): value is Rational {
 
 /**
  * Validates whether a value is a strictly positive Rational fraction (n > 0 and d > 0).
- * Required for frame rates (avgFrameRate, rFrameRate) per ADR-002.
+ * Required for timebases and frame rates (avgFrameRate, rFrameRate) per ADR-002.
  */
 export function isPositiveRational(value: unknown): value is Rational {
   return isSignedRational(value) && value.n > 0;
@@ -95,7 +112,6 @@ export function isPositiveRational(value: unknown): value is Rational {
 
 /**
  * Validates whether a value is a non-negative Rational fraction (n >= 0 and d > 0).
- * Required for stream duration per ADR-002.
  */
 export function isNonNegativeRational(value: unknown): value is Rational {
   return isSignedRational(value) && value.n >= 0;
@@ -160,7 +176,7 @@ export function isAudioProbe(value: unknown): value is AudioProbe {
 }
 
 /**
- * Validates a MediaProbe object boundary representation.
+ * Validates a MediaProbe object boundary representation against source PTS contracts.
  */
 export function isMediaProbe(value: unknown): value is MediaProbe {
   if (typeof value !== "object" || value === null) {
@@ -192,30 +208,36 @@ export function isMediaProbe(value: unknown): value is MediaProbe {
   if (!isPositiveU32(p.width) || !isPositiveU32(p.height)) {
     return false;
   }
+  if (!isNonNegativeU32(p.videoStreamIndex)) {
+    return false;
+  }
+  if (!isPositiveRational(p.videoTimeBase)) {
+    return false;
+  }
+  if (p.videoStartPts !== null && !isPtsString(p.videoStartPts)) {
+    return false;
+  }
+  if (p.videoDurationTicks !== null && !isTickCountString(p.videoDurationTicks)) {
+    return false;
+  }
   if (
-    !isPositiveRational(p.avgFrameRate) ||
-    !isPositiveRational(p.rFrameRate) ||
-    !isSignedRational(p.startTime)
+    p.approximateDurationSeconds !== null &&
+    !isValidApproximateDuration(p.approximateDurationSeconds)
   ) {
     return false;
   }
-  if (p.duration !== null && !isNonNegativeRational(p.duration)) {
+  if (p.avgFrameRate !== null && !isPositiveRational(p.avgFrameRate)) {
     return false;
   }
-  if (
-    typeof p.frameCount !== "number" ||
-    !Number.isSafeInteger(p.frameCount) ||
-    p.frameCount < 0
-  ) {
+  if (p.rFrameRate !== null && !isPositiveRational(p.rFrameRate)) {
+    return false;
+  }
+  if (p.reportedFrameCount !== null && !isTickCountString(p.reportedFrameCount)) {
     return false;
   }
   if (p.audio !== null && !isAudioProbe(p.audio)) {
     return false;
   }
-  if (typeof p.isVfr !== "boolean") {
-    return false;
-  }
-
   return true;
 }
 
@@ -249,11 +271,28 @@ export function validateImportMediaResult(value: unknown): ImportMediaResult {
     );
   }
 
-  if (!isMediaProbe(r.probe)) {
+  if (typeof r.probe !== "object" || r.probe === null) {
     throw new TypeError(
       "Invalid media import result: probe payload is invalid or malformed",
     );
   }
 
-  return value as ImportMediaResult;
+  const rawProbe = r.probe as Record<string, unknown>;
+  const normalizedProbe = {
+    ...rawProbe,
+    approximateDurationSeconds: validateApproximateDuration(
+      rawProbe.approximateDurationSeconds,
+    ),
+  };
+
+  if (!isMediaProbe(normalizedProbe)) {
+    throw new TypeError(
+      "Invalid media import result: probe payload is invalid or malformed",
+    );
+  }
+
+  return {
+    ...(value as Omit<ImportMediaResult, "probe">),
+    probe: normalizedProbe,
+  };
 }

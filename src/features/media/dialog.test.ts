@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { openMediaFileDialog, VIDEO_FILE_EXTENSIONS } from "./dialog";
 import { ImportMediaError, type ImportMediaResult } from "./types";
+import type { Pts, TickCount } from "@/types/project";
 
 function createFakeMediaResult(fileName: string): ImportMediaResult {
   return {
@@ -17,13 +18,15 @@ function createFakeMediaResult(fileName: string): ImportMediaResult {
       bitDepth: 8,
       width: 1920,
       height: 1080,
+      videoStreamIndex: 0,
+      videoTimeBase: { n: 1, d: 90000 },
+      videoStartPts: "0" as Pts,
+      videoDurationTicks: "900000" as TickCount,
+      approximateDurationSeconds: 10,
       avgFrameRate: { n: 30, d: 1 },
       rFrameRate: { n: 30, d: 1 },
-      startTime: { n: 0, d: 1 },
-      duration: { n: 10, d: 1 },
-      frameCount: 300,
+      reportedFrameCount: "300" as TickCount,
       audio: null,
-      isVfr: false,
     },
   };
 }

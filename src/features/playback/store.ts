@@ -1,15 +1,22 @@
 /**
  * Playback store managing active media element attachment, readiness lifecycle,
- * synchronous playback, frame stepping, and seek error state.
+ * synchronous playback, PTS calibration, RVFC presentation, seekToPts, and nominal seek hints.
  *
- * Implements ADR-003 midpoint frame seek math and strict source-element concurrency guards.
+ * Implements ADR 002, ADR 003, and ADR 007 with strict source-element concurrency guards.
  */
 
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
-import { getMediaSourceIdentity } from "@/features/media";
-import { midpointSecondsAtFrame } from "@/lib/time";
+import { getSourceRevisionKey } from "@/features/media";
+import {
+  assertPositiveTimeBase,
+  isPtsString,
+  mediaTimeToPts,
+  ptsToMediaTime,
+} from "@/lib/time";
+import type { Pts, Rational } from "@/types/project";
 import type {
+  CalibrationStatus,
   PlaybackMediaElement,
   PlaybackSource,
   PlaybackState,
@@ -17,32 +24,37 @@ import type {
 } from "./types";
 
 /**
- * Clamps an integer or BigInt frame target to the valid frame range [0, frameCount - 1].
- * Uses BigInt internally to prevent floating-point overflow when target is near Number.MAX_SAFE_INTEGER.
- * If frameCount <= 0 or not a safe integer, returns 0.
+ * Chooses valid avgFrameRate then rFrameRate for nominal navigation hints.
+ * Returns null when neither frame rate is valid (ADR 003).
  */
-export function clampFrameIndex(target: number | bigint, frameCount: number): number {
-  if (!Number.isSafeInteger(frameCount) || frameCount <= 0) {
-    return 0;
+export function getNominalFrameRate(source: PlaybackSource): Rational | null {
+  if (
+    source.avgFrameRate &&
+    Number.isSafeInteger(source.avgFrameRate.n) &&
+    source.avgFrameRate.n > 0 &&
+    Number.isSafeInteger(source.avgFrameRate.d) &&
+    source.avgFrameRate.d > 0
+  ) {
+    return source.avgFrameRate;
   }
-
-  const maxFrameBig = BigInt(frameCount - 1);
-  const targetBig = typeof target === "bigint" ? target : BigInt(target);
-
-  if (targetBig < 0n) {
-    return 0;
+  if (
+    source.rFrameRate &&
+    Number.isSafeInteger(source.rFrameRate.n) &&
+    source.rFrameRate.n > 0 &&
+    Number.isSafeInteger(source.rFrameRate.d) &&
+    source.rFrameRate.d > 0
+  ) {
+    return source.rFrameRate;
   }
-  if (targetBig > maxFrameBig) {
-    return frameCount - 1;
-  }
-  return Number(targetBig);
+  return null;
 }
 
 /**
  * Factory function creating a vanilla Zustand store instance for playback state.
  *
- * The attached HTMLVideoElement/PlaybackMediaElement and active PlaybackSource are kept
- * strictly in the store factory closure to ensure that the public state remains fully serializable.
+ * The attached HTMLVideoElement/PlaybackMediaElement, active PlaybackSource, and calibration
+ * anchor are kept strictly in the store factory closure to ensure that the public state
+ * remains fully serializable.
  *
  * @param initialState Optional initial state overrides for testing.
  */
@@ -51,11 +63,17 @@ export function createPlaybackStore(
 ): StoreApi<PlaybackStoreState> {
   let attachedSource: PlaybackSource | null = null;
   let attachedElement: PlaybackMediaElement | null = null;
-  let activeSourceIdentity: string | null = null;
+  let activeSourceRevisionKey: string | null = null;
   let playSessionId = 0;
+  let calibratedMediaTime: number | null = null;
+  let lastPresentedMediaTime: number | null = null;
+  let lastInferredPts: Pts | null = null;
 
   return createStore<PlaybackStoreState>()((set, get) => ({
-    currentFrame: initialState?.currentFrame ?? 0,
+    presentedFrame: initialState?.presentedFrame ?? null,
+    calibrationStatus: initialState?.calibrationStatus ?? "unavailable",
+    runtimeBrowserDurationSeconds:
+      initialState?.runtimeBrowserDurationSeconds ?? null,
     isPlaying: initialState?.isPlaying ?? false,
     isAttached: initialState?.isAttached ?? false,
     isReady: initialState?.isReady ?? false,
@@ -73,27 +91,26 @@ export function createPlaybackStore(
         return;
       }
 
-      // 2. Validate source frameCount and timebase
-      if (
-        !Number.isSafeInteger(source.frameCount) ||
-        source.frameCount < 0 ||
-        !source.avgFrameRate ||
-        !Number.isSafeInteger(source.avgFrameRate.n) ||
-        source.avgFrameRate.n <= 0 ||
-        !Number.isSafeInteger(source.avgFrameRate.d) ||
-        source.avgFrameRate.d <= 0
-      ) {
-        return;
+      let hasValidTimeBase = true;
+      try {
+        assertPositiveTimeBase(source.videoTimeBase);
+      } catch {
+        hasValidTimeBase = false;
       }
 
-      const newIdentity = getMediaSourceIdentity(source);
+      const hasValidStartPts =
+        source.videoStartPts !== null && isPtsString(source.videoStartPts);
+      const initialCalibrationStatus: CalibrationStatus =
+        hasValidStartPts && hasValidTimeBase ? "calibrating" : "unavailable";
+
+      const newIdentity = getSourceRevisionKey(source);
       const isElementReady =
         typeof element.readyState === "number" &&
         (typeof HTMLMediaElement !== "undefined"
           ? element.readyState >= HTMLMediaElement.HAVE_METADATA
           : element.readyState >= 1);
 
-      if (attachedElement === element && activeSourceIdentity === newIdentity) {
+      if (attachedElement === element && activeSourceRevisionKey === newIdentity) {
         attachedSource = source;
         if (isElementReady && !get().isReady) {
           set({ isReady: true });
@@ -110,36 +127,31 @@ export function createPlaybackStore(
       }
 
       playSessionId++;
-      const isIdentityChanging = activeSourceIdentity !== newIdentity;
-      activeSourceIdentity = newIdentity;
+      activeSourceRevisionKey = newIdentity;
       attachedSource = source;
       attachedElement = element;
+      calibratedMediaTime = null;
+      lastPresentedMediaTime = null;
+      lastInferredPts = null;
 
-      if (isIdentityChanging) {
-        set({
-          currentFrame: 0,
-          isPlaying: false,
-          isAttached: true,
-          isReady: isElementReady,
-          error: null,
-        });
-      } else {
-        set({
-          isPlaying: false,
-          isAttached: true,
-          isReady: isElementReady,
-          error: null,
-        });
-      }
+      set({
+        presentedFrame: null,
+        calibrationStatus: initialCalibrationStatus,
+        runtimeBrowserDurationSeconds: null,
+        isPlaying: false,
+        isAttached: true,
+        isReady: isElementReady,
+        error: null,
+      });
     },
 
-    detach: (sourceIdentity: string, element: PlaybackMediaElement) => {
+    detach: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
       if (!attachedSource || !attachedElement || !element) {
         return;
       }
 
-      const currentIdentity = getMediaSourceIdentity(attachedSource);
-      if (sourceIdentity !== currentIdentity) {
+      const currentIdentity = getSourceRevisionKey(attachedSource);
+      if (sourceRevisionKey !== currentIdentity) {
         return;
       }
 
@@ -155,20 +167,27 @@ export function createPlaybackStore(
       }
       attachedSource = null;
       attachedElement = null;
+      activeSourceRevisionKey = null;
+      calibratedMediaTime = null;
+      lastPresentedMediaTime = null;
+      lastInferredPts = null;
 
       set({
+        presentedFrame: null,
+        calibrationStatus: "unavailable",
+        runtimeBrowserDurationSeconds: null,
         isPlaying: false,
         isAttached: false,
         isReady: false,
       });
     },
 
-    syncReady: (sourceIdentity: string, element: PlaybackMediaElement) => {
+    syncReady: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
       if (!attachedSource || !attachedElement) {
         return;
       }
 
-      if (getMediaSourceIdentity(attachedSource) !== sourceIdentity) {
+      if (getSourceRevisionKey(attachedSource) !== sourceRevisionKey) {
         return;
       }
 
@@ -179,12 +198,12 @@ export function createPlaybackStore(
       set({ isReady: true });
     },
 
-    syncUnready: (sourceIdentity: string, element: PlaybackMediaElement) => {
+    syncUnready: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
       if (!attachedSource || !attachedElement) {
         return;
       }
 
-      if (getMediaSourceIdentity(attachedSource) !== sourceIdentity) {
+      if (getSourceRevisionKey(attachedSource) !== sourceRevisionKey) {
         return;
       }
 
@@ -215,17 +234,12 @@ export function createPlaybackStore(
 
     play: () => {
       const state = get();
-      if (
-        !attachedSource ||
-        !attachedElement ||
-        !state.isReady ||
-        attachedSource.frameCount <= 0
-      ) {
+      if (!attachedSource || !attachedElement || !state.isReady) {
         return;
       }
 
       const currentSession = ++playSessionId;
-      const currentIdentity = getMediaSourceIdentity(attachedSource);
+      const currentIdentity = getSourceRevisionKey(attachedSource);
       const targetElement = attachedElement;
 
       // Optimistically update playing state and clear previous error
@@ -238,7 +252,7 @@ export function createPlaybackStore(
         if (
           playSessionId === currentSession &&
           attachedSource &&
-          getMediaSourceIdentity(attachedSource) === currentIdentity &&
+          getSourceRevisionKey(attachedSource) === currentIdentity &&
           attachedElement === targetElement &&
           get().isReady
         ) {
@@ -253,7 +267,7 @@ export function createPlaybackStore(
             if (
               playSessionId === currentSession &&
               attachedSource &&
-              getMediaSourceIdentity(attachedSource) === currentIdentity &&
+              getSourceRevisionKey(attachedSource) === currentIdentity &&
               attachedElement === targetElement &&
               get().isReady
             ) {
@@ -264,7 +278,7 @@ export function createPlaybackStore(
             if (
               playSessionId === currentSession &&
               attachedSource &&
-              getMediaSourceIdentity(attachedSource) === currentIdentity &&
+              getSourceRevisionKey(attachedSource) === currentIdentity &&
               attachedElement === targetElement &&
               get().isReady
             ) {
@@ -289,18 +303,52 @@ export function createPlaybackStore(
       set({ isPlaying: false });
     },
 
-    stepFrames: (delta: number) => {
-      if (typeof delta !== "number" || !Number.isSafeInteger(delta)) {
-        return;
-      }
-
+    seekToPts: (targetPts: Pts) => {
       const state = get();
       if (
         !attachedSource ||
         !attachedElement ||
         !state.isReady ||
-        attachedSource.frameCount <= 0
+        state.calibrationStatus !== "ready" ||
+        calibratedMediaTime === null ||
+        attachedSource.videoStartPts === null
       ) {
+        playSessionId++;
+        try {
+          attachedElement?.pause();
+        } catch {
+          // Ignore DOM exception
+        }
+        set({ isPlaying: false, error: "seekFailed" });
+        return;
+      }
+
+      if (!isPtsString(targetPts)) {
+        playSessionId++;
+        try {
+          attachedElement.pause();
+        } catch {
+          // Ignore DOM exception
+        }
+        set({ isPlaying: false, error: "seekFailed" });
+        return;
+      }
+
+      const targetMediaTime = ptsToMediaTime(
+        targetPts,
+        attachedSource.videoStartPts,
+        calibratedMediaTime,
+        attachedSource.videoTimeBase,
+      );
+
+      if (targetMediaTime === null) {
+        playSessionId++;
+        try {
+          attachedElement.pause();
+        } catch {
+          // Ignore DOM exception
+        }
+        set({ isPlaying: false, error: "seekFailed" });
         return;
       }
 
@@ -311,13 +359,8 @@ export function createPlaybackStore(
         // Ignore DOM exception
       }
 
-      const current = get().currentFrame;
-      const targetBig = BigInt(current) + BigInt(delta);
-      const target = clampFrameIndex(targetBig, attachedSource.frameCount);
-      const midpoint = midpointSecondsAtFrame(target, attachedSource.avgFrameRate);
-
       try {
-        attachedElement.currentTime = midpoint;
+        attachedElement.currentTime = targetMediaTime;
       } catch {
         set({
           isPlaying: false,
@@ -326,26 +369,58 @@ export function createPlaybackStore(
         return;
       }
 
+      // Do not update inferred PTS optimistically after assigning currentTime.
+      // Inferred PTS will update when RVFC fires for the newly presented frame.
       set({
-        currentFrame: target,
         isPlaying: false,
         error: null,
+        presentedFrame: null,
       });
     },
 
-    seekToFrame: (targetFrame: number) => {
-      if (typeof targetFrame !== "number" || !Number.isSafeInteger(targetFrame)) {
+    seekNominal: (deltaFrames: number) => {
+      if (
+        typeof deltaFrames !== "number" ||
+        !Number.isSafeInteger(deltaFrames) ||
+        deltaFrames === 0
+      ) {
         return;
       }
 
       const state = get();
+      if (!attachedSource || !attachedElement || !state.isReady) {
+        return;
+      }
+
+      const fps = getNominalFrameRate(attachedSource);
+      if (!fps) {
+        // Disabled when neither frame rate exists
+        return;
+      }
+
+      const deltaSeconds = (deltaFrames * fps.d) / fps.n;
+      if (!Number.isFinite(deltaSeconds)) {
+        return;
+      }
+
+      const currentBrowserTime = attachedElement.currentTime;
       if (
-        !attachedSource ||
-        !attachedElement ||
-        !state.isReady ||
-        attachedSource.frameCount <= 0
+        typeof currentBrowserTime !== "number" ||
+        !Number.isFinite(currentBrowserTime)
       ) {
         return;
+      }
+
+      let targetTime = currentBrowserTime + deltaSeconds;
+      if (targetTime < 0) {
+        targetTime = 0;
+      }
+      if (
+        typeof attachedSource.approximateDurationSeconds === "number" &&
+        Number.isFinite(attachedSource.approximateDurationSeconds) &&
+        attachedSource.approximateDurationSeconds > 0
+      ) {
+        targetTime = Math.min(targetTime, attachedSource.approximateDurationSeconds);
       }
 
       playSessionId++;
@@ -355,11 +430,8 @@ export function createPlaybackStore(
         // Ignore DOM exception
       }
 
-      const target = clampFrameIndex(targetFrame, attachedSource.frameCount);
-      const midpoint = midpointSecondsAtFrame(target, attachedSource.avgFrameRate);
-
       try {
-        attachedElement.currentTime = midpoint;
+        attachedElement.currentTime = targetTime;
       } catch {
         set({
           isPlaying: false,
@@ -368,23 +440,56 @@ export function createPlaybackStore(
         return;
       }
 
+      // Do not update inferred PTS optimistically after assigning currentTime.
       set({
-        currentFrame: target,
         isPlaying: false,
         error: null,
+        presentedFrame: null,
       });
     },
 
-    syncRenderedFrame: (
-      sourceIdentity: string,
-      frame: number,
+    seekApproximate: (seconds: number) => {
+      const state = get();
+      if (
+        !attachedElement ||
+        !state.isReady ||
+        typeof seconds !== "number" ||
+        !Number.isFinite(seconds) ||
+        seconds < 0
+      ) {
+        return;
+      }
+
+      let target = seconds;
+      if (state.runtimeBrowserDurationSeconds !== null) {
+        target = Math.min(target, state.runtimeBrowserDurationSeconds);
+      }
+      if (!Number.isFinite(target) || target < 0) {
+        return;
+      }
+
+      playSessionId++;
+      try {
+        attachedElement.pause();
+        attachedElement.currentTime = target;
+      } catch {
+        set({ isPlaying: false, error: "seekFailed", presentedFrame: null });
+        return;
+      }
+      set({ isPlaying: false, error: null, presentedFrame: null });
+    },
+
+    syncPresentedFrame: (
+      sourceRevisionKey: string,
+      mediaTime: number,
+      _presentedFrames: number | undefined,
       element: PlaybackMediaElement,
     ) => {
       if (!attachedSource || !attachedElement) {
         return;
       }
 
-      if (getMediaSourceIdentity(attachedSource) !== sourceIdentity) {
+      if (getSourceRevisionKey(attachedSource) !== sourceRevisionKey) {
         return;
       }
 
@@ -392,20 +497,130 @@ export function createPlaybackStore(
         return;
       }
 
-      if (typeof frame !== "number" || !Number.isSafeInteger(frame)) {
+      if (
+        typeof mediaTime !== "number" ||
+        !Number.isFinite(mediaTime) ||
+        mediaTime < 0
+      ) {
+        calibratedMediaTime = null;
+        lastPresentedMediaTime = null;
+        lastInferredPts = null;
+        set({ calibrationStatus: "unavailable", presentedFrame: null });
         return;
       }
 
-      const clamped = clampFrameIndex(frame, attachedSource.frameCount);
-      set({ currentFrame: clamped });
+      // If source does not have videoStartPts, precision is unavailable
+      if (
+        attachedSource.videoStartPts === null ||
+        !isPtsString(attachedSource.videoStartPts) ||
+        get().calibrationStatus === "unavailable"
+      ) {
+        set({ calibrationStatus: "unavailable", presentedFrame: null });
+        return;
+      }
+
+      const isFirstCallback = calibratedMediaTime === null;
+
+      if (isFirstCallback) {
+        // First presented frame establishes calibration anchor
+        calibratedMediaTime = mediaTime;
+        const initialPts = attachedSource.videoStartPts;
+        lastInferredPts = initialPts;
+        lastPresentedMediaTime = mediaTime;
+
+        set({
+          calibrationStatus: "ready",
+          presentedFrame: { mediaTime, inferredSourcePts: initialPts },
+        });
+        return;
+      }
+
+      // Subsequent frame presentation
+      if (get().calibrationStatus !== "ready") {
+        return;
+      }
+
+      const calibrationAnchor = calibratedMediaTime;
+      if (calibrationAnchor === null) {
+        set({ calibrationStatus: "unavailable", presentedFrame: null });
+        return;
+      }
+
+      const inferredPts = mediaTimeToPts(
+        mediaTime,
+        calibrationAnchor,
+        attachedSource.videoStartPts,
+        attachedSource.videoTimeBase,
+      );
+
+      if (inferredPts === null) {
+        set({ calibrationStatus: "unavailable", presentedFrame: null });
+        return;
+      }
+
+      // Detect duplicate inferred PTS on a distinct presented frame
+      const isDistinctPresentation =
+        lastPresentedMediaTime !== null && mediaTime !== lastPresentedMediaTime;
+
+      if (isDistinctPresentation && inferredPts === lastInferredPts) {
+        // Distinct RVFC presented frames inferred the same source PTS -> disable precision
+        set({ calibrationStatus: "unavailable", presentedFrame: null });
+        return;
+      }
+
+      lastPresentedMediaTime = mediaTime;
+      lastInferredPts = inferredPts;
+
+      set({
+        presentedFrame: { mediaTime, inferredSourcePts: inferredPts },
+      });
     },
 
-    syncPlay: (sourceIdentity: string, element: PlaybackMediaElement) => {
+    syncPresentationUnavailable: (
+      sourceRevisionKey: string,
+      element: PlaybackMediaElement,
+    ) => {
+      if (
+        !attachedSource ||
+        !attachedElement ||
+        attachedElement !== element ||
+        getSourceRevisionKey(attachedSource) !== sourceRevisionKey
+      ) {
+        return;
+      }
+
+      calibratedMediaTime = null;
+      lastPresentedMediaTime = null;
+      lastInferredPts = null;
+      set({ calibrationStatus: "unavailable", presentedFrame: null });
+    },
+
+    syncBrowserDuration: (
+      sourceRevisionKey: string,
+      element: PlaybackMediaElement,
+    ) => {
+      if (
+        !attachedSource ||
+        attachedElement !== element ||
+        getSourceRevisionKey(attachedSource) !== sourceRevisionKey
+      ) {
+        return;
+      }
+      const duration = element.duration;
+      set({
+        runtimeBrowserDurationSeconds:
+          typeof duration === "number" && Number.isFinite(duration) && duration >= 0
+            ? duration
+            : null,
+      });
+    },
+
+    syncPlay: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
       if (!attachedSource || !attachedElement) {
         return;
       }
 
-      if (getMediaSourceIdentity(attachedSource) !== sourceIdentity) {
+      if (getSourceRevisionKey(attachedSource) !== sourceRevisionKey) {
         return;
       }
 
@@ -420,12 +635,12 @@ export function createPlaybackStore(
       set({ isPlaying: true, error: null });
     },
 
-    syncPause: (sourceIdentity: string, element: PlaybackMediaElement) => {
+    syncPause: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
       if (!attachedSource || !attachedElement) {
         return;
       }
 
-      if (getMediaSourceIdentity(attachedSource) !== sourceIdentity) {
+      if (getSourceRevisionKey(attachedSource) !== sourceRevisionKey) {
         return;
       }
 
@@ -437,12 +652,12 @@ export function createPlaybackStore(
       set({ isPlaying: false });
     },
 
-    syncEnded: (sourceIdentity: string, element: PlaybackMediaElement) => {
+    syncEnded: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
       if (!attachedSource || !attachedElement) {
         return;
       }
 
-      if (getMediaSourceIdentity(attachedSource) !== sourceIdentity) {
+      if (getSourceRevisionKey(attachedSource) !== sourceRevisionKey) {
         return;
       }
 
@@ -465,10 +680,15 @@ export function createPlaybackStore(
       }
       attachedSource = null;
       attachedElement = null;
-      activeSourceIdentity = null;
+      activeSourceRevisionKey = null;
+      calibratedMediaTime = null;
+      lastPresentedMediaTime = null;
+      lastInferredPts = null;
 
       set({
-        currentFrame: 0,
+        presentedFrame: null,
+        calibrationStatus: "unavailable",
+        runtimeBrowserDurationSeconds: null,
         isPlaying: false,
         isAttached: false,
         isReady: false,

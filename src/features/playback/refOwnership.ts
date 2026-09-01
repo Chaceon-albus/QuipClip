@@ -5,7 +5,7 @@
  * passes that exact element to detach, and only clears videoRef.current if it still owns that element.
  */
 
-import { getMediaSourceIdentity } from "@/features/media";
+import { getSourceRevisionKey } from "@/features/media";
 import type { PlaybackMediaElement, PlaybackSource } from "./types";
 
 export interface VideoRefOwnershipOptions<
@@ -14,7 +14,7 @@ export interface VideoRefOwnershipOptions<
   videoRef: { current: TElement | null };
   getSource: () => PlaybackSource | null;
   attach: (source: PlaybackSource, element: TElement) => void;
-  detach: (sourceIdentity: string, element: TElement) => void;
+  detach: (sourceRevisionKey: string, element: TElement) => void;
 }
 
 /**
@@ -41,7 +41,7 @@ export function createVideoRefCallback<
       options.videoRef.current = node;
       const source = options.getSource();
       if (source) {
-        ownedIdentity = getMediaSourceIdentity(source);
+        ownedIdentity = getSourceRevisionKey(source);
         options.attach(source, node);
       } else {
         ownedIdentity = "";

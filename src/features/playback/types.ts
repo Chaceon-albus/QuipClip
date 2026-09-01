@@ -1,20 +1,25 @@
 /**
- * Types and interfaces for the playback store and frame-stepping engine.
+ * Types and interfaces for the playback store, PTS calibration, and RVFC presentation engine.
  *
  * See ADR 002, ADR 003, and ADR 007.
  */
 
-import type { Rational } from "@/types/project";
+import type { Pts, Rational, TickCount } from "@/types/project";
 
 /**
- * Minimal media descriptor required to model a playback source attachment.
+ * Timing and revision descriptor required to model a playback source attachment.
  */
 export interface PlaybackSource {
   readonly path: string;
   readonly size: number;
   readonly mtime: number;
-  readonly avgFrameRate: Rational;
-  readonly frameCount: number;
+  readonly videoTimeBase: Rational;
+  readonly videoStartPts: Pts | null;
+  readonly videoDurationTicks?: TickCount | null;
+  readonly approximateDurationSeconds?: number | null;
+  readonly avgFrameRate?: Rational | null;
+  readonly rFrameRate?: Rational | null;
+  readonly reportedFrameCount?: TickCount | null;
 }
 
 /**
@@ -25,7 +30,27 @@ export interface PlaybackMediaElement {
   play: () => Promise<void> | void;
   pause: () => void;
   currentTime: number;
+  duration?: number;
   readyState?: number;
+}
+
+/**
+ * Status of the first-presented-frame PTS calibration.
+ *
+ * - "calibrating": Awaiting first RVFC callback to associate with videoStartPts.
+ * - "ready": Calibrated linear mapping active; inferred source PTS available.
+ * - "unavailable": Missing RVFC, missing videoStartPts, invalid metadata, duplicate PTS, or unsafe calculation.
+ */
+export type CalibrationStatus = "calibrating" | "ready" | "unavailable";
+
+/**
+ * Frame presentation fact reported by requestVideoFrameCallback and inferred source PTS.
+ */
+export interface PresentedFrame {
+  /** mediaTime in seconds reported by requestVideoFrameCallback. */
+  readonly mediaTime: number;
+  /** Inferred presentation timestamp in source video stream time base. */
+  readonly inferredSourcePts: Pts;
 }
 
 /**
@@ -39,10 +64,19 @@ export type PlaybackErrorCode = (typeof PLAYBACK_ERROR_CODES)[number];
  * Serializable public state of the playback store.
  */
 export interface PlaybackState {
-  readonly currentFrame: number;
+  /** Last confirmed presented frame from RVFC with inferred source PTS, or null. */
+  readonly presentedFrame: PresentedFrame | null;
+  /** Calibration status of the active source. */
+  readonly calibrationStatus: CalibrationStatus;
+  /** Finite browser-reported duration used only for runtime layout and approximate seeking. */
+  readonly runtimeBrowserDurationSeconds: number | null;
+  /** True when video is currently playing. */
   readonly isPlaying: boolean;
+  /** True when a media element is attached. */
   readonly isAttached: boolean;
+  /** True when the attached element has loaded metadata (readyState >= HAVE_METADATA). */
   readonly isReady: boolean;
+  /** Local playback or seek error code, or null. */
   readonly error: PlaybackErrorCode | null;
 }
 
@@ -52,8 +86,7 @@ export interface PlaybackState {
 export interface PlaybackActions {
   /**
    * Attaches a media source and its corresponding DOM media element.
-   * Starts in an unready state (isReady: false) unless the element is already ready.
-   * Validates source frameCount and timebase before attaching.
+   * Prepares first-presented-frame calibration without using seekable.start(0).
    */
   attach: (source: PlaybackSource, element: PlaybackMediaElement) => void;
 
@@ -61,18 +94,18 @@ export interface PlaybackActions {
    * Detaches the media element for a matching source identity and element.
    * Guarded so a late detach from an old source or element does not detach a newer active source.
    */
-  detach: (sourceIdentity: string, element: PlaybackMediaElement) => void;
+  detach: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
    * Marks the media element ready once metadata has loaded for the matching source and element.
    */
-  syncReady: (sourceIdentity: string, element: PlaybackMediaElement) => void;
+  syncReady: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
    * Marks the media element unready on decode error or readiness loss.
    * Invalidates any pending play sessions.
    */
-  syncUnready: (sourceIdentity: string, element: PlaybackMediaElement) => void;
+  syncUnready: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
    * Toggles playback. Synchronously invokes video.play() to preserve user activation.
@@ -91,43 +124,62 @@ export interface PlaybackActions {
   pause: () => void;
 
   /**
-   * Steps playback forward or backward by a safe integer frame delta.
-   * Invalidates pending play sessions, pauses unconditionally, clamps target safely,
-   * sets currentTime to midpoint, updates currentFrame, and clears previous errors.
+   * Seeks to a target PTS in source video time base using checked inverse calibrated mapping.
+   * Does not update inferred PTS optimistically after setting currentTime; waits for RVFC.
    */
-  stepFrames: (delta: number) => void;
+  seekToPts: (targetPts: Pts) => void;
 
   /**
-   * Seeks directly to an absolute safe integer frame index.
-   * Invalidates pending play sessions, pauses unconditionally, clamps target safely,
-   * sets currentTime to midpoint, updates currentFrame, and clears previous errors.
+   * Seeks by a nominal frame delta hint using valid avgFrameRate then rFrameRate.
+   * Disabled when neither frame rate is valid.
    */
-  seekToFrame: (targetFrame: number) => void;
+  seekNominal: (deltaFrames: number) => void;
+
+  /** Requests a checked browser-time seek without creating a canonical edit position. */
+  seekApproximate: (seconds: number) => void;
 
   /**
-   * Synchronizes the confirmed painted frame from RVFC or fallback readback.
-   * Stale readbacks from non-matching source identities or mismatched elements are ignored.
+   * Synchronizes confirmed presented frame from requestVideoFrameCallback.
+   * On first frame, calibrates mediaTime to videoStartPts.
+   * On later frames, infers PTS via checked slope-one mapping.
+   * Detects duplicate inferred PTS for distinct presented frames and marks calibration unavailable.
    */
-  syncRenderedFrame: (
-    sourceIdentity: string,
-    frame: number,
+  syncPresentedFrame: (
+    sourceRevisionKey: string,
+    mediaTime: number,
+    presentedFrames: number | undefined,
+    element: PlaybackMediaElement,
+  ) => void;
+
+  /**
+   * Marks precise presentation mapping unavailable when RVFC is unsupported.
+   * Playback and approximate browser timing remain available.
+   */
+  syncPresentationUnavailable: (
+    sourceRevisionKey: string,
+    element: PlaybackMediaElement,
+  ) => void;
+
+  /** Reads and stores a finite non-negative browser duration for the matching source. */
+  syncBrowserDuration: (
+    sourceRevisionKey: string,
     element: PlaybackMediaElement,
   ) => void;
 
   /**
    * Synchronizes play state when the matching video element emits an onPlay event.
    */
-  syncPlay: (sourceIdentity: string, element: PlaybackMediaElement) => void;
+  syncPlay: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
    * Synchronizes pause state when the matching video element emits an onPause event.
    */
-  syncPause: (sourceIdentity: string, element: PlaybackMediaElement) => void;
+  syncPause: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
    * Synchronizes state when playback reaches the end of media (onEnded event).
    */
-  syncEnded: (sourceIdentity: string, element: PlaybackMediaElement) => void;
+  syncEnded: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
    * Resets playback state and detaches any active media source and element.

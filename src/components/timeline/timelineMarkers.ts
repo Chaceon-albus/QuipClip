@@ -1,22 +1,21 @@
 /**
  * Timeline ruler marker calculation and layout helpers.
  *
- * Generates an evenly spaced set of timecode markers from exact frame count and frame rate.
- * Spans source time [0, frameCount] where frameCount is the exclusive total source extent (ADR 002, ADR 007).
+ * Generates an evenly spaced set of source-relative timecode markers (HH:MM:SS.mmm) across the timeline duration.
+ * Spans source time [0, totalDurationSeconds] (ADR 002, ADR 003, ADR 007).
  */
 
-import { formatTimecode } from "@/lib/time";
-import type { Rational } from "@/types/project";
+import { formatMillisecondsTimecode } from "@/components/preview/previewFrame";
 
 export interface RulerMarker {
-  /** Frame index on the source frame grid. */
-  frame: number;
-  /** Formatted non-drop-frame timecode (HH:MM:SS:FF). */
+  /** Formatted source-relative timecode (HH:MM:SS.mmm). */
   timecode: string;
   /** Percentage offset along the ruler width (0..100). */
   percent: number;
   /** CSS left percentage string (e.g. "0%", "20%"). */
   left: string;
+  /** Elapsed seconds at this marker. */
+  seconds: number;
 }
 
 export interface GenerateRulerMarkersOptions {
@@ -57,42 +56,39 @@ export function sanitizeMarkerCount(markerCount?: number): number {
 }
 
 /**
- * Generates a small fixed set of evenly spaced ruler markers across source extent.
- * Guarantees arithmetic safety for large values up to Number.MAX_SAFE_INTEGER.
+ * Generates an evenly spaced set of source-relative timecode markers across the timeline duration.
+ * Returns empty array if duration is indeterminate, null, or non-positive.
  *
- * @param frameCount Total video stream frame count (exclusive upper bound).
- * @param avgFrameRate Average frame rate as a positive Rational fraction.
+ * @param totalDurationSeconds Total duration of the active source in seconds.
  * @param options Optional configuration including markerCount.
  */
 export function generateRulerMarkers(
-  frameCount: number,
-  avgFrameRate: Rational,
+  totalDurationSeconds: number | null | undefined,
   options: GenerateRulerMarkersOptions = {},
 ): RulerMarker[] {
-  const safeCount = sanitizeMarkerCount(options.markerCount);
-  const safeFrameCount =
-    Number.isSafeInteger(frameCount) && frameCount >= 0
-      ? frameCount
-      : typeof frameCount === "number" && !Number.isNaN(frameCount)
-        ? Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(frameCount)))
-        : 0;
+  if (
+    typeof totalDurationSeconds !== "number" ||
+    !Number.isFinite(totalDurationSeconds) ||
+    totalDurationSeconds <= 0
+  ) {
+    return [];
+  }
 
+  const safeCount = sanitizeMarkerCount(options.markerCount);
   const markers: RulerMarker[] = [];
 
   for (let i = 0; i < safeCount; i++) {
     const ratio = i / (safeCount - 1);
     const percent = ratio * 100;
-    const rawFrame = ratio * safeFrameCount;
-    const frame = Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.round(rawFrame)));
-    const timecode = formatTimecode(frame, avgFrameRate);
-
+    const seconds = ratio * totalDurationSeconds;
+    const timecode = formatMillisecondsTimecode(seconds);
     const left = percent === 0 ? "0%" : percent === 100 ? "100%" : `${percent}%`;
 
     markers.push({
-      frame,
       timecode,
       percent,
       left,
+      seconds,
     });
   }
 

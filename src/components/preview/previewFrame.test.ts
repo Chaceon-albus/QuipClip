@@ -1,159 +1,224 @@
 import { describe, expect, it } from "vitest";
+import type { Pts, Rational, TickCount } from "@/types/project";
 import {
-  calculateFrameFromCurrentTime,
-  calculateFrameFromMediaTime,
-  clampDisplayFrame,
   createSourceLifecycleGuard,
-  formatDisplayTimecode,
-  formatTotalTimecode,
+  formatApproximateTime,
+  formatMillisecondsTimecode,
+  formatPreviewCurrentTime,
+  formatPreviewTotalDuration,
+  formatSourceRelativeTime,
+  isPreviewTimeApproximate,
   SourceLifecycleController,
 } from "./previewFrame";
 
-describe("Preview Frame Helpers & ADR-003 Math", () => {
-  const fps30 = { n: 30, d: 1 };
-  const fps25 = { n: 25, d: 1 };
-  const fpsNtsc = { n: 30000, d: 1001 }; // ~29.97002997... fps
+describe("Preview Frame Helpers & ADR 003 Math", () => {
+  const tb25: Rational = { n: 1, d: 25 };
+  const tb30: Rational = { n: 1, d: 30 };
+  const tbNtsc: Rational = { n: 1001, d: 30000 };
+  const tb90k: Rational = { n: 1, d: 90000 };
 
-  describe("clampDisplayFrame", () => {
-    it("preserves valid frame indices within [0, frameCount - 1]", () => {
-      expect(clampDisplayFrame(0, 300)).toBe(0);
-      expect(clampDisplayFrame(150, 300)).toBe(150);
-      expect(clampDisplayFrame(299, 300)).toBe(299);
+  describe("formatMillisecondsTimecode", () => {
+    it("formats 0 seconds as 00:00:00.000", () => {
+      expect(formatMillisecondsTimecode(0)).toBe("00:00:00.000");
     });
 
-    it("clamps negative raw frame indices to 0", () => {
-      expect(clampDisplayFrame(-1, 300)).toBe(0);
-      expect(clampDisplayFrame(-100, 300)).toBe(0);
+    it("formats whole seconds and sub-second milliseconds accurately", () => {
+      expect(formatMillisecondsTimecode(1)).toBe("00:00:01.000");
+      expect(formatMillisecondsTimecode(1.234)).toBe("00:00:01.234");
+      expect(formatMillisecondsTimecode(1.005)).toBe("00:00:01.005");
+      expect(formatMillisecondsTimecode(59.999)).toBe("00:00:59.999");
     });
 
-    it("clamps upper bound to frameCount - 1", () => {
-      expect(clampDisplayFrame(300, 300)).toBe(299);
-      expect(clampDisplayFrame(500, 300)).toBe(299);
+    it("formats minutes and hours rollover correctly", () => {
+      expect(formatMillisecondsTimecode(60)).toBe("00:01:00.000");
+      expect(formatMillisecondsTimecode(3600)).toBe("01:00:00.000");
+      expect(formatMillisecondsTimecode(3661.5)).toBe("01:01:01.500");
+      expect(formatMillisecondsTimecode(3723.456)).toBe("01:02:03.456");
     });
 
-    it("clamps to 0 when frameCount is 0 or negative", () => {
-      expect(clampDisplayFrame(0, 0)).toBe(0);
-      expect(clampDisplayFrame(10, 0)).toBe(0);
-      expect(clampDisplayFrame(10, -50)).toBe(0);
-    });
-
-    it("handles non-integer floats by truncating and clamping safely", () => {
-      expect(clampDisplayFrame(10.7, 300)).toBe(10);
-      expect(clampDisplayFrame(-0.5, 300)).toBe(0);
-      expect(clampDisplayFrame(NaN, 300)).toBe(0);
-    });
-  });
-
-  describe("calculateFrameFromMediaTime (RVFC readback)", () => {
-    it("converts mediaTime accurately with zero startTime at 25 fps", () => {
-      const startTime = { n: 0, d: 1 };
-      const frameCount = 250;
-
-      // At 25 fps: 1.0s is frame 25
-      expect(calculateFrameFromMediaTime(1.0, startTime, fps25, frameCount)).toBe(25);
-      // 0.0s is frame 0
-      expect(calculateFrameFromMediaTime(0.0, startTime, fps25, frameCount)).toBe(0);
-      // 4.0s is frame 100
-      expect(calculateFrameFromMediaTime(4.0, startTime, fps25, frameCount)).toBe(100);
-    });
-
-    it("handles positive startTime offset correctly at 30 fps", () => {
-      // Stream starts at PTS = 1.0s (30 frames)
-      const startTime = { n: 1, d: 1 };
-      const frameCount = 300;
-
-      // mediaTime = 1.0s corresponds to relative offset 0s -> frame 0
-      expect(calculateFrameFromMediaTime(1.0, startTime, fps30, frameCount)).toBe(0);
-
-      // mediaTime = 2.0s corresponds to relative offset 1.0s -> frame 30
-      expect(calculateFrameFromMediaTime(2.0, startTime, fps30, frameCount)).toBe(30);
-
-      // mediaTime = 0.5s corresponds to relative offset -0.5s -> clamped to frame 0
-      expect(calculateFrameFromMediaTime(0.5, startTime, fps30, frameCount)).toBe(0);
-    });
-
-    it("handles negative startTime offset correctly at 25 fps", () => {
-      // Container has negative PTS start: startTime = -1.0s (-25 frames)
-      const startTime = { n: -1, d: 1 };
-      const frameCount = 250;
-
-      // mediaTime = -1.0s -> offset 0s -> frame 0
-      expect(calculateFrameFromMediaTime(-1.0, startTime, fps25, frameCount)).toBe(0);
-
-      // mediaTime = 0.0s -> offset +1.0s -> frame 25
-      expect(calculateFrameFromMediaTime(0.0, startTime, fps25, frameCount)).toBe(25);
-
-      // mediaTime = 1.0s -> offset +2.0s -> frame 50
-      expect(calculateFrameFromMediaTime(1.0, startTime, fps25, frameCount)).toBe(50);
-    });
-
-    it("handles fractional NTSC 30000/1001 fps with nonzero rational startTime", () => {
-      // startTime = 1001/30000 seconds (exact 1 frame PTS offset)
-      const startTime = { n: 1001, d: 30000 };
-      const frameCount = 300;
-
-      // mediaTime = 1001/30000s -> offset 0s -> frame 0
-      expect(
-        calculateFrameFromMediaTime(1001 / 30000, startTime, fpsNtsc, frameCount),
-      ).toBe(0);
-
-      // mediaTime = 31 * (1001/30000)s -> offset 30 frames -> frame 30
-      const mediaTime30Frames = (31 * 1001) / 30000;
-      expect(
-        calculateFrameFromMediaTime(mediaTime30Frames, startTime, fpsNtsc, frameCount),
-      ).toBe(30);
-    });
-
-    it("clamps display frame to [0, frameCount - 1] on exceeding mediaTime", () => {
-      const startTime = { n: 0, d: 1 };
-      const frameCount = 100;
-
-      // 10.0s at 25fps would be frame 250, but frameCount is 100 -> clamped to 99
-      expect(calculateFrameFromMediaTime(10.0, startTime, fps25, frameCount)).toBe(99);
+    it("handles invalid or non-finite inputs by returning 00:00:00.000", () => {
+      expect(formatMillisecondsTimecode(-1)).toBe("00:00:00.000");
+      expect(formatMillisecondsTimecode(NaN)).toBe("00:00:00.000");
+      expect(formatMillisecondsTimecode(Infinity)).toBe("00:00:00.000");
+      expect(formatMillisecondsTimecode(-Infinity)).toBe("00:00:00.000");
+      expect(formatMillisecondsTimecode(null as unknown as number)).toBe(
+        "00:00:00.000",
+      );
+      expect(formatMillisecondsTimecode(Number.MAX_VALUE)).toBe("00:00:00.000");
     });
   });
 
-  describe("calculateFrameFromCurrentTime (Fallback semantics)", () => {
-    it("converts video.currentTime accurately at 25 fps", () => {
-      const frameCount = 250;
-
-      expect(calculateFrameFromCurrentTime(0.0, fps25, frameCount)).toBe(0);
-      expect(calculateFrameFromCurrentTime(1.0, fps25, frameCount)).toBe(25);
-      expect(calculateFrameFromCurrentTime(2.5, fps25, frameCount)).toBe(62);
+  describe("formatSourceRelativeTime", () => {
+    it("formats zero elapsed time relative to videoStartPts as 00:00:00.000", () => {
+      expect(formatSourceRelativeTime("0" as Pts, "0" as Pts, tb25)).toBe(
+        "00:00:00.000",
+      );
+      expect(formatSourceRelativeTime("1000" as Pts, "1000" as Pts, tb25)).toBe(
+        "00:00:00.000",
+      );
     });
 
-    it("converts video.currentTime accurately for NTSC 30000/1001 fps", () => {
-      const frameCount = 300;
-
-      // 1001/30000s = frame 1
-      expect(calculateFrameFromCurrentTime(1001 / 30000, fpsNtsc, frameCount)).toBe(1);
-
-      // (30 * 1001) / 30000s = 1.001s = frame 30
-      expect(calculateFrameFromCurrentTime(1.001, fpsNtsc, frameCount)).toBe(30);
+    it("formats positive elapsed PTS with zero start PTS at 25 fps and 30 fps", () => {
+      // 25 ticks at 1/25 is exactly 1.000s
+      expect(formatSourceRelativeTime("25" as Pts, "0" as Pts, tb25)).toBe(
+        "00:00:01.000",
+      );
+      // 30 ticks at 1/30 is exactly 1.000s
+      expect(formatSourceRelativeTime("30" as Pts, "0" as Pts, tb30)).toBe(
+        "00:00:01.000",
+      );
+      // 50 ticks at 1/25 is exactly 2.000s
+      expect(formatSourceRelativeTime("50" as Pts, "0" as Pts, tb25)).toBe(
+        "00:00:02.000",
+      );
+      // 1 tick at 1/25 is 0.040s (40ms)
+      expect(formatSourceRelativeTime("1" as Pts, "0" as Pts, tb25)).toBe(
+        "00:00:00.040",
+      );
     });
 
-    it("clamps currentTime fallback to valid display range [0, frameCount - 1]", () => {
-      const frameCount = 100;
+    it("formats positive elapsed PTS with nonzero start PTS", () => {
+      const startPts = "5000" as Pts;
+      // Inferred PTS 5025 at 25fps -> delta 25 ticks -> 1.000s
+      expect(formatSourceRelativeTime("5025" as Pts, startPts, tb25)).toBe(
+        "00:00:01.000",
+      );
+      // Inferred PTS 5000 -> delta 0 ticks -> 0.000s
+      expect(formatSourceRelativeTime("5000" as Pts, startPts, tb25)).toBe(
+        "00:00:00.000",
+      );
+    });
 
-      expect(calculateFrameFromCurrentTime(-5.0, fps25, frameCount)).toBe(0);
-      expect(calculateFrameFromCurrentTime(100.0, fps25, frameCount)).toBe(99);
+    it("formats positive elapsed PTS with negative start PTS (ADR 002)", () => {
+      const startPts = "-50" as Pts;
+      // Inferred PTS -25 at 25fps -> delta (-25 - (-50)) = 25 ticks -> 1.000s
+      expect(formatSourceRelativeTime("-25" as Pts, startPts, tb25)).toBe(
+        "00:00:01.000",
+      );
+      // Inferred PTS 0 at 25fps -> delta (0 - (-50)) = 50 ticks -> 2.000s
+      expect(formatSourceRelativeTime("0" as Pts, startPts, tb25)).toBe("00:00:02.000");
+    });
+
+    it("formats high-frequency time base (1/90000) accurately", () => {
+      const startPts = "90000" as Pts;
+      // 90000 ticks delta = 1.000s
+      expect(formatSourceRelativeTime("180000" as Pts, startPts, tb90k)).toBe(
+        "00:00:01.000",
+      );
+      // 45000 ticks delta = 0.500s
+      expect(formatSourceRelativeTime("135000" as Pts, startPts, tb90k)).toBe(
+        "00:00:00.500",
+      );
+    });
+
+    it("formats fractional NTSC time base accurately", () => {
+      const startPts = "0" as Pts;
+      // 30000 ticks at 1001/30000 = 1001s = 16min 41s
+      expect(formatSourceRelativeTime("30000" as Pts, startPts, tbNtsc)).toBe(
+        "00:16:41.000",
+      );
+    });
+
+    it("formats negative elapsed time with leading minus sign", () => {
+      // Inferred PTS before start PTS
+      expect(formatSourceRelativeTime("0" as Pts, "25" as Pts, tb25)).toBe(
+        "-00:00:01.000",
+      );
+    });
+
+    it("handles malformed or invalid PTS strings gracefully", () => {
+      expect(formatSourceRelativeTime("invalid" as Pts, "0" as Pts, tb25)).toBe(
+        "00:00:00.000",
+      );
+      expect(formatSourceRelativeTime("0" as Pts, "invalid" as Pts, tb25)).toBe(
+        "00:00:00.000",
+      );
+      expect(formatSourceRelativeTime("+10" as Pts, "0" as Pts, tb25)).toBe(
+        "00:00:00.000",
+      );
     });
   });
 
-  describe("Timecode Formatting", () => {
-    it("formats display timecode from integer frame index", () => {
-      expect(formatDisplayTimecode(0, fps30)).toBe("00:00:00:00");
-      expect(formatDisplayTimecode(29, fps30)).toBe("00:00:00:29");
-      expect(formatDisplayTimecode(30, fps30)).toBe("00:00:01:00");
-      expect(formatDisplayTimecode(299, fps30)).toBe("00:00:09:29");
+  describe("formatApproximateTime", () => {
+    it("formats positive approximate seconds", () => {
+      expect(formatApproximateTime(0)).toBe("00:00:00.000");
+      expect(formatApproximateTime(5.123)).toBe("00:00:05.123");
+      expect(formatApproximateTime(65.5)).toBe("00:01:05.500");
     });
 
-    it("formats total timecode at exclusive frameCount (ADR 002, ADR 007)", () => {
-      // 300 frames total at 30 fps is exactly 10s: 00:00:10:00
-      expect(formatTotalTimecode(300, fps30)).toBe("00:00:10:00");
-      expect(formatTotalTimecode(250, fps25)).toBe("00:00:10:00");
-      expect(formatTotalTimecode(0, fps30)).toBe("00:00:00:00");
-      expect(formatTotalTimecode(-10, fps30)).toBe("00:00:00:00");
+    it("formats negative approximate seconds with minus sign", () => {
+      expect(formatApproximateTime(-1.5)).toBe("-00:00:01.500");
+    });
+
+    it("handles non-finite approximate seconds", () => {
+      expect(formatApproximateTime(NaN)).toBe("00:00:00.000");
+      expect(formatApproximateTime(Infinity)).toBe("00:00:00.000");
+    });
+  });
+
+  describe("formatPreviewTotalDuration", () => {
+    it("formats reported source extent when videoDurationTicks and videoTimeBase exist", () => {
+      const ticks = "250" as TickCount; // 250 ticks at 1/25 = 10.000s
+      expect(formatPreviewTotalDuration(null, ticks, tb25)).toBe("00:00:10.000");
+    });
+
+    it("falls back to approximateDurationSeconds when ticks are unavailable", () => {
+      expect(formatPreviewTotalDuration(12.345, null, null)).toBe("00:00:12.345");
+    });
+
+    it("returns 00:00:00.000 when both are unavailable or invalid", () => {
+      expect(formatPreviewTotalDuration(null, null, null)).toBe("00:00:00.000");
+      expect(formatPreviewTotalDuration(undefined, null, null)).toBe("00:00:00.000");
+    });
+  });
+
+  describe("formatPreviewCurrentTime", () => {
+    it("returns source-relative formatted time when calibrationStatus is ready", () => {
+      const presented = {
+        mediaTime: 1.0,
+        inferredSourcePts: "25" as Pts,
+      };
+      const result = formatPreviewCurrentTime(
+        presented,
+        "ready",
+        "0" as Pts,
+        tb25,
+        1.0,
+      );
+      expect(result).toBe("00:00:01.000");
+    });
+
+    it("returns approximate browser time when calibrationStatus is calibrating", () => {
+      const result = formatPreviewCurrentTime(
+        null,
+        "calibrating",
+        "0" as Pts,
+        tb25,
+        2.5,
+      );
+      expect(result).toBe("00:00:02.500");
+    });
+
+    it("returns approximate browser time when calibrationStatus is unavailable", () => {
+      const result = formatPreviewCurrentTime(null, "unavailable", null, tb25, 3.75);
+      expect(result).toBe("00:00:03.750");
+    });
+  });
+
+  describe("isPreviewTimeApproximate", () => {
+    const presented = {
+      mediaTime: 1,
+      inferredSourcePts: "25" as Pts,
+    };
+
+    it("identifies calibration and unavailable fallbacks", () => {
+      expect(isPreviewTimeApproximate("calibrating", null)).toBe(true);
+      expect(isPreviewTimeApproximate("unavailable", null)).toBe(true);
+    });
+
+    it("identifies a pending RVFC seek as browser fallback even while calibrated", () => {
+      expect(isPreviewTimeApproximate("ready", null)).toBe(true);
+      expect(isPreviewTimeApproximate("ready", presented)).toBe(false);
     });
   });
 
@@ -252,52 +317,6 @@ describe("Preview Frame Helpers & ADR-003 Math", () => {
       guard.activate(undefined);
       expect(guard.getActiveId()).toBe("");
       expect(guard.isActive(undefined)).toBe(false);
-    });
-
-    it("guards RVFC frame updates and decode error dispatch across simulated component lifecycle", () => {
-      const guard = createSourceLifecycleGuard(sourceA);
-
-      let currentFrame = 0;
-      let videoError = false;
-
-      const handleFrame = (sourceId: string, frame: number) => {
-        if (!guard.isActive(sourceId)) {
-          return false;
-        }
-        currentFrame = frame;
-        return true;
-      };
-
-      const handleError = (sourceId: string) => {
-        if (!guard.isActive(sourceId)) {
-          return false;
-        }
-        videoError = true;
-        return true;
-      };
-
-      // Frame 1 arrives from source A while source A is active -> accepted
-      expect(handleFrame(sourceA, 24)).toBe(true);
-      expect(currentFrame).toBe(24);
-
-      // Source B commits and layout effect activates source B
-      guard.activate(sourceB);
-
-      // Late RVFC callback from source A arrives after B commits -> rejected
-      expect(handleFrame(sourceA, 48)).toBe(false);
-      expect(currentFrame).toBe(24); // Untouched
-
-      // Late decode error event from source A arrives -> rejected
-      expect(handleError(sourceA)).toBe(false);
-      expect(videoError).toBe(false); // Untouched
-
-      // Frame arrives from newly active source B -> accepted
-      expect(handleFrame(sourceB, 10)).toBe(true);
-      expect(currentFrame).toBe(10);
-
-      // Decode error from source B -> accepted
-      expect(handleError(sourceB)).toBe(true);
-      expect(videoError).toBe(true);
     });
   });
 });
