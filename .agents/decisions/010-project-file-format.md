@@ -1,47 +1,30 @@
-# 010. Store a project as a versioned JSON file with the extension .qcproj
+# 010. Store source-PTS projects as version 1 JSON files
 
 - Status: Accepted
-- Date: 2026-08-29
+- Date: 2026-08-31
 - Deciders: capric98
 
 ## Context
 
-ADR 007 defines the edit model in memory. It does not say how that model reaches the disk.
-ADR 009 makes a change to the project schema a breaking change, so the schema must exist
-and must be identified.
+ADR 002 defines source PTS edit points. ADR 007 separates persisted source metadata from
+runtime playback state. The project file must preserve exact timestamps across Rust and
+TypeScript without storing machine-specific caches.
 
-Two questions need an answer before any code writes a file.
-
-1. **How does a project name its source files?** An absolute path breaks when the user
-   moves the project or opens it on the other operating system. A relative path breaks when
-   the source and the project live on different volumes.
-2. **How does an old file open in a new build?** Without a version field the application
-   must guess, and a wrong guess loses the user's work.
+QuipClip is not released. Backward compatibility with the old frame-grid version 1 schema
+is not required.
 
 ## Decision
 
-A project is one JSON file with the extension `.qcproj`. It is UTF-8, and it ends with a
-newline. It is written for a human to read in a diff.
-
-**Every file carries a `schemaVersion` integer.** The first version is 1. The application
-refuses to open a file whose `schemaVersion` is above the version it knows, and it says so.
-It migrates a lower version forward, and it writes the file back only when the user saves.
-
-**Source paths are stored twice.** Each source holds an absolute `path`, and a `relPath`
-relative to the directory of the project file when the two share a volume. On open, the
-application tries `relPath` first, then `path`. When neither resolves, it asks the user to
-locate the file, and it keeps the segment list, because the segments belong to the source
-identity and not to its location.
-
-**A source identity does not depend on its path.** Each source holds `size`, `mtime`, and
-the frame count from ffprobe. A file that resolves but does not match those is a different
-file, and the application warns before it opens the project.
+A project is a UTF-8 JSON file with the extension `.qcproj`. It ends with a newline. The
+schema version remains 1.
 
 ```jsonc
 {
   "schemaVersion": 1,
-  "timebase": { "n": 30000, "d": 1001 },
-  "resolution": { "w": 1920, "h": 1080 },
+  "renderSettings": {
+    "frameRate": { "n": 30000, "d": 1001 },
+    "resolution": { "w": 1920, "h": 1080 }
+  },
   "sources": [
     {
       "id": "s1",
@@ -49,28 +32,64 @@ file, and the application warns before it opens the project.
       "relPath": "clips/a.mp4",
       "size": 12345678,
       "mtime": 1787073674,
-      "timebase": { "n": 30000, "d": 1001 },
-      "frameCount": 10790
+      "videoStreamIndex": 0,
+      "videoTimeBase": { "n": 1, "d": 90000 },
+      "videoStartPts": "-1800",
+      "videoDurationTicks": "32370000",
+      "approximateDurationSeconds": 359.666667,
+      "avgFrameRate": { "n": 30000, "d": 1001 },
+      "rFrameRate": { "n": 30000, "d": 1001 },
+      "reportedFrameCount": null
     }
   ],
-  "segments": [{ "id": "g1", "sourceId": "s1", "inFrame": 120, "outFrame": 360 }],
+  "segments": [
+    { "id": "g1", "sourceId": "s1", "inPts": "9000", "outPts": "27000" }
+  ],
   "activeSourceId": "s1"
 }
 ```
 
-The file holds no ffprobe dump, no proxy path, and no capability result. Those are all
-caches, they belong in the application data directory, and they would make the project file
-machine-specific.
+`videoStartPts`, `inPts`, and `outPts` are canonical signed decimal strings.
+`videoDurationTicks` and `reportedFrameCount` are canonical non-negative decimal strings
+when they exist.
+
+The source keeps both `path` and `relPath`. The application creates `relPath` when the
+project and source share a volume. Project loading tries `relPath` first and then `path`.
+If neither path resolves, the application asks the user to locate the source. It retains
+the source's segments while the source is unavailable.
+
+The stable source `id` does not depend on either path. Size and modification time form
+source revision metadata. After a path resolves, QuipClip checks the media against that
+revision and warns when the file was replaced or modified. A stable source ID does not
+suppress this check.
+
+The file stores only `PersistedSource` fields. Before serialization, the frontend maps
+each runtime `Source` through `toPersistedSource`. That function constructs a new object
+and lists each persisted field. It must not use an object spread. Rust rejects unknown
+fields as a second defense.
+
+The file does not store proxy paths, proxy status, object URLs, browser duration,
+calibration state, capability results, a project time base, or output timeline positions.
+
+The application validates source references, unique IDs, time bases, decimal timestamp
+strings, and half-open segment ranges. `activeSourceId` must reference a persisted source.
+A segment source must have a positive `videoTimeBase` and a non-null `videoStartPts`.
+`videoDurationTicks` and `approximateDurationSeconds` can be null and are not segment
+prerequisites.
+
+The application does not detect the old frame-grid version 1 shape specially. Such a file
+fails normal JSON structure validation. The application provides no migration, adapter,
+or alternate parser.
 
 Write the file to a temporary name in the same directory, then rename. A crash then leaves
 either the old file or the new file, and never a half-written one.
 
 ## Consequences
 
-- A project opens after the user moves the whole folder, because `relPath` resolves.
-- A project opens on the other operating system when the sources travel with it.
-- The application must carry a migration for every schema version it has ever written.
-  Version 1 needs none, and the code path must exist from the start anyway.
-- A change to this schema needs `BREAKING CHANGE:` in the commit footer, and a bump of
-  `schemaVersion`.
-- The times in this file are rationals in the `{n, d}` wire shape from ADR 002.
+- Rust and TypeScript preserve the full signed `i64` PTS range.
+- Project files remain independent of runtime proxy and browser state.
+- Old frame-grid project files do not load.
+- A schema change still needs a `BREAKING CHANGE:` commit footer, even though the version
+  number remains 1 for this unreleased replacement.
+- Future released schema changes must use a new version and a deliberate compatibility
+  policy.
