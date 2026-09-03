@@ -67,6 +67,17 @@ no shell, so this rule stops an argument, not a shell command.
 `quality.kind` is `crf`, `bitrate`, or `qualityScale`. `bitrate` counts kilobits per second.
 Each kind holds its own range.
 
+**Limits.** The document holds at most 100 presets. A preset name holds at most 120
+characters. A custom resolution holds 1 to 16384 in each dimension. Each quality kind holds
+its own range: `crf` from 0 to 63, `bitrate` from 1 to 200000, and `qualityScale` from 1 to
+100.
+
+These bounds stop a fault in the interface from writing a document that the application
+cannot use, and they give the interface one rule to check before it sends. The `crf` range
+covers the widest of the encoders, because `libsvtav1` accepts 0 to 63 where `libx264`
+accepts 0 to 51. The application does not narrow the range per encoder, because a preset can
+name an encoder that this machine does not have.
+
 `resolution` is the word `source` or an object of `w` and `h`. `frameRate` is the word
 `source` or a rational of `n` and `d`. Each reader accepts the word or the object and
 nothing else. A reader that accepted any shape would report "no variant matched" and would
