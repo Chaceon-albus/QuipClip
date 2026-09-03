@@ -30,6 +30,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// The largest number of stderr bytes [`run_with_timeout`] retains from a smoke test.
 const STDERR_CAPTURE_LIMIT: usize = 8 * 1024;
 
+/// The largest number of stderr-tail bytes [`run_smoke_report`] keeps in a [`SmokeReport`]'s
+/// `detail` field.
+const SMOKE_DETAIL_LIMIT: usize = 512;
+
 /// One lock for the whole application's smoke-test phase.
 ///
 /// ADR 006 requires that the smoke tests run one after another, never two at once: two
@@ -268,12 +272,30 @@ fn read_capped(mut reader: impl Read, cap: usize) -> Vec<u8> {
     captured
 }
 
-/// Run the ADR 006 smoke test for one encoder and classify the outcome.
+/// The outcome of one smoke test, together with the diagnostic detail a failure leaves
+/// behind.
+///
+/// [`run_smoke_report`] always fills `exit_code` and `detail` from the process it ran,
+/// regardless of `status`: deciding which status keeps them and which discards them on the
+/// wire is the orchestrator's job, not this module's. See
+/// [`EncoderResult`](super::EncoderResult)'s own field docs for that wire-level rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmokeReport {
+    /// The classified outcome, exactly as [`classify`] would produce it.
+    pub status: EncoderStatus,
+    /// The process's exit code, when it ran to completion before the deadline.
+    pub exit_code: Option<i32>,
+    /// Up to [`SMOKE_DETAIL_LIMIT`] bytes of the process's stderr tail, when it produced any.
+    pub detail: Option<String>,
+}
+
+/// Run the ADR 006 smoke test for one encoder and report the outcome together with its exit
+/// code and a stderr tail.
 ///
 /// Acquires [`SMOKE_LOCK`] for the duration of the test. A poisoned lock is recovered
 /// rather than propagated as a panic: a panicking test thread must not permanently disable
 /// capability probing for the rest of the application's lifetime.
-pub fn run_smoke_test(ffmpeg: &Path, encoder: &str, kind: CodecKind) -> io::Result<EncoderStatus> {
+pub fn run_smoke_report(ffmpeg: &Path, encoder: &str, kind: CodecKind) -> io::Result<SmokeReport> {
     let _guard = SMOKE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -284,7 +306,25 @@ pub fn run_smoke_test(ffmpeg: &Path, encoder: &str, kind: CodecKind) -> io::Resu
         )
     })?;
     let outcome = run_with_timeout(ffmpeg, &arguments, SMOKE_TIMEOUT, POLL_INTERVAL)?;
-    Ok(classify(&outcome))
+    let status = classify(&outcome);
+    let exit_code = match outcome.status {
+        CommandStatus::Exited { code, .. } => code,
+        CommandStatus::TimedOut => None,
+    };
+    let detail = stderr_tail(&outcome.stderr, SMOKE_DETAIL_LIMIT);
+    Ok(SmokeReport {
+        status,
+        exit_code,
+        detail,
+    })
+}
+
+/// Run the ADR 006 smoke test for one encoder and classify the outcome.
+///
+/// A thin wrapper over [`run_smoke_report`] for a caller that only needs the classified
+/// status, such as this module's own tests.
+pub fn run_smoke_test(ffmpeg: &Path, encoder: &str, kind: CodecKind) -> io::Result<EncoderStatus> {
+    run_smoke_report(ffmpeg, encoder, kind).map(|report| report.status)
 }
 
 #[cfg(test)]
@@ -527,6 +567,21 @@ mod tests {
             result.is_ok(),
             "run_smoke_test should recover the poisoned lock, got {result:?}"
         );
+    }
+
+    #[test]
+    fn run_smoke_report_captures_the_exit_code_and_stderr_tail_for_a_failing_process() {
+        // Same stand-in as `a_nonzero_exit_classifies_as_failed`: the current test binary
+        // spawns and exits non-zero on an argument it does not recognize, with no
+        // dependency on ffmpeg being installed.
+        let program = std::env::current_exe().expect("the test binary has a path");
+
+        let report = run_smoke_report(&program, "--this-flag-does-not-exist", CodecKind::Video)
+            .expect("the test binary should spawn and exit quickly");
+
+        assert_eq!(report.status, EncoderStatus::Failed);
+        assert!(report.exit_code.is_some());
+        assert!(report.detail.is_some());
     }
 
     #[test]

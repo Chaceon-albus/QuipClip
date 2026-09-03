@@ -1,5 +1,6 @@
 //! Discovery of a user-owned ffmpeg and ffprobe executable pair.
 
+use serde::Serialize;
 use std::collections::HashSet;
 use std::env;
 use std::error::Error;
@@ -18,7 +19,12 @@ const FFPROBE_NAME: &str = "ffprobe.exe";
 const FFPROBE_NAME: &str = "ffprobe";
 
 /// The location class that supplied a complete executable pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// This crosses the IPC boundary as part of the ADR 006 capability-probe wire contract
+/// (`CapabilityProbeStart`, the `located` event, and each `InspectedLocation`), so it derives
+/// `Serialize` with the same camelCase convention as every other wire enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ExecutableOrigin {
     Configured,
     Path,
@@ -34,6 +40,14 @@ pub struct FfmpegPaths {
 }
 
 /// One candidate pair inspected during discovery.
+///
+/// This deliberately does NOT derive `Serialize`. `PathBuf` serializes as a plain string
+/// only when it is valid UTF-8; a single non-UTF-8 `PATH` entry (an unpaired surrogate from
+/// Windows, for example) would make `serde_json` fail the *entire* `inspected` vector, not
+/// just that one candidate, turning a clean `ffmpegPairMissing` rejection into an opaque
+/// Tauri serialization error. `commands::capabilities::InspectedCandidate` is the wire type
+/// instead: it down-converts each path with `to_string_lossy` before it ever reaches serde,
+/// so one bad candidate can never take down the others.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectedLocation {
     pub ffmpeg: PathBuf,
