@@ -14,7 +14,11 @@ pub fn run() {
             commands::capabilities::start_capability_probe,
             commands::media::import_media,
             commands::project::load_project,
-            commands::project::save_project
+            commands::project::save_project,
+            commands::settings::load_settings,
+            commands::settings::save_settings,
+            commands::settings::restore_default_presets,
+            commands::settings::reset_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

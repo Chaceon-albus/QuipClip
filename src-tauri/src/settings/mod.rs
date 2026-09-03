@@ -551,6 +551,14 @@ pub enum SettingsFileError {
     /// [`save`] refused to write because the file that already exists at the destination
     /// could not be read back. The bytes on disk are left exactly as they were.
     Unreadable,
+    /// [`reset`] failed to rename the existing settings file to [`INVALID_SETTINGS_FILE_NAME`]
+    /// before writing fresh seeds, for a reason other than the file being absent.
+    ///
+    /// This is kept separate from [`Self::Io`] so that `commands::settings::map_reset_error`
+    /// can report a rename failure as `backupFailed` while every other I/O failure `reset` can
+    /// raise -- inside the `save_locked` call that follows a successful rename -- goes through
+    /// the same `permissionDenied`/`readFailed`/`writeFailed` mapping every other command uses.
+    Backup(io::Error),
 }
 
 impl fmt::Display for SettingsFileError {
@@ -567,6 +575,7 @@ impl fmt::Display for SettingsFileError {
                 formatter,
                 "the existing settings file could not be read; refusing to overwrite it"
             ),
+            Self::Backup(error) => write!(formatter, "settings backup failed: {error}"),
         }
     }
 }
@@ -578,6 +587,7 @@ impl Error for SettingsFileError {
             Self::Json(error) => Some(error),
             Self::Validation(error) => Some(error),
             Self::FutureSchemaVersion { .. } | Self::Unreadable => None,
+            Self::Backup(error) => Some(error),
         }
     }
 }
@@ -794,7 +804,7 @@ pub fn reset(app_data_directory: &Path) -> Result<Settings, SettingsFileError> {
     match fs::rename(&path, &backup_path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(SettingsFileError::Io(error)),
+        Err(error) => return Err(SettingsFileError::Backup(error)),
     }
 
     let settings = defaults::seeded_settings();
@@ -1875,7 +1885,7 @@ mod tests {
         fs::write(backup_path.join("occupied"), b"x").unwrap();
 
         let error = reset(&directory.path).unwrap_err();
-        assert!(matches!(error, SettingsFileError::Io(_)));
+        assert!(matches!(error, SettingsFileError::Backup(_)));
         assert_eq!(fs::read(&path).unwrap(), original_bytes);
     }
 
@@ -1948,6 +1958,9 @@ mod tests {
         assert!(SettingsFileError::Unreadable
             .to_string()
             .contains("could not be read"));
+
+        let backup_error = SettingsFileError::Backup(io::Error::other("boom"));
+        assert!(backup_error.to_string().contains("backup failed"));
     }
 
     // -- Composition with real ffmpeg discovery. --
