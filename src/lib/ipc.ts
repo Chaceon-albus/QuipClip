@@ -6,15 +6,26 @@
  */
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen } from "@tauri-apps/api/event";
 
 /**
  * Stable backend Tauri command names implemented in Rust.
  */
 export const BACKEND_COMMANDS = {
   IMPORT_MEDIA: "import_media",
+  START_CAPABILITY_PROBE: "start_capability_probe",
 } as const;
 
 export type BackendCommand = (typeof BACKEND_COMMANDS)[keyof typeof BACKEND_COMMANDS];
+
+/**
+ * Stable backend Tauri event names emitted from Rust.
+ */
+export const BACKEND_EVENTS = {
+  CAPABILITY_PROBE: "ffmpeg:capability-probe",
+} as const;
+
+export type BackendEvent = (typeof BACKEND_EVENTS)[keyof typeof BACKEND_EVENTS];
 
 /**
  * Signature for Tauri invoke-compatible functions.
@@ -35,4 +46,33 @@ export async function invokeCommand<T>(
   invokeFn: InvokeFn = tauriInvoke,
 ): Promise<T> {
   return await invokeFn<T>(cmd, args);
+}
+
+/**
+ * Function type returned by Tauri event listeners to unsubscribe.
+ */
+export type UnlistenFn = () => void;
+
+/**
+ * Signature for Tauri listen-compatible functions.
+ */
+export type ListenFn = <T>(
+  event: string,
+  handler: (event: { payload: T }) => void,
+) => Promise<UnlistenFn>;
+
+/**
+ * Type-safe event listener wrapper around `@tauri-apps/api/event` listen.
+ *
+ * @param event The typed backend event identifier to subscribe to.
+ * @param handler Callback receiving the unwrapped payload when the event fires.
+ * @param listenFn Optional custom listen implementation (defaults to Tauri event listen).
+ * @returns Promise resolving to an unlisten function.
+ */
+export async function listenEvent<T>(
+  event: BackendEvent,
+  handler: (payload: T) => void,
+  listenFn: ListenFn = tauriListen,
+): Promise<UnlistenFn> {
+  return await listenFn<T>(event, (eventObj) => handler(eventObj.payload));
 }
