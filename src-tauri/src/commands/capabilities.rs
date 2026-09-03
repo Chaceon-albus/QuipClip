@@ -23,6 +23,7 @@ use crate::ffmpeg::capabilities::{
 // that returns it. The wire shape (`"probe"` / `"cache"`) is unchanged either way.
 pub use crate::ffmpeg::capabilities::CapabilityProbeSource;
 use crate::ffmpeg::{self, ExecutableOrigin, FfmpegPaths, InspectedLocation, LocateError};
+use crate::settings;
 use serde::Serialize;
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -180,7 +181,7 @@ pub async fn start_capability_probe(
 
     let discovery_app_data_directory = app_data_directory.clone();
     let paths = tauri::async_runtime::spawn_blocking(move || {
-        ffmpeg::discover(None, &discovery_app_data_directory)
+        discover_for_probe(&discovery_app_data_directory)
     })
     .await
     .map_err(|_| CapabilityProbeError::new(CapabilityProbeErrorCode::CommandExecutionFailed))?
@@ -197,6 +198,19 @@ pub async fn start_capability_probe(
     spawn_probe_worker(app, run_id, paths, app_data_directory, force);
 
     Ok(start)
+}
+
+/// Resolve the ffmpeg executable pair `start_capability_probe` reports to the frontend: the
+/// configured path from settings, if any, ahead of `PATH` and the application data directory
+/// per ADR 005's resolution order.
+///
+/// This is a named function, not two lines inlined into the `spawn_blocking` closure, so the
+/// composition it performs -- reading `settings::configured_ffmpeg_path` and feeding it into
+/// `ffmpeg::discover` -- has a call site a test can exercise directly, rather than only through
+/// `settings::mod`'s own composition test of the two functions in isolation.
+fn discover_for_probe(app_data_directory: &Path) -> Result<FfmpegPaths, LocateError> {
+    let configured = settings::configured_ffmpeg_path(app_data_directory);
+    ffmpeg::discover(configured.as_deref(), app_data_directory)
 }
 
 /// Start the background worker that runs one capability probe and reports it through
@@ -768,5 +782,77 @@ mod tests {
             .as_str()
             .unwrap()
             .contains('\u{FFFD}'));
+    }
+
+    // Fake executable names, following the same platform `cfg` split `ffmpeg::locate` and
+    // `settings::mod`'s own composition test use for their private `FFMPEG_NAME`/
+    // `FFPROBE_NAME` equivalents.
+    #[cfg(windows)]
+    const FAKE_FFMPEG_NAME: &str = "ffmpeg.exe";
+    #[cfg(not(windows))]
+    const FAKE_FFMPEG_NAME: &str = "ffmpeg";
+    #[cfg(windows)]
+    const FAKE_FFPROBE_NAME: &str = "ffprobe.exe";
+    #[cfg(not(windows))]
+    const FAKE_FFPROBE_NAME: &str = "ffprobe";
+
+    /// Create a fake executable file: a plain file on Windows, a file with the execute
+    /// permission bit set on Unix, mirroring `settings::mod`'s own
+    /// `create_fake_executable` test helper. The file never runs; discovery only checks that
+    /// it exists and, on Unix, that it is executable.
+    fn create_fake_executable(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::File::create(path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn discover_for_probe_resolves_the_configured_path_written_to_settings() {
+        let base = std::env::temp_dir().join(format!(
+            "quipclip-discover-for-probe-{}-{}",
+            std::process::id(),
+            next_run_id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // A fake ffmpeg/ffprobe pair the configured path will point at. This proves the real
+        // call site `start_capability_probe` uses -- `discover_for_probe`, wired to the real
+        // `ffmpeg::discover` -- actually reaches a configured entry, with no injected `PATH`
+        // and no real ffmpeg required: `discover_with_path` pushes the configured candidate
+        // first, and the first accepted candidate wins regardless of what else is on `PATH`.
+        let configured = base.join("configured");
+        std::fs::create_dir_all(&configured).unwrap();
+        create_fake_executable(&configured.join(FAKE_FFMPEG_NAME));
+        create_fake_executable(&configured.join(FAKE_FFPROBE_NAME));
+
+        let app_data = base.join("app-data");
+        let settings = crate::settings::Settings {
+            schema_version: crate::settings::CURRENT_SCHEMA_VERSION,
+            ffmpeg_path: Some(configured.to_string_lossy().into_owned()),
+            presets: vec![],
+            active_preset_id: None,
+        };
+        crate::settings::save(&app_data, &settings).unwrap();
+
+        let found = discover_for_probe(&app_data).unwrap();
+
+        assert_eq!(found.origin, ExecutableOrigin::Configured);
+        assert_eq!(
+            found.ffmpeg,
+            configured.join(FAKE_FFMPEG_NAME).canonicalize().unwrap()
+        );
+        assert_eq!(
+            found.ffprobe,
+            configured.join(FAKE_FFPROBE_NAME).canonicalize().unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

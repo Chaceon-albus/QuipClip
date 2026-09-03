@@ -1949,4 +1949,95 @@ mod tests {
             .to_string()
             .contains("could not be read"));
     }
+
+    // -- Composition with real ffmpeg discovery. --
+    //
+    // `commands::capabilities::start_capability_probe` wires `configured_ffmpeg_path` into
+    // `ffmpeg::discover`, through the named `commands::capabilities::discover_for_probe`,
+    // which that module tests directly against a real settings file. This test instead covers
+    // the composition itself, from this side: a real settings file on disk, read by the real
+    // `configured_ffmpeg_path`, feeding the real `ffmpeg::discover_with_path` with an empty
+    // `PATH` slice, so nothing but the configured entry can satisfy the lookup.
+    // `discover_with_path`, not `discover`, is what this test calls: `discover` unconditionally
+    // appends `/opt/homebrew/bin` and `/usr/local/bin` on macOS, which would let a real
+    // Homebrew ffmpeg on this machine satisfy the lookup instead of the configured entry
+    // actually being exercised.
+
+    // Fake executable names, following the same platform `cfg` split as the private
+    // `FFMPEG_NAME`/`FFPROBE_NAME` constants in `ffmpeg::locate`, which this module cannot
+    // reach directly because they are private to that module.
+    #[cfg(windows)]
+    const FAKE_FFMPEG_NAME: &str = "ffmpeg.exe";
+    #[cfg(not(windows))]
+    const FAKE_FFMPEG_NAME: &str = "ffmpeg";
+    #[cfg(windows)]
+    const FAKE_FFPROBE_NAME: &str = "ffprobe.exe";
+    #[cfg(not(windows))]
+    const FAKE_FFPROBE_NAME: &str = "ffprobe";
+
+    /// Create a fake executable file: a plain file on Windows, a file with the execute
+    /// permission bit set on Unix, mirroring `ffmpeg::locate`'s own test helpers. The file
+    /// never runs; discovery only checks that it exists and, on Unix, that it is executable.
+    fn create_fake_executable(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::File::create(path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_configured_path_written_to_settings_is_what_discovery_receives() {
+        let directory = TestDirectory::new();
+
+        // A fake ffmpeg/ffprobe pair the configured path will point at. Discovery must find
+        // this pair through `configured_ffmpeg_path`, with an empty PATH slice so nothing but
+        // the configured entry can satisfy the lookup.
+        let configured = directory.path.join("configured");
+        fs::create_dir_all(&configured).unwrap();
+        create_fake_executable(&configured.join(FAKE_FFMPEG_NAME));
+        create_fake_executable(&configured.join(FAKE_FFPROBE_NAME));
+
+        let app_data = directory.path.join("app-data");
+        let mut settings = sample_settings(vec![]);
+        settings.ffmpeg_path = Some(configured.to_string_lossy().into_owned());
+        save(&app_data, &settings).unwrap();
+
+        let resolved = configured_ffmpeg_path(&app_data);
+        assert_eq!(resolved.as_deref(), Some(configured.as_path()));
+
+        let found = crate::ffmpeg::discover_with_path(resolved.as_deref(), &[], &app_data).unwrap();
+        assert_eq!(found.origin, crate::ffmpeg::ExecutableOrigin::Configured);
+        assert_eq!(
+            found.ffmpeg,
+            configured.join(FAKE_FFMPEG_NAME).canonicalize().unwrap()
+        );
+        assert_eq!(
+            found.ffprobe,
+            configured.join(FAKE_FFPROBE_NAME).canonicalize().unwrap()
+        );
+
+        // Negative half: a configured directory holding no pair, still with an empty PATH
+        // slice, must genuinely fail to resolve. This rules out the app-data fallback, or an
+        // empty PATH being treated as "no restriction", quietly satisfying the lookup instead
+        // of the configured entry actually being consulted.
+        let empty_configured = directory.path.join("configured-empty");
+        fs::create_dir_all(&empty_configured).unwrap();
+        let mut empty_settings = sample_settings(vec![]);
+        empty_settings.ffmpeg_path = Some(empty_configured.to_string_lossy().into_owned());
+        let empty_app_data = directory.path.join("app-data-empty");
+        save(&empty_app_data, &empty_settings).unwrap();
+
+        let empty_resolved = configured_ffmpeg_path(&empty_app_data);
+        assert_eq!(empty_resolved.as_deref(), Some(empty_configured.as_path()));
+
+        let error =
+            crate::ffmpeg::discover_with_path(empty_resolved.as_deref(), &[], &empty_app_data)
+                .unwrap_err();
+        assert!(matches!(error, crate::ffmpeg::LocateError::NotFound { .. }));
+    }
 }

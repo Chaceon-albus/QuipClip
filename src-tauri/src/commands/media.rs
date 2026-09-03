@@ -1,6 +1,7 @@
 //! Media import validation and probing.
 
 use crate::ffmpeg::{self, FfmpegPaths, MediaProbe, ProbeError};
+use crate::settings;
 use serde::Serialize;
 use std::fs;
 use std::io;
@@ -93,6 +94,7 @@ pub async fn import_media(
         import_media_with(
             &path,
             &app_data_directory,
+            settings::configured_ffmpeg_path,
             ffmpeg::discover,
             ffmpeg::probe_media,
             |media_path| {
@@ -106,20 +108,23 @@ pub async fn import_media(
     .map_err(|_| generated_error(ImportMediaErrorCode::CommandExecutionFailed))?
 }
 
-fn import_media_with<Discover, Probe, Allow>(
+fn import_media_with<ConfiguredPath, Discover, Probe, Allow>(
     path: &str,
     app_data_directory: &Path,
+    configured_path: ConfiguredPath,
     discover: Discover,
     probe: Probe,
     allow: Allow,
 ) -> Result<ImportMediaResult, ImportMediaError>
 where
+    ConfiguredPath: FnOnce(&Path) -> Option<PathBuf>,
     Discover: FnOnce(Option<&Path>, &Path) -> Result<FfmpegPaths, ffmpeg::LocateError>,
     Probe: FnOnce(&Path, &Path) -> Result<MediaProbe, ProbeError>,
     Allow: FnOnce(&Path) -> Result<(), String>,
 {
     let media = validate_media(path)?;
-    let executables = discover(None, app_data_directory)
+    let configured = configured_path(app_data_directory);
+    let executables = discover(configured.as_deref(), app_data_directory)
         .map_err(|_| generated_error(ImportMediaErrorCode::FfmpegPairMissing))?;
     let probe = probe(&executables.ffprobe, &media.path).map_err(map_probe_error)?;
 
@@ -290,6 +295,7 @@ mod tests {
             let error = import_media_with(
                 &path,
                 &directory.path,
+                |_| unreachable!(),
                 |_, _| {
                     *called.borrow_mut() = true;
                     unreachable!()
@@ -313,6 +319,7 @@ mod tests {
         let error = import_media_with(
             media_path.to_str().unwrap(),
             &directory.path,
+            |_| None,
             |_, _| Err(ffmpeg::LocateError::NotFound { inspected: vec![] }),
             |_, _| {
                 *probe_called.borrow_mut() = true;
@@ -341,6 +348,10 @@ mod tests {
         let result = import_media_with(
             media_path.to_str().unwrap(),
             &directory.path,
+            |_| {
+                events.borrow_mut().push("configured-path");
+                None
+            },
             |_, _| {
                 events.borrow_mut().push("discover");
                 Ok(fake_executables(&directory.path))
@@ -358,10 +369,60 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(&*events.borrow(), &["discover", "probe", "allow-file"]);
+        assert_eq!(
+            &*events.borrow(),
+            &["configured-path", "discover", "probe", "allow-file"]
+        );
         assert_eq!(result.path, canonical.to_str().unwrap());
         assert_eq!(result.file_name, "clip.mp4");
         assert_eq!(result.size, 5);
+    }
+
+    #[test]
+    fn passes_the_configured_path_from_settings_into_discovery() {
+        let directory = TestDirectory::new();
+        let media_path = directory.file("clip.mp4", b"media");
+        let received: RefCell<Option<Option<PathBuf>>> = RefCell::new(None);
+
+        import_media_with(
+            media_path.to_str().unwrap(),
+            &directory.path,
+            |_| Some(PathBuf::from("/configured/bin")),
+            |configured, _| {
+                *received.borrow_mut() = Some(configured.map(Path::to_path_buf));
+                Ok(fake_executables(&directory.path))
+            },
+            |_, _| Ok(fake_probe()),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            received.into_inner(),
+            Some(Some(PathBuf::from("/configured/bin")))
+        );
+    }
+
+    #[test]
+    fn an_absent_configured_path_passes_none_to_discovery() {
+        let directory = TestDirectory::new();
+        let media_path = directory.file("clip.mp4", b"media");
+        let received: RefCell<Option<Option<PathBuf>>> = RefCell::new(None);
+
+        import_media_with(
+            media_path.to_str().unwrap(),
+            &directory.path,
+            |_| None,
+            |configured, _| {
+                *received.borrow_mut() = Some(configured.map(Path::to_path_buf));
+                Ok(fake_executables(&directory.path))
+            },
+            |_, _| Ok(fake_probe()),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(received.into_inner(), Some(None));
     }
 
     #[test]
@@ -373,6 +434,7 @@ mod tests {
         let error = import_media_with(
             media_path.to_str().unwrap(),
             &directory.path,
+            |_| None,
             |_, _| Ok(fake_executables(&directory.path)),
             |_, _| {
                 Err(ProbeError::ProcessFailed {
@@ -423,6 +485,7 @@ mod tests {
         let error = import_media_with(
             media_path.to_str().unwrap(),
             &directory.path,
+            |_| None,
             |_, _| Ok(fake_executables(&directory.path)),
             |_, _| Ok(fake_probe()),
             |_| Err("scope rejected pattern".to_owned()),
@@ -519,6 +582,7 @@ mod tests {
         import_media_with(
             media_path.to_str().unwrap(),
             app_data,
+            |_| None,
             |_, _| Ok(fake_executables(app_data)),
             |_, _| Ok(fake_probe()),
             |_| Ok(()),
