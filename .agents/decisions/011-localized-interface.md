@@ -67,8 +67,8 @@ them.
 
 Gemini language review is additional to the independent review that ADR 008 requires. It
 never replaces that review. If Gemini makes no accepted edit, add
-`Reviewed-By: agy/gemini-3.7-flash-high`. If the catalog accepts a Gemini edit, add
-`Assisted-By: agy/gemini-3.7-flash-high` instead. If `agy` does not exist or its review
+`Reviewed-By: agy/<model-id>`. If the catalog accepts a Gemini edit, add
+`Assisted-By: agy/<model-id>` instead. If `agy` does not exist or its review
 fails, the independent review still applies without a Gemini trailer.
 
 ## Consequences

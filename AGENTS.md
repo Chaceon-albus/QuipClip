@@ -87,9 +87,11 @@ ffmpeg lifecycle. Those four parts carry the accuracy requirement of the product
 Read the `dev-workflow` skill. It gives the routing rules, the review loop, the gate, and
 the commit rules.
 
-Short form: the main agent orchestrates and reviews. `agy` on `gemini-3.7-flash-high`
-writes the frontend. A subagent writes the Rust. A different agent reviews. The main agent
-commits.
+Short form: the main agent orchestrates and reviews. `agy` writes the frontend. A subagent
+writes the Rust. A different agent reviews. The main agent commits.
+
+Every delegated command runs the newest model its vendor offers. Never pin a model version
+in a document. ADR 008 states the rule.
 
 ### Commits
 

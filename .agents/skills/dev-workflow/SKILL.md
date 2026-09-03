@@ -15,7 +15,7 @@ The commit rules are in `.agents/decisions/009-incremental-commit-policy.md`.
 
 | Work | First choice | Fallback |
 |---|---|---|
-| Frontend: `.ts`, `.tsx`, `.css` | `agy` with `gemini-3.7-flash-high` | a subagent at medium reasoning |
+| Frontend: `.ts`, `.tsx`, `.css` | `agy` with the newest Gemini Flash at high reasoning | a subagent at medium reasoning |
 | Rust and backend: `.rs`, `Cargo.toml`, `tauri.conf.json` | a subagent at medium reasoning | — |
 | A command the user named | that command | a subagent at medium reasoning |
 
@@ -31,11 +31,24 @@ The main agent never writes feature code. The main agent writes only these:
 
 ## 2. Start the writing agent
 
+Every command runs the newest model its vendor offers: `agy` runs the newest Gemini,
+`claude` runs the newest Claude, `codex` runs the newest OpenAI model. Resolve the version
+at run time. Never pin one in this file.
+
 ```bash
-agy -p "<brief>" --model gemini-3.7-flash-high --mode accept-edits
+agy models          # lists every model the tool offers
+```
+
+Take the highest version of the named family at the named reasoning level. Then run:
+
+```bash
+agy -p "<brief>" --model <resolved-model-id> --mode accept-edits
 codex exec "<brief>"
 claude -p "<brief>" --permission-mode acceptEdits
 ```
+
+ADR 008 states the rule. A document names a family and a level. A run resolves the
+version.
 
 A run **failed** when any of these is true:
 
@@ -100,8 +113,8 @@ Message format:
 <why the change exists, wrapped at 72 columns>
 
 Refs: ADR-003
-Assisted-By: agy/gemini-3.7-flash-high
-Reviewed-By: subagent/opus-xhigh
+Assisted-By: agy/<model-id>
+Reviewed-By: subagent/<model-id>
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 ```
 
@@ -110,6 +123,8 @@ Scopes: `timeline`, `preview`, `export`, `ffmpeg`, `project`, `time`, `ui`, `the
 `icons`, `tauri`, `agents`, `adr`, `deps`.
 
 Add `Assisted-By` when another agent wrote the diff. Add `Reviewed-By` for the reviewer.
+Write the model you actually ran, with its version. The trailer is a record of one run,
+so it is the one place that names a version.
 
 **Hard limits.**
 

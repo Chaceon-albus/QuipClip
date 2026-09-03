@@ -64,8 +64,8 @@ Refs: ADR-003
 agent that ran the commit.
 
 ```
-Assisted-By: agy/gemini-3.7-flash-high
-Reviewed-By: subagent/opus-xhigh
+Assisted-By: agy/<model-id>
+Reviewed-By: subagent/<model-id>
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 ```
 
