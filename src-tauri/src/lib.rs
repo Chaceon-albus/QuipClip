@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod ffmpeg;
+pub mod fsutil;
 pub mod project;
 pub mod time;
 

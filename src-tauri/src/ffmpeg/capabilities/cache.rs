@@ -32,12 +32,10 @@
 use super::CapabilityReport;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fs;
+use std::io;
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -66,12 +64,6 @@ pub const CACHE_SCHEMA_VERSION: u32 = 1;
 /// unbounded `probedAt` would poison an entry forever with no self-healing; treating it as a
 /// miss in [`read`] instead lets the next probe overwrite it with a fresh, valid value.
 pub const MAX_PROBED_AT_SECONDS: i64 = 4_294_967_295;
-
-/// A per-process counter that makes each temporary cache file name unique.
-///
-/// Mirrored from `project/mod.rs`'s `TEMP_FILE_COUNTER`: see the note on [`write`] about why
-/// this module does not share that code.
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// One process-wide lock over the whole read-merge-write cycle in [`write`].
 ///
@@ -255,18 +247,8 @@ pub fn write(
     file.schema_version = CACHE_SCHEMA_VERSION;
     upsert_entry(&mut file.entries, key, report);
 
-    let mut json = serde_json::to_vec_pretty(&file)?;
-    json.push(b'\n');
-
-    let (temporary_path, mut temporary_file) = create_temporary_file(&path)?;
-    let mut cleanup = TemporaryFileCleanup::new(temporary_path);
-    let write_result = temporary_file
-        .write_all(&json)
-        .and_then(|()| temporary_file.sync_all());
-    drop(temporary_file);
-    write_result?;
-    replace_file(cleanup.path(), &path)?;
-    cleanup.disarm();
+    let json = crate::fsutil::to_pretty_json_line(&file)?;
+    crate::fsutil::write_bytes_atomically(&path, &json)?;
     Ok(())
 }
 
@@ -322,124 +304,12 @@ fn upsert_entry(entries: &mut Vec<CacheEntry>, key: &CacheKey, report: &Capabili
     });
 }
 
-// The functions below atomically replace the cache file. They mirror `project/mod.rs`'s
-// `create_temporary_file`, `replace_file`, `parent_directory`, and `TemporaryFileCleanup`
-// verbatim in shape. ADR 009 treats extracting a shared helper as a refactor separate from
-// any one feature, so this module keeps its own copy rather than reaching into `project`.
-
-fn create_temporary_file(path: &Path) -> io::Result<(PathBuf, File)> {
-    let directory = parent_directory(path);
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing cache file name"))?;
-    for _ in 0..100 {
-        let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut temporary_name = OsString::from(".");
-        temporary_name.push(file_name);
-        temporary_name.push(format!(".tmp-{}-{sequence}", std::process::id()));
-        let temporary_path = directory.join(temporary_name);
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-        {
-            Ok(file) => return Ok((temporary_path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not create a unique temporary cache file",
-    ))
-}
-
-fn parent_directory(path: &Path) -> &Path {
-    match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        Some(_) | None => Path::new("."),
-    }
-}
-
-#[cfg(unix)]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(source, destination)?;
-    File::open(parent_directory(destination))?.sync_all()
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    #[link(name = "Kernel32")]
-    extern "system" {
-        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-    }
-    let source = absolute_path_without_following_file(source)?;
-    let destination = absolute_path_without_following_file(destination)?;
-    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination_wide: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let result = unsafe {
-        MoveFileExW(
-            source_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-fn absolute_path_without_following_file(path: &Path) -> io::Result<PathBuf> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing cache file name"))?;
-    Ok(parent_directory(path).canonicalize()?.join(file_name))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(source, destination)
-}
-
-struct TemporaryFileCleanup {
-    path: PathBuf,
-    armed: bool,
-}
-
-impl TemporaryFileCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
-    }
-    fn path(&self) -> &Path {
-        &self.path
-    }
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for TemporaryFileCleanup {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ffmpeg::capabilities::{CodecKind, EncoderResult, EncoderStatus, LicenseFlags};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -825,8 +695,8 @@ mod tests {
         // and macos-latest CI runners, so this test pins only the successful path: after
         // `write` returns, no `.capabilities.json.tmp-*` file is left behind. The failure
         // path -- a partial file never surviving a write that errors out partway -- is
-        // exercised only by `TemporaryFileCleanup`'s armed-Drop guard, mirrored from
-        // `project/mod.rs`, and has no dedicated test here.
+        // exercised only by the shared `fsutil` module's armed-Drop cleanup guard, and has
+        // no dedicated test here.
         let directory = TestDirectory::new();
         write(
             &directory.path,

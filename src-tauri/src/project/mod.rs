@@ -4,18 +4,15 @@ use crate::time::{FrameCount, Pts, Rational, TickCount};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::error::Error;
-use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fs;
+use std::io;
+use std::path::Path;
 
 /// The project schema this build reads and writes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A project document stored in a `.qcproj` file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -217,17 +214,8 @@ pub fn load(path: impl AsRef<Path>) -> Result<ProjectFile, ProjectFileError> {
 pub fn save(path: impl AsRef<Path>, project: &ProjectFile) -> Result<(), ProjectFileError> {
     let path = path.as_ref();
     validate_project(project)?;
-    let mut json = serde_json::to_vec_pretty(project)?;
-    json.push(b'\n');
-    let (temporary_path, mut temporary_file) = create_temporary_file(path)?;
-    let mut cleanup = TemporaryFileCleanup::new(temporary_path);
-    let write_result = temporary_file
-        .write_all(&json)
-        .and_then(|()| temporary_file.sync_all());
-    drop(temporary_file);
-    write_result?;
-    replace_file(cleanup.path(), path)?;
-    cleanup.disarm();
+    let json = crate::fsutil::to_pretty_json_line(project)?;
+    crate::fsutil::write_bytes_atomically(path, &json)?;
     Ok(())
 }
 
@@ -354,118 +342,11 @@ fn validate_unsigned_integer(field: &str, value: u64) -> Result<(), ProjectValid
     Ok(())
 }
 
-#[cfg(unix)]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(source, destination)?;
-    File::open(parent_directory(destination))?.sync_all()
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    #[link(name = "Kernel32")]
-    extern "system" {
-        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-    }
-    let source = absolute_path_without_following_file(source)?;
-    let destination = absolute_path_without_following_file(destination)?;
-    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination_wide: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let result = unsafe {
-        MoveFileExW(
-            source_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-fn absolute_path_without_following_file(path: &Path) -> io::Result<PathBuf> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing project file name"))?;
-    Ok(parent_directory(path).canonicalize()?.join(file_name))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(source, destination)
-}
-
-fn create_temporary_file(path: &Path) -> io::Result<(PathBuf, File)> {
-    let directory = parent_directory(path);
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing project file name"))?;
-    for _ in 0..100 {
-        let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut temporary_name = OsString::from(".");
-        temporary_name.push(file_name);
-        temporary_name.push(format!(".tmp-{}-{sequence}", std::process::id()));
-        let temporary_path = directory.join(temporary_name);
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-        {
-            Ok(file) => return Ok((temporary_path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not create a unique temporary project file",
-    ))
-}
-
-fn parent_directory(path: &Path) -> &Path {
-    match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        Some(_) | None => Path::new("."),
-    }
-}
-
-struct TemporaryFileCleanup {
-    path: PathBuf,
-    armed: bool,
-}
-
-impl TemporaryFileCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
-    }
-    fn path(&self) -> &Path {
-        &self.path
-    }
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for TemporaryFileCleanup {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
     const EXAMPLE: &str = r#"{

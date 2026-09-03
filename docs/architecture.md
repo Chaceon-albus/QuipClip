@@ -53,6 +53,7 @@ document summarizes them and shows how the parts fit together.
 |                                                             |
 |  commands/   the IPC surface                                |
 |  ffmpeg/     locate, download, probe, capabilities, export  |
+|  fsutil.rs   atomic file replacement                        |
 |  project/    the .qcproj file                               |
 |  time.rs     Rational and decimal-string timestamp types    |
 +------------------|------------------------------------------+

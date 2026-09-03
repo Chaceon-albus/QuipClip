@@ -32,6 +32,7 @@ src/            React frontend
   assets/brand/     the icon master
 src-tauri/      Rust backend
   src/ffmpeg/       locate, download, probe, capabilities, export
+  src/fsutil.rs     atomic file replacement
   src/project/      the project file
   src/time.rs       the Rational type
 docs/           architecture.md
