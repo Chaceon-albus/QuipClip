@@ -33,6 +33,7 @@ document summarizes them and shows how the parts fit together.
 | [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                             | Version 1 JSON with exact source-PTS boundaries               |
 | [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                             | English and Simplified Chinese interface with a saved setting |
 | [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)         | Homebrew path fallback for macOS GUI applications             |
+| [`013-application-settings-file.md`](../.agents/decisions/013-application-settings-file.md)                 | One settings file for the ffmpeg path and the export presets  |
 
 ## Shape
 
@@ -219,6 +220,32 @@ path today. The failure payload names each inspected `ffmpeg` and `ffprobe` cand
 its origin class, so the user sees where the application looked. The job runs two of the
 four listings. `-decoders` and `-filters` have parsers and tests, and they gain their
 command when the preview proxy and the export renderer need them.
+
+## Settings
+
+See ADR 013.
+
+`<app_data>/settings.json` holds the configured ffmpeg path, the export preset library, and
+the identifier of the active preset. Rust owns the file, because Rust reads the path during
+discovery and ADR 001 gives Rust the file system.
+
+A preset names a container, a video encoder, an audio encoder, one quality control, and an
+output resolution and frame rate. Each output setting is the word `source` or an explicit
+value. The container set is closed. The encoder names are free text, because the capability
+probe discovers what the installed build offers, but each name must read as a name and not
+as an ffmpeg flag.
+
+A missing file seeds presets in memory and writes them on the first save. The seeded
+identifiers are constants. The restore action replaces a seeded preset by identifier and
+keeps everything else, including the ffmpeg path.
+
+A damaged file fails the read, and a save refuses to write over a file it could not read.
+Losing a preset library is not the same as losing a cache entry. A separate permissive
+reader takes only the ffmpeg path, so one damaged preset never makes the application report
+a missing ffmpeg.
+
+The language preference stays in the web view store that ADR 011 defines. It is interface
+state, and Rust never reads it.
 
 ## Edit model
 
