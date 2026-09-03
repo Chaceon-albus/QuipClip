@@ -2,6 +2,7 @@ pub mod commands;
 pub mod ffmpeg;
 pub mod fsutil;
 pub mod project;
+pub mod settings;
 pub mod time;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
