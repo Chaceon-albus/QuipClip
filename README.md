@@ -11,7 +11,8 @@ are no effects.
 ## Status
 
 Early. Import, playback, PTS-based marking, and the source timeline are implemented.
-Export is not implemented yet.
+QuipClip also finds `ffmpeg` and reports which encoders work on your machine. Export is not
+implemented yet.
 
 ## How it works
 
