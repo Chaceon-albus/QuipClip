@@ -3,9 +3,13 @@
 //! ADR 006 splits the probe into a listing step and a smoke-test step, then a cache. This
 //! module holds the types both steps share: the kind of a codec, the outcome of a smoke
 //! test, the licence flags read from `-version`, and the fixed set of encoders the smoke
-//! test exercises. The listing parsers live in [`listing`]. The smoke test itself, its
-//! timed process runner, and the application-wide smoke-test lock live in [`smoke`].
+//! test exercises. It also holds the shape of a finished probe, [`CapabilityReport`], which
+//! both the frontend and the on-disk cache read. The listing parsers live in [`listing`].
+//! The smoke test itself, its timed process runner, and the application-wide smoke-test
+//! lock live in [`smoke`]. The cache file that stores a [`CapabilityReport`] per probed
+//! binary lives in [`cache`].
 
+pub mod cache;
 pub mod listing;
 pub mod smoke;
 
@@ -73,6 +77,49 @@ pub struct ListedCodec {
 pub struct VersionInfo {
     pub version: String,
     pub configuration_flags: Vec<String>,
+}
+
+/// The outcome of probing one candidate encoder, combining the listing step and the
+/// smoke-test step.
+///
+/// `listed` is `false` exactly when `status` is [`EncoderStatus::NotListed`]: the listing
+/// step never runs a smoke test for an encoder the build does not have. `exit_code` and
+/// `detail` are absent, not `null`, on the wire: the frontend expects the key to be missing
+/// entirely for a candidate that has neither, such as one the listing step already rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncoderResult {
+    pub name: String,
+    pub kind: CodecKind,
+    pub listed: bool,
+    pub status: EncoderStatus,
+    /// The smoke-test process's exit code, when the process ran to completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// A short diagnostic for a failed or timed-out smoke test, such as a stderr tail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// The full result of one ADR 006 capability probe: the licence flags, the hardware
+/// accelerators, and every tested encoder's outcome.
+///
+/// The `finished` event carries this to the frontend, and [`cache`] stores it on disk keyed
+/// by [`cache::CacheKey`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityReport {
+    pub version: String,
+    pub license: LicenseFlags,
+    pub hwaccels: Vec<String>,
+    pub encoders: Vec<EncoderResult>,
+    /// When the probe finished, in whole seconds since the Unix epoch (Unix seconds, not
+    /// milliseconds). This is pinned on the TypeScript side; do not switch units here. The
+    /// type is a plain `i64`, but the frontend only accepts a value strictly greater than `0`
+    /// and at most [`cache::MAX_PROBED_AT_SECONDS`]; [`cache::read`] enforces that range on
+    /// the way out of the cache, so this field can never widen it without also widening the
+    /// constant.
+    pub probed_at: i64,
 }
 
 /// One encoder the smoke test exercises.
