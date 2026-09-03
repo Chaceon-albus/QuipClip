@@ -319,7 +319,10 @@ The frontend explicitly projects each runtime `Source` into `PersistedSource`. T
 projection lists each persisted field. It does not use object spread as a serialization
 filter.
 
-The project file is `.qcproj`, which is versioned JSON. See ADR 010. It stores absolute and
+The project file is `.qcproj`, which is versioned JSON. See ADR 010. Version 1 does not
+write one. The user imports the sources in each session, so the segments last for one
+session, and the export presets live in the settings file instead. Rust keeps the reader and
+the writer, and nothing calls them. It stores absolute and
 relative source paths. It also stores `activeSourceId`. Runtime proxy and browser state do
 not enter the file.
 

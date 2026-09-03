@@ -84,6 +84,21 @@ or alternate parser.
 Write the file to a temporary name in the same directory, then rename. A crash then leaves
 either the old file or the new file, and never a half-written one.
 
+**Version 1 does not write a project file.** The user imports the sources in each session.
+
+The format below stays defined, and `src-tauri/src/project/` keeps `load_project` and
+`save_project` in the command surface. Nothing calls them. The decision is a scope decision,
+not a defect, so the code stays ready rather than being deleted and rebuilt.
+
+Persistence needs more than the file. It needs a source that resolves after a move, a
+revision check against the file on disk, an order for restoring the media, playback, and
+timeline state, a fresh asset-protocol grant for each source, and a guard that stops the
+window closing over unsaved work. The first release does not need any of that to let a user
+mark a video and export it.
+
+The export settings therefore live in the application settings file. See ADR 013. A preset
+belongs to the application, because no project document exists to hold one.
+
 ## Consequences
 
 - Rust and TypeScript preserve the full signed `i64` PTS range.
@@ -93,3 +108,8 @@ either the old file or the new file, and never a half-written one.
   number remains 1 for this unreleased replacement.
 - Future released schema changes must use a new version and a deliberate compatibility
   policy.
+- Segments last for one session. A user who marks segments and then quits loses them. This
+  is the price of the scope decision above, and it is the first thing to reconsider when
+  the editing session stops being short.
+- Two commands stay registered with no caller. A reader finds this record instead of an
+  unexplained interface.
