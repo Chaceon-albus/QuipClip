@@ -1,10 +1,13 @@
-//! Document types and validation for the application settings file.
+//! Document types, validation, and file operations for the application settings file.
 //!
 //! ADR 013 defines the on-disk shape: `<app_data>/settings.json`, at schema version 1,
 //! holding an optional ffmpeg path, a list of export presets, and an optional active preset
-//! id. This module holds only the pure parts of that decision -- the serde types and
-//! [`validate_settings`] -- with no file I/O. Loading, saving, seeding, and the read/write
-//! lock belong to a separate unit.
+//! id. The top of this module holds the pure parts of that decision -- the serde types and
+//! [`validate_settings`] -- with no file I/O. The bottom half holds loading, saving, seeding,
+//! restore, reset, the permissive ffmpeg-path accessor, and the read/write lock that
+//! coordinates them.
+
+pub mod defaults;
 
 use crate::project::Resolution;
 use crate::time::Rational;
@@ -12,6 +15,10 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 /// The settings schema this build reads and writes; see ADR 013.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -515,6 +522,319 @@ fn validate_safe_integer(field: &str, value: i128) -> Result<(), SettingsValidat
         });
     }
     Ok(())
+}
+
+/// The settings file's name inside the application data directory; see ADR 013.
+pub const SETTINGS_FILE_NAME: &str = "settings.json";
+
+/// The fixed backup name [`reset`] moves a damaged settings file to.
+///
+/// ADR 013 uses one fixed name rather than a timestamped one, so a machine that gets reset
+/// repeatedly does not accumulate an unbounded number of backup files in the application data
+/// directory; each reset simply overwrites the previous backup.
+pub const INVALID_SETTINGS_FILE_NAME: &str = "settings.invalid.json";
+
+/// A failure to read, validate, or save the settings document.
+///
+/// This mirrors [`crate::project::ProjectFileError`] with one addition, [`Self::Unreadable`]:
+/// ADR 013 requires [`save`] to refuse to overwrite a settings file it cannot read back, so
+/// that a transient or partial read failure never masks the loss of an entire preset library.
+#[derive(Debug)]
+pub enum SettingsFileError {
+    Io(io::Error),
+    Json(serde_json::Error),
+    Validation(SettingsValidationError),
+    FutureSchemaVersion {
+        found: u64,
+        supported: u32,
+    },
+    /// [`save`] refused to write because the file that already exists at the destination
+    /// could not be read back. The bytes on disk are left exactly as they were.
+    Unreadable,
+}
+
+impl fmt::Display for SettingsFileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "settings file I/O failed: {error}"),
+            Self::Json(error) => write!(formatter, "settings JSON is invalid: {error}"),
+            Self::Validation(error) => write!(formatter, "settings values are invalid: {error}"),
+            Self::FutureSchemaVersion { found, supported } => write!(
+                formatter,
+                "settings schema version {found} is newer than supported version {supported}"
+            ),
+            Self::Unreadable => write!(
+                formatter,
+                "the existing settings file could not be read; refusing to overwrite it"
+            ),
+        }
+    }
+}
+
+impl Error for SettingsFileError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            Self::Validation(error) => Some(error),
+            Self::FutureSchemaVersion { .. } | Self::Unreadable => None,
+        }
+    }
+}
+
+impl From<io::Error> for SettingsFileError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for SettingsFileError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+impl From<SettingsValidationError> for SettingsFileError {
+    fn from(error: SettingsValidationError) -> Self {
+        Self::Validation(error)
+    }
+}
+
+/// A probe of just the `schemaVersion` field, read before full deserialization so a future
+/// document is reported by its version rather than as an opaque JSON error. This mirrors
+/// `project::SchemaEnvelope` exactly.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SchemaEnvelope {
+    schema_version: u64,
+}
+
+/// A narrow, permissive probe of the settings file used by [`configured_ffmpeg_path`]: the
+/// schema version and the ffmpeg path, with every other key ignored.
+///
+/// This deliberately does NOT derive `deny_unknown_fields`, unlike [`Settings`]. [`Settings`]
+/// must stay strict, because a permissive load could silently accept a document the rest of
+/// the application cannot trust. This probe exists for the opposite reason: it must survive
+/// damage anywhere else in the document, so it looks at nothing but these two fields.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FfmpegPathProbe {
+    schema_version: u64,
+    #[serde(default)]
+    ffmpeg_path: Option<String>,
+}
+
+/// One process-wide lock over the settings file's write path.
+///
+/// [`save`], [`restore_default_presets`], and [`reset`] each take this lock exactly once and
+/// then do their work through a private `*_locked` helper or by calling [`load`] (which takes
+/// no lock of its own). `std::sync::Mutex` is not reentrant, so a function that took this lock
+/// and then called the public [`save`] would deadlock against itself; none of them do.
+///
+/// A poisoned lock is recovered with `PoisonError::into_inner`, the same recovery
+/// `ffmpeg::capabilities::cache::CACHE_LOCK` and `ffmpeg::capabilities::smoke::SMOKE_LOCK`
+/// use: a writer that panics while holding this lock must not permanently disable settings
+/// persistence for the rest of the process's life.
+///
+/// [`load`] and [`configured_ffmpeg_path`] take no lock at all. [`save`] finishes with an
+/// atomic rename (see [`crate::fsutil::write_bytes_atomically`]), so a reader always observes
+/// either the whole previous file or the whole new one, never a torn write. Taking the lock
+/// for a read would serialize every read behind a slow write and would add a second path to a
+/// deadlock, with no correctness benefit to show for it.
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+/// The result of [`load`]: the document, and whether it came from the seed table because no
+/// file existed yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedSettings {
+    pub settings: Settings,
+    pub seeded: bool,
+}
+
+/// Load and validate the settings document from `app_data_directory`.
+///
+/// Three outcomes, per ADR 013:
+/// - the file is absent (`io::ErrorKind::NotFound`): this returns
+///   [`defaults::seeded_settings`] with `seeded: true`, and creates neither the file nor
+///   `app_data_directory` itself. A read with a write side effect would make tests
+///   order-dependent, and it would turn a first-run permission problem into a confusing
+///   startup error that has nothing to do with settings.
+/// - the file exists and validates: this returns it with `seeded: false`.
+/// - the file is corrupt, fails validation, or is otherwise unreadable: this returns `Err`.
+///
+/// A `schemaVersion` above [`CURRENT_SCHEMA_VERSION`] is caught by a [`SchemaEnvelope`] probe
+/// read before the full document deserializes, exactly as `project::load` does, so a document
+/// from a later build is reported by its version rather than as an opaque JSON error.
+///
+/// This takes no lock; see [`SETTINGS_LOCK`] for why.
+pub fn load(app_data_directory: &Path) -> Result<LoadedSettings, SettingsFileError> {
+    let path = app_data_directory.join(SETTINGS_FILE_NAME);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(LoadedSettings {
+                settings: defaults::seeded_settings(),
+                seeded: true,
+            });
+        }
+        Err(error) => return Err(SettingsFileError::Io(error)),
+    };
+
+    let envelope: SchemaEnvelope = serde_json::from_slice(&bytes)?;
+    if envelope.schema_version > u64::from(CURRENT_SCHEMA_VERSION) {
+        return Err(SettingsFileError::FutureSchemaVersion {
+            found: envelope.schema_version,
+            supported: CURRENT_SCHEMA_VERSION,
+        });
+    }
+
+    let settings: Settings = serde_json::from_slice(&bytes)?;
+    validate_settings(&settings)?;
+    Ok(LoadedSettings {
+        settings,
+        seeded: false,
+    })
+}
+
+/// Validate and save `settings` to `app_data_directory`, refusing to overwrite a file this
+/// build cannot read back.
+///
+/// This is the data-loss guard and the single most important behaviour in this module. A
+/// capability cache miss (see `ffmpeg::capabilities::cache`) costs one extra probe on the
+/// next launch; a lost preset library costs the user work that nothing can rebuild. So, after
+/// validating the new document, this re-reads whatever currently exists at the destination
+/// through the strict [`load`] -- the same reader a later launch would use -- before writing
+/// anything:
+/// - nothing exists yet ([`load`]'s "no file" outcome): proceed.
+/// - [`load`] succeeds: proceed.
+/// - [`load`] fails for any reason -- corrupt JSON, a failed [`validate_settings`], or a
+///   schema version above [`CURRENT_SCHEMA_VERSION`] -- return [`SettingsFileError::Unreadable`]
+///   and leave the bytes on disk exactly as they were. ADR 013 requires this: a document a
+///   later build wrote, or one with a damaged preset a hand edit could still recover, must
+///   survive an older build's save instead of being silently overwritten with seeds. Checking
+///   only "is this JSON" would miss both cases, so the guard reuses the strict reader rather
+///   than re-implementing a weaker check of its own.
+///
+/// `app_data_directory` is created first when it does not exist yet.
+pub fn save(app_data_directory: &Path, settings: &Settings) -> Result<(), SettingsFileError> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    save_locked(app_data_directory, settings)
+}
+
+/// The body of [`save`], factored out so [`restore_default_presets`] and [`reset`] can reuse
+/// it while already holding [`SETTINGS_LOCK`], without calling the public [`save`] and
+/// deadlocking on the non-reentrant `Mutex`.
+///
+/// This calls [`load`] directly rather than the public [`save`] to run its overwrite guard:
+/// [`load`] takes no lock of its own (see [`SETTINGS_LOCK`]), so calling it here is safe even
+/// though [`save_locked`] already holds the lock.
+fn save_locked(app_data_directory: &Path, settings: &Settings) -> Result<(), SettingsFileError> {
+    validate_settings(settings)?;
+
+    match load(app_data_directory) {
+        Ok(_) => {}
+        Err(SettingsFileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(SettingsFileError::Unreadable),
+    }
+
+    let path = app_data_directory.join(SETTINGS_FILE_NAME);
+    fs::create_dir_all(app_data_directory)?;
+    let json = crate::fsutil::to_pretty_json_line(settings)?;
+    crate::fsutil::write_bytes_atomically(&path, &json)?;
+    Ok(())
+}
+
+/// Restore every seeded default preset, keeping every other preset, `ffmpegPath`, and
+/// `activePresetId` intact, then save.
+///
+/// For each seed in [`defaults::default_presets`], this replaces the preset with that id in
+/// place when one exists, or appends the seed when it is absent. It never rebuilds the
+/// document from the seed table: doing so would silently discard every user-added preset and
+/// would clear the `ffmpegPath` the user just configured, which is exactly the mistake ADR
+/// 013 calls out by name. When `activePresetId` is absent afterwards and the preset list is
+/// non-empty, this sets it to the first seed so restoring presets from an empty library still
+/// leaves one selected.
+pub fn restore_default_presets(app_data_directory: &Path) -> Result<Settings, SettingsFileError> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let mut settings = load(app_data_directory)?.settings;
+    for seed in defaults::default_presets() {
+        match settings
+            .presets
+            .iter_mut()
+            .find(|preset| preset.id == seed.id)
+        {
+            Some(existing) => *existing = seed,
+            None => settings.presets.push(seed),
+        }
+    }
+    if settings.active_preset_id.is_none() {
+        if let Some(first) = settings.presets.first() {
+            settings.active_preset_id = Some(first.id.clone());
+        }
+    }
+
+    save_locked(app_data_directory, &settings)?;
+    Ok(settings)
+}
+
+/// Move a damaged settings file aside and write fresh seeds.
+///
+/// This renames the existing file to [`INVALID_SETTINGS_FILE_NAME`] in the same directory --
+/// one fixed backup name, so app data does not grow without bound across repeated resets --
+/// then writes [`defaults::seeded_settings`]. When the rename itself fails for a reason other
+/// than the source file being absent, this returns that error and writes nothing, leaving the
+/// original file in place. A missing settings file is not an error: it is treated the same as
+/// [`load`]'s "no file yet" outcome, and this simply writes the seeds.
+pub fn reset(app_data_directory: &Path) -> Result<Settings, SettingsFileError> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let path = app_data_directory.join(SETTINGS_FILE_NAME);
+    let backup_path = app_data_directory.join(INVALID_SETTINGS_FILE_NAME);
+    match fs::rename(&path, &backup_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(SettingsFileError::Io(error)),
+    }
+
+    let settings = defaults::seeded_settings();
+    save_locked(app_data_directory, &settings)?;
+    Ok(settings)
+}
+
+/// The configured ffmpeg path, or `None` for any problem reading it.
+///
+/// This is the permissive counterpart to the strict [`load`]/[`save`] surface described in
+/// [`FfmpegPathProbe`]. It reads the same settings file, but through that narrow probe, which
+/// ignores every key except `schemaVersion` and `ffmpegPath`. A missing file, an unreadable
+/// file, corrupt JSON, an absent `ffmpegPath` key, a blank or NUL-bearing path, or a
+/// `schemaVersion` above [`CURRENT_SCHEMA_VERSION`] are all `None`, never an error. The NUL
+/// check mirrors [`validate_settings`]'s own [`SettingsValidationError::InvalidFfmpegPath`]
+/// rule, so this permissive probe never reports a path the strict [`load`] would reject.
+///
+/// This exists so that ffmpeg discovery survives a damaged preset. Without it, one malformed
+/// preset entry anywhere in `presets` would fail strict deserialization of the whole
+/// [`Settings`] document, costing the user their configured ffmpeg path along with it, and the
+/// application would report "ffmpeg missing" for a reason that has nothing to do with ffmpeg.
+/// The strict surface ([`load`], [`save`]) stays exactly as strict as it is for everything
+/// that writes the file; when this probe falls back to `None`, discovery simply degrades to
+/// `PATH` and the application data directory, which is exactly the behaviour from before
+/// settings existed at all.
+///
+/// This takes no lock, for the same reason [`load`] does not: [`save`] replaces the file with
+/// an atomic rename, so a reader here always observes a whole file, never a torn one.
+pub fn configured_ffmpeg_path(app_data_directory: &Path) -> Option<PathBuf> {
+    let path = app_data_directory.join(SETTINGS_FILE_NAME);
+    let bytes = fs::read(path).ok()?;
+    let probe: FfmpegPathProbe = serde_json::from_slice(&bytes).ok()?;
+    if probe.schema_version > u64::from(CURRENT_SCHEMA_VERSION) {
+        return None;
+    }
+    let ffmpeg_path = probe.ffmpeg_path?;
+    if ffmpeg_path.trim().is_empty() || ffmpeg_path.contains('\0') {
+        return None;
+    }
+    Some(PathBuf::from(ffmpeg_path))
 }
 
 #[cfg(test)]
@@ -1043,5 +1363,590 @@ mod tests {
         settings.active_preset_id = Some("default".to_owned());
         settings.ffmpeg_path = Some("/opt/homebrew/bin/ffmpeg".to_owned());
         assert!(validate_settings(&settings).is_ok());
+    }
+
+    // -- File operations: load, save, restore, reset, and the permissive accessor. --
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory {
+        path: PathBuf,
+    }
+    impl TestDirectory {
+        fn new() -> Self {
+            for _ in 0..1000 {
+                let sequence = TEST_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "quipclip-settings-test-{}-{sequence}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Self { path },
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => panic!("could not create test directory: {error}"),
+                }
+            }
+            panic!("could not create a unique test directory")
+        }
+    }
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// Run `f` on a background thread and wait up to `timeout` for it to finish.
+    /// [`restore_and_reset_do_not_deadlock`] uses this so that a real regression -- a
+    /// `*_locked` helper calling the public [`save`] and deadlocking on the non-reentrant
+    /// `Mutex` -- is reported instead of hanging forever.
+    ///
+    /// A timeout here means the worker is stuck holding [`SETTINGS_LOCK`], and it will never
+    /// release it: the thread is detached and keeps running after this function returns, so
+    /// every other settings test in the same process would then block behind that same lock
+    /// forever. Returning `None` and letting the test merely fail would not prevent that; a
+    /// plain `cargo test` run would still hang past this one failing test. So a timeout here
+    /// ends the whole process instead, which fails fast rather than hanging CI to its job
+    /// timeout.
+    fn call_with_timeout<T: Send + 'static>(
+        timeout: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(f());
+        });
+        match receiver.recv_timeout(timeout) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                // The worker still holds SETTINGS_LOCK and never will release it, so every
+                // other settings test would block behind it. End the process instead of
+                // hanging CI.
+                eprintln!(
+                    "settings deadlock probe timed out; the worker still holds SETTINGS_LOCK"
+                );
+                std::process::exit(101);
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_file_loads_seeded_defaults_without_creating_it() {
+        let directory = TestDirectory::new();
+        let loaded = load(&directory.path).unwrap();
+        assert!(loaded.seeded);
+        assert_eq!(loaded.settings, defaults::seeded_settings());
+        assert!(
+            fs::read_dir(&directory.path).unwrap().next().is_none(),
+            "load must not create the settings file, or anything else, in the directory"
+        );
+    }
+
+    #[test]
+    fn a_missing_app_data_directory_also_loads_seeded_defaults_without_creating_it() {
+        let directory = TestDirectory::new();
+        let missing = directory.path.join("does-not-exist");
+        let loaded = load(&missing).unwrap();
+        assert!(loaded.seeded);
+        assert_eq!(loaded.settings, defaults::seeded_settings());
+        assert!(
+            !missing.exists(),
+            "load must not create the application data directory either"
+        );
+    }
+
+    #[test]
+    fn save_then_load_round_trips_with_a_trailing_newline_and_no_leftover_temporary() {
+        let directory = TestDirectory::new();
+        let settings = sample_settings(vec![sample_preset("preset-1")]);
+        save(&directory.path, &settings).unwrap();
+
+        let loaded = load(&directory.path).unwrap();
+        assert!(!loaded.seeded);
+        assert_eq!(loaded.settings, settings);
+
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
+
+        let leftover = fs::read_dir(&directory.path)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().contains(".tmp-"));
+        assert!(!leftover, "a temporary settings file was left behind");
+    }
+
+    #[test]
+    fn save_refuses_to_overwrite_a_file_it_cannot_read_and_leaves_the_bytes_intact() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        fs::write(&path, b"{ not json").unwrap();
+
+        let settings = sample_settings(vec![sample_preset("preset-1")]);
+        let error = save(&directory.path, &settings).unwrap_err();
+        assert!(matches!(error, SettingsFileError::Unreadable));
+        assert_eq!(fs::read(&path).unwrap(), b"{ not json");
+    }
+
+    #[test]
+    fn save_refuses_to_overwrite_a_file_from_a_future_schema_version() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        // Syntactically valid JSON, and even a schema-envelope-valid future document, but
+        // this build must still refuse it: ADR 013 requires a later build's document to
+        // survive an older build's save rather than being overwritten.
+        let original_bytes = br#"{"schemaVersion":2,"presets":[],"somethingNew":true}"#.to_vec();
+        fs::write(&path, &original_bytes).unwrap();
+
+        let settings = sample_settings(vec![sample_preset("preset-1")]);
+        let error = save(&directory.path, &settings).unwrap_err();
+        assert!(matches!(error, SettingsFileError::Unreadable));
+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
+    }
+
+    #[test]
+    fn save_refuses_to_overwrite_a_file_that_fails_validation() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        // Well-formed JSON that deserializes cleanly but fails validate_settings: an unknown
+        // activePresetId. The old "does this parse as JSON" guard would have accepted this
+        // and overwritten it.
+        let original_bytes =
+            br#"{"schemaVersion":1,"presets":[],"activePresetId":"gone"}"#.to_vec();
+        fs::write(&path, &original_bytes).unwrap();
+
+        let settings = sample_settings(vec![sample_preset("preset-1")]);
+        let error = save(&directory.path, &settings).unwrap_err();
+        assert!(matches!(error, SettingsFileError::Unreadable));
+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
+    }
+
+    #[test]
+    fn save_into_a_missing_directory_creates_it_and_succeeds() {
+        let directory = TestDirectory::new();
+        let nested = directory.path.join("nested").join("app-data");
+        assert!(!nested.exists());
+
+        let settings = sample_settings(vec![sample_preset("preset-1")]);
+        save(&nested, &settings).unwrap();
+
+        assert!(nested.join(SETTINGS_FILE_NAME).is_file());
+        assert_eq!(load(&nested).unwrap().settings, settings);
+    }
+
+    #[test]
+    fn corrupt_json_is_an_error_not_a_silent_default() {
+        let directory = TestDirectory::new();
+        fs::write(directory.path.join(SETTINGS_FILE_NAME), b"{ not json").unwrap();
+        assert!(matches!(
+            load(&directory.path),
+            Err(SettingsFileError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn a_future_schema_version_is_typed_and_a_lower_one_is_a_validation_error() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        let settings = sample_settings(vec![]);
+        let mut value = serde_json::to_value(&settings).unwrap();
+
+        value["schemaVersion"] = serde_json::json!(2);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(
+            load(&directory.path),
+            Err(SettingsFileError::FutureSchemaVersion {
+                found: 2,
+                supported: 1
+            })
+        ));
+
+        value["schemaVersion"] = serde_json::json!(0);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(
+            load(&directory.path),
+            Err(SettingsFileError::Validation(
+                SettingsValidationError::SchemaVersion {
+                    found: 0,
+                    expected: 1
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn configured_ffmpeg_path_survives_a_damaged_preset() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "ffmpegPath": "/opt/homebrew/bin/ffmpeg",
+            "presets": [{"id": "broken", "container": "not-a-real-container"}],
+            "activePresetId": "broken",
+        });
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        // The strict surface really does reject this document; the probe below must still
+        // find the path despite that failure, not because the document happens to be fine.
+        assert!(load(&directory.path).is_err());
+        assert_eq!(
+            configured_ffmpeg_path(&directory.path),
+            Some(PathBuf::from("/opt/homebrew/bin/ffmpeg"))
+        );
+    }
+
+    #[test]
+    fn configured_ffmpeg_path_returns_none_for_a_missing_corrupt_or_future_file() {
+        let directory = TestDirectory::new();
+        assert_eq!(configured_ffmpeg_path(&directory.path), None);
+
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        fs::write(&path, b"{ not json").unwrap();
+        assert_eq!(configured_ffmpeg_path(&directory.path), None);
+
+        let future = serde_json::json!({
+            "schemaVersion": 2,
+            "ffmpegPath": "/opt/homebrew/bin/ffmpeg",
+            "presets": [],
+        });
+        fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
+        assert_eq!(configured_ffmpeg_path(&directory.path), None);
+    }
+
+    #[test]
+    fn configured_ffmpeg_path_returns_none_for_a_blank_or_absent_path() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"schemaVersion": 1, "presets": []})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(configured_ffmpeg_path(&directory.path), None);
+
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "ffmpegPath": "   ",
+                "presets": [],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(configured_ffmpeg_path(&directory.path), None);
+    }
+
+    #[test]
+    fn configured_ffmpeg_path_returns_none_for_a_path_the_strict_surface_would_reject() {
+        // validate_settings rejects a NUL-bearing ffmpegPath (InvalidFfmpegPath); the
+        // permissive probe must reject it too, not report a path load/save would refuse.
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "ffmpegPath": "/a\0b",
+                "presets": [],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(configured_ffmpeg_path(&directory.path), None);
+    }
+
+    #[test]
+    fn configured_ffmpeg_path_reads_a_document_saved_through_the_strict_surface() {
+        let directory = TestDirectory::new();
+        let mut settings = sample_settings(vec![sample_preset("preset-1")]);
+        settings.ffmpeg_path = Some("/usr/local/bin/ffmpeg".to_owned());
+        save(&directory.path, &settings).unwrap();
+        assert_eq!(
+            configured_ffmpeg_path(&directory.path),
+            Some(PathBuf::from("/usr/local/bin/ffmpeg"))
+        );
+    }
+
+    #[test]
+    fn restore_default_presets_replaces_an_edited_default_by_id_and_keeps_user_presets() {
+        let directory = TestDirectory::new();
+        let mut edited_default = defaults::default_presets().remove(0);
+        edited_default.name = "Edited name".to_owned();
+        edited_default.quality.value = 63;
+        let user_preset = sample_preset("user-preset");
+
+        let mut settings = sample_settings(vec![edited_default.clone(), user_preset.clone()]);
+        settings.active_preset_id = Some(user_preset.id.clone());
+        save(&directory.path, &settings).unwrap();
+
+        let restored = restore_default_presets(&directory.path).unwrap();
+
+        let restored_default = restored
+            .presets
+            .iter()
+            .find(|preset| preset.id == edited_default.id)
+            .unwrap();
+        assert_eq!(restored_default, &defaults::default_presets()[0]);
+        assert_ne!(restored_default.name, "Edited name");
+        assert_eq!(
+            restored.presets[0].id, edited_default.id,
+            "the seed must replace the edited default in place, keeping display order"
+        );
+
+        assert!(restored
+            .presets
+            .iter()
+            .any(|preset| preset.id == user_preset.id));
+        assert_eq!(restored.active_preset_id, Some(user_preset.id));
+        assert_eq!(load(&directory.path).unwrap().settings, restored);
+    }
+
+    #[test]
+    fn restore_default_presets_keeps_the_configured_ffmpeg_path() {
+        let directory = TestDirectory::new();
+        let mut settings = sample_settings(vec![sample_preset("preset-1")]);
+        settings.ffmpeg_path = Some("/opt/homebrew/bin/ffmpeg".to_owned());
+        save(&directory.path, &settings).unwrap();
+
+        let restored = restore_default_presets(&directory.path).unwrap();
+        assert_eq!(
+            restored.ffmpeg_path.as_deref(),
+            Some("/opt/homebrew/bin/ffmpeg")
+        );
+        assert_eq!(
+            load(&directory.path)
+                .unwrap()
+                .settings
+                .ffmpeg_path
+                .as_deref(),
+            Some("/opt/homebrew/bin/ffmpeg")
+        );
+    }
+
+    #[test]
+    fn restore_default_presets_appends_missing_seeds_and_seeds_an_absent_active_preset() {
+        let directory = TestDirectory::new();
+        let empty = Settings {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            ffmpeg_path: None,
+            presets: vec![],
+            active_preset_id: None,
+        };
+        save(&directory.path, &empty).unwrap();
+
+        let restored = restore_default_presets(&directory.path).unwrap();
+        let seed_ids: Vec<String> = defaults::default_presets()
+            .into_iter()
+            .map(|preset| preset.id)
+            .collect();
+        for id in &seed_ids {
+            assert!(restored.presets.iter().any(|preset| &preset.id == id));
+        }
+        assert_eq!(restored.active_preset_id.as_ref(), Some(&seed_ids[0]));
+    }
+
+    #[test]
+    fn restore_default_presets_on_a_missing_file_creates_it_with_the_seeds() {
+        let directory = TestDirectory::new();
+        let restored = restore_default_presets(&directory.path).unwrap();
+        assert_eq!(restored, defaults::seeded_settings());
+        assert!(directory.path.join(SETTINGS_FILE_NAME).is_file());
+    }
+
+    #[test]
+    fn restore_default_presets_on_a_corrupt_existing_file_is_an_error() {
+        let directory = TestDirectory::new();
+        fs::write(directory.path.join(SETTINGS_FILE_NAME), b"{ not json").unwrap();
+        assert!(matches!(
+            restore_default_presets(&directory.path),
+            Err(SettingsFileError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn restore_default_presets_refuses_rather_than_exceeding_the_preset_cap() {
+        // With a full preset library, appending the seeds would push the count past
+        // MAX_PRESETS. Refusing beats silently truncating the user's library, so this pins
+        // that refusal -- and that nothing is written -- as documented behaviour rather than
+        // a surprise.
+        let directory = TestDirectory::new();
+        let full_presets: Vec<Preset> = (0..MAX_PRESETS)
+            .map(|index| sample_preset(&format!("preset-{index}")))
+            .collect();
+        let settings = sample_settings(full_presets);
+        save(&directory.path, &settings).unwrap();
+
+        let seed_count = defaults::default_presets().len();
+        let error = restore_default_presets(&directory.path).unwrap_err();
+        assert!(matches!(
+            error,
+            SettingsFileError::Validation(SettingsValidationError::TooManyPresets { count })
+                if count == MAX_PRESETS + seed_count
+        ));
+
+        // Nothing was written: the file on disk still holds the un-restored settings.
+        assert_eq!(load(&directory.path).unwrap().settings, settings);
+    }
+
+    #[test]
+    fn deleting_every_default_and_saving_does_not_reseed_on_the_next_load() {
+        let directory = TestDirectory::new();
+        let user_preset = sample_preset("only-user-preset");
+        let mut settings = sample_settings(vec![user_preset.clone()]);
+        settings.active_preset_id = Some(user_preset.id.clone());
+        save(&directory.path, &settings).unwrap();
+
+        let loaded = load(&directory.path).unwrap();
+        assert!(!loaded.seeded);
+        assert_eq!(loaded.settings.presets.len(), 1);
+        assert_eq!(loaded.settings.presets[0].id, user_preset.id);
+    }
+
+    #[test]
+    fn reset_moves_the_damaged_file_aside_and_writes_defaults() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        let original_bytes = b"{ this is not valid settings json".to_vec();
+        fs::write(&path, &original_bytes).unwrap();
+
+        let settings = reset(&directory.path).unwrap();
+        assert_eq!(settings, defaults::seeded_settings());
+
+        let backup_path = directory.path.join(INVALID_SETTINGS_FILE_NAME);
+        assert_eq!(fs::read(&backup_path).unwrap(), original_bytes);
+
+        let loaded = load(&directory.path).unwrap();
+        assert!(!loaded.seeded);
+        assert_eq!(loaded.settings, defaults::seeded_settings());
+    }
+
+    #[test]
+    fn reset_with_no_existing_file_just_writes_seeds() {
+        let directory = TestDirectory::new();
+        let settings = reset(&directory.path).unwrap();
+        assert_eq!(settings, defaults::seeded_settings());
+        assert!(!directory.path.join(INVALID_SETTINGS_FILE_NAME).exists());
+        assert_eq!(
+            load(&directory.path).unwrap().settings,
+            defaults::seeded_settings()
+        );
+    }
+
+    #[test]
+    fn reset_overwrites_a_previous_backup_rather_than_accumulating_files() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+
+        fs::write(&path, b"first damaged file").unwrap();
+        reset(&directory.path).unwrap();
+
+        fs::write(&path, b"{ not json, second damage").unwrap();
+        reset(&directory.path).unwrap();
+
+        let backup_path = directory.path.join(INVALID_SETTINGS_FILE_NAME);
+        assert_eq!(
+            fs::read(&backup_path).unwrap(),
+            b"{ not json, second damage"
+        );
+
+        let entries: Vec<_> = fs::read_dir(&directory.path).unwrap().collect();
+        assert_eq!(
+            entries.len(),
+            2,
+            "only the live settings file and one fixed backup should exist"
+        );
+    }
+
+    #[test]
+    fn reset_writes_nothing_when_the_rename_fails() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        let original_bytes = b"{ this is not valid settings json".to_vec();
+        fs::write(&path, &original_bytes).unwrap();
+        // A non-empty directory at the backup name makes fs::rename fail with something
+        // other than NotFound.
+        let backup_path = directory.path.join(INVALID_SETTINGS_FILE_NAME);
+        fs::create_dir(&backup_path).unwrap();
+        fs::write(backup_path.join("occupied"), b"x").unwrap();
+
+        let error = reset(&directory.path).unwrap_err();
+        assert!(matches!(error, SettingsFileError::Io(_)));
+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
+    }
+
+    #[test]
+    fn save_recovers_from_a_poisoned_lock() {
+        let directory = TestDirectory::new();
+        // Poison SETTINGS_LOCK from a thread that panics while holding it, the same way a
+        // panicking save would. save's `PoisonError::into_inner` recovery must still hand
+        // back a usable guard afterward instead of propagating the poison as a panic.
+        let poison_result = thread::spawn(|| {
+            let _guard = SETTINGS_LOCK.lock().unwrap();
+            panic!("poison SETTINGS_LOCK on purpose for the recovery test");
+        })
+        .join();
+        assert!(poison_result.is_err());
+        assert!(SETTINGS_LOCK.is_poisoned());
+
+        let settings = sample_settings(vec![sample_preset("preset-1")]);
+        save(&directory.path, &settings).unwrap();
+        assert_eq!(load(&directory.path).unwrap().settings, settings);
+    }
+
+    #[test]
+    fn restore_and_reset_do_not_deadlock() {
+        let directory = TestDirectory::new();
+
+        let restore_path = directory.path.clone();
+        let restore_result = call_with_timeout(Duration::from_secs(5), move || {
+            restore_default_presets(&restore_path)
+        });
+        assert!(
+            restore_result.is_some(),
+            "restore_default_presets did not return; it likely deadlocked on its own lock"
+        );
+        assert!(restore_result.unwrap().is_ok());
+
+        let reset_path = directory.path.clone();
+        let reset_result = call_with_timeout(Duration::from_secs(5), move || reset(&reset_path));
+        assert!(
+            reset_result.is_some(),
+            "reset did not return; it likely deadlocked on its own lock"
+        );
+        assert!(reset_result.unwrap().is_ok());
+    }
+
+    #[test]
+    fn file_name_constants_match_adr_013() {
+        assert_eq!(SETTINGS_FILE_NAME, "settings.json");
+        assert_eq!(INVALID_SETTINGS_FILE_NAME, "settings.invalid.json");
+    }
+
+    #[test]
+    fn settings_file_error_display_messages_name_the_kind_of_failure() {
+        let io_error = SettingsFileError::from(io::Error::other("boom"));
+        assert!(io_error.to_string().contains("I/O"));
+
+        let json_error =
+            SettingsFileError::from(serde_json::from_str::<Settings>("{").unwrap_err());
+        assert!(json_error.to_string().contains("JSON"));
+
+        let validation_error = SettingsFileError::from(SettingsValidationError::InvalidFfmpegPath);
+        assert!(validation_error.to_string().contains("values are invalid"));
+
+        let future = SettingsFileError::FutureSchemaVersion {
+            found: 9,
+            supported: 1,
+        };
+        assert!(future.to_string().contains("newer than supported"));
+
+        assert!(SettingsFileError::Unreadable
+            .to_string()
+            .contains("could not be read"));
     }
 }
