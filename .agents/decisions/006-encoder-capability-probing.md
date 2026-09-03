@@ -31,8 +31,9 @@ only capability that lives there and nowhere else.
 The four listings do not share one output format:
 
 - `-encoders` and `-decoders` print a flag column of six characters. One parser reads both.
-- `-filters` prints a flag column of three characters. It then prints one more column for
-  the input and output signature.
+- `-filters` prints a flag column, then one more column for the input and output
+  signature. The printed flag width does not match the legend above the list, so a parser
+  must not depend on that width. The filter name is the second field of the row.
 - `-hwaccels` prints one header line and then bare names.
 
 **The first implementation runs two of these four listings.** It runs `-encoders` and
