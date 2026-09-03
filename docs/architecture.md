@@ -198,8 +198,27 @@ sources, because the Windows build server publishes no macOS asset.
 
 After the programs resolve, a background job finds out which encoders work. It lists them,
 then runs a fraction-of-a-second encode with each candidate, because a listed hardware
-encoder fails on a machine without that hardware. The result caches against the binary path,
-version, size, and mtime.
+encoder fails on a machine without that hardware. The tests run one after another, because
+two hardware tests that run together compete for the same encoder hardware. One lock holds
+that phase for the whole application, so two runs never test an encoder at the same time.
+
+The job reports through one Tauri event named `ffmpeg:capability-probe`. Each payload
+carries the `runId` that the starting command returned. The backend does not cancel a
+superseded run. The frontend discards each event that carries a stale `runId`.
+
+The result caches in `<app_data>/capabilities.json`. That file holds a list of entries, and
+each entry holds one cache key, one probe time, and one report. The key is the binary path,
+version, size, and mtime. The list holds at most eight entries. The application removes the
+oldest by probe time. Each writer merges its own entry into the current file under a lock,
+then renames a temporary file into place, so a late write keeps the entries that another
+run wrote.
+
+The first implementation resolves the executables through `PATH` and the application data
+directory. The application has no settings storage yet, so no caller supplies a configured
+path today. The failure payload names each inspected `ffmpeg` and `ffprobe` candidate with
+its origin class, so the user sees where the application looked. The job runs two of the
+four listings. `-decoders` and `-filters` have parsers and tests, and they gain their
+command when the preview proxy and the export renderer need them.
 
 ## Edit model
 
