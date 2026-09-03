@@ -117,6 +117,10 @@ own entry, and writes the whole list to a temporary file. It then renames that f
 `capabilities.json`. A late write therefore keeps the entries that another run wrote. ADR
 005 and ADR 010 already use a temporary file and a rename.
 
+That lock covers one process. A second QuipClip process, or a user who edits the file, can
+still drop an entry. The application accepts that gap. The cost is one extra probe, and a
+file lock is a larger change than the fault deserves.
+
 The application reads a damaged or unreadable cache file as a miss. It does not report an
 error for that file. The probe result reaches the frontend even when the cache write fails.
 
@@ -146,7 +150,10 @@ macOS that order includes the two Homebrew directories from ADR 012.
   the first result of the new run waits for at most one other test.
 - A superseded run continues to spend processor time until it ends. The frontend ignores
   its events, and the merge on write keeps its late write from destroying the entry of
-  another binary.
+  another binary. That protection holds inside one process only.
+- One damaged entry discards every entry in the file. The reader parses the list as a
+  unit. This is deliberate, because a miss costs one probe and a per-entry reader costs
+  more code than that.
 - No caller supplies a configured path until settings storage exists. A user whose ffmpeg
   is outside `PATH` and the application data directory cannot point the application at it.
   ADR 005 keeps that step first in the order, and it returns with the settings storage.
