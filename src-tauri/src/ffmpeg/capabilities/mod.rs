@@ -3,12 +3,18 @@
 //! ADR 006 splits the probe into a listing step and a smoke-test step, then a cache. This
 //! module holds the types both steps share: the kind of a codec, the outcome of a smoke
 //! test, the licence flags read from `-version`, and the fixed set of encoders the smoke
-//! test exercises. The listing parsers live in [`listing`].
+//! test exercises. The listing parsers live in [`listing`]. The smoke test itself, its
+//! timed process runner, and the application-wide smoke-test lock live in [`smoke`].
 
 pub mod listing;
+pub mod smoke;
 
 pub use listing::{
     license_flags, parse_codec_list, parse_filter_list, parse_hwaccel_list, parse_version,
+};
+pub use smoke::{
+    classify, run_smoke_test, run_with_timeout, smoke_arguments, stderr_tail, CommandOutcome,
+    CommandStatus, SMOKE_TIMEOUT,
 };
 
 use serde::{Deserialize, Serialize};
