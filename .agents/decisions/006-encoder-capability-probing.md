@@ -75,9 +75,13 @@ The smoke tests run one after another. Two hardware encoder tests that run toget
 for the same encoder hardware. That competition makes a working encoder fail. That result
 is a false negative, and the probe exists to prevent it.
 
-One lock holds the smoke-test phase for the whole application. A superseded run and the
-active run therefore never test an encoder at the same time. The active run waits for the
-superseded run to end.
+One lock serializes each smoke test across the whole application. A superseded run and the
+active run therefore never test an encoder at the same time.
+
+The lock covers one test, not the whole phase. Two runs interleave their tests instead of
+one run waiting for the other to finish. The safety property holds either way, because
+each test still runs alone. A phase lock would add up to a minute of delay for no further
+protection.
 
 **Event contract.** The probe reports through one Tauri event named
 `ffmpeg:capability-probe`. The payload is a tagged union with these variants:
@@ -138,8 +142,8 @@ macOS that order includes the two Homebrew directories from ADR 012.
   and must offer the software fallback.
 - Sequential tests make the probe slower than a parallel probe. That cost buys a correct
   result on a machine with one encoder device.
-- A new probe waits for a superseded probe to release the smoke-test lock. Its first result
-  can arrive up to a minute late.
+- A new probe interleaves its tests with a superseded probe. Each test still runs alone, so
+  the first result of the new run waits for at most one other test.
 - A superseded run continues to spend processor time until it ends. The frontend ignores
   its events, and the merge on write keeps its late write from destroying the entry of
   another binary.
