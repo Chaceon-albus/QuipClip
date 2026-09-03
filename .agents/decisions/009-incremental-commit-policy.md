@@ -50,8 +50,8 @@ Refs: ADR-003
 
 - Types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`,
   `revert`.
-- Scopes: `timeline`, `preview`, `export`, `ffmpeg`, `project`, `time`, `ui`, `theme`,
-  `icons`, `tauri`, `agents`, `adr`, `deps`.
+- Scopes: `timeline`, `preview`, `export`, `ffmpeg`, `project`, `settings`, `time`, `ui`,
+  `theme`, `icons`, `tauri`, `agents`, `adr`, `deps`.
 - Subject: imperative, lower case, no full stop, 72 characters or fewer. Write "add
   rational time type", not "added" and not "adds".
 - Body: state why. The diff already states what. Omit the body only when the subject is

@@ -119,8 +119,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 ```
 
 Types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
-Scopes: `timeline`, `preview`, `export`, `ffmpeg`, `project`, `time`, `ui`, `theme`,
-`icons`, `tauri`, `agents`, `adr`, `deps`.
+Scopes: `timeline`, `preview`, `export`, `ffmpeg`, `project`, `settings`, `time`, `ui`,
+`theme`, `icons`, `tauri`, `agents`, `adr`, `deps`.
 
 Add `Assisted-By` when another agent wrote the diff. Add `Reviewed-By` for the reviewer.
 Write the model you actually ran, with its version. The trailer is a record of one run,
