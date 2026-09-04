@@ -1230,6 +1230,85 @@ describe("application shell localization and status bar formatting", () => {
     // TimelinePanel
     expect(instance.t("timeline.sourceLane")).toBe("Source Media");
 
+    // Settings: FFmpeg location
+    expect(instance.t("settings.ffmpeg.section")).toBe("FFmpeg Location");
+    expect(instance.t("settings.ffmpeg.pathLabel")).toBe("Current Path");
+    expect(instance.t("settings.ffmpeg.pathUnset")).toBe("No path set");
+    expect(instance.t("settings.ffmpeg.chooseFolder")).toBe("Choose Folder...");
+    expect(instance.t("settings.ffmpeg.chooseFile")).toBe("Choose File...");
+    expect(instance.t("settings.ffmpeg.clear")).toBe("Clear");
+    expect(instance.t("settings.ffmpeg.hint")).toBe(
+      "Choose a folder or a single file. A folder that holds both FFmpeg and FFprobe is preferred.",
+    );
+
+    // Settings: export presets
+    expect(instance.t("settings.preset.section")).toBe("Export Presets");
+    expect(instance.t("settings.preset.newName")).toBe("New Preset");
+    expect(instance.t("settings.preset.add")).toBe("Add Preset");
+    expect(instance.t("settings.preset.delete")).toBe("Delete Preset");
+    expect(instance.t("settings.preset.restoreDefaults")).toBe("Restore Defaults");
+    expect(instance.t("settings.preset.setActive")).toBe("Set Active");
+    expect(instance.t("settings.preset.activeBadge")).toBe("Active");
+    expect(instance.t("settings.preset.empty")).toBe("No presets yet.");
+    expect(instance.t("settings.preset.limitReached", { max: 100 })).toBe(
+      "Limit of 100 presets reached.",
+    );
+    expect(instance.t("settings.preset.unsaved")).toBe("Unsaved changes");
+    expect(instance.t("settings.preset.nameLabel")).toBe("Name");
+    expect(instance.t("settings.preset.containerLabel")).toBe("Container");
+    expect(instance.t("settings.preset.videoEncoderLabel")).toBe("Video Encoder");
+    expect(instance.t("settings.preset.audioEncoderLabel")).toBe("Audio Encoder");
+    expect(instance.t("settings.preset.qualityLabel")).toBe("Quality");
+    expect(instance.t("settings.preset.qualityKindLabel")).toBe("Quality Type");
+    expect(instance.t("settings.preset.qualityValueLabel")).toBe("Quality Value");
+    expect(instance.t("settings.preset.resolutionLabel")).toBe("Resolution");
+    expect(instance.t("settings.preset.frameRateLabel")).toBe("Frame Rate");
+    expect(instance.t("settings.preset.widthLabel")).toBe("Width");
+    expect(instance.t("settings.preset.heightLabel")).toBe("Height");
+    expect(instance.t("settings.preset.frameRateNumeratorLabel")).toBe("Numerator");
+    expect(instance.t("settings.preset.frameRateDenominatorLabel")).toBe("Denominator");
+    expect(instance.t("settings.preset.sourceOption")).toBe("Same as Source");
+    expect(instance.t("settings.preset.customOption")).toBe("Custom");
+
+    // Settings: quality kinds
+    expect(instance.t("settings.quality.crf")).toBe("Constant Quality (CRF)");
+    expect(instance.t("settings.quality.bitrate")).toBe("Bitrate (kbps)");
+    expect(instance.t("settings.quality.qualityScale")).toBe("Quality Scale");
+
+    // Settings: encoder availability
+    expect(instance.t("settings.encoder.available")).toBe("Available");
+    expect(instance.t("settings.encoder.unavailable")).toBe("Unavailable");
+    expect(instance.t("settings.encoder.unknown")).toBe("Not checked");
+    expect(instance.t("settings.encoder.reasonNotListed")).toBe(
+      "This FFmpeg build does not include the encoder.",
+    );
+    expect(instance.t("settings.encoder.reasonFailed")).toBe(
+      "The encoder failed its test on this machine.",
+    );
+    expect(instance.t("settings.encoder.reasonTimedOut")).toBe(
+      "The encoder did not respond in time.",
+    );
+    expect(instance.t("settings.encoder.customLabel")).toBe("Custom Encoder Name");
+    expect(instance.t("settings.encoder.customHint")).toBe(
+      "Use 1 to 64 characters. Start with a letter or digit. After that, use only letters, digits, underscores, periods, or hyphens.",
+    );
+
+    // Settings: field validation messages
+    expect(instance.t("settings.field.required")).toBe("This field is required.");
+    expect(instance.t("settings.field.tooLong", { max: 120 })).toBe(
+      "Use 120 characters or fewer.",
+    );
+    expect(instance.t("settings.field.charset")).toBe(
+      "Use 1 to 64 characters. Start with a letter or digit. After that, use only letters, digits, underscores, periods, or hyphens.",
+    );
+    expect(instance.t("settings.field.outOfRange", { min: 0, max: 63 })).toBe(
+      "Enter a value from 0 to 63.",
+    );
+    expect(instance.t("settings.field.positive")).toBe(
+      "Enter a whole number above zero.",
+    );
+    expect(instance.t("settings.field.notInteger")).toBe("Enter a whole number.");
+
     // Switch to Simplified Chinese
     await instance.changeLanguage("zh-CN");
 
@@ -1277,6 +1356,81 @@ describe("application shell localization and status bar formatting", () => {
 
     // TimelinePanel
     expect(instance.t("timeline.sourceLane")).toBe("源媒体");
+
+    // Settings: FFmpeg location
+    expect(instance.t("settings.ffmpeg.section")).toBe("FFmpeg 位置");
+    expect(instance.t("settings.ffmpeg.pathLabel")).toBe("当前路径");
+    expect(instance.t("settings.ffmpeg.pathUnset")).toBe("未设置路径");
+    expect(instance.t("settings.ffmpeg.chooseFolder")).toBe("选择文件夹...");
+    expect(instance.t("settings.ffmpeg.chooseFile")).toBe("选择文件...");
+    expect(instance.t("settings.ffmpeg.clear")).toBe("清除");
+    expect(instance.t("settings.ffmpeg.hint")).toBe(
+      "可以选择文件夹，也可以选择单个文件；建议选择同时包含 FFmpeg 和 FFprobe 的文件夹。",
+    );
+
+    // Settings: export presets
+    expect(instance.t("settings.preset.section")).toBe("导出预设");
+    expect(instance.t("settings.preset.newName")).toBe("新预设");
+    expect(instance.t("settings.preset.add")).toBe("添加预设");
+    expect(instance.t("settings.preset.delete")).toBe("删除预设");
+    expect(instance.t("settings.preset.restoreDefaults")).toBe("恢复默认预设");
+    expect(instance.t("settings.preset.setActive")).toBe("设为当前预设");
+    expect(instance.t("settings.preset.activeBadge")).toBe("当前");
+    expect(instance.t("settings.preset.empty")).toBe("暂无预设。");
+    expect(instance.t("settings.preset.limitReached", { max: 100 })).toBe(
+      "已达到 100 个预设的上限。",
+    );
+    expect(instance.t("settings.preset.unsaved")).toBe("未保存的更改");
+    expect(instance.t("settings.preset.nameLabel")).toBe("名称");
+    expect(instance.t("settings.preset.containerLabel")).toBe("容器");
+    expect(instance.t("settings.preset.videoEncoderLabel")).toBe("视频编码器");
+    expect(instance.t("settings.preset.audioEncoderLabel")).toBe("音频编码器");
+    expect(instance.t("settings.preset.qualityLabel")).toBe("质量");
+    expect(instance.t("settings.preset.qualityKindLabel")).toBe("质量类型");
+    expect(instance.t("settings.preset.qualityValueLabel")).toBe("质量数值");
+    expect(instance.t("settings.preset.resolutionLabel")).toBe("分辨率");
+    expect(instance.t("settings.preset.frameRateLabel")).toBe("帧率");
+    expect(instance.t("settings.preset.widthLabel")).toBe("宽度");
+    expect(instance.t("settings.preset.heightLabel")).toBe("高度");
+    expect(instance.t("settings.preset.frameRateNumeratorLabel")).toBe("分子");
+    expect(instance.t("settings.preset.frameRateDenominatorLabel")).toBe("分母");
+    expect(instance.t("settings.preset.sourceOption")).toBe("与源相同");
+    expect(instance.t("settings.preset.customOption")).toBe("自定义");
+
+    // Settings: quality kinds
+    expect(instance.t("settings.quality.crf")).toBe("恒定质量（CRF）");
+    expect(instance.t("settings.quality.bitrate")).toBe("比特率（kbps）");
+    expect(instance.t("settings.quality.qualityScale")).toBe("质量系数");
+
+    // Settings: encoder availability
+    expect(instance.t("settings.encoder.available")).toBe("可用");
+    expect(instance.t("settings.encoder.unavailable")).toBe("不可用");
+    expect(instance.t("settings.encoder.unknown")).toBe("未检测");
+    expect(instance.t("settings.encoder.reasonNotListed")).toBe(
+      "此 FFmpeg 版本不包含该编码器。",
+    );
+    expect(instance.t("settings.encoder.reasonFailed")).toBe(
+      "该编码器在本机测试失败。",
+    );
+    expect(instance.t("settings.encoder.reasonTimedOut")).toBe("编码器未及时响应。");
+    expect(instance.t("settings.encoder.customLabel")).toBe("自定义编码器名称");
+    expect(instance.t("settings.encoder.customHint")).toBe(
+      "请使用 1 到 64 个字符。以字母或数字开头，后续只能使用字母、数字、下划线、句点或连字符。",
+    );
+
+    // Settings: field validation messages
+    expect(instance.t("settings.field.required")).toBe("此字段为必填项。");
+    expect(instance.t("settings.field.tooLong", { max: 120 })).toBe(
+      "最多可输入 120 个字符。",
+    );
+    expect(instance.t("settings.field.charset")).toBe(
+      "请使用 1 到 64 个字符。以字母或数字开头，后续只能使用字母、数字、下划线、句点或连字符。",
+    );
+    expect(instance.t("settings.field.outOfRange", { min: 0, max: 63 })).toBe(
+      "请输入 0 到 63（含两端）之间的数值。",
+    );
+    expect(instance.t("settings.field.positive")).toBe("请输入一个大于零的整数。");
+    expect(instance.t("settings.field.notInteger")).toBe("请输入一个整数。");
   });
 
   it("formats resolution and frame rate numbers with Intl under resolved locale", async () => {
