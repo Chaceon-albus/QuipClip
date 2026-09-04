@@ -28,6 +28,14 @@ export type FfmpegPathView = {
   path: string | null;
   /** True while a choose or clear operation is in flight. */
   pending: boolean;
+  /**
+   * True exactly when the controller currently has a settings document to work from
+   * (`getSettingsFn() !== null`). False right after a failed load, when `choose()` and
+   * `clear()` are safe no-ops that open no dialog, save nothing, and probe nothing. A view
+   * should disable its buttons while this is false: otherwise every click is a silent no-op,
+   * and `path === null` is indistinguishable from "the application does not know yet".
+   */
+  ready: boolean;
 };
 
 /**
@@ -129,11 +137,15 @@ export class FfmpegPathController {
 
   /**
    * Builds the current view snapshot for the UI to render.
+   *
+   * `ready` is recomputed from `getSettingsFn()` on every call, never cached, so it always
+   * reflects whether the controller currently has a settings document to act on.
    */
   getView(): FfmpegPathView {
     return {
       path: this.path,
       pending: this.pendingCount > 0,
+      ready: this.getSettingsFn() !== null,
     };
   }
 

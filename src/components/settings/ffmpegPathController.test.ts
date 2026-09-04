@@ -509,6 +509,72 @@ describe("FfmpegPathController", () => {
     });
   });
 
+  // `ready` reports whether the controller currently has a settings document to work from.
+  // It must track `getSettingsFn()`, not merely `path`: a failed load leaves `path === null`
+  // AND `ready === false`, while a loaded document with no configured ffmpeg path leaves
+  // `path === null` but `ready === true`. A view uses `ready` to decide whether to disable the
+  // choose/clear buttons instead of letting every click become a silent no-op.
+  describe("ready", () => {
+    it("is false before any document is synced, and true after syncFromSettings delivers one", () => {
+      let currentSettings: Settings | null = null;
+      const onChange = vi.fn();
+      const controller = createFfmpegPathController({
+        getSettings: () => currentSettings,
+        onChange,
+      });
+
+      expect(controller.getView().ready).toBe(false);
+
+      currentSettings = createSettings();
+      controller.syncFromSettings(currentSettings);
+
+      expect(controller.getView().ready).toBe(true);
+      expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ ready: true }));
+    });
+
+    it("syncFromSettings(null) sets ready back to false and emits", () => {
+      let currentSettings: Settings | null = createSettings();
+      const onChange = vi.fn();
+      const controller = createFfmpegPathController({
+        getSettings: () => currentSettings,
+        onChange,
+      });
+
+      controller.syncFromSettings(currentSettings);
+      expect(controller.getView().ready).toBe(true);
+      onChange.mockClear();
+
+      currentSettings = null;
+      controller.syncFromSettings(null);
+
+      expect(controller.getView().ready).toBe(false);
+      expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ ready: false }));
+    });
+
+    it("with no document, choose() and clear() still return false and perform no IPC, and ready is false", async () => {
+      const saveSettings = vi.fn();
+      const startProbe = vi.fn();
+      const openDialog = vi.fn();
+      const controller = createFfmpegPathController({
+        getSettings: () => null,
+        saveSettings,
+        startProbe,
+        openDialog,
+      });
+
+      expect(controller.getView().ready).toBe(false);
+
+      await expect(controller.choose("file")).resolves.toBe(false);
+      await expect(controller.clear()).resolves.toBe(false);
+
+      expect(saveSettings).not.toHaveBeenCalled();
+      expect(startProbe).not.toHaveBeenCalled();
+      expect(openDialog).not.toHaveBeenCalled();
+      // A view could have used `ready` to disable the control before either call was made.
+      expect(controller.getView().ready).toBe(false);
+    });
+  });
+
   describe("syncFromSettings", () => {
     it("updates the view path from the given document", () => {
       const onChange = vi.fn();
