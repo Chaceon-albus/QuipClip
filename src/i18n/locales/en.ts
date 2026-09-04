@@ -161,4 +161,21 @@ export const en = {
     commandExecutionFailed: "The FFmpeg capability probe command failed to execute.",
     unknown: "An unknown error occurred while probing FFmpeg.",
   },
+  settingsError: {
+    appDataUnavailable: "The application data directory is unavailable.",
+    readFailed: "Failed to read the settings file.",
+    permissionDenied: "Permission was denied while accessing the settings file.",
+    writeFailed: "Failed to write the settings file.",
+    invalidJson: "The settings file contains invalid JSON.",
+    invalidSettings: "The settings file contains invalid settings values.",
+    unsafeSettingsValue: "A settings value exceeds safe limits.",
+    futureSchemaVersion: "The settings file is from a newer version of QuipClip.",
+    settingsUnreadable:
+      "The existing settings file could not be read, so it was not overwritten.",
+    backupFailed: "Failed to back up the existing settings file.",
+    invalidPath: "The configured FFmpeg path is invalid.",
+    commandExecutionFailed: "The settings command failed to execute.",
+    dialogFailed: "Failed to open the file selection dialog.",
+    unknown: "An unknown error occurred while processing settings.",
+  },
 } as const;

@@ -22,6 +22,7 @@ import {
   zhCN,
   type PreferenceStorage,
 } from "./index";
+import { SETTINGS_ERROR_CODES } from "@/features/settings/types";
 
 /**
  * Creates an in-memory PreferenceStorage for isolated testing.
@@ -1317,5 +1318,21 @@ describe("application shell localization and status bar formatting", () => {
       }),
     ).toBe("源标称帧率：25 fps");
     expect(instance.t("statusBar.sourceNominalRateUnavailable")).toBe("源标称帧率：—");
+  });
+});
+
+describe("settingsError message catalog parity", () => {
+  it("defines non-empty strings in en.settingsError and zhCN.settingsError for every error code", () => {
+    expect(SETTINGS_ERROR_CODES.length).toBe(14);
+    for (const code of SETTINGS_ERROR_CODES) {
+      const enText = en.settingsError[code];
+      const zhText = zhCN.settingsError[code];
+
+      expect(typeof enText).toBe("string");
+      expect(enText.trim().length).toBeGreaterThan(0);
+
+      expect(typeof zhText).toBe("string");
+      expect(zhText.trim().length).toBeGreaterThan(0);
+    }
   });
 });
