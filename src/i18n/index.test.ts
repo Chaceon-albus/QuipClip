@@ -1258,7 +1258,6 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.preset.containerLabel")).toBe("Container");
     expect(instance.t("settings.preset.videoEncoderLabel")).toBe("Video Encoder");
     expect(instance.t("settings.preset.audioEncoderLabel")).toBe("Audio Encoder");
-    expect(instance.t("settings.preset.qualityLabel")).toBe("Quality");
     expect(instance.t("settings.preset.qualityKindLabel")).toBe("Quality Type");
     expect(instance.t("settings.preset.qualityValueLabel")).toBe("Quality Value");
     expect(instance.t("settings.preset.resolutionLabel")).toBe("Resolution");
@@ -1279,6 +1278,12 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.encoder.available")).toBe("Available");
     expect(instance.t("settings.encoder.unavailable")).toBe("Unavailable");
     expect(instance.t("settings.encoder.unknown")).toBe("Not checked");
+    expect(
+      instance.t("settings.encoder.optionLabel", {
+        name: "libx264",
+        availability: "Available",
+      }),
+    ).toBe("libx264 (Available)");
     expect(instance.t("settings.encoder.reasonNotListed")).toBe(
       "This FFmpeg build does not include the encoder.",
     );
@@ -1385,7 +1390,6 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.preset.containerLabel")).toBe("容器");
     expect(instance.t("settings.preset.videoEncoderLabel")).toBe("视频编码器");
     expect(instance.t("settings.preset.audioEncoderLabel")).toBe("音频编码器");
-    expect(instance.t("settings.preset.qualityLabel")).toBe("质量");
     expect(instance.t("settings.preset.qualityKindLabel")).toBe("质量类型");
     expect(instance.t("settings.preset.qualityValueLabel")).toBe("质量数值");
     expect(instance.t("settings.preset.resolutionLabel")).toBe("分辨率");
@@ -1406,6 +1410,12 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.encoder.available")).toBe("可用");
     expect(instance.t("settings.encoder.unavailable")).toBe("不可用");
     expect(instance.t("settings.encoder.unknown")).toBe("未检测");
+    expect(
+      instance.t("settings.encoder.optionLabel", {
+        name: "libx264",
+        availability: "可用",
+      }),
+    ).toBe("libx264（可用）");
     expect(instance.t("settings.encoder.reasonNotListed")).toBe(
       "此 FFmpeg 版本不包含该编码器。",
     );
