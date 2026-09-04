@@ -17,12 +17,45 @@ export type FfmpegStatusLineKey =
   | "ffmpeg.status.missing"
   | "ffmpeg.status.failed";
 
+export type FfmpegStatusDetailEntry = {
+  key: string;
+  values?: Record<string, string>;
+  /** Stable, unique React key for this entry within its `detail` array. */
+  id: string;
+  /** True for the entry that carries raw diagnostic text, rendered in monospace. */
+  mono: boolean;
+};
+
 export type FfmpegStatusView = {
   lineKey: FfmpegStatusLineKey;
   lineValues: Record<string, string>;
-  detail: Array<{ key: string; values?: Record<string, string> }>;
+  detail: FfmpegStatusDetailEntry[];
   tone: "neutral" | "ready" | "warning";
 };
+
+/**
+ * Appends one detail entry, deriving its React key and monospace flag so components never
+ * have to make those decisions themselves.
+ *
+ * The id combines the translation key with the entry's position in the array, which keeps
+ * it deterministic and unique even when two entries share a key or a value.
+ */
+function pushDetail(
+  detail: FfmpegStatusDetailEntry[],
+  key: string,
+  values?: Record<string, string>,
+): void {
+  const entry: FfmpegStatusDetailEntry = {
+    key,
+    id: `${key}#${detail.length}`,
+    // The raw diagnostic entry is the only one rendered in monospace.
+    mono: key === "ffmpeg.detail.raw",
+  };
+  if (values) {
+    entry.values = values;
+  }
+  detail.push(entry);
+}
 
 export function presentFfmpegStatus(
   state: FfmpegState,
@@ -56,66 +89,58 @@ export function presentFfmpegStatus(
       const workingCount = workingResults.length;
       const testedCount = state.results.length;
 
-      const detail: Array<{ key: string; values?: Record<string, string> }> = [];
+      const detail: FfmpegStatusDetailEntry[] = [];
 
       // 1. Origin
       if (state.origin) {
-        detail.push({ key: `ffmpeg.detail.origin.${state.origin}` });
+        pushDetail(detail, `ffmpeg.detail.origin.${state.origin}`);
       }
 
       // 2. Program path
       if (state.paths?.ffmpeg) {
-        detail.push({
-          key: "ffmpeg.detail.program",
-          values: { path: state.paths.ffmpeg },
-        });
+        pushDetail(detail, "ffmpeg.detail.program", { path: state.paths.ffmpeg });
       }
 
       // 3. Version
       if (state.version) {
-        detail.push({
-          key: "ffmpeg.detail.version",
-          values: { version: state.version },
-        });
+        pushDetail(detail, "ffmpeg.detail.version", { version: state.version });
       }
 
       // 4. Licence flags
       let hasLicenseFlag = false;
       if (state.license?.gpl) {
-        detail.push({ key: "ffmpeg.detail.license.gpl" });
+        pushDetail(detail, "ffmpeg.detail.license.gpl");
         hasLicenseFlag = true;
       }
       if (state.license?.nonfree) {
-        detail.push({ key: "ffmpeg.detail.license.nonfree" });
+        pushDetail(detail, "ffmpeg.detail.license.nonfree");
         hasLicenseFlag = true;
       }
       if (state.license?.version3) {
-        detail.push({ key: "ffmpeg.detail.license.version3" });
+        pushDetail(detail, "ffmpeg.detail.license.version3");
         hasLicenseFlag = true;
       }
       if (!hasLicenseFlag) {
-        detail.push({ key: "ffmpeg.detail.license.none" });
+        pushDetail(detail, "ffmpeg.detail.license.none");
       }
 
       // 5. Hardware acceleration methods
       if (state.hwaccels && state.hwaccels.length > 0) {
-        detail.push({
-          key: "ffmpeg.detail.hardware",
-          values: { methods: format.list.format(state.hwaccels) },
+        pushDetail(detail, "ffmpeg.detail.hardware", {
+          methods: format.list.format(state.hwaccels),
         });
       } else {
-        detail.push({ key: "ffmpeg.detail.hardwareNone" });
+        pushDetail(detail, "ffmpeg.detail.hardwareNone");
       }
 
       // 6. Working encoders
       if (workingResults.length > 0) {
         const encoderNames = workingResults.map((r) => r.name);
-        detail.push({
-          key: "ffmpeg.detail.workingEncoders",
-          values: { encoders: format.list.format(encoderNames) },
+        pushDetail(detail, "ffmpeg.detail.workingEncoders", {
+          encoders: format.list.format(encoderNames),
         });
       } else {
-        detail.push({ key: "ffmpeg.detail.noWorkingEncoders" });
+        pushDetail(detail, "ffmpeg.detail.noWorkingEncoders");
       }
 
       return {
@@ -131,25 +156,19 @@ export function presentFfmpegStatus(
     }
 
     case "missing": {
-      const detail: Array<{ key: string; values?: Record<string, string> }> = [];
-      detail.push({ key: "ffmpegError.ffmpegPairMissing" });
+      const detail: FfmpegStatusDetailEntry[] = [];
+      pushDetail(detail, "ffmpegError.ffmpegPairMissing");
 
       if (state.error?.detail) {
-        detail.push({
-          key: "ffmpeg.detail.raw",
-          values: { detail: state.error.detail },
-        });
+        pushDetail(detail, "ffmpeg.detail.raw", { detail: state.error.detail });
       }
 
       if (state.inspected) {
         for (const candidate of state.inspected) {
-          detail.push({
-            key: "ffmpeg.detail.searchedPair",
-            values: {
-              path: candidate.ffmpeg,
-              probe: candidate.ffprobe,
-              origin: candidate.origin,
-            },
+          pushDetail(detail, "ffmpeg.detail.searchedPair", {
+            path: candidate.ffmpeg,
+            probe: candidate.ffprobe,
+            origin: candidate.origin,
           });
         }
       }
@@ -163,20 +182,17 @@ export function presentFfmpegStatus(
     }
 
     case "failed": {
-      const detail: Array<{ key: string; values?: Record<string, string> }> = [];
+      const detail: FfmpegStatusDetailEntry[] = [];
       const rawCode = state.error?.code;
       const isKnownCode =
         typeof rawCode === "string" &&
         (BACKEND_CAPABILITY_PROBE_ERROR_CODES as readonly string[]).includes(rawCode);
       const errorCode = isKnownCode ? rawCode : "unknown";
 
-      detail.push({ key: `ffmpegError.${errorCode}` });
+      pushDetail(detail, `ffmpegError.${errorCode}`);
 
       if (state.error?.detail) {
-        detail.push({
-          key: "ffmpeg.detail.raw",
-          values: { detail: state.error.detail },
-        });
+        pushDetail(detail, "ffmpeg.detail.raw", { detail: state.error.detail });
       }
 
       return {

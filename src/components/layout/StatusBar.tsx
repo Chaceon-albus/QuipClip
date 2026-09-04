@@ -155,12 +155,10 @@ export function StatusBar() {
             )}
           >
             <p className="font-semibold">{t("ffmpeg.detail.title")}</p>
-            {statusView.detail.map((item, index) => (
+            {statusView.detail.map((item) => (
               <p
-                key={item.values?.path ?? `${item.key}-${index}`}
-                className={cn(
-                  item.key === "ffmpeg.detail.raw" && "font-mono break-all select-text",
-                )}
+                key={item.id}
+                className={cn(item.mono && "font-mono break-all select-text")}
               >
                 {t(item.key, {
                   defaultValue: t("ffmpegError.unknown"),

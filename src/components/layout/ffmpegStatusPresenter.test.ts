@@ -154,25 +154,41 @@ describe("presentFfmpegStatus", () => {
       expect(view.tone).toBe("ready");
 
       expect(view.detail).toEqual([
-        { key: "ffmpeg.detail.origin.path" },
+        {
+          key: "ffmpeg.detail.origin.path",
+          id: "ffmpeg.detail.origin.path#0",
+          mono: false,
+        },
         {
           key: "ffmpeg.detail.program",
           values: { path: "/opt/homebrew/bin/ffmpeg" },
+          id: "ffmpeg.detail.program#1",
+          mono: false,
         },
         {
           key: "ffmpeg.detail.version",
           values: { version: "7.1.1" },
+          id: "ffmpeg.detail.version#2",
+          mono: false,
         },
-        { key: "ffmpeg.detail.license.gpl" },
+        {
+          key: "ffmpeg.detail.license.gpl",
+          id: "ffmpeg.detail.license.gpl#3",
+          mono: false,
+        },
         {
           key: "ffmpeg.detail.hardware",
           values: { methods: "videotoolbox" },
+          id: "ffmpeg.detail.hardware#4",
+          mono: false,
         },
         {
           key: "ffmpeg.detail.workingEncoders",
           values: {
             encoders: "h264_videotoolbox, hevc_videotoolbox, libx264, libx265, aac",
           },
+          id: "ffmpeg.detail.workingEncoders#5",
+          mono: false,
         },
       ]);
     });
@@ -201,25 +217,49 @@ describe("presentFfmpegStatus", () => {
       const view = presentFfmpegStatus(state, format);
 
       expect(view.detail).toEqual([
-        { key: "ffmpeg.detail.origin.configured" },
+        {
+          key: "ffmpeg.detail.origin.configured",
+          id: "ffmpeg.detail.origin.configured#0",
+          mono: false,
+        },
         {
           key: "ffmpeg.detail.program",
           values: { path: "/usr/local/bin/ffmpeg" },
+          id: "ffmpeg.detail.program#1",
+          mono: false,
         },
         {
           key: "ffmpeg.detail.version",
           values: { version: "6.1" },
+          id: "ffmpeg.detail.version#2",
+          mono: false,
         },
-        { key: "ffmpeg.detail.license.gpl" },
-        { key: "ffmpeg.detail.license.nonfree" },
-        { key: "ffmpeg.detail.license.version3" },
+        {
+          key: "ffmpeg.detail.license.gpl",
+          id: "ffmpeg.detail.license.gpl#3",
+          mono: false,
+        },
+        {
+          key: "ffmpeg.detail.license.nonfree",
+          id: "ffmpeg.detail.license.nonfree#4",
+          mono: false,
+        },
+        {
+          key: "ffmpeg.detail.license.version3",
+          id: "ffmpeg.detail.license.version3#5",
+          mono: false,
+        },
         {
           key: "ffmpeg.detail.hardware",
           values: { methods: "cuda, vdpau" },
+          id: "ffmpeg.detail.hardware#6",
+          mono: false,
         },
         {
           key: "ffmpeg.detail.workingEncoders",
           values: { encoders: "libx264" },
+          id: "ffmpeg.detail.workingEncoders#7",
+          mono: false,
         },
       ]);
     });
@@ -253,10 +293,26 @@ describe("presentFfmpegStatus", () => {
         tested: "1",
       });
       expect(view.tone).toBe("warning");
-      expect(view.detail).toContainEqual({ key: "ffmpeg.detail.origin.appData" });
-      expect(view.detail).toContainEqual({ key: "ffmpeg.detail.license.none" });
-      expect(view.detail).toContainEqual({ key: "ffmpeg.detail.hardwareNone" });
-      expect(view.detail).toContainEqual({ key: "ffmpeg.detail.noWorkingEncoders" });
+      expect(view.detail).toContainEqual({
+        key: "ffmpeg.detail.origin.appData",
+        id: "ffmpeg.detail.origin.appData#0",
+        mono: false,
+      });
+      expect(view.detail).toContainEqual({
+        key: "ffmpeg.detail.license.none",
+        id: "ffmpeg.detail.license.none#3",
+        mono: false,
+      });
+      expect(view.detail).toContainEqual({
+        key: "ffmpeg.detail.hardwareNone",
+        id: "ffmpeg.detail.hardwareNone#4",
+        mono: false,
+      });
+      expect(view.detail).toContainEqual({
+        key: "ffmpeg.detail.noWorkingEncoders",
+        id: "ffmpeg.detail.noWorkingEncoders#5",
+        mono: false,
+      });
     });
 
     it("returns tone 'warning' when ready with zero working encoders", () => {
@@ -306,23 +362,39 @@ describe("presentFfmpegStatus", () => {
 
       expect(view.tone).toBe("ready");
       expect(view.detail).toEqual([
-        { key: "ffmpeg.detail.origin.path" },
+        {
+          key: "ffmpeg.detail.origin.path",
+          id: "ffmpeg.detail.origin.path#0",
+          mono: false,
+        },
         {
           key: "ffmpeg.detail.program",
           values: { path: "/opt/homebrew/bin/ffmpeg" },
+          id: "ffmpeg.detail.program#1",
+          mono: false,
         },
         {
           key: "ffmpeg.detail.version",
           values: { version: "7.1" },
+          id: "ffmpeg.detail.version#2",
+          mono: false,
         },
-        { key: "ffmpeg.detail.license.nonfree" },
+        {
+          key: "ffmpeg.detail.license.nonfree",
+          id: "ffmpeg.detail.license.nonfree#3",
+          mono: false,
+        },
         {
           key: "ffmpeg.detail.hardware",
           values: { methods: "videotoolbox" },
+          id: "ffmpeg.detail.hardware#4",
+          mono: false,
         },
         {
           key: "ffmpeg.detail.workingEncoders",
           values: { encoders: "libx264" },
+          id: "ffmpeg.detail.workingEncoders#5",
+          mono: false,
         },
       ]);
     });
@@ -354,9 +426,21 @@ describe("presentFfmpegStatus", () => {
       });
       expect(view.tone).toBe("warning");
       expect(view.detail).toEqual([
-        { key: "ffmpeg.detail.license.none" },
-        { key: "ffmpeg.detail.hardwareNone" },
-        { key: "ffmpeg.detail.noWorkingEncoders" },
+        {
+          key: "ffmpeg.detail.license.none",
+          id: "ffmpeg.detail.license.none#0",
+          mono: false,
+        },
+        {
+          key: "ffmpeg.detail.hardwareNone",
+          id: "ffmpeg.detail.hardwareNone#1",
+          mono: false,
+        },
+        {
+          key: "ffmpeg.detail.noWorkingEncoders",
+          id: "ffmpeg.detail.noWorkingEncoders#2",
+          mono: false,
+        },
       ]);
     });
   });
@@ -400,6 +484,8 @@ describe("presentFfmpegStatus", () => {
         detail: [
           {
             key: "ffmpegError.ffmpegPairMissing",
+            id: "ffmpegError.ffmpegPairMissing#0",
+            mono: false,
           },
           {
             key: "ffmpeg.detail.searchedPair",
@@ -408,6 +494,8 @@ describe("presentFfmpegStatus", () => {
               probe: "/Users/user/.config/quipclip/bin/ffprobe",
               origin: "configured",
             },
+            id: "ffmpeg.detail.searchedPair#1",
+            mono: false,
           },
           {
             key: "ffmpeg.detail.searchedPair",
@@ -416,6 +504,8 @@ describe("presentFfmpegStatus", () => {
               probe: "/opt/homebrew/bin/ffprobe",
               origin: "path",
             },
+            id: "ffmpeg.detail.searchedPair#2",
+            mono: false,
           },
           {
             key: "ffmpeg.detail.searchedPair",
@@ -424,6 +514,8 @@ describe("presentFfmpegStatus", () => {
               probe: "/usr/local/bin/ffprobe",
               origin: "path",
             },
+            id: "ffmpeg.detail.searchedPair#3",
+            mono: false,
           },
           {
             key: "ffmpeg.detail.searchedPair",
@@ -432,6 +524,8 @@ describe("presentFfmpegStatus", () => {
               probe: "/Users/user/Library/Application Support/quipclip/ffprobe",
               origin: "appData",
             },
+            id: "ffmpeg.detail.searchedPair#4",
+            mono: false,
           },
         ],
         tone: "warning",
@@ -450,7 +544,13 @@ describe("presentFfmpegStatus", () => {
       expect(view).toEqual({
         lineKey: "ffmpeg.status.missing",
         lineValues: {},
-        detail: [{ key: "ffmpegError.ffmpegPairMissing" }],
+        detail: [
+          {
+            key: "ffmpegError.ffmpegPairMissing",
+            id: "ffmpegError.ffmpegPairMissing#0",
+            mono: false,
+          },
+        ],
         tone: "warning",
       });
       expect(view.detail.length).toBeGreaterThan(0);
@@ -468,7 +568,13 @@ describe("presentFfmpegStatus", () => {
       expect(view).toEqual({
         lineKey: "ffmpeg.status.missing",
         lineValues: {},
-        detail: [{ key: "ffmpegError.ffmpegPairMissing" }],
+        detail: [
+          {
+            key: "ffmpegError.ffmpegPairMissing",
+            id: "ffmpegError.ffmpegPairMissing#0",
+            mono: false,
+          },
+        ],
         tone: "warning",
       });
       expect(view.detail.length).toBeGreaterThan(0);
@@ -493,10 +599,16 @@ describe("presentFfmpegStatus", () => {
         lineKey: "ffmpeg.status.missing",
         lineValues: {},
         detail: [
-          { key: "ffmpegError.ffmpegPairMissing" },
+          {
+            key: "ffmpegError.ffmpegPairMissing",
+            id: "ffmpegError.ffmpegPairMissing#0",
+            mono: false,
+          },
           {
             key: "ffmpeg.detail.raw",
             values: { detail: "ffmpeg present but ffprobe absent" },
+            id: "ffmpeg.detail.raw#1",
+            mono: true,
           },
         ],
         tone: "warning",
@@ -527,10 +639,14 @@ describe("presentFfmpegStatus", () => {
         detail: [
           {
             key: "ffmpegError.ffmpegSpawnFailed",
+            id: "ffmpegError.ffmpegSpawnFailed#0",
+            mono: false,
           },
           {
             key: "ffmpeg.detail.raw",
             values: { detail: "execve: /usr/bin/ffmpeg permission denied" },
+            id: "ffmpeg.detail.raw#1",
+            mono: true,
           },
         ],
         tone: "warning",
@@ -556,6 +672,8 @@ describe("presentFfmpegStatus", () => {
         detail: [
           {
             key: "ffmpegError.cacheUnavailable",
+            id: "ffmpegError.cacheUnavailable#0",
+            mono: false,
           },
         ],
         tone: "warning",
@@ -575,6 +693,8 @@ describe("presentFfmpegStatus", () => {
         detail: [
           {
             key: "ffmpegError.unknown",
+            id: "ffmpegError.unknown#0",
+            mono: false,
           },
         ],
         tone: "warning",
@@ -596,10 +716,14 @@ describe("presentFfmpegStatus", () => {
         detail: [
           {
             key: "ffmpegError.unknown",
+            id: "ffmpegError.unknown#0",
+            mono: false,
           },
           {
             key: "ffmpeg.detail.raw",
             values: { detail: "unexpected system fault" },
+            id: "ffmpeg.detail.raw#1",
+            mono: true,
           },
         ],
         tone: "warning",
@@ -621,13 +745,83 @@ describe("presentFfmpegStatus", () => {
 
         const view = presentFfmpegStatus(state, format);
         expect(view.detail).toEqual([
-          { key: `ffmpegError.${code}` },
+          { key: `ffmpegError.${code}`, id: `ffmpegError.${code}#0`, mono: false },
           {
             key: "ffmpeg.detail.raw",
             values: { detail: `Diagnostic for ${code}` },
+            id: "ffmpeg.detail.raw#1",
+            mono: true,
           },
         ]);
       },
     );
+  });
+
+  describe("detail entry ids and mono flag", () => {
+    it("marks only the raw diagnostic entry as mono", () => {
+      const error = new CapabilityProbeError({
+        code: "ffmpegSpawnFailed",
+        detail: "execve: /usr/bin/ffmpeg permission denied",
+        exitCode: 126,
+      });
+      const state: FfmpegState = {
+        ...createBaseState(),
+        status: "failed",
+        error,
+      };
+
+      const view = presentFfmpegStatus(state, format);
+
+      const monoEntries = view.detail.filter((entry) => entry.mono);
+      const nonMonoEntries = view.detail.filter((entry) => !entry.mono);
+
+      expect(monoEntries).toEqual([
+        {
+          key: "ffmpeg.detail.raw",
+          values: { detail: "execve: /usr/bin/ffmpeg permission denied" },
+          id: "ffmpeg.detail.raw#1",
+          mono: true,
+        },
+      ]);
+      expect(nonMonoEntries).toEqual([
+        {
+          key: "ffmpegError.ffmpegSpawnFailed",
+          id: "ffmpegError.ffmpegSpawnFailed#0",
+          mono: false,
+        },
+      ]);
+    });
+
+    it("gives every detail entry a unique id even when entries share a key", () => {
+      const inspected: InspectedCandidate[] = [
+        {
+          ffmpeg: "/Users/user/.config/quipclip/bin/ffmpeg",
+          ffprobe: "/Users/user/.config/quipclip/bin/ffprobe",
+          origin: "configured",
+        },
+        {
+          ffmpeg: "/opt/homebrew/bin/ffmpeg",
+          ffprobe: "/opt/homebrew/bin/ffprobe",
+          origin: "path",
+        },
+        {
+          ffmpeg: "/usr/local/bin/ffmpeg",
+          ffprobe: "/usr/local/bin/ffprobe",
+          origin: "path",
+        },
+      ];
+      const state: FfmpegState = {
+        ...createBaseState(),
+        status: "missing",
+        inspected,
+      };
+
+      const view = presentFfmpegStatus(state, format);
+      const ids = view.detail.map((entry) => entry.id);
+
+      // Several entries share the "ffmpeg.detail.searchedPair" key; ids must still be
+      // pairwise distinct, so the set of ids is exactly as large as the detail array.
+      expect(new Set(ids).size).toBe(view.detail.length);
+    });
   });
 });
