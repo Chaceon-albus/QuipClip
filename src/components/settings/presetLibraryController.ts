@@ -17,12 +17,15 @@
 import {
   addPreset as addPresetToDocument,
   createPresetDraft,
+  DEFAULT_CUSTOM_FRAME_RATE,
+  DEFAULT_CUSTOM_RESOLUTION,
   deletePreset as deletePresetFromDocument,
   setActivePreset,
   updatePreset,
 } from "@/features/settings/presetDocument";
 import {
   canAddPreset,
+  defaultQualityValue,
   validatePresetFields,
   type PresetFieldIssue,
 } from "@/features/settings/limits";
@@ -31,7 +34,49 @@ import {
 // serialized write queue (ADR 013). Taking that export by mistake would let this controller's
 // whole-document writes race the store's own writes and silently revert the settings file.
 import { settingsStore } from "@/features/settings/store";
-import type { Preset, Settings } from "@/features/settings/types";
+import type {
+  Preset,
+  PresetContainer,
+  QualityKind,
+  Settings,
+} from "@/features/settings/types";
+
+/**
+ * Sentinel value for the "custom encoder" choice in an encoder `<Select>`.
+ *
+ * MUST NOT be a value `isValidEncoderName` accepts (guarded by a test in
+ * `presetLibraryController.test.ts`): if it were, choosing "custom" from the list would be
+ * indistinguishable from the user typing this exact literal string as a real encoder name.
+ */
+export const CUSTOM_ENCODER_VALUE = "__custom__";
+
+/**
+ * Parses raw text from a numeric input into an integer, or `NaN` when the field is blank or
+ * the text does not parse to a whole number.
+ *
+ * `Number("")` and `Number("   ")` both evaluate to `0` in JavaScript, which would let an
+ * emptied field masquerade as a real, in-range value -- crf 0 is a valid CRF. Checking for a
+ * blank string BEFORE calling `Number` is what keeps a cleared field from silently becoming a
+ * valid 0. It is also what keeps the field clearable at all: writing 0 back into a controlled
+ * input re-renders its value as "0", so the next keystroke reads "0" followed by the typed
+ * digit instead of replacing it. Storing `NaN` instead renders as an empty string, which a new
+ * keystroke replaces cleanly.
+ *
+ * Every field this parses -- quality, resolution, frame rate -- is an integer on the wire
+ * (Rust reads each as a bounded integer), so a fractional value such as "1.5" is exactly as
+ * invalid as blank or non-numeric text and also maps to `NaN`, not to the literal fraction.
+ *
+ * `NaN` is never a safe integer (`Number.isSafeInteger(NaN) === false`), so
+ * `validatePresetFields` reports `notInteger` for it, `canSave` becomes false, and the user
+ * sees why -- rather than the field silently accepting an out-of-range or wrong value.
+ */
+function parseNumericField(raw: string): number {
+  if (raw.trim() === "") {
+    return Number.NaN;
+  }
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) ? parsed : Number.NaN;
+}
 
 /**
  * Deep-copies a preset so mutating the copy never alters the stored preset.
@@ -63,6 +108,30 @@ export type PresetLibraryView = {
   canAdd: boolean;
   canSave: boolean;
   pending: boolean;
+
+  /**
+   * Whether a settings document is available. False while the store has not loaded yet, which
+   * lets the view tell "still loading" apart from "no presets" and keep Add disabled instead
+   * of enabled-but-silently-refusing.
+   */
+  ready: boolean;
+
+  /**
+   * Whether the user explicitly chose the "custom" option for the video encoder. This is
+   * controller state, NOT derived from the draft: a preset whose stored encoder simply is not
+   * in the probe list is a normal unavailable option, not custom. Reset to false whenever a
+   * different draft is loaded.
+   */
+  videoEncoderIsCustom: boolean;
+
+  /** Same as `videoEncoderIsCustom`, for the audio encoder. */
+  audioEncoderIsCustom: boolean;
+
+  /** "source" when the draft's resolution is the literal string "source", else "custom". */
+  resolutionMode: "source" | "custom";
+
+  /** "source" when the draft's frame rate is the literal string "source", else "custom". */
+  frameRateMode: "source" | "custom";
 };
 
 /**
@@ -130,6 +199,10 @@ export class PresetLibraryController {
   private dirty = false;
   private issues: PresetFieldIssue[] = [];
 
+  // Controller state, not derived from the draft: see `PresetLibraryView.videoEncoderIsCustom`.
+  private videoEncoderIsCustom = false;
+  private audioEncoderIsCustom = false;
+
   constructor(options: PresetLibraryControllerOptions = {}) {
     this.getSettingsFn =
       options.getSettings ?? (() => settingsStore.getState().settings);
@@ -158,6 +231,13 @@ export class PresetLibraryController {
       canAdd: canAddPreset(presets.length),
       canSave: this.dirty && this.issues.length === 0,
       pending: this.pendingCount > 0,
+      ready: settings !== null,
+      videoEncoderIsCustom: this.videoEncoderIsCustom,
+      audioEncoderIsCustom: this.audioEncoderIsCustom,
+      resolutionMode:
+        this.draft && this.draft.resolution !== "source" ? "custom" : "source",
+      frameRateMode:
+        this.draft && this.draft.frameRate !== "source" ? "custom" : "source",
     };
   }
 
@@ -187,6 +267,165 @@ export class PresetLibraryController {
     this.issues = validatePresetFields(this.draft);
     this.dirty = true;
     this.notify();
+  }
+
+  /**
+   * Sets the draft's display name to `raw`, verbatim. No-op when there is no draft.
+   */
+  setName(raw: string): void {
+    this.updateDraft({ name: raw });
+  }
+
+  /**
+   * Sets the draft's output container. No-op when there is no draft.
+   */
+  setContainer(container: PresetContainer): void {
+    this.updateDraft({ container });
+  }
+
+  /**
+   * Handles a selection from an encoder `<Select>`.
+   *
+   * When `value` is `CUSTOM_ENCODER_VALUE`, this sets the matching `*IsCustom` flag and
+   * leaves the stored encoder name UNCHANGED, so the free-text field that then opens is
+   * pre-filled with whatever the preset already had. Otherwise it clears the flag and stores
+   * `value` as the encoder name.
+   *
+   * No-op when there is no draft.
+   */
+  chooseEncoder(kind: "video" | "audio", value: string): void {
+    if (!this.draft) {
+      return;
+    }
+    if (value === CUSTOM_ENCODER_VALUE) {
+      if (kind === "video") {
+        this.videoEncoderIsCustom = true;
+      } else {
+        this.audioEncoderIsCustom = true;
+      }
+      // Nothing in the preset itself changed, but the method still recomputes issues and
+      // marks the draft dirty, matching every other draft-editing method here.
+      this.updateDraft({});
+      return;
+    }
+    if (kind === "video") {
+      this.videoEncoderIsCustom = false;
+      this.updateDraft({ videoEncoder: value });
+    } else {
+      this.audioEncoderIsCustom = false;
+      this.updateDraft({ audioEncoder: value });
+    }
+  }
+
+  /**
+   * Sets the draft's encoder name from the custom free-text field, verbatim.
+   *
+   * Does NOT trim `raw`. `validatePresetFields` rejects a padded name as a `charset` failure,
+   * and trimming here would hide that from the user while Rust would still reject it.
+   *
+   * No-op when there is no draft.
+   */
+  setEncoderName(kind: "video" | "audio", raw: string): void {
+    this.updateDraft(kind === "video" ? { videoEncoder: raw } : { audioEncoder: raw });
+  }
+
+  /**
+   * Sets the draft's quality kind and REPLACES its numeric value with that kind's default
+   * (`defaultQualityValue`). Carrying the old number across kinds would turn a crf of 20 into
+   * 20 kbit/s, or a bitrate of 8000 into a crf far out of range that the user would have to
+   * clear by hand.
+   *
+   * No-op when there is no draft.
+   */
+  setQualityKind(kind: QualityKind): void {
+    this.updateDraft({ quality: { kind, value: defaultQualityValue(kind) } });
+  }
+
+  /**
+   * Parses `raw` from the quality value input and stores the result.
+   *
+   * A blank or unparseable `raw` stores `NaN` rather than coercing to 0 (see
+   * `parseNumericField`), so an emptied field reports `notInteger` and disables Save instead
+   * of silently becoming a valid CRF 0.
+   *
+   * No-op when there is no draft.
+   */
+  updateQualityValue(raw: string): void {
+    if (!this.draft) {
+      return;
+    }
+    this.updateDraft({
+      quality: { kind: this.draft.quality.kind, value: parseNumericField(raw) },
+    });
+  }
+
+  /**
+   * Switches the draft's resolution between "same as source" and a custom value.
+   *
+   * Switching to "custom" writes `DEFAULT_CUSTOM_RESOLUTION`. Switching to "source" writes the
+   * literal string "source".
+   *
+   * No-op when there is no draft.
+   */
+  setResolutionMode(mode: "source" | "custom"): void {
+    this.updateDraft({
+      resolution: mode === "source" ? "source" : { ...DEFAULT_CUSTOM_RESOLUTION },
+    });
+  }
+
+  /**
+   * Parses `raw` from a custom resolution field (width or height) and stores the result,
+   * carrying the other dimension through unchanged. Falls back to `DEFAULT_CUSTOM_RESOLUTION`
+   * for the dimension it carries through when the draft's resolution is still "source".
+   *
+   * A blank or unparseable `raw` stores `NaN` (see `parseNumericField`), never 0.
+   *
+   * No-op when there is no draft.
+   */
+  updateResolutionField(field: "w" | "h", raw: string): void {
+    if (!this.draft) {
+      return;
+    }
+    const base =
+      this.draft.resolution === "source"
+        ? DEFAULT_CUSTOM_RESOLUTION
+        : this.draft.resolution;
+    this.updateDraft({ resolution: { ...base, [field]: parseNumericField(raw) } });
+  }
+
+  /**
+   * Switches the draft's frame rate between "same as source" and a custom value.
+   *
+   * Switching to "custom" writes `DEFAULT_CUSTOM_FRAME_RATE`. Switching to "source" writes the
+   * literal string "source".
+   *
+   * No-op when there is no draft.
+   */
+  setFrameRateMode(mode: "source" | "custom"): void {
+    this.updateDraft({
+      frameRate: mode === "source" ? "source" : { ...DEFAULT_CUSTOM_FRAME_RATE },
+    });
+  }
+
+  /**
+   * Parses `raw` from a custom frame rate field (numerator or denominator) and stores the
+   * result, carrying the other component through unchanged. Falls back to
+   * `DEFAULT_CUSTOM_FRAME_RATE` for the component it carries through when the draft's frame
+   * rate is still "source".
+   *
+   * A blank or unparseable `raw` stores `NaN` (see `parseNumericField`), never 0.
+   *
+   * No-op when there is no draft.
+   */
+  updateFrameRateField(field: "n" | "d", raw: string): void {
+    if (!this.draft) {
+      return;
+    }
+    const base =
+      this.draft.frameRate === "source"
+        ? DEFAULT_CUSTOM_FRAME_RATE
+        : this.draft.frameRate;
+    this.updateDraft({ frameRate: { ...base, [field]: parseNumericField(raw) } });
   }
 
   /**
@@ -434,6 +673,10 @@ export class PresetLibraryController {
     this.draft = preset ? clonePreset(preset) : null;
     this.issues = preset ? validatePresetFields(preset) : [];
     this.dirty = false;
+    // A newly loaded draft never inherits an in-progress "choose a custom encoder" edit from
+    // whatever was loaded before it.
+    this.videoEncoderIsCustom = false;
+    this.audioEncoderIsCustom = false;
   }
 
   /**

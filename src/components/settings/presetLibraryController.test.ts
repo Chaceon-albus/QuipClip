@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  DEFAULT_CUSTOM_FRAME_RATE,
+  DEFAULT_CUSTOM_RESOLUTION,
+} from "@/features/settings/presetDocument";
+import { defaultQualityValue, isValidEncoderName } from "@/features/settings/limits";
+import type { Preset, Settings } from "@/features/settings/types";
+import {
+  CUSTOM_ENCODER_VALUE,
   createPresetLibraryController,
   PresetLibraryController,
 } from "./presetLibraryController";
-import type { Preset, Settings } from "@/features/settings/types";
 
 /**
  * Builds a preset for tests. Every field carries a deterministic default so a test overrides
@@ -774,6 +780,646 @@ describe("PresetLibraryController", () => {
       expect(() => controller.syncFromSettings(null)).not.toThrow();
 
       expect(saveSettings).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("CUSTOM_ENCODER_VALUE", () => {
+    it("is never accepted as a valid encoder name, so it can never collide with a real one", () => {
+      expect(isValidEncoderName(CUSTOM_ENCODER_VALUE)).toBe(false);
+    });
+  });
+
+  describe("ready", () => {
+    it("is false when no settings document is available", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      expect(controller.getView().ready).toBe(false);
+    });
+
+    it("is true once a settings document is available", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => createSettings(),
+        saveSettings: vi.fn(),
+      });
+
+      expect(controller.getView().ready).toBe(true);
+    });
+  });
+
+  describe("resolutionMode and frameRateMode", () => {
+    it("report 'source' when the draft holds the literal string 'source'", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { resolution: "source", frameRate: "source" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+
+      const view = controller.getView();
+      expect(view.resolutionMode).toBe("source");
+      expect(view.frameRateMode).toBe("source");
+    });
+
+    it("report 'custom' when the draft holds an explicit resolution or frame rate", () => {
+      const settings = createSettings({
+        presets: [
+          createPreset("p1", {
+            resolution: { w: 1280, h: 720 },
+            frameRate: { n: 24, d: 1 },
+          }),
+        ],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+
+      const view = controller.getView();
+      expect(view.resolutionMode).toBe("custom");
+      expect(view.frameRateMode).toBe("custom");
+    });
+
+    it("default to 'source' when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      const view = controller.getView();
+      expect(view.resolutionMode).toBe("source");
+      expect(view.frameRateMode).toBe("source");
+    });
+  });
+
+  describe("setName", () => {
+    it("sets the draft's name verbatim, recomputes issues, and marks dirty", () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setName("Renamed");
+
+      const view = controller.getView();
+      expect(view.draft?.name).toBe("Renamed");
+      expect(view.dirty).toBe(true);
+      expect(view.issues).toEqual([]);
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.setName("x");
+
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("setContainer", () => {
+    it("sets the draft's container, recomputes issues, and marks dirty", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { container: "mp4" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setContainer("mkv");
+
+      const view = controller.getView();
+      expect(view.draft?.container).toBe("mkv");
+      expect(view.dirty).toBe(true);
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.setContainer("mkv");
+
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("chooseEncoder", () => {
+    it("sets the video custom flag and leaves the stored name unchanged for CUSTOM_ENCODER_VALUE", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { videoEncoder: "libx264" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseEncoder("video", CUSTOM_ENCODER_VALUE);
+
+      const view = controller.getView();
+      expect(view.videoEncoderIsCustom).toBe(true);
+      expect(view.draft?.videoEncoder).toBe("libx264");
+      expect(view.dirty).toBe(true);
+    });
+
+    it("clears the video custom flag and stores the value for a real encoder name", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { videoEncoder: "libx264" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseEncoder("video", CUSTOM_ENCODER_VALUE);
+      expect(controller.getView().videoEncoderIsCustom).toBe(true);
+
+      controller.chooseEncoder("video", "libx265");
+
+      const view = controller.getView();
+      expect(view.videoEncoderIsCustom).toBe(false);
+      expect(view.draft?.videoEncoder).toBe("libx265");
+    });
+
+    it("tracks the audio side independently of the video side", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { audioEncoder: "aac" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseEncoder("audio", CUSTOM_ENCODER_VALUE);
+
+      let view = controller.getView();
+      expect(view.audioEncoderIsCustom).toBe(true);
+      expect(view.videoEncoderIsCustom).toBe(false);
+      expect(view.draft?.audioEncoder).toBe("aac");
+
+      controller.chooseEncoder("audio", "opus");
+
+      view = controller.getView();
+      expect(view.audioEncoderIsCustom).toBe(false);
+      expect(view.draft?.audioEncoder).toBe("opus");
+    });
+
+    it("resets both custom flags to false when a different preset is selected", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1"), createPreset("p2")],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseEncoder("video", CUSTOM_ENCODER_VALUE);
+      controller.chooseEncoder("audio", CUSTOM_ENCODER_VALUE);
+      expect(controller.getView().videoEncoderIsCustom).toBe(true);
+      expect(controller.getView().audioEncoderIsCustom).toBe(true);
+
+      controller.select("p2");
+
+      const view = controller.getView();
+      expect(view.videoEncoderIsCustom).toBe(false);
+      expect(view.audioEncoderIsCustom).toBe(false);
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.chooseEncoder("video", CUSTOM_ENCODER_VALUE);
+
+      const view = controller.getView();
+      expect(view.videoEncoderIsCustom).toBe(false);
+      expect(view.draft).toBeNull();
+    });
+  });
+
+  describe("setEncoderName", () => {
+    it("stores the video encoder name verbatim, without trimming, yielding a charset issue for a padded name", () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setEncoderName("video", " libx264 ");
+
+      const view = controller.getView();
+      expect(view.draft?.videoEncoder).toBe(" libx264 ");
+      expect(view.issues).toContainEqual({ field: "videoEncoder", code: "charset" });
+      expect(view.dirty).toBe(true);
+    });
+
+    it("stores the audio encoder name verbatim the same way", () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setEncoderName("audio", " aac ");
+
+      const view = controller.getView();
+      expect(view.draft?.audioEncoder).toBe(" aac ");
+      expect(view.issues).toContainEqual({ field: "audioEncoder", code: "charset" });
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.setEncoderName("video", "libx264");
+
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("setQualityKind", () => {
+    it("replaces the value with the new kind's default rather than carrying the old value across", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { quality: { kind: "crf", value: 20 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setQualityKind("bitrate");
+
+      const view = controller.getView();
+      expect(view.draft?.quality).toEqual({
+        kind: "bitrate",
+        value: defaultQualityValue("bitrate"),
+      });
+      expect(view.dirty).toBe(true);
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.setQualityKind("bitrate");
+
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("updateQualityValue", () => {
+    it("stores a valid parsed integer and leaves canSave true", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { quality: { kind: "crf", value: 20 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.updateQualityValue("30");
+
+      const view = controller.getView();
+      expect(view.draft?.quality.value).toBe(30);
+      expect(view.dirty).toBe(true);
+      expect(view.canSave).toBe(true);
+    });
+
+    // PINNED: clearing the field must store NaN, never 0 -- Number("") === 0 in JavaScript,
+    // and QUALITY_RANGES.crf.min === 0, so coercing a blank field to a number would silently
+    // write a valid CRF 0 and leave Save enabled.
+    it("stores NaN, not 0, for a blank value, producing a notInteger issue and disabling Save", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { quality: { kind: "crf", value: 20 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.updateQualityValue("");
+
+      const view = controller.getView();
+      expect(Number.isNaN(view.draft?.quality.value)).toBe(true);
+      expect(view.draft?.quality.value).not.toBe(0);
+      expect(view.issues).toContainEqual({ field: "quality", code: "notInteger" });
+      expect(view.canSave).toBe(false);
+    });
+
+    it.each(["abc", "1.5", "  "])(
+      "behaves the same way as a blank value for %j: stores NaN, notInteger, canSave false",
+      (raw) => {
+        const settings = createSettings({
+          presets: [createPreset("p1", { quality: { kind: "crf", value: 20 } })],
+        });
+        const controller = createPresetLibraryController({
+          getSettings: () => settings,
+          saveSettings: vi.fn(),
+        });
+
+        controller.select("p1");
+        controller.updateQualityValue(raw);
+
+        const view = controller.getView();
+        expect(Number.isNaN(view.draft?.quality.value)).toBe(true);
+        expect(view.issues).toContainEqual({ field: "quality", code: "notInteger" });
+        expect(view.canSave).toBe(false);
+      },
+    );
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.updateQualityValue("30");
+
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("setResolutionMode", () => {
+    it("switches to DEFAULT_CUSTOM_RESOLUTION", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { resolution: "source" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setResolutionMode("custom");
+
+      const view = controller.getView();
+      expect(view.draft?.resolution).toEqual(DEFAULT_CUSTOM_RESOLUTION);
+      expect(view.resolutionMode).toBe("custom");
+      expect(view.dirty).toBe(true);
+    });
+
+    it("switches back to the literal string 'source'", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { resolution: { w: 1280, h: 720 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setResolutionMode("source");
+
+      const view = controller.getView();
+      expect(view.draft?.resolution).toBe("source");
+      expect(view.resolutionMode).toBe("source");
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.setResolutionMode("custom");
+
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("updateResolutionField", () => {
+    it("parses a valid width, carrying the height through unchanged", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { resolution: { w: 1920, h: 1080 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.updateResolutionField("w", "1280");
+
+      const view = controller.getView();
+      expect(view.draft?.resolution).toEqual({ w: 1280, h: 1080 });
+      expect(view.dirty).toBe(true);
+    });
+
+    it.each(["", "abc", "1.5", "  "])(
+      "stores NaN, not 0, for %j on either field, producing a notInteger issue",
+      (raw) => {
+        const settings = createSettings({
+          presets: [createPreset("p1", { resolution: { w: 1920, h: 1080 } })],
+        });
+        const controller = createPresetLibraryController({
+          getSettings: () => settings,
+          saveSettings: vi.fn(),
+        });
+
+        controller.select("p1");
+        controller.updateResolutionField("w", raw);
+
+        const view = controller.getView();
+        expect(
+          view.draft?.resolution !== "source" && Number.isNaN(view.draft?.resolution.w),
+        ).toBe(true);
+        expect(
+          view.draft?.resolution !== "source" && view.draft?.resolution.w,
+        ).not.toBe(0);
+        expect(view.issues).toContainEqual({ field: "resolution", code: "notInteger" });
+        expect(view.canSave).toBe(false);
+      },
+    );
+
+    it("falls back to DEFAULT_CUSTOM_RESOLUTION for the carried-through dimension when resolution is still 'source'", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { resolution: "source" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.updateResolutionField("w", "640");
+
+      const view = controller.getView();
+      expect(view.draft?.resolution).toEqual({
+        w: 640,
+        h: DEFAULT_CUSTOM_RESOLUTION.h,
+      });
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.updateResolutionField("w", "640");
+
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("setFrameRateMode", () => {
+    it("switches to DEFAULT_CUSTOM_FRAME_RATE", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { frameRate: "source" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setFrameRateMode("custom");
+
+      const view = controller.getView();
+      expect(view.draft?.frameRate).toEqual(DEFAULT_CUSTOM_FRAME_RATE);
+      expect(view.frameRateMode).toBe("custom");
+      expect(view.dirty).toBe(true);
+    });
+
+    it("switches back to the literal string 'source'", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { frameRate: { n: 24, d: 1 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setFrameRateMode("source");
+
+      const view = controller.getView();
+      expect(view.draft?.frameRate).toBe("source");
+      expect(view.frameRateMode).toBe("source");
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.setFrameRateMode("custom");
+
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("updateFrameRateField", () => {
+    it("parses a valid numerator, carrying the denominator through unchanged", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { frameRate: { n: 30, d: 1 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.updateFrameRateField("n", "24");
+
+      const view = controller.getView();
+      expect(view.draft?.frameRate).toEqual({ n: 24, d: 1 });
+      expect(view.dirty).toBe(true);
+    });
+
+    it.each(["", "abc", "1.5", "  "])(
+      "stores NaN, not 0, for %j on either field, producing a notInteger issue",
+      (raw) => {
+        const settings = createSettings({
+          presets: [createPreset("p1", { frameRate: { n: 30, d: 1 } })],
+        });
+        const controller = createPresetLibraryController({
+          getSettings: () => settings,
+          saveSettings: vi.fn(),
+        });
+
+        controller.select("p1");
+        controller.updateFrameRateField("n", raw);
+
+        const view = controller.getView();
+        expect(
+          view.draft?.frameRate !== "source" && Number.isNaN(view.draft?.frameRate.n),
+        ).toBe(true);
+        expect(view.draft?.frameRate !== "source" && view.draft?.frameRate.n).not.toBe(
+          0,
+        );
+        expect(view.issues).toContainEqual({ field: "frameRate", code: "notInteger" });
+        expect(view.canSave).toBe(false);
+      },
+    );
+
+    it("falls back to DEFAULT_CUSTOM_FRAME_RATE for the carried-through component when frame rate is still 'source'", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { frameRate: "source" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.updateFrameRateField("n", "60");
+
+      const view = controller.getView();
+      expect(view.draft?.frameRate).toEqual({
+        n: 60,
+        d: DEFAULT_CUSTOM_FRAME_RATE.d,
+      });
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.updateFrameRateField("n", "60");
+
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
     });
   });
 });
