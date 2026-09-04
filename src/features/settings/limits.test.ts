@@ -362,10 +362,10 @@ describe("limits", () => {
         validatePresetFields(createPreset({ frameRate: { n: 30_000, d: 1001 } })),
       ).toEqual([]);
       expect(validatePresetFields(createPreset({ frameRate: { n: 0, d: 1 } }))).toEqual(
-        [{ field: "frameRate", code: "outOfRange" }],
+        [{ field: "frameRate", code: "positive" }],
       );
       expect(validatePresetFields(createPreset({ frameRate: { n: 1, d: 0 } }))).toEqual(
-        [{ field: "frameRate", code: "outOfRange" }],
+        [{ field: "frameRate", code: "positive" }],
       );
       expect(
         validatePresetFields(createPreset({ frameRate: { n: 29.97, d: 1 } })),
@@ -403,8 +403,40 @@ describe("limits", () => {
           code: "outOfRange",
           values: { min: 1, max: 16_384 },
         },
-        { field: "frameRate", code: "outOfRange" },
+        { field: "frameRate", code: "positive" },
       ]);
+    });
+  });
+
+  describe("outOfRange contract", () => {
+    it("attaches min and max to every outOfRange issue, and no values to positive, notInteger, or required issues", () => {
+      const brokenPreset: Preset = {
+        id: "broken-preset",
+        name: "   ",
+        videoEncoder: "-f",
+        audioEncoder: "   ",
+        quality: { kind: "crf", value: 20.5 },
+        resolution: { w: 0, h: 1080 },
+        frameRate: { n: 0, d: 1 },
+        container: "mp4",
+      };
+
+      const issues = validatePresetFields(brokenPreset);
+      expect(issues.length).toBeGreaterThan(0);
+
+      for (const issue of issues) {
+        if (issue.code === "outOfRange") {
+          expect(issue.values).toBeDefined();
+          expect(issue.values).toHaveProperty("min");
+          expect(issue.values).toHaveProperty("max");
+        } else if (
+          issue.code === "positive" ||
+          issue.code === "notInteger" ||
+          issue.code === "required"
+        ) {
+          expect(issue).not.toHaveProperty("values");
+        }
+      }
     });
   });
 });

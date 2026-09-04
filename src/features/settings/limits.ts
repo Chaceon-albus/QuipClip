@@ -64,7 +64,7 @@ export type PresetFieldName =
   "name" | "videoEncoder" | "audioEncoder" | "quality" | "resolution" | "frameRate";
 
 export type PresetFieldIssueCode =
-  "required" | "tooLong" | "charset" | "outOfRange" | "notInteger";
+  "required" | "tooLong" | "charset" | "outOfRange" | "notInteger" | "positive";
 
 export type PresetFieldIssue = {
   field: PresetFieldName;
@@ -138,25 +138,16 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
   if (!Number.isSafeInteger(preset.quality.value)) {
     issues.push({ field: "quality", code: "notInteger" });
   } else {
-    const range: { min: number; max: number } | undefined =
-      QUALITY_RANGES[preset.quality.kind];
-    if (
-      !range ||
-      preset.quality.value < range.min ||
-      preset.quality.value > range.max
-    ) {
+    const range = QUALITY_RANGES[preset.quality.kind];
+    if (preset.quality.value < range.min || preset.quality.value > range.max) {
       issues.push({
         field: "quality",
         code: "outOfRange",
-        ...(range
-          ? {
-              values: {
-                kind: preset.quality.kind,
-                min: range.min,
-                max: range.max,
-              },
-            }
-          : {}),
+        values: {
+          kind: preset.quality.kind,
+          min: range.min,
+          max: range.max,
+        },
       });
     }
   }
@@ -185,7 +176,7 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
     }
   }
 
-  // 6. frameRate: skip "source"; { n, d }: not safe integer -> notInteger; n <= 0 || d <= 0 -> outOfRange
+  // 6. frameRate: skip "source"; { n, d }: not safe integer -> notInteger; n <= 0 || d <= 0 -> positive
   if (preset.frameRate !== "source") {
     if (
       !Number.isSafeInteger(preset.frameRate.n) ||
@@ -193,7 +184,7 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
     ) {
       issues.push({ field: "frameRate", code: "notInteger" });
     } else if (preset.frameRate.n <= 0 || preset.frameRate.d <= 0) {
-      issues.push({ field: "frameRate", code: "outOfRange" });
+      issues.push({ field: "frameRate", code: "positive" });
     }
   }
 
