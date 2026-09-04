@@ -13,6 +13,7 @@ import {
 import { settingsStore, useSettingsStore } from "@/features/settings/store";
 import { presentSettingsError } from "./settingsErrorPresenter";
 import { FfmpegPathSection } from "./FfmpegPathSection";
+import { PresetLibrarySection } from "./PresetLibrarySection";
 
 export function SettingsDialog({
   open,
@@ -62,6 +63,7 @@ export function SettingsDialog({
         ) : null}
 
         <FfmpegPathSection />
+        <PresetLibrarySection />
 
         <DialogFooter>
           <DialogClose asChild>
