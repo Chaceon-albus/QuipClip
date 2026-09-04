@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -12,6 +13,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { useFfmpegStore } from "@/features/ffmpeg";
 import { useMediaStore } from "@/features/media";
 import {
@@ -35,6 +37,7 @@ export function StatusBar() {
   const [preference, setPreference] = useState<LanguagePreference>(() =>
     getLanguagePreference(),
   );
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const controller = useMemo(
     () =>
@@ -211,8 +214,13 @@ export function StatusBar() {
                 {t("settings.language.zhCN")}
               </DropdownMenuRadioItem>
             </DropdownMenuRadioGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
+              {t("settings.title")}
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       </div>
     </footer>
   );
