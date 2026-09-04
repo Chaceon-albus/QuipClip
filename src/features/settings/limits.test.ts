@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { Preset } from "./types";
+import { QUALITY_KINDS, type Preset } from "./types";
 import {
   canAddPreset,
+  defaultQualityValue,
   ENCODER_NAME_PATTERN,
   isValidEncoderName,
   MAX_ENCODER_NAME_CHARS,
@@ -43,6 +44,23 @@ describe("limits", () => {
         bitrate: { min: 1, max: 200_000 },
         qualityScale: { min: 1, max: 100 },
       });
+    });
+  });
+
+  describe("defaultQualityValue", () => {
+    it("returns the documented default for each kind", () => {
+      expect(defaultQualityValue("crf")).toBe(20);
+      expect(defaultQualityValue("bitrate")).toBe(8000);
+      expect(defaultQualityValue("qualityScale")).toBe(50);
+    });
+
+    it("keeps every kind's default inside its own QUALITY_RANGES entry", () => {
+      for (const kind of QUALITY_KINDS) {
+        const value = defaultQualityValue(kind);
+        const range = QUALITY_RANGES[kind];
+        expect(value).toBeGreaterThanOrEqual(range.min);
+        expect(value).toBeLessThanOrEqual(range.max);
+      }
     });
   });
 

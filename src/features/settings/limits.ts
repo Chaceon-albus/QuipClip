@@ -60,6 +60,26 @@ export const QUALITY_RANGES: Record<QualityKind, { min: number; max: number }> =
   qualityScale: { min: 1, max: 100 },
 };
 
+/**
+ * Default numeric value written when the user switches the quality kind to a given kind.
+ * Each value sits inside its own `QUALITY_RANGES` entry (see limits.test.ts), so switching
+ * kind never carries a stale number out of range: a crf of 20 read as a bitrate would mean
+ * 20 kbit/s, and a bitrate of 8000 read as a crf would be out of range and need clearing by
+ * hand.
+ */
+const DEFAULT_QUALITY_VALUES: Record<QualityKind, number> = {
+  crf: 20,
+  bitrate: 8000,
+  qualityScale: 50,
+};
+
+/**
+ * Returns the default numeric value for the given quality kind.
+ */
+export function defaultQualityValue(kind: QualityKind): number {
+  return DEFAULT_QUALITY_VALUES[kind];
+}
+
 export type PresetFieldName =
   "name" | "videoEncoder" | "audioEncoder" | "quality" | "resolution" | "frameRate";
 

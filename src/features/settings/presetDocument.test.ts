@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   addPreset,
   createPresetDraft,
+  DEFAULT_CUSTOM_FRAME_RATE,
+  DEFAULT_CUSTOM_RESOLUTION,
   deletePreset,
   findPreset,
   setActivePreset,
@@ -69,6 +71,13 @@ describe("createPresetDraft", () => {
       resolution: "source",
       frameRate: "source",
     });
+  });
+});
+
+describe("DEFAULT_CUSTOM_RESOLUTION and DEFAULT_CUSTOM_FRAME_RATE", () => {
+  it("expose the documented literal defaults for switching from source to custom", () => {
+    expect(DEFAULT_CUSTOM_RESOLUTION).toStrictEqual({ w: 1920, h: 1080 });
+    expect(DEFAULT_CUSTOM_FRAME_RATE).toStrictEqual({ n: 30, d: 1 });
   });
 });
 

@@ -8,7 +8,23 @@
  * are testable with no store and no mock.
  */
 
+import type { Rational, Resolution } from "@/types/project";
+
 import type { Preset, Settings } from "./types";
+
+/**
+ * Resolution written when the user switches the output resolution setting from "same as
+ * source" to a custom value. A product decision, not a derived constant, so it lives beside
+ * `createPresetDraft`.
+ */
+export const DEFAULT_CUSTOM_RESOLUTION: Resolution = { w: 1920, h: 1080 };
+
+/**
+ * Frame rate written when the user switches the output frame rate setting from "same as
+ * source" to a custom value. A product decision, not a derived constant, so it lives beside
+ * `createPresetDraft`.
+ */
+export const DEFAULT_CUSTOM_FRAME_RATE: Rational = { n: 30, d: 1 };
 
 /**
  * Builds a new export preset draft with sensible defaults for immediate creation.
