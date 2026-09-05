@@ -34,6 +34,7 @@ document summarizes them and shows how the parts fit together.
 | [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                             | English and Simplified Chinese interface with a saved setting |
 | [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)         | Homebrew path fallback for macOS GUI applications             |
 | [`013-application-settings-file.md`](../.agents/decisions/013-application-settings-file.md)                 | One settings file for the ffmpeg path and the export presets  |
+| [`014-export-cut-with-trim-after-seek.md`](../.agents/decisions/014-export-cut-with-trim-after-seek.md)     | Seeked input, trim on raw source PTS, one process, one output |
 
 ## Shape
 
@@ -164,24 +165,34 @@ frame stepping needs future frame-boundary discovery or another decoder.
 The current _Source_ preview plays the whole file. A future _Program_ preview will play
 only the segments, so the user can watch what the export will contain.
 
-## Future export
+## Export
 
-See ADR 004.
+See ADR 004 and ADR 014.
 
-Export is not implemented yet. The stored model supports a future renderer with these
-semantic steps for each segment:
+ADR 004 gives the semantic steps. ADR 014 selects the command shape from measurements on
+ffmpeg 9.0.1. The renderer is not written yet.
 
-1. Resolve `sourceId` to the original media.
-2. Seek before `inPts` as an optimization.
-3. Decode accurately through the selected interval.
-4. Resolve source PTS boundaries into FFmpeg's actual post-seek timestamp domain.
-5. Keep the half-open interval and derive the matching audio interval.
-6. Reset local timestamps and normalize the streams.
-7. Concatenate segments in project array order.
+One `ffmpeg` process writes one output. It opens one input for each segment, and it seeks
+each input to `inPts * videoTimeBase - formatStartTime - SEEK_MARGIN_SECONDS`. Each input
+carries `-copyts`, which keeps the raw source PTS visible to the filter graph. Each segment
+chain cuts with `trim` and `atrim` on those raw PTS values. It then resets the timestamps
+and normalizes the streams. The chains end in `concat`, in project array order.
 
-ADR 004 does not select a raw `trim` expression or a fixed placement for input `-ss`.
-Output frame-rate conversion, scaling, codec conversion, and audio resampling belong only
-to this future render layer. They never change stored source edit points.
+The seek supplies the speed. The trim supplies the exactness. An input seek alone is not
+frame-exact: on MPEG-TS a seek lands only on key frames, and it can land after the target.
+A seek that lands before the target lets `trim` cut the selected frames.
+
+Boundaries stay integer ticks. `trim` takes `start_pts` and `end_pts`, which match the
+half-open interval of ADR 002 exactly. The `start` and `end` options are not used, because
+FFmpeg truncates them to microseconds.
+
+Progress reads the `frame` field of `-progress pipe:1`. `out_time_us` is wrong when the
+command sets `-copyts`. The renderer compares the final frame count against an exact
+expected count, and it reports a mismatch instead of writing an incorrect cut.
+
+Version 1 writes constant-frame-rate output. Output frame-rate conversion, scaling, codec
+conversion, and audio resampling belong only to this render layer. They never change stored
+source edit points.
 
 ## ffmpeg lifecycle
 
@@ -215,9 +226,9 @@ oldest by probe time. Each writer merges its own entry into the current file und
 then renames a temporary file into place, so a late write keeps the entries that another
 run wrote.
 
-The first implementation resolves the executables through `PATH` and the application data
-directory. The application has no settings storage yet, so no caller supplies a configured
-path today. The failure payload names each inspected `ffmpeg` and `ffprobe` candidate with
+Discovery reads the configured path from the settings file first, and then it falls back to
+`PATH` and the application data directory. The failure payload names each inspected
+`ffmpeg` and `ffprobe` candidate with
 its origin class, so the user sees where the application looked. The job runs two of the
 four listings. `-decoders` and `-filters` have parsers and tests, and they gain their
 command when the preview proxy and the export renderer need them.
