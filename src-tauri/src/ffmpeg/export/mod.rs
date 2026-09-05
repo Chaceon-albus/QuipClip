@@ -11,6 +11,11 @@
 //! exposes [`ExportPlan::single_input_seek_seconds`], the one extra value ADR 014's second
 //! graph shape (one input for the whole source) needs beyond the per-segment plan.
 //!
+//! [`fsinspect`] is the one production implementation of that injected closure: it turns a real
+//! path into the [`PathFacts`] the planner reads, and it reports a file only when it could also
+//! read a platform identity for it, so a destination that spells the source a second way -- a hard
+//! link, a symlink, a case-insensitive volume -- cannot pass the same-file check.
+//!
 //! [`graph`] renders a finished plan into ADR 014's inline `-filter_complex` string: one
 //! `trim`/`atrim` chain for each segment, cut on absolute stream indices at integer
 //! `start_pts`/`end_pts` boundaries, joined by `concat` in plan order, in whichever of the two
@@ -49,6 +54,7 @@
 //! and still exits zero.
 
 pub mod arguments;
+pub mod fsinspect;
 pub mod graph;
 pub mod output;
 pub mod plan;
@@ -57,6 +63,7 @@ pub mod progress;
 pub mod registry;
 
 pub use arguments::{build_arguments, choose_graph_shape};
+pub use fsinspect::inspect_path;
 pub use graph::{build_filter_graph, GraphShape};
 pub use output::PendingOutput;
 pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, SegmentBoundary};
