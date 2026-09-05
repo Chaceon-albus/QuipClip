@@ -79,6 +79,9 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     `atrim=start_pts=441000` therefore reads as 10 seconds without the seek and as 9.1875
     seconds with it. The error grows with the position in the source, and it also shortens
     the segment. A 48000 Hz source shows nothing, because the two rates agree.
+18. `-copyts` is global, not per input. One instance before the first input gives raw source
+    PTS on every input. A command with two inputs and one `-copyts` reports PTS 128000 on
+    both. The same command without it reports PTS 297.
 
 ## Decision
 
@@ -107,7 +110,9 @@ have square pixels. The preview shows that source correctly. The export would th
 match what the user marked. Version 1 exports one source, so every chain already reports
 the same sample aspect ratio, and `concat` has nothing to make equal.
 
-The renderer must set `-copyts` on each input.
+The renderer must set `-copyts` once, before the first input. Measurement 18 shows the
+option is global. One instance covers every input, and a second instance changes nothing
+except the length of the command line, which measurement 15 counts.
 
 ### The seek
 
@@ -128,7 +133,8 @@ One process writes one output. The renderer opens one input for each segment.
 
 ```
 ffmpeg -nostdin -hide_banner -loglevel error -progress pipe:1 -nostats -y \
-  -copyts -ss <seek> -i <source>   (once for each segment) \
+  -copyts \
+  -ss <seek> -i <source>             (once for each segment) \
   -filter_complex "<graph>" \
   -map "[v]" -map "[a]" \
   -c:v <encoder> <quality> -c:a <encoder> [-movflags +faststart] \
