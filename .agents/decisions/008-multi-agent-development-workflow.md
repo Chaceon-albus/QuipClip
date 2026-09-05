@@ -28,9 +28,14 @@ at the reasoning level the work needs.
 | `agy`      | Google    | the newest Gemini model                            |
 | `claude`   | Anthropic | the newest Claude model                            |
 | `codex`    | OpenAI    | the newest OpenAI model                            |
-| a subagent | Anthropic | the newest Claude model of the tier the work needs |
+| a subagent | Anthropic | the newest Claude Opus model, at medium reasoning  |
 
 Name the family and the reasoning level in a document. Do not name a version.
+
+The subagent row names one tier. The user compared the two candidates. The newest Claude
+Opus model at medium reasoning gives better results than the newest Claude Sonnet model at
+maximum reasoning. It also costs less. The table therefore states the tier. The
+orchestrator does not choose the tier.
 
 Before an agent run, ask the tool which models it offers. `agy models` prints the list.
 Take the newest version, then run the agent with it. When a vendor offers more than one
