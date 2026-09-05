@@ -141,8 +141,11 @@ pub enum PathFacts {
 ///    not absolute -- [`ExportErrorCode::OutputPathInvalid`].
 /// 8. `destination`'s parent is missing or is not a directory --
 ///    [`ExportErrorCode::OutputDirectoryMissing`].
-/// 9. `destination` and `source` name the same file -- [`ExportErrorCode::OutputEqualsSource`].
-/// 10. The preset's frame rate is [`FrameRateSetting::Source`] but the probe has neither a
+/// 9. `destination` exists but is a directory, or is neither a regular file nor a directory
+///    -- [`ExportErrorCode::OutputPathInvalid`].
+/// 10. `destination` and `source` name the same file --
+///     [`ExportErrorCode::OutputEqualsSource`].
+/// 11. The preset's frame rate is [`FrameRateSetting::Source`] but the probe has neither a
 ///     valid `avg_frame_rate` nor `r_frame_rate`, or the resolved rate is not strictly
 ///     positive -- [`ExportErrorCode::SourceFrameRateUnknown`].
 ///
@@ -209,6 +212,23 @@ pub fn build_plan(
     }
 
     let destination_facts = inspect(destination);
+    // The renderer reserves a temporary file beside the destination
+    // (`fsutil::reserve_temporary_path`), lets ffmpeg write into it, and then renames that
+    // file over the destination (`fsutil::replace_file`). A rename cannot replace a
+    // directory with a regular file (`EISDIR` on Unix; `MoveFileEx` with
+    // `MOVEFILE_REPLACE_EXISTING` is documented to fail on a directory target on Windows),
+    // and a device node, a socket, or a named pipe is not a file the renderer can rename
+    // over either. The reservation only touches the destination's *parent*, so it would
+    // still succeed here, and the whole encode -- potentially minutes of it -- would run
+    // before the final rename failed. Reject the destination now instead, which is what
+    // this preflight exists for. There is no dedicated code for this case:
+    // `OutputPathInvalid` already means "the destination is not a usable output file
+    // path," whichever way the path is unusable.
+    match destination_facts {
+        PathFacts::Directory | PathFacts::Other => return Err(ExportErrorCode::OutputPathInvalid),
+        PathFacts::Absent | PathFacts::File { .. } => {}
+    }
+
     let same_identity = matches!(
         (source_facts, destination_facts),
         (PathFacts::File { identity: a }, PathFacts::File { identity: b }) if a == b
@@ -778,6 +798,45 @@ mod tests {
     }
 
     #[test]
+    fn a_destination_that_is_an_existing_directory_is_rejected_with_output_path_invalid() {
+        // The parent exists and is a directory, so step 8 passes; without step 9 this plan
+        // would be returned as valid, ffmpeg would encode the whole export, and only the
+        // final rename in `commit` would fail.
+        let mut facts = valid_path_facts();
+        facts.insert(PathBuf::from(DESTINATION), present_directory());
+        let error =
+            plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts).unwrap_err();
+        assert_eq!(error, ExportErrorCode::OutputPathInvalid);
+    }
+
+    #[test]
+    fn a_destination_that_is_neither_a_file_nor_a_directory_is_rejected_with_output_path_invalid() {
+        // A device node, a socket, or a named pipe is not something the renderer can rename
+        // a finished temporary file over either.
+        let mut facts = valid_path_facts();
+        facts.insert(PathBuf::from(DESTINATION), present_other());
+        let error =
+            plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts).unwrap_err();
+        assert_eq!(error, ExportErrorCode::OutputPathInvalid);
+    }
+
+    #[test]
+    fn an_absent_destination_and_an_unrelated_existing_file_both_still_pass_the_output_path_check()
+    {
+        // The guard against step 9 over-rejecting: the two destination shapes an ordinary
+        // export actually produces -- a first export, where nothing is there yet, and a
+        // re-export over a previous output whose identity differs from the source -- must
+        // both still plan.
+        for destination_facts in [absent(), present_file(7)] {
+            let mut facts = valid_path_facts();
+            facts.insert(PathBuf::from(DESTINATION), destination_facts);
+            let plan = plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts)
+                .unwrap_or_else(|error| panic!("destination: {destination_facts:?}, {error:?}"));
+            assert_eq!(plan.destination, PathBuf::from(DESTINATION));
+        }
+    }
+
+    #[test]
     fn a_destination_identical_to_the_source_path_is_rejected_with_output_equals_source() {
         let request = PlanRequest {
             source: Path::new(SOURCE),
@@ -791,7 +850,7 @@ mod tests {
         // The destination is the source path itself here, so its parent is `SOURCE_PARENT`,
         // not `DESTINATION_PARENT`: the fixture must report that directory as present too,
         // or the parent check (step 8) would fail the plan with `OutputDirectoryMissing`
-        // before this check (step 9) ever runs.
+        // before this check (step 10) ever runs.
         facts.insert(PathBuf::from(SOURCE_PARENT), present_directory());
         let error = build_plan(&request, inspect_from(facts)).unwrap_err();
         assert_eq!(error, ExportErrorCode::OutputEqualsSource);
