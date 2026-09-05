@@ -133,11 +133,23 @@ fn create_temporary_file(path: &Path) -> io::Result<(PathBuf, File)> {
 /// Reserving the path by creating it means the path exists and is zero bytes the moment this
 /// function returns, before `ffmpeg` has run at all. The caller's `ffmpeg` invocation must
 /// account for that:
-/// - it must pass `-y`, because ADR 004 also requires `-nostdin`, and without `-y` ffmpeg
-///   cannot prompt to overwrite the existing zero-byte file and instead exits with "Not
-///   overwriting - exiting";
+/// - it must pass `-y`, because ADR 004 also requires `-nostdin`, which puts the interactive
+///   overwrite prompt out of reach: ffmpeg refuses the existing zero-byte reservation outright
+///   and prints `File '<path>' already exists. Exiting.` and then
+///   `Error opening output file <path>.` It does not print "Not overwriting - exiting"; that
+///   line comes from the prompt itself, which only a run without `-nostdin` reaches, and only
+///   when stdin is at end of file;
 /// - it must pass an explicit `-f <format>`, because the reserved name's extension is
 ///   `.tmp-{pid}-{sequence}`, not `destination`'s, so ffmpeg cannot infer the muxer from it.
+///
+/// A missing `-y` then fails in the one way a caller is least likely to notice. Measured on
+/// ffmpeg 9.0.1, that refusal exits with status 0 -- fftools maps `AVERROR_EXIT` to zero --
+/// and leaves the reservation at zero bytes. A caller that checks only the exit status reads
+/// the run as a success, renames the reservation over `destination`, and so publishes a
+/// zero-byte file over the user's own video. The exit status alone cannot detect this. The
+/// frame count comparison ADR 014 requires is what catches it: the final `frame` value ffmpeg
+/// reported never reaches the expected count, so the renderer reports `frameCountMismatch` and
+/// never reaches the rename.
 ///
 /// The caller owns the reserved path from here on. This function arms no cleanup guard, because
 /// the reservation must survive past this call's return for `ffmpeg` to write into -- only the
