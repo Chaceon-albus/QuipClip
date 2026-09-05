@@ -31,20 +31,31 @@
 //! renames that file over the destination once the render has succeeded, and deletes it on
 //! every other exit path, a panic included.
 //!
-//! Later units add `arguments` (the ffmpeg command line) and `process` (spawning and
-//! supervising ffmpeg). None of the remaining modules exist yet; the units written so far only
-//! supply the vocabulary they will share, including every [`ExportErrorCode`] variant those
-//! later stages will eventually produce.
+//! [`process`] owns the `ffmpeg` child: it refuses to spawn one for an export the user has
+//! already cancelled, drains both of the child's pipes on their own threads so a chatty encoder
+//! can never block itself inside a write, feeds [`progress`] the stdout stream one line at a
+//! time, kills and reaps the child on cancellation and on a panic alike, and reports an exit
+//! status that the caller must **not** read as a successful export on its own -- see
+//! [`process::ExportProcessStatus::Exited`] for the measured case where `ffmpeg` writes no frames
+//! and still exits zero.
+//!
+//! One later unit adds `arguments` (the ffmpeg command line). That module does not exist yet;
+//! the units written so far only supply the vocabulary it will share, including every
+//! [`ExportErrorCode`] variant it and the command layer will eventually produce.
 
 pub mod graph;
 pub mod output;
 pub mod plan;
+pub mod process;
 pub mod progress;
 pub mod registry;
 
 pub use graph::{build_filter_graph, GraphShape};
 pub use output::PendingOutput;
 pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, SegmentBoundary};
+pub use process::{
+    run_export_process, ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus,
+};
 pub use progress::{ProgressReader, ProgressSnapshot};
 pub use registry::{ExportRegistry, ExportSlot};
 
