@@ -18,6 +18,8 @@ export const BACKEND_COMMANDS = {
   SAVE_SETTINGS: "save_settings",
   RESTORE_DEFAULT_PRESETS: "restore_default_presets",
   RESET_SETTINGS: "reset_settings",
+  START_EXPORT: "start_export",
+  CANCEL_EXPORT: "cancel_export",
 } as const;
 
 export type BackendCommand = (typeof BACKEND_COMMANDS)[keyof typeof BACKEND_COMMANDS];
@@ -27,6 +29,7 @@ export type BackendCommand = (typeof BACKEND_COMMANDS)[keyof typeof BACKEND_COMM
  */
 export const BACKEND_EVENTS = {
   CAPABILITY_PROBE: "ffmpeg:capability-probe",
+  EXPORT_PROGRESS: "export:progress",
 } as const;
 
 export type BackendEvent = (typeof BACKEND_EVENTS)[keyof typeof BACKEND_EVENTS];
