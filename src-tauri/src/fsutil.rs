@@ -106,6 +106,54 @@ fn create_temporary_file(path: &Path) -> io::Result<(PathBuf, File)> {
     ))
 }
 
+/// Reserve a unique temporary path next to `destination`, without leaving a handle open on it.
+///
+/// The export renderer (ADR 004, ADR 014) needs a bare path to hand to a spawned `ffmpeg`
+/// process, not a `File` this process still holds open: `ffmpeg` opens and writes the path
+/// itself, so a handle this process kept open would serve this process no purpose. Closing it
+/// immediately also removes any dependence on exactly what share flags `ffmpeg`'s own open
+/// uses, and on the muxer being able to re-open the output for a second pass (for example
+/// `-movflags +faststart` does that). This function reserves the name by opening it with
+/// `create_new(true)`, so no other writer can claim the same name in the window between the
+/// reservation and `ffmpeg` opening it, then closes the handle immediately and returns only the
+/// path.
+///
+/// The reservation lands in `destination`'s own directory, the same directory
+/// [`write_bytes_atomically`] uses for its own temporary file, so that once `ffmpeg` finishes,
+/// [`replace_file`] can rename the reservation over `destination` as a same-filesystem, atomic
+/// step rather than a cross-filesystem copy.
+///
+/// The name and retry discipline are exactly `create_temporary_file`'s:
+/// `.{file_name}.tmp-{pid}-{sequence}`, drawn from the same per-process counter, retried up to
+/// 100 times before giving up with an `AlreadyExists` error. As with that function, a
+/// `destination` file name close to the platform's `NAME_MAX` can push the generated name past
+/// the limit and surface as `ENAMETOOLONG` instead of retrying as `AlreadyExists`; that
+/// limitation is pre-existing and out of scope for this function.
+///
+/// Reserving the path by creating it means the path exists and is zero bytes the moment this
+/// function returns, before `ffmpeg` has run at all. The caller's `ffmpeg` invocation must
+/// account for that:
+/// - it must pass `-y`, because ADR 004 also requires `-nostdin`, and without `-y` ffmpeg
+///   cannot prompt to overwrite the existing zero-byte file and instead exits with "Not
+///   overwriting - exiting";
+/// - it must pass an explicit `-f <format>`, because the reserved name's extension is
+///   `.tmp-{pid}-{sequence}`, not `destination`'s, so ffmpeg cannot infer the muxer from it.
+///
+/// The caller owns the reserved path from here on. This function arms no cleanup guard, because
+/// the reservation must survive past this call's return for `ffmpeg` to write into -- only the
+/// caller knows when the export has actually finished or failed. A caller that needs to remove
+/// the reservation on an early failure -- discovery fails, the spawn fails, the user cancels --
+/// can wrap the returned path in the same `TemporaryFileCleanup` guard [`write_bytes_atomically`]
+/// uses, rather than hand-rolling its own cleanup on every early return.
+pub fn reserve_temporary_path(destination: &Path) -> io::Result<PathBuf> {
+    let (path, file) = create_temporary_file(destination)?;
+    // Close the handle immediately: this process has nothing left to do with it, and closing
+    // it now removes any dependence on exactly what share flags ffmpeg's own open uses, or on
+    // ffmpeg's muxer re-opening the output for a second pass.
+    drop(file);
+    Ok(path)
+}
+
 /// The directory a temporary file for `path` belongs in.
 ///
 /// A bare file name with no directory component -- `path.parent()` returning `Some` of an
@@ -122,8 +170,13 @@ fn parent_directory(path: &Path) -> &Path {
 ///
 /// A plain rename is already atomic on Unix, so this only adds the directory fsync that makes
 /// the rename itself durable across a crash.
+///
+/// [`write_bytes_atomically`] is one caller. The export renderer (ADR 004, ADR 014) is a
+/// second, direct one: it calls this itself once the `ffmpeg` process it spawned has finished
+/// writing the path [`reserve_temporary_path`] reserved, to move that output over the
+/// destination the user chose.
 #[cfg(unix)]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(source, destination)?;
     File::open(parent_directory(destination))?.sync_all()
 }
@@ -134,8 +187,14 @@ fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 /// `MoveFileExW` directly with `MOVEFILE_REPLACE_EXISTING` to get the same atomic-replace
 /// semantics as the Unix rename, plus `MOVEFILE_WRITE_THROUGH` so the call does not return
 /// until the replace is durable on disk.
+///
+/// [`write_bytes_atomically`] is one caller. The export renderer (ADR 004, ADR 014) is a
+/// second, direct one: it calls this itself once the `ffmpeg` process it spawned has finished
+/// writing the path [`reserve_temporary_path`] reserved, to move that output over the
+/// destination the user chose. `ffmpeg` must have closed its own handle to the source by then,
+/// or this call fails the same way an in-process caller's leftover handle would.
 #[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
@@ -182,8 +241,14 @@ fn absolute_path_without_following_file(path: &Path) -> io::Result<PathBuf> {
 ///
 /// This falls back to a plain rename with no extra durability step, since neither the Unix
 /// fsync nor the Windows `MoveFileExW` treatment has a portable equivalent here.
+///
+/// [`write_bytes_atomically`] is one caller. The export renderer (ADR 004, ADR 014) is a
+/// second, direct one: it calls this itself once the `ffmpeg` process it spawned has finished
+/// writing the path [`reserve_temporary_path`] reserved, to move that output over the
+/// destination the user chose. QuipClip does not ship on such a platform today, but this keeps
+/// the module buildable on one.
 #[cfg(not(any(unix, windows)))]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(source, destination)
 }
 
@@ -193,21 +258,28 @@ fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 /// only once the rename over the destination has succeeded, so the temporary file is removed on
 /// every early return -- a failed write, a failed sync, or a failed rename -- and left alone
 /// only after it no longer exists under its temporary name.
-struct TemporaryFileCleanup {
+///
+/// Visibility is `pub(crate)` so the export renderer (ADR 004, ADR 014) can reuse it for the
+/// path [`reserve_temporary_path`] hands back. Without this, the export module would need to
+/// hand-roll its own `let _ = fs::remove_file(...)` on every early return -- discovery fails,
+/// the `ffmpeg` spawn fails, the user cancels -- and a bug in any one of those call sites would
+/// leave a zero-byte `.{file_name}.tmp-{pid}-{sequence}` behind in the user's chosen output
+/// folder, not in a temporary directory nobody looks at.
+pub(crate) struct TemporaryFileCleanup {
     path: PathBuf,
     armed: bool,
 }
 
 impl TemporaryFileCleanup {
-    fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self { path, armed: true }
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -297,6 +369,62 @@ mod tests {
             !leftover,
             "a temporary file was left behind after concurrent writes"
         );
+    }
+
+    #[test]
+    fn reserve_temporary_path_places_the_reservation_in_the_destinations_own_directory() {
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        let reserved = reserve_temporary_path(&destination).unwrap();
+        assert_eq!(
+            reserved.parent(),
+            Some(directory.path.as_path()),
+            "the reservation must share destination's directory, not the system temp \
+             directory, so the later rename stays on one filesystem"
+        );
+    }
+
+    #[test]
+    fn reserve_temporary_path_creates_an_empty_file_at_the_reserved_path() {
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        let reserved = reserve_temporary_path(&destination).unwrap();
+        let metadata = fs::metadata(&reserved).unwrap();
+        assert_eq!(metadata.len(), 0);
+    }
+
+    #[test]
+    fn reserve_temporary_path_leaves_a_writable_file_at_the_reserved_path() {
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        let reserved = reserve_temporary_path(&destination).unwrap();
+        // Stand in for the ffmpeg child process: open the reserved path with a fresh handle,
+        // the way ffmpeg itself would, and write the output through it.
+        let mut file = OpenOptions::new().write(true).open(&reserved).unwrap();
+        file.write_all(b"ffmpeg output").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert_eq!(fs::read(&reserved).unwrap(), b"ffmpeg output");
+    }
+
+    #[test]
+    fn two_reservations_for_one_destination_never_share_a_path() {
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        let first = reserve_temporary_path(&destination).unwrap();
+        let second = reserve_temporary_path(&destination).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn replace_file_moves_a_file_over_an_existing_destination() {
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        fs::write(&destination, b"old contents").unwrap();
+        let source = directory.path.join("source.tmp");
+        fs::write(&source, b"new contents").unwrap();
+        replace_file(&source, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"new contents");
     }
 
     struct TestDirectory {
