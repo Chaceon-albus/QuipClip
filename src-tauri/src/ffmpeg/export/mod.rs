@@ -16,6 +16,15 @@
 //! `start_pts`/`end_pts` boundaries, joined by `concat` in plan order, in whichever of the two
 //! [`GraphShape`] variants the argument builder's command-line budget allows.
 //!
+//! [`arguments`] builds the ffmpeg argument vector from a plan, a rendered graph, and the
+//! reserved output path, in the order ADR 014's "The command" section gives. This module also
+//! holds the command-line budget, because the graph goes on the command line.
+//! [`arguments::choose_graph_shape`] decides whether one input for each segment stays inside
+//! that budget, and [`graph`] does not. Two of the arguments are mandatory. Without `-f`,
+//! ffmpeg cannot select a muxer for the reserved name, and it stops with an error. Without
+//! `-y`, ffmpeg does not write the reserved file, and it exits with code 0. That second
+//! failure is silent, and [`output`] holds the measurement.
+//!
 //! [`progress`] is the `frame`-based progress reader: it accumulates the `key=value` line
 //! stream of `ffmpeg -progress pipe:1 -nostats` into one [`ProgressSnapshot`] for each completed
 //! block, and it ignores the output-time keys that ADR 014 measurement 12 found wrong under
@@ -38,11 +47,8 @@
 //! status that the caller must **not** read as a successful export on its own -- see
 //! [`process::ExportProcessStatus::Exited`] for the measured case where `ffmpeg` writes no frames
 //! and still exits zero.
-//!
-//! One later unit adds `arguments` (the ffmpeg command line). That module does not exist yet;
-//! the units written so far only supply the vocabulary it will share, including every
-//! [`ExportErrorCode`] variant it and the command layer will eventually produce.
 
+pub mod arguments;
 pub mod graph;
 pub mod output;
 pub mod plan;
@@ -50,6 +56,7 @@ pub mod process;
 pub mod progress;
 pub mod registry;
 
+pub use arguments::{build_arguments, choose_graph_shape};
 pub use graph::{build_filter_graph, GraphShape};
 pub use output::PendingOutput;
 pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, SegmentBoundary};
