@@ -602,6 +602,7 @@ mod tests {
         MediaProbe {
             format_names: vec!["mov".to_owned(), "mp4".to_owned()],
             format_long_name: Some("QuickTime / MOV".to_owned()),
+            format_start_time: None,
             video_codec: "h264".to_owned(),
             video_profile: Some("High".to_owned()),
             pixel_format: Some("yuv420p".to_owned()),

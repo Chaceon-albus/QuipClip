@@ -15,6 +15,21 @@ use std::process::{Command, Stdio};
 pub struct MediaProbe {
     pub format_names: Vec<String>,
     pub format_long_name: Option<String>,
+    /// The container start time, from `format.start_time`, in seconds.
+    ///
+    /// ADR 014 measurement 8: an input `-ss` is relative to this value, not to an absolute
+    /// timestamp. The renderer computes each seek as `inPts * videoTimeBase - formatStartTime
+    /// - margin`, so this must stay exact and must never round-trip through `f64` (ADR 002).
+    ///
+    /// This is not the video stream's own start time. ADR 014 measurement 2 compared the
+    /// container start time against the video stream's start time, both in seconds, and the
+    /// two values differed in every one of its six fixtures, not only when an audio stream
+    /// starts first.
+    ///
+    /// A missing value here is not a harmless default: the renderer then has to treat the
+    /// container as if it started at zero, and an export can silently drop frames from the
+    /// start of a segment when the real start time was not zero.
+    pub format_start_time: Option<Rational>,
     pub video_codec: String,
     pub video_profile: Option<String>,
     pub pixel_format: Option<String>,
@@ -36,6 +51,17 @@ pub struct MediaProbe {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioProbe {
+    /// The absolute stream index of this audio stream, as ffprobe reported it.
+    ///
+    /// The export filter graph must address this exact stream by its absolute index. A short
+    /// specifier such as `[0:a]` does not invoke ffmpeg's "best stream" selection; filter
+    /// graph label resolution walks the input's streams in order and binds the first one
+    /// that matches. That is not always the stream `preferred_stream` picked below, which
+    /// prefers the stream that carries the `default` disposition: the two rules disagree
+    /// whenever the default audio stream is not the first audio stream. One test fixture in
+    /// this file is exactly that case — `preferred_stream` returns stream 2, and `[0:a]`
+    /// would bind stream 1 (ADR 014).
+    pub index: u32,
     pub codec: Option<String>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
@@ -229,6 +255,7 @@ struct RawFormat {
     format_name: Option<String>,
     format_long_name: Option<String>,
     duration: Option<String>,
+    start_time: Option<String>,
 }
 
 fn normalize(raw: RawProbe) -> Result<MediaProbe, ProbeDataError> {
@@ -272,6 +299,9 @@ fn normalize(raw: RawProbe) -> Result<MediaProbe, ProbeDataError> {
             .map(str::to_owned)
             .collect(),
         format_long_name: format.and_then(|value| value.format_long_name.clone()),
+        format_start_time: parse_format_start_time(
+            format.and_then(|value| value.start_time.as_deref()),
+        ),
         video_codec,
         video_profile: video.profile.clone(),
         pixel_format: video.pix_fmt.clone(),
@@ -323,7 +353,13 @@ where
 }
 
 fn normalize_audio(raw: &RawStream) -> Result<AudioProbe, ProbeDataError> {
+    let stream_index = required_json_integer(raw.index.as_ref(), "streams.audio.index")?;
+    let index = u32::try_from(stream_index).map_err(|_| ProbeDataError::InvalidInteger {
+        field: "streams.audio.index",
+        value: stream_index.to_string(),
+    })?;
     Ok(AudioProbe {
+        index,
         codec: raw.codec_name.clone(),
         sample_rate: parse_optional_text_i64(
             raw.sample_rate.as_deref(),
@@ -475,6 +511,29 @@ fn optional_positive_rational(value: Option<&str>) -> Option<Rational> {
     value
         .and_then(Rational::from_ffprobe)
         .filter(|value| value.num() > 0)
+}
+
+/// Parse `format.start_time` exactly, treating anything but a fixed-point decimal as unknown.
+///
+/// ADR 014 measurement 8 needs this value for an exact seek computation, so it goes through
+/// `Rational::from_decimal_str` rather than `f64` (ADR 002). An absent field, the literal
+/// `"N/A"`, and any text that is not a base-10 integer or fixed-point decimal all become
+/// `None` instead of failing the whole probe, because a missing video stream is the only
+/// failure that should block importing the source. `None` is still not a safe value to see
+/// here: the renderer falls back to treating the container as if it started at zero, and an
+/// export can silently drop frames from the start of a segment when the real start time was
+/// not zero.
+///
+/// `ffprobe -of json` formats this field with `%f`, so it is always fixed point today and
+/// this parse never fails on real output. If the probe invocation ever adds `-unit` or
+/// `-prefix`, ffprobe can switch to scientific notation, which is not fixed point; this
+/// function would then return `None` for a real value, silently, and every seek that depends
+/// on it would lose its container offset.
+fn parse_format_start_time(value: Option<&str>) -> Option<Rational> {
+    let text = value
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && *text != "N/A")?;
+    Rational::from_decimal_str(text)
 }
 
 fn approximate_duration(stream: Option<&str>, format: Option<&str>) -> Option<f64> {
@@ -637,9 +696,160 @@ mod tests {
     }
 
     #[test]
+    fn audio_index_is_the_absolute_stream_index_of_the_selected_default_audio_stream() {
+        // Video at 0, a non-default audio at 1, and the default-disposition audio at 2:
+        // `preferred_stream` must return the stream at 2, and `AudioProbe.index` must carry
+        // that same absolute index so the export filter graph can name it exactly (ADR 014).
+        let value = serde_json::json!({
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "time_base": "1/90000",
+                    "disposition": {"default": 1, "attached_pic": 0}
+                },
+                {
+                    "index": 1,
+                    "codec_type": "audio",
+                    "codec_name": "ac3",
+                    "sample_rate": "44100",
+                    "channels": 2,
+                    "disposition": {"default": 0, "attached_pic": 0}
+                },
+                {
+                    "index": 2,
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "sample_rate": "48000",
+                    "channels": 6,
+                    "disposition": {"default": 1, "attached_pic": 0}
+                }
+            ],
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"}
+        });
+        let probe = parse_value(value).unwrap();
+        // Assert the whole `AudioProbe`, not just `index`: this proves every field came from
+        // stream 2, the default-disposition stream, and none of it leaked from stream 1.
+        let audio = probe.audio.unwrap();
+        assert_eq!(audio.index, 2);
+        assert_eq!(audio.codec, Some("aac".to_owned()));
+        assert_eq!(audio.sample_rate, Some(48_000));
+        assert_eq!(audio.channels, Some(6));
+    }
+
+    #[test]
+    fn audio_index_falls_back_to_the_first_audio_stream_when_none_is_marked_default() {
+        // No audio stream carries `default`, so `preferred_stream` falls back to the first
+        // audio stream in file order, which is stream 1, not stream 0 or 2.
+        let value = serde_json::json!({
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "time_base": "1/90000",
+                    "disposition": {"default": 1, "attached_pic": 0}
+                },
+                {
+                    "index": 1,
+                    "codec_type": "audio",
+                    "codec_name": "ac3",
+                    "sample_rate": "44100",
+                    "channels": 2,
+                    "disposition": {"default": 0, "attached_pic": 0}
+                },
+                {
+                    "index": 2,
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "sample_rate": "48000",
+                    "channels": 6,
+                    "disposition": {"default": 0, "attached_pic": 0}
+                }
+            ],
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"}
+        });
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.audio.unwrap().index, 1);
+    }
+
+    #[test]
+    fn format_start_time_parses_a_positive_decimal_exactly() {
+        let mut value = base_probe();
+        value["format"]["start_time"] = serde_json::json!("9.976780");
+        let probe = parse_value(value).unwrap();
+        // The literal reduced fraction, not the parser checked against itself: 9976780 over
+        // 1000000, reduced by 20, is 498839 over 50000.
+        assert_eq!(probe.format_start_time, Rational::new(498_839, 50_000));
+    }
+
+    #[test]
+    fn format_start_time_parses_a_negative_decimal_exactly() {
+        let mut value = base_probe();
+        value["format"]["start_time"] = serde_json::json!("-0.500000");
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.format_start_time, Rational::new(-1, 2));
+    }
+
+    #[test]
+    fn format_start_time_parses_zero_exactly() {
+        let mut value = base_probe();
+        value["format"]["start_time"] = serde_json::json!("0.000000");
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.format_start_time, Rational::new(0, 1));
+    }
+
+    #[test]
+    fn format_start_time_is_none_when_the_field_is_absent() {
+        let probe = parse_value(base_probe()).unwrap();
+        assert_eq!(probe.format_start_time, None);
+    }
+
+    #[test]
+    fn format_start_time_is_none_for_an_empty_string() {
+        let mut value = base_probe();
+        value["format"]["start_time"] = serde_json::json!("");
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.format_start_time, None);
+    }
+
+    #[test]
+    fn format_start_time_is_none_for_the_literal_n_a() {
+        let mut value = base_probe();
+        value["format"]["start_time"] = serde_json::json!("N/A");
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.format_start_time, None);
+    }
+
+    #[test]
+    fn format_start_time_non_numeric_text_becomes_none_without_failing_the_parse() {
+        let mut value = base_probe();
+        value["format"]["start_time"] = serde_json::json!("not-a-number");
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.format_start_time, None);
+    }
+
+    #[test]
     fn serializes_pts_and_tick_metadata_as_decimal_strings() {
         let mut raw = base_probe();
         raw["streams"][0]["nb_frames"] = serde_json::json!("300");
+        raw["format"]["start_time"] = serde_json::json!("9.976780");
+        raw["streams"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "index": 7,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "sample_rate": "48000",
+                "channels": 2,
+                "disposition": {"default": 1, "attached_pic": 0}
+            }));
         let probe = parse_value(raw).unwrap();
         assert_eq!(
             probe.reported_frame_count,
@@ -649,8 +859,22 @@ mod tests {
         assert_eq!(value["videoStartPts"], "-1800");
         assert_eq!(value["videoDurationTicks"], "900000");
         assert_eq!(value["reportedFrameCount"], "300");
+        // Pin the cross-IPC wire shape for both new fields: `formatStartTime` crosses as the
+        // same `{"n":...,"d":...}` object every other `Rational` field uses, and the audio
+        // stream index crosses under the key `index`.
+        assert_eq!(
+            value["formatStartTime"],
+            serde_json::json!({"n": 498_839, "d": 50_000})
+        );
+        assert_eq!(value["audio"]["index"], 7);
         assert!(value.get("frameCount").is_none());
         assert!(value.get("isVfr").is_none());
+
+        // An absent `format.start_time` serializes as JSON `null`: the field carries no
+        // `skip_serializing_if`, so the key is always present on the wire.
+        let without_start_time = parse_value(base_probe()).unwrap();
+        let value = serde_json::to_value(without_start_time).unwrap();
+        assert_eq!(value["formatStartTime"], serde_json::Value::Null);
     }
 
     fn parse_value(value: Value) -> Result<MediaProbe, ProbeParseError> {
