@@ -64,11 +64,16 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     each version that a user can have.
 14. Many inputs of one file do not cause a failure. Runs with 8, 32, and 64 segments gave
     exactly 200, 800, and 1600 frames. The largest run used 20 MB of memory.
-15. Both graph shapes grow with the segment count. The graph adds about 260 bytes for each
-    segment either way. With a 46-character source path, one input for each segment gives
-    266 bytes at one segment and 127963 bytes at 500. One input gives 303 bytes and 134774
-    bytes, so its graph is the larger of the two at every count. One input still reaches
-    further, because it writes the source path once instead of once for each segment.
+15. Both graph shapes grow with the segment count, by roughly the same amount for each
+    added segment. One input reaches further than one input for each segment, because it
+    writes the source path once instead of once for each segment. That saving is outside the
+    graph, in the argument list.
+    The two graphs themselves changed places after measurement 17. The input rate pin adds
+    one filter to every audio chain under one input for each segment, and exactly one filter
+    in front of `asplit` under one input. One input therefore holds the larger graph for the
+    first three segments and the smaller graph from four segments upward, measured as 29804
+    bytes against 31266 bytes at the segment cap. No decision reads this number: the shape
+    is chosen on the length of the whole command line, not on the size of the graph.
 16. `setsar=1` changes the picture of a source that does not have square pixels. A 720x480
     source with a sample aspect ratio of 32:27 shows a display aspect ratio of 16:9. The
     filter `setsar=1` gives that source a display aspect ratio of 3:2, which is compressed
