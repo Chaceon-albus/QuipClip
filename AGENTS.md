@@ -89,7 +89,8 @@ Read the `dev-workflow` skill. It gives the routing rules, the review loop, the 
 the commit rules.
 
 Short form: the main agent orchestrates and reviews. `agy` writes the frontend. A subagent
-writes the Rust. A different agent reviews. The main agent commits.
+with the newest Claude Opus at medium reasoning writes the Rust. A different agent reviews
+at high reasoning. The main agent commits.
 
 Every delegated command runs the newest model its vendor offers. Never pin a model version
 in a document. ADR 008 states the rule.

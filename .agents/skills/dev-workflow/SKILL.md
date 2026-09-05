@@ -15,9 +15,9 @@ The commit rules are in `.agents/decisions/009-incremental-commit-policy.md`.
 
 | Work | First choice | Fallback |
 |---|---|---|
-| Frontend: `.ts`, `.tsx`, `.css` | `agy` with the newest Gemini Flash at high reasoning | a subagent at medium reasoning |
-| Rust and backend: `.rs`, `Cargo.toml`, `tauri.conf.json` | a subagent at medium reasoning | — |
-| A command the user named | that command | a subagent at medium reasoning |
+| Frontend: `.ts`, `.tsx`, `.css` | `agy` with the newest Gemini Flash at high reasoning | a subagent with the newest Claude Opus at medium reasoning |
+| Rust and backend: `.rs`, `Cargo.toml`, `tauri.conf.json` | a subagent with the newest Claude Opus at medium reasoning | — |
+| A command the user named | that command | a subagent with the newest Claude Opus at medium reasoning |
 
 The user can name a command-line agent for a task. Obey that instruction. If the named
 command fails, fall back to a subagent and tell the user which fallback ran.
@@ -74,8 +74,15 @@ Give the writing agent all of this:
 
 ## 4. Review
 
-The reviewing agent is **never** the writing agent, and runs at a higher reasoning level
-than the writer.
+The reviewing agent is **never** the writing agent. The reviewing agent runs the newest
+Claude Opus. Start the reviewer at high reasoning. High reasoning is one level above the
+medium reasoning of a writing subagent. A reviewing agent at medium reasoning does not
+satisfy this rule.
+
+The main agent can raise the reviewer to `xhigh` reasoning. Raise it when the change
+carries more risk than a usual change. The time model, the export pipeline, the preview,
+the ffmpeg lifecycle, and a wire contract are examples. Raise the level only when the work
+needs it, because a higher level costs more.
 
 Give the reviewer the diff, the ADR numbers, and the acceptance criteria. Ask it to find
 faults, not to approve. Ask it to mark each finding BLOCKING or NON-BLOCKING.
