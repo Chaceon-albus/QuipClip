@@ -69,10 +69,10 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     writes the source path once instead of once for each segment. That saving is outside the
     graph, in the argument list.
     The two graphs themselves changed places after measurement 17. The input rate pin adds
-    one filter to every audio chain under one input for each segment, and exactly one filter
-    in front of `asplit` under one input. One input therefore holds the larger graph for the
-    first three segments and the smaller graph from four segments upward, measured as 29804
-    bytes against 31266 bytes at the segment cap. No decision reads this number: the shape
+    one filter to every audio chain under one input for each segment. It adds exactly one
+    filter in front of `asplit` under one input. One input therefore holds the larger graph
+    for the first three segments. It holds the smaller graph from four segments upward,
+    measured as 29804 bytes against 31266 bytes at the segment cap. No decision reads this number: the shape
     is chosen on the length of the whole command line, not on the size of the graph.
 16. `setsar=1` changes the picture of a source that does not have square pixels. A 720x480
     source with a sample aspect ratio of 32:27 shows a display aspect ratio of 16:9. The
