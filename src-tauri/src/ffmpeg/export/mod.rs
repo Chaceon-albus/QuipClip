@@ -11,21 +11,28 @@
 //! exposes [`ExportPlan::single_input_seek_seconds`], the one extra value ADR 014's second
 //! graph shape (one input for the whole source) needs beyond the per-segment plan.
 //!
+//! [`progress`] is the `frame`-based progress reader: it accumulates the `key=value` line
+//! stream of `ffmpeg -progress pipe:1 -nostats` into one [`ProgressSnapshot`] for each completed
+//! block, and it ignores the output-time keys that ADR 014 measurement 12 found wrong under
+//! `-copyts`.
+//!
 //! [`registry`] holds the single-flight guard and the cancellation flag: it decides whether an
 //! export may start at all, refusing a second one while one is running, and it carries a stop
 //! request from the command layer to the process stage. It owns no path, no plan, and no
 //! process handle.
 //!
 //! Later units add `graph` (the `trim`/`atrim` filter chains), `arguments` (the ffmpeg command
-//! line), `progress` (the `frame`-based progress reader), `process` (spawning and supervising
-//! ffmpeg), and `output` (the temporary-file rename). None of the remaining modules exist yet;
-//! the units written so far only supply the vocabulary they will share, including every
-//! [`ExportErrorCode`] variant those later stages will eventually produce.
+//! line), `process` (spawning and supervising ffmpeg), and `output` (the temporary-file
+//! rename). None of the remaining modules exist yet; the units written so far only supply the
+//! vocabulary they will share, including every [`ExportErrorCode`] variant those later stages
+//! will eventually produce.
 
 pub mod plan;
+pub mod progress;
 pub mod registry;
 
 pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, SegmentBoundary};
+pub use progress::{ProgressReader, ProgressSnapshot};
 pub use registry::{ExportRegistry, ExportSlot};
 
 use crate::project::Resolution;
