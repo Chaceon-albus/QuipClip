@@ -11,6 +11,11 @@
 //! exposes [`ExportPlan::single_input_seek_seconds`], the one extra value ADR 014's second
 //! graph shape (one input for the whole source) needs beyond the per-segment plan.
 //!
+//! [`graph`] renders a finished plan into ADR 014's inline `-filter_complex` string: one
+//! `trim`/`atrim` chain for each segment, cut on absolute stream indices at integer
+//! `start_pts`/`end_pts` boundaries, joined by `concat` in plan order, in whichever of the two
+//! [`GraphShape`] variants the argument builder's command-line budget allows.
+//!
 //! [`progress`] is the `frame`-based progress reader: it accumulates the `key=value` line
 //! stream of `ffmpeg -progress pipe:1 -nostats` into one [`ProgressSnapshot`] for each completed
 //! block, and it ignores the output-time keys that ADR 014 measurement 12 found wrong under
@@ -26,16 +31,18 @@
 //! renames that file over the destination once the render has succeeded, and deletes it on
 //! every other exit path, a panic included.
 //!
-//! Later units add `graph` (the `trim`/`atrim` filter chains), `arguments` (the ffmpeg command
-//! line), and `process` (spawning and supervising ffmpeg). None of the remaining modules exist
-//! yet; the units written so far only supply the vocabulary they will share, including every
-//! [`ExportErrorCode`] variant those later stages will eventually produce.
+//! Later units add `arguments` (the ffmpeg command line) and `process` (spawning and
+//! supervising ffmpeg). None of the remaining modules exist yet; the units written so far only
+//! supply the vocabulary they will share, including every [`ExportErrorCode`] variant those
+//! later stages will eventually produce.
 
+pub mod graph;
 pub mod output;
 pub mod plan;
 pub mod progress;
 pub mod registry;
 
+pub use graph::{build_filter_graph, GraphShape};
 pub use output::PendingOutput;
 pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, SegmentBoundary};
 pub use progress::{ProgressReader, ProgressSnapshot};
