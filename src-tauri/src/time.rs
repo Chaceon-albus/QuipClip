@@ -324,6 +324,47 @@ impl Ord for Rational {
     }
 }
 
+/// Convert a source presentation timestamp into exact seconds, in the source's own PTS
+/// origin, with no start-time subtraction.
+///
+/// The export renderer (ADR 014) computes an input seek as
+/// `inPts * videoTimeBase - formatStartTime - margin`, clamped to zero, and the renderer
+/// omits `-ss` entirely when that clamped result is zero; its second graph shape uses one
+/// such seek before the first segment rather than one per input. It also converts video
+/// PTS into audio ticks as `round(pts * videoTimeBase * sampleRate)`. Both computations
+/// start by multiplying a `Pts` by its stream `time_base`. This helper composes that step
+/// once so a caller does not rebuild `Rational::new(pts.value(), 1)` by hand and risk
+/// getting the overflow handling subtly wrong.
+///
+/// The result is an absolute value on the source's own PTS timeline; this function never
+/// subtracts a source start time. The frontend's `ptsElapsedSeconds` is the near-homonym
+/// that performs that subtraction, and ADR 014's measurement 2 warns that a container's
+/// start time and its video stream's start time can differ, so the two functions are not
+/// interchangeable.
+///
+/// ADR 002 requires exact rational arithmetic for timestamps and permits a source to
+/// start at a negative PTS. This function performs no floating-point arithmetic and
+/// accepts the full signed `Pts` range, including `i64::MIN`.
+///
+/// `time_base` must be strictly positive (`time_base.num() > 0`), matching every other
+/// stream time base check in this codebase (`probe.rs` filters on `num() > 0`,
+/// `project/mod.rs` calls `validate_positive_rational`, and the frontend calls
+/// `assertPositiveTimeBase`). A zero or negative `time_base` cannot represent elapsed
+/// time; returning `None` for it prevents a zero or negative time base from silently
+/// producing zero (or negative) elapsed seconds, which the export path would read as a
+/// silently wrong cut. This function also returns `None` when the exact product cannot be
+/// represented as a reduced `Rational`.
+#[must_use]
+pub fn pts_seconds(pts: Pts, time_base: Rational) -> Option<Rational> {
+    if time_base.num() <= 0 {
+        return None;
+    }
+    // `Rational::new(pts.value(), 1)` cannot fail: the denominator is 1, so `reduce`
+    // always finds a divisor of 1 and the numerator round-trips through `i64` unchanged.
+    // Only the following `mul` can return `None`.
+    Rational::new(pts.value(), 1)?.mul(time_base)
+}
+
 /// Print a rational number of seconds as a fixed-point decimal.
 #[must_use]
 pub fn format_seconds(value: Rational, decimals: u32) -> Option<String> {
@@ -448,6 +489,123 @@ mod tests {
     fn rational_serde_rejects_unknown_fields_and_zero_denominator() {
         assert!(serde_json::from_str::<Rational>(r#"{"n":1,"d":0}"#).is_err());
         assert!(serde_json::from_str::<Rational>(r#"{"n":1,"d":2,"x":3}"#).is_err());
+    }
+
+    #[test]
+    fn pts_seconds_converts_a_positive_timestamp_exactly() {
+        let time_base = Rational::new(1, 12800).unwrap();
+        assert_eq!(
+            pts_seconds(Pts::new(128000), time_base),
+            Rational::new(10, 1)
+        );
+    }
+
+    #[test]
+    fn pts_seconds_handles_a_negative_source_start() {
+        let time_base = Rational::new(1, 2).unwrap();
+        assert_eq!(pts_seconds(Pts::new(-5), time_base), Rational::new(-5, 2));
+    }
+
+    #[test]
+    fn pts_seconds_is_zero_at_the_origin() {
+        let time_base = Rational::new(1, 12800).unwrap();
+        assert_eq!(pts_seconds(Pts::new(0), time_base), Rational::new(0, 1));
+    }
+
+    #[test]
+    fn pts_seconds_stays_exact_for_a_non_terminating_decimal_time_base() {
+        // 1001/30000 is NTSC frame timing. Its decimal expansion never terminates, so a
+        // correct result only survives as a fraction: any float would round it.
+        let time_base = Rational::new(1001, 30000).unwrap();
+        assert_eq!(
+            pts_seconds(Pts::new(1), time_base),
+            Rational::new(1001, 30000)
+        );
+    }
+
+    #[test]
+    fn pts_seconds_returns_none_on_overflow() {
+        let time_base = Rational::new(2, 1).unwrap();
+        assert_eq!(pts_seconds(Pts::new(i64::MAX), time_base), None);
+    }
+
+    #[test]
+    fn pts_seconds_result_is_reduced_with_a_positive_denominator() {
+        // 6/8 reduces to 3/4 at construction; the product must reduce again to 3/1.
+        let time_base = Rational::new(6, 8).unwrap();
+        let seconds = pts_seconds(Pts::new(4), time_base).unwrap();
+        assert_eq!(seconds, Rational::new(3, 1).unwrap());
+        assert_eq!(seconds.num(), 3);
+        assert_eq!(seconds.den(), 1);
+        assert!(seconds.den() > 0);
+    }
+
+    #[test]
+    fn pts_seconds_fails_a_float_based_reimplementation_above_two_pow_53() {
+        // f64 cannot exactly represent every i64 above 2^53. A reimplementation that
+        // routes the multiplication through f64 rounds 9007199254740993 (2^53 + 1) down
+        // to 9007199254740992 before it ever reaches the denominator, and reports
+        // 17592186044416/25 instead of the exact value below. This test exists to fail
+        // any float-based reimplementation of `pts_seconds`.
+        let time_base = Rational::new(1, 12800).unwrap();
+        assert_eq!(
+            pts_seconds(Pts::new(9_007_199_254_740_993), time_base),
+            Rational::new(9_007_199_254_740_993, 12800)
+        );
+    }
+
+    #[test]
+    fn pts_seconds_handles_the_most_negative_pts_without_panicking() {
+        // ADR 002 permits a source to start at i64::MIN. This is only safe today
+        // because `reduce` widens to i128 before it takes a magnitude; negating
+        // i64::MIN directly, or taking its i64 `abs()`, would panic in debug.
+        assert_eq!(
+            pts_seconds(Pts::new(i64::MIN), Rational::new(1, 1).unwrap()),
+            Rational::new(i64::MIN, 1)
+        );
+    }
+
+    #[test]
+    fn pts_seconds_succeeds_at_the_largest_product_that_still_fits_in_i64() {
+        let time_base = Rational::new(2, 1).unwrap();
+        assert_eq!(
+            pts_seconds(Pts::new(4_611_686_018_427_387_903), time_base),
+            Rational::new(9_223_372_036_854_775_806, 1)
+        );
+    }
+
+    #[test]
+    fn pts_seconds_returns_none_one_tick_past_the_positive_overflow_boundary() {
+        let time_base = Rational::new(2, 1).unwrap();
+        assert_eq!(
+            pts_seconds(Pts::new(4_611_686_018_427_387_904), time_base),
+            None
+        );
+    }
+
+    #[test]
+    fn pts_seconds_reaches_i64_min_exactly_at_the_negative_boundary() {
+        let time_base = Rational::new(2, 1).unwrap();
+        assert_eq!(
+            pts_seconds(Pts::new(-4_611_686_018_427_387_904), time_base),
+            Rational::new(i64::MIN, 1)
+        );
+    }
+
+    #[test]
+    fn pts_seconds_rejects_a_zero_time_base() {
+        // A zero time base cannot represent elapsed time. Returning `Some(0/1)` here
+        // would silently turn a real PTS into a zero-second seek in the export path.
+        assert_eq!(
+            pts_seconds(Pts::new(12345), Rational::new(0, 1).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn pts_seconds_rejects_a_negative_time_base() {
+        let time_base = Rational::new(-1, 12800).unwrap();
+        assert_eq!(pts_seconds(Pts::new(12345), time_base), None);
     }
 
     #[test]
