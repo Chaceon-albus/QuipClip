@@ -9,17 +9,24 @@
 //! segment boundaries: it resolves the output frame rate, computes each segment's exact
 //! duration and seek position, and converts video PTS into audio ticks. [`ExportPlan`] also
 //! exposes [`ExportPlan::single_input_seek_seconds`], the one extra value ADR 014's second
-//! graph shape (one input for the whole source) needs beyond the per-segment plan. Later
-//! units add `graph` (the `trim`/`atrim` filter chains), `arguments` (the ffmpeg command
-//! line), `progress` (the `frame`-based progress reader), `process` (spawning and
-//! supervising ffmpeg), `output` (the temporary-file rename), and `registry` (wiring the
-//! Tauri command). None of those modules exist yet; this unit only supplies the vocabulary
-//! they will share, including every [`ExportErrorCode`] variant those later stages will
-//! eventually produce.
+//! graph shape (one input for the whole source) needs beyond the per-segment plan.
+//!
+//! [`registry`] holds the single-flight guard and the cancellation flag: it decides whether an
+//! export may start at all, refusing a second one while one is running, and it carries a stop
+//! request from the command layer to the process stage. It owns no path, no plan, and no
+//! process handle.
+//!
+//! Later units add `graph` (the `trim`/`atrim` filter chains), `arguments` (the ffmpeg command
+//! line), `progress` (the `frame`-based progress reader), `process` (spawning and supervising
+//! ffmpeg), and `output` (the temporary-file rename). None of the remaining modules exist yet;
+//! the units written so far only supply the vocabulary they will share, including every
+//! [`ExportErrorCode`] variant those later stages will eventually produce.
 
 pub mod plan;
+pub mod registry;
 
 pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, SegmentBoundary};
+pub use registry::{ExportRegistry, ExportSlot};
 
 use crate::project::Resolution;
 use crate::settings::{Container, Quality};
@@ -229,9 +236,11 @@ macro_rules! export_error_codes {
         /// in this enum, matching `ImportMediaErrorCode` and `CapabilityProbeErrorCode`
         /// elsewhere in this crate. Every variant below is documented with the stage that
         /// produces it; most of those stages (`graph`, `arguments`, `progress`, `process`,
-        /// `output`, `registry`) are not implemented yet, so their variants are reserved
-        /// here so every later stage of the pipeline shares one closed error vocabulary from
-        /// the start, rather than each stage growing its own.
+        /// `output`, and the command wiring the variants below call "the registry stage")
+        /// are not implemented yet, so their variants are reserved here so every later stage
+        /// of the pipeline shares one closed error vocabulary from the start, rather than
+        /// each stage growing its own. That name predates the `registry` module, which is
+        /// the single-flight guard and produces none of these codes.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
         #[serde(rename_all = "camelCase")]
         pub enum ExportErrorCode {
