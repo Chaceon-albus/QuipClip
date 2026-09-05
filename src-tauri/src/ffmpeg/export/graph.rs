@@ -5,7 +5,7 @@
 //! graph is testable without ffmpeg installed -- which is what the pinned-string tests below
 //! do, exactly as `capabilities::smoke`'s tests pin ADR 006's two smoke commands verbatim.
 //!
-//! Three of ADR 014's decisions live here and nowhere else:
+//! Four of ADR 014's decisions live here and nowhere else:
 //!
 //! - Every chain binds an **absolute** stream index, never the short specifier `[i:v]` or
 //!   `[i:a]`. A short specifier selects the first stream of its type; the probe selects the
@@ -20,6 +20,10 @@
 //!   under `-copyts` by ADR 014 measurements 1 and 3; the audio ticks are the plan's
 //!   precomputed `audio_in_tick`/`audio_out_tick`, so this module performs no timestamp
 //!   arithmetic of its own and cannot round anything.
+//! - Every audio chain **pins its input link to the source's own sample rate** with an
+//!   `aformat` in front of `atrim`. This one looks redundant beside the `aformat` that ends
+//!   the same chain, and it is not: see [`audio_input_pin`] for the measurement, and do not
+//!   delete it.
 //! - The two graph shapes exist because one input for each segment repeats the source path,
 //!   and Windows limits a command line to 32767 bytes. [`GraphShape`] names the choice but
 //!   does not make it: only the argument builder knows the assembled command's length, so
@@ -53,6 +57,11 @@ const VIDEO_PIXEL_FORMAT: &str = "format=yuv420p";
 /// agree, so each chain resamples to this one rate; the ticks stay in the source's rate
 /// because that is the unit `atrim` reads them in. The test fixtures deliberately use a
 /// 44100 Hz source so the two numbers can never be confused for each other.
+///
+/// This is not the same `aformat` as [`audio_input_pin`], which carries the *source* rate and
+/// stands at the head of the chain. Both are needed, for opposite reasons: this one converts
+/// the cut audio to the one rate `concat` joins at; that one stops ffmpeg from converting
+/// the audio *before* the cut, which would read the boundary ticks in the wrong unit.
 const AUDIO_SAMPLE_FORMAT: &str =
     "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
 
@@ -150,12 +159,22 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
     if shape == GraphShape::SingleInput {
         chains.push(splitter_chain(
             plan.video_stream_index,
+            "",
             "split",
             "sv",
             count,
         ));
         if let Some((planned, _)) = &audio {
-            chains.push(splitter_chain(planned.stream_index, "asplit", "sa", count));
+            // The rate pin goes in front of `asplit`, not on each branch behind it: this
+            // chain's head *is* the input link, so one filter pins it directly. See
+            // `audio_input_pin`.
+            chains.push(splitter_chain(
+                planned.stream_index,
+                &audio_input_pin(*planned),
+                "asplit",
+                "sa",
+                count,
+            ));
         }
     }
 
@@ -186,11 +205,52 @@ fn resolve_audio(plan: &ExportPlan) -> Option<(PlannedAudio, Vec<(i64, i64)>)> {
 }
 
 /// Render the `split`/`asplit` chain that feeds every segment chain from one input.
-fn splitter_chain(stream_index: u32, filter: &str, label: &str, count: usize) -> String {
+///
+/// `pin` is inserted between the input link and the splitter, already carrying its own
+/// trailing comma, or is empty. Only the audio splitter uses it, for
+/// [`audio_input_pin`]'s reason; the video link has no equivalent hazard, because ADR 014
+/// measurement 3 found the video input link time base equal to the video stream's own with
+/// or without a seek.
+fn splitter_chain(stream_index: u32, pin: &str, filter: &str, label: &str, count: usize) -> String {
     let outputs: String = (0..count)
         .map(|index| format!("[{label}{index}]"))
         .collect();
-    format!("[0:{stream_index}]{filter}={count}{outputs}")
+    format!("[0:{stream_index}]{pin}{filter}={count}{outputs}")
+}
+
+/// Render the `aformat` that holds an audio **input** link at the source's own sample rate,
+/// with the trailing comma that joins it to the filter behind it.
+///
+/// This is the one filter in the graph that exists to defeat an ffmpeg behaviour rather than
+/// to express a decision, so it reads as redundant beside [`AUDIO_SAMPLE_FORMAT`] at the end
+/// of the same chain. It is not. **Deleting it silently desynchronizes every export that
+/// seeks.**
+///
+/// ADR 014 measurement 17 has the behaviour. FFmpeg negotiates one sample rate over a filter
+/// link, and it configures an input's audio buffer source at whatever the link settles on.
+/// With no `-ss`, that is the source stream's own rate. With `-ss` -- which ADR 014's "The
+/// seek" puts on almost every export -- the negotiation instead pulls the *output* rate
+/// backwards through the graph, out of [`AUDIO_SAMPLE_FORMAT`]'s `48000`, and the input
+/// arrives already resampled. The `atrim` boundaries do not follow: the plan computes them as
+/// `round(pts * videoTimeBase * sampleRate)` in the source's rate, and `atrim` reads them in
+/// whatever unit its input link happens to use. On the measured 44100 Hz source,
+/// `start_pts=441000` therefore means 10 s without the seek and 9.1875 s with it -- the cut
+/// starts early, and the segment loses length in proportion to its position in the source. A
+/// 1.000000 s segment measured 0.918750 s.
+///
+/// Nothing downstream can catch that. The video frame count is untouched, so ADR 014's
+/// `frameCountMismatch` guard passes, ffmpeg exits zero, and the export ships with the audio
+/// seconds out of step with the picture. A 48000 Hz source hides the fault completely,
+/// because the two rates agree.
+///
+/// Pinning the link to [`PlannedAudio::sample_rate`] restores the boundary: the constraint
+/// applies to this filter's *input* link as well as its output, so it reaches back to the
+/// buffer source and the ticks are read in the unit they were computed in. The pin therefore
+/// has to sit on the input link itself -- in front of `atrim`, and in front of `asplit` under
+/// [`GraphShape::SingleInput`] rather than on the branches behind it, which is also one
+/// filter instead of one for each segment.
+fn audio_input_pin(audio: PlannedAudio) -> String {
+    format!("aformat=sample_rates={},", audio.sample_rate)
 }
 
 /// Render one segment's video chain, from its input link to its `[v<index>]` output label.
@@ -242,9 +302,17 @@ fn video_chain(
 }
 
 /// Render one segment's audio chain, from its input link to its `[a<index>]` output label.
+///
+/// Under [`GraphShape::InputPerSegment`] this chain starts at an input link, so it carries
+/// [`audio_input_pin`] itself. Under [`GraphShape::SingleInput`] it starts behind `asplit`,
+/// and the splitter chain already pinned the one input link they share; repeating the pin
+/// here would only add a filter for each segment to a graph ADR 014 measurement 15 already
+/// counts in bytes against the Windows command-line limit.
 fn audio_chain(audio: PlannedAudio, shape: GraphShape, index: usize, ticks: (i64, i64)) -> String {
     let source = match shape {
-        GraphShape::InputPerSegment => format!("[{index}:{}]", audio.stream_index),
+        GraphShape::InputPerSegment => {
+            format!("[{index}:{}]{}", audio.stream_index, audio_input_pin(audio))
+        }
         GraphShape::SingleInput => format!("[sa{index}]"),
     };
     let (in_tick, out_tick) = ticks;
@@ -288,7 +356,10 @@ mod tests {
     /// - The source rate is 44100, while `AUDIO_SAMPLE_FORMAT` pins the output rate at
     ///   48000. Replacing that constant with [`PlannedAudio::sample_rate`] therefore changes
     ///   every pinned string below, instead of passing unnoticed as it would if the fixture
-    ///   also ran at 48000.
+    ///   also ran at 48000. The same gap is what makes [`audio_input_pin`] visible at all:
+    ///   its `44100` and the chain's closing `48000` are two different rates in one chain,
+    ///   and a 48000 Hz fixture would render them identically -- which is exactly why the
+    ///   fault ADR 014 measurement 17 records reached a shipped graph unseen.
     /// - Element 1 starts *earlier* in the source than element 0. ADR 007 makes array order
     ///   authoritative and forbids sorting; a builder that sorted by `in_pts` would reorder
     ///   this fixture and change every pinned string of two or more segments.
@@ -357,7 +428,8 @@ mod tests {
             concat!(
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v0];",
-                "[0:2]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[v][a]",
             )
@@ -372,11 +444,13 @@ mod tests {
             concat!(
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v0];",
-                "[0:2]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
                 "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v1];",
-                "[1:2]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
+                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
+                "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
             )
@@ -391,15 +465,18 @@ mod tests {
             concat!(
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v0];",
-                "[0:2]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
                 "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v1];",
-                "[1:2]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
+                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
+                "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
                 "[2:1]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v2];",
-                "[2:2]atrim=start_pts=882000:end_pts=903168,asetpts=PTS-STARTPTS,",
+                "[2:2]aformat=sample_rates=44100,atrim=start_pts=882000:end_pts=903168,",
+                "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a2];",
                 "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]",
             )
@@ -416,7 +493,7 @@ mod tests {
             graph,
             concat!(
                 "[0:1]split=1[sv0];",
-                "[0:2]asplit=1[sa0];",
+                "[0:2]aformat=sample_rates=44100,asplit=1[sa0];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
@@ -433,7 +510,7 @@ mod tests {
             graph,
             concat!(
                 "[0:1]split=2[sv0][sv1];",
-                "[0:2]asplit=2[sa0][sa1];",
+                "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
@@ -454,7 +531,7 @@ mod tests {
             graph,
             concat!(
                 "[0:1]split=3[sv0][sv1][sv2];",
-                "[0:2]asplit=3[sa0][sa1][sa2];",
+                "[0:2]aformat=sample_rates=44100,asplit=3[sa0][sa1][sa2];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
@@ -490,14 +567,104 @@ mod tests {
     fn the_audio_output_rate_is_a_constant_not_the_sources_tick_rate() {
         // The fixture's audio stream runs at 44100 Hz, so its ticks are in 1/44100 units,
         // while ADR 014's chain template resamples every chain to 48000 Hz for `concat`.
-        // Swapping the constant for `PlannedAudio::sample_rate` would keep the ticks correct
-        // and still produce the wrong output rate, which is why these two are asserted apart.
+        // Swapping `AUDIO_SAMPLE_FORMAT`'s constant for `PlannedAudio::sample_rate` would keep
+        // the ticks correct and still produce the wrong output rate. The chain now carries the
+        // source rate too, in `audio_input_pin` at its head, so this asserts the two rates by
+        // position rather than by presence: 44100 in front of the cut, 48000 behind it.
         let graph = build_filter_graph(&fixture_plan(1), GraphShape::InputPerSegment);
-        assert!(graph.contains("sample_rates=48000"), "{graph}");
-        assert!(!graph.contains("sample_rates=44100"), "{graph}");
         assert!(
-            graph.contains("atrim=start_pts=511560:end_pts=522144"),
+            graph.contains("aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144"),
             "{graph}"
+        );
+        assert!(
+            graph.contains("aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"),
+            "{graph}"
+        );
+        assert!(
+            !graph.contains("sample_rates=44100:channel_layouts"),
+            "{graph}"
+        );
+    }
+
+    #[test]
+    fn the_audio_input_link_is_pinned_to_the_source_rate_in_both_shapes() {
+        // The test class ADR 014's consequences ask for: a fixture that is not 48000 Hz.
+        //
+        // Measurement 17. An input seek makes ffmpeg configure that input's audio at the rate
+        // the graph negotiates for its *output*, pulled backwards out of `AUDIO_SAMPLE_FORMAT`.
+        // `atrim` then reads the plan's source-rate ticks as 48000ths: on this 44100 Hz
+        // fixture `start_pts=441000` means 9.1875 s instead of 10 s, and a 1.000000 s segment
+        // exports 0.918750 s of audio, starting in the wrong place, with the error growing
+        // with the segment's position in the source. The video frame count is untouched, so
+        // ADR 014's `frameCountMismatch` guard cannot see it and the export exits zero.
+        //
+        // Only a source whose rate differs from 48000 can show the fault, which is why this
+        // asserts the fixture's rate first: at 48000 the two rates agree and every assertion
+        // below would still pass with the pin deleted.
+        let plan = fixture_plan(2);
+        assert_eq!(plan.audio.expect("fixture audio").sample_rate, 44_100);
+
+        // One input for each segment: every chain begins at an input link of its own, so
+        // every chain carries the pin.
+        let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
+        assert!(
+            graph.contains("[0:2]aformat=sample_rates=44100,atrim="),
+            "{graph}"
+        );
+        assert!(
+            graph.contains("[1:2]aformat=sample_rates=44100,atrim="),
+            "{graph}"
+        );
+
+        // One input: the chains begin behind `asplit`, so the pin belongs on the single input
+        // link in front of it. That is the link ffmpeg configures the buffer source from, and
+        // one filter covers every branch instead of one for each segment.
+        let graph = build_filter_graph(&plan, GraphShape::SingleInput);
+        assert!(
+            graph.contains("[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];"),
+            "{graph}"
+        );
+        assert_eq!(graph.matches("sample_rates=44100").count(), 1, "{graph}");
+        assert!(graph.contains("[sa0]atrim=start_pts=511560"), "{graph}");
+        assert!(graph.contains("[sa1]atrim=start_pts=441000"), "{graph}");
+    }
+
+    #[test]
+    fn the_input_pin_renders_the_plans_own_rate_not_the_fixtures() {
+        // ADR 014 measurement 4 met source rates of 44100, 48000, and 32000 Hz. A pin that
+        // spelled a literal 44100 would satisfy every other test in this module and would
+        // still misread a 32000 Hz source's boundaries, by the mechanism the pin exists to
+        // stop. The ticks here are that source's own: 148480 and 151552 at time base 1/12800
+        // are 11.6 s and 11.84 s, which are 371200 and 378880 ticks at 32000 Hz.
+        let mut plan = fixture_plan(1);
+        plan.audio = Some(PlannedAudio {
+            stream_index: 2,
+            sample_rate: 32_000,
+        });
+        plan.segments[0].audio_in_tick = Some(371_200);
+        plan.segments[0].audio_out_tick = Some(378_880);
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::InputPerSegment),
+            concat!(
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v0];",
+                "[0:2]aformat=sample_rates=32000,atrim=start_pts=371200:end_pts=378880,",
+                "asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+            )
+        );
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::SingleInput),
+            concat!(
+                "[0:1]split=1[sv0];",
+                "[0:2]aformat=sample_rates=32000,asplit=1[sa0];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v0];",
+                "[sa0]atrim=start_pts=371200:end_pts=378880,asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+            )
         );
     }
 
@@ -584,7 +751,8 @@ mod tests {
             concat!(
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v0];",
-                "[0:2]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[v][a]",
             )
@@ -603,7 +771,8 @@ mod tests {
             concat!(
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "scale=1920:1080,setsar=1,format=yuv420p[v0];",
-                "[0:2]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[v][a]",
             )
@@ -621,7 +790,8 @@ mod tests {
             concat!(
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,",
                 "fps=30000/1001,format=yuv420p[v0];",
-                "[0:2]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[v][a]",
             )
@@ -647,7 +817,8 @@ mod tests {
             concat!(
                 "[0:2]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v0];",
-                "[0:5]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "[0:5]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[v][a]",
             )
@@ -656,7 +827,7 @@ mod tests {
             build_filter_graph(&plan, GraphShape::SingleInput),
             concat!(
                 "[0:2]split=1[sv0];",
-                "[0:5]asplit=1[sa0];",
+                "[0:5]aformat=sample_rates=44100,asplit=1[sa0];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "format=yuv420p[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
@@ -693,6 +864,13 @@ mod tests {
                     "truncating astart in {graph}"
                 );
                 assert!(!graph.contains(":end="), "truncating end in {graph}");
+                // The same guard for the rate pin. A chain that cuts audio without it reads
+                // its boundary ticks in the output's rate after a seek (measurement 17), and
+                // no later stage of the export reports that.
+                assert!(
+                    plan.audio.is_none() || graph.contains("aformat=sample_rates=44100,"),
+                    "unpinned audio input link in {graph}"
+                );
             }
         }
     }
