@@ -21,16 +21,22 @@
 //! request from the command layer to the process stage. It owns no path, no plan, and no
 //! process handle.
 //!
+//! [`output`] owns the temporary output file that ADR 004 and ADR 014's "Other rules" require:
+//! it reserves a path in the destination's own directory for the spawned ffmpeg to write,
+//! renames that file over the destination once the render has succeeded, and deletes it on
+//! every other exit path, a panic included.
+//!
 //! Later units add `graph` (the `trim`/`atrim` filter chains), `arguments` (the ffmpeg command
-//! line), `process` (spawning and supervising ffmpeg), and `output` (the temporary-file
-//! rename). None of the remaining modules exist yet; the units written so far only supply the
-//! vocabulary they will share, including every [`ExportErrorCode`] variant those later stages
-//! will eventually produce.
+//! line), and `process` (spawning and supervising ffmpeg). None of the remaining modules exist
+//! yet; the units written so far only supply the vocabulary they will share, including every
+//! [`ExportErrorCode`] variant those later stages will eventually produce.
 
+pub mod output;
 pub mod plan;
 pub mod progress;
 pub mod registry;
 
+pub use output::PendingOutput;
 pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, SegmentBoundary};
 pub use progress::{ProgressReader, ProgressSnapshot};
 pub use registry::{ExportRegistry, ExportSlot};
