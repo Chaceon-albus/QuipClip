@@ -110,13 +110,28 @@ ffmpeg -nostdin -hide_banner -loglevel error -progress pipe:1 -nostats -y \
 Each segment has this chain:
 
 ```
-[i:v]trim=start_pts=<in>:end_pts=<out>,setpts=PTS-STARTPTS,
+[<i>:<videoStreamIndex>]trim=start_pts=<in>:end_pts=<out>,setpts=PTS-STARTPTS,
      fps=<rate>,scale=<w>:<h>,setsar=1,format=yuv420p[v<i>];
-[i:a]atrim=start_pts=<in>:end_pts=<out>,asetpts=PTS-STARTPTS,
+[<i>:<audioStreamIndex>]atrim=start_pts=<in>:end_pts=<out>,asetpts=PTS-STARTPTS,
      aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a<i>];
 ```
 
 The chains end in `concat`, in project array order.
+
+Each chain names an absolute stream index. It must not use the short specifiers `[<i>:v]`
+and `[<i>:a]`.
+
+A short specifier selects the **first** stream of that type. The probe selects the stream
+that carries the `default` disposition. The two rules disagree when a file holds more than
+one audio stream and the default one is not the first one.
+
+One file shows the disagreement. It holds an AC-3 stream at index 1, which does not carry
+the default disposition. It holds an AAC stream at index 2, which does. The probe reports
+stream 2. `[0:a]` binds stream 1. The export would then contain audio that the preview
+never played, and nothing would report an error.
+
+`MediaProbe.video_stream_index` already carries the video index. `AudioProbe.index` carries
+the audio index for the same reason.
 
 `-f` is necessary. The temporary file has no usable extension, so FFmpeg cannot select a
 muxer from the name. `mkv` selects the muxer `matroska`.
@@ -174,7 +189,10 @@ The renderer decodes the original media. It must not decode a preview proxy.
 - An export cuts at the frames that the user selected, on each container that was tested.
 - An export of a short part of a long source does not decode the parts that it does not
   need.
-- The renderer needs the container `start_time`, so `MediaProbe` gets a new field.
+- The renderer needs the container `start_time` and the selected audio stream index, so
+  `MediaProbe` gets one new field and `AudioProbe` gets one.
+- The renderer re-probes the source when an export starts. It does not read these two values
+  from a project file, and ADR 010 therefore needs no new field.
 - The renderer needs two graph shapes, and each shape needs its own tests.
 - A container that seeks worse than MPEG-TS can still remove frames. The frame count
   comparison finds that condition and reports it.
