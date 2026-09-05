@@ -253,7 +253,12 @@ pub fn run_with_timeout(
 /// The read loop does not stop once `cap` bytes are captured: it keeps reading and
 /// discarding until the pipe closes, so a chatty process is fully drained and can never
 /// block on a full pipe buffer waiting for a reader that stopped early.
-fn read_capped(mut reader: impl Read, cap: usize) -> Vec<u8> {
+///
+/// The export process runner (ADR 004, ADR 014) is a second caller of this function: it
+/// must drain a long-running ffmpeg process's stderr without blocking, and that
+/// keep-reading-after-the-cap behaviour is exactly why this function is shared rather than
+/// duplicated there.
+pub(crate) fn read_capped(mut reader: impl Read, cap: usize) -> Vec<u8> {
     let mut captured = Vec::new();
     let mut buffer = [0_u8; 4096];
     loop {
