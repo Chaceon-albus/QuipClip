@@ -64,6 +64,15 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     each version that a user can have.
 14. Many inputs of one file do not cause a failure. Runs with 8, 32, and 64 segments gave
     exactly 200, 800, and 1600 frames. The largest run used 20 MB of memory.
+15. Both graph shapes grow with the segment count. The graph adds about 260 bytes for each
+    segment either way. With a 46-character source path, one input for each segment gives
+    266 bytes at one segment and 127963 bytes at 500. One input gives 303 bytes and 134774
+    bytes, so its graph is the larger of the two at every count. One input still reaches
+    further, because it writes the source path once instead of once for each segment.
+16. `setsar=1` changes the picture of a source that does not have square pixels. A 720x480
+    source with a sample aspect ratio of 32:27 shows a display aspect ratio of 16:9. The
+    filter `setsar=1` gives that source a display aspect ratio of 3:2, which is compressed
+    horizontally. `setsar=sar` and no filter at all both keep 16:9.
 
 ## Decision
 
@@ -78,6 +87,13 @@ and 3 make this correct. The audio boundaries are
 
 The renderer must not use the `start` and `end` options of `trim`. FFmpeg parses those
 options into microseconds, and that truncation loses the precision that ADR 002 protects.
+
+The chain applies `scale` and `setsar=1` together, and only when the preset gives an
+explicit resolution. A chain that keeps the source resolution applies neither filter.
+Measurement 16 gives the reason. `setsar=1` on its own compresses a source that does not
+have square pixels. The preview shows that source correctly. The export would therefore not
+match what the user marked. Version 1 exports one source, so every chain already reports
+the same sample aspect ratio, and `concat` has nothing to make equal.
 
 The renderer must set `-copyts` on each input.
 
@@ -138,17 +154,34 @@ muxer from the name. `mkv` selects the muxer `matroska`.
 
 ### The graph shape
 
-One input for each segment repeats the source path. The command line therefore grows with
-the number of segments, and Windows limits a command line to 32767 bytes.
+Measurement 13 removes the filter-graph file, so the renderer writes the graph inline.
+Windows limits a command line to 32767 bytes. The graph therefore competes with the
+arguments for one budget.
 
-Measurement 13 removes the filter-graph file. The renderer therefore writes the graph
-inline, and it selects between two shapes:
+Measurement 15 shows how each shape uses that budget. The graph grows by about 260 bytes for
+each segment, in both shapes. One input for each segment adds the source path and its flags
+again for each segment. One input adds the path once, and it adds a `split` chain and an
+`asplit` chain, which cost more than the labels they replace.
+
+The renderer selects between the two shapes:
 
 - One input for each segment, when the computed command line is inside the platform budget.
 - One input, one seek before the first segment, and `split` and `asplit`, when it is not.
 
+The second shape does not remove the growth. It removes the repeated path only, so it
+extends the reachable segment count by about half on a long path. Neither shape can spell an
+export of more than about 125 segments on Windows.
+
+`MAX_EXPORT_SEGMENTS` is therefore 100. That value stays inside the Windows budget for a
+long path. It is also far above the number of segments a person marks by hand.
+
+A larger export needs the graph off the command line. That syntax exists as
+`-/filter_complex <file>` in FFmpeg 7.1 and later. The capability probe already reads the
+version. A later unit can select that form when the installed build offers it. It keeps the
+inline form for an older build. This record does not require that work.
+
 This satisfies the requirement in ADR 004 for a filter-graph file. The renderer never needs
-one, because the second shape keeps the command line inside the limit.
+one, because the segment cap keeps the command line inside the limit.
 
 ### Progress
 
@@ -194,6 +227,8 @@ The renderer decodes the original media. It must not decode a preview proxy.
 - The renderer re-probes the source when an export starts. It does not read these two values
   from a project file, and ADR 010 therefore needs no new field.
 - The renderer needs two graph shapes, and each shape needs its own tests.
+- An export of more than 100 segments fails the preflight. The interface must say so before
+  the user marks them, and not after.
 - A container that seeks worse than MPEG-TS can still remove frames. The frame count
   comparison finds that condition and reports it.
 - `SEEK_MARGIN_SECONDS` needs a test against a real capture from a content delivery
