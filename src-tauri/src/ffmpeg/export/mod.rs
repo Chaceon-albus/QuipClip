@@ -56,16 +56,29 @@ use std::path::PathBuf;
 
 /// The largest number of segments [`plan::build_plan`] accepts in one export request.
 ///
-/// This is a plain sanity bound, not a command-line-limit calculation: ADR 014's second
-/// graph shape (one input, one seek, `split`/`asplit`) exists precisely so the command
-/// line stays inside the platform budget regardless of segment count, so segment count
-/// alone does not force this limit. ADR 014 measurement 14 found that many inputs of one
-/// file do not cause a failure -- runs with 8, 32, and 64 segments gave exactly 200, 800,
-/// and 1600 frames, and the largest run used 20 MB of memory -- so this bound exists only
-/// to reject a request so large it very likely reflects a mistake (a malformed project, a
-/// runaway script) rather than a real editing session, before that request reaches later,
-/// more expensive stages of the pipeline.
-pub const MAX_EXPORT_SEGMENTS: usize = 500;
+/// This is a command-line budget, not a sanity bound. ADR 014 measurement 13 leaves the
+/// renderer no portable way to move the filter graph off the command line:
+/// `-filter_complex_script` is absent from ffmpeg 9.0.1, and its replacement
+/// `-/filter_complex` is absent before 7.1, so no single spelling works on every build a
+/// user can have. The graph therefore rides inline and competes with the arguments for the
+/// one command-line budget Windows allows.
+///
+/// ADR 014 measurement 15 measures what that costs: the graph grows by about the same
+/// amount for each added segment in *both* [`GraphShape`] variants. The single-input shape
+/// (one seek, then `split`/`asplit`) writes the source path once instead of once for each
+/// segment, so it reaches further on a long path, but it does not remove that growth. ADR
+/// 014's "The graph shape" section keeps the byte figures and the reach they imply; the
+/// conclusion is that neither shape can spell an export much larger than this cap on
+/// Windows. 100 keeps the command line inside the Windows budget even for a long source
+/// path, and it is still far above the number of segments a person marks by hand.
+///
+/// ffmpeg itself is not the constraint here: measurement 14 found that many inputs of one
+/// file do not cause a failure. A larger export needs the graph off the command line
+/// instead, through the `-/filter_complex <file>` form that ffmpeg 7.1 and later accept.
+/// The capability probe already reads the version, so a later unit can select that form on
+/// a build that offers it and keep the inline form on an older one. ADR 014 does not
+/// require that work, and this crate does not do it.
+pub const MAX_EXPORT_SEGMENTS: usize = 100;
 
 /// The seek margin ADR 014 selects, in whole seconds.
 ///
