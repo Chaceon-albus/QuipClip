@@ -73,6 +73,12 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     source with a sample aspect ratio of 32:27 shows a display aspect ratio of 16:9. The
     filter `setsar=1` gives that source a display aspect ratio of 3:2, which is compressed
     horizontally. `setsar=sar` and no filter at all both keep 16:9.
+17. An input seek changes the sample rate that the audio filter link reports. Without `-ss`,
+    a 44100 Hz source presents its audio at 44100 Hz. With `-ss`, FFmpeg configures that
+    input at the rate the graph negotiates for its output, which is 48000 Hz. The same
+    `atrim=start_pts=441000` therefore reads as 10 seconds without the seek and as 9.1875
+    seconds with it. The error grows with the position in the source, and it also shortens
+    the segment. A 48000 Hz source shows nothing, because the two rates agree.
 
 ## Decision
 
@@ -87,6 +93,12 @@ and 3 make this correct. The audio boundaries are
 
 The renderer must not use the `start` and `end` options of `trim`. FFmpeg parses those
 options into microseconds, and that truncation loses the precision that ADR 002 protects.
+
+The audio chain applies `aformat` with the source sample rate before `atrim`. Measurement
+17 gives the reason. An input seek makes FFmpeg present that input at the output rate. The
+boundary ticks count the source rate. The cut therefore lands early, and the segment loses
+length. The video frame count stays correct, so the frame comparison cannot report
+this. Pinning the input link to the source rate restores the boundary.
 
 The chain applies `scale` and `setsar=1` together, and only when the preset gives an
 explicit resolution. A chain that keeps the source resolution applies neither filter.
@@ -229,6 +241,8 @@ The renderer decodes the original media. It must not decode a preview proxy.
 - The renderer needs two graph shapes, and each shape needs its own tests.
 - An export of more than 100 segments fails the preflight. The interface must say so before
   the user marks them, and not after.
+- The frame count comparison sees a lost video frame. It cannot see an audio boundary that
+  moved. An audio fault needs its own test against a source that is not 48000 Hz.
 - A container that seeks worse than MPEG-TS can still remove frames. The frame count
   comparison finds that condition and reports it.
 - `SEEK_MARGIN_SECONDS` needs a test against a real capture from a content delivery
