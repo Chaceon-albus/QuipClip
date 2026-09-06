@@ -28,16 +28,14 @@ use serde::Serialize;
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
+// The run id generator will be shared with the export command, so it sits in `commands::mod`.
+use super::next_run_id;
+
 /// The Tauri event every capability-probe run reports through.
 const EVENT_NAME: &str = "ffmpeg:capability-probe";
-
-/// A per-process counter that, combined with the current time, makes each run id unique
-/// without a uuid dependency.
-static RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The immediate payload `start_capability_probe` resolves with when it accepts a run.
 ///
@@ -458,19 +456,6 @@ fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Build a run id unique within this process: epoch milliseconds, then a monotonic counter
-/// to break ties between two runs started within the same millisecond. No uuid dependency
-/// is available, and none is needed for an id that only has to be unique within one running
-/// application.
-fn next_run_id() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    let sequence = RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{millis}-{sequence}")
-}
-
 fn current_unix_seconds() -> i64 {
     // The frontend's `isPositiveU32` check rejects `probedAt: 0` outright, which would
     // silently drop the `finished` event and hang the status bar on "probing" forever. `1`
@@ -703,14 +688,6 @@ mod tests {
         assert_eq!(captured.code, CapabilityProbeErrorCode::FfmpegProcessFailed);
         assert!(captured.exit_code.is_some());
         assert!(captured.detail.is_some());
-    }
-
-    #[test]
-    fn next_run_id_is_unique_across_calls() {
-        let first = next_run_id();
-        let second = next_run_id();
-
-        assert_ne!(first, second);
     }
 
     #[test]

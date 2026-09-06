@@ -130,10 +130,9 @@ impl ExportRegistry {
     /// exists to prevent: cancel the first export of `out.mp4`, start a second export of
     /// `out.mp4`, and the first cancel request, still in flight, matches the second run by
     /// string equality and kills it. Derive the id from a generator that cannot repeat within
-    /// one process, the way `commands::capabilities::next_run_id` does it (epoch milliseconds
-    /// plus a monotonic counter to break ties inside one millisecond). That function is
-    /// private to its module today; the unit that adds the export command should reuse it by
-    /// hoisting it to a shared place rather than inventing a second scheme.
+    /// one process. `commands::next_run_id` is that generator (epoch milliseconds plus a
+    /// monotonic counter to break ties inside one millisecond); the later unit that adds the
+    /// export command must call it rather than invent a second scheme.
     ///
     /// # What the caller must do with the result
     ///
