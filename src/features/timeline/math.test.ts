@@ -12,8 +12,10 @@ import {
   canMarkIn,
   canMarkOut,
   canSplit,
+  canSplitWithBounds,
   findSplittableSegmentIndex,
   getActiveSourceSegmentEntries,
+  getSegmentBounds,
   getTimelineDurationSeconds,
   splitSegment,
 } from "./math";
@@ -85,6 +87,54 @@ describe("timeline PTS editing", () => {
       { segment: segments[2], projectIndex: 2 },
     ]);
   });
+
+  it("drops a malformed or unordered segment from the precomputed bounds", () => {
+    const malformed: Segment[] = [
+      ...segments,
+      { id: "bad", sourceId: "source-a", inPts: pts("01"), outPts: pts("100") },
+      { id: "empty", sourceId: "source-a", inPts: pts("200"), outPts: pts("200") },
+    ];
+    expect(getSegmentBounds(malformed)).toEqual([
+      { sourceId: "source-a", lo: -100n, hi: 0n },
+      { sourceId: "source-a", lo: 50n, hi: 100n },
+      { sourceId: "source-b", lo: -100n, hi: 100n },
+      { sourceId: "source-a", lo: 200n, hi: 200n },
+    ]);
+    // An unordered pair survives the parse but can never contain a PTS.
+    expect(
+      canSplitWithBounds(
+        getSegmentBounds(malformed),
+        "ready",
+        frame("200"),
+        true,
+        "source-a",
+      ),
+    ).toBe(false);
+  });
+
+  it("agrees with canSplit for every case the bounds path replaces", () => {
+    const bounds = getSegmentBounds(segments);
+    const cases: Array<[Parameters<typeof canSplit>[1], string, boolean, string]> = [
+      ["ready", "75", true, "source-a"],
+      ["ready", "0", true, "source-a"],
+      ["ready", "-50", true, "source-a"],
+      ["ready", "-50", true, "source-b"],
+      ["calibrating", "75", true, "source-a"],
+      ["ready", "75", false, "source-a"],
+    ];
+    for (const [status, value, hasActiveSource, activeSourceId] of cases) {
+      expect(
+        canSplitWithBounds(
+          bounds,
+          status,
+          frame(value),
+          hasActiveSource,
+          activeSourceId,
+        ),
+      ).toBe(canSplit(segments, status, frame(value), hasActiveSource, activeSourceId));
+    }
+    expect(canSplitWithBounds(bounds, "ready", null, true, "source-a")).toBe(false);
+  });
 });
 
 describe("timeline extent precedence", () => {
@@ -118,6 +168,26 @@ describe("timeline extent precedence", () => {
         runtimeBrowserDuration: 8.25,
       }),
     ).toBe(8.25);
+  });
+
+  it("falls through from zero approximate duration to runtime browser duration", () => {
+    expect(
+      getTimelineDurationSeconds({
+        videoDurationTicks: null,
+        approximateDurationSeconds: 0,
+        runtimeBrowserDuration: 300,
+      }),
+    ).toBe(300);
+  });
+
+  it("returns null when runtime browser duration is zero", () => {
+    expect(
+      getTimelineDurationSeconds({
+        videoDurationTicks: null,
+        approximateDurationSeconds: 0,
+        runtimeBrowserDuration: 0,
+      }),
+    ).toBeNull();
   });
 
   it("returns null for a fully indeterminate ruler", () => {

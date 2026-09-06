@@ -5,8 +5,9 @@ import {
   generateSourceId,
   getSourceRevisionKey,
   useMediaStore,
+  type MediaStoreState,
 } from "@/features/media";
-import { usePlaybackStore } from "@/features/playback";
+import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
 import {
   calculatePendingInRegionLayout,
   calculatePercentFromPts,
@@ -17,6 +18,7 @@ import {
   getActiveSourceSegmentEntries,
   getTimelineDurationSeconds,
   useTimelineStore,
+  type TimelineStoreState,
 } from "@/features/timeline";
 import { ptsElapsedSeconds } from "@/lib/time";
 import { generateRulerMarkers } from "./timelineMarkers";
@@ -42,23 +44,35 @@ function getGeneratedSourceId(path: string): string {
   return generated;
 }
 
+const selectMedia = (state: MediaStoreState) => state.media;
+const selectPresentedFrame = (state: PlaybackStoreState) => state.presentedFrame;
+const selectCalibrationStatus = (state: PlaybackStoreState) => state.calibrationStatus;
+const selectIsAttached = (state: PlaybackStoreState) => state.isAttached;
+const selectIsReady = (state: PlaybackStoreState) => state.isReady;
+const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
+const selectSeekNominal = (state: PlaybackStoreState) => state.seekNominal;
+
+const selectSegments = (state: TimelineStoreState) => state.segments;
+const selectPendingInPts = (state: TimelineStoreState) => state.pendingInPts;
+const selectSetSource = (state: TimelineStoreState) => state.setSource;
+
 export function TimelinePanel({
   activeSourceId,
   runtimeBrowserDurationSeconds = null,
   onApproximateSeek,
 }: TimelinePanelProps = {}) {
   const { t } = useTranslation();
-  const media = useMediaStore((state) => state.media);
-  const presentedFrame = usePlaybackStore((state) => state.presentedFrame);
-  const calibrationStatus = usePlaybackStore((state) => state.calibrationStatus);
-  const isAttached = usePlaybackStore((state) => state.isAttached);
-  const isReady = usePlaybackStore((state) => state.isReady);
-  const seekToPts = usePlaybackStore((state) => state.seekToPts);
-  const seekNominal = usePlaybackStore((state) => state.seekNominal);
+  const media = useMediaStore(selectMedia);
+  const presentedFrame = usePlaybackStore(selectPresentedFrame);
+  const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
+  const isAttached = usePlaybackStore(selectIsAttached);
+  const isReady = usePlaybackStore(selectIsReady);
+  const seekToPts = usePlaybackStore(selectSeekToPts);
+  const seekNominal = usePlaybackStore(selectSeekNominal);
 
-  const segments = useTimelineStore((state) => state.segments);
-  const pendingInPts = useTimelineStore((state) => state.pendingInPts);
-  const setSource = useTimelineStore((state) => state.setSource);
+  const segments = useTimelineStore(selectSegments);
+  const pendingInPts = useTimelineStore(selectPendingInPts);
+  const setSource = useTimelineStore(selectSetSource);
 
   const sourceRevisionKey = getSourceRevisionKey(media);
   const sourceId = media ? (activeSourceId ?? getGeneratedSourceId(media.path)) : null;
@@ -173,6 +187,23 @@ export function TimelinePanel({
     () => getActiveSourceSegmentEntries(segments, sourceId),
     [segments, sourceId],
   );
+  // None of the layout inputs depends on the playhead, so this must not rerun per frame.
+  const segmentLayouts = useMemo(
+    () =>
+      activeSourceSegments.map(({ segment, projectIndex }) => ({
+        segment,
+        projectIndex,
+        layout: calculateSegmentLayout(
+          segment,
+          media?.probe.videoStartPts,
+          media?.probe.videoTimeBase,
+          totalDurationSeconds,
+        ),
+      })),
+    [activeSourceSegments, media, totalDurationSeconds],
+  );
+
+  // The pending In region does depend on the playhead, so it stays on the render path.
   const pendingRegion = calculatePendingInRegionLayout(
     pendingInPts,
     presentedFrame?.inferredSourcePts ?? null,
@@ -277,28 +308,20 @@ export function TimelinePanel({
                   </div>
 
                   {/* Completed segment overlays */}
-                  {activeSourceSegments.map(({ segment: seg, projectIndex }) => {
-                    const layout = calculateSegmentLayout(
-                      seg,
-                      media.probe.videoStartPts,
-                      media.probe.videoTimeBase,
-                      totalDurationSeconds,
-                    );
-                    return (
-                      <div
-                        key={seg.id}
-                        className="pointer-events-none absolute inset-y-1 z-10 flex items-center overflow-hidden rounded-md border-2 border-primary bg-primary/25 px-2 text-foreground shadow-xs backdrop-blur-xs"
-                        style={{
-                          left: layout.left,
-                          width: layout.width,
-                        }}
-                      >
-                        <span className="truncate font-mono text-[10px] font-semibold text-primary">
-                          #{projectIndex + 1}
-                        </span>
-                      </div>
-                    );
-                  })}
+                  {segmentLayouts.map(({ segment: seg, projectIndex, layout }) => (
+                    <div
+                      key={seg.id}
+                      className="pointer-events-none absolute inset-y-1 z-10 flex items-center overflow-hidden rounded-md border-2 border-primary bg-primary/25 px-2 text-foreground shadow-xs backdrop-blur-xs"
+                      style={{
+                        left: layout.left,
+                        width: layout.width,
+                      }}
+                    >
+                      <span className="truncate font-mono text-[10px] font-semibold text-primary">
+                        #{projectIndex + 1}
+                      </span>
+                    </div>
+                  ))}
 
                   {/* Pending In active region preview overlay */}
                   {pendingRegion && pendingRegion.isVisible && (

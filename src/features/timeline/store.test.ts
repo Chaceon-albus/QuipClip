@@ -162,4 +162,63 @@ describe("timeline store half-open editing", () => {
     store.getState().redo();
     expect(store.getState().segments).toHaveLength(3);
   });
+
+  it("restores pending In mark on undo after markOut and clears it on redo", () => {
+    const store = createStore();
+    store.getState().setSource("source-1", "revision-1");
+    store.getState().markIn(pts("9000"));
+    expect(store.getState().pendingInPts).toBe(pts("9000"));
+
+    store.getState().markOut(pts("27000"));
+    expect(store.getState().segments).toHaveLength(1);
+    expect(store.getState().pendingInPts).toBeNull();
+    expect(store.getState().canUndo).toBe(true);
+
+    store.getState().undo();
+    expect(store.getState().segments).toHaveLength(0);
+    expect(store.getState().pendingInPts).toBe(pts("9000"));
+    expect(store.getState().canUndo).toBe(false);
+    expect(store.getState().canRedo).toBe(true);
+
+    store.getState().redo();
+    expect(store.getState().segments).toHaveLength(1);
+    expect(store.getState().pendingInPts).toBeNull();
+    expect(store.getState().canUndo).toBe(true);
+    expect(store.getState().canRedo).toBe(false);
+  });
+
+  it("does not restore a pending In mark from another source on undo or redo", () => {
+    const store = createStore();
+    store.getState().setSource("source-1", "revision-1");
+    store.getState().markIn(pts("9000"));
+    store.getState().markOut(pts("27000"));
+
+    store.getState().setSource("source-2", "revision-2");
+    expect(store.getState().pendingInPts).toBeNull();
+    expect(store.getState().canUndo).toBe(true);
+
+    // The undo entry carries source-1's pending mark, which is not a PTS on source-2.
+    store.getState().undo();
+    expect(store.getState().segments).toHaveLength(0);
+    expect(store.getState().pendingInPts).toBeNull();
+
+    // With no pending mark, Mark Out on source-2 cannot complete a segment.
+    store.getState().markOut(pts("18000"));
+    expect(store.getState().segments).toHaveLength(0);
+
+    store.getState().redo();
+    expect(store.getState().segments).toHaveLength(1);
+    expect(store.getState().pendingInPts).toBeNull();
+  });
+
+  it("does not restore a pending In mark from an earlier revision of the same source", () => {
+    const store = createStore();
+    store.getState().setSource("source-1", "revision-1");
+    store.getState().markIn(pts("9000"));
+    store.getState().markOut(pts("27000"));
+
+    store.getState().setSource("source-1", "revision-2");
+    store.getState().undo();
+    expect(store.getState().pendingInPts).toBeNull();
+  });
 });

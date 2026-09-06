@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ArrowLeftToLine,
@@ -13,9 +14,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useMediaStore } from "@/features/media";
-import { usePlaybackStore } from "@/features/playback";
-import { canMarkIn, canMarkOut, canSplit, useTimelineStore } from "@/features/timeline";
+import { useMediaStore, type MediaStoreState } from "@/features/media";
+import { playbackStore, usePlaybackStore } from "@/features/playback";
+import {
+  canMarkIn,
+  canMarkOut,
+  canSplitWithBounds,
+  getSegmentBounds,
+  useTimelineStore,
+  type TimelineStoreState,
+} from "@/features/timeline";
 import { assertPositiveTimeBase } from "@/lib/time";
 import type { Rational } from "@/types/project";
 
@@ -31,53 +39,72 @@ function isValidNominalRate(rate: Rational | null | undefined): boolean {
   }
 }
 
+const selectMedia = (s: MediaStoreState) => s.media;
+
+const selectCanUndo = (s: TimelineStoreState) => s.canUndo;
+const selectCanRedo = (s: TimelineStoreState) => s.canRedo;
+const selectPendingInPts = (s: TimelineStoreState) => s.pendingInPts;
+const selectSegments = (s: TimelineStoreState) => s.segments;
+const selectSourceId = (s: TimelineStoreState) => s.sourceId;
+const selectMarkIn = (s: TimelineStoreState) => s.markIn;
+const selectMarkOut = (s: TimelineStoreState) => s.markOut;
+const selectSplit = (s: TimelineStoreState) => s.split;
+const selectUndo = (s: TimelineStoreState) => s.undo;
+const selectRedo = (s: TimelineStoreState) => s.redo;
+
 export function TransportBar() {
   const { t } = useTranslation();
-  const media = useMediaStore((s) => s.media);
-  const presentedFrame = usePlaybackStore((s) => s.presentedFrame);
-  const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
+  const media = useMediaStore(selectMedia);
+
+  const canUndo = useTimelineStore(selectCanUndo);
+  const canRedo = useTimelineStore(selectCanRedo);
+  const pendingInPts = useTimelineStore(selectPendingInPts);
+  const segments = useTimelineStore(selectSegments);
+  const sourceId = useTimelineStore(selectSourceId);
+  const markIn = useTimelineStore(selectMarkIn);
+  const markOut = useTimelineStore(selectMarkOut);
+  const split = useTimelineStore(selectSplit);
+  const undo = useTimelineStore(selectUndo);
+  const redo = useTimelineStore(selectRedo);
+
+  const hasMedia = media !== null;
+  // The playback store replaces presentedFrame on every presented frame. Selecting the
+  // derived booleans instead of the object keeps this tree off the frame-rate render path.
+  const hasActiveSource = usePlaybackStore(
+    (s) => hasMedia && s.isAttached && s.isReady,
+  );
   const isPlaying = usePlaybackStore((s) => s.isPlaying);
-  const isAttached = usePlaybackStore((s) => s.isAttached);
-  const isReady = usePlaybackStore((s) => s.isReady);
-  const togglePlayback = usePlaybackStore((s) => s.togglePlayback);
-  const seekNominal = usePlaybackStore((s) => s.seekNominal);
+  const togglePlayback = playbackStore.getState().togglePlayback;
+  const seekNominal = playbackStore.getState().seekNominal;
 
-  const canUndo = useTimelineStore((s) => s.canUndo);
-  const canRedo = useTimelineStore((s) => s.canRedo);
-  const pendingInPts = useTimelineStore((s) => s.pendingInPts);
-  const segments = useTimelineStore((s) => s.segments);
-  const markIn = useTimelineStore((s) => s.markIn);
-  const markOut = useTimelineStore((s) => s.markOut);
-  const split = useTimelineStore((s) => s.split);
-  const undo = useTimelineStore((s) => s.undo);
-  const redo = useTimelineStore((s) => s.redo);
-  const sourceId = useTimelineStore((s) => s.sourceId);
-
-  const hasActiveSource = media !== null && isAttached && isReady;
   const hasNominalRate =
     isValidNominalRate(media?.probe.avgFrameRate) ||
     isValidNominalRate(media?.probe.rFrameRate);
 
+  // Parsed once per segments change, so the per-frame split test stays cheap.
+  const segmentBounds = useMemo(() => getSegmentBounds(segments), [segments]);
+
+  const isMarkInEnabled = usePlaybackStore((s) =>
+    canMarkIn(s.calibrationStatus, s.presentedFrame, hasActiveSource),
+  );
+  const isMarkOutEnabled = usePlaybackStore((s) =>
+    canMarkOut(s.calibrationStatus, s.presentedFrame, pendingInPts, hasActiveSource),
+  );
+  const isSplitEnabled = usePlaybackStore((s) =>
+    canSplitWithBounds(
+      segmentBounds,
+      s.calibrationStatus,
+      s.presentedFrame,
+      hasActiveSource,
+      sourceId ?? undefined,
+    ),
+  );
+
   const isUndoDisabled = !hasActiveSource || !canUndo;
   const isRedoDisabled = !hasActiveSource || !canRedo;
-  const isMarkInDisabled = !canMarkIn(
-    calibrationStatus,
-    presentedFrame,
-    hasActiveSource,
-  );
-  const isMarkOutDisabled = !canMarkOut(
-    calibrationStatus,
-    presentedFrame,
-    pendingInPts,
-    hasActiveSource,
-  );
-  const isSplitDisabled = !canSplit(
-    segments,
-    calibrationStatus,
-    presentedFrame,
-    hasActiveSource,
-    sourceId ?? undefined,
-  );
+  const isMarkInDisabled = !isMarkInEnabled;
+  const isMarkOutDisabled = !isMarkOutEnabled;
+  const isSplitDisabled = !isSplitEnabled;
 
   return (
     <section className="flex h-[72px] shrink-0 items-center justify-center border-y border-border bg-card px-4 select-none">
@@ -118,8 +145,11 @@ export function TransportBar() {
             variant="outline"
             disabled={isMarkInDisabled}
             onClick={() => {
-              if (presentedFrame) {
-                markIn(presentedFrame.inferredSourcePts);
+              // Read at click time: the store is the single source, and the click runs
+              // after the render that enabled the button.
+              const frame = playbackStore.getState().presentedFrame;
+              if (frame) {
+                markIn(frame.inferredSourcePts);
               }
             }}
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
@@ -140,8 +170,9 @@ export function TransportBar() {
             variant="outline"
             disabled={isMarkOutDisabled}
             onClick={() => {
-              if (presentedFrame) {
-                markOut(presentedFrame.inferredSourcePts);
+              const frame = playbackStore.getState().presentedFrame;
+              if (frame) {
+                markOut(frame.inferredSourcePts);
               }
             }}
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
@@ -162,8 +193,9 @@ export function TransportBar() {
             variant="outline"
             disabled={isSplitDisabled}
             onClick={() => {
-              if (presentedFrame) {
-                split(presentedFrame.inferredSourcePts);
+              const frame = playbackStore.getState().presentedFrame;
+              if (frame) {
+                split(frame.inferredSourcePts);
               }
             }}
             className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"

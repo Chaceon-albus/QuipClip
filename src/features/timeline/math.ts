@@ -137,6 +137,62 @@ export function canSplit(
   );
 }
 
+/** Exact half-open bounds of one segment, parsed once so a per-frame test can reuse them. */
+export interface SegmentBounds {
+  readonly sourceId: string;
+  readonly lo: bigint;
+  readonly hi: bigint;
+}
+
+/**
+ * Parses the segment array into exact bounds once per change of the array.
+ * Drops a segment with a malformed PTS, which `isPtsInsideSegment` also never reports as
+ * containing a PTS. An unordered pair is kept, because `lo < pts && pts < hi` rejects it.
+ */
+export function getSegmentBounds(segments: readonly Segment[]): SegmentBounds[] {
+  const bounds: SegmentBounds[] = [];
+  segments.forEach((seg) => {
+    if (!isPtsString(seg.inPts) || !isPtsString(seg.outPts)) {
+      return;
+    }
+    bounds.push({
+      sourceId: seg.sourceId,
+      lo: BigInt(seg.inPts),
+      hi: BigInt(seg.outPts),
+    });
+  });
+  return bounds;
+}
+
+/**
+ * Same result as `canSplit`, evaluated against precomputed bounds.
+ * Costs one BigInt construction plus one comparison per segment, so it is cheap enough
+ * to run on every presented frame.
+ */
+export function canSplitWithBounds(
+  bounds: readonly SegmentBounds[],
+  calibrationStatus: CalibrationStatus,
+  presentedFrame: PresentedFrame | null,
+  hasActiveSource: boolean,
+  activeSourceId?: string,
+): boolean {
+  if (
+    !hasActiveSource ||
+    calibrationStatus !== "ready" ||
+    presentedFrame === null ||
+    !isPtsString(presentedFrame.inferredSourcePts)
+  ) {
+    return false;
+  }
+  const value = BigInt(presentedFrame.inferredSourcePts);
+  return bounds.some(
+    (bound) =>
+      (activeSourceId === undefined || bound.sourceId === activeSourceId) &&
+      bound.lo < value &&
+      value < bound.hi,
+  );
+}
+
 export interface ActiveSourceSegmentEntry {
   readonly segment: Segment;
   readonly projectIndex: number;
@@ -172,8 +228,8 @@ export interface SourceTimelineExtentDescriptor {
 /**
  * Resolves the timeline ruler extent duration in seconds according to ADR 007 precedence:
  * 1. `videoDurationTicks` through `videoTimeBase` when present and valid.
- * 2. Finite non-negative persisted `approximateDurationSeconds`.
- * 3. Finite non-negative runtime `runtimeBrowserDuration` (HTMLMediaElement.duration).
+ * 2. Finite strictly positive persisted `approximateDurationSeconds`.
+ * 3. Finite strictly positive runtime `runtimeBrowserDuration` (HTMLMediaElement.duration).
  * 4. Otherwise null (indeterminate ruler with click-seeking disabled).
  */
 export function getTimelineDurationSeconds(
@@ -195,7 +251,7 @@ export function getTimelineDurationSeconds(
   if (
     typeof descriptor.approximateDurationSeconds === "number" &&
     Number.isFinite(descriptor.approximateDurationSeconds) &&
-    descriptor.approximateDurationSeconds >= 0
+    descriptor.approximateDurationSeconds > 0
   ) {
     return descriptor.approximateDurationSeconds;
   }
@@ -204,7 +260,7 @@ export function getTimelineDurationSeconds(
   if (
     typeof descriptor.runtimeBrowserDuration === "number" &&
     Number.isFinite(descriptor.runtimeBrowserDuration) &&
-    descriptor.runtimeBrowserDuration >= 0
+    descriptor.runtimeBrowserDuration > 0
   ) {
     return descriptor.runtimeBrowserDuration;
   }
@@ -598,10 +654,6 @@ export function calculatePlayheadLayout(
   };
 }
 
-/**
- * Converts a source PTS to elapsed seconds at the final UI boundary.
- * Exact PTS subtraction and rational multiplication occur before conversion to a number.
- */
 /**
  * Converts a PTS to a percentage along the single-source timeline axis.
  */

@@ -4,7 +4,6 @@ import {
   elapsedSecondsToPts,
   frameCountFromBigInt,
   frameCountToBigInt,
-  formatSecondsForFfmpeg,
   gcd,
   I64_MAX,
   I64_MIN,
@@ -258,6 +257,22 @@ describe("time helpers and PTS arithmetic", () => {
       }
     });
 
+    it("breaks rounding ties away from zero for positive and negative deltas", () => {
+      const timeBase: Rational = { n: 1, d: 2 };
+      const startPts = "0" as Pts;
+      const anchor = 1.0;
+
+      // Positive delta: 1.25 - 1.0 = +0.25s, raw ticks = +0.5 -> rounds to +1
+      expect(mediaTimeToPts(1.25, anchor, startPts, timeBase)).toBe("1");
+
+      // Negative delta: 0.75 - 1.0 = -0.25s, raw ticks = -0.5 -> rounds away from zero to -1
+      expect(mediaTimeToPts(0.75, anchor, startPts, timeBase)).toBe("-1");
+
+      // Ties at magnitude 1.5: +1.5 -> +2, -1.5 -> -2
+      expect(mediaTimeToPts(1.75, anchor, startPts, timeBase)).toBe("2");
+      expect(mediaTimeToPts(0.25, anchor, startPts, timeBase)).toBe("-2");
+    });
+
     it("rejects non-finite, negative, or invalid parameters in mediaTimeToPts", () => {
       const startPts = "0" as Pts;
       expect(mediaTimeToPts(NaN, 0, startPts, TIMEBASE_90K)).toBeNull();
@@ -357,6 +372,13 @@ describe("time helpers and PTS arithmetic", () => {
       expect(secondsToTicks(Infinity, TIMEBASE_90K)).toBeNull();
       expect(secondsToTicks(-Infinity, TIMEBASE_90K)).toBeNull();
     });
+
+    it("rejects a negative input rather than rounding its magnitude", () => {
+      // secondsToTicks has no negative range: the guard runs before any rounding.
+      expect(secondsToTicks(-0.5, { n: 1, d: 2 })).toBeNull();
+      expect(secondsToTicks(-0.25, TIMEBASE_90K)).toBeNull();
+      expect(secondsToTicks(0.25, { n: 1, d: 2 })).toBe("1");
+    });
   });
 
   describe("segment PTS helpers", () => {
@@ -432,9 +454,15 @@ describe("time helpers and PTS arithmetic", () => {
       expect(gcd(12, 18)).toBe(6);
     });
 
-    it("rationalToNumber converts to float", () => {
+    it("rationalToNumber converts to float and returns null on invalid or unrepresentable inputs", () => {
       expect(rationalToNumber(FPS25)).toBe(25);
       expect(rationalToNumber(NTSC)).toBeCloseTo(29.97002997, 6);
+      expect(rationalToNumber({ n: 0, d: 1 })).toBe(0);
+      expect(rationalToNumber({ n: -2, d: 1 })).toBe(-2);
+      expect(rationalToNumber({ n: 1, d: 0 })).toBeNull();
+      expect(rationalToNumber({ n: 1.5, d: 1 })).toBeNull();
+      expect(rationalToNumber({ n: 1, d: 1.5 })).toBeNull();
+      expect(rationalToNumber({ n: Number.MAX_SAFE_INTEGER + 1, d: 1 })).toBeNull();
     });
 
     it("parseFrameRate parses valid frame rates and reduces fractions", () => {
@@ -452,13 +480,6 @@ describe("time helpers and PTS arithmetic", () => {
       expect(rationalsEqual({ n: 30000, d: 1001 }, { n: 60000, d: 2002 })).toBe(true);
       expect(rationalsEqual(NTSC, FPS25)).toBe(false);
       expect(rationalsEqual({ n: 1, d: 0 }, { n: 1, d: 0 })).toBe(false);
-    });
-  });
-
-  describe("legacy FFmpeg frame formatting", () => {
-    it("formats seconds for ffmpeg from frames", () => {
-      expect(formatSecondsForFfmpeg(0, FPS25)).toBe("0.000000000");
-      expect(formatSecondsForFfmpeg(25, FPS25)).toBe("1.000000000");
     });
   });
 });

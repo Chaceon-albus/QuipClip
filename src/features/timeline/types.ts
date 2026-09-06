@@ -87,11 +87,14 @@ export interface TimelineActions {
 
   /**
    * Undoes the last completed mark-out or split edit.
+   * Restores the pending In mark of that edit only while the active source identity is
+   * the one the edit was made on, otherwise clears it.
    */
   undo: () => void;
 
   /**
    * Redoes the last undone edit.
+   * Restores the pending In mark under the same source identity condition as `undo`.
    */
   redo: () => void;
 

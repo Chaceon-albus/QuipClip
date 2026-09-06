@@ -31,6 +31,37 @@ export function generateSegmentId(): string {
   return crypto.randomUUID();
 }
 
+interface TimelineHistoryEntry {
+  segments: Segment[];
+  pendingInPts: Pts | null;
+  /**
+   * Active source identity at the time the entry was pushed.
+   * The pending In mark is source-view state, so it is only restored while the
+   * identity still matches. Canonical segments are project state and always restore.
+   */
+  sourceId: string | null;
+  sourceRevisionKey: string | null;
+}
+
+/**
+ * Reads the pending In mark of a history entry, but only while it belongs to the
+ * source identity that is active now. A PTS from another source's timeline would
+ * otherwise become the pending In mark of the current source.
+ */
+function restorablePendingIn(
+  entry: TimelineHistoryEntry,
+  state: TimelineState,
+): Pts | null {
+  if (
+    entry.sourceId !== state.sourceId ||
+    entry.sourceRevisionKey !== state.sourceRevisionKey
+  ) {
+    return null;
+  }
+
+  return entry.pendingInPts;
+}
+
 /**
  * Factory function creating a vanilla Zustand store instance for timeline state.
  *
@@ -46,8 +77,8 @@ export function createTimelineStore(
 ): StoreApi<TimelineStoreState> {
   const generateId = dependencies.generateId ?? generateSegmentId;
 
-  let undoStack: Segment[][] = [];
-  let redoStack: Segment[][] = [];
+  let undoStack: TimelineHistoryEntry[] = [];
+  let redoStack: TimelineHistoryEntry[] = [];
 
   return createStore<TimelineStoreState>()((set, get) => ({
     sourceId: initialState?.sourceId ?? null,
@@ -70,11 +101,6 @@ export function createTimelineStore(
           sourceRevisionKey: null,
           pendingInPts: null,
         });
-        return;
-      }
-
-      // 2. Validate inputs
-      if (typeof sourceId !== "string" || typeof sourceRevisionKey !== "string") {
         return;
       }
 
@@ -125,7 +151,12 @@ export function createTimelineStore(
         outPts,
       };
 
-      undoStack.push(state.segments);
+      undoStack.push({
+        segments: state.segments,
+        pendingInPts: state.pendingInPts,
+        sourceId: state.sourceId,
+        sourceRevisionKey: state.sourceRevisionKey,
+      });
       redoStack = [];
 
       const nextSegments = [...state.segments, newSegment];
@@ -156,7 +187,12 @@ export function createTimelineStore(
       const targetSeg = state.segments[targetIndex];
       const [leftSeg, rightSeg] = splitSegment(targetSeg, currentPts, generateId());
 
-      undoStack.push(state.segments);
+      undoStack.push({
+        segments: state.segments,
+        pendingInPts: state.pendingInPts,
+        sourceId: state.sourceId,
+        sourceRevisionKey: state.sourceRevisionKey,
+      });
       redoStack = [];
 
       const nextSegments = [
@@ -179,11 +215,17 @@ export function createTimelineStore(
       }
 
       const state = get();
-      const previousSegments = undoStack.pop()!;
-      redoStack.push(state.segments);
+      const previous = undoStack.pop()!;
+      redoStack.push({
+        segments: state.segments,
+        pendingInPts: state.pendingInPts,
+        sourceId: state.sourceId,
+        sourceRevisionKey: state.sourceRevisionKey,
+      });
 
       set({
-        segments: previousSegments,
+        segments: previous.segments,
+        pendingInPts: restorablePendingIn(previous, state),
         canUndo: undoStack.length > 0,
         canRedo: true,
       });
@@ -195,11 +237,17 @@ export function createTimelineStore(
       }
 
       const state = get();
-      const nextSegments = redoStack.pop()!;
-      undoStack.push(state.segments);
+      const next = redoStack.pop()!;
+      undoStack.push({
+        segments: state.segments,
+        pendingInPts: state.pendingInPts,
+        sourceId: state.sourceId,
+        sourceRevisionKey: state.sourceRevisionKey,
+      });
 
       set({
-        segments: nextSegments,
+        segments: next.segments,
+        pendingInPts: restorablePendingIn(next, state),
         canUndo: true,
         canRedo: redoStack.length > 0,
       });

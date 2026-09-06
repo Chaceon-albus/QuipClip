@@ -20,6 +20,13 @@ export const I64_MIN = -9_223_372_036_854_775_808n;
 export const I64_MAX = 9_223_372_036_854_775_807n;
 
 /**
+ * Safe-integer bounds as BigInt. Hoisted so the per-frame range checks below
+ * do not construct the same two values on every call.
+ */
+const MIN_SAFE = BigInt(Number.MIN_SAFE_INTEGER);
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+/**
  * Calculates the greatest common divisor of two integers using Euclid's algorithm.
  */
 export function gcd(a: number, b: number): number {
@@ -197,18 +204,15 @@ export function validateApproximateDuration(value: unknown): number | null {
 }
 
 /**
- * Converts a Rational to a floating-point number.
+ * Converts a Rational to a floating-point number, returning null if unrepresentable or invalid.
  * Used only for UI presentation and layout percentages where IEEE 754 precision is sufficient.
  */
-export function rationalToNumber(r: Rational): number {
-  assertPositiveTimeBase(r);
-  const result = r.n / r.d;
-  if (!Number.isFinite(result)) {
-    throw new RangeError(
-      `Rational conversion produced non-finite number: ${r.n}/${r.d}`,
-    );
+export function rationalToNumber(r: Rational): number | null {
+  if (r.d === 0 || !Number.isSafeInteger(r.n) || !Number.isSafeInteger(r.d)) {
+    return null;
   }
-  return result;
+  const result = r.n / r.d;
+  return Number.isFinite(result) ? result : null;
 }
 
 /**
@@ -277,6 +281,7 @@ export function rationalsEqual(a: Rational, b: Rational): boolean {
  * `videoStartPts + round((mediaTime - calibratedMediaTime) / videoTimeBase)`
  *
  * Checked conversion:
+ * - Breaks a rounding tie away from zero, which is the rule the Rust crate applies.
  * - Rejects non-finite or negative mediaTime / calibratedMediaTime.
  * - Rejects unsafe integer tick deltas.
  * - Rejects results outside signed i64 range.
@@ -315,7 +320,11 @@ export function mediaTimeToPts(
   }
 
   const rawDeltaTicks = (deltaSeconds * videoTimeBase.d) / videoTimeBase.n;
-  const deltaTicks = Math.round(rawDeltaTicks);
+  // Round the magnitude so a tie breaks away from zero. Math.round alone breaks a
+  // tie toward positive infinity, which would disagree with the Rust helpers for a
+  // negative delta, and the delta is negative before the calibration anchor.
+  const deltaTicks =
+    rawDeltaTicks < 0 ? -Math.round(-rawDeltaTicks) : Math.round(rawDeltaTicks);
 
   if (!Number.isSafeInteger(deltaTicks)) {
     return null;
@@ -368,10 +377,7 @@ export function ptsToMediaTime(
 
   const deltaTicksBig = ptsToBigInt(targetPts) - ptsToBigInt(videoStartPts);
 
-  if (
-    deltaTicksBig < BigInt(Number.MIN_SAFE_INTEGER) ||
-    deltaTicksBig > BigInt(Number.MAX_SAFE_INTEGER)
-  ) {
+  if (deltaTicksBig < MIN_SAFE || deltaTicksBig > MAX_SAFE) {
     return null;
   }
 
@@ -404,10 +410,7 @@ export function ptsElapsedSeconds(
   }
 
   const deltaTicks = ptsToBigInt(pts) - ptsToBigInt(videoStartPts);
-  if (
-    deltaTicks < BigInt(Number.MIN_SAFE_INTEGER) ||
-    deltaTicks > BigInt(Number.MAX_SAFE_INTEGER)
-  ) {
+  if (deltaTicks < MIN_SAFE || deltaTicks > MAX_SAFE) {
     return null;
   }
   const seconds = (Number(deltaTicks) * videoTimeBase.n) / videoTimeBase.d;
@@ -442,7 +445,7 @@ export function ticksToSeconds(ticks: TickCount, timeBase: Rational): number | n
   }
 
   const ticksBig = tickCountToBigInt(ticks);
-  if (ticksBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+  if (ticksBig > MAX_SAFE) {
     return null;
   }
 
@@ -469,8 +472,9 @@ export function secondsToTicks(seconds: number, timeBase: Rational): TickCount |
     return null;
   }
 
-  const rawTicks = (seconds * timeBase.d) / timeBase.n;
-  const ticks = Math.round(rawTicks);
+  // The guard above rejects a negative input and the time base is positive, so rawTicks
+  // is non-negative and Math.round already breaks a tie away from zero.
+  const ticks = Math.round((seconds * timeBase.d) / timeBase.n);
 
   if (!Number.isSafeInteger(ticks) || ticks < 0) {
     return null;
@@ -533,7 +537,7 @@ export function segmentDurationSeconds(
   timeBase: Rational,
 ): number | null {
   const ticks = segmentDurationTicks(inPts, outPts);
-  if (ticks === null || ticks > BigInt(Number.MAX_SAFE_INTEGER)) {
+  if (ticks === null || ticks > MAX_SAFE) {
     return null;
   }
   try {
@@ -543,41 +547,4 @@ export function segmentDurationSeconds(
   }
   const seconds = (Number(ticks) * timeBase.n) / timeBase.d;
   return Number.isFinite(seconds) ? seconds : null;
-}
-
-/**
- * Formats a frame timestamp into fixed 9 decimal places for FFmpeg (transitional).
- */
-export function formatSecondsForFfmpeg(frame: number, fps: Rational): string {
-  assertPositiveTimeBase(fps);
-  if (!Number.isSafeInteger(frame)) {
-    return "0.000000000";
-  }
-
-  const frameBig = BigInt(Math.trunc(frame));
-  const dBig = BigInt(Math.trunc(fps.d));
-  const nBig = BigInt(Math.trunc(fps.n));
-
-  const num = frameBig * dBig;
-  const den = nBig;
-
-  const negative = num < 0n !== den < 0n;
-  const numMag = num < 0n ? -num : num;
-  const denMag = den < 0n ? -den : den;
-
-  const scale = 1_000_000_000n; // 10^9
-  const scaled = numMag * scale;
-  const quotient = scaled / denMag;
-  const remainder = scaled % denMag;
-
-  const rounded = remainder * 2n >= denMag ? quotient + 1n : quotient;
-
-  const digits = rounded.toString();
-  const padded = digits.padStart(10, "0");
-  const splitAt = padded.length - 9;
-  const intPart = padded.slice(0, splitAt);
-  const fracPart = padded.slice(splitAt);
-  const sign = negative && rounded !== 0n ? "-" : "";
-
-  return `${sign}${intPart}.${fracPart}`;
 }
