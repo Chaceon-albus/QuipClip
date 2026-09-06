@@ -89,8 +89,25 @@ describe("Export Validation & Normalization", () => {
         totalDurationUs: 20_000_000,
       };
       expect(isExportProgressEvent(startedEvent)).toBe(true);
+
+      const publishingEvent: ExportProgressEvent = {
+        event: "publishing",
+        runId: "run-1",
+      };
+      expect(isExportProgressEvent(publishingEvent)).toBe(true);
+      expect(isExportProgressEvent({ event: "publishing" })).toBe(false);
+      expect(isExportProgressEvent({ event: "publishing", runId: 123 })).toBe(false);
+      expect(isExportProgressEvent({ event: "publishing", runId: null })).toBe(false);
+      expect(isExportProgressEvent({ event: "publishing", runId: undefined })).toBe(
+        false,
+      );
+
       expect(isExportProgressEvent(null)).toBe(false);
       expect(isExportProgressEvent({ event: "unknown", runId: "1" })).toBe(false);
+      expect(isExportProgressEvent({ event: "finalizing", runId: "1" })).toBe(false);
+      expect(isExportProgressEvent({ event: "post-processing", runId: "1" })).toBe(
+        false,
+      );
       expect(
         isExportProgressEvent({
           event: "progress",
@@ -180,6 +197,14 @@ describe("Export Validation & Normalization", () => {
       expect(validateExportProgressEvent(zeroSpeedProgress)).toEqual(zeroSpeedProgress);
     });
 
+    it("accepts valid 'publishing' event", () => {
+      const publishing: ExportProgressEvent = {
+        event: "publishing",
+        runId: "run-1",
+      };
+      expect(validateExportProgressEvent(publishing)).toEqual(publishing);
+    });
+
     it("accepts valid 'finished' event", () => {
       const finished: ExportProgressEvent = {
         event: "finished",
@@ -226,6 +251,19 @@ describe("Export Validation & Normalization", () => {
           frame: 10,
         }),
       ).toThrow(TypeError);
+
+      expect(() =>
+        validateExportProgressEvent({
+          event: "publishing",
+        }),
+      ).toThrow(TypeError);
+
+      expect(() =>
+        validateExportProgressEvent({
+          event: "publishing",
+          runId: 123,
+        }),
+      ).toThrow(TypeError);
     });
 
     it("rejects event when tag is non-string or unknown", () => {
@@ -239,6 +277,20 @@ describe("Export Validation & Normalization", () => {
       expect(() =>
         validateExportProgressEvent({
           event: "unknownTag",
+          runId: "run-1",
+        }),
+      ).toThrow(TypeError);
+
+      expect(() =>
+        validateExportProgressEvent({
+          event: "finalizing",
+          runId: "run-1",
+        }),
+      ).toThrow(TypeError);
+
+      expect(() =>
+        validateExportProgressEvent({
+          event: "post-processing",
           runId: "run-1",
         }),
       ).toThrow(TypeError);

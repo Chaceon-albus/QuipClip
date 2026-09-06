@@ -159,6 +159,26 @@ export type ExportProgressUpdateEvent = {
 };
 
 /**
+ * Event emitted when ffmpeg execution has completed and the output file is being published.
+ *
+ * This phase begins after ffmpeg has exited successfully, the frame count has been verified,
+ * and the cancel flag has been re-checked. Nothing is being encoded or processed at this stage.
+ * All that remains is renaming the finished temporary file over the destination, which on
+ * Windows can wait seconds while a virus scanner reads back a multi-gigabyte file.
+ *
+ * Note that `-movflags +faststart` is a genuine post-write pass: the flag is set for the MP4 and MOV
+ * containers and not for Matroska, and where it is set it runs inside ffmpeg before the process
+ * exits. That is why this phase is not called "finalizing" or "post-processing".
+ *
+ * The user interface must NOT show the word "publishing" -- it renders as "Finishing...".
+ * That is the ADR 011 split: a stable code crosses the boundary, the frontend translates.
+ */
+export type ExportPublishingEvent = {
+  event: "publishing";
+  runId: string;
+};
+
+/**
  * Event emitted when media export completes successfully.
  *
  * NOTE: There is deliberately NO out-time field on finished.
@@ -191,6 +211,7 @@ export type ExportFailedEvent = {
 export type ExportProgressEvent =
   | ExportStartedEvent
   | ExportProgressUpdateEvent
+  | ExportPublishingEvent
   | ExportFinishedEvent
   | ExportFailedEvent;
 
@@ -201,6 +222,7 @@ export const EXPORT_STATUSES = [
   "idle",
   "preparing",
   "running",
+  "publishing",
   "finished",
   "canceled",
   "failed",
@@ -265,6 +287,15 @@ export type ExportActions = {
    * Unsubscribes from backend export progress events.
    */
   unsubscribe: () => void;
+  /**
+   * Entry point for recording frontend-only errors (such as `dialogFailed`),
+   * allowing client-side failures to render through exactly the same path as
+   * a backend failure. The store normalizes the error through `normalizeExportError`,
+   * matching the media and settings slices.
+   *
+   * @param error The raw error to normalize and record in the store.
+   */
+  reportError: (error: unknown) => void;
 };
 
 /**

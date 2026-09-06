@@ -109,6 +109,8 @@ export function isExportProgressEvent(value: unknown): value is ExportProgressEv
             Number.isSafeInteger(e.totalSize) &&
             e.totalSize >= 0))
       );
+    case "publishing":
+      return true;
     case "finished":
       return typeof e.outputPath === "string" && isNonNegativeU32(e.frames);
     case "failed":
