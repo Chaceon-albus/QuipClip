@@ -1,0 +1,332 @@
+/**
+ * Export store managing export rendering lifecycle, active runId, and progress events.
+ *
+ * Implements:
+ * - Pre-invocation subscription to prevent losing early started/progress events.
+ * - Monotonic counter & active runId matching for latest-request-wins semantics.
+ * - Idempotent, memoized event subscription holding a Tauri listener for the process lifetime.
+ * - ADR 002, ADR 007, ADR 011, and ADR 014.
+ */
+
+import { useStore } from "zustand";
+import { createStore, type StoreApi } from "zustand/vanilla";
+import type { UnlistenFn } from "@/lib/ipc";
+import { cancelExport, startExport } from "./client";
+import { subscribeExportProgress } from "./events";
+import {
+  ExportError,
+  type ExportProgressEvent,
+  type ExportRequest,
+  type ExportStart,
+  type ExportState,
+  type ExportStoreState,
+} from "./types";
+import { normalizeExportError } from "./validation";
+
+/**
+ * Dependencies that can be injected into the export store factory for testing.
+ */
+export interface ExportStoreDependencies {
+  /**
+   * Function to start export via backend command. Defaults to `startExport`.
+   */
+  startExport?: (request: ExportRequest) => Promise<ExportStart>;
+  /**
+   * Function to cancel export via backend command. Defaults to `cancelExport`.
+   */
+  cancelExport?: (runId: string) => Promise<boolean>;
+  /**
+   * Function to subscribe to backend export progress events. Defaults to `subscribeExportProgress`.
+   */
+  subscribeExportProgress?: (
+    handler: (event: ExportProgressEvent) => void,
+  ) => Promise<UnlistenFn>;
+}
+
+/**
+ * Factory function creating a vanilla Zustand store instance for export state.
+ *
+ * Non-serializable state (request counter, active run id, unlisten function, pending event buffer)
+ * lives strictly in the factory closure to ensure public store state remains serializable.
+ *
+ * @param dependencies Injected dependencies for testability.
+ * @param initialState Optional initial state overrides.
+ */
+export function createExportStore(
+  dependencies: ExportStoreDependencies = {},
+  initialState?: Partial<ExportState>,
+): StoreApi<ExportStoreState> {
+  const startExportFn = dependencies.startExport ?? startExport;
+  const cancelExportFn = dependencies.cancelExport ?? cancelExport;
+  const subscribeExportProgressFn =
+    dependencies.subscribeExportProgress ?? subscribeExportProgress;
+
+  let latestRequestId = 0;
+  let activeRunId: string | null = initialState?.runId ?? null;
+  let subscriptionPromise: Promise<UnlistenFn> | null = null;
+  let activeUnlisten: UnlistenFn | null = null;
+  let pendingEvents: ExportProgressEvent[] = [];
+  let awaitingRunId = false;
+
+  return createStore<ExportStoreState>()((set) => {
+    function handleEvent(event: ExportProgressEvent): void {
+      if (awaitingRunId && !activeRunId) {
+        pendingEvents.push(event);
+        return;
+      }
+
+      // MUST ignore any payload whose runId is not the active run
+      if (!activeRunId || event.runId !== activeRunId) {
+        return;
+      }
+
+      switch (event.event) {
+        case "started": {
+          set({
+            status: "running",
+            outputPath: event.outputPath,
+            segmentCount: event.segmentCount,
+            expectedFrames: event.expectedFrames ?? null,
+          });
+          break;
+        }
+        case "progress": {
+          set((state) => ({
+            status: state.status === "preparing" ? "running" : state.status,
+            frame: event.frame,
+            expectedFrames:
+              event.expectedFrames !== undefined
+                ? event.expectedFrames
+                : state.expectedFrames,
+          }));
+          break;
+        }
+        case "publishing": {
+          set({
+            status: "publishing",
+          });
+          break;
+        }
+        case "finished": {
+          activeRunId = null;
+          set({
+            status: "finished",
+            outputPath: event.outputPath,
+            frame: event.frames,
+            error: null,
+          });
+          break;
+        }
+        case "failed": {
+          activeRunId = null;
+          const normalizedError = new ExportError({
+            code: event.code,
+            detail: event.detail,
+            exitCode: event.exitCode,
+            encoder: event.encoder,
+          });
+          set({
+            status: event.code === "canceled" ? "canceled" : "failed",
+            error: normalizedError,
+          });
+          break;
+        }
+      }
+    }
+
+    async function ensureSubscribed(): Promise<void> {
+      if (!subscriptionPromise) {
+        const currentPromise = subscribeExportProgressFn((event) => {
+          handleEvent(event);
+        })
+          .then((unlisten) => {
+            if (subscriptionPromise !== currentPromise) {
+              unlisten();
+              return unlisten;
+            }
+            activeUnlisten = unlisten;
+            return unlisten;
+          })
+          .catch((e) => {
+            if (subscriptionPromise === currentPromise) {
+              subscriptionPromise = null;
+              activeUnlisten = null;
+            }
+            throw e;
+          });
+        subscriptionPromise = currentPromise;
+      }
+      await subscriptionPromise;
+    }
+
+    function unsubscribe(): void {
+      if (activeUnlisten) {
+        activeUnlisten();
+        activeUnlisten = null;
+      }
+      subscriptionPromise = null;
+      latestRequestId++;
+      awaitingRunId = false;
+      pendingEvents = [];
+    }
+
+    function reportError(error: unknown): void {
+      const normalized = normalizeExportError(error);
+      if (!activeRunId) {
+        // Invalidate only a start that has not yet learned its run id. A run that reported one
+        // keeps its tracking: the backend is still writing, and the user must still be able to
+        // cancel it.
+        latestRequestId++;
+        awaitingRunId = false;
+        pendingEvents = [];
+      }
+      set({
+        status: normalized.code === "canceled" ? "canceled" : "failed",
+        error: normalized,
+      });
+    }
+
+    return {
+      status: initialState?.status ?? "idle",
+      runId: initialState?.runId ?? null,
+      outputPath: initialState?.outputPath ?? null,
+      segmentCount: initialState?.segmentCount ?? 0,
+      frame: initialState?.frame ?? null,
+      expectedFrames: initialState?.expectedFrames ?? null,
+      error: initialState?.error ?? null,
+
+      ensureSubscribed,
+      unsubscribe,
+      reportError,
+
+      reset: () => {
+        latestRequestId++;
+        activeRunId = null;
+        awaitingRunId = false;
+        pendingEvents = [];
+        set({
+          status: "idle",
+          runId: null,
+          outputPath: null,
+          segmentCount: 0,
+          frame: null,
+          expectedFrames: null,
+          error: null,
+        });
+      },
+
+      cancelExport: async (): Promise<boolean> => {
+        const runId = activeRunId;
+        if (!runId) {
+          return false;
+        }
+        try {
+          return await cancelExportFn(runId);
+        } catch (err) {
+          // A rejection that lands after the run changed belongs to nobody.
+          if (activeRunId === runId) {
+            reportError(err);
+          }
+          return false;
+        }
+      },
+
+      startExport: async (request: ExportRequest): Promise<ExportStart | null> => {
+        const requestId = ++latestRequestId;
+        activeRunId = null;
+        awaitingRunId = true;
+        pendingEvents = [];
+
+        set({
+          status: "preparing",
+          runId: null,
+          outputPath: request.outputPath,
+          segmentCount: request.segments.length,
+          frame: null,
+          expectedFrames: null,
+          error: null,
+        });
+
+        try {
+          // Acceptance criterion: subscribe BEFORE invoking the command
+          await ensureSubscribed();
+
+          if (requestId !== latestRequestId) {
+            // A superseded run MUST NOT touch the buffering state: the successor
+            // (or reset) already owns it.
+            return null;
+          }
+
+          const start = await startExportFn(request);
+
+          if (requestId !== latestRequestId) {
+            // A superseded run MUST NOT touch the buffering state: the successor
+            // (or reset) already owns it.
+            return null;
+          }
+
+          activeRunId = start.runId;
+          awaitingRunId = false;
+
+          set({
+            runId: start.runId,
+            outputPath: start.outputPath,
+            segmentCount: start.segmentCount,
+            expectedFrames: start.expectedFrames ?? null,
+          });
+
+          const buffered = pendingEvents;
+          pendingEvents = [];
+          for (const e of buffered) {
+            handleEvent(e);
+          }
+
+          return start;
+        } catch (err) {
+          const normalized = normalizeExportError(err);
+
+          if (requestId !== latestRequestId) {
+            // A superseded run MUST NOT touch the buffering state: the successor
+            // (or reset) already owns it.
+            return null;
+          }
+
+          activeRunId = null;
+          awaitingRunId = false;
+          pendingEvents = [];
+
+          set({
+            status: normalized.code === "canceled" ? "canceled" : "failed",
+            runId: null,
+            error: normalized,
+          });
+
+          return null;
+        }
+      },
+    };
+  });
+}
+
+export type ExportStore = ReturnType<typeof createExportStore>;
+
+/**
+ * Default singleton export store for production application use.
+ */
+export const exportStore: ExportStore = createExportStore();
+
+const defaultSelector = (state: ExportStoreState): ExportStoreState => state;
+
+/**
+ * React hook for consuming the production export store.
+ */
+export function useExportStore(): ExportStoreState;
+export function useExportStore<T>(selector: (state: ExportStoreState) => T): T;
+export function useExportStore<T>(
+  selector?: (state: ExportStoreState) => T,
+): T | ExportStoreState {
+  return useStore(
+    exportStore,
+    (selector ?? defaultSelector) as (state: ExportStoreState) => T,
+  );
+}
