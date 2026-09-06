@@ -655,7 +655,7 @@ mod tests {
     }
 
     /// A program that reports its own process id as one `-progress` block and then occupies a
-    /// process for 30 seconds, with no shell and no grandchild around it.
+    /// process for 120 seconds, with no shell and no grandchild around it.
     ///
     /// The process id leaves through the progress stream, as the `frame` value of that block.
     /// Neither of the tests that use this helper can reach the `Child` -- one cancels through a
@@ -666,7 +666,7 @@ mod tests {
     /// shell with `sleep`, which keeps the pid the shell just printed; PowerShell's `$PID` is
     /// its own, and it sleeps in that same process. A shell that forked instead would die on
     /// the kill while its child kept the inherited pipes open, and the joins in
-    /// `run_export_process` would then block for the full 30 seconds -- in tests that are
+    /// `run_export_process` would then block for the full 120 seconds -- in tests that are
     /// asserting the opposite.
     #[cfg(unix)]
     fn pid_reporting_sleeper() -> (PathBuf, Vec<String>) {
@@ -674,15 +674,35 @@ mod tests {
             PathBuf::from("/bin/sh"),
             vec![
                 "-c".to_owned(),
-                "echo frame=$$; echo progress=continue; exec sleep 30".to_owned(),
+                "echo frame=$$; echo progress=continue; exec sleep 120".to_owned(),
             ],
         )
     }
 
     /// The Windows counterpart of [`pid_reporting_sleeper`]. `cmd.exe` cannot report its own
     /// process id, so this arm uses PowerShell, spawned directly rather than through `cmd /c`
-    /// so that no quote in the script has to survive `cmd`'s own parsing. The explicit flush
-    /// keeps the two lines from sitting in a buffer for the length of the sleep.
+    /// so that no quote in the script has to survive `cmd`'s own parsing.
+    ///
+    /// Both lines go through `[Console]::Out` rather than being written as bare strings. A bare
+    /// string goes to PowerShell's success output stream, which the host formats and writes on
+    /// its own path; whether that path ends in the same writer `[Console]::Out.Flush()` empties
+    /// has not been established here. Writing through `[Console]::Out` removes the question,
+    /// because that writer is the one on the parent's stdout pipe.
+    ///
+    /// This is a precaution, not a fix for a measured defect. The CI failure measured
+    /// `24.4525496s` against a 30-second sleep, so the first block had already reached the
+    /// callback about 5.5 seconds before the sleep could end: the delay sat in front of the
+    /// block, not behind it, and buffering that holds a block until the process exits is ruled
+    /// out by that arithmetic. The part that addresses the failure is the assertion change in
+    /// `a_cancel_flag_set_during_the_run_kills_the_process_and_reports_canceled`.
+    ///
+    /// `[Console]::Out.Flush()` stays in the command string as insurance only. .NET builds
+    /// `Console.Out` as a `StreamWriter` with `AutoFlush = true`, so `WriteLine` has already
+    /// flushed by the time it returns; the explicit flush is harmless and covers a host that
+    /// differs, and nothing here leans on it.
+    ///
+    /// One process per arm, as above: PowerShell's `$PID` is its own, and it sleeps in that
+    /// same process, so the pid the test reads is the pid the kill has to reach.
     #[cfg(windows)]
     fn pid_reporting_sleeper() -> (PathBuf, Vec<String>) {
         (
@@ -691,8 +711,9 @@ mod tests {
                 "-NoProfile".to_owned(),
                 "-NonInteractive".to_owned(),
                 "-Command".to_owned(),
-                "'frame=' + $PID; 'progress=continue'; [Console]::Out.Flush(); \
-                 Start-Sleep -Seconds 30"
+                "[Console]::Out.WriteLine('frame=' + $PID); \
+                 [Console]::Out.WriteLine('progress=continue'); [Console]::Out.Flush(); \
+                 Start-Sleep -Seconds 120"
                     .to_owned(),
             ],
         )
@@ -898,6 +919,7 @@ mod tests {
         let (program, arguments) = pid_reporting_sleeper();
         let cancel = AtomicBool::new(false);
         let mut child_pid = None;
+        let mut canceled_at = None;
         let started = Instant::now();
 
         let outcome = run_export_process(
@@ -915,11 +937,16 @@ mod tests {
                 // after it finished.
                 child_pid = snapshot.frame;
                 cancel.store(true, Ordering::SeqCst);
+                // The start of the interval the test asserts on. Taken here, on the first
+                // block only, so that it marks the moment the flag went up.
+                canceled_at.get_or_insert_with(Instant::now);
             },
         )
         .expect("the process should spawn and then be killed");
 
-        let elapsed = started.elapsed();
+        let after_cancel = canceled_at
+            .expect("the callback runs at least once")
+            .elapsed();
         let pid = child_pid.expect("the child reports its process id before it is cancelled");
 
         assert_eq!(outcome.status, ExportProcessStatus::Canceled);
@@ -930,9 +957,27 @@ mod tests {
             process_is_gone(pid),
             "the cancelled child survived as process {pid}"
         );
+        // The quantity the cancel path owns, measured from the flag going up: a kill, a wait,
+        // two reader-thread joins and the final drain. No poll interval is inside it.
+        // `drain_progress` runs at the top of the loop body and `cancel.load` is the next
+        // statement, with no sleep between them, so the flag is read on the same iteration that
+        // delivered this block; `thread::sleep(poll)` elapses before the snapshot ever reaches
+        // the callback. Five seconds is generous for all of that on a loaded runner.
         assert!(
-            elapsed < Duration::from_secs(15),
-            "expected the cancel to end a 30-second process promptly, took {elapsed:?}"
+            after_cancel < Duration::from_secs(5),
+            "expected the cancel to end the process promptly, took {after_cancel:?}"
+        );
+        // The status alone does not prove the child was cut short: the supervision loop reads
+        // the cancel flag before `try_wait`, and `Child::kill` on an already-exited child
+        // returns `Ok`, so a child that reached its natural end with the flag already up is
+        // still reported `Canceled`. This bound carries that claim instead -- the first
+        // progress block reached the callback during the run rather than at the end of it.
+        // Sixty seconds is half the child's own sleep, so no run that waited the sleep out can
+        // meet it, and it sits far above any interpreter startup this test does not control.
+        let total = started.elapsed();
+        assert!(
+            total < Duration::from_secs(60),
+            "expected the first progress block to arrive during the run, took {total:?}"
         );
     }
 
