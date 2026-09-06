@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useShallow } from "zustand/react/shallow";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -45,7 +46,7 @@ function PresetEditor({
   draft: Preset;
   view: PresetLibraryView;
   controller: PresetLibraryController;
-  ffmpegState: FfmpegState;
+  ffmpegState: Pick<FfmpegState, "status" | "results">;
 }) {
   const { t } = useTranslation();
   const translate = t as (
@@ -107,10 +108,7 @@ function PresetEditor({
           <SelectContent>
             {videoSelect.options.map((option) => (
               <SelectItem key={option.value} value={option.value}>
-                {translate(option.labelKey, {
-                  ...option.labelValues,
-                  availability: translate(option.labelValues.availability),
-                })}
+                {translate(option.labelKey, option.labelValues)}
               </SelectItem>
             ))}
           </SelectContent>
@@ -151,10 +149,7 @@ function PresetEditor({
           <SelectContent>
             {audioSelect.options.map((option) => (
               <SelectItem key={option.value} value={option.value}>
-                {translate(option.labelKey, {
-                  ...option.labelValues,
-                  availability: translate(option.labelValues.availability),
-                })}
+                {translate(option.labelKey, option.labelValues)}
               </SelectItem>
             ))}
           </SelectContent>
@@ -392,8 +387,18 @@ export function PresetLibrarySection() {
     options?: Record<string, string | number>,
   ) => string;
 
-  const ffmpegState = useFfmpegStore();
+  // Only `status` and `results` reach `presentEncoderSelect`. Selecting the two fields with
+  // a shallow comparison keeps a capability-probe write that touches neither from
+  // re-rendering the whole preset library.
+  const ffmpegState = useFfmpegStore(
+    useShallow((state) => ({ status: state.status, results: state.results })),
+  );
   const [pendingView, setView] = useState<PresetLibraryView | null>(null);
+
+  // Row the user asked to switch to while an edit is unsaved. The controller documents that
+  // `select` discards a dirty draft without warning and leaves the confirmation to the
+  // view; this holds the pending target until the user answers.
+  const [pendingSelectId, setPendingSelectId] = useState<string | null>(null);
 
   const controller = useMemo(
     () =>
@@ -405,6 +410,15 @@ export function PresetLibrarySection() {
 
   const view = pendingView ?? controller.getView();
 
+  // Drop the pending target as soon as the draft is clean, derived during render the way
+  // `PreviewPane` clears its decode error. A Save or a Cancel elsewhere in the editor clears
+  // `dirty` only, so without this the prompt would merely hide while still holding the old
+  // target: a later edit would bring it back aimed at a row the user never answered for, and
+  // its Discard button would throw away an edit nobody offered to discard.
+  if (pendingSelectId !== null && !view.dirty) {
+    setPendingSelectId(null);
+  }
+
   useEffect(() => {
     controller.activate();
     return () => {
@@ -413,11 +427,28 @@ export function PresetLibrarySection() {
   }, [controller]);
 
   useEffect(() => {
-    controller.syncFromSettings(settingsStore.getState().settings);
+    // Compare the settings slice rather than resubscribing to every store write. The store
+    // publishes pure lifecycle transitions ("loading", "saving", "ready") that leave
+    // `settings` referentially identical, and each of those would otherwise rebuild the
+    // draft for a field this controller never reads.
+    let previous = settingsStore.getState().settings;
+    controller.syncFromSettings(previous);
     return settingsStore.subscribe((state) => {
+      if (state.settings === previous) {
+        return;
+      }
+      previous = state.settings;
       controller.syncFromSettings(state.settings);
     });
   }, [controller]);
+
+  const handleActivateRow = (id: string) => {
+    if (view.dirty && id !== view.selectedPresetId) {
+      setPendingSelectId(id);
+      return;
+    }
+    controller.select(id);
+  };
 
   return (
     <section className="space-y-3">
@@ -439,7 +470,10 @@ export function PresetLibrarySection() {
           <Button
             variant="outline"
             size="sm"
-            disabled={view.pending}
+            // Gated on `ready` as well as `pending`: `restore_default_presets` begins by
+            // reading the settings file, so it fails the same way the load did and must not
+            // be the one enabled control in a state where it cannot work.
+            disabled={view.ready ? view.pending : true}
             onClick={() => {
               void controller.restoreDefaults();
             }}
@@ -455,6 +489,32 @@ export function PresetLibrarySection() {
         </p>
       ) : null}
 
+      {/* The target above is cleared once the draft is clean, so a Save or a Cancel elsewhere
+          in the editor leaves no stale prompt behind. */}
+      {pendingSelectId !== null ? (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning/30 bg-warning/10 p-2.5 text-xs"
+        >
+          <span>{t("settings.preset.discardPrompt")}</span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                controller.select(pendingSelectId);
+                setPendingSelectId(null);
+              }}
+            >
+              {t("settings.preset.discardConfirm")}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setPendingSelectId(null)}>
+              {t("settings.preset.discardCancel")}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       {!view.ready ? (
         <p className="text-xs text-muted-foreground">{t("common.loading")}</p>
       ) : view.presets.length === 0 ? (
@@ -466,10 +526,10 @@ export function PresetLibrarySection() {
               key={preset.id}
               role="button"
               tabIndex={0}
-              onClick={() => controller.select(preset.id)}
+              onClick={() => handleActivateRow(preset.id)}
               onKeyDown={(e) => {
                 if (isActivationKey(e.key)) {
-                  controller.select(preset.id);
+                  handleActivateRow(preset.id);
                 }
               }}
               className={cn(

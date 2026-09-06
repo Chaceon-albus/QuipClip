@@ -222,7 +222,7 @@ describe("presetPresenter", () => {
   });
 
   describe("presentEncoderSelect", () => {
-    it("maps available options to optionLabel view models and appends the custom sentinel last", () => {
+    it("maps available options to complete option-label view models and appends the custom sentinel last", () => {
       const state = createProbeState({
         status: "ready",
         results: [
@@ -237,24 +237,18 @@ describe("presetPresenter", () => {
         options: [
           {
             value: "libx264",
-            labelKey: "settings.encoder.optionLabel",
-            labelValues: {
-              name: "libx264",
-              availability: "settings.encoder.available",
-            },
+            labelKey: "settings.encoder.optionLabelAvailable",
+            labelValues: { name: "libx264" },
           },
           {
             value: "libx265",
-            labelKey: "settings.encoder.optionLabel",
-            labelValues: {
-              name: "libx265",
-              availability: "settings.encoder.available",
-            },
+            labelKey: "settings.encoder.optionLabelAvailable",
+            labelValues: { name: "libx265" },
           },
           {
             value: CUSTOM_ENCODER_VALUE,
             labelKey: "settings.preset.customOption",
-            labelValues: { name: "", availability: "" },
+            labelValues: { name: "" },
           },
         ],
       });
@@ -272,16 +266,13 @@ describe("presetPresenter", () => {
         options: [
           {
             value: "libx264",
-            labelKey: "settings.encoder.optionLabel",
-            labelValues: {
-              name: "libx264",
-              availability: "settings.encoder.unavailable",
-            },
+            labelKey: "settings.encoder.optionLabelUnavailable",
+            labelValues: { name: "libx264" },
           },
           {
             value: CUSTOM_ENCODER_VALUE,
             labelKey: "settings.preset.customOption",
-            labelValues: { name: "", availability: "" },
+            labelValues: { name: "" },
           },
         ],
         currentReasonKey: "settings.encoder.reasonFailed",
@@ -298,7 +289,7 @@ describe("presetPresenter", () => {
           {
             value: CUSTOM_ENCODER_VALUE,
             labelKey: "settings.preset.customOption",
-            labelValues: { name: "", availability: "" },
+            labelValues: { name: "" },
           },
         ],
       });
@@ -420,8 +411,10 @@ describe("presetPresenter", () => {
       "settings.quality.crf",
       "settings.quality.bitrate",
       "settings.quality.qualityScale",
-      // the encoder option label template
-      "settings.encoder.optionLabel",
+      // all three complete encoder option labels
+      "settings.encoder.optionLabelAvailable",
+      "settings.encoder.optionLabelUnavailable",
+      "settings.encoder.optionLabelUnknown",
     ];
 
     it.each(emittedKeys)(

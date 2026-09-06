@@ -385,22 +385,10 @@ describe("Settings Store", () => {
       expect(store.getState().error?.code).toBe("backupFailed");
     });
 
-    it("provides alias methods loadSettings, saveSettings, restoreDefaultPresets", () => {
+    it("keeps resetSettings and reset as different actions", () => {
       const store = createSettingsStore();
-      const state = store.getState() as unknown as {
-        load: unknown;
-        save: unknown;
-        restoreDefaults: unknown;
-        loadSettings: unknown;
-        saveSettings: unknown;
-        restoreDefaultPresets: unknown;
-        resetSettings: unknown;
-        reset: unknown;
-      };
+      const state = store.getState();
 
-      expect(state.loadSettings).toBe(state.load);
-      expect(state.saveSettings).toBe(state.save);
-      expect(state.restoreDefaultPresets).toBe(state.restoreDefaults);
       expect(state.resetSettings).not.toBe(state.reset);
     });
 
@@ -670,6 +658,38 @@ describe("Settings Store", () => {
       expect(store.getState().settings).toEqual(initialDoc);
       expect(store.getState().error).toBeInstanceOf(SettingsError);
       expect(store.getState().error?.code).toBe("invalidSettings");
+    });
+
+    it("NON-BLOCKING 7: an early-rejected save does not invalidate an in-flight load", async () => {
+      const loadedDoc = createValidSettings({ activePresetId: "default-h264-mp4" });
+      let releaseLoad: () => void = () => {};
+      const loadGate = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+
+      const store = createSettingsStore({
+        loadSettings: async () => {
+          await loadGate;
+          return { settings: loadedDoc, seeded: false };
+        },
+      });
+
+      const loadPromise = store.getState().loadSettings();
+
+      // Rejected before any IPC, so it has no result to win with and must not supersede
+      // the load that is already on the wire.
+      const saveResult = await store.getState().saveSettings({
+        schemaVersion: 999,
+        presets: "not-an-array",
+      } as unknown as Settings);
+      expect(saveResult).toBeNull();
+
+      releaseLoad();
+      await loadPromise;
+
+      expect(store.getState().status).toBe("ready");
+      expect(store.getState().settings).toEqual(loadedDoc);
+      expect(store.getState().error).toBeNull();
     });
   });
 

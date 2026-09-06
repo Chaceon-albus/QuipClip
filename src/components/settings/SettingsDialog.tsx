@@ -24,7 +24,15 @@ export function SettingsDialog({
 }) {
   const { t } = useTranslation();
   const error = useSettingsStore((state) => state.error);
+  const status = useSettingsStore((state) => state.status);
+  const settings = useSettingsStore((state) => state.settings);
   const errorView = presentSettingsError(error);
+
+  // The load failed and no document survived it. Every control below then disables itself,
+  // so without this the dialog has no way out and the user must delete the file by hand.
+  // `reset_settings` is the escape hatch ADR 013 defines: it renames the damaged file to
+  // settings.invalid.json and writes fresh seeds.
+  const canRecover = status === "error" && settings === null;
 
   useEffect(() => {
     if (open) {
@@ -59,6 +67,21 @@ export function SettingsDialog({
               errorView.key,
               errorView.values,
             )}
+          </div>
+        ) : null}
+
+        {canRecover ? (
+          <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3 text-xs">
+            <p className="text-muted-foreground">{t("settings.resetDamagedHint")}</p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void settingsStore.getState().resetSettings();
+              }}
+            >
+              {t("settings.resetDamaged")}
+            </Button>
           </div>
         ) : null}
 

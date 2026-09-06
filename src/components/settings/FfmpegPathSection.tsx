@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useShallow } from "zustand/react/shallow";
 import { Button } from "@/components/ui/button";
 import { useFfmpegStore } from "@/features/ffmpeg";
 import { settingsStore } from "@/features/settings/store";
@@ -7,6 +8,7 @@ import { getResolvedLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
 import {
   presentFfmpegStatus,
+  selectFfmpegState,
   type FfmpegStatusView,
 } from "@/components/layout/ffmpegStatusPresenter";
 import {
@@ -48,13 +50,22 @@ export function FfmpegPathSection() {
   }, [controller]);
 
   useEffect(() => {
-    controller.syncFromSettings(settingsStore.getState().settings);
+    // Compare the settings slice rather than resubscribing to every store write. The store
+    // publishes pure lifecycle transitions ("loading", "saving", "ready") that leave
+    // `settings` referentially identical, and `syncFromSettings` is unguarded here, so each
+    // of those would otherwise re-render this section with no change in what it displays.
+    let previous = settingsStore.getState().settings;
+    controller.syncFromSettings(previous);
     return settingsStore.subscribe((state) => {
+      if (state.settings === previous) {
+        return;
+      }
+      previous = state.settings;
       controller.syncFromSettings(state.settings);
     });
   }, [controller]);
 
-  const ffmpeg = useFfmpegStore();
+  const ffmpeg = useFfmpegStore(useShallow(selectFfmpegState));
   const resolvedLanguage = getResolvedLanguage(i18n);
 
   const listFormatter = useMemo(

@@ -183,6 +183,59 @@ describe("PresetLibraryController", () => {
       expect(result).toBe(true);
       expect(controller.getView().draft).toBeNull();
     });
+
+    // BLOCKING 09-F2: a restore merges the seeds by id and keeps every other preset, so it
+    // says nothing about the preset the user is editing. Reloading over a dirty draft would
+    // discard that edit with no prompt and no undo.
+    it("keeps a dirty draft when the selected preset survives the restore", async () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { name: "Stored name" })],
+      });
+      const restored = createSettings({
+        presets: [createPreset("p1", { name: "Stored name" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+        restoreDefaultPresets: vi.fn().mockResolvedValue(restored),
+      });
+
+      controller.select("p1");
+      controller.setName("Half-typed name");
+      expect(controller.getView().dirty).toBe(true);
+
+      const result = await controller.restoreDefaults();
+
+      expect(result).toBe(true);
+      expect(controller.getView().draft?.name).toBe("Half-typed name");
+      expect(controller.getView().dirty).toBe(true);
+    });
+
+    // The one condition that still replaces a dirty draft: there is no longer anything to
+    // save the edit back to.
+    it("replaces a dirty draft when the restore drops the selected preset", async () => {
+      const settings = createSettings({
+        presets: [createPreset("p1"), createPreset("p2")],
+      });
+      const restored = createSettings({
+        presets: [createPreset("p2")],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+        restoreDefaultPresets: vi.fn().mockResolvedValue(restored),
+      });
+
+      controller.select("p1");
+      controller.setName("Half-typed name");
+      expect(controller.getView().dirty).toBe(true);
+
+      const result = await controller.restoreDefaults();
+
+      expect(result).toBe(true);
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
+    });
   });
 
   // RULE 2 -- deleting the active preset must never leave a dangling activePresetId. This

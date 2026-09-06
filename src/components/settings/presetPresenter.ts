@@ -114,25 +114,37 @@ export function presentEncoderOption(option: EncoderOption): {
 /** View model for one entry in an encoder `<Select>`, including the appended custom option. */
 export type EncoderOptionView = {
   value: string;
-  labelKey: string;
   /**
-   * Interpolation values for `labelKey`. `availability` holds the AVAILABILITY KEY (e.g.
-   * "settings.encoder.available"), not translated text: this presenter must not call i18next,
-   * so it cannot produce the final string itself. The component translates `availability`
-   * first, then passes the resulting text back in as the interpolation value for the outer
-   * `t(labelKey, labelValues)` call.
+   * The key of one COMPLETE message. Each availability has its own key holding the whole
+   * label, so the component never assembles a sentence from translated fragments (ADR 011);
+   * a translator moves the parenthesis, drops it, or reorders the words per language.
    */
-  labelValues: { name: string; availability: string };
+  labelKey: string;
+  /** Interpolation values for `labelKey`. The encoder name is never translated. */
+  labelValues: { name: string };
 };
+
+/**
+ * Maps an encoder availability to the key of the complete `<Select>` option label for it.
+ */
+function presentEncoderOptionLabelKey(option: EncoderOption): string {
+  switch (option.availability) {
+    case "available":
+      return "settings.encoder.optionLabelAvailable";
+    case "unavailable":
+      return "settings.encoder.optionLabelUnavailable";
+    case "unknown":
+      return "settings.encoder.optionLabelUnknown";
+  }
+}
 
 /**
  * Builds the encoder `<Select>` options for `kind`, plus the reason line for the currently
  * selected encoder when it is unavailable with a reason.
  *
  * Appends one final option for the "custom encoder name" sentinel. That option's label needs no
- * interpolation (`settings.preset.customOption` holds no placeholders), so its `labelValues` are
- * empty strings -- present only to satisfy `EncoderOptionView`'s shape, never read by the
- * template.
+ * interpolation (`settings.preset.customOption` holds no placeholders), so its `name` is the empty
+ * string -- present only to satisfy `EncoderOptionView`'s shape, never read by the template.
  */
 export function presentEncoderSelect(
   state: Pick<FfmpegState, "status" | "results">,
@@ -143,17 +155,14 @@ export function presentEncoderSelect(
 
   const options: EncoderOptionView[] = rawOptions.map((option) => ({
     value: option.name,
-    labelKey: "settings.encoder.optionLabel",
-    labelValues: {
-      name: option.name,
-      availability: presentEncoderOption(option).availabilityKey,
-    },
+    labelKey: presentEncoderOptionLabelKey(option),
+    labelValues: { name: option.name },
   }));
 
   options.push({
     value: CUSTOM_ENCODER_VALUE,
     labelKey: "settings.preset.customOption",
-    labelValues: { name: "", availability: "" },
+    labelValues: { name: "" },
   });
 
   const currentOption = rawOptions.find((option) => option.name === currentValue);

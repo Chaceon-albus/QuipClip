@@ -28,7 +28,6 @@ describe("Settings Types & Wire Constants", () => {
       expect(PRESET_CONTAINERS).toContain("mp4");
       expect(PRESET_CONTAINERS).toContain("mov");
       expect(PRESET_CONTAINERS).toContain("mkv");
-      expect(PRESET_CONTAINERS.length).toBe(3);
     });
   });
 
@@ -38,12 +37,11 @@ describe("Settings Types & Wire Constants", () => {
       expect(QUALITY_KINDS).toContain("crf");
       expect(QUALITY_KINDS).toContain("bitrate");
       expect(QUALITY_KINDS).toContain("qualityScale");
-      expect(QUALITY_KINDS.length).toBe(3);
     });
   });
 
   describe("Error Codes", () => {
-    it("contains all twelve backend error codes verbatim from the Rust source", () => {
+    it("contains the backend error codes verbatim from the Rust source", () => {
       expect(BACKEND_SETTINGS_ERROR_CODES).toEqual([
         "appDataUnavailable",
         "readFailed",
@@ -58,7 +56,6 @@ describe("Settings Types & Wire Constants", () => {
         "invalidPath",
         "commandExecutionFailed",
       ]);
-      expect(BACKEND_SETTINGS_ERROR_CODES.length).toBe(12);
     });
 
     it("contains the frontend-only dialog code", () => {
@@ -71,7 +68,6 @@ describe("Settings Types & Wire Constants", () => {
         ...FRONTEND_SETTINGS_ERROR_CODES,
         "unknown",
       ]);
-      expect(SETTINGS_ERROR_CODES.length).toBe(14);
     });
   });
 

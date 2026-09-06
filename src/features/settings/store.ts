@@ -114,21 +114,20 @@ export function createSettingsStore(
     };
 
     const save = async (next: Settings): Promise<Settings | null> => {
-      // Reject malformed documents early before publishing to state (NON-BLOCKING 8)
+      // Reject malformed documents early before publishing to state (NON-BLOCKING 8).
+      // This branch does NOT touch `latestRequestId`. The counter decides which of the
+      // requests that were actually issued wins; a request rejected before any IPC has no
+      // result to win with, and bumping the counter here would invalidate an in-flight
+      // load and leave the dialog on "Loading..." forever.
       if (!isSettings(next)) {
-        const requestId = ++latestRequestId;
-        const normalized = new SettingsError({
-          code: "invalidSettings",
-          detail: "Invalid settings document: payload must match Settings schema",
+        set({
+          status: "error",
+          settings: lastConfirmedSettings,
+          error: new SettingsError({
+            code: "invalidSettings",
+            detail: "Invalid settings document: payload must match Settings schema",
+          }),
         });
-
-        if (requestId === latestRequestId) {
-          set({
-            status: "error",
-            settings: lastConfirmedSettings,
-            error: normalized,
-          });
-        }
 
         return null;
       }
@@ -299,11 +298,6 @@ export function createSettingsStore(
       resetSettings: resetSettingsAction,
       reportError,
       reset,
-
-      // Runtime aliases for backward compatibility and test identity assertion
-      load,
-      save,
-      restoreDefaults,
     };
 
     return storeState;

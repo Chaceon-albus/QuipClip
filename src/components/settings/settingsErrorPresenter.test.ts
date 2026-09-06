@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { presentSettingsError } from "./settingsErrorPresenter";
 import { en } from "@/i18n/locales/en";
 import {
+  BACKEND_SETTINGS_ERROR_CODES,
+  FRONTEND_SETTINGS_ERROR_CODES,
   SETTINGS_ERROR_CODES,
   SettingsError,
   type SettingsErrorCode,
@@ -46,8 +48,14 @@ describe("presentSettingsError", () => {
     },
   );
 
-  it("checks that SETTINGS_ERROR_CODES still has exactly 14 codes, so the loop above covers the whole catalog", () => {
-    expect(SETTINGS_ERROR_CODES.length).toBe(14);
+  // The count is derived, never typed: a literal number here would go stale the moment the
+  // backend vocabulary grows, even though nothing is wrong. What must hold is the relationship
+  // -- every backend code, every frontend code, and the single "unknown" fallback -- so that the
+  // loop above covers the whole catalog.
+  it("covers the backend codes plus the frontend codes plus the unknown fallback", () => {
+    expect(SETTINGS_ERROR_CODES.length).toBe(
+      BACKEND_SETTINGS_ERROR_CODES.length + FRONTEND_SETTINGS_ERROR_CODES.length + 1,
+    );
   });
 
   it("falls back to settingsError.unknown for a code absent from the catalog", () => {

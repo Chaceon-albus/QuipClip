@@ -612,7 +612,18 @@ export class PresetLibraryController {
 
     // Reload the current selection against the restored document: a merge can change the
     // values of the selected preset, or remove it entirely.
-    this.loadDraftFrom(restored, this.selectedPresetId);
+    //
+    // RULE 3 applies here as it does in `syncFromSettings`: a restore merges the seeds by
+    // id and keeps every other preset, so it says nothing about the preset the user is
+    // editing, and reloading over a dirty draft would discard that edit with no prompt.
+    // The one condition that still replaces a dirty draft is the selected preset no longer
+    // being in the restored document, because there is then nothing left to save it to.
+    const selectedSurvives =
+      this.selectedPresetId !== null &&
+      restored.presets.some((preset) => preset.id === this.selectedPresetId);
+    if (!this.dirty || !selectedSurvives) {
+      this.loadDraftFrom(restored, this.selectedPresetId);
+    }
     this.notify();
     return true;
   }
