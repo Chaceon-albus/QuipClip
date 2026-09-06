@@ -11,12 +11,53 @@ import {
 } from "@/components/ui/dialog";
 import { useExportStore } from "@/features/export";
 import { getResolvedLanguage } from "@/i18n";
-import { isCancelEnabled, isCancelOutstanding } from "./exportCancelState";
+import {
+  isCancelEnabled,
+  isCancelOutstanding,
+  isExportDismissalRefused,
+} from "./exportCancelState";
 import { presentExportError } from "./exportErrorPresenter";
 
 export interface ExportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+}
+
+/**
+ * Progress readout for a running export.
+ *
+ * `frame` is written once per drained ffmpeg `-progress` block, so it changes many times
+ * per second for the whole encode. It is subscribed HERE, in a leaf, rather than in
+ * `ExportDialog`, so a progress write re-renders this element alone instead of the whole
+ * Radix dialog subtree. The observable output is identical.
+ */
+function ExportProgress({ formatter }: { formatter: Intl.NumberFormat }) {
+  const { t } = useTranslation();
+  const frame = useExportStore((state) => state.frame);
+  const expectedFrames = useExportStore((state) => state.expectedFrames);
+
+  return (
+    <div className="space-y-3 py-2">
+      <div className="text-sm text-muted-foreground">
+        {frame !== null && expectedFrames !== null
+          ? t("export.status.progress", {
+              frame: formatter.format(frame),
+              expectedFrames: formatter.format(expectedFrames),
+            })
+          : t("export.status.running")}
+      </div>
+      {frame !== null && expectedFrames !== null && expectedFrames > 0 && (
+        <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
+          <div
+            className="h-full bg-primary transition-all duration-150"
+            style={{
+              width: `${Math.min(100, Math.max(0, (frame / expectedFrames) * 100))}%`,
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
@@ -28,16 +69,12 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
 
   const status = useExportStore((state) => state.status);
   const runId = useExportStore((state) => state.runId);
-  const frame = useExportStore((state) => state.frame);
-  const expectedFrames = useExportStore((state) => state.expectedFrames);
   const error = useExportStore((state) => state.error);
   const cancelExport = useExportStore((state) => state.cancelExport);
   const reset = useExportStore((state) => state.reset);
 
-  const isRunning =
-    status === "preparing" || status === "running" || status === "publishing";
-
-  // Both derived values live in a pure module, so their rules carry their own tests.
+  // All three derived values live in a pure module, so their rules carry their own tests.
+  const isRunning = isExportDismissalRefused({ status, runId });
   const canceling = isCancelOutstanding({ status, runId, cancelingRunId });
   const cancelEnabled = isCancelEnabled({ status, runId, cancelingRunId });
 
@@ -94,28 +131,7 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
             </div>
           );
         }
-        return (
-          <div className="space-y-3 py-2">
-            <div className="text-sm text-muted-foreground">
-              {frame !== null && expectedFrames !== null
-                ? t("export.status.progress", {
-                    frame: numberFormatter.format(frame),
-                    expectedFrames: numberFormatter.format(expectedFrames),
-                  })
-                : t("export.status.running")}
-            </div>
-            {frame !== null && expectedFrames !== null && expectedFrames > 0 && (
-              <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
-                <div
-                  className="h-full bg-primary transition-all duration-150"
-                  style={{
-                    width: `${Math.min(100, Math.max(0, (frame / expectedFrames) * 100))}%`,
-                  }}
-                />
-              </div>
-            )}
-          </div>
-        );
+        return <ExportProgress formatter={numberFormatter} />;
 
       case "publishing":
         if (canceling) {
@@ -213,7 +229,9 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
         {renderContent()}
 
         <DialogFooter>
-          {status === "preparing" || status === "running" || status === "publishing" ? (
+          {/* Reads the same `isRunning` rule as every other exit, so the phase that has no
+              run id yet offers Close rather than a Cancel that stays disabled. */}
+          {isRunning ? (
             <Button
               variant="outline"
               onClick={() => void handleCancel()}

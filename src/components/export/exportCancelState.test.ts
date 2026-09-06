@@ -1,9 +1,45 @@
 import { describe, expect, it } from "vitest";
 import { EXPORT_STATUSES } from "@/features/export";
-import { isCancelEnabled, isCancelOutstanding } from "./exportCancelState";
+import {
+  isCancelEnabled,
+  isCancelOutstanding,
+  isExportDismissalRefused,
+} from "./exportCancelState";
 
 const RUN_ID = "run-abc-123";
 const OTHER_RUN_ID = "run-xyz-789";
+
+describe("isExportDismissalRefused", () => {
+  // BLOCKING 08-F1: "preparing" before the backend answers is the one progress phase with
+  // no run to protect. Refusing it too left the interface with a state it could enter and
+  // could not leave, because `isCancelEnabled` also refuses while `runId` is null.
+  it("permits dismissal during preparing while no run id exists", () => {
+    expect(isExportDismissalRefused({ status: "preparing", runId: null })).toBe(false);
+    expect(
+      isCancelEnabled({ status: "preparing", runId: null, cancelingRunId: null }),
+    ).toBe(false);
+  });
+
+  it("refuses dismissal once a run exists, and for running and publishing", () => {
+    expect(isExportDismissalRefused({ status: "preparing", runId: RUN_ID })).toBe(true);
+    expect(isExportDismissalRefused({ status: "running", runId: RUN_ID })).toBe(true);
+    expect(isExportDismissalRefused({ status: "publishing", runId: RUN_ID })).toBe(
+      true,
+    );
+  });
+
+  it("permits dismissal in every status that is not a progress phase", () => {
+    for (const status of EXPORT_STATUSES) {
+      const progress =
+        status === "preparing" || status === "running" || status === "publishing";
+      if (progress) {
+        continue;
+      }
+      expect(isExportDismissalRefused({ status, runId: RUN_ID })).toBe(false);
+      expect(isExportDismissalRefused({ status, runId: null })).toBe(false);
+    }
+  });
+});
 
 describe("isCancelOutstanding", () => {
   it("reports no outstanding cancel while no run id is known, in every status", () => {

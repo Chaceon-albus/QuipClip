@@ -34,8 +34,11 @@ export interface ExportFlowControllerOptions {
 
   /**
    * Localized filter name displayed in the native save dialog.
+   *
+   * Required, with no default: the value is user-facing text and must come from a catalog
+   * key (ADR 011). A default here would be an English literal with no key.
    */
-  filterName?: string;
+  filterName: string;
 
   /**
    * Dialog opener function. Defaults to `openExportSaveDialog`.
@@ -111,7 +114,7 @@ export class ExportFlowController {
 
   constructor(options: ExportFlowControllerOptions) {
     this.setModalOpen = options.setModalOpen;
-    this.filterName = options.filterName ?? "Video Files";
+    this.filterName = options.filterName;
     this.openSaveDialogFn = options.openSaveDialog ?? openExportSaveDialog;
     this.getMediaFn = options.getMedia ?? (() => mediaStore.getState().media);
     this.getSegmentsFn =

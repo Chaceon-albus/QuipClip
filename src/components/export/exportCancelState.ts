@@ -13,6 +13,33 @@ export interface ExportCancelStateInput {
 }
 
 /**
+ * Answers whether the dialog must refuse every dismissal: Escape, the outside click, the
+ * close control, and the Close button.
+ *
+ * "preparing" WITHOUT a run id is deliberately dismissable, and that is a trade rather than a
+ * free exit. Refusing it would give the interface a state it can enter and cannot leave,
+ * because `isCancelEnabled` also refuses while `runId` is null, and the backend preparation
+ * this phase waits for has no timeout.
+ *
+ * What the dismissal buys is bounded: the store's `reset` invalidates the in-flight start
+ * through its request counter, so the store's own state stays consistent. It does NOT reach
+ * the backend. `start_export` claims the registry slot, prepares, spawns the worker, and only
+ * then answers with the run id, so a dismissal inside that window leaves ffmpeg encoding and
+ * publishing to the path the user chose. The store never learns that run id, so it cannot
+ * cancel the run, every event for it is dropped, and the next export is refused with
+ * `exportAlreadyRunning` until the orphan finishes.
+ */
+export function isExportDismissalRefused({
+  status,
+  runId,
+}: Pick<ExportCancelStateInput, "status" | "runId">): boolean {
+  if (status === "preparing") {
+    return runId !== null;
+  }
+  return status === "running" || status === "publishing";
+}
+
+/**
  * Answers whether a cancel the user asked for is still outstanding.
  *
  * The flag is keyed to a run id rather than held as a boolean, so a cancel that names

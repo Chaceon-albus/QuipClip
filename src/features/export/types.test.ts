@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   BACKEND_EXPORT_ERROR_CODES,
@@ -38,7 +40,50 @@ export type _StoreReportErrorIsPinned = Assert<
   "reportError" extends keyof ExportStoreState ? true : false
 >;
 
+/**
+ * Reads the wire strings of every `ExportErrorCode` out of the Rust source.
+ *
+ * `BACKEND_EXPORT_ERROR_CODES` and the Rust enum are two independent hand-written lists that
+ * must name the same set, and until this test existed nothing compared them: a code added on
+ * one side reached the user as the generic "unknown" message, which is the opposite of why a
+ * stable code crosses the boundary at all (ADR 011).
+ *
+ * The `export_error_codes!` invocation is the one place that pairs a variant with its wire
+ * string, and the Rust side already proves through serde that those strings are what the
+ * backend actually emits (`every_error_code_serializes_to_its_stable_camel_case_string`).
+ * Reading it here therefore needs no second table on either side. The invocation is matched
+ * rather than the whole file so the macro's own definition, which carries the same `=>`
+ * shape, cannot contribute a match.
+ */
+function readRustExportErrorCodes(): string[] {
+  const source = readFileSync(
+    fileURLToPath(
+      new URL("../../../src-tauri/src/ffmpeg/export/mod.rs", import.meta.url),
+    ),
+    "utf8",
+  );
+
+  const invocation = /\nexport_error_codes! \{\n([\s\S]*?)\n\}\n/.exec(source);
+  expect(invocation).not.toBeNull();
+
+  const wireStrings = invocation![1].matchAll(/=>\s*"([A-Za-z]+)",/g);
+  return Array.from(wireStrings, (match) => match[1]);
+}
+
 describe("Export Types & Wire Constants", () => {
+  describe("Rust vocabulary parity", () => {
+    it("names exactly the codes the Rust export vocabulary emits", () => {
+      const rustCodes = readRustExportErrorCodes();
+
+      // Guards the parse itself: a moved or renamed Rust file would otherwise read as an
+      // empty vocabulary and pass every comparison below.
+      expect(rustCodes.length).toBeGreaterThan(20);
+      expect(new Set(rustCodes).size).toBe(rustCodes.length);
+
+      expect([...BACKEND_EXPORT_ERROR_CODES].sort()).toEqual([...rustCodes].sort());
+    });
+  });
+
   describe("Export Statuses", () => {
     it("contains exactly the expected lifecycle statuses", () => {
       expect(EXPORT_STATUSES).toEqual([
@@ -50,12 +95,11 @@ describe("Export Types & Wire Constants", () => {
         "canceled",
         "failed",
       ]);
-      expect(EXPORT_STATUSES.length).toBe(7);
     });
   });
 
   describe("Export Error Codes", () => {
-    it("contains all 26 backend error codes matching expected literal list in order", () => {
+    it("matches the expected backend error code literals in order", () => {
       expect(BACKEND_EXPORT_ERROR_CODES).toEqual([
         "appDataUnavailable",
         "settingsUnreadable",
@@ -64,6 +108,7 @@ describe("Export Types & Wire Constants", () => {
         "ffprobeSpawnFailed",
         "ffprobeProcessFailed",
         "ffprobeParseFailed",
+        "ffprobeTimedOut",
         "noSegments",
         "tooManySegments",
         "invalidSegment",
@@ -75,6 +120,7 @@ describe("Export Types & Wire Constants", () => {
         "outputEqualsSource",
         "outputNotWritable",
         "sourceFrameRateUnknown",
+        "sourceAudioRateUnknown",
         "encoderUnavailable",
         "ffmpegSpawnFailed",
         "ffmpegProcessFailed",
@@ -84,23 +130,23 @@ describe("Export Types & Wire Constants", () => {
         "commandExecutionFailed",
         "exportAlreadyRunning",
       ]);
-      expect(BACKEND_EXPORT_ERROR_CODES.length).toBe(26);
     });
 
     it("contains the frontend dialog error code", () => {
       expect(FRONTEND_EXPORT_ERROR_CODES).toEqual(["dialogFailed"]);
-      expect(FRONTEND_EXPORT_ERROR_CODES.length).toBe(1);
     });
 
-    it("contains 28 entries, ends with 'unknown', and has no duplicates", () => {
+    // The literal above pins the content, so a count here would only restate it with a number
+    // that goes stale the moment the backend gains a code. What is asserted instead is the
+    // composition, the terminating fallback, and the absence of duplicates.
+    it("concatenates the backend and frontend codes, ends with 'unknown', and has no duplicates", () => {
       expect(EXPORT_ERROR_CODES).toEqual([
         ...BACKEND_EXPORT_ERROR_CODES,
         ...FRONTEND_EXPORT_ERROR_CODES,
         "unknown",
       ]);
-      expect(EXPORT_ERROR_CODES.length).toBe(28);
       expect(EXPORT_ERROR_CODES[EXPORT_ERROR_CODES.length - 1]).toBe("unknown");
-      expect(new Set(EXPORT_ERROR_CODES).size).toBe(28);
+      expect(new Set(EXPORT_ERROR_CODES).size).toBe(EXPORT_ERROR_CODES.length);
     });
   });
 

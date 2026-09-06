@@ -4,7 +4,9 @@ import { presentExportError } from "./exportErrorPresenter";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n";
 import {
+  BACKEND_EXPORT_ERROR_CODES,
   EXPORT_ERROR_CODES,
+  FRONTEND_EXPORT_ERROR_CODES,
   ExportError,
   type ExportErrorCode,
 } from "@/features/export/types";
@@ -57,8 +59,14 @@ describe("presentExportError", () => {
     },
   );
 
-  it("checks that EXPORT_ERROR_CODES has exactly 28 codes, covering 26 backend codes plus dialogFailed and unknown", () => {
-    expect(EXPORT_ERROR_CODES.length).toBe(28);
+  // The count is derived, never typed: the backend vocabulary grows, and a literal number here
+  // would fail on the next code added even though nothing is wrong. What must hold is the
+  // relationship -- every backend code, every frontend code, and the single "unknown" fallback --
+  // so that the two loops above cover the whole vocabulary.
+  it("covers the backend codes plus the frontend codes plus the unknown fallback", () => {
+    expect(EXPORT_ERROR_CODES.length).toBe(
+      BACKEND_EXPORT_ERROR_CODES.length + FRONTEND_EXPORT_ERROR_CODES.length + 1,
+    );
   });
 
   it("falls back to exportError.unknown for a code absent from the catalog", () => {

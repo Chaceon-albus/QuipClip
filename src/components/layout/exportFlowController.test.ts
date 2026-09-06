@@ -70,6 +70,7 @@ describe("ExportFlowController", () => {
       startExport,
       openSaveDialog,
       getExportStatus,
+      filterName: "Video Files",
       getSettings: () => createSettings(createPreset()),
       getMedia: () => ({ path: "/path/to/video.mp4", fileName: "video.mp4" }),
     });
@@ -100,6 +101,7 @@ describe("ExportFlowController", () => {
       startExport,
       openSaveDialog,
       getExportStatus: () => storeStatus,
+      filterName: "Video Files",
       getSettings: () => createSettings(createPreset()),
       getMedia: () => ({ path: "/path/to/video.mp4", fileName: "video.mp4" }),
     });
@@ -124,6 +126,7 @@ describe("ExportFlowController", () => {
       startExport,
       openSaveDialog,
       getExportStatus: () => "idle",
+      filterName: "Video Files",
       getSettings: () => createSettings(createPreset()),
     });
 
@@ -151,6 +154,7 @@ describe("ExportFlowController", () => {
       getMedia: () => ({ path: "/media/sample.mp4", fileName: "sample.mp4" }),
       getSegments: () => [],
       getSourceId: () => "source-1",
+      filterName: "Video Files",
       getSettings: () => createSettings(createPreset()),
     });
 
@@ -178,6 +182,7 @@ describe("ExportFlowController", () => {
       openSaveDialog,
       getExportStatus: () => "idle",
       getMedia: () => null,
+      filterName: "Video Files",
       getSegments: () => [],
       getSourceId: () => null,
       getSettings: () => createSettings(createPreset()),
@@ -291,6 +296,7 @@ describe("ExportFlowController", () => {
       startExport,
       openSaveDialog,
       loadSettings,
+      filterName: "Video Files",
       getExportStatus: () => "idle",
       getSettings: () => currentSettings,
       getMedia: () => ({ path: "/in/clip.mov", fileName: "clip.mov" }),
@@ -318,6 +324,7 @@ describe("ExportFlowController", () => {
         openSaveDialog,
         startExport,
         getExportStatus: () => activeStatus,
+        filterName: "Video Files",
       });
 
       expect(result).toBe(false);
