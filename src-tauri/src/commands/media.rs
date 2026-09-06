@@ -218,7 +218,13 @@ fn unix_seconds(time: SystemTime) -> Result<i64, ImportMediaError> {
     Ok(seconds as i64)
 }
 
-fn map_probe_error(error: ProbeError) -> ImportMediaError {
+/// Map one `ffprobe` failure to a stable code, a raw diagnostic, and an exit code.
+///
+/// Visible to the crate because `commands::export` re-probes the source when an export starts
+/// (ADR 014's "Other rules") and must report the same three failures. It translates the codes
+/// below into its own vocabulary rather than keeping a second copy of this mapping, which
+/// could drift away from this one.
+pub(crate) fn map_probe_error(error: ProbeError) -> ImportMediaError {
     match error {
         ProbeError::Spawn { source } => ImportMediaError::with_detail(
             ImportMediaErrorCode::FfprobeSpawnFailed,

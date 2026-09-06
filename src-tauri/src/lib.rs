@@ -10,8 +10,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // The one export slot for the whole application (ADR 016). `ExportRegistry::begin`
+        // takes `self: &Arc<Self>`, because the `ExportSlot` it hands out owns a reference to
+        // the registry and outlives the command that claimed it, so the managed value is the
+        // `Arc` itself rather than the registry.
+        .manage(std::sync::Arc::new(
+            ffmpeg::export::ExportRegistry::default(),
+        ))
         .invoke_handler(tauri::generate_handler![
             commands::capabilities::start_capability_probe,
+            commands::export::start_export,
+            commands::export::cancel_export,
             commands::media::import_media,
             commands::project::load_project,
             commands::project::save_project,
