@@ -35,6 +35,7 @@ document summarizes them and shows how the parts fit together.
 | [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)         | Homebrew path fallback for macOS GUI applications             |
 | [`013-application-settings-file.md`](../.agents/decisions/013-application-settings-file.md)                 | One settings file for the ffmpeg path and the export presets  |
 | [`014-export-cut-with-trim-after-seek.md`](../.agents/decisions/014-export-cut-with-trim-after-seek.md)     | Seeked input, trim on raw source PTS, one process, one output |
+| [`015-windows-atomic-replace-retry.md`](../.agents/decisions/015-windows-atomic-replace-retry.md)           | Layered Windows rename with a bounded retry                   |
 
 ## Shape
 
