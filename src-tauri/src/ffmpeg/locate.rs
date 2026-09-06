@@ -98,6 +98,13 @@ fn search_directories(path: Option<OsString>) -> Vec<PathBuf> {
         PathBuf::from("/usr/local/bin"),
     ]);
 
+    // An empty `PATH` element yields one empty `PathBuf`, on Unix and on Windows. `candidate_in`
+    // would join the program name onto nothing, and `accept_candidate` would then canonicalize
+    // that relative name against the working directory of the process. A `PATH` that ends in a
+    // separator is common, and the working directory is not one of the locations ADR 005 and
+    // ADR 012 name.
+    directories.retain(|directory| !directory.as_os_str().is_empty());
+
     let mut seen = HashSet::new();
     directories.retain(|directory| seen.insert(directory.clone()));
     directories
@@ -463,6 +470,33 @@ mod tests {
                 PathBuf::from("/opt/homebrew/bin"),
                 PathBuf::from("/usr/local/bin"),
             ]
+        );
+    }
+
+    #[test]
+    fn an_empty_path_element_never_becomes_a_search_directory() {
+        // A `PATH` that ends in a separator is common. `env::split_paths` yields one empty
+        // `PathBuf` for that element, and an empty directory would make discovery run an `ffmpeg`
+        // that sits in the working directory of the process, which no ADR names.
+        let inherited =
+            env::join_paths([Path::new("/custom/bin"), Path::new(""), Path::new("")]).unwrap();
+        assert!(
+            env::split_paths(&inherited).any(|directory| directory.as_os_str().is_empty()),
+            "this test is only meaningful while split_paths still yields the empty element"
+        );
+
+        let directories = search_directories(Some(inherited));
+
+        assert!(
+            !directories
+                .iter()
+                .any(|directory| directory.as_os_str().is_empty()),
+            "no search directory may be empty, got {directories:?}"
+        );
+        assert_eq!(
+            directories.first(),
+            Some(&PathBuf::from("/custom/bin")),
+            "the non-empty elements keep their order"
         );
     }
 

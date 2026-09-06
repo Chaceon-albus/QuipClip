@@ -1,8 +1,8 @@
 //! On-disk cache for ADR 006 capability probe reports.
 //!
 //! The cache lives at `<app_data>/capabilities.json` and holds a bounded list of entries.
-//! Each entry pairs a [`CacheKey`] with the [`CapabilityReport`] it was probed under and the
-//! time of that probe. ADR 006 requires the list shape, not a single entry, because the
+//! Each entry pairs a [`CacheKey`] with the [`CapabilityReport`] it was probed under; the
+//! report carries the time of that probe. ADR 006 requires the list shape, not a single entry, because the
 //! application never cancels a superseded probe run: two runs can finish at nearly the same
 //! time, and both call [`write`] while the other is still in flight. A naive
 //! read-modify-write would let the later `rename` silently discard the earlier writer's
@@ -139,12 +139,16 @@ impl From<serde_json::Error> for CacheError {
     }
 }
 
-/// One cached probe: the key it was probed under, when, and what it found.
+/// One cached probe: the key it was probed under, and what it found.
+///
+/// The probe time lives in [`CapabilityReport::probed_at`] alone. An entry once carried a
+/// second copy of it, and the two could disagree in a hand-edited or damaged file: [`read`]
+/// range-checked the entry's copy and then returned the report holding the other one, which is
+/// the value that crosses to the frontend. One field cannot disagree with itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CacheEntry {
     key: CacheKey,
-    probed_at: i64,
     report: CapabilityReport,
 }
 
@@ -211,7 +215,7 @@ pub fn read(app_data_directory: &Path, key: &CacheKey) -> Option<CapabilityRepor
     let path = app_data_directory.join(CACHE_FILE_NAME);
     let file = load_cache_file(&path)?;
     let entry = file.entries.into_iter().find(|entry| entry.key == *key)?;
-    if entry.probed_at <= 0 || entry.probed_at > MAX_PROBED_AT_SECONDS {
+    if entry.report.probed_at <= 0 || entry.report.probed_at > MAX_PROBED_AT_SECONDS {
         return None;
     }
     Some(entry.report)
@@ -280,7 +284,6 @@ fn load_cache_file(path: &Path) -> Option<CacheFile> {
 /// never evicts, because that does not grow the list.
 fn upsert_entry(entries: &mut Vec<CacheEntry>, key: &CacheKey, report: &CapabilityReport) {
     if let Some(existing) = entries.iter_mut().find(|entry| entry.key == *key) {
-        existing.probed_at = report.probed_at;
         existing.report = report.clone();
         return;
     }
@@ -289,7 +292,7 @@ fn upsert_entry(entries: &mut Vec<CacheEntry>, key: &CacheKey, report: &Capabili
         let Some(oldest_index) = entries
             .iter()
             .enumerate()
-            .min_by_key(|(_, entry)| entry.probed_at)
+            .min_by_key(|(_, entry)| entry.report.probed_at)
             .map(|(index, _)| index)
         else {
             break;
@@ -299,7 +302,6 @@ fn upsert_entry(entries: &mut Vec<CacheEntry>, key: &CacheKey, report: &Capabili
 
     entries.push(CacheEntry {
         key: key.clone(),
-        probed_at: report.probed_at,
         report: report.clone(),
     });
 }
@@ -425,7 +427,12 @@ mod tests {
         assert!(value.get("schemaVersion").is_some());
         assert!(value.get("entries").is_some());
         let entry = &value["entries"][0];
-        assert!(entry.get("probedAt").is_some());
+        assert!(entry["report"].get("probedAt").is_some());
+        assert!(
+            entry.get("probedAt").is_none(),
+            "the entry must not carry a second copy of the probe time: `read` would then \
+             range-check one copy and return the other, which is the one the frontend parses"
+        );
         assert!(entry["key"].get("ffmpegPath").is_some());
 
         let encoder = entry["report"]["encoders"][0].as_object().unwrap();
@@ -453,7 +460,6 @@ mod tests {
                 let probed_at = 1_700_000_000 + i64::try_from(index).unwrap();
                 CacheEntry {
                     key: sample_key(&format!("seeded-{index}")),
-                    probed_at,
                     report: sample_report(probed_at),
                 }
             })
@@ -477,6 +483,9 @@ mod tests {
 
     #[test]
     fn an_out_of_range_probed_at_reads_as_a_miss() {
+        // The value under test is the one `read` returns, and therefore the one the frontend
+        // parses. A frontend that receives `probedAt: 0` drops the `finished` event and stays in
+        // the probing state, so the range check must sit on this copy and no other.
         let directory = TestDirectory::new();
         let path = directory.path.join(CACHE_FILE_NAME);
 
@@ -486,7 +495,6 @@ mod tests {
                 schema_version: CACHE_SCHEMA_VERSION,
                 entries: vec![CacheEntry {
                     key: key.clone(),
-                    probed_at,
                     report: sample_report(probed_at),
                 }],
             };
@@ -505,7 +513,6 @@ mod tests {
             schema_version: CACHE_SCHEMA_VERSION,
             entries: vec![CacheEntry {
                 key: key.clone(),
-                probed_at: MAX_PROBED_AT_SECONDS,
                 report: report.clone(),
             }],
         };

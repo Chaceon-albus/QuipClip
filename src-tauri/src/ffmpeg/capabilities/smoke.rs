@@ -13,7 +13,7 @@
 use super::{CodecKind, EncoderStatus};
 use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,11 +30,21 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// The largest number of stderr bytes [`run_with_timeout`] retains from a smoke test.
 const STDERR_CAPTURE_LIMIT: usize = 8 * 1024;
 
+/// The largest number of stdout bytes [`run_with_timeout`] retains for a caller that asked
+/// for stdout.
+///
+/// A stderr tail of 8 KiB is a diagnostic, and a truncated one still reads. Captured stdout is
+/// input to a parser instead, so the cap must sit far above the real output rather than near
+/// it: `ffmpeg -encoders` on a full GPL build prints tens of kilobytes, and `-filters` prints
+/// more. One mebibyte leaves that whole range untouched and still bounds the memory a runaway
+/// process can make this process hold.
+const STDOUT_CAPTURE_LIMIT: usize = 1024 * 1024;
+
 /// The largest number of stderr-tail bytes [`run_smoke_report`] keeps in a [`SmokeReport`]'s
 /// `detail` field.
 const SMOKE_DETAIL_LIMIT: usize = 512;
 
-/// One lock for the whole application's smoke-test phase.
+/// One lock, held for one smoke test at a time, for the whole application.
 ///
 /// ADR 006 requires that the smoke tests run one after another, never two at once: two
 /// hardware encoder tests that run at the same time compete for the same encoder device,
@@ -65,6 +75,23 @@ pub struct CommandOutcome {
     /// Up to [`STDERR_CAPTURE_LIMIT`] bytes of the process's stderr, captured on a
     /// separate thread while the process ran or was awaited.
     pub stderr: Vec<u8>,
+    /// Up to [`STDOUT_CAPTURE_LIMIT`] bytes of the process's stdout, captured the same way,
+    /// and empty when the caller passed [`StdoutCapture::Discard`].
+    pub stdout: Vec<u8>,
+}
+
+/// Whether [`run_with_timeout`] keeps the child's stdout or sends it to the null device.
+///
+/// A smoke test discards it: ADR 006's command writes its encode to the null muxer and every
+/// verdict comes from the exit status and stderr. A listing command is the opposite -- its
+/// stdout is the whole result -- so the two cases are named rather than passed as a bare
+/// `bool` at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdoutCapture {
+    /// Send stdout to the null device. [`CommandOutcome::stdout`] is then empty.
+    Discard,
+    /// Pipe stdout and drain it on its own thread, the same way stderr is drained.
+    Capture,
 }
 
 /// Build the ffmpeg arguments for the smoke test of one encoder, or `None` when `kind` has
@@ -176,18 +203,28 @@ fn is_utf8_char_boundary(byte: u8) -> bool {
 /// The child's stderr is piped and drained on a separate thread from the moment it spawns.
 /// This is not an optimization: a chatty ffmpeg build fills the stderr pipe's OS buffer
 /// and blocks the child before it can exit, and an undrained pipe would then produce a
-/// false timeout on exactly that build. Killing the child on timeout closes its end of the
-/// pipe, which unblocks the drain thread's read and bounds the final join.
+/// false timeout on exactly that build. Killing the child closes its end of the pipe, which
+/// unblocks the drain thread's read and bounds the final join, and [`kill_and_reap`] runs on
+/// every path that leaves the polling loop with a child that may still be alive.
+///
+/// `stdout` decides whether the child's stdout is kept. [`StdoutCapture::Capture`] gives it a
+/// pipe and a drain thread of its own, for the same reason and with the same guarantees as
+/// stderr's: a listing command that fills the stdout buffer must not block before it exits.
+/// [`StdoutCapture::Discard`] sends it to the null device, where no buffer can fill.
 pub fn run_with_timeout(
     program: &Path,
     args: &[String],
     timeout: Duration,
     poll: Duration,
+    stdout: StdoutCapture,
 ) -> io::Result<CommandOutcome> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(match stdout {
+            StdoutCapture::Capture => Stdio::piped(),
+            StdoutCapture::Discard => Stdio::null(),
+        })
         .stderr(Stdio::piped())
         .spawn()?;
 
@@ -196,56 +233,90 @@ pub fn run_with_timeout(
         .take()
         .expect("stderr was requested as piped above");
     let stderr_thread = thread::spawn(move || read_capped(stderr, STDERR_CAPTURE_LIMIT));
+    // Taken before the polling loop, like stderr's, so the drain runs for the whole life of
+    // the process rather than starting once it has already filled the pipe and stopped.
+    let stdout_thread = child
+        .stdout
+        .take()
+        .map(|stdout| thread::spawn(move || read_capped(stdout, STDOUT_CAPTURE_LIMIT)));
 
-    // The polling and kill/wait logic below returns `Result` instead of using `?`
-    // directly in this function: every path here must still join `stderr_thread` before
-    // this function returns, including the error paths, or a failed `try_wait`/`kill`
-    // would abandon the drain thread and leak it reading a pipe nobody joins.
-    let status = (|| -> io::Result<CommandStatus> {
+    // The polling below returns `Result` instead of using `?` directly in this function:
+    // every path here must still end the child and join the drain threads before this
+    // function returns, including the error paths. A failed `try_wait` that returned early
+    // would leave a live, unreaped process holding its pipe ends open, and the joins below
+    // would then wait for it with no bound -- the exact failure this timeout exists to
+    // prevent -- because `read_capped` reads until the pipe closes and the pipe closes when
+    // the child exits. On Unix, dropping a `Child` neither kills nor reaps it, so no later
+    // step would end it either.
+    let polled = (|| -> io::Result<Option<ExitStatus>> {
         let deadline = Instant::now() + timeout;
-        let exit_status = loop {
+        loop {
             match child.try_wait()? {
-                Some(status) => break Some(status),
-                None if Instant::now() >= deadline => break None,
+                Some(status) => return Ok(Some(status)),
+                None if Instant::now() >= deadline => return Ok(None),
                 None => thread::sleep(poll),
-            }
-        };
-
-        match exit_status {
-            Some(status) => Ok(CommandStatus::Exited {
-                code: status.code(),
-                success: status.success(),
-            }),
-            None => {
-                // The process is still running at the deadline. Kill it, then wait on it
-                // so the operating system does not keep it around as a zombie. Both run
-                // unconditionally: if the process exited in the narrow window between the
-                // last `try_wait` and here, `Child::kill` documents that race as an
-                // `InvalidInput` error rather than a real failure, and `wait` still needs
-                // to run either way to reap the process.
-                let kill_result = child.kill();
-                let wait_result = child.wait();
-                match kill_result {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::InvalidInput => {}
-                    Err(error) => return Err(error),
-                }
-                wait_result?;
-                Ok(CommandStatus::TimedOut)
             }
         }
     })();
 
-    // Killing the child above closes its stderr pipe, so this join completes even when
+    // Only the first arm has a child the polling already reaped. The deadline arm and the
+    // failed-`try_wait` arm both leave a process that may still be running, so each one ends
+    // it here, before the joins below.
+    let status = match polled {
+        Ok(Some(status)) => Ok(CommandStatus::Exited {
+            code: status.code(),
+            success: status.success(),
+        }),
+        Ok(None) => kill_and_reap(&mut child).map(|()| CommandStatus::TimedOut),
+        Err(error) => {
+            // The polling failure is what this run reports. The kill runs only to bound the
+            // joins below, so its own result has nowhere to go.
+            let _ = kill_and_reap(&mut child);
+            Err(error)
+        }
+    };
+
+    // Ending the child above closes its stderr pipe, so this join completes even when
     // the process timed out; when the process exited on its own, the pipe already closed
     // with it. Joined unconditionally, before the `?` below, so an error from the polling
     // closure still leaves the drain thread reaped rather than detached.
     let stderr = stderr_thread.join().unwrap_or_default();
+    let stdout = stdout_thread
+        .map(|thread| thread.join().unwrap_or_default())
+        .unwrap_or_default();
 
     Ok(CommandOutcome {
         status: status?,
         stderr,
+        stdout,
     })
+}
+
+/// Kill `child` and reap it, so the operating system keeps neither a runaway process nor a
+/// zombie, and so both of the child's pipe ends close for the drain threads reading them.
+///
+/// Every exit from a timed runner's polling loop that did not already collect the child's
+/// status calls this: the deadline path, and a `try_wait` that failed. `read_capped` returns
+/// only when the pipe closes, so a live child left behind here turns each drain-thread join
+/// into an unbounded wait.
+///
+/// The order is kill, inspect, then wait. `Child::kill` reports the process it was asked to
+/// end as already gone with an `InvalidInput` error on some platforms, which is the documented
+/// race between the last poll and this call rather than a real failure, and the `wait` is
+/// needed to reap the process either way. A kill that failed for any other reason is
+/// different: it leaves a process that is still running, and a blocking `wait` on that process
+/// would last as long as the process does, so the failure is reported without waiting.
+///
+/// `ffmpeg::export::process` keeps a `kill_and_reap` of its own. That one is called from a
+/// cancel branch where the `Child` was just polled, so it documents why it can wait
+/// unconditionally; this one runs on a path where the child's state is unknown.
+pub(crate) fn kill_and_reap(child: &mut Child) -> io::Result<()> {
+    match child.kill() {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => {}
+        Err(error) => return Err(error),
+    }
+    child.wait().map(|_| ())
 }
 
 /// Read `reader` to end of stream, retaining only the first `cap` bytes.
@@ -310,7 +381,13 @@ pub fn run_smoke_report(ffmpeg: &Path, encoder: &str, kind: CodecKind) -> io::Re
             "the smoke test has no command for CodecKind::Subtitle",
         )
     })?;
-    let outcome = run_with_timeout(ffmpeg, &arguments, SMOKE_TIMEOUT, POLL_INTERVAL)?;
+    let outcome = run_with_timeout(
+        ffmpeg,
+        &arguments,
+        SMOKE_TIMEOUT,
+        POLL_INTERVAL,
+        StdoutCapture::Discard,
+    )?;
     let status = classify(&outcome);
     let exit_code = match outcome.status {
         CommandStatus::Exited { code, .. } => code,
@@ -408,6 +485,7 @@ mod tests {
                 success: true,
             },
             stderr: Vec::new(),
+            stdout: Vec::new(),
         };
         assert_eq!(classify(&outcome), EncoderStatus::Works);
     }
@@ -420,6 +498,7 @@ mod tests {
                 success: false,
             },
             stderr: Vec::new(),
+            stdout: Vec::new(),
         };
         assert_eq!(classify(&outcome), EncoderStatus::Failed);
     }
@@ -429,6 +508,7 @@ mod tests {
         let outcome = CommandOutcome {
             status: CommandStatus::TimedOut,
             stderr: Vec::new(),
+            stdout: Vec::new(),
         };
         assert_eq!(classify(&outcome), EncoderStatus::TimedOut);
     }
@@ -470,8 +550,14 @@ mod tests {
         let program = std::env::current_exe().expect("the test binary has a path");
         let args = vec!["--this-flag-does-not-exist".to_owned()];
 
-        let outcome = run_with_timeout(&program, &args, Duration::from_secs(5), POLL_INTERVAL)
-            .expect("the test binary should spawn and exit quickly");
+        let outcome = run_with_timeout(
+            &program,
+            &args,
+            Duration::from_secs(5),
+            POLL_INTERVAL,
+            StdoutCapture::Discard,
+        )
+        .expect("the test binary should spawn and exit quickly");
 
         assert!(matches!(
             outcome.status,
@@ -496,6 +582,7 @@ mod tests {
             &args,
             Duration::from_millis(200),
             Duration::from_millis(10),
+            StdoutCapture::Discard,
         )
         .expect("the process should spawn and then be killed");
 
@@ -527,6 +614,7 @@ mod tests {
             &args,
             Duration::from_millis(200),
             Duration::from_millis(10),
+            StdoutCapture::Discard,
         )
         .expect("the process should spawn and then be killed");
 
@@ -539,6 +627,34 @@ mod tests {
     }
 
     #[test]
+    fn kill_and_reap_answers_for_a_process_that_already_exited_on_its_own() {
+        // The race arm, which every non-deadline exit from the polling loop now runs into:
+        // the child ended between the last poll and the kill. It must read as success and
+        // must not block, because the two drain-thread joins are behind it.
+        let program = std::env::current_exe().expect("the test binary has a path");
+        let mut child = Command::new(program)
+            .arg("--list")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the test binary should spawn");
+        // Poll rather than sleep, so the child is known to have exited before the kill.
+        while child.try_wait().expect("try_wait must answer").is_none() {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let started = Instant::now();
+        kill_and_reap(&mut child).expect("a child that already exited is not a failure");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "kill_and_reap must not block on a process that is already gone, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn read_capped_drains_past_the_cap_so_a_chatty_process_never_blocks() {
         let data = vec![b'x'; 32 * 1024];
         let mut cursor = std::io::Cursor::new(data.clone());
@@ -546,6 +662,41 @@ mod tests {
         assert_eq!(captured.len(), 8 * 1024);
         // The load-bearing half: the reader must be consumed to the end, not abandoned at the cap.
         assert_eq!(cursor.position() as usize, data.len());
+    }
+
+    #[test]
+    fn stdout_is_captured_only_when_the_caller_asks_for_it() {
+        // The test binary stands in for ffmpeg again. `--list` makes the harness print its test
+        // names to stdout and exit at once, on every platform this crate targets, so this needs
+        // no real listing command and no ffmpeg build.
+        let program = std::env::current_exe().expect("the test binary has a path");
+        let args = vec!["--list".to_owned()];
+
+        let captured = run_with_timeout(
+            &program,
+            &args,
+            Duration::from_secs(30),
+            POLL_INTERVAL,
+            StdoutCapture::Capture,
+        )
+        .expect("the test binary should spawn and exit quickly");
+        assert!(
+            !captured.stdout.is_empty(),
+            "Capture must keep the child's stdout, which is the whole result of a listing command"
+        );
+
+        let discarded = run_with_timeout(
+            &program,
+            &args,
+            Duration::from_secs(30),
+            POLL_INTERVAL,
+            StdoutCapture::Discard,
+        )
+        .expect("the test binary should spawn and exit quickly");
+        assert!(
+            discarded.stdout.is_empty(),
+            "Discard must send stdout to the null device and leave the field empty"
+        );
     }
 
     #[test]

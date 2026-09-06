@@ -224,6 +224,13 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 /// the rename itself durable across a crash. `budget` is unused here: `rename(2)` is safe under
 /// concurrency, so there is nothing on this platform to wait out.
 ///
+/// The rename is the step that publishes, and the directory fsync only adds durability across a
+/// crash. A failed fsync is therefore not reported: an `Err` from this function always means the
+/// rename itself failed and `destination` still holds what it held before. Reporting a failed
+/// fsync would tell every caller that the replacement did not happen when it did -- a settings
+/// save, a settings reset that has already moved the old file aside, and an export publication
+/// that has already written the user's chosen path.
+///
 /// The two platform arms are less symmetric than they look, and this is the arm a macOS
 /// developer reads. This one is two lines because `rename(2)` is also safe when two writers
 /// target one destination, and because the parent-directory fsync makes it durable. The Windows
@@ -239,7 +246,11 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(unix)]
 pub fn replace_file_within(source: &Path, destination: &Path, _budget: Duration) -> io::Result<()> {
     fs::rename(source, destination)?;
-    File::open(parent_directory(destination))?.sync_all()
+    // The rename is complete and every reader already sees it. A failed directory open or fsync
+    // costs durability across a crash; it does not undo the replacement, so it must not be
+    // reported as one.
+    let _ = File::open(parent_directory(destination)).and_then(|directory| directory.sync_all());
+    Ok(())
 }
 
 /// Replace `destination` with `source` in one atomic step, through two layered renames, waiting
@@ -775,6 +786,39 @@ mod tests {
         fs::write(&source, b"new contents").unwrap();
         replace_file(&source, &destination).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"new contents");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_directory_that_cannot_be_opened_still_publishes_the_replacement() {
+        // The rename is the step that publishes; the parent-directory fsync only adds durability
+        // across a crash. A directory with mode 0o300 grants the write and search permissions
+        // `rename(2)` needs and withholds the read permission `File::open` needs, so it separates
+        // the two steps without a file-descriptor limit or an unmount.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("value.txt");
+        fs::write(&destination, b"old contents").unwrap();
+        let source = directory.path.join("source.tmp");
+        fs::write(&source, b"new contents").unwrap();
+
+        fs::set_permissions(&directory.path, fs::Permissions::from_mode(0o300)).unwrap();
+        let directory_opens = File::open(&directory.path).is_ok();
+        let result = replace_file(&source, &destination);
+        fs::set_permissions(&directory.path, fs::Permissions::from_mode(0o700)).unwrap();
+
+        if directory_opens {
+            // A process that ignores the mode -- root, most often -- cannot reach the case this
+            // test exists for, so it claims nothing.
+            return;
+        }
+        result.expect("a failed parent-directory fsync must not be reported as a failed rename");
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"new contents",
+            "the rename published, so the caller must not be told that it did not"
+        );
     }
 
     #[test]

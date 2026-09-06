@@ -18,10 +18,11 @@ pub use listing::{
 };
 pub use smoke::{
     classify, run_smoke_report, run_smoke_test, run_with_timeout, smoke_arguments, stderr_tail,
-    CommandOutcome, CommandStatus, SmokeReport, SMOKE_TIMEOUT,
+    CommandOutcome, CommandStatus, SmokeReport, StdoutCapture, SMOKE_TIMEOUT,
 };
 
 use serde::{Deserialize, Serialize};
+use std::io;
 use std::path::Path;
 
 /// The media kind ffmpeg reports for one codec row.
@@ -118,8 +119,9 @@ pub struct CapabilityReport {
     /// milliseconds). This is pinned on the TypeScript side; do not switch units here. The
     /// type is a plain `i64`, but the frontend only accepts a value strictly greater than `0`
     /// and at most [`cache::MAX_PROBED_AT_SECONDS`]; [`cache::read`] enforces that range on
-    /// the way out of the cache, so this field can never widen it without also widening the
-    /// constant.
+    /// this field on the way out of the cache, so it can never widen it without also widening
+    /// the constant. A cache entry keeps no second copy of the probe time, so there is no other
+    /// value the check could land on by mistake.
     pub probed_at: i64,
 }
 
@@ -249,10 +251,6 @@ pub struct ProbeRequest<'a> {
     /// read from the system clock, so a test can pin [`CapabilityReport::probed_at`] to an
     /// exact, reproducible value.
     pub now_unix_seconds: i64,
-    /// Flips to `false` when a smoke test raises a transient I/O error rather than reporting
-    /// a genuine encoder outcome, so step 6 never caches a report an I/O error may have
-    /// poisoned.
-    pub allow_cache_write: &'a std::cell::Cell<bool>,
 }
 
 /// Run one full ADR 006 capability probe: list, then smoke-test, then cache.
@@ -282,10 +280,9 @@ pub struct ProbeRequest<'a> {
 ///    `run_smoke`; only a listed candidate is actually smoke-tested.
 /// 5. Report each result through `emit` as it lands, with a running `done` count and the
 ///    fixed `total` of [`TESTED_ENCODERS`]'s length.
-/// 6. Cache the finished report, unless `allow_cache_write` reports `false` by then or the
-///    fingerprint failed in step 2. A cache write failure is not fatal either way: the report
-///    still reaches the caller, per ADR 006's "a write failure must never keep a probe result
-///    from reaching the frontend".
+/// 6. Cache the finished report, unless the fingerprint failed in step 2. A cache write
+///    failure is not fatal: the report still reaches the caller, per ADR 006's "a write
+///    failure must never keep a probe result from reaching the frontend".
 ///
 /// The return value names the report's source explicitly: [`CapabilityProbeSource::Cache`]
 /// for the step-2 early return, [`CapabilityProbeSource::Probe`] for every other `Ok` path.
@@ -295,13 +292,13 @@ pub struct ProbeRequest<'a> {
 /// `now_unix_seconds` is injected rather than read from the system clock, so a test can pin
 /// [`CapabilityReport::probed_at`] to an exact, reproducible value.
 ///
-/// `allow_cache_write` gates step 6. `RunSmoke` can only return an [`EncoderStatus`], not a
-/// `Result`, so it has no way to tell this function that a candidate's smoke test raised a
-/// transient I/O error (file-descriptor exhaustion, the binary removed mid-probe) rather
-/// than genuinely failing. The caller's `run_smoke` closure instead flips this shared
-/// `Cell` to `false` when that happens, and this function checks it right before the write
-/// it owns: an I/O error must never be cached as if it were a permanent verdict on the
-/// encoder, but the report itself is still returned either way.
+/// `RunSmoke` returns an `io::Result`, and an `Err` ends the whole run with
+/// [`CapabilityProbeErrorCode::FfmpegSpawnFailed`]. An I/O error (file-descriptor exhaustion,
+/// the binary removed mid-probe) means the test never ran, so it is not an answer about the
+/// encoder: [`EncoderStatus::Failed`] states that the encoder ran and did not work, and a
+/// probe that reported it for every remaining candidate would leave the export dialog with no
+/// encoder and no reason. The run stops at the first one, nothing is emitted for the
+/// candidates after it, and no report is built or cached.
 pub fn probe_capabilities_with<RunList, OnLocated, RunSmoke, Emit>(
     request: ProbeRequest<'_>,
     run_list: RunList,
@@ -312,7 +309,7 @@ pub fn probe_capabilities_with<RunList, OnLocated, RunSmoke, Emit>(
 where
     RunList: Fn(&[&str]) -> Result<String, CapabilityProbeErrorCode>,
     OnLocated: Fn(&VersionInfo, LicenseFlags),
-    RunSmoke: Fn(&str, CodecKind) -> SmokeReport,
+    RunSmoke: Fn(&str, CodecKind) -> io::Result<SmokeReport>,
     Emit: Fn(&EncoderResult, u32, u32),
 {
     let ProbeRequest {
@@ -320,7 +317,6 @@ where
         app_data_directory,
         force,
         now_unix_seconds,
-        allow_cache_write,
     } = request;
 
     let version_stdout = run_list(&["-version"])?;
@@ -367,7 +363,11 @@ where
         // worked needs no diagnostic either, even though the process itself did have an
         // exit code: only `Failed` and `TimedOut` carry `exit_code` and `detail` onward.
         let (status, exit_code, detail) = if listed {
-            let report = run_smoke(candidate.name, candidate.kind);
+            // An I/O error means the smoke test never ran. Reporting it as a verdict on this
+            // candidate, and then on every candidate after it, is what this early return
+            // exists to prevent.
+            let report = run_smoke(candidate.name, candidate.kind)
+                .map_err(|_| CapabilityProbeErrorCode::FfmpegSpawnFailed)?;
             match report.status {
                 EncoderStatus::Failed | EncoderStatus::TimedOut => {
                     (report.status, report.exit_code, report.detail)
@@ -399,15 +399,12 @@ where
     };
 
     // A cache write failure must never keep this report from reaching the caller: ADR 006
-    // treats the cache as a pure optimization, so its error is discarded here on purpose.
-    // Skipping the write entirely on `allow_cache_write == false` is separate: that is not
-    // a failure to persist, it is a deliberate refusal to persist a report a smoke test's
-    // I/O error may have poisoned. A missing `cache_key` (the step-2 fingerprint failed) is a
-    // third, independent reason to skip: there is no key to write under.
-    if allow_cache_write.get() {
-        if let Some(key) = cache_key.as_ref() {
-            let _ = cache::write(app_data_directory, key, &report);
-        }
+    // treats the cache as a pure optimization, so its error is discarded here on purpose. A
+    // missing `cache_key` (the step-2 fingerprint failed) is the one reason to skip the write
+    // entirely: there is no key to write under. A report a smoke-test I/O error may have
+    // poisoned cannot reach this point at all, because that error already ended the run.
+    if let Some(key) = cache_key.as_ref() {
+        let _ = cache::write(app_data_directory, key, &report);
     }
 
     Ok(ProbeOutcome {
@@ -531,12 +528,15 @@ mod tests {
     }
 
     /// A [`SmokeReport`] for a candidate that simply worked: no exit code, no diagnostic.
-    fn works_report() -> SmokeReport {
-        SmokeReport {
+    ///
+    /// Wrapped in `Ok` because `RunSmoke` returns an `io::Result`: an `Err` means the test
+    /// never ran, which is a different statement from any [`EncoderStatus`].
+    fn works_report() -> io::Result<SmokeReport> {
+        Ok(SmokeReport {
             status: EncoderStatus::Works,
             exit_code: None,
             detail: None,
-        }
+        })
     }
 
     #[test]
@@ -574,7 +574,7 @@ mod tests {
                 other => panic!("cache hit must not fetch beyond -version, got {other:?}"),
             }
         };
-        let run_smoke = |_: &str, _: CodecKind| -> SmokeReport {
+        let run_smoke = |_: &str, _: CodecKind| -> io::Result<SmokeReport> {
             panic!("a cache hit must never run a smoke test")
         };
         let emitted = RefCell::new(Vec::new());
@@ -594,7 +594,6 @@ mod tests {
                 app_data_directory: &directory.path,
                 force: false,
                 now_unix_seconds: 1_700_000_999,
-                allow_cache_write: &Cell::new(true),
             },
             run_list,
             on_located,
@@ -628,7 +627,7 @@ mod tests {
         cache::write(&directory.path, &key, &stale_report).unwrap();
 
         let smoke_calls = RefCell::new(Vec::new());
-        let run_smoke = |name: &str, kind: CodecKind| -> SmokeReport {
+        let run_smoke = |name: &str, kind: CodecKind| -> io::Result<SmokeReport> {
             smoke_calls.borrow_mut().push((name.to_owned(), kind));
             works_report()
         };
@@ -649,7 +648,6 @@ mod tests {
                 app_data_directory: &directory.path,
                 force: true,
                 now_unix_seconds: 1_700_000_100,
-                allow_cache_write: &Cell::new(true),
             },
             full_probe_run_list,
             on_located,
@@ -679,7 +677,7 @@ mod tests {
         let ffmpeg = write_dummy_ffmpeg(&directory.path);
 
         let smoke_calls = RefCell::new(Vec::new());
-        let run_smoke = |name: &str, kind: CodecKind| -> SmokeReport {
+        let run_smoke = |name: &str, kind: CodecKind| -> io::Result<SmokeReport> {
             smoke_calls.borrow_mut().push((name.to_owned(), kind));
             works_report()
         };
@@ -694,7 +692,6 @@ mod tests {
                 app_data_directory: &directory.path,
                 force: false,
                 now_unix_seconds: 1_700_000_200,
-                allow_cache_write: &Cell::new(true),
             },
             full_probe_run_list,
             no_op_on_located,
@@ -730,7 +727,7 @@ mod tests {
         let directory = TestDirectory::new();
         let ffmpeg = write_dummy_ffmpeg(&directory.path);
 
-        let run_smoke = |_: &str, _: CodecKind| -> SmokeReport { works_report() };
+        let run_smoke = |_: &str, _: CodecKind| -> io::Result<SmokeReport> { works_report() };
         let emitted = RefCell::new(Vec::new());
         let emit = |result: &EncoderResult, done: u32, total: u32| {
             emitted
@@ -744,7 +741,6 @@ mod tests {
                 app_data_directory: &directory.path,
                 force: false,
                 now_unix_seconds: 1_700_000_300,
-                allow_cache_write: &Cell::new(true),
             },
             full_probe_run_list,
             no_op_on_located,
@@ -775,7 +771,8 @@ mod tests {
         let run_list = |_: &[&str]| -> Result<String, CapabilityProbeErrorCode> {
             Ok("not a version line".to_owned())
         };
-        let run_smoke = |_: &str, _: CodecKind| -> SmokeReport { panic!("must not be reached") };
+        let run_smoke =
+            |_: &str, _: CodecKind| -> io::Result<SmokeReport> { panic!("must not be reached") };
         let emit = |_: &EncoderResult, _: u32, _: u32| panic!("must not be reached");
 
         let error = probe_capabilities_with(
@@ -784,7 +781,6 @@ mod tests {
                 app_data_directory: &directory.path,
                 force: false,
                 now_unix_seconds: 1_700_000_400,
-                allow_cache_write: &Cell::new(true),
             },
             run_list,
             unreachable_on_located,
@@ -808,7 +804,8 @@ mod tests {
                 other => panic!("must not fetch hwaccels first, got {other:?}"),
             }
         };
-        let run_smoke = |_: &str, _: CodecKind| -> SmokeReport { panic!("must not be reached") };
+        let run_smoke =
+            |_: &str, _: CodecKind| -> io::Result<SmokeReport> { panic!("must not be reached") };
         let emit = |_: &EncoderResult, _: u32, _: u32| panic!("must not be reached");
 
         let error = probe_capabilities_with(
@@ -817,7 +814,6 @@ mod tests {
                 app_data_directory: &directory.path,
                 force: false,
                 now_unix_seconds: 1_700_000_500,
-                allow_cache_write: &Cell::new(true),
             },
             run_list,
             no_op_on_located,
@@ -839,7 +835,7 @@ mod tests {
         let app_data_directory = directory.path.join("app-data-is-a-file");
         fs::write(&app_data_directory, b"not a directory").unwrap();
 
-        let run_smoke = |_: &str, _: CodecKind| -> SmokeReport { works_report() };
+        let run_smoke = |_: &str, _: CodecKind| -> io::Result<SmokeReport> { works_report() };
         let emit = |_: &EncoderResult, _: u32, _: u32| {};
 
         let outcome = probe_capabilities_with(
@@ -848,7 +844,6 @@ mod tests {
                 app_data_directory: &app_data_directory,
                 force: false,
                 now_unix_seconds: 1_700_000_600,
-                allow_cache_write: &Cell::new(true),
             },
             full_probe_run_list,
             no_op_on_located,
@@ -864,44 +859,61 @@ mod tests {
     }
 
     #[test]
-    fn an_io_error_during_smoke_testing_skips_the_cache_write_but_still_returns_the_report() {
-        // This exercises the Finding A fix directly at the orchestrator boundary: the
-        // caller's `run_smoke` closure has already flipped `allow_cache_write` to `false`
-        // by the time the loop below finishes (a real caller does this the instant
-        // `capabilities::run_smoke_report` returns an `io::Error`, not a genuine encoder
-        // failure). The orchestrator must still return the finished report, but it must
-        // never let this run reach the cache: a transient failure must not be pinned to the
-        // cache key as a permanent verdict.
+    fn an_io_error_during_smoke_testing_ends_the_run_and_never_answers_for_an_encoder() {
+        // An I/O error means the smoke test never ran, so it is not a verdict. The run must
+        // stop at the first one: it must not emit a result for the candidate that raised it,
+        // must not emit a result for any candidate after it, must not build a report, and
+        // must not reach the cache.
         let directory = TestDirectory::new();
         let ffmpeg = write_dummy_ffmpeg(&directory.path);
         let key = cache::fingerprint(&ffmpeg, "9.0.1").unwrap();
         let cache_file = directory.path.join(cache::CACHE_FILE_NAME);
 
-        let run_smoke = |_: &str, _: CodecKind| -> SmokeReport { works_report() };
-        let emit = |_: &EncoderResult, _: u32, _: u32| {};
-        let allow_cache_write = Cell::new(false);
+        let smoke_calls = Cell::new(0u32);
+        let run_smoke = |_: &str, _: CodecKind| -> io::Result<SmokeReport> {
+            smoke_calls.set(smoke_calls.get() + 1);
+            Err(io::Error::other(
+                "too many open files, so the test never ran",
+            ))
+        };
+        let emitted = RefCell::new(Vec::new());
+        let emit = |result: &EncoderResult, done: u32, total: u32| {
+            emitted.borrow_mut().push((result.clone(), done, total));
+        };
 
-        let outcome = probe_capabilities_with(
+        let error = probe_capabilities_with(
             ProbeRequest {
                 ffmpeg: &ffmpeg,
                 app_data_directory: &directory.path,
                 force: false,
                 now_unix_seconds: 1_700_000_700,
-                allow_cache_write: &allow_cache_write,
             },
             full_probe_run_list,
             no_op_on_located,
             run_smoke,
             emit,
         )
-        .unwrap();
+        .expect_err("an I/O error from a smoke test must end the run");
 
-        assert_eq!(outcome.report.version, "9.0.1");
-        assert_eq!(outcome.report.encoders.len(), TESTED_ENCODERS.len());
+        assert_eq!(error, CapabilityProbeErrorCode::FfmpegSpawnFailed);
+        assert_eq!(
+            smoke_calls.get(),
+            1,
+            "the run must stop at the first I/O error rather than test every candidate after it"
+        );
+        let statuses: Vec<EncoderStatus> = emitted
+            .borrow()
+            .iter()
+            .map(|(result, _, _)| result.status)
+            .collect();
+        assert!(
+            !statuses.contains(&EncoderStatus::Failed),
+            "`failed` means the encoder ran and did not work, which this run never measured"
+        );
         assert!(cache::read(&directory.path, &key).is_none());
         assert!(
             !cache_file.exists(),
-            "an I/O error during smoke testing must skip the cache write entirely"
+            "a run that ended on an I/O error must not reach the cache"
         );
     }
 
@@ -913,7 +925,8 @@ mod tests {
         let run_list = |_: &[&str]| -> Result<String, CapabilityProbeErrorCode> {
             Err(CapabilityProbeErrorCode::FfmpegSpawnFailed)
         };
-        let run_smoke = |_: &str, _: CodecKind| -> SmokeReport { panic!("must not be reached") };
+        let run_smoke =
+            |_: &str, _: CodecKind| -> io::Result<SmokeReport> { panic!("must not be reached") };
         let emit = |_: &EncoderResult, _: u32, _: u32| panic!("must not be reached");
 
         let error = probe_capabilities_with(
@@ -922,7 +935,6 @@ mod tests {
                 app_data_directory: &directory.path,
                 force: false,
                 now_unix_seconds: 1_700_000_800,
-                allow_cache_write: &Cell::new(true),
             },
             run_list,
             unreachable_on_located,
@@ -942,7 +954,8 @@ mod tests {
         let run_list = |_: &[&str]| -> Result<String, CapabilityProbeErrorCode> {
             Err(CapabilityProbeErrorCode::FfmpegProcessFailed)
         };
-        let run_smoke = |_: &str, _: CodecKind| -> SmokeReport { panic!("must not be reached") };
+        let run_smoke =
+            |_: &str, _: CodecKind| -> io::Result<SmokeReport> { panic!("must not be reached") };
         let emit = |_: &EncoderResult, _: u32, _: u32| panic!("must not be reached");
 
         let error = probe_capabilities_with(
@@ -951,7 +964,6 @@ mod tests {
                 app_data_directory: &directory.path,
                 force: false,
                 now_unix_seconds: 1_700_000_900,
-                allow_cache_write: &Cell::new(true),
             },
             run_list,
             unreachable_on_located,
@@ -975,7 +987,7 @@ mod tests {
         let ffmpeg = directory.path.join("ffmpeg-that-does-not-exist");
         assert!(cache::fingerprint(&ffmpeg, "9.0.1").is_err());
 
-        let run_smoke = |_: &str, _: CodecKind| -> SmokeReport { works_report() };
+        let run_smoke = |_: &str, _: CodecKind| -> io::Result<SmokeReport> { works_report() };
         let emitted = RefCell::new(Vec::new());
         let emit = |result: &EncoderResult, done: u32, total: u32| {
             emitted.borrow_mut().push((result.clone(), done, total));
@@ -987,7 +999,6 @@ mod tests {
                 app_data_directory: &directory.path,
                 force: false,
                 now_unix_seconds: 1_700_001_000,
-                allow_cache_write: &Cell::new(true),
             },
             full_probe_run_list,
             no_op_on_located,
@@ -1014,13 +1025,13 @@ mod tests {
         let directory = TestDirectory::new();
         let ffmpeg = write_dummy_ffmpeg(&directory.path);
 
-        let run_smoke = |name: &str, _: CodecKind| -> SmokeReport {
+        let run_smoke = |name: &str, _: CodecKind| -> io::Result<SmokeReport> {
             if name == "libx264" {
-                SmokeReport {
+                Ok(SmokeReport {
                     status: EncoderStatus::Failed,
                     exit_code: Some(1),
                     detail: Some("libx264 exploded".to_owned()),
-                }
+                })
             } else {
                 works_report()
             }
@@ -1036,7 +1047,6 @@ mod tests {
                 app_data_directory: &directory.path,
                 force: false,
                 now_unix_seconds: 1_700_001_100,
-                allow_cache_write: &Cell::new(true),
             },
             full_probe_run_list,
             no_op_on_located,

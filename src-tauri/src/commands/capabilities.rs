@@ -15,8 +15,8 @@
 //! has already returned its `CapabilityProbeStart` payload and has no rejection path left.
 
 use crate::ffmpeg::capabilities::{
-    self, CapabilityProbeErrorCode, CapabilityReport, CodecKind, EncoderResult, EncoderStatus,
-    LicenseFlags, ProbeRequest, SmokeReport, VersionInfo,
+    self, CapabilityProbeErrorCode, CapabilityReport, CodecKind, EncoderResult, LicenseFlags,
+    ProbeRequest, SmokeReport, VersionInfo,
 };
 // Re-exported so a caller can name the wire type through this command module, even though
 // [`CapabilityProbeSource`] is now defined in `capabilities::mod` alongside the orchestrator
@@ -25,10 +25,10 @@ pub use crate::ffmpeg::capabilities::CapabilityProbeSource;
 use crate::ffmpeg::{self, ExecutableOrigin, FfmpegPaths, InspectedLocation, LocateError};
 use crate::settings;
 use serde::Serialize;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
 // The run id generator will be shared with the export command, so it sits in `commands::mod`.
@@ -295,26 +295,12 @@ fn run_probe_worker(
         );
     };
 
-    // Set to `false` the moment a smoke test raises an I/O error (file-descriptor
-    // exhaustion, the binary removed mid-probe) rather than reporting a real encoder
-    // outcome. `run_smoke` cannot change its return type to carry that distinction -- the
-    // orchestrator's `RunSmoke` bound is a plain `Fn(&str, CodecKind) -> SmokeReport` --
-    // so this `Cell` is the side channel: `run_smoke` sets it, and the orchestrator reads it
-    // right before it would cache the report. A transient failure must never be pinned to
-    // the cache key as if it were a permanent verdict.
-    let allow_cache_write = Cell::new(true);
-    let run_smoke = |encoder: &str, kind: CodecKind| -> SmokeReport {
-        match capabilities::run_smoke_report(&paths.ffmpeg, encoder, kind) {
-            Ok(report) => report,
-            Err(_) => {
-                allow_cache_write.set(false);
-                SmokeReport {
-                    status: EncoderStatus::Failed,
-                    exit_code: None,
-                    detail: None,
-                }
-            }
-        }
+    // An I/O error here (file-descriptor exhaustion, the binary removed mid-probe) means the
+    // test never ran, so it is passed straight through rather than turned into a verdict on
+    // the encoder. The orchestrator ends the run on it, and the `Err(code)` arm below reports
+    // it as `ffmpegSpawnFailed`.
+    let run_smoke = |encoder: &str, kind: CodecKind| -> io::Result<SmokeReport> {
+        capabilities::run_smoke_report(&paths.ffmpeg, encoder, kind)
     };
 
     match capabilities::probe_capabilities_with(
@@ -323,7 +309,6 @@ fn run_probe_worker(
             app_data_directory,
             force,
             now_unix_seconds: current_unix_seconds(),
-            allow_cache_write: &allow_cache_write,
         },
         run_list,
         on_located,
@@ -362,33 +347,80 @@ struct ListingFailure {
     detail: Option<String>,
 }
 
+/// The deadline for one listing command.
+///
+/// A listing prints a table the build already holds in memory, so a real one finishes in
+/// milliseconds. This bound exists for the case where it never finishes at all: a binary on a
+/// network share that stops answering. The probe worker thread is the only thread that can
+/// report a run, so a listing that waits forever leaves the interface in the probing state
+/// with no `finished` event and no `failed` event. Ten seconds is far above the real cost and
+/// still short enough that a person sees a message rather than nothing.
+const LISTING_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often [`run_ffmpeg_listing_within`] polls the listing process for completion.
+const LISTING_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 /// Spawn `ffmpeg` with `args` and capture its stdout as UTF-8 text, lossily.
 ///
 /// This is the only place in this module that spawns `ffmpeg` for a listing command, so
 /// `-version`, `-encoders`, and `-hwaccels` all share one mapping from a process failure to
 /// a stable error code, an exit code, and a stderr tail.
+///
+/// The run goes through [`capabilities::run_with_timeout`], not `Command::output()`, so
+/// [`LISTING_TIMEOUT`] bounds it. That runner drains both streams on their own threads, which
+/// `output()` also did, and it additionally kills and reaps a process that outlives the
+/// deadline. A timeout maps to `ffmpegProcessFailed`: the process did run, and that code
+/// already exists on both sides of the boundary.
 fn run_ffmpeg_listing(ffmpeg: &Path, args: &[&str]) -> Result<String, ListingFailure> {
-    let output = Command::new(ffmpeg)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|_| ListingFailure {
-            code: CapabilityProbeErrorCode::FfmpegSpawnFailed,
-            exit_code: None,
-            detail: None,
-        })?;
+    run_ffmpeg_listing_within(ffmpeg, args, LISTING_TIMEOUT, LISTING_POLL_INTERVAL)
+}
 
-    if !output.status.success() {
-        return Err(ListingFailure {
-            code: CapabilityProbeErrorCode::FfmpegProcessFailed,
-            exit_code: output.status.code(),
-            detail: capabilities::stderr_tail(&output.stderr, 512),
-        });
+/// [`run_ffmpeg_listing`] with the deadline and the poll interval supplied.
+///
+/// This exists for the same reason [`crate::fsutil::replace_file_within`] does: a test must be
+/// able to observe the timeout without sitting through [`LISTING_TIMEOUT`]. No product caller
+/// passes anything but the two constants above.
+fn run_ffmpeg_listing_within(
+    ffmpeg: &Path,
+    args: &[&str],
+    timeout: Duration,
+    poll: Duration,
+) -> Result<String, ListingFailure> {
+    let arguments: Vec<String> = args.iter().map(|argument| (*argument).to_owned()).collect();
+    let outcome = capabilities::run_with_timeout(
+        ffmpeg,
+        &arguments,
+        timeout,
+        poll,
+        capabilities::StdoutCapture::Capture,
+    )
+    .map_err(|_| ListingFailure {
+        code: CapabilityProbeErrorCode::FfmpegSpawnFailed,
+        exit_code: None,
+        detail: None,
+    })?;
+
+    match outcome.status {
+        capabilities::CommandStatus::Exited { success: true, .. } => {}
+        capabilities::CommandStatus::Exited { code, .. } => {
+            return Err(ListingFailure {
+                code: CapabilityProbeErrorCode::FfmpegProcessFailed,
+                exit_code: code,
+                detail: capabilities::stderr_tail(&outcome.stderr, 512),
+            });
+        }
+        capabilities::CommandStatus::TimedOut => {
+            return Err(ListingFailure {
+                code: CapabilityProbeErrorCode::FfmpegProcessFailed,
+                // The process was killed at the deadline, so it reported no exit code of its
+                // own.
+                exit_code: None,
+                detail: capabilities::stderr_tail(&outcome.stderr, 512),
+            });
+        }
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&outcome.stdout).into_owned())
 }
 
 /// Adapt [`run_ffmpeg_listing`]'s richer failure into the plain error code
@@ -470,6 +502,9 @@ fn current_unix_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests build an `EncoderResult` by hand; the command surface passes the
+    // status through without naming it.
+    use crate::ffmpeg::capabilities::EncoderStatus;
 
     fn sample_encoder_result() -> EncoderResult {
         EncoderResult {
@@ -667,6 +702,48 @@ mod tests {
         assert_eq!(error.code, CapabilityProbeErrorCode::FfmpegProcessFailed);
         assert!(error.exit_code.is_some());
         assert!(error.detail.is_some());
+    }
+
+    #[test]
+    fn a_successful_listing_returns_the_processs_stdout() {
+        // The listing's stdout is the whole result, so the runner must be asked to keep it. A
+        // regression to a discarded stdout would return an empty string here, and the
+        // orchestrator would then report a parse failure for a listing that actually ran.
+        // `--list` makes the test binary print its test names and exit, with no real ffmpeg.
+        let program = std::env::current_exe().unwrap();
+
+        let stdout = run_ffmpeg_listing(&program, &["--list"]).expect("--list exits successfully");
+
+        assert!(!stdout.is_empty(), "the listing's stdout must be captured");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_listing_is_killed_at_the_deadline_and_reported() {
+        // One process, no shell, for the reason `smoke.rs`'s own timeout test states: a shell
+        // that forked would keep the inherited stderr write handle open after the child is
+        // killed, and the drain-thread join would then block for the whole sleep.
+        //
+        // Without a deadline this call never returns, the probe worker thread waits forever,
+        // and the interface stays in the probing state with no event at all.
+        let started = std::time::Instant::now();
+
+        let error = run_ffmpeg_listing_within(
+            Path::new("/bin/sleep"),
+            &["10"],
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+        )
+        .expect_err("a listing that outlives its deadline must be reported, not awaited");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline must fire well before the 10-second sleep, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(error.code, CapabilityProbeErrorCode::FfmpegProcessFailed);
+        // The process was killed at the deadline, so it reported no exit code of its own.
+        assert!(error.exit_code.is_none());
     }
 
     #[test]
