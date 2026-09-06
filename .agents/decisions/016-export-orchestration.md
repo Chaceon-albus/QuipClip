@@ -72,6 +72,16 @@ arms a cleanup guard that deletes the temporary file on an early return, so a re
 destroys the finished encode. Waiting seconds is better than that. A virus scanner that reads back
 a file of several gigabytes holds it for seconds, which 511 milliseconds does not cover.
 
+The waits double from one millisecond, and each single wait stops at one second.
+
+Doubling with no cap abandons most of a long budget. A 30-second budget would take fourteen waits
+that total 16.4 seconds. It would then stop, because the fifteenth wait of 16.4 seconds does not
+fit in the 13.6 seconds that are left. It would report a failure after 16.4 seconds when it was
+given 30. Uncapped doubling also looks at the destination more and more slowly toward the
+end. A destination that becomes free early then stays unpublished for as long as 8.2 seconds. The
+cap spends the budget the caller asked for, and it keeps the rate steady. The cost is more
+attempts, and an attempt is cheap next to the sleeping.
+
 The budget is a limit and not an unbounded wait. A different application that holds the
 destination open, such as a media player, can hold it for as long as the user leaves it open. Only
 the user can clear that condition, so QuipClip reports it instead of waiting for it.
