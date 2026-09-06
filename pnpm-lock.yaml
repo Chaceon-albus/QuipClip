@@ -17,9 +17,6 @@ importers:
       '@tauri-apps/plugin-dialog':
         specifier: ^2.7.2
         version: 2.7.2
-      '@tauri-apps/plugin-opener':
-        specifier: ^2.5.0
-        version: 2.5.4
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -44,9 +41,6 @@ importers:
       react-i18next:
         specifier: ^17.0.12
         version: 17.0.12(i18next@26.4.0(typescript@5.9.3))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(typescript@5.9.3)
-      shadcn:
-        specifier: ^4.19.0
-        version: 4.19.0(typescript@5.9.3)
       tailwind-merge:
         specifier: ^3.6.0
         version: 3.6.0
@@ -96,6 +90,9 @@ importers:
       prettier-plugin-tailwindcss:
         specifier: ^0.8.1
         version: 0.8.1(prettier@3.9.6)
+      shadcn:
+        specifier: ^4.19.0
+        version: 4.19.0(typescript@5.9.3)
       tailwindcss:
         specifier: ^4.3.3
         version: 4.3.3
@@ -1352,9 +1349,6 @@ packages:
 
   '@tauri-apps/plugin-dialog@2.7.2':
     resolution: {integrity: sha512-pX0IGm1I3I6wc+zeKYcq1GSqogK6okCNX5fOdaNU5ab1AjGS6l1E5wFNjEb7meg7ZFSp0JUs+0jQGQNyOvLrsg==}
-
-  '@tauri-apps/plugin-opener@2.5.4':
-    resolution: {integrity: sha512-1HnPkb+AmgO29HBazm4uPLKB+r7zzcTBW1d0fyYp1uP+jwtpoiNDGKMMzz58SFp49nOIrxdE3aUJtT57lfO9CQ==}
 
   '@ts-morph/common@0.27.0':
     resolution: {integrity: sha512-Wf29UqxWDpc+i61k3oIOzcUfQt79PIT9y/MWfAGlrkjg6lBC1hwDECLXPVJAhWjiGbfBCxZd65F/LIZF3+jeJQ==}
@@ -4548,10 +4542,6 @@ snapshots:
       '@tauri-apps/cli-win32-x64-msvc': 2.11.4
 
   '@tauri-apps/plugin-dialog@2.7.2':
-    dependencies:
-      '@tauri-apps/api': 2.11.1
-
-  '@tauri-apps/plugin-opener@2.5.4':
     dependencies:
       '@tauri-apps/api': 2.11.1
 
