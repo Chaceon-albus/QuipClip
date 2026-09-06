@@ -6,8 +6,8 @@
 //! rename within one directory is atomic on every platform this application targets, so a
 //! reader always sees either the previous contents or the complete new ones, never a mix of
 //! both. Atomic is not the same as safe under concurrency: on Windows the rename step can
-//! still fail while another writer replaces the same destination, so [`replace_file`] layers two
-//! renames and a bounded retry there (ADR 015). This module holds that machinery once. ADR 015
+//! still fail while another writer replaces the same destination, so [`replace_file_within`] layers
+//! two renames and a bounded retry there (ADR 015). This module holds that machinery once. ADR 015
 //! tabulates the four write paths that reach it: the settings file (ADR 013), the
 //! capability cache (ADR 006), the project file (ADR 010), and the export output publication
 //! (ADR 004, ADR 014). All four call it in this repository, and the settings write and the cache
@@ -29,7 +29,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(windows)]
 use std::time::Duration;
 
 /// A per-process counter that makes each temporary file name unique.
@@ -186,29 +185,65 @@ fn parent_directory(path: &Path) -> &Path {
     }
 }
 
-/// Replace `destination` with `source` in one atomic step.
+/// The retry budget [`replace_file`] spends, and the one every caller used before the budget
+/// became a parameter (ADR 015).
+///
+/// 511 milliseconds is sized for the settings file (ADR 013) and the capability cache (ADR 006),
+/// where a scanner holds a file of a few kilobytes for milliseconds. It is deliberately short,
+/// because both of those writes run under a lock the rest of the application waits on.
+///
+/// It is the wrong size for the export publication, where a scanner reading back a file of
+/// several gigabytes holds it for seconds and a failed rename discards a finished encode. That
+/// caller passes its own budget to [`replace_file_within`]; see
+/// `ffmpeg::export::output::EXPORT_PUBLISH_BUDGET`.
+pub const DEFAULT_REPLACE_BUDGET: Duration = Duration::from_millis(511);
+
+// While the waits still double, a budget of 2^n - 1 milliseconds buys exactly n waits: those n
+// waits sum to 2^n - 1 and exhaust the budget, so the (n+1)-th wait of 2^n milliseconds is 2^n
+// milliseconds too large for the nothing that is left. `MAXIMUM_RETRY_WAIT` breaks that law from
+// 4095 milliseconds on, where the doubling has already stopped: 4095 buys 13 waits, not 12. 511
+// is 2^9 - 1 and is below that point, so the default budget buys the nine waits 1, 2, 4, 8, 16, 32,
+// 64, 128 and 256, and therefore ten attempts. That is the schedule this module had before the
+// budget was a parameter, byte for byte, and it is why the existing Windows tests still pass
+// unchanged. Changing this value changes both figures, and five doc comments state them.
+const _: () = assert!(DEFAULT_REPLACE_BUDGET.as_millis() == 511);
+
+/// Replace `destination` with `source` in one atomic step, spending [`DEFAULT_REPLACE_BUDGET`].
+///
+/// This is [`replace_file_within`] with the budget the settings file and the capability cache
+/// need; that function carries the whole description of what the replacement does per platform,
+/// and it is the one to call with a longer budget.
+pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    replace_file_within(source, destination, DEFAULT_REPLACE_BUDGET)
+}
+
+/// Replace `destination` with `source` in one atomic step, waiting up to `budget` for a
+/// transient sharing failure to clear.
 ///
 /// A plain rename is already atomic on Unix, so this only adds the directory fsync that makes
-/// the rename itself durable across a crash.
+/// the rename itself durable across a crash. `budget` is unused here: `rename(2)` is safe under
+/// concurrency, so there is nothing on this platform to wait out.
 ///
 /// The two platform arms are less symmetric than they look, and this is the arm a macOS
 /// developer reads. This one is two lines because `rename(2)` is also safe when two writers
 /// target one destination, and because the parent-directory fsync makes it durable. The Windows
 /// arm reaches the concurrency guarantee through two rename layers and a bounded retry, and
 /// reaches durability on every attempt that carries `MOVEFILE_WRITE_THROUGH` (ADR 015). Do not
-/// assume a change here has an equivalent there, or the reverse.
+/// assume a change here has an equivalent there, or the reverse -- a `budget` that decides
+/// nothing here decides how long the call blocks there.
 ///
-/// [`write_bytes_atomically`] is one caller. The export renderer (ADR 004, ADR 014) is a
-/// second, direct one: it calls this itself once the `ffmpeg` process it spawned has finished
-/// writing the path [`reserve_temporary_path`] reserved, to move that output over the
-/// destination the user chose.
+/// [`write_bytes_atomically`] is one caller, through [`replace_file`]. The export renderer
+/// (ADR 004, ADR 014) is a second, direct one: it calls this itself, with its own longer budget,
+/// once the `ffmpeg` process it spawned has finished writing the path
+/// [`reserve_temporary_path`] reserved, to move that output over the destination the user chose.
 #[cfg(unix)]
-pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn replace_file_within(source: &Path, destination: &Path, _budget: Duration) -> io::Result<()> {
     fs::rename(source, destination)?;
     File::open(parent_directory(destination))?.sync_all()
 }
 
-/// Replace `destination` with `source` in one atomic step, through two layered renames.
+/// Replace `destination` with `source` in one atomic step, through two layered renames, waiting
+/// up to `budget` for a transient sharing failure to clear.
 ///
 /// Both layers replace an existing `destination`, and both are atomic. `std::fs::rename` on
 /// Windows passes `MOVEFILE_REPLACE_EXISTING` too, so an existing destination is not the reason
@@ -254,45 +289,47 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 /// be read is not a confirmed refusal, so it keeps the retries: an ordinary delete-pending race
 /// still clears by waiting.
 ///
-/// This makes up to `MAXIMUM_REPLACE_ATTEMPTS` attempts and goes on to the next one only for the
-/// codes [`is_transient_sharing_error`] accepts. Every other error is reported at the attempt
-/// that raises it, which can be the tenth if transient failures came first. A wait from
-/// `replace_retry_delay` precedes each attempt after the first, and no wait follows the last
-/// attempt. The last `io::Error` is returned unchanged **by this module**, never wrapped and
+/// This makes one attempt for the first rename and one more for each wait [`retry_waits`] yields
+/// out of `budget`, and it goes on to the next attempt only for the codes
+/// [`is_transient_sharing_error`] accepts. Every other error is reported at the attempt that
+/// raises it, which can be the last one if transient failures came first. A wait precedes each
+/// attempt after the first, and no wait follows the last attempt. The last `io::Error` is
+/// returned unchanged **by this module**, never wrapped and
 /// never replaced: a synthetic error carries no raw operating-system code, and `map_io_error` in
 /// `commands/settings.rs` keeps a diagnostic only when the error carries one (ADR 011).
 /// `fs::rename` itself is not so faithful, so a code 5 out of layer 2 can be a stand-in: when its
 /// POSIX attempt fails for any reason other than `ERROR_DIR_NOT_EMPTY` it reports the earlier
 /// `ERROR_ACCESS_DENIED` rather than the real cause.
 ///
-/// The whole budget is 511 milliseconds, and that size is set by the settings file and the cache
-/// file, where a scanner holds a file of a few kilobytes for milliseconds. It is too short for the
-/// export publication, where a scanner reads back a file of several gigabytes and holds it for
-/// seconds. The export publication therefore needs its own waiting policy, which no decision
-/// records yet. `PendingOutput::commit` has no production caller yet, which is why this function
-/// does not size that wait today. A separate application that holds the destination open -- a
-/// media player, for example -- is a genuinely unbounded condition that only the user can clear.
-/// That case is the reason the limit here is a limit at all, rather than an unbounded wait.
+/// **The budget is the caller's, not this function's.** [`replace_file`] passes
+/// [`DEFAULT_REPLACE_BUDGET`], 511 milliseconds, and that size is set by the settings file and the
+/// cache file, where a scanner holds a file of a few kilobytes for milliseconds. It is too short
+/// for the export publication, where a scanner reads back a file of several gigabytes and holds it
+/// for seconds, and where a rename this function gives up on discards a finished encode. That
+/// caller passes its own, far longer budget; see `ffmpeg::export::output::EXPORT_PUBLISH_BUDGET`.
+/// A separate application that holds the destination open -- a media player, for example -- is a
+/// genuinely unbounded condition that only the user can clear. That case is the reason `budget` is
+/// a limit at all, rather than an unbounded wait.
 ///
 /// Both paths are resolved one time, above the loop. A retry changes neither path, and the two
 /// directory opens `canonicalize` performs are network round trips on a network share, so
-/// hoisting them keeps the whole call as close to the documented figure as this design allows.
-/// The 511 milliseconds bounds the sleeping alone: the two `canonicalize` round trips, the ten
-/// rename calls and up to eighteen `symlink_metadata` reads from the read-only guard -- two on
-/// each code-5 attempt, one for the early return and one for the routing rule -- all sit outside
-/// it.
+/// hoisting them keeps the whole call as close to `budget` as this design allows. `budget` bounds
+/// the sleeping alone: the two `canonicalize` round trips, the rename calls themselves and the
+/// `symlink_metadata` reads from the read-only guard -- two on each code-5 attempt, one for the
+/// early return and one for the routing rule -- all sit outside it.
 ///
 /// The Unix arm needs neither layer nor retry, so the two arms are less symmetric than they
 /// look. A reader of one must not assume the other has the same shape.
 ///
-/// [`write_bytes_atomically`] is one caller. The export renderer (ADR 004, ADR 014) is a
-/// second, direct one: it calls this itself once the `ffmpeg` process it spawned has finished
+/// [`write_bytes_atomically`] is one caller, through [`replace_file`]. The export renderer
+/// (ADR 004, ADR 014) is a second, direct one: it calls this itself, with its own longer budget,
+/// once the `ffmpeg` process it spawned has finished
 /// writing the path [`reserve_temporary_path`] reserved, to move that output over the
 /// destination the user chose. `ffmpeg` must have closed its own handle to the source by then,
 /// or this call fails the same way an in-process caller's leftover handle would -- and there
 /// the retry only delays the report, because that handle never goes away on its own.
 #[cfg(windows)]
-pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn replace_file_within(source: &Path, destination: &Path, budget: Duration) -> io::Result<()> {
     let source = absolute_path_without_following_file(source)?;
     let destination = absolute_path_without_following_file(destination)?;
 
@@ -304,10 +341,10 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
     };
 
-    // Attempts 2 to MAXIMUM_REPLACE_ATTEMPTS. `retry_index` counts the first retry as 0, and it
-    // also indexes the wait that precedes that retry, so the loop performs exactly
-    // MAXIMUM_REPLACE_ATTEMPTS - 1 waits and never one after the last attempt.
-    for retry_index in 0..MAXIMUM_REPLACE_ATTEMPTS - 1 {
+    // Every attempt after the first, one per wait the budget affords. `retry_waits` owns the
+    // whole schedule and the whole stopping rule, so the loop performs exactly one wait per
+    // attempt after the first and never one after the last attempt.
+    for wait in retry_waits(budget) {
         // A confirmed read-only destination is a permanent code-5 condition, and layer 2 is
         // closed to it, so no later attempt can succeed. Report it now instead of sleeping the
         // rest of the budget while the caller holds SETTINGS_LOCK or CACHE_LOCK. Only
@@ -319,7 +356,7 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
         {
             return Err(last_error);
         }
-        std::thread::sleep(replace_retry_delay(retry_index));
+        std::thread::sleep(wait);
         // Route by the code the previous attempt raised. `fs::rename` gates its
         // POSIX-semantics fallback behind ERROR_ACCESS_DENIED alone, so for any other code it
         // is layer 1 without MOVEFILE_WRITE_THROUGH: no new capability, and no durability.
@@ -338,21 +375,32 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     Err(last_error)
 }
 
-/// The greatest number of rename attempts one [`replace_file`] call makes (ADR 015).
+/// A backstop on the number of rename attempts one [`replace_file_within`] call makes.
 ///
-/// The first attempt is always layer 1, and each of the remaining nine is layer 1 again unless
-/// the previous attempt raised the one code that routes to layer 2.
-#[cfg(windows)]
-const MAXIMUM_REPLACE_ATTEMPTS: u32 = 10;
+/// This is not what sizes a call. The budget does: [`retry_waits`] stops as soon as the next wait
+/// no longer fits, and because the waits double until they reach [`MAXIMUM_RETRY_WAIT`], a budget
+/// of `b` seconds already buys fewer than `b + 10` attempts. Reaching 1000 attempts therefore
+/// needs a budget near 1000 seconds -- more than sixteen minutes of sleeping inside one call --
+/// which is about thirty-three times the longest budget any caller in this repository passes. The
+/// constant exists so that a budget arrived at by arithmetic somewhere else, or by a future
+/// settings value, cannot turn a bounded wait into an unbounded loop; it is a guard rail, not a
+/// tuning knob.
+#[cfg(any(windows, test))]
+const MAXIMUM_REPLACE_ATTEMPTS: u32 = 1000;
 
-// `replace_retry_delay` doubles, so this constant sets the whole budget and is not a linear knob:
-// at 20 the final wait alone is minutes, and at 66 the shift exceeds a u64 and panics, because
-// `retry_index` peaks at MAXIMUM_REPLACE_ATTEMPTS - 2. The value is pinned exactly rather than
-// bounded, because a reduction is as wrong as an increase: five places state 511 milliseconds,
-// nine waits, and ten attempts. A different budget needs a different schedule and a new figure in
-// every one of those places, not a different count here.
-#[cfg(windows)]
-const _: () = assert!(MAXIMUM_REPLACE_ATTEMPTS == 10);
+/// The largest single wait [`retry_waits`] yields, however large the budget is.
+///
+/// Doubling without a cap abandons most of a long budget. Under this module's stopping rule, an
+/// uncapped 30-second budget takes the fourteen waits 1 to 8192 milliseconds, which total 16.4
+/// seconds, and then stops, because the fifteenth wait of 16.4 seconds does not fit in the 13.6
+/// seconds that are left. It would report a failure after 16.4 seconds when it was given 30, with
+/// 13.6 seconds -- 45 percent of the budget -- unspent. Uncapped doubling also looks at the
+/// destination more and more slowly toward the end, so a destination that becomes free early
+/// stays unpublished for as long as 8.2 seconds, the largest wait that schedule reaches. Capping
+/// each wait at one second spends the budget the caller asked for and keeps the tail polling at a
+/// steady rate, at the cost of more attempts, which are cheap next to the sleeping (ADR 016).
+#[cfg(any(windows, test))]
+const MAXIMUM_RETRY_WAIT: Duration = Duration::from_secs(1);
 
 /// `ERROR_ACCESS_DENIED`: a different replacement left the destination delete-pending.
 ///
@@ -360,13 +408,13 @@ const _: () = assert!(MAXIMUM_REPLACE_ATTEMPTS == 10);
 /// that holds the destination raises `ERROR_SHARING_VIOLATION` for as long as the user leaves it
 /// open, and a permanently mapped file raises `ERROR_USER_MAPPED_FILE` the same way. The
 /// permanent code-5 conditions are a read-only destination, which [`destination_is_read_only`]
-/// makes [`replace_file`] refuse deliberately, an access list that denies deletion, and a
+/// makes [`replace_file_within`] refuse deliberately, an access list that denies deletion, and a
 /// `destination` that is an existing directory. `ffmpeg::export::output` documents that last case
 /// as reachable: a user who picks a directory as the export target reserves a temporary path
 /// successfully and then fails at the rename. A permanent case does not have to spend the whole
 /// budget. A directory destination can report at attempt 2, because `fs::rename` substitutes
 /// `ERROR_DIR_NOT_EMPTY` (145) when its POSIX attempt raises it, and 145 is not in this set, so
-/// [`replace_file`] stops there. Treating code 5 as transient at all is the accepted cost of
+/// [`replace_file_within`] stops there. Treating code 5 as transient at all is the accepted cost of
 /// clearing the delete-pending race, which is both common and short.
 #[cfg(windows)]
 const ERROR_ACCESS_DENIED: i32 = 5;
@@ -404,7 +452,7 @@ fn is_transient_sharing_error(error: &io::Error) -> bool {
 
 /// Whether the attempt that follows `last_error` uses layer 2.
 ///
-/// The whole routing rule lives here so that a test can pin it. [`replace_file`] calls this
+/// The whole routing rule lives here so that a test can pin it. [`replace_file_within`] calls this
 /// function itself, rather than restating the condition inline, so the rule a test observes is
 /// the rule that runs.
 ///
@@ -418,12 +466,12 @@ fn routes_to_posix_rename(last_error: &io::Error, destination: &Path) -> bool {
 
 /// Whether `destination` carries the read-only attribute, or `None` if the attribute is unreadable.
 ///
-/// This is the one `ERROR_ACCESS_DENIED` case [`replace_file`] deliberately refuses to clear. A
-/// read-only destination fails layer 1 with code 5, and layer 2 would succeed on it: the standard
-/// library's POSIX-semantics path exists precisely to move a file while ignoring the read-only
-/// attribute. Routing a read-only destination there would make QuipClip overwrite a file the user
-/// protected, where today the call fails. So [`replace_file`] keeps that failure and never takes
-/// layer 2 for a read-only destination.
+/// This is the one `ERROR_ACCESS_DENIED` case [`replace_file_within`] deliberately refuses to
+/// clear. A read-only destination fails layer 1 with code 5, and layer 2 would succeed on it: the
+/// standard library's POSIX-semantics path exists precisely to move a file while ignoring the
+/// read-only attribute. Routing it there would make QuipClip overwrite a file the user
+/// protected, where today the call fails. So [`replace_file_within`] keeps that failure and never
+/// takes layer 2 for a read-only destination.
 ///
 /// This guard exists to protect a file the user marked read-only, so an attribute it cannot read
 /// must not open layer 2. `None` is therefore the protected answer, not a permissive one: an
@@ -433,9 +481,9 @@ fn routes_to_posix_rename(last_error: &io::Error, destination: &Path) -> bool {
 /// an unreadable attribute is not a confirmed refusal and an ordinary delete-pending race must
 /// still clear by waiting.
 ///
-/// The read is `symlink_metadata`, not `metadata`, because [`replace_file`] never resolves the
-/// destination's final component: [`absolute_path_without_following_file`] canonicalizes only the
-/// parent. The attribute `MoveFileExW` refused is the one on that final component itself, so
+/// The read is `symlink_metadata`, not `metadata`, because [`replace_file_within`] never resolves
+/// the destination's final component: [`absolute_path_without_following_file`] canonicalizes only
+/// the parent. The attribute `MoveFileExW` refused is the one on that final component itself, so
 /// following a symlink here would read the wrong file -- refusing a link that points at a
 /// read-only file while nothing protected would be touched, and overwriting a read-only link that
 /// points at a writable file.
@@ -448,18 +496,51 @@ fn destination_is_read_only(destination: &Path) -> Option<bool> {
 
 /// The wait before retry number `retry_index`, counting the first retry as index 0.
 ///
-/// The waits double from 1 millisecond, so the nine waits [`replace_file`] can perform are 1, 2,
-/// 4, 8, 16, 32, 64, 128, and 256 milliseconds, and they total 511 milliseconds (ADR 015).
-#[cfg(windows)]
+/// The waits double from 1 millisecond -- 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 -- and every one
+/// after that is [`MAXIMUM_RETRY_WAIT`] (ADR 016).
+#[cfg(any(windows, test))]
 fn replace_retry_delay(retry_index: u32) -> Duration {
-    Duration::from_millis(1u64 << retry_index)
+    // Clamp before shifting, not after. Rust defines both outcomes of a shift of 64 or more, and
+    // neither is usable here: with overflow checks on, which is the default in a debug build,
+    // `1u64 << 64` panics; with them off, the shift amount is masked to its low six bits, so
+    // `1u64 << 64` silently becomes `1u64 << 0` and the wait collapses to 1 millisecond. 32 is far
+    // past the point where the cap takes over -- 2^32 milliseconds is seven weeks -- so the clamp
+    // only ever prevents that, and never changes which value the cap already decided.
+    Duration::from_millis(1u64 << retry_index.min(32)).min(MAXIMUM_RETRY_WAIT)
+}
+
+/// Every wait one [`replace_file_within`] call performs for `budget`, in order.
+///
+/// This is the whole retry schedule and the whole stopping rule, in one place: an attempt happens
+/// for the first rename and for each wait this yields, so the number of attempts is one more than
+/// the number of waits. A wait is yielded while it still fits in what is left of `budget`, and the
+/// iterator ends as soon as one does not -- `checked_sub` returning `None` is that rule. The
+/// Windows arm of [`replace_file_within`] consumes this directly, so the schedule a test collects
+/// here is the schedule that runs; the other two arms do not retry at all and never call it.
+///
+/// With [`DEFAULT_REPLACE_BUDGET`] this yields 1, 2, 4, 8, 16, 32, 64, 128 and 256 milliseconds:
+/// nine waits summing to exactly 511, which exhausts the budget, so the tenth wait of 512 is 512
+/// milliseconds too large for the nothing that is left. That is nine waits and ten attempts, byte
+/// for byte the fixed schedule this module ran before the budget was a parameter, and it is why
+/// the `#[cfg(windows)]` tests that time a held destination still pass unchanged.
+#[cfg(any(windows, test))]
+fn retry_waits(budget: Duration) -> impl Iterator<Item = Duration> {
+    let mut remaining = budget;
+    // `saturating_sub`, not `- 1`: a `MAXIMUM_REPLACE_ATTEMPTS` of 0 would underflow a `u32` to
+    // `u32::MAX` with overflow checks off, turning the guard rail into the unbounded loop it
+    // exists to prevent.
+    (0..MAXIMUM_REPLACE_ATTEMPTS.saturating_sub(1)).map_while(move |retry_index| {
+        let wait = replace_retry_delay(retry_index);
+        remaining = remaining.checked_sub(wait)?;
+        Some(wait)
+    })
 }
 
 /// Layer 1: one `MoveFileExW` call that replaces `destination` with `source`, durably.
 ///
 /// `MOVEFILE_WRITE_THROUGH` is the whole reason this hand-written call exists, and it is the
-/// only part of [`replace_file`] the standard library cannot supply. Both paths arrive already
-/// resolved, because [`replace_file`] resolves them one time above its loop.
+/// only part of [`replace_file_within`] the standard library cannot supply. Both paths arrive
+/// already resolved, because [`replace_file_within`] resolves them one time above its loop.
 #[cfg(windows)]
 fn move_file_write_through(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -493,8 +574,8 @@ fn move_file_write_through(source: &Path, destination: &Path) -> io::Result<()> 
 ///
 /// `Path::canonicalize` would follow `path` itself if it names a symlink, which is wrong for a
 /// rename endpoint; canonicalizing only the parent directory and rejoining the file name avoids
-/// that while still producing the absolute path `MoveFileExW` needs. [`replace_file`] calls this
-/// twice, above its loop, and both layers reuse the two results.
+/// that while still producing the absolute path `MoveFileExW` needs. [`replace_file_within`] calls
+/// this twice, above its loop, and both layers reuse the two results.
 #[cfg(windows)]
 fn absolute_path_without_following_file(path: &Path) -> io::Result<PathBuf> {
     let file_name = path.file_name().ok_or_else(|| {
@@ -506,15 +587,18 @@ fn absolute_path_without_following_file(path: &Path) -> io::Result<PathBuf> {
 /// Replace `destination` with `source` on a platform with neither Unix nor Windows semantics.
 ///
 /// This falls back to a plain rename with no extra durability step, since neither the Unix
-/// fsync nor the Windows `MoveFileExW` treatment has a portable equivalent here.
+/// fsync nor the Windows `MoveFileExW` treatment has a portable equivalent here. `budget` is
+/// unused for the same reason there is no retry: this arm assumes nothing about what a failed
+/// rename means on a platform nobody has characterised, so it has nothing to wait out.
 ///
-/// [`write_bytes_atomically`] is one caller. The export renderer (ADR 004, ADR 014) is a
-/// second, direct one: it calls this itself once the `ffmpeg` process it spawned has finished
+/// [`write_bytes_atomically`] is one caller, through [`replace_file`]. The export renderer
+/// (ADR 004, ADR 014) is a second, direct one: it calls this itself, with its own longer budget,
+/// once the `ffmpeg` process it spawned has finished
 /// writing the path [`reserve_temporary_path`] reserved, to move that output over the
 /// destination the user chose. QuipClip does not ship on such a platform today, but this keeps
 /// the module buildable on one.
 #[cfg(not(any(unix, windows)))]
-pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn replace_file_within(source: &Path, destination: &Path, _budget: Duration) -> io::Result<()> {
     fs::rename(source, destination)
 }
 
@@ -693,6 +777,77 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), b"new contents");
     }
 
+    #[test]
+    fn the_default_budget_affords_nine_waits_totalling_511_milliseconds() {
+        // The schedule comes out of `retry_waits`, the same iterator the Windows loop drives, so
+        // this observes the rule rather than a copy of it. The expected waits are bare literals
+        // for the reason the transient-code test spells out: a list rebuilt from
+        // `replace_retry_delay` would agree with any doubling schedule, including a wrong one.
+        //
+        // Only the count and the values are observable here, because the Unix arm does not
+        // retry at all. That these waits are actually slept is observed by
+        // `a_held_destination_spends_the_whole_budget_and_reports_the_operating_system_code`,
+        // which times a real call on Windows and still passes unchanged -- the point of keeping
+        // the default budget at 511 milliseconds.
+        let waits: Vec<Duration> = retry_waits(DEFAULT_REPLACE_BUDGET).collect();
+        assert_eq!(
+            waits,
+            [1u64, 2, 4, 8, 16, 32, 64, 128, 256].map(Duration::from_millis),
+            "the default budget must reproduce the fixed schedule this module ran before the \
+             budget was a parameter"
+        );
+        assert_eq!(
+            waits.iter().sum::<Duration>(),
+            DEFAULT_REPLACE_BUDGET,
+            "511 milliseconds is spent exactly, with nothing left for a tenth wait of 512"
+        );
+    }
+
+    #[test]
+    fn a_larger_budget_affords_more_attempts_and_never_a_wait_past_the_cap() {
+        let default_waits = retry_waits(DEFAULT_REPLACE_BUDGET).count();
+        let budget = Duration::from_secs(30);
+        let waits: Vec<Duration> = retry_waits(budget).collect();
+
+        assert!(
+            waits.len() > default_waits,
+            "a 30-second budget must buy more attempts than 511 milliseconds does, got \
+             {} against {default_waits}",
+            waits.len()
+        );
+        assert!(
+            waits.iter().all(|wait| *wait <= MAXIMUM_RETRY_WAIT),
+            "no single wait may exceed the cap, got {waits:?}"
+        );
+        assert!(
+            waits.contains(&MAXIMUM_RETRY_WAIT),
+            "a budget this large must reach the cap rather than keep doubling, got {waits:?}"
+        );
+        let spent: Duration = waits.iter().sum();
+        assert!(spent <= budget, "the schedule must stay inside the budget");
+        assert!(
+            spent + MAXIMUM_RETRY_WAIT > budget,
+            "the schedule must stop only because the next wait no longer fits, and it left \
+             {:?} unspent",
+            budget - spent
+        );
+    }
+
+    #[test]
+    fn a_budget_below_the_first_wait_yields_no_wait() {
+        // An attempt happens for the first rename and for each wait, so no wait means exactly one
+        // attempt. That attempt is not observable here -- this drives `retry_waits` as a pure
+        // function -- so this test claims only the empty schedule. A budget this small is the
+        // caller asking for no retry, not for no rename.
+        for budget in [Duration::ZERO, Duration::from_micros(999)] {
+            assert_eq!(
+                retry_waits(budget).count(),
+                0,
+                "a budget of {budget:?} cannot afford the first wait of 1 millisecond"
+            );
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn only_the_four_transient_sharing_codes_start_a_new_attempt() {
@@ -792,6 +947,61 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(1023),
             "an extra attempt would add a 512-millisecond wait, waited {elapsed:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_short_budget_reaches_the_retry_loop_and_ends_the_call_early() {
+        // The one test that observes `budget` arriving at the Windows loop. Elapsed time is the
+        // only thing that can observe it: a loop that ignored `budget` and always spent
+        // DEFAULT_REPLACE_BUDGET would report the same operating-system code here, and every
+        // other test in this crate would still pass. So this calls `replace_file_within`
+        // directly, with a budget no other test passes, and asserts the call is far shorter than
+        // the default would have been.
+        //
+        // The share_mode(0) idiom is
+        // `a_held_destination_spends_the_whole_budget_and_reports_the_operating_system_code`'s:
+        // every attempt fails the same way, so the call runs the whole schedule.
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::Instant;
+
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        fs::write(&destination, b"old contents").unwrap();
+        let source = directory.path.join("source.tmp");
+        fs::write(&source, b"new contents").unwrap();
+
+        let _held_open = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&destination)
+            .expect(
+                "the test could not take the exclusive handle it needs; another program, a \
+                 virus scanner for example, holds the destination this test just wrote",
+            );
+
+        // 7 milliseconds buys the three waits 1, 2 and 4, and therefore four attempts.
+        let started = Instant::now();
+        let error =
+            replace_file_within(&source, &destination, Duration::from_millis(7)).unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(
+                error.raw_os_error(),
+                Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+            ),
+            "the operating-system error must reach the caller unchanged, got {error:?}"
+        );
+        // Three `Sleep` calls each round up to the system timer tick, worst case about 15.6
+        // milliseconds, so a realistic ceiling is around 55 milliseconds. 255 leaves generous
+        // headroom for a loaded runner and is still far below the 511 milliseconds the default
+        // budget spends, which is the figure this bound exists to exclude.
+        assert!(
+            elapsed < Duration::from_millis(255),
+            "a 7-millisecond budget must not spend the 511 milliseconds the default budget does, \
+             waited {elapsed:?}"
         );
     }
 

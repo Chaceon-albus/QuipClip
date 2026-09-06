@@ -157,7 +157,8 @@ fn read_identity(_path: &Path, metadata: &fs::Metadata) -> Option<PathIdentity> 
 /// would report every Windows file without one, and the same-file check would silently stop
 /// working on the platform where NTFS hard links and case-insensitive names make it matter most.
 ///
-/// The FFI is declared the way [`crate::fsutil::replace_file`] declares `MoveFileExW`: a local
+/// The FFI is declared the way `fsutil`'s own `move_file_write_through` declares `MoveFileExW` --
+/// that private function holds the declaration, not the public entry points around it -- a local
 /// `#[link(name = "Kernel32")] extern "system"` block, so the export pipeline gains no dependency
 /// on a Windows binding crate for three calls.
 ///
@@ -318,11 +319,12 @@ fn read_identity(path: &Path, _metadata: &fs::Metadata) -> Option<PathIdentity> 
 /// Report no identity on a platform with neither Unix nor Windows semantics.
 ///
 /// QuipClip ships on Windows and macOS only, and this arm exists so the crate still builds
-/// elsewhere, exactly as [`crate::fsutil::replace_file`]'s own fallback arm does. The consequence
-/// is stated rather than hidden: with no identity, [`inspect_path`] reports every regular file as
-/// [`PathFacts::Other`] and no export can pass the preflight at all. A port to such a platform has
-/// to write this arm before anything exports, which is the correct order -- the alternative,
-/// answering with a constant, would make every destination compare equal to every source.
+/// elsewhere, exactly as [`crate::fsutil::replace_file_within`]'s own fallback arm does. The
+/// consequence is stated rather than hidden: with no identity, [`inspect_path`] reports every
+/// regular file as [`PathFacts::Other`] and no export can pass the preflight at all. A port to such
+/// a platform has to write this arm before anything exports, which is the correct order -- the
+/// alternative, answering with a constant, would make every destination compare equal to every
+/// source.
 #[cfg(not(any(unix, windows)))]
 fn read_identity(_path: &Path, _metadata: &fs::Metadata) -> Option<PathIdentity> {
     None

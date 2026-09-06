@@ -214,7 +214,8 @@ pub fn build_plan(
     let destination_facts = inspect(destination);
     // The renderer reserves a temporary file beside the destination
     // (`fsutil::reserve_temporary_path`), lets ffmpeg write into it, and then renames that
-    // file over the destination (`fsutil::replace_file`). A rename cannot replace a
+    // file over the destination (`PendingOutput::commit`, which calls `commit_within`, which
+    // calls `fsutil::replace_file_within` with `EXPORT_PUBLISH_BUDGET`). A rename cannot replace a
     // directory with a regular file (`EISDIR` on Unix; `MoveFileEx` with
     // `MOVEFILE_REPLACE_EXISTING` is documented to fail on a directory target on Windows),
     // and a device node, a socket, or a named pipe is not a file the renderer can rename

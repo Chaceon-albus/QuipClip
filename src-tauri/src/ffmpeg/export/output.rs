@@ -51,10 +51,47 @@
 //!   not in `.mp4`, so `ffmpeg` has no extension to infer a muxer from. ADR 014's "The command"
 //!   section already carries `-f` for this reason; `mkv` selects the muxer `matroska`.
 
-use crate::fsutil::{replace_file, reserve_temporary_path, TemporaryFileCleanup};
+use crate::fsutil::{replace_file_within, reserve_temporary_path, TemporaryFileCleanup};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// How long [`PendingOutput::commit`] waits for a transient sharing failure on the destination to
+/// clear before it gives up and discards the render.
+///
+/// [`crate::fsutil::DEFAULT_REPLACE_BUDGET`] is 511 milliseconds, and ADR 015 sizes that figure
+/// for the settings file and the capability cache: a few kilobytes, held by a scanner for
+/// milliseconds, written under a lock the rest of the application waits on. ADR 015 says plainly
+/// that the same limit is too short for an export output, for two reasons this constant answers.
+///
+/// A scanner that reads back a file of several gigabytes holds it for seconds, not milliseconds,
+/// and a freshly muxed video is exactly what a scanner reads back. Half a second of retries is
+/// not a meaningful attempt to wait that out.
+///
+/// And the cost of giving up is not symmetric here. When
+/// [`crate::fsutil::write_bytes_atomically`] fails, the user loses the one edit they just made and
+/// has to make it again -- `settings::save_locked` keeps no in-memory copy to retry from -- and
+/// the next setting they change writes the file afresh. When this fails, the temporary file is
+/// deleted by [`PendingOutput`]'s drop guard, so a rename that gives up **destroys a finished
+/// encode** that already cost the user minutes of their machine. Blocking the export worker for
+/// another thirty seconds is plainly the better outcome: it is one export's worker thread, not a
+/// lock the user interface waits on, and thirty seconds is short next to re-running the encode.
+///
+/// It is finite rather than unbounded for the reason [`crate::fsutil::replace_file_within`]
+/// records: a media player that holds the destination open is a condition only the user can
+/// clear, so a call that waited forever would hang the worker rather than report a failure the
+/// user can act on.
+pub const EXPORT_PUBLISH_BUDGET: Duration = Duration::from_secs(30);
+
+// ADR 016 sizes this at thirty seconds, and nothing else in the suite holds it there.
+// `PendingOutput::commit` is the only caller of `commit_within(EXPORT_PUBLISH_BUDGET)`, and no test
+// can observe that choice without sitting through the whole wait: a test that held a destination
+// for thirty seconds to watch the budget be spent would cost more than it proves, so none exists,
+// and swapping this value for `DEFAULT_REPLACE_BUDGET` would leave every test passing. The value is
+// therefore pinned here instead, the same way `fsutil` pins `DEFAULT_REPLACE_BUDGET` -- this is the
+// cheap half of that pair, with no timed counterpart.
+const _: () = assert!(EXPORT_PUBLISH_BUDGET.as_secs() == 30);
 
 /// A reserved temporary output file and the destination it is waiting to become.
 ///
@@ -198,13 +235,18 @@ impl PendingOutput {
     /// Publish the rendered output: rename the temporary file over the destination.
     ///
     /// This is the one step a reader of the destination can observe, and
-    /// [`crate::fsutil::replace_file`] makes it atomic on every platform. It is durable on Unix,
-    /// through a rename plus a directory fsync. On Windows durability depends on which attempt
+    /// [`crate::fsutil::replace_file_within`] makes it atomic on every platform. It is durable on
+    /// Unix, through a rename plus a directory fsync. On Windows durability depends on which attempt
     /// succeeded: layer 1 carries `MOVEFILE_WRITE_THROUGH` and is durable, and a success through
     /// `fs::rename` -- layer 2, which only a retry after `ERROR_ACCESS_DENIED` on a writable
     /// destination takes -- is the one atomic but non-durable outcome (ADR 015). Blocking has a
-    /// separate cause: the retry loop runs for all four transient codes, not only code 5, so any
-    /// of them can hold this call for up to 511 milliseconds before it reports the failure.
+    /// separate cause, and it arises on Windows alone, because the Unix arm of
+    /// [`crate::fsutil::replace_file_within`] does not retry: there the retry loop runs for all
+    /// four transient codes, not only code 5, so any of them can hold this call for up to
+    /// [`EXPORT_PUBLISH_BUDGET`] before it reports the failure. On macOS the rename either
+    /// succeeds or fails at once. That constant carries why the export waits far longer than a
+    /// settings write does. [`PendingOutput::commit_within`] is the same publication with a
+    /// different budget.
     ///
     /// # What the caller must have done first
     ///
@@ -217,8 +259,8 @@ impl PendingOutput {
     ///
     /// # A destination that is a symlink is replaced, not written through
     ///
-    /// [`crate::fsutil::replace_file`] never resolves the destination's final component: on Unix
-    /// `fs::rename` does not follow it, and the Windows arm canonicalizes only the parent
+    /// [`crate::fsutil::replace_file_within`] never resolves the destination's final component: on
+    /// Unix `fs::rename` does not follow it, and the Windows arm canonicalizes only the parent
     /// directory, deliberately, for exactly this reason. So a destination that is a symlink ends
     /// up a regular file holding the export, and whatever it pointed at is left untouched. That
     /// is what `mv` does, and what [`crate::fsutil::write_bytes_atomically`] already does for the
@@ -231,8 +273,30 @@ impl PendingOutput {
     /// [`super::ExportErrorCode::OutputRenameFailed`]. A failure leaves `destination` exactly as
     /// it was, and the temporary file is still deleted, because `self` is consumed here and its
     /// guard is disarmed only after the rename has succeeded.
-    pub fn commit(mut self) -> io::Result<()> {
-        replace_file(self.cleanup.path(), &self.destination)?;
+    pub fn commit(self) -> io::Result<()> {
+        self.commit_within(EXPORT_PUBLISH_BUDGET)
+    }
+
+    /// Publish the rendered output, waiting up to `budget` for a transient sharing failure on the
+    /// destination to clear.
+    ///
+    /// [`PendingOutput::commit`] is this with [`EXPORT_PUBLISH_BUDGET`], and it carries the whole
+    /// description of what the publication does and what the caller must have done first. This
+    /// function exists for a caller that knows something `commit` cannot: a test that must not
+    /// sit through thirty seconds of retries, or a future caller publishing somewhere a long wait
+    /// makes no sense.
+    ///
+    /// `budget` bounds the sleeping between rename attempts, and only on Windows -- the Unix arm
+    /// of [`crate::fsutil::replace_file_within`] does not retry, because `rename(2)` is already
+    /// safe under concurrency. It does not bound the rename itself, so a call can outlast
+    /// `budget` on a slow network share.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`PendingOutput::commit`]'s: the `io::Error` from the rename, with `destination`
+    /// left as it was and the temporary file still removed.
+    pub fn commit_within(mut self, budget: Duration) -> io::Result<()> {
+        replace_file_within(self.cleanup.path(), &self.destination, budget)?;
         // The disarm buys little on this path, and is kept because it is honest and free: the
         // guard targets the *temporary* name, and the rename just moved that name away, so an
         // armed drop here would call `remove_file` on a path that no longer exists, take
@@ -412,6 +476,12 @@ mod tests {
     fn a_failed_commit_leaves_the_destination_untouched_and_still_removes_the_temporary_file() {
         // A destination that names a directory makes the rename fail on every platform this
         // application targets, without needing a permission trick that differs between them.
+        //
+        // This goes through `commit_within` rather than `commit`, for two reasons. It is the one
+        // caller `commit_within` has in the tests, so the budget parameter is exercised at all.
+        // And `Duration::ZERO` buys no wait, so on Windows the failing rename reports at the first
+        // attempt instead of sitting through EXPORT_PUBLISH_BUDGET -- thirty seconds of sleeping
+        // for a permanent condition no retry can clear.
         let directory = TestDirectory::new();
         let destination = directory.path.join("movie.mp4");
         fs::create_dir(&destination).unwrap();
@@ -422,7 +492,7 @@ mod tests {
         write_as_ffmpeg_would(pending.path(), b"the rendered movie");
 
         assert!(
-            pending.commit().is_err(),
+            pending.commit_within(Duration::ZERO).is_err(),
             "renaming a file over a directory must fail"
         );
         assert!(
