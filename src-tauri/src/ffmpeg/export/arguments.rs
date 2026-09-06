@@ -154,10 +154,12 @@ pub const COMMAND_LINE_BUDGET: usize = UNIX_COMMAND_LINE_BUDGET;
 /// separately would let the budget describe a command that [`build_arguments`] never builds.
 ///
 /// The rule is ADR 014's: prefer one input for each segment, and fall back to one input for
-/// the whole source when the first shape does not fit. `SingleInput` is not the smaller graph
-/// -- measurement 15 found it the larger of the two at every segment count -- so it is a
-/// fallback, never a default. What it saves lies outside the graph: it writes the source path
-/// and its input flags once instead of once for each segment.
+/// the whole source when the first shape does not fit. `SingleInput` is a fallback, never a
+/// default. What it saves lies outside the graph: it writes the source path and its input
+/// flags once instead of once for each segment. Measurement 15 puts the graphs themselves
+/// close together and on both sides of the line -- `SingleInput` holds the larger graph for
+/// the first three segments and the smaller one from four segments upward -- so the graph size
+/// is not what decides between them.
 ///
 /// # This function cannot fail
 ///
@@ -1553,15 +1555,12 @@ mod tests {
         // fallback writes the source path and its input flags once instead of once for each
         // segment, so its command line is the shorter of the two wherever the choice is live.
         //
-        // The *graph* half of ADR 014 measurement 15 has since stopped holding. The record says
-        // the single-input graph is "the larger of the two at every count", which was true as
-        // measured: `split` and `asplit` cost more than the input labels they replace. Commit
-        // 79f9918 then added the audio input-rate pin, which `InputPerSegment` pays for on every
-        // chain and `SingleInput` pays for once, in front of `asplit`. Measured on this fixture:
-        // the single-input graph is larger at 1, 2 and 3 segments and smaller from 4 up --
-        // 29804 bytes against 31266 at the cap. No decision changes, because the fallback was
-        // never selected for its graph size, but a reader taking the record at face value would
-        // mis-predict where the budget goes.
+        // The second assertion holds a separate property: ADR 014 measurement 15 records that
+        // the single-input *graph* is the larger of the two for the first three segments and
+        // the smaller one from four segments upward, 29804 bytes against 31266 at the cap. No
+        // decision reads that, because the fallback is never selected for its graph size, but a
+        // reader who expects the graphs to be ordered the other way would mis-predict where the
+        // budget goes.
         let plan = windows_plan(MAX_EXPORT_SEGMENTS);
         assert!(
             measured_length(&plan, GraphShape::SingleInput, WINDOWS_OUTPUT)
@@ -1570,7 +1569,7 @@ mod tests {
         assert!(
             build_filter_graph(&plan, GraphShape::SingleInput).len()
                 < build_filter_graph(&plan, GraphShape::InputPerSegment).len(),
-            "the reversal described above"
+            "the graph ordering described above, at the segment cap"
         );
     }
 

@@ -101,7 +101,8 @@ impl PathIdentity {
 ///
 /// **Symlinks.** This contract does not by itself say whether `inspect` follows a symlink
 /// (`std::fs::metadata`) or reports the link itself (`std::fs::symlink_metadata`); that
-/// choice belongs to the concrete `inspect` a later unit writes. It is not a free choice,
+/// choice belongs to the concrete `inspect`, which is [`super::fsinspect::inspect_path`]. It
+/// is not a free choice,
 /// though: `inspect` must follow symlinks when it computes identity, exactly as
 /// `std::fs::metadata` does, or a symlinked destination that targets the source reports the
 /// link's own identity instead of the source's, and the same-file check can be defeated the
@@ -148,6 +149,8 @@ pub enum PathFacts {
 /// 11. The preset's frame rate is [`FrameRateSetting::Source`] but the probe has neither a
 ///     valid `avg_frame_rate` nor `r_frame_rate`, or the resolved rate is not strictly
 ///     positive -- [`ExportErrorCode::SourceFrameRateUnknown`].
+/// 12. The probe reports an audio stream whose sample rate is absent, not positive, or
+///     larger than `u32` -- [`ExportErrorCode::SourceAudioRateUnknown`].
 ///
 /// `destination` must be absolute for the same reason `source` must: a CWD-relative path
 /// would carry an ambiguous location into a pipeline that spawns a child process and later
@@ -263,12 +266,21 @@ pub fn build_plan(
     let zero = zero_rational();
     let format_start_time = probe.format_start_time.unwrap_or(zero);
     let margin = seek_margin_rational();
-    let audio = probe.audio.as_ref().and_then(|audio| {
-        audio.sample_rate.map(|sample_rate| PlannedAudio {
+    // An audio stream with no usable sample rate is refused, not dropped. ADR 014 cuts audio
+    // at integer ticks of `1 / sample_rate` and forbids the microsecond `atrim` fallback, so
+    // there is no exact way to cut this track. Planning it away instead would set `concat=a=0`
+    // and emit neither `-map "[a]"` nor `-c:a`, and the export would then exit zero with a
+    // video-only file for a source whose audio the preview played -- the same silent failure
+    // ADR 014 rules out for the short stream specifier one paragraph earlier.
+    let audio = match probe.audio.as_ref() {
+        None => None,
+        Some(audio) => Some(PlannedAudio {
             stream_index: audio.index,
-            sample_rate,
-        })
-    });
+            sample_rate: audio
+                .sample_rate
+                .ok_or(ExportErrorCode::SourceAudioRateUnknown)?,
+        }),
+    };
 
     let mut planned_segments = Vec::with_capacity(segments.len());
     let mut total_duration = zero;
@@ -314,9 +326,9 @@ pub fn build_plan(
                     .ok_or(ExportErrorCode::InvalidSegment)?;
                 (Some(in_tick), Some(out_tick))
             }
-            // `ExportPlan::audio` is `None`: no audio stream, or no usable sample rate.
-            // Both ticks stay `None` too, distinct from an overflow above, which is
-            // reported as an error rather than silently `None`.
+            // `ExportPlan::audio` is `None`, which now means one thing only: the source
+            // reports no audio stream. Both ticks stay `None` too, distinct from an
+            // overflow above, which is reported as an error rather than silently `None`.
             None => (None, None),
         };
 
@@ -1251,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_present_but_with_no_reported_sample_rate_is_treated_as_no_audio() {
+    fn audio_present_but_with_no_reported_sample_rate_refuses_the_whole_plan() {
         let mut probe = sample_probe();
         probe.audio = Some(AudioProbe {
             index: 1,
@@ -1259,19 +1271,18 @@ mod tests {
             sample_rate: None,
             channels: Some(6),
         });
-        let plan = plan_with(
+        let error = plan_with(
             &[boundary(0, 1001)],
             &probe,
             &sample_preset(),
             valid_path_facts(),
         )
-        .unwrap();
+        .unwrap_err();
         // No usable sample rate means no exact way to cut this audio at all (ADR 014
-        // forbids the imprecise `atrim` start/end fallback), so this plan carries no audio
-        // at all, exactly as if the source had none.
-        assert_eq!(plan.audio, None);
-        assert_eq!(plan.segments[0].audio_in_tick, None);
-        assert_eq!(plan.segments[0].audio_out_tick, None);
+        // forbids the imprecise `atrim` start/end fallback). Planning the track away
+        // instead would export a video-only file for a source the preview played with
+        // sound, and report nothing, so the preflight refuses the export here.
+        assert_eq!(error, ExportErrorCode::SourceAudioRateUnknown);
     }
 
     #[test]

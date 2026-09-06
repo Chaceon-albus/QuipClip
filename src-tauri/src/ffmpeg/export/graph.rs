@@ -74,11 +74,13 @@ const AUDIO_SAMPLE_FORMAT: &str =
 ///
 /// **Neither shape makes the command line independent of the segment count.** ADR 014
 /// measurement 15 has the figures: the graph grows by about the same amount for each added
-/// segment under *both* shapes, and the `SingleInput` graph is the larger of the two at
-/// every count, because the `split` and `asplit` chains cost more than the input specifiers
-/// they replace. What `SingleInput` saves lies outside the graph -- it writes the source
-/// path once instead of once for each segment -- so it extends the reachable segment count
-/// without removing the growth. ADR 014's "graph shape" section draws the conclusion this
+/// segment under *both* shapes. The two graphs changed places after measurement 17 added the
+/// input rate pin, which costs one filter for each audio chain under `InputPerSegment` and
+/// exactly one filter in front of `asplit` under `SingleInput`. `SingleInput` therefore holds
+/// the larger graph for the first three segments, and the smaller graph from four segments
+/// upward: 29804 bytes against 31266 bytes at the segment cap. What `SingleInput` saves lies
+/// outside the graph as well -- it writes the source path once instead of once for each
+/// segment -- so it extends the reachable segment count without removing the growth. ADR 014's "graph shape" section draws the conclusion this
 /// module cannot: the segment cap, not the shape, is what keeps an export inside Windows'
 /// 32767-byte limit, and a larger export needs the version-gated `-/filter_complex <file>`
 /// form that measurement 13 rules out for the inline path.
@@ -93,9 +95,10 @@ pub enum GraphShape {
     InputPerSegment,
     /// One `-i` for the whole source, divided among the chains by `split` and `asplit`.
     ///
-    /// The graph this renders is slightly *larger* than `InputPerSegment`'s at the same
-    /// segment count; what it saves is the repeated input path and flags around it. It needs
-    /// the single seek [`ExportPlan::single_input_seek_seconds`] returns, not any one
+    /// The graph this renders is slightly *larger* than `InputPerSegment`'s for the first
+    /// three segments and slightly *smaller* from four segments upward (ADR 014 measurement
+    /// 15); what it saves at every count is the repeated input path and the flags around it.
+    /// It needs the single seek [`ExportPlan::single_input_seek_seconds`] returns, not any one
     /// segment's own.
     SingleInput,
 }

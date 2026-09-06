@@ -272,7 +272,10 @@ impl PendingOutput {
     /// Returns the `io::Error` from the rename, reported by the renderer as
     /// [`super::ExportErrorCode::OutputRenameFailed`]. A failure leaves `destination` exactly as
     /// it was, and the temporary file is still deleted, because `self` is consumed here and its
-    /// guard is disarmed only after the rename has succeeded.
+    /// guard is disarmed only after the rename has succeeded. Only the rename can fail this call:
+    /// the Unix arm of [`crate::fsutil::replace_file_within`] runs its parent-directory fsync
+    /// after the rename has already published, and does not report a failure of that step,
+    /// because the published file is at `destination` either way.
     pub fn commit(self) -> io::Result<()> {
         self.commit_within(EXPORT_PUBLISH_BUDGET)
     }
@@ -294,7 +297,8 @@ impl PendingOutput {
     /// # Errors
     ///
     /// Exactly [`PendingOutput::commit`]'s: the `io::Error` from the rename, with `destination`
-    /// left as it was and the temporary file still removed.
+    /// left as it was and the temporary file still removed. A failed parent-directory fsync on
+    /// Unix is not one of them; it costs durability across a crash and not the publication.
     pub fn commit_within(mut self, budget: Duration) -> io::Result<()> {
         replace_file_within(self.cleanup.path(), &self.destination, budget)?;
         // The disarm buys little on this path, and is kept because it is honest and free: the

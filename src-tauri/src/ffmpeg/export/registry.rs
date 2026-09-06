@@ -62,11 +62,12 @@ struct ActiveExport {
 /// The one export slot for the whole application, plus the cancellation flag of whichever
 /// export holds it.
 ///
-/// This type is the shared state behind the export commands: a later unit stores one
+/// This type is the shared state behind the export commands: `lib.rs` stores one
 /// `Arc<ExportRegistry>` as Tauri managed state, so a single value is reachable from every
-/// command invocation and from every worker thread. It holds no path, no plan, and no process
-/// handle on purpose -- the stages that own those can then be written, and tested, without
-/// knowing how the application decides which export is allowed to run.
+/// command invocation, from every worker thread, and from the application's own exit
+/// handler. It holds no path, no plan, and no process handle on purpose -- the stages that
+/// own those can then be written, and tested, without knowing how the application decides
+/// which export is allowed to run.
 ///
 /// [`Default`] gives the empty registry, which is the correct starting state: no export is
 /// running before one begins.
@@ -107,8 +108,8 @@ pub struct ExportSlot {
     cancel: Arc<AtomicBool>,
 }
 
-// The registry becomes Tauri managed state in a later unit, and the slot travels from the
-// command thread to the worker thread, so both need `Send + Sync + 'static`. Those obligations
+// The registry is Tauri managed state, and the slot travels from the command thread to the
+// worker thread, so both need `Send + Sync + 'static`. Those obligations
 // are pinned here as compile-time assertions rather than left to the distant call sites: a
 // future field that is not thread-safe -- an `Rc`, a `Cell`, a raw pointer -- would otherwise
 // compile cleanly in this module and fail only in the unit that spawns the worker.
@@ -131,8 +132,8 @@ impl ExportRegistry {
     /// `out.mp4`, and the first cancel request, still in flight, matches the second run by
     /// string equality and kills it. Derive the id from a generator that cannot repeat within
     /// one process. `commands::next_run_id` is that generator (epoch milliseconds plus a
-    /// monotonic counter to break ties inside one millisecond); the later unit that adds the
-    /// export command must call it rather than invent a second scheme.
+    /// monotonic counter to break ties inside one millisecond), and
+    /// `commands::export::start_export` calls it rather than inventing a second scheme.
     ///
     /// # What the caller must do with the result
     ///
@@ -223,6 +224,25 @@ impl ExportRegistry {
         // argument to convince themselves the flag is delivered.
         export.cancel.store(true, Ordering::SeqCst);
         true
+    }
+
+    /// The identifier of the export that currently holds the slot, or `None` when the slot
+    /// is free.
+    ///
+    /// This exists for one caller: the application-exit handler in `lib.rs`. A quit during an
+    /// export has to name the running run to [`ExportRegistry::cancel`], and it has to be
+    /// able to see when the slot has been released, so it can let the exit proceed instead of
+    /// leaving `ffmpeg` orphaned and its temporary file on disk. Nothing else needs it, and
+    /// no decision can be made on it that is not also correct one instant later: the value is
+    /// a snapshot, and the run it names can end between this call and the next statement.
+    /// Cancelling a run this returned is safe for exactly that reason -- [`ExportRegistry::cancel`]
+    /// compares the id again under the lock, so a run that ended in the window is a no-op
+    /// rather than a cancellation of its successor.
+    ///
+    /// The id is cloned rather than borrowed because the lock cannot outlive this call.
+    #[must_use]
+    pub fn active_run_id(&self) -> Option<String> {
+        self.lock().as_ref().map(|export| export.run_id.clone())
     }
 
     /// Release the slot held by `run_id`, so the next export can begin.
@@ -351,6 +371,20 @@ mod tests {
             !slot.is_canceled(),
             "a fresh export must not start out canceled"
         );
+    }
+
+    #[test]
+    fn active_run_id_names_the_holder_of_the_slot_and_nothing_once_it_is_free() {
+        // The application-exit handler reads this to find the run it must cancel before the
+        // process ends, so a free slot has to be distinguishable from a held one.
+        let registry = registry();
+        assert_eq!(registry.active_run_id(), None);
+
+        let slot = registry.begin("run-1").expect("the slot starts free");
+        assert_eq!(registry.active_run_id().as_deref(), Some("run-1"));
+
+        drop(slot);
+        assert_eq!(registry.active_run_id(), None);
     }
 
     #[test]

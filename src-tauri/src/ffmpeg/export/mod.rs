@@ -213,19 +213,21 @@ pub struct ExportPlan {
     /// [`PlannedAudio::stream_index`].
     pub video_stream_index: u32,
     /// The audio stream this plan addresses, together with the sample rate every audio
-    /// tick in [`PlannedSegment`] is measured in, or `None` when there is no exact way to
-    /// cut this source's audio.
+    /// tick in [`PlannedSegment`] is measured in, or `None` when the source reports no
+    /// audio stream at all.
     ///
     /// ADR 014 requires an exact `atrim` boundary in ticks of `1 / sample_rate`, and
     /// forbids the imprecise fallback of `atrim`'s `start`/`end` options, which ffmpeg
     /// parses into microseconds -- exactly the truncation ADR 002 already rules out
-    /// elsewhere. A source whose audio stream carries no reported sample rate therefore has
-    /// no ADR-014-compliant way to be cut at all, so this plan treats it exactly like a
-    /// source with no audio stream: `audio` is `None`, the output carries no audio track,
-    /// and every segment's audio ticks are `None` too. Bundling the stream index and the
-    /// sample rate into one [`PlannedAudio`] makes "an audio stream to address, but no
-    /// exact way to address it" unrepresentable, instead of leaving that combination as an
-    /// unstated policy question for the graph builder.
+    /// elsewhere. A source whose audio stream carries no usable sample rate therefore has
+    /// no ADR-014-compliant way to be cut at all, and [`plan::build_plan`] refuses the whole
+    /// export with [`ExportErrorCode::SourceAudioRateUnknown`] rather than reaching this
+    /// field: dropping the track here would write a video-only file for a source the
+    /// preview played with sound, and report nothing. `None` therefore means one thing
+    /// only, "this source has no audio". Bundling the stream index and the sample rate into
+    /// one [`PlannedAudio`] makes "an audio stream to address, but no exact way to address
+    /// it" unrepresentable, instead of leaving that combination as an unstated policy
+    /// question for the graph builder.
     pub audio: Option<PlannedAudio>,
     /// The segments to render, in the order they must appear in the concatenated output.
     pub segments: Vec<PlannedSegment>,
@@ -292,13 +294,12 @@ macro_rules! export_error_codes {
         /// ADR 011 forbids a user-facing English sentence in a code the frontend matches
         /// against; a diagnostic belongs in a separate field a later caller attaches, never
         /// in this enum, matching `ImportMediaErrorCode` and `CapabilityProbeErrorCode`
-        /// elsewhere in this crate. Every variant below is documented with the stage that
-        /// produces it; most of those stages (`graph`, `arguments`, `progress`, `process`,
-        /// `output`, and the command wiring the variants below call "the registry stage")
-        /// are not implemented yet, so their variants are reserved here so every later stage
-        /// of the pipeline shares one closed error vocabulary from the start, rather than
-        /// each stage growing its own. That name predates the `registry` module, which is
-        /// the single-flight guard and produces none of these codes.
+        /// elsewhere in this crate. Every variant below is documented with the function that
+        /// produces it. All of them have one today except [`ExportErrorCode::EncoderUnavailable`],
+        /// which ADR 016 defers by name. The stages the variants below once called "the
+        /// registry stage" are the preparation steps of `commands::export`; that name
+        /// predates the `registry` module, which is the single-flight guard and produces
+        /// none of these codes itself.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
         #[serde(rename_all = "camelCase")]
         pub enum ExportErrorCode {
@@ -313,36 +314,39 @@ macro_rules! export_error_codes {
 }
 
 export_error_codes! {
-    /// Reserved for the Tauri command layer (not implemented yet): the command could not
-    /// resolve the application data directory needed to read settings or run ffmpeg
-    /// discovery, mirroring `ImportMediaErrorCode::AppDataUnavailable` and
+    /// Produced by `commands::export::start_export`: the command could not resolve the
+    /// application data directory needed to read settings or run ffmpeg discovery,
+    /// mirroring `ImportMediaErrorCode::AppDataUnavailable` and
     /// `CapabilityProbeErrorCode::AppDataUnavailable`.
     AppDataUnavailable => "appDataUnavailable",
-    /// Reserved for the Tauri command layer (not implemented yet), and produced by no
-    /// function in this module: an export was requested while another one is already
-    /// running. [`registry::ExportRegistry::begin`] answers `None` when a run already holds
-    /// the single slot, and the command layer turns that `None` into this code rather than
-    /// queueing the request.
+    /// Produced by `commands::export::start_export`: an export was requested while another
+    /// one is already running. [`registry::ExportRegistry::begin`] answers `None` when a run
+    /// already holds the single slot, and the command layer turns that `None` into this code
+    /// rather than queueing the request.
     ExportAlreadyRunning => "exportAlreadyRunning",
-    /// Reserved for the registry stage (not implemented yet): the settings file could not
-    /// be read to resolve the requested preset or the configured ffmpeg path.
+    /// Produced by `commands::export::prepare_export_with`: the settings file could not be
+    /// read to resolve the requested preset or the configured ffmpeg path.
     SettingsUnreadable => "settingsUnreadable",
-    /// Reserved for the registry stage (not implemented yet): the requested preset id is
-    /// not present in the settings document.
+    /// Produced by `commands::export::resolve_preset`: the requested preset id is not
+    /// present in the settings document, or the request named none and the document has no
+    /// active preset either.
     PresetNotFound => "presetNotFound",
-    /// Reserved for the registry stage (not implemented yet): `ffmpeg` and `ffprobe` could
-    /// not both be located, mirroring `CapabilityProbeErrorCode::FfmpegPairMissing`.
+    /// Produced by `commands::export::prepare_export_with`: `ffmpeg` and `ffprobe` could not
+    /// both be located, mirroring `CapabilityProbeErrorCode::FfmpegPairMissing`.
     FfmpegPairMissing => "ffmpegPairMissing",
-    /// Reserved for the registry stage's mandatory re-probe (not implemented yet; ADR 014's
-    /// "Other rules": the renderer re-probes the source when an export starts): `ffprobe`
-    /// failed to start.
+    /// Produced by `commands::export::map_reprobe_error`, for the mandatory re-probe (ADR
+    /// 014's "Other rules": the renderer re-probes the source when an export starts):
+    /// `ffprobe` failed to start.
     FfprobeSpawnFailed => "ffprobeSpawnFailed",
-    /// Reserved for the registry stage's re-probe (not implemented yet): `ffprobe` exited
-    /// unsuccessfully.
+    /// Produced by `commands::export::map_reprobe_error`: `ffprobe` exited unsuccessfully.
     FfprobeProcessFailed => "ffprobeProcessFailed",
-    /// Reserved for the registry stage's re-probe (not implemented yet): `ffprobe`'s output
-    /// failed to parse.
+    /// Produced by `commands::export::map_reprobe_error`: `ffprobe`'s output failed to
+    /// parse.
     FfprobeParseFailed => "ffprobeParseFailed",
+    /// Produced by `commands::export::map_reprobe_error`: `ffprobe` was still running at
+    /// [`crate::ffmpeg::probe::PROBE_TIMEOUT`] and was killed. A stalled re-probe holds the
+    /// single export slot, so it is bounded rather than waited on.
+    FfprobeTimedOut => "ffprobeTimedOut",
     /// Produced by [`plan::build_plan`]: the request carried zero segments.
     NoSegments => "noSegments",
     /// Produced by [`plan::build_plan`]: the request carried more than
@@ -367,33 +371,57 @@ export_error_codes! {
     /// Produced by [`plan::build_plan`]: the destination names the same file as the
     /// source.
     OutputEqualsSource => "outputEqualsSource",
-    /// Reserved for the output stage (not implemented yet): the destination directory
-    /// rejected the reserved temporary file.
+    /// Produced by `commands::export::prepare_export_with`: the destination directory
+    /// rejected the reserved temporary file ([`output::PendingOutput::reserve`]).
     OutputNotWritable => "outputNotWritable",
     /// Produced by [`plan::build_plan`]: the preset asks for the source's own frame rate
     /// but the probe reports neither a valid `avg_frame_rate` nor `r_frame_rate`, or the
     /// resolved frame rate (from either the probe or an explicit preset rate) is not
     /// strictly positive.
     SourceFrameRateUnknown => "sourceFrameRateUnknown",
-    /// Reserved for the registry stage (not implemented yet): the preset names an encoder
-    /// the capability probe did not report as working.
+    /// Produced by [`plan::build_plan`]: the source reports an audio stream, and that
+    /// stream carries no usable sample rate.
+    ///
+    /// ADR 014 cuts audio at integer ticks of `1 / sample_rate` and forbids the microsecond
+    /// `atrim` fallback, so an unknown rate leaves no exact way to cut the track. The plan
+    /// refuses the export rather than dropping the track: a dropped track writes a
+    /// video-only file for a source the preview played with sound, and reports nothing --
+    /// the same silent class of failure ADR 014 rules out for the short stream specifier.
+    SourceAudioRateUnknown => "sourceAudioRateUnknown",
+    /// Reserved: the preset names an encoder the capability probe did not report as
+    /// working.
+    ///
+    /// This is the one code in this vocabulary that no function produces. ADR 016's "The
+    /// encoder test reports only a known failure" defers it by name: "**The first
+    /// implementation does not make this test.** It reads no capability cache, and
+    /// `encoderUnavailable` stays a code that no code path produces. The test needs the
+    /// version string, which needs one more `ffmpeg` process, and that is a separate unit."
+    /// Until that unit lands, a bad encoder arrives as [`ExportErrorCode::FfmpegProcessFailed`]
+    /// with the diagnostic text from `ffmpeg`.
     EncoderUnavailable => "encoderUnavailable",
-    /// Reserved for the process stage (not implemented yet): the `ffmpeg` child process
-    /// failed to start.
+    /// Produced by `commands::export::run_export_with`: the `ffmpeg` child process failed
+    /// to start.
     FfmpegSpawnFailed => "ffmpegSpawnFailed",
-    /// Reserved for the process stage (not implemented yet): `ffmpeg` exited unsuccessfully.
+    /// Produced by `commands::export::run_export_with`: `ffmpeg` exited unsuccessfully.
     FfmpegProcessFailed => "ffmpegProcessFailed",
-    /// Reserved for the progress stage (not implemented yet): the final `frame` count
+    /// Produced by `commands::export::verified_frame_count`: the final `frame` count
     /// differed from [`ExportPlan::expected_frames`] (ADR 014's frame-count comparison).
     FrameCountMismatch => "frameCountMismatch",
-    /// Reserved for the output stage (not implemented yet): the renderer could not rename
-    /// the temporary file over the destination.
+    /// Produced by `commands::export::run_export_with`: the renderer could not rename the
+    /// temporary file over the destination.
     OutputRenameFailed => "outputRenameFailed",
-    /// Reserved for the process stage (not implemented yet): the user canceled an export in
-    /// progress.
+    /// Produced by `commands::export::run_export_with`, on either of ADR 016's two cancel
+    /// tests: the user canceled an export in progress.
+    ///
+    /// Also produced by `commands::export::prepare_export_with` and by
+    /// `commands::export::start_export`, for a cancel that arrives while the run is still in
+    /// preparation. Preparation already holds the export slot and can last as long as
+    /// [`crate::ffmpeg::probe::PROBE_TIMEOUT`], so a cancel there ends the run rather than
+    /// letting it work through every remaining step and then start `ffmpeg`.
     Canceled => "canceled",
-    /// Reserved for the Tauri command layer (not implemented yet): the blocking task
-    /// running the pipeline itself failed to execute, mirroring
+    /// Produced by `commands::export::start_export` when the blocking task running the
+    /// preparation failed to execute, and by `commands::export::run_export_worker` when the
+    /// worker panicked or its thread could not be started, mirroring
     /// `ImportMediaErrorCode::CommandExecutionFailed`.
     CommandExecutionFailed => "commandExecutionFailed",
 }
@@ -439,6 +467,7 @@ mod tests {
                 "ffprobeParseFailed",
                 "ffprobeProcessFailed",
                 "ffprobeSpawnFailed",
+                "ffprobeTimedOut",
                 "frameCountMismatch",
                 "invalidSegment",
                 "noSegments",
@@ -449,6 +478,7 @@ mod tests {
                 "outputRenameFailed",
                 "presetNotFound",
                 "settingsUnreadable",
+                "sourceAudioRateUnknown",
                 "sourceFrameRateUnknown",
                 "sourceNotFile",
                 "sourceNotFound",

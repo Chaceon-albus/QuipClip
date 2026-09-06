@@ -37,6 +37,10 @@ pub enum ImportMediaErrorCode {
     FfprobeSpawnFailed,
     FfprobeProcessFailed,
     FfprobeParseFailed,
+    /// `ffprobe` was still running at `ffmpeg::probe::PROBE_TIMEOUT` and was killed. An
+    /// import of a file on a share that stops answering ends here rather than staying in the
+    /// loading state for as long as the application runs.
+    FfprobeTimedOut,
     AssetScopeDenied,
     CommandExecutionFailed,
 }
@@ -237,6 +241,15 @@ pub(crate) fn map_probe_error(error: ProbeError) -> ImportMediaError {
         },
         ProbeError::Parse { source: _, stderr } => ImportMediaError {
             code: ImportMediaErrorCode::FfprobeParseFailed,
+            detail: diagnostic_text(&stderr),
+            exit_code: None,
+        },
+        // The deadline itself is not reported as a detail: it is this application's own
+        // policy, not a diagnostic from ffprobe, and ADR 011 keeps an English sentence out of
+        // a payload the frontend translates. Whatever ffprobe did manage to write before it
+        // was killed is still carried, exactly as for the two failures above.
+        ProbeError::TimedOut { timeout: _, stderr } => ImportMediaError {
+            code: ImportMediaErrorCode::FfprobeTimedOut,
             detail: diagnostic_text(&stderr),
             exit_code: None,
         },
@@ -473,8 +486,20 @@ mod tests {
             stderr: Vec::new(),
         });
 
+        let timed_out = map_probe_error(ProbeError::TimedOut {
+            timeout: Duration::from_secs(30),
+            stderr: b"stalled on the share".to_vec(),
+        });
+
         assert_eq!(spawn.code, ImportMediaErrorCode::FfprobeSpawnFailed);
         assert_eq!(parse.code, ImportMediaErrorCode::FfprobeParseFailed);
+        assert_eq!(timed_out.code, ImportMediaErrorCode::FfprobeTimedOut);
+        assert_eq!(timed_out.detail.as_deref(), Some("stalled on the share"));
+        assert_eq!(timed_out.exit_code, None);
+        assert_eq!(
+            serde_json::to_value(timed_out).unwrap()["code"],
+            "ffprobeTimedOut"
+        );
         assert_eq!(spawn.detail.as_deref(), Some("denied"));
         assert_eq!(parse.detail, None);
         assert_eq!(

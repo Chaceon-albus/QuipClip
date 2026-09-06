@@ -1,13 +1,48 @@
 //! ffprobe execution and normalization for imported media.
 
+use crate::ffmpeg::capabilities::smoke::{kill_and_reap, read_capped};
 use crate::time::{FrameCount, Pts, Rational, TickCount};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
+use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// The deadline one `ffprobe` run gets before it is killed.
+///
+/// ADR 006 bounds the smoke test because "a broken hardware encoder can hang instead of
+/// fail". An `ffprobe` that reads a file on a share which stops answering has the same
+/// failure mode, and the cost is higher: `commands::export::start_export` claims the single
+/// export slot *before* the re-probe runs, so a stalled probe holds that slot until the
+/// application restarts and every later export is refused with `exportAlreadyRunning`.
+///
+/// 30 seconds is far above the real cost of a probe, even of a large file on a slow disk,
+/// and it is short enough that a person waiting on an import is told something rather than
+/// left with an interface that never leaves the loading state.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often [`probe_media_within`] looks at the child process.
+///
+/// The same interval the smoke test uses. It bounds how long a finished `ffprobe` waits to
+/// be noticed, and a probe is short enough that the poll rate costs nothing next to it.
+const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// The largest number of stdout bytes one probe retains.
+///
+/// `Command::output()` kept no bound at all here. This one exists so a child that never
+/// stops writing cannot exhaust memory, and it is set far above any real answer: the JSON of
+/// `-show_format -show_streams` is a few kilobytes for an ordinary file and stays well under
+/// a megabyte even for a container with an unusual number of streams. A truncated answer is
+/// not silently accepted -- it is invalid JSON, so it reports [`ProbeError::Parse`].
+const STDOUT_CAPTURE_LIMIT: usize = 16 * 1024 * 1024;
+
+/// The largest number of stderr bytes one probe retains, matching the smoke path's cap.
+const STDERR_CAPTURE_LIMIT: usize = 8 * 1024;
 
 /// Normalized media facts needed by the editor and later capability checks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,6 +116,12 @@ pub enum ProbeError {
         source: ProbeParseError,
         stderr: Vec<u8>,
     },
+    /// `ffprobe` was still running at the deadline and was killed. See [`PROBE_TIMEOUT`] for
+    /// why the probe is bounded at all.
+    TimedOut {
+        timeout: Duration,
+        stderr: Vec<u8>,
+    },
 }
 
 /// A deterministic JSON parsing or normalization failure.
@@ -111,6 +152,9 @@ impl fmt::Display for ProbeError {
                 )
             }
             Self::Parse { source, .. } => write!(formatter, "ffprobe output is invalid: {source}"),
+            Self::TimedOut { timeout, .. } => {
+                write!(formatter, "ffprobe did not finish within {timeout:?}")
+            }
         }
     }
 }
@@ -120,7 +164,7 @@ impl Error for ProbeError {
         match self {
             Self::Spawn { source } => Some(source),
             Self::Parse { source, .. } => Some(source),
-            Self::ProcessFailed { .. } => None,
+            Self::ProcessFailed { .. } | Self::TimedOut { .. } => None,
         }
     }
 }
@@ -175,33 +219,158 @@ impl From<ProbeDataError> for ProbeParseError {
     }
 }
 
-/// Run the resolved ffprobe executable and normalize its JSON output.
+/// Run the resolved ffprobe executable and normalize its JSON output, within
+/// [`PROBE_TIMEOUT`].
 pub fn probe_media(ffprobe_path: &Path, media_path: &Path) -> Result<MediaProbe, ProbeError> {
-    let output = Command::new(ffprobe_path)
-        .args([
-            "-v",
-            "error",
-            "-of",
-            "json",
-            "-show_format",
-            "-show_streams",
-            "-i",
-        ])
-        .arg(media_path)
+    probe_media_within(ffprobe_path, media_path, PROBE_TIMEOUT)
+}
+
+/// [`probe_media`] with an explicit deadline.
+///
+/// The bound is a constant rather than a parameter of every caller because it is one policy
+/// for the whole application, exactly as `capabilities::smoke::SMOKE_TIMEOUT` is; this form
+/// exists so the deadline can be varied under test.
+pub fn probe_media_within(
+    ffprobe_path: &Path,
+    media_path: &Path,
+    timeout: Duration,
+) -> Result<MediaProbe, ProbeError> {
+    let arguments = [
+        OsStr::new("-v"),
+        OsStr::new("error"),
+        OsStr::new("-of"),
+        OsStr::new("json"),
+        OsStr::new("-show_format"),
+        OsStr::new("-show_streams"),
+        OsStr::new("-i"),
+        media_path.as_os_str(),
+    ];
+    let run = run_probe_process(ffprobe_path, &arguments, timeout, PROBE_POLL_INTERVAL)
+        .map_err(|source| ProbeError::Spawn { source })?;
+    finish_probe_run(run, timeout)
+}
+
+/// How one `ffprobe` run ended, and everything it wrote.
+#[derive(Debug)]
+struct ProbeRun {
+    /// `None` when the process was still running at the deadline and was killed.
+    exit: Option<ProbeExit>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// The exit status of an `ffprobe` that ended on its own.
+#[derive(Debug, Clone, Copy)]
+struct ProbeExit {
+    code: Option<i32>,
+    success: bool,
+}
+
+/// Turn one finished run into a probe or into the failure it reports.
+///
+/// Separate from [`probe_media_within`] so the four outcomes -- killed at the deadline, a
+/// non-zero exit, unparsable output, and a good probe -- are each reachable from a test
+/// without a real `ffprobe` and without waiting for a real deadline.
+fn finish_probe_run(run: ProbeRun, timeout: Duration) -> Result<MediaProbe, ProbeError> {
+    let Some(exit) = run.exit else {
+        return Err(ProbeError::TimedOut {
+            timeout,
+            stderr: run.stderr,
+        });
+    };
+    if !exit.success {
+        return Err(ProbeError::ProcessFailed {
+            code: exit.code,
+            stderr: run.stderr,
+        });
+    }
+    parse_probe_json(&run.stdout).map_err(|source| ProbeError::Parse {
+        source,
+        stderr: run.stderr,
+    })
+}
+
+/// Run `program` with `args`, killing it if it has not finished by `timeout`, and capture
+/// both of its output streams.
+///
+/// This is `capabilities::smoke::run_with_timeout` with a stdout capture added. That runner
+/// discards stdout, and a probe's whole answer arrives on stdout, so it cannot be called
+/// here as it stands; the drain discipline it documents is reproduced exactly, and its
+/// `read_capped` is shared rather than copied. The two runners should become one once that
+/// one grows a stdout capture of its own.
+///
+/// Both pipes are drained on their own threads from the moment the child spawns. That is a
+/// correctness requirement, not an optimization: a child that fills either pipe's operating
+/// system buffer blocks in its own write and never exits, and an undrained pipe would then
+/// produce a false timeout. Killing the child closes both of its ends, so the two joins at
+/// the end are bounded on every path: `kill_and_reap` runs on each exit from the polling
+/// loop that did not already collect the child's status.
+fn run_probe_process(
+    program: &Path,
+    args: &[&OsStr],
+    timeout: Duration,
+    poll: Duration,
+) -> io::Result<ProbeRun> {
+    let mut child = Command::new(program)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .map_err(|source| ProbeError::Spawn { source })?;
-    if !output.status.success() {
-        return Err(ProbeError::ProcessFailed {
-            code: output.status.code(),
-            stderr: output.stderr,
-        });
-    }
-    parse_probe_json(&output.stdout).map_err(|source| ProbeError::Parse {
-        source,
-        stderr: output.stderr,
+        .spawn()?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .expect("stdout was requested as piped above");
+    let stderr = child
+        .stderr
+        .take()
+        .expect("stderr was requested as piped above");
+    let stdout_thread = thread::spawn(move || read_capped(stdout, STDOUT_CAPTURE_LIMIT));
+    let stderr_thread = thread::spawn(move || read_capped(stderr, STDERR_CAPTURE_LIMIT));
+
+    // The polling below returns its `Result` rather than using `?` in this function, so that
+    // every path -- the error paths included -- still ends the child and joins both drain
+    // threads before this function returns. A failed `try_wait` that returned early would
+    // leave a live, unreaped `ffprobe` holding both pipes open, and because `read_capped`
+    // reads until the pipe closes, the joins below would then wait for that child with no
+    // bound at all. On Unix, dropping a `Child` neither kills nor reaps it, so nothing later
+    // would end it.
+    let polled = (|| -> io::Result<Option<ExitStatus>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait()? {
+                Some(status) => return Ok(Some(status)),
+                None if Instant::now() >= deadline => return Ok(None),
+                None => thread::sleep(poll),
+            }
+        }
+    })();
+
+    // Only the first arm has a child the polling already reaped. The deadline arm and the
+    // failed-`try_wait` arm both leave a process that may still be running, so each one ends
+    // it here, before the joins below.
+    let exit = match polled {
+        Ok(Some(status)) => Ok(Some(ProbeExit {
+            code: status.code(),
+            success: status.success(),
+        })),
+        Ok(None) => kill_and_reap(&mut child).map(|()| None),
+        Err(error) => {
+            // The polling failure is what this run reports. The kill runs only to bound the
+            // joins below, so its own result has nowhere to go.
+            let _ = kill_and_reap(&mut child);
+            Err(error)
+        }
+    };
+
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+
+    Ok(ProbeRun {
+        exit: exit?,
+        stdout,
+        stderr,
     })
 }
 
@@ -875,6 +1044,133 @@ mod tests {
         let without_start_time = parse_value(base_probe()).unwrap();
         let value = serde_json::to_value(without_start_time).unwrap();
         assert_eq!(value["formatStartTime"], serde_json::Value::Null);
+    }
+
+    // -- the bounded runner -------------------------------------------------------------------
+
+    #[test]
+    fn a_run_that_hit_the_deadline_reports_a_timeout_and_keeps_what_was_written() {
+        let run = ProbeRun {
+            exit: None,
+            stdout: b"{".to_vec(),
+            stderr: b"the share stopped answering".to_vec(),
+        };
+
+        let error = finish_probe_run(run, Duration::from_secs(30)).unwrap_err();
+
+        // The truncated stdout is not parsed at all. A killed probe answered nothing, and
+        // reporting a parse failure would name the wrong cause.
+        match error {
+            ProbeError::TimedOut { timeout, stderr } => {
+                assert_eq!(timeout, Duration::from_secs(30));
+                assert_eq!(stderr, b"the share stopped answering");
+            }
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_run_that_exited_unsuccessfully_still_reports_the_process_failure() {
+        let run = ProbeRun {
+            exit: Some(ProbeExit {
+                code: Some(1),
+                success: false,
+            }),
+            stdout: Vec::new(),
+            stderr: b"invalid data".to_vec(),
+        };
+
+        let error = finish_probe_run(run, PROBE_TIMEOUT).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProbeError::ProcessFailed { code: Some(1), .. }
+        ));
+    }
+
+    #[test]
+    fn a_successful_run_parses_its_captured_stdout() {
+        let run = ProbeRun {
+            exit: Some(ProbeExit {
+                code: Some(0),
+                success: true,
+            }),
+            stdout: serde_json::to_vec(&base_probe()).unwrap(),
+            stderr: Vec::new(),
+        };
+
+        let probe = finish_probe_run(run, PROBE_TIMEOUT).unwrap();
+
+        assert_eq!(probe.video_stream_index, 2);
+    }
+
+    #[test]
+    fn a_run_that_exits_on_its_own_captures_both_streams() {
+        // The test binary itself, run with an argument its harness rejects: a deterministic,
+        // immediate, non-zero exit on every platform this crate targets, with no shell and no
+        // dependency on ffprobe being installed. `capabilities::smoke` uses the same fixture.
+        let program = std::env::current_exe().expect("the test binary has a path");
+
+        let run = run_probe_process(
+            &program,
+            &[OsStr::new("--this-flag-does-not-exist")],
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+        )
+        .expect("the test binary should spawn and exit quickly");
+
+        let exit = run.exit.expect("the process exited on its own");
+        assert!(!exit.success);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_probe_is_killed_at_the_deadline_instead_of_waited_on() {
+        // One process, no shell. A shell that forked would die on `Child::kill` while `sleep`
+        // kept the inherited pipe write handles open, and the two drain joins would then block
+        // for the full ten seconds -- which the elapsed assertion below catches.
+        let started = Instant::now();
+
+        let run = run_probe_process(
+            Path::new("/bin/sleep"),
+            &[OsStr::new("10")],
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+        )
+        .expect("the process should spawn and then be killed");
+
+        let elapsed = started.elapsed();
+        assert!(run.exit.is_none(), "a killed process reports no exit");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "expected the deadline to fire well before the ten-second sleep, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_stalled_probe_is_killed_at_the_deadline_instead_of_waited_on() {
+        // `ping -n 20 127.0.0.1` occupies a process for about nineteen seconds and needs no
+        // tool outside a default install. It must run as one process, not through `cmd.exe /c`:
+        // `cmd.exe` stays alive as the parent of `ping`, so `Child::kill` terminates only
+        // `cmd.exe` while `ping` keeps the inherited pipe write handles open, and the drain
+        // joins then block for that full runtime.
+        let started = Instant::now();
+
+        let run = run_probe_process(
+            Path::new("ping.exe"),
+            &[OsStr::new("-n"), OsStr::new("20"), OsStr::new("127.0.0.1")],
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+        )
+        .expect("the process should spawn and then be killed");
+
+        let elapsed = started.elapsed();
+        assert!(run.exit.is_none(), "a killed process reports no exit");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "expected the deadline to fire well before ping finishes, took {elapsed:?}"
+        );
     }
 
     fn parse_value(value: Value) -> Result<MediaProbe, ProbeParseError> {

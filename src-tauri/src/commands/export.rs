@@ -60,6 +60,7 @@ use crate::settings::{self, LoadedSettings, Preset, Settings, SettingsFileError}
 use crate::time::{Pts, Rational};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -277,10 +278,16 @@ pub async fn start_export(
     // Preparation spawns ffprobe and touches the filesystem, so it does not belong on the
     // async executor. It is bounded work -- one short-lived child process -- which is what
     // the blocking pool is for; the export itself runs for minutes and gets its own thread.
+    //
+    // The flag goes with it: preparation is the one stretch of a run that can last tens of
+    // seconds -- `ffmpeg::probe::PROBE_TIMEOUT` alone is 30 -- and a cancel that arrives
+    // inside it must not have to wait for every remaining step to finish.
+    let cancel = slot.cancel_flag();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         prepare_export_with(
             &request,
             &app_data_directory,
+            cancel.as_ref(),
             discover_for_export,
             settings::load,
             ffmpeg::probe_media,
@@ -288,6 +295,14 @@ pub async fn start_export(
     })
     .await
     .map_err(|_| ExportCommandError::new(ExportErrorCode::CommandExecutionFailed))??;
+
+    // The last read before the worker takes over, for a cancel that landed after preparation
+    // passed its own checks. Returning here drops `prepared`, which deletes the reserved
+    // temporary file, and then drops `slot`, which releases the export slot -- the release
+    // `lib::cancel_active_export` waits for on an application quit.
+    if slot.is_canceled() {
+        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+    }
 
     let start = start_payload(&run_id, &prepared);
 
@@ -334,9 +349,20 @@ fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateE
 /// indices from a fresh probe, never from stale project metadata.
 ///
 /// See this module's documentation for the five ordering obligations the body below carries.
+///
+/// `cancel` is this run's flag, read between the steps. Preparation runs while the run already
+/// holds the export slot, and its steps reach outside the process, so it is the longest stretch
+/// of a run that nothing could stop: a re-probe of a source on a share that stopped answering
+/// takes [`crate::ffmpeg::probe::PROBE_TIMEOUT`], which is 30 seconds, six times the budget
+/// `lib::EXIT_CANCEL_BUDGET` gives an application quit. Reading the flag between the steps does
+/// not shorten a step that has already started -- the timeout bounds that one -- but it stops
+/// the run from working through every remaining step after the answer is no longer wanted, and
+/// it means a cancel during preparation ends with the slot released and no reserved file left
+/// on disk.
 fn prepare_export_with<Discover, Load, Probe>(
     request: &ExportRequestWire,
     app_data_directory: &Path,
+    cancel: &AtomicBool,
     discover: Discover,
     load: Load,
     probe: Probe,
@@ -346,6 +372,10 @@ where
     Load: FnOnce(&Path) -> Result<LoadedSettings, SettingsFileError>,
     Probe: FnOnce(&Path, &Path) -> Result<MediaProbe, ProbeError>,
 {
+    // Read the same way `ExportSlot::is_canceled` reads it, so the ordering pairs with
+    // `ExportRegistry::cancel`'s store.
+    let canceled = || cancel.load(std::sync::atomic::Ordering::SeqCst);
+
     let executables = discover(app_data_directory)
         .map_err(|_| ExportCommandError::new(ExportErrorCode::FfmpegPairMissing))?;
 
@@ -358,6 +388,11 @@ where
 
     let source = PathBuf::from(&request.source_path);
     let destination = PathBuf::from(&request.output_path);
+
+    // Before the re-probe, which is the one step here that can spend tens of seconds.
+    if canceled() {
+        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+    }
     let probe = probe(&executables.ffprobe, &source).map_err(map_reprobe_error)?;
 
     let segments: Vec<SegmentBoundary> = request
@@ -382,6 +417,13 @@ where
         inspect_path,
     )
     .map_err(ExportCommandError::new)?;
+
+    // Before the reservation, which is the first step here that writes to the user's disk. A
+    // cancel read after it would have to delete the file it created; read here, there is
+    // nothing to undo.
+    if canceled() {
+        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+    }
 
     let pending = PendingOutput::reserve(&plan.destination).map_err(|error| {
         ExportCommandError::with_detail(ExportErrorCode::OutputNotWritable, error.to_string())
@@ -743,18 +785,23 @@ fn progress_event(
 
 /// Translate the shared ffprobe mapping of `commands::media` into the export vocabulary.
 ///
-/// The re-probe runs the same ffprobe the import ran, so it fails in the same three ways.
+/// The re-probe runs the same ffprobe the import ran, so it fails in the same four ways.
 /// Reusing `map_probe_error` keeps one mapping from a `ProbeError` to a code, a diagnostic,
 /// and an exit code, rather than letting a second copy drift away from it.
+///
+/// The timeout matters more here than it does on the import path. The single export slot is
+/// claimed before the re-probe runs, so an unbounded probe would hold it for the rest of the
+/// process's life and refuse every later export with `exportAlreadyRunning`.
 fn map_reprobe_error(error: ProbeError) -> ExportCommandError {
     let mapped = map_probe_error(error);
     let code = match mapped.code {
         ImportMediaErrorCode::FfprobeSpawnFailed => ExportErrorCode::FfprobeSpawnFailed,
         ImportMediaErrorCode::FfprobeProcessFailed => ExportErrorCode::FfprobeProcessFailed,
         ImportMediaErrorCode::FfprobeParseFailed => ExportErrorCode::FfprobeParseFailed,
-        // `map_probe_error` produces exactly the three codes above, and `ProbeError` has
-        // exactly three variants, so this arm is unreachable. It reports rather than panics:
-        // a fourth probe failure mode must not take an export worker down with it.
+        ImportMediaErrorCode::FfprobeTimedOut => ExportErrorCode::FfprobeTimedOut,
+        // `map_probe_error` produces exactly the four codes above, and `ProbeError` has
+        // exactly four variants, so this arm is unreachable. It reports rather than panics:
+        // a fifth probe failure mode must not take an export worker down with it.
         _ => {
             debug_assert!(false, "map_probe_error produced an unexpected code");
             ExportErrorCode::FfprobeProcessFailed
@@ -1242,6 +1289,7 @@ mod tests {
         let error = prepare_export_with(
             &request,
             &directory.path,
+            &AtomicBool::new(false),
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -1285,6 +1333,7 @@ mod tests {
         let prepared = prepare_export_with(
             &request,
             &directory.path,
+            &AtomicBool::new(false),
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -1352,6 +1401,7 @@ mod tests {
         let error = prepare_export_with(
             &request,
             &directory.path,
+            &AtomicBool::new(false),
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -1395,6 +1445,7 @@ mod tests {
         let error = prepare_export_with(
             &request,
             &directory.path,
+            &AtomicBool::new(false),
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -1423,6 +1474,114 @@ mod tests {
     }
 
     #[test]
+    fn a_cancel_before_the_re_probe_ends_preparation_without_spawning_ffprobe() {
+        // The run holds the export slot for the whole of preparation, and the re-probe alone
+        // can spend `PROBE_TIMEOUT`. A cancel read only after preparation returned would spend
+        // that time for an answer nobody wants, which is what holds an application quit past
+        // its budget.
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let probed = RefCell::new(false);
+        let request = ExportRequestWire {
+            source_path: source.to_string_lossy().into_owned(),
+            output_path: directory
+                .path
+                .join("out.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            segments: vec![ExportSegmentBoundaryWire {
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            preset_id: None,
+        };
+
+        let error = prepare_export_with(
+            &request,
+            &directory.path,
+            &AtomicBool::new(true),
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_| {
+                Ok(LoadedSettings {
+                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
+                    seeded: false,
+                })
+            },
+            |_, _| {
+                *probed.borrow_mut() = true;
+                unreachable!()
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::Canceled);
+        assert!(!*probed.borrow());
+    }
+
+    #[test]
+    fn a_cancel_during_the_re_probe_ends_preparation_with_nothing_reserved() {
+        // The realistic timing: the flag is set while the re-probe runs, which is the step a
+        // cancel is most likely to land in. Preparation must then stop before the reservation
+        // rather than leave a temporary file on the user's disk for a run that never starts.
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let cancel = AtomicBool::new(false);
+        let request = ExportRequestWire {
+            source_path: source.to_string_lossy().into_owned(),
+            output_path: directory
+                .path
+                .join("out.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            segments: vec![ExportSegmentBoundaryWire {
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            preset_id: None,
+        };
+
+        let error = prepare_export_with(
+            &request,
+            &directory.path,
+            &cancel,
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_| {
+                Ok(LoadedSettings {
+                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
+                    seeded: false,
+                })
+            },
+            |_, _| {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(sample_probe())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::Canceled);
+        let leftovers = fs::read_dir(&directory.path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
     fn a_missing_ffmpeg_pair_is_reported_before_the_settings_are_read() {
         let directory = TestDirectory::new();
         let request = ExportRequestWire {
@@ -1439,6 +1598,7 @@ mod tests {
         let error = prepare_export_with(
             &request,
             &directory.path,
+            &AtomicBool::new(false),
             |_| Err(LocateError::NotFound { inspected: vec![] }),
             |_| unreachable!(),
             |_, _| unreachable!(),
@@ -1464,6 +1624,21 @@ mod tests {
         assert_eq!(error.detail.as_deref(), Some("decoder rejected input"));
         assert_eq!(spawn.code, ExportErrorCode::FfprobeSpawnFailed);
         assert_eq!(spawn.detail.as_deref(), Some("denied"));
+    }
+
+    #[test]
+    fn a_re_probe_that_times_out_reports_its_own_code_and_not_a_spawn_failure() {
+        // The re-probe runs with the export slot already claimed, so a stall that was
+        // reported as any other code -- or not reported at all -- would leave the slot held
+        // for the life of the process and refuse every later export.
+        let error = map_reprobe_error(ProbeError::TimedOut {
+            timeout: Duration::from_secs(30),
+            stderr: b"could not read the source".to_vec(),
+        });
+
+        assert_eq!(error.code, ExportErrorCode::FfprobeTimedOut);
+        assert_eq!(error.detail.as_deref(), Some("could not read the source"));
+        assert_eq!(error.exit_code, None);
     }
 
     #[test]
