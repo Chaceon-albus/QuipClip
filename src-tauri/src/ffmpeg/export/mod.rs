@@ -318,6 +318,12 @@ export_error_codes! {
     /// discovery, mirroring `ImportMediaErrorCode::AppDataUnavailable` and
     /// `CapabilityProbeErrorCode::AppDataUnavailable`.
     AppDataUnavailable => "appDataUnavailable",
+    /// Reserved for the Tauri command layer (not implemented yet), and produced by no
+    /// function in this module: an export was requested while another one is already
+    /// running. [`registry::ExportRegistry::begin`] answers `None` when a run already holds
+    /// the single slot, and the command layer turns that `None` into this code rather than
+    /// queueing the request.
+    ExportAlreadyRunning => "exportAlreadyRunning",
     /// Reserved for the registry stage (not implemented yet): the settings file could not
     /// be read to resolve the requested preset or the configured ffmpeg path.
     SettingsUnreadable => "settingsUnreadable",
@@ -426,6 +432,7 @@ mod tests {
                 "canceled",
                 "commandExecutionFailed",
                 "encoderUnavailable",
+                "exportAlreadyRunning",
                 "ffmpegPairMissing",
                 "ffmpegProcessFailed",
                 "ffmpegSpawnFailed",
