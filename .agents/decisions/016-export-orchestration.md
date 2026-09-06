@@ -112,6 +112,12 @@ A cache miss does not block an export. The cache is a cache, and a user who has 
 must still be able to export. `ffmpeg` reports a bad encoder at the first frame, and the command
 maps that to `ffmpegProcessFailed` with the diagnostic text.
 
+**The first implementation does not make this test.** It reads no capability cache, and
+`encoderUnavailable` stays a code that no code path produces. The test needs the version string,
+which needs one more `ffmpeg` process, and that is a separate unit. Until it lands, every bad
+encoder arrives as `ffmpegProcessFailed` with the text from `ffmpeg`. The export is correct
+without the test, and the test only moves the report earlier and names the encoder.
+
 ### One event, one name
 
 All four progress reports, and the new fifth, cross on the event `export:progress`. The payload is
