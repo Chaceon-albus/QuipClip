@@ -4,6 +4,12 @@ version = "0.1.0"
 description = "Mark in and out points on a video, then export the segments joined in order."
 authors = ["capric98"]
 edition = "2021"
+# Layer 2 of `fsutil::replace_file` needs the POSIX-semantics path `fs::rename` gained in
+# 1.85 (ADR 015), in rust-lang/rust#131072. An older toolchain builds and loses it with no
+# diagnostic. Cite the pull request so a later reader can re-check the floor without a Windows
+# machine. Declaring `rust-version` also switches on `clippy::incompatible_msrv` crate-wide, so
+# under `-D warnings` any future use of a std API stabilised after 1.85 becomes a build failure.
+rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

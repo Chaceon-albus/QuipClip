@@ -198,10 +198,13 @@ impl PendingOutput {
     /// Publish the rendered output: rename the temporary file over the destination.
     ///
     /// This is the one step a reader of the destination can observe, and
-    /// [`crate::fsutil::replace_file`] makes it atomic and durable on each platform -- a rename
-    /// plus a directory fsync on Unix, `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING |
-    /// MOVEFILE_WRITE_THROUGH` on Windows, which also lets the rename replace an existing
-    /// destination that a plain `fs::rename` would refuse there.
+    /// [`crate::fsutil::replace_file`] makes it atomic on every platform. It is durable on Unix,
+    /// through a rename plus a directory fsync. On Windows durability depends on which attempt
+    /// succeeded: layer 1 carries `MOVEFILE_WRITE_THROUGH` and is durable, and a success through
+    /// `fs::rename` -- layer 2, which only a retry after `ERROR_ACCESS_DENIED` on a writable
+    /// destination takes -- is the one atomic but non-durable outcome (ADR 015). Blocking has a
+    /// separate cause: the retry loop runs for all four transient codes, not only code 5, so any
+    /// of them can hold this call for up to 511 milliseconds before it reports the failure.
     ///
     /// # What the caller must have done first
     ///
@@ -368,8 +371,8 @@ mod tests {
 
     #[test]
     fn commit_replaces_an_existing_destination_with_the_new_contents() {
-        // Re-exporting over a previous export is ordinary use, and on Windows a plain
-        // `fs::rename` would refuse it; `fsutil::replace_file` is what makes it work.
+        // Re-exporting over a previous export is ordinary use, so an existing destination must
+        // not stop the publication on any platform.
         let directory = TestDirectory::new();
         let destination = directory.path.join("movie.mp4");
         fs::write(&destination, b"a movie exported earlier").unwrap();

@@ -5,8 +5,14 @@
 //! file in the destination's own directory, then rename that file over the destination. A
 //! rename within one directory is atomic on every platform this application targets, so a
 //! reader always sees either the previous contents or the complete new ones, never a mix of
-//! both. This module holds that machinery once. A settings module and the ADR 004 export
-//! output file are the next two callers.
+//! both. Atomic is not the same as safe under concurrency: on Windows the rename step can
+//! still fail while another writer replaces the same destination, so [`replace_file`] layers two
+//! renames and a bounded retry there (ADR 015). This module holds that machinery once. ADR 015
+//! tabulates the four write paths that reach it: the settings file (ADR 013), the
+//! capability cache (ADR 006), the project file (ADR 010), and the export output publication
+//! (ADR 004, ADR 014). All four call it in this repository, and the settings write and the cache
+//! write are the two that run today: version 1 writes no project file (ADR 010), and
+//! `PendingOutput::commit` is called only from its own tests.
 //!
 //! The public surface is two functions, not one combined `write_json_atomically`. A combined
 //! function would need a new error type carrying both an `io::Error` and a `serde_json::Error`,
@@ -23,6 +29,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
+use std::time::Duration;
 
 /// A per-process counter that makes each temporary file name unique.
 ///
@@ -183,6 +191,13 @@ fn parent_directory(path: &Path) -> &Path {
 /// A plain rename is already atomic on Unix, so this only adds the directory fsync that makes
 /// the rename itself durable across a crash.
 ///
+/// The two platform arms are less symmetric than they look, and this is the arm a macOS
+/// developer reads. This one is two lines because `rename(2)` is also safe when two writers
+/// target one destination, and because the parent-directory fsync makes it durable. The Windows
+/// arm reaches the concurrency guarantee through two rename layers and a bounded retry, and
+/// reaches durability on every attempt that carries `MOVEFILE_WRITE_THROUGH` (ADR 015). Do not
+/// assume a change here has an equivalent there, or the reverse.
+///
 /// [`write_bytes_atomically`] is one caller. The export renderer (ADR 004, ADR 014) is a
 /// second, direct one: it calls this itself once the `ffmpeg` process it spawned has finished
 /// writing the path [`reserve_temporary_path`] reserved, to move that output over the
@@ -193,20 +208,260 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     File::open(parent_directory(destination))?.sync_all()
 }
 
-/// Replace `destination` with `source` in one atomic step.
+/// Replace `destination` with `source` in one atomic step, through two layered renames.
 ///
-/// Plain `fs::rename` on Windows fails when `destination` already exists, so this calls
-/// `MoveFileExW` directly with `MOVEFILE_REPLACE_EXISTING` to get the same atomic-replace
-/// semantics as the Unix rename, plus `MOVEFILE_WRITE_THROUGH` so the call does not return
-/// until the replace is durable on disk.
+/// Both layers replace an existing `destination`, and both are atomic. `std::fs::rename` on
+/// Windows passes `MOVEFILE_REPLACE_EXISTING` too, so an existing destination is not the reason
+/// this calls `MoveFileExW` directly. The reason is `MOVEFILE_WRITE_THROUGH`, which the standard
+/// library does not pass: Windows has no equivalent of the Unix parent-directory fsync, so that
+/// flag is the only crash-durability guarantee this function has here (ADR 015).
+///
+/// **Layer 1, the durable call.** `MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`. It is atomic and durable, and almost
+/// every call ends here with the guarantee the Unix arm gets from its directory fsync. Every
+/// attempt runs layer 1 unless the routing rule below sends that one attempt to layer 2.
+///
+/// **Layer 2, one narrow detour.** `std::fs::rename`. Since Rust 1.85 the standard library can
+/// open the source and call `SetFileInformationByHandle` with `FileRenameInfoEx` and
+/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS`, which a recent
+/// Windows 10 or later supplies on NTFS. POSIX semantics removes the destination name at once,
+/// instead of leaving it delete-pending, and delete-pending is exactly what makes the next of
+/// several racing writers read code 5. So layer 2 dissolves that race rather than waiting it out.
+/// Delegating it to the standard library also keeps a large `unsafe` block over a
+/// variable-length structure out of this repository.
+///
+/// Layer 2 is atomic and **not** durable, because no write-through flag reaches it. That trade
+/// is deliberate (ADR 015): on the export publication path the alternative outcome is no file at
+/// all, so a replacement that is atomic but not yet flushed beats a lost encode.
+///
+/// **Which code reaches layer 2.** Only `ERROR_ACCESS_DENIED`, and only when `destination` is
+/// not read-only. A current `fs::rename` gates its whole POSIX-semantics path behind that one
+/// code: it calls `MoveFileExW(old, new, MOVEFILE_REPLACE_EXISTING)` first and takes the POSIX
+/// path only when that call reports code 5. Rust 1.85, the floor `Cargo.toml` declares, is
+/// shaped the other way round: `FileRenameInfoEx` is its first attempt, and `FileRenameInfo` is
+/// the fallback on `ERROR_INVALID_PARAMETER`. Neither shape changes this rule. For
+/// `ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION` and `ERROR_USER_MAPPED_FILE` -- the
+/// virus-scanner and file-indexer codes, and the common case on a freshly muxed export --
+/// `fs::rename` would be layer 1 **minus** `MOVEFILE_WRITE_THROUGH`: it would surrender the only
+/// durability guarantee this arm has. Those three therefore stay on layer 1 and stay durable,
+/// for the write-through flag alone. A read-only destination is excluded for a separate reason;
+/// [`destination_is_read_only`] carries it. [`routes_to_posix_rename`] holds the whole rule, and
+/// is the function this loop calls.
+///
+/// A confirmed read-only destination also ends the call at once, without the remaining waits: the
+/// condition is permanent, layer 2 is closed to it, and no later attempt can succeed, so sleeping
+/// the rest of the budget would only hold the caller's lock for nothing. An attribute that cannot
+/// be read is not a confirmed refusal, so it keeps the retries: an ordinary delete-pending race
+/// still clears by waiting.
+///
+/// This makes up to `MAXIMUM_REPLACE_ATTEMPTS` attempts and goes on to the next one only for the
+/// codes [`is_transient_sharing_error`] accepts. Every other error is reported at the attempt
+/// that raises it, which can be the tenth if transient failures came first. A wait from
+/// `replace_retry_delay` precedes each attempt after the first, and no wait follows the last
+/// attempt. The last `io::Error` is returned unchanged **by this module**, never wrapped and
+/// never replaced: a synthetic error carries no raw operating-system code, and `map_io_error` in
+/// `commands/settings.rs` keeps a diagnostic only when the error carries one (ADR 011).
+/// `fs::rename` itself is not so faithful, so a code 5 out of layer 2 can be a stand-in: when its
+/// POSIX attempt fails for any reason other than `ERROR_DIR_NOT_EMPTY` it reports the earlier
+/// `ERROR_ACCESS_DENIED` rather than the real cause.
+///
+/// The whole budget is 511 milliseconds, and that size is set by the settings file and the cache
+/// file, where a scanner holds a file of a few kilobytes for milliseconds. It is too short for the
+/// export publication, where a scanner reads back a file of several gigabytes and holds it for
+/// seconds. The export publication therefore needs its own waiting policy, which no decision
+/// records yet. `PendingOutput::commit` has no production caller yet, which is why this function
+/// does not size that wait today. A separate application that holds the destination open -- a
+/// media player, for example -- is a genuinely unbounded condition that only the user can clear.
+/// That case is the reason the limit here is a limit at all, rather than an unbounded wait.
+///
+/// Both paths are resolved one time, above the loop. A retry changes neither path, and the two
+/// directory opens `canonicalize` performs are network round trips on a network share, so
+/// hoisting them keeps the whole call as close to the documented figure as this design allows.
+/// The 511 milliseconds bounds the sleeping alone: the two `canonicalize` round trips, the ten
+/// rename calls and up to eighteen `symlink_metadata` reads from the read-only guard -- two on
+/// each code-5 attempt, one for the early return and one for the routing rule -- all sit outside
+/// it.
+///
+/// The Unix arm needs neither layer nor retry, so the two arms are less symmetric than they
+/// look. A reader of one must not assume the other has the same shape.
 ///
 /// [`write_bytes_atomically`] is one caller. The export renderer (ADR 004, ADR 014) is a
 /// second, direct one: it calls this itself once the `ffmpeg` process it spawned has finished
 /// writing the path [`reserve_temporary_path`] reserved, to move that output over the
 /// destination the user chose. `ffmpeg` must have closed its own handle to the source by then,
-/// or this call fails the same way an in-process caller's leftover handle would.
+/// or this call fails the same way an in-process caller's leftover handle would -- and there
+/// the retry only delays the report, because that handle never goes away on its own.
 #[cfg(windows)]
 pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    let source = absolute_path_without_following_file(source)?;
+    let destination = absolute_path_without_following_file(destination)?;
+
+    // The first attempt. Always layer 1. A `let` binding rather than a loop iteration, so the
+    // compiler proves `last_error` holds a value on every path that reaches the loop.
+    let mut last_error = match move_file_write_through(&source, &destination) {
+        Ok(()) => return Ok(()),
+        Err(error) if is_transient_sharing_error(&error) => error,
+        Err(error) => return Err(error),
+    };
+
+    // Attempts 2 to MAXIMUM_REPLACE_ATTEMPTS. `retry_index` counts the first retry as 0, and it
+    // also indexes the wait that precedes that retry, so the loop performs exactly
+    // MAXIMUM_REPLACE_ATTEMPTS - 1 waits and never one after the last attempt.
+    for retry_index in 0..MAXIMUM_REPLACE_ATTEMPTS - 1 {
+        // A confirmed read-only destination is a permanent code-5 condition, and layer 2 is
+        // closed to it, so no later attempt can succeed. Report it now instead of sleeping the
+        // rest of the budget while the caller holds SETTINGS_LOCK or CACHE_LOCK. Only
+        // `Some(true)` ends the call: `None` means the attribute could not be read, which is not
+        // a confirmed refusal, and an ordinary delete-pending race still clears by waiting. The
+        // attribute is read only when the code is 5, so the common path pays nothing.
+        if last_error.raw_os_error() == Some(ERROR_ACCESS_DENIED)
+            && destination_is_read_only(&destination) == Some(true)
+        {
+            return Err(last_error);
+        }
+        std::thread::sleep(replace_retry_delay(retry_index));
+        // Route by the code the previous attempt raised. `fs::rename` gates its
+        // POSIX-semantics fallback behind ERROR_ACCESS_DENIED alone, so for any other code it
+        // is layer 1 without MOVEFILE_WRITE_THROUGH: no new capability, and no durability.
+        // Repeat the durable call instead.
+        let attempt = if routes_to_posix_rename(&last_error, &destination) {
+            fs::rename(&source, &destination)
+        } else {
+            move_file_write_through(&source, &destination)
+        };
+        last_error = match attempt {
+            Ok(()) => return Ok(()),
+            Err(error) if is_transient_sharing_error(&error) => error,
+            Err(error) => return Err(error),
+        };
+    }
+    Err(last_error)
+}
+
+/// The greatest number of rename attempts one [`replace_file`] call makes (ADR 015).
+///
+/// The first attempt is always layer 1, and each of the remaining nine is layer 1 again unless
+/// the previous attempt raised the one code that routes to layer 2.
+#[cfg(windows)]
+const MAXIMUM_REPLACE_ATTEMPTS: u32 = 10;
+
+// `replace_retry_delay` doubles, so this constant sets the whole budget and is not a linear knob:
+// at 20 the final wait alone is minutes, and at 66 the shift exceeds a u64 and panics, because
+// `retry_index` peaks at MAXIMUM_REPLACE_ATTEMPTS - 2. The value is pinned exactly rather than
+// bounded, because a reduction is as wrong as an increase: five places state 511 milliseconds,
+// nine waits, and ten attempts. A different budget needs a different schedule and a new figure in
+// every one of those places, not a different count here.
+#[cfg(windows)]
+const _: () = assert!(MAXIMUM_REPLACE_ATTEMPTS == 10);
+
+/// `ERROR_ACCESS_DENIED`: a different replacement left the destination delete-pending.
+///
+/// This code is treated as transient, and no code in this set is always transient: a media player
+/// that holds the destination raises `ERROR_SHARING_VIOLATION` for as long as the user leaves it
+/// open, and a permanently mapped file raises `ERROR_USER_MAPPED_FILE` the same way. The
+/// permanent code-5 conditions are a read-only destination, which [`destination_is_read_only`]
+/// makes [`replace_file`] refuse deliberately, an access list that denies deletion, and a
+/// `destination` that is an existing directory. `ffmpeg::export::output` documents that last case
+/// as reachable: a user who picks a directory as the export target reserves a temporary path
+/// successfully and then fails at the rename. A permanent case does not have to spend the whole
+/// budget. A directory destination can report at attempt 2, because `fs::rename` substitutes
+/// `ERROR_DIR_NOT_EMPTY` (145) when its POSIX attempt raises it, and 145 is not in this set, so
+/// [`replace_file`] stops there. Treating code 5 as transient at all is the accepted cost of
+/// clearing the delete-pending race, which is both common and short.
+#[cfg(windows)]
+const ERROR_ACCESS_DENIED: i32 = 5;
+
+/// `ERROR_SHARING_VIOLATION`: a program holds an endpoint and did not permit deletion.
+#[cfg(windows)]
+const ERROR_SHARING_VIOLATION: i32 = 32;
+
+/// `ERROR_LOCK_VIOLATION`: a program holds a byte-range lock on an endpoint.
+#[cfg(windows)]
+const ERROR_LOCK_VIOLATION: i32 = 33;
+
+/// `ERROR_USER_MAPPED_FILE`: a program holds an endpoint in mapped memory.
+#[cfg(windows)]
+const ERROR_USER_MAPPED_FILE: i32 = 1224;
+
+/// Whether `error` is the kind of transient sharing failure a new attempt can clear.
+///
+/// Only the four codes ADR 015 lists qualify. Every other error, including one carrying no raw
+/// operating-system code at all, is reported at the attempt that raises it, with no further
+/// attempt and no further wait. Read [`ERROR_ACCESS_DENIED`] before you rely on "transient":
+/// several permanent conditions raise that code as well.
+#[cfg(windows)]
+fn is_transient_sharing_error(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            ERROR_ACCESS_DENIED
+                | ERROR_SHARING_VIOLATION
+                | ERROR_LOCK_VIOLATION
+                | ERROR_USER_MAPPED_FILE
+        )
+    )
+}
+
+/// Whether the attempt that follows `last_error` uses layer 2.
+///
+/// The whole routing rule lives here so that a test can pin it. [`replace_file`] calls this
+/// function itself, rather than restating the condition inline, so the rule a test observes is
+/// the rule that runs.
+///
+/// `Some(false)` is the only read-only answer that opens layer 2. `None` -- the attribute could
+/// not be read -- keeps layer 1, for the reason [`destination_is_read_only`] states.
+#[cfg(windows)]
+fn routes_to_posix_rename(last_error: &io::Error, destination: &Path) -> bool {
+    last_error.raw_os_error() == Some(ERROR_ACCESS_DENIED)
+        && destination_is_read_only(destination) == Some(false)
+}
+
+/// Whether `destination` carries the read-only attribute, or `None` if the attribute is unreadable.
+///
+/// This is the one `ERROR_ACCESS_DENIED` case [`replace_file`] deliberately refuses to clear. A
+/// read-only destination fails layer 1 with code 5, and layer 2 would succeed on it: the standard
+/// library's POSIX-semantics path exists precisely to move a file while ignoring the read-only
+/// attribute. Routing a read-only destination there would make QuipClip overwrite a file the user
+/// protected, where today the call fails. So [`replace_file`] keeps that failure and never takes
+/// layer 2 for a read-only destination.
+///
+/// This guard exists to protect a file the user marked read-only, so an attribute it cannot read
+/// must not open layer 2. `None` is therefore the protected answer, not a permissive one: an
+/// answer of "not read-only" drawn from a failed metadata read would send a genuinely read-only
+/// destination to layer 2, which ignores the attribute and succeeds, and the protected file would
+/// be overwritten with no error reported at all. `None` still keeps the layer 1 retries, because
+/// an unreadable attribute is not a confirmed refusal and an ordinary delete-pending race must
+/// still clear by waiting.
+///
+/// The read is `symlink_metadata`, not `metadata`, because [`replace_file`] never resolves the
+/// destination's final component: [`absolute_path_without_following_file`] canonicalizes only the
+/// parent. The attribute `MoveFileExW` refused is the one on that final component itself, so
+/// following a symlink here would read the wrong file -- refusing a link that points at a
+/// read-only file while nothing protected would be touched, and overwriting a read-only link that
+/// points at a writable file.
+#[cfg(windows)]
+fn destination_is_read_only(destination: &Path) -> Option<bool> {
+    fs::symlink_metadata(destination)
+        .ok()
+        .map(|metadata| metadata.permissions().readonly())
+}
+
+/// The wait before retry number `retry_index`, counting the first retry as index 0.
+///
+/// The waits double from 1 millisecond, so the nine waits [`replace_file`] can perform are 1, 2,
+/// 4, 8, 16, 32, 64, 128, and 256 milliseconds, and they total 511 milliseconds (ADR 015).
+#[cfg(windows)]
+fn replace_retry_delay(retry_index: u32) -> Duration {
+    Duration::from_millis(1u64 << retry_index)
+}
+
+/// Layer 1: one `MoveFileExW` call that replaces `destination` with `source`, durably.
+///
+/// `MOVEFILE_WRITE_THROUGH` is the whole reason this hand-written call exists, and it is the
+/// only part of [`replace_file`] the standard library cannot supply. Both paths arrive already
+/// resolved, because [`replace_file`] resolves them one time above its loop.
+#[cfg(windows)]
+fn move_file_write_through(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
@@ -214,8 +469,6 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     extern "system" {
         fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
     }
-    let source = absolute_path_without_following_file(source)?;
-    let destination = absolute_path_without_following_file(destination)?;
     let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
     let destination_wide: Vec<u16> = destination
         .as_os_str()
@@ -236,11 +489,12 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     }
 }
 
-/// Resolve `path` to an absolute path without following it as a symlink, for `MoveFileExW`.
+/// Resolve `path` to an absolute path without following it as a symlink, for both rename layers.
 ///
 /// `Path::canonicalize` would follow `path` itself if it names a symlink, which is wrong for a
 /// rename endpoint; canonicalizing only the parent directory and rejoining the file name avoids
-/// that while still producing the absolute path `MoveFileExW` needs.
+/// that while still producing the absolute path `MoveFileExW` needs. [`replace_file`] calls this
+/// twice, above its loop, and both layers reuse the two results.
 #[cfg(windows)]
 fn absolute_path_without_following_file(path: &Path) -> io::Result<PathBuf> {
     let file_name = path.file_name().ok_or_else(|| {
@@ -437,6 +691,199 @@ mod tests {
         fs::write(&source, b"new contents").unwrap();
         replace_file(&source, &destination).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"new contents");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_the_four_transient_sharing_codes_start_a_new_attempt() {
+        // Bare literals, not the module's own constants. A test that feeds a module's constants
+        // into a predicate matching on those same constants restates them and observes nothing:
+        // change ERROR_USER_MAPPED_FILE to 1225 and it still passes, while Windows silently
+        // stops retrying mapped-file conflicts.
+        for code in [5, 32, 33, 1224] {
+            assert!(
+                is_transient_sharing_error(&io::Error::from_raw_os_error(code)),
+                "operating-system code {code} must start a new attempt"
+            );
+        }
+        // The values themselves are a separate claim, so assert them separately.
+        assert_eq!(
+            [
+                ERROR_ACCESS_DENIED,
+                ERROR_SHARING_VIOLATION,
+                ERROR_LOCK_VIOLATION,
+                ERROR_USER_MAPPED_FILE
+            ],
+            [5, 32, 33, 1224],
+            "the constants must keep the values ADR 015 tabulates"
+        );
+        // ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND are permanent: no wait clears them.
+        for code in [2, 3] {
+            assert!(
+                !is_transient_sharing_error(&io::Error::from_raw_os_error(code)),
+                "operating-system code {code} must fail immediately"
+            );
+        }
+        // An error with no raw operating-system code carries no evidence of a sharing failure.
+        assert!(!is_transient_sharing_error(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "no raw operating-system code"
+        )));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_held_destination_spends_the_whole_budget_and_reports_the_operating_system_code() {
+        // This test is the guard on the export publication path, and it covers three properties
+        // together, from observed behaviour rather than from the constants the loop uses: the
+        // attempt count, the total wait, and the fidelity of the reported error. A loop that
+        // ran fewer attempts, or that dropped a wait, returns too early. A loop that wrapped or
+        // rebuilt the error loses the raw operating-system code, and `map_io_error` in
+        // `commands/settings.rs` then drops the diagnostic (ADR 011).
+        //
+        // What it does not cover: no test reaches layer 2's POSIX-semantics path
+        // deterministically. `share_mode(0)` yields ERROR_SHARING_VIOLATION, which never routes
+        // there, and the only code-5 route `replace_file` allows is the delete-pending race,
+        // which `eight_concurrent_writers_into_one_directory_never_collide_on_a_temporary_name`
+        // reaches only under real contention.
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::Instant;
+
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        fs::write(&destination, b"old contents").unwrap();
+        let source = directory.path.join("source.tmp");
+        fs::write(&source, b"new contents").unwrap();
+
+        // A share mode of 0 denies every other open, including the delete a rename needs, and
+        // this handle is held for the whole call, so every attempt fails the same way and no
+        // layer can succeed.
+        let _held_open = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&destination)
+            .expect(
+                "the test could not take the exclusive handle it needs; another program, a \
+                 virus scanner for example, holds the destination this test just wrote",
+            );
+
+        let started = Instant::now();
+        let error = replace_file(&source, &destination).unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(
+                error.raw_os_error(),
+                Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+            ),
+            "the operating-system error must reach the caller unchanged, got {error:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(511),
+            "ten attempts leave nine waits totalling 511 milliseconds, waited {elapsed:?}"
+        );
+        // The upper bound is tight on purpose, because a loose one observes no attempt count: an
+        // eleventh attempt would add a 512-millisecond wait and still finish under a second. The
+        // nine `Sleep` calls each round up to the system timer tick, worst case about 15.6
+        // milliseconds, so a realistic ceiling is around 650 milliseconds and this bound leaves
+        // roughly 370 milliseconds of headroom. It is still a clock standing in for a count: a
+        // runner stalled for longer than that headroom fails this line with no regression behind
+        // it.
+        assert!(
+            elapsed < Duration::from_millis(1023),
+            "an extra attempt would add a 512-millisecond wait, waited {elapsed:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_destination_is_refused_rather_than_overwritten() {
+        // `replace_file` routes ERROR_ACCESS_DENIED to `fs::rename`, whose POSIX-semantics path
+        // moves a file while ignoring the read-only attribute. This pins the exclusion that
+        // keeps it from doing so: a file the user marked read-only must survive.
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        fs::write(&destination, b"protected contents").unwrap();
+        let source = directory.path.join("source.tmp");
+        fs::write(&source, b"new contents").unwrap();
+
+        let mut permissions = fs::metadata(&destination).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&destination, permissions).unwrap();
+
+        let error = replace_file(&source, &destination).unwrap_err();
+
+        // Clear the read-only bit before the assertions, not after. An assertion that fails is
+        // the point of this test, and `remove_dir_all` cannot delete a read-only file on
+        // Windows, so a bit cleared after a panic is never cleared and the run leaks a temporary
+        // directory.
+        let mut permissions = fs::metadata(&destination).unwrap().permissions();
+        // The lint warns that this makes a file world writable on Unix. This test is
+        // Windows-only, so that hazard cannot arise, and the bit must be cleared for `Drop`
+        // to remove the directory.
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&destination, permissions).unwrap();
+
+        assert_eq!(
+            error.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED),
+            "a read-only destination must report code 5, got {error:?}"
+        );
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"protected contents",
+            "the protected destination must keep its contents"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_code_5_on_a_writable_destination_routes_to_the_posix_rename() {
+        // This is the rule an earlier version of `replace_file` got wrong: it sent every
+        // transient code to `fs::rename`, which is layer 1 minus MOVEFILE_WRITE_THROUGH, and so
+        // it surrendered durability for nothing on the three sharing codes. Nothing else in this
+        // suite catches that. `a_held_destination_...` spends the same budget and reports the
+        // same code on either route, and `only_the_four_transient_sharing_codes_...` tests the
+        // transient set, not the route.
+        let directory = TestDirectory::new();
+        let writable = directory.path.join("writable.mp4");
+        fs::write(&writable, b"contents").unwrap();
+
+        assert!(
+            routes_to_posix_rename(&io::Error::from_raw_os_error(5), &writable),
+            "code 5 on a writable destination must take layer 2, the one route that clears the \
+             delete-pending race"
+        );
+        for code in [32, 33, 1224] {
+            assert!(
+                !routes_to_posix_rename(&io::Error::from_raw_os_error(code), &writable),
+                "operating-system code {code} must stay on layer 1 and keep MOVEFILE_WRITE_THROUGH"
+            );
+        }
+
+        let read_only = directory.path.join("read-only.mp4");
+        fs::write(&read_only, b"protected contents").unwrap();
+        let mut permissions = fs::metadata(&read_only).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&read_only, permissions).unwrap();
+
+        let routed = routes_to_posix_rename(&io::Error::from_raw_os_error(5), &read_only);
+
+        // Clear the bit before asserting, so a failure still leaves a directory `Drop` can
+        // remove.
+        let mut permissions = fs::metadata(&read_only).unwrap().permissions();
+        // The lint warns that this makes a file world writable on Unix. This test is
+        // Windows-only, so that hazard cannot arise.
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&read_only, permissions).unwrap();
+
+        assert!(
+            !routed,
+            "code 5 on a read-only destination must stay on layer 1: layer 2 ignores the \
+             read-only attribute and would overwrite a file the user protected"
+        );
     }
 
     struct TestDirectory {
