@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ChevronDown, Minus, Square, X } from "lucide-react";
@@ -11,8 +12,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
+import { ExportDialog } from "@/components/export/ExportDialog";
 import { openMediaFileDialog, useMediaStore } from "@/features/media";
 import { cn } from "@/lib/utils";
+import { runExportFlow } from "./exportFlowController";
 
 /**
  * Detect whether the client is running on macOS.
@@ -26,9 +29,19 @@ export function TitleBar() {
   const { t } = useTranslation();
   const isMac = isMacOS();
   const media = useMediaStore((state) => state.media);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
   const handleOpenMedia = () => {
     void openMediaFileDialog({
+      filterName: t("dialog.videoFilter"),
+    });
+  };
+
+  const handleExport = () => {
+    void runExportFlow({
+      setModalOpen: setExportDialogOpen,
+      // The save dialog and the open dialog list the same file kind, so both read the
+      // one `dialog.videoFilter` label. A second key with the same text would drift.
       filterName: t("dialog.videoFilter"),
     });
   };
@@ -84,7 +97,9 @@ export function TitleBar() {
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem disabled>{t("titleBar.menu.save")}</DropdownMenuItem>
-            <DropdownMenuItem disabled>{t("titleBar.menu.export")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => void handleExport()}>
+              {t("titleBar.menu.export")}
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -131,6 +146,7 @@ export function TitleBar() {
           </div>
         )}
       </div>
+      <ExportDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />
     </header>
   );
 }
