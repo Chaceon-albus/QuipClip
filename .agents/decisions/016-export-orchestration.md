@@ -85,9 +85,10 @@ before the rename.
 the cancel flag is tested. Only the rename remains.
 
 The name is therefore not `postProcessing` and not `finalizing`. `-movflags +faststart` is a real
-post-write pass, and it happens earlier, inside `ffmpeg`, before the process exits. A name shared
-between the two phases would tell a reader that the bytes are still changing when they are not.
-`publishing` also matches the words `output.rs` and ADR 015 already use.
+post-write pass. `arguments.rs` sets that flag for the MP4 and the MOV containers, and not for
+Matroska. Where it is set, it runs earlier, inside `ffmpeg`, before the process exits. A name
+shared between the two phases would tell a reader that the bytes are still changing when they are
+not. `publishing` also matches the words `output.rs` and ADR 015 already use.
 
 The interface does not show that word. It shows "Finishing...". ADR 011 puts a stable code on the
 wire and the sentence in the catalogs, and this follows that split.
