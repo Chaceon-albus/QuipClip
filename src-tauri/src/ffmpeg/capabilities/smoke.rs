@@ -483,8 +483,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_hanging_process_is_killed_and_reported_as_timed_out() {
-        let program = Path::new("/bin/sh");
-        let args = vec!["-c".to_owned(), "sleep 10".to_owned()];
+        // One process, no shell. A shell that forked would die on `Child::kill` while `sleep`
+        // kept the inherited stderr write handle open, and the drain-thread join at the end of
+        // `run_with_timeout` would then block for the full 10 seconds -- the Windows failure the
+        // counterpart arm below was fixed for.
+        let program = Path::new("/bin/sleep");
+        let args = vec!["10".to_owned()];
         let started = Instant::now();
 
         let outcome = run_with_timeout(
@@ -506,16 +510,16 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_hanging_process_is_killed_and_reported_as_timed_out() {
-        // `ping -n 20 127.0.0.1` is a portable way to occupy a process on Windows for
-        // about 19 seconds without a dependency on any tool outside a default install.
-        let program = Path::new("cmd.exe");
-        let args = vec![
-            "/c".to_owned(),
-            "ping".to_owned(),
-            "-n".to_owned(),
-            "20".to_owned(),
-            "127.0.0.1".to_owned(),
-        ];
+        // `ping -n 20 127.0.0.1` occupies a process for about 19 seconds and needs no tool
+        // outside a default install. It must run as one process, not through `cmd.exe /c`:
+        // `cmd.exe` stays alive as the parent of `ping`, so `Child::kill` terminates only
+        // `cmd.exe` while `ping` keeps the inherited stderr write handle open. The pipe then
+        // reaches end of stream only when `ping` exits on its own, and the drain-thread join
+        // at the end of `run_with_timeout` blocks for that full runtime -- which is what the
+        // elapsed-time assertion below catches. `pid_reporting_sleeper` in
+        // `ffmpeg::export::process`'s tests states the same one-process-per-arm requirement.
+        let program = Path::new("ping.exe");
+        let args = vec!["-n".to_owned(), "20".to_owned(), "127.0.0.1".to_owned()];
         let started = Instant::now();
 
         let outcome = run_with_timeout(
