@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   BACKEND_IMPORT_MEDIA_ERROR_CODES,
@@ -30,6 +32,7 @@ function createValidProbe(): ImportMediaResult["probe"] {
   return {
     formatNames: ["mov", "mp4", "m4a"],
     formatLongName: "QuickTime / MOV",
+    formatStartTime: null,
     videoCodec: "h264",
     videoProfile: "High",
     pixelFormat: "yuv420p",
@@ -45,6 +48,7 @@ function createValidProbe(): ImportMediaResult["probe"] {
     rFrameRate: { n: 30000, d: 1001 },
     reportedFrameCount: "300" as FrameCount,
     audio: {
+      index: 0,
       codec: "aac",
       sampleRate: 48000,
       channels: 2,
@@ -65,7 +69,50 @@ function createValidImportResult(
   };
 }
 
+/**
+ * Reads the wire strings of every `ImportMediaErrorCode` out of the Rust source.
+ *
+ * `BACKEND_IMPORT_MEDIA_ERROR_CODES` and the Rust enum are two independent hand-written lists
+ * that must name the same set, and until this test existed nothing compared them: a code added
+ * on one side reached the user as the generic "unknown" message, which is the opposite of why a
+ * stable code crosses the boundary at all (ADR 011).
+ *
+ * The enum carries `#[serde(rename_all = "camelCase")]`, so the wire string of a variant is its
+ * name with the first letter lowered. That attribute is asserted rather than assumed, because
+ * dropping it would silently change every string on the wire.
+ */
+const IMPORT_MEDIA_ENUM_PATTERN =
+  /#\[serde\(rename_all = "camelCase"\)\]\npub enum ImportMediaErrorCode \{\n([\s\S]*?)\n\}\n/;
+
+function readRustImportMediaErrorCodes(): string[] {
+  const source = readFileSync(
+    fileURLToPath(new URL("../../../src-tauri/src/commands/media.rs", import.meta.url)),
+    "utf8",
+  );
+
+  const declaration = IMPORT_MEDIA_ENUM_PATTERN.exec(source);
+  expect(declaration).not.toBeNull();
+
+  const variants = declaration![1].matchAll(/^ {4}([A-Z][A-Za-z0-9]*),$/gm);
+  return Array.from(variants, (match) => match[1][0].toLowerCase() + match[1].slice(1));
+}
+
 describe("Media Validation & Normalization", () => {
+  describe("Rust vocabulary parity", () => {
+    it("names exactly the codes the Rust import_media vocabulary emits", () => {
+      const rustCodes = readRustImportMediaErrorCodes();
+
+      // Guards the parse itself: a moved or renamed Rust file would otherwise read as an
+      // empty vocabulary and pass the comparison below.
+      expect(rustCodes.length).toBeGreaterThan(10);
+      expect(new Set(rustCodes).size).toBe(rustCodes.length);
+
+      expect([...BACKEND_IMPORT_MEDIA_ERROR_CODES].sort()).toEqual(
+        [...rustCodes].sort(),
+      );
+    });
+  });
+
   describe("Type Guards & Helpers", () => {
     it("recognizes all valid backend error codes", () => {
       for (const code of BACKEND_IMPORT_MEDIA_ERROR_CODES) {
@@ -284,6 +331,7 @@ describe("Media Validation & Normalization", () => {
     it("validates audio stream probe fields", () => {
       expect(
         isAudioProbe({
+          index: 0,
           codec: "aac",
           sampleRate: 48000,
           channels: 2,
@@ -292,6 +340,7 @@ describe("Media Validation & Normalization", () => {
 
       expect(
         isAudioProbe({
+          index: 1,
           codec: null,
           sampleRate: null,
           channels: null,
@@ -300,6 +349,24 @@ describe("Media Validation & Normalization", () => {
 
       expect(
         isAudioProbe({
+          index: -1,
+          codec: "aac",
+          sampleRate: 48000,
+          channels: 2,
+        }),
+      ).toBe(false);
+
+      expect(
+        isAudioProbe({
+          codec: "aac",
+          sampleRate: 48000,
+          channels: 2,
+        }),
+      ).toBe(false);
+
+      expect(
+        isAudioProbe({
+          index: 0,
           codec: 123,
           sampleRate: 48000,
           channels: 2,
@@ -311,6 +378,58 @@ describe("Media Validation & Normalization", () => {
   describe("isMediaProbe", () => {
     it("returns true for a valid MediaProbe object", () => {
       expect(isMediaProbe(createValidProbe())).toBe(true);
+    });
+
+    it("accepts valid signed rational for formatStartTime", () => {
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          formatStartTime: { n: 0, d: 1 },
+        }),
+      ).toBe(true);
+
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          formatStartTime: { n: -1, d: 2 },
+        }),
+      ).toBe(true);
+
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          formatStartTime: { n: 498839, d: 50000 },
+        }),
+      ).toBe(true);
+    });
+
+    it("rejects invalid formatStartTime", () => {
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          formatStartTime: { n: 1, d: 0 },
+        }),
+      ).toBe(false);
+
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          formatStartTime: { n: 1.5, d: 1 },
+        }),
+      ).toBe(false);
+
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          formatStartTime: "0" as unknown as null,
+        }),
+      ).toBe(false);
+
+      // Rust always serializes the field, as a Rational or as null. An absent key is a payload
+      // that did not come from the backend contract.
+      const withoutStartTime: Record<string, unknown> = { ...createValidProbe() };
+      delete withoutStartTime.formatStartTime;
+      expect(isMediaProbe(withoutStartTime)).toBe(false);
     });
 
     it("returns false for non-objects or malformed structures", () => {

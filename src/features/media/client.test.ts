@@ -23,6 +23,7 @@ function createValidImportResult(): ImportMediaResult {
     probe: {
       formatNames: ["mov", "mp4"],
       formatLongName: "QuickTime / MOV",
+      formatStartTime: null,
       videoCodec: "h264",
       videoProfile: "High",
       pixelFormat: "yuv420p",
@@ -38,6 +39,7 @@ function createValidImportResult(): ImportMediaResult {
       rFrameRate: { n: 30000, d: 1001 },
       reportedFrameCount: "300" as FrameCount,
       audio: {
+        index: 0,
         codec: "aac",
         sampleRate: 48000,
         channels: 2,

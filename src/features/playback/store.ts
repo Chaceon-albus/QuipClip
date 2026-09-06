@@ -50,6 +50,21 @@ export function getNominalFrameRate(source: PlaybackSource): Rational | null {
 }
 
 /**
+ * Largest accepted distance in seconds, both between the start of the media timeline and the
+ * position the attached element held at attach time, and between the position the element is
+ * known to hold while nothing has moved it and the mediaTime of the first RVFC callback after
+ * the attach (ADR 003 step 4).
+ *
+ * A first callback outside those bounds does not identify the frame that videoStartPts names.
+ * It comes from an element that already played and was attached again, or from a loop that was
+ * registered in a passive effect and missed the first presented frame. Calibration is refused
+ * in that case, and the preview falls back to the approximate clock.
+ *
+ * The value is far above one frame interval, because the failure it rejects is tens of seconds.
+ */
+export const ANCHOR_TOLERANCE_SECONDS = 1.0;
+
+/**
  * Factory function creating a vanilla Zustand store instance for playback state.
  *
  * The attached HTMLVideoElement/PlaybackMediaElement, active PlaybackSource, and calibration
@@ -68,6 +83,22 @@ export function createPlaybackStore(
   let calibratedMediaTime: number | null = null;
   let lastPresentedMediaTime: number | null = null;
   let lastInferredPts: Pts | null = null;
+  // Position the attached element held when it was attached, or null when it reported no
+  // finite position. An element React has just created reports 0, and an element that already
+  // played reports the position it reached, so the value separates the two whether or not
+  // metadata has loaded. Used only by the anchor guard.
+  let attachedStartTime: number | null = null;
+  // Position the element is known to hold while nothing has moved it since the attach. It
+  // starts at attachedStartTime and is taken again when metadata loads, because that is the
+  // first moment the browser reports the true start of the media timeline, which ADR 003 does
+  // not require to be 0. Used only by the anchor guard.
+  let anchorBaselineTime: number | null = null;
+  // True when the element was seeked after the attach and before the calibration anchor was
+  // taken. The frame such a seek presents is not the frame videoStartPts names.
+  let seekedBeforeCalibration = false;
+  // Source revision keys that lost precise editing. ADR 003 denies precision per source, so the
+  // denial must outlive the attachment that detected it.
+  const precisionDeniedSources = new Set<string>();
 
   return createStore<PlaybackStoreState>()((set, get) => ({
     presentedFrame: initialState?.presentedFrame ?? null,
@@ -97,12 +128,15 @@ export function createPlaybackStore(
         hasValidTimeBase = false;
       }
 
+      const newIdentity = getSourceRevisionKey(source);
+      const isPrecisionDenied = precisionDeniedSources.has(newIdentity);
       const hasValidStartPts =
         source.videoStartPts !== null && isPtsString(source.videoStartPts);
       const initialCalibrationStatus: CalibrationStatus =
-        hasValidStartPts && hasValidTimeBase ? "calibrating" : "unavailable";
+        hasValidStartPts && hasValidTimeBase && !isPrecisionDenied
+          ? "calibrating"
+          : "unavailable";
 
-      const newIdentity = getSourceRevisionKey(source);
       const isElementReady =
         typeof element.readyState === "number" &&
         (typeof HTMLMediaElement !== "undefined"
@@ -132,6 +166,16 @@ export function createPlaybackStore(
       calibratedMediaTime = null;
       lastPresentedMediaTime = null;
       lastInferredPts = null;
+      // Record where the element stands, so the first RVFC callback can be checked against it.
+      // The application reaches attach from the ref callback of a node React has just created,
+      // which reports readyState 0, so the guard must have a baseline for that element too.
+      const startTime =
+        typeof element.currentTime === "number" && Number.isFinite(element.currentTime)
+          ? element.currentTime
+          : null;
+      attachedStartTime = startTime;
+      anchorBaselineTime = startTime;
+      seekedBeforeCalibration = false;
 
       set({
         presentedFrame: null,
@@ -170,6 +214,9 @@ export function createPlaybackStore(
       calibratedMediaTime = null;
       lastPresentedMediaTime = null;
       lastInferredPts = null;
+      attachedStartTime = null;
+      anchorBaselineTime = null;
+      seekedBeforeCalibration = false;
 
       set({
         presentedFrame: null,
@@ -192,6 +239,20 @@ export function createPlaybackStore(
 
       if (attachedElement !== element) {
         return;
+      }
+
+      // Loaded metadata is the first moment the browser reports the true start of the media
+      // timeline. Take it as the baseline of the anchor guard while the anchor is still open
+      // and nothing has moved the element, so a source whose timeline starts away from 0 still
+      // calibrates (ADR 003). No seek can precede this point, because every seek action of the
+      // store requires isReady, and this call is what grants it.
+      if (
+        calibratedMediaTime === null &&
+        !seekedBeforeCalibration &&
+        typeof element.currentTime === "number" &&
+        Number.isFinite(element.currentTime)
+      ) {
+        anchorBaselineTime = element.currentTime;
       }
 
       set({ isReady: true });
@@ -439,6 +500,12 @@ export function createPlaybackStore(
         return;
       }
 
+      if (calibratedMediaTime === null) {
+        // The element left the position the anchor guard holds as its baseline before the
+        // anchor was taken, so the next first callback cannot identify videoStartPts.
+        seekedBeforeCalibration = true;
+      }
+
       // Do not update inferred PTS optimistically after assigning currentTime.
       set({
         isPlaying: false,
@@ -475,6 +542,13 @@ export function createPlaybackStore(
         set({ isPlaying: false, error: "seekFailed", presentedFrame: null });
         return;
       }
+
+      if (calibratedMediaTime === null) {
+        // The element left the position the anchor guard holds as its baseline before the
+        // anchor was taken, so the next first callback cannot identify videoStartPts.
+        seekedBeforeCalibration = true;
+      }
+
       set({ isPlaying: false, error: null, presentedFrame: null });
     },
 
@@ -496,15 +570,30 @@ export function createPlaybackStore(
         return;
       }
 
+      // Write the unavailable state only when it is not already the state. RVFC fires for every
+      // presented frame, and an unchanged partial still allocates a state and notifies everyone.
+      const markUnavailable = () => {
+        const state = get();
+        if (
+          state.calibrationStatus !== "unavailable" ||
+          state.presentedFrame !== null
+        ) {
+          set({ calibrationStatus: "unavailable", presentedFrame: null });
+        }
+      };
+
       if (
         typeof mediaTime !== "number" ||
         !Number.isFinite(mediaTime) ||
         mediaTime < 0
       ) {
+        // An RVFC callback that reports no usable mediaTime is a property of the source,
+        // so the denial holds for every later attachment of it (ADR 003).
+        precisionDeniedSources.add(sourceRevisionKey);
         calibratedMediaTime = null;
         lastPresentedMediaTime = null;
         lastInferredPts = null;
-        set({ calibrationStatus: "unavailable", presentedFrame: null });
+        markUnavailable();
         return;
       }
 
@@ -514,13 +603,33 @@ export function createPlaybackStore(
         !isPtsString(attachedSource.videoStartPts) ||
         get().calibrationStatus === "unavailable"
       ) {
-        set({ calibrationStatus: "unavailable", presentedFrame: null });
+        markUnavailable();
         return;
       }
 
       const isFirstCallback = calibratedMediaTime === null;
 
       if (isFirstCallback) {
+        // ADR 003 step 4 anchors videoStartPts on the first frame the element presents after it
+        // loads at the beginning of the source. An element that already played and was attached
+        // again presents another frame first, and binding videoStartPts to that frame offsets
+        // every later inferred PTS. Refuse the anchor and fall back to the approximate clock.
+        //
+        // The element can also leave the start before the first callback arrives. The ruler
+        // becomes clickable as soon as metadata loads, so an approximate or nominal seek can
+        // precede the anchor. Such a seek is recorded, because the browser moves currentTime
+        // on its own when metadata loads and a position alone cannot separate the two.
+        const hasMovedBeforeAttach =
+          attachedStartTime !== null && attachedStartTime > ANCHOR_TOLERANCE_SECONDS;
+        const hasMovedAfterAttach =
+          anchorBaselineTime !== null &&
+          Math.abs(mediaTime - anchorBaselineTime) > ANCHOR_TOLERANCE_SECONDS;
+
+        if (hasMovedBeforeAttach || hasMovedAfterAttach || seekedBeforeCalibration) {
+          markUnavailable();
+          return;
+        }
+
         // First presented frame establishes calibration anchor
         calibratedMediaTime = mediaTime;
         const initialPts = attachedSource.videoStartPts;
@@ -541,7 +650,7 @@ export function createPlaybackStore(
 
       const calibrationAnchor = calibratedMediaTime;
       if (calibrationAnchor === null) {
-        set({ calibrationStatus: "unavailable", presentedFrame: null });
+        markUnavailable();
         return;
       }
 
@@ -553,7 +662,10 @@ export function createPlaybackStore(
       );
 
       if (inferredPts === null) {
-        set({ calibrationStatus: "unavailable", presentedFrame: null });
+        // The mapping of this source cannot be converted safely, which no later attachment
+        // of the same file changes (ADR 003).
+        precisionDeniedSources.add(sourceRevisionKey);
+        markUnavailable();
         return;
       }
 
@@ -562,8 +674,10 @@ export function createPlaybackStore(
         lastPresentedMediaTime !== null && mediaTime !== lastPresentedMediaTime;
 
       if (isDistinctPresentation && inferredPts === lastInferredPts) {
-        // Distinct RVFC presented frames inferred the same source PTS -> disable precision
-        set({ calibrationStatus: "unavailable", presentedFrame: null });
+        // Distinct RVFC presented frames inferred the same source PTS -> disable precision.
+        // ADR 003 disables it for that source, so record it against the source revision key.
+        precisionDeniedSources.add(sourceRevisionKey);
+        markUnavailable();
         return;
       }
 
@@ -680,6 +794,11 @@ export function createPlaybackStore(
       calibratedMediaTime = null;
       lastPresentedMediaTime = null;
       lastInferredPts = null;
+      attachedStartTime = null;
+      anchorBaselineTime = null;
+      seekedBeforeCalibration = false;
+      // precisionDeniedSources is kept: ADR 003 denies precise editing for the source, and a
+      // source keeps the same revision key until the file on disk changes.
 
       set({
         presentedFrame: null,

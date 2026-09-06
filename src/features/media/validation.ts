@@ -167,13 +167,14 @@ export function isAudioProbe(value: unknown): value is AudioProbe {
   if (typeof value !== "object" || value === null) {
     return false;
   }
-  const { codec, sampleRate, channels } = value as Record<string, unknown>;
+  const { index, codec, sampleRate, channels } = value as Record<string, unknown>;
 
+  const isIndexValid = isNonNegativeU32(index);
   const isCodecValid = codec === null || typeof codec === "string";
   const isSampleRateValid = sampleRate === null || isPositiveU32(sampleRate);
   const isChannelsValid = channels === null || isPositiveU32(channels);
 
-  return isCodecValid && isSampleRateValid && isChannelsValid;
+  return isIndexValid && isCodecValid && isSampleRateValid && isChannelsValid;
 }
 
 /**
@@ -192,6 +193,9 @@ export function isMediaProbe(value: unknown): value is MediaProbe {
     return false;
   }
   if (p.formatLongName !== null && typeof p.formatLongName !== "string") {
+    return false;
+  }
+  if (p.formatStartTime !== null && !isSignedRational(p.formatStartTime)) {
     return false;
   }
   if (typeof p.videoCodec !== "string") {

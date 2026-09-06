@@ -12,6 +12,7 @@ function createFakeMediaResult(fileName: string): ImportMediaResult {
     probe: {
       formatNames: ["mov", "mp4"],
       formatLongName: "QuickTime / MOV",
+      formatStartTime: null,
       videoCodec: "h264",
       videoProfile: "High",
       pixelFormat: "yuv420p",

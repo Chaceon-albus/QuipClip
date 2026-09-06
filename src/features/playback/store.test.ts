@@ -331,6 +331,12 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       // sourceB has videoStartPts "1000"
       store.getState().attach(sourceB, video);
+
+      // The media timeline of this source starts at 1.5s. An element without metadata reports
+      // 0, and the browser moves currentTime to the start of the timeline when it loads the
+      // metadata, which is the event syncReady models.
+      video.readyState = 1;
+      video.currentTime = 1.5;
       store.getState().syncReady(identityB, video);
 
       // Browser begins playback at mediaTime 1.5s
@@ -1033,6 +1039,286 @@ describe("Playback Store & PTS Presentation Engine", () => {
       // Source replacement clears error
       store.getState().attach(sourceB, createFakeVideo());
       expect(store.getState().error).toBeNull();
+    });
+  });
+
+  describe("Calibration Anchor Guard", () => {
+    it("refuses the anchor when a re-attached element already played past the start", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ readyState: 1 });
+
+      // Load and calibrate normally
+      store.getState().attach(sourceA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+
+      // The user plays to 42.4s
+      video.currentTime = 42.4;
+      store.getState().syncPresentedFrame(identityA, 42.4, 1061, video);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1060");
+
+      // The same file is imported again: the element is detached and re-attached where it stands
+      store.getState().detach(identityA, video);
+      store.getState().attach(sourceA, video);
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+
+      // The first callback after the re-attach reports the position the element already reached.
+      // It must not become the anchor of videoStartPts.
+      store.getState().syncPresentedFrame(identityA, 42.4, 1062, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().presentedFrame).toBeNull();
+
+      // A later callback does not restore precision either
+      store.getState().syncPresentedFrame(identityA, 43.4, 1087, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().presentedFrame).toBeNull();
+    });
+
+    it("accepts the anchor when the re-attached element still stands where it was attached", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ readyState: 1 });
+
+      store.getState().attach(sourceA, video);
+      store.getState().detach(identityA, video);
+      store.getState().attach(sourceA, video);
+
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+    });
+
+    it("refuses the anchor when the element moved between the attach and the first callback", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ readyState: 1 });
+
+      store.getState().attach(sourceA, video);
+
+      // The element was seeked before the frame callback loop reported anything
+      video.currentTime = 42.4;
+      store.getState().syncPresentedFrame(identityA, 42.4, 1061, video);
+
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().presentedFrame).toBeNull();
+    });
+
+    it("takes the baseline from the timeline start the browser reports with the metadata", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+
+      // sourceB reports videoStartPts "1000" and its browser timeline starts at 1.5s, while an
+      // element without metadata still reports currentTime 0. The baseline recorded at the
+      // attach would refuse the first callback at 1.5, so loading the metadata takes it again.
+      store.getState().attach(sourceB, video);
+      video.readyState = 1;
+      video.currentTime = 1.5;
+      store.getState().syncReady(identityB, video);
+      store.getState().syncPresentedFrame(identityB, 1.5, 1, video);
+
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1000");
+    });
+
+    it("refuses the anchor when an element without metadata moved before the first callback", () => {
+      const store = createPlaybackStore();
+      // The application attaches the node React has just created, which reports readyState 0
+      const video = createFakeVideo();
+
+      store.getState().attach(sourceA, video);
+
+      // The element left the start before the frame callback loop reported anything
+      video.currentTime = 42.4;
+      store.getState().syncPresentedFrame(identityA, 42.4, 1061, video);
+
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().presentedFrame).toBeNull();
+    });
+
+    it("refuses the anchor after a ruler click that precedes the first presented frame", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 600 });
+
+      // React mounts the node, so the element carries no metadata yet
+      store.getState().attach(sourceA, video);
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+
+      // Loaded metadata makes the ruler clickable
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncBrowserDuration(identityA, video);
+
+      // The user clicks the ruler at half of a 10-minute clip before the first RVFC callback
+      store.getState().seekApproximate(300);
+      expect(video.currentTime).toBe(300);
+
+      // The first callback reports the frame that seek presented. Binding videoStartPts to it
+      // would write PTS 0 for a picture five minutes into the source.
+      store.getState().syncPresentedFrame(identityA, 300, 1, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().presentedFrame).toBeNull();
+    });
+
+    it("refuses the anchor after a nominal step that precedes the first presented frame", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+
+      // One frame at 25 fps stays well inside the tolerance, so only the recorded seek
+      // separates this callback from a true first frame
+      store.getState().seekNominal(1);
+      expect(video.currentTime).toBeCloseTo(0.04, 9);
+
+      store.getState().syncPresentedFrame(identityA, 0.04, 1, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().presentedFrame).toBeNull();
+    });
+
+    it("keeps calibration ready for a seek that follows the anchor", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 600 });
+
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncBrowserDuration(identityA, video);
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+
+      store.getState().seekApproximate(300);
+      store.getState().syncPresentedFrame(identityA, 300, 2, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("7500");
+    });
+
+    it("clears the recorded seek when the element is attached again", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 600 });
+
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncBrowserDuration(identityA, video);
+      store.getState().seekApproximate(300);
+
+      // A new import returns the element to the start of the source
+      store.getState().detach(identityA, video);
+      video.currentTime = 0;
+      store.getState().attach(sourceA, video);
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+    });
+  });
+
+  describe("Precision Denial Held Against the Source (ADR 003)", () => {
+    it("keeps a duplicate-PTS denial across a re-attachment of the same source", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      store.getState().syncPresentedFrame(identityA, 0.00001, 2, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+
+      // Re-import of the same file: the element is detached and attached again
+      store.getState().detach(identityA, video);
+      store.getState().attach(sourceA, video);
+
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().presentedFrame).toBeNull();
+    });
+
+    it("keeps an invalid mediaTime denial across a re-attachment of the same source", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncPresentedFrame(identityA, Number.NaN, 1, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+
+      store.getState().detach(identityA, video);
+      store.getState().attach(sourceA, video);
+
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().presentedFrame).toBeNull();
+    });
+
+    it("keeps an unsafe conversion denial across a re-attachment of the same source", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      store.getState().syncPresentedFrame(identityA, Number.MAX_VALUE, 2, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+
+      store.getState().detach(identityA, video);
+      store.getState().attach(sourceA, video);
+
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+    });
+
+    it("denies precision for the failing source only, and not for another source", () => {
+      const store = createPlaybackStore();
+      const videoA = createFakeVideo();
+
+      store.getState().attach(sourceA, videoA);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, videoA);
+      store.getState().syncPresentedFrame(identityA, 0.00001, 2, videoA);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+
+      const videoB = createFakeVideo();
+      store.getState().attach(sourceB, videoB);
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+    });
+
+    it("tries a source again once the file on disk has a new revision key", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      store.getState().syncPresentedFrame(identityA, 0.00001, 2, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+
+      // The file changed on disk, so its revision key changed
+      const editedSource: PlaybackSource = { ...sourceA, mtime: sourceA.mtime + 60 };
+      store.getState().attach(editedSource, createFakeVideo());
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+    });
+  });
+
+  describe("Unavailable State Store Writes", () => {
+    it("does not write to the store for later callbacks once calibration is unavailable", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+
+      const noStartPtsSource: PlaybackSource = { ...sourceA, videoStartPts: null };
+      const identity = getSourceRevisionKey(noStartPtsSource);
+
+      store.getState().attach(noStartPtsSource, video);
+      store.getState().syncReady(identity, video);
+
+      const listener = vi.fn();
+      const unsubscribe = store.subscribe(listener);
+
+      store.getState().syncPresentedFrame(identity, 0.0, 1, video);
+      store.getState().syncPresentedFrame(identity, 0.04, 2, video);
+      store.getState().syncPresentedFrame(identity, 0.08, 3, video);
+
+      expect(listener).not.toHaveBeenCalled();
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().presentedFrame).toBeNull();
+
+      unsubscribe();
     });
   });
 });

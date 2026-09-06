@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { AlertCircle, ChevronDown, Loader2, Maximize2 } from "lucide-react";
@@ -10,8 +17,19 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { getSourceRevisionKey, useMediaStore } from "@/features/media";
-import { createVideoRefCallback, usePlaybackStore } from "@/features/playback";
+import {
+  getSourceRevisionKey,
+  mediaStore,
+  useMediaStore,
+  type ImportMediaResult,
+} from "@/features/media";
+import {
+  createVideoRefCallback,
+  playbackStore,
+  usePlaybackStore,
+  type PlaybackSource,
+} from "@/features/playback";
+import type { Pts, Rational } from "@/types/project";
 import {
   createSourceLifecycleGuard,
   formatPreviewCurrentTime,
@@ -19,40 +37,106 @@ import {
   isPreviewTimeApproximate,
 } from "./previewFrame";
 
-export function PreviewPane() {
-  const { t } = useTranslation();
-  const { status, media, error } = useMediaStore();
+// The playback store actions never change, so they are read once instead of through a
+// subscription for each one.
+const {
+  syncReady,
+  syncUnready,
+  syncPresentedFrame,
+  syncPresentationUnavailable,
+  syncBrowserDuration,
+  syncPlay,
+  syncPause,
+  syncEnded,
+  reset: resetPlayback,
+} = playbackStore.getState();
 
+/**
+ * Builds the timing descriptor the playback store attaches, or null when no media is open.
+ */
+function toPlaybackSource(media: ImportMediaResult | null): PlaybackSource | null {
+  if (!media) {
+    return null;
+  }
+  return {
+    path: media.path,
+    size: media.size,
+    mtime: media.mtime,
+    videoTimeBase: media.probe.videoTimeBase,
+    videoStartPts: media.probe.videoStartPts,
+    videoDurationTicks: media.probe.videoDurationTicks,
+    approximateDurationSeconds: media.probe.approximateDurationSeconds,
+    avgFrameRate: media.probe.avgFrameRate,
+    rFrameRate: media.probe.rFrameRate,
+    reportedFrameCount: media.probe.reportedFrameCount,
+  };
+}
+
+/**
+ * Current preview timecode. It subscribes to `presentedFrame` on its own, so the surrounding
+ * pane does not re-render once for every presented video frame.
+ */
+function PreviewTimecode({
+  videoStartPts,
+  videoTimeBase,
+  approximateBrowserTime,
+}: {
+  videoStartPts: Pts | null;
+  videoTimeBase: Rational;
+  approximateBrowserTime: number;
+}) {
+  const { t } = useTranslation();
   const presentedFrame = usePlaybackStore((s) => s.presentedFrame);
   const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
-  const playbackError = usePlaybackStore((s) => s.error);
-  const attach = usePlaybackStore((s) => s.attach);
-  const detach = usePlaybackStore((s) => s.detach);
-  const syncReady = usePlaybackStore((s) => s.syncReady);
-  const syncUnready = usePlaybackStore((s) => s.syncUnready);
-  const syncPresentedFrame = usePlaybackStore((s) => s.syncPresentedFrame);
-  const syncPresentationUnavailable = usePlaybackStore(
-    (s) => s.syncPresentationUnavailable,
+
+  // Source-relative HH:MM:SS.mmm for a ready inferred PTS, approximate browser time otherwise
+  const currentTimeDisplay = formatPreviewCurrentTime(
+    presentedFrame,
+    calibrationStatus,
+    videoStartPts,
+    videoTimeBase,
+    approximateBrowserTime,
   );
-  const syncBrowserDuration = usePlaybackStore((s) => s.syncBrowserDuration);
-  const syncPlay = usePlaybackStore((s) => s.syncPlay);
-  const syncPause = usePlaybackStore((s) => s.syncPause);
-  const syncEnded = usePlaybackStore((s) => s.syncEnded);
-  const resetPlayback = usePlaybackStore((s) => s.reset);
+
+  return (
+    <>
+      <span className="font-medium text-primary">{currentTimeDisplay}</span>
+      {isPreviewTimeApproximate(calibrationStatus, presentedFrame) && (
+        <span className="text-preview-muted">{t("preview.approximate")}</span>
+      )}
+    </>
+  );
+}
+
+export function PreviewPane() {
+  const { t } = useTranslation();
+  const status = useMediaStore((s) => s.status);
+  const media = useMediaStore((s) => s.media);
+  const error = useMediaStore((s) => s.error);
+
+  const playbackError = usePlaybackStore((s) => s.error);
 
   const sourceRevisionKey = getSourceRevisionKey(media);
   const [previousRevisionKey, setPreviousRevisionKey] = useState(sourceRevisionKey);
+  const [previousMedia, setPreviousMedia] = useState(media);
   const [videoError, setVideoError] = useState(false);
   const [approximateBrowserTime, setApproximateBrowserTime] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [sourceGuard] = useState(() => createSourceLifecycleGuard());
 
-  // Reset decode error state and approximate time synchronously when source identity changes
+  // Reset the approximate clock synchronously when source identity changes
   if (previousRevisionKey !== sourceRevisionKey) {
     setPreviousRevisionKey(sourceRevisionKey);
-    setVideoError(false);
     setApproximateBrowserTime(0);
+  }
+
+  // Clear a decode error for every new media object, including a re-import of the same file,
+  // which keeps its revision key. Otherwise the import reports success and the pane keeps the
+  // decode-error panel.
+  if (previousMedia !== media) {
+    setPreviousMedia(media);
+    setVideoError(false);
   }
 
   // Reset playback store if media disappears
@@ -60,7 +144,7 @@ export function PreviewPane() {
     if (!media) {
       resetPlayback();
     }
-  }, [media, resetPlayback]);
+  }, [media]);
 
   // Synchronously activate / deactivate source identity before browser paint (ADR 003)
   useLayoutEffect(() => {
@@ -71,57 +155,41 @@ export function PreviewPane() {
   }, [sourceRevisionKey, sourceGuard]);
 
   const mediaPath = media?.path;
-  const mediaSize = media?.size;
-  const mediaMtime = media?.mtime;
-  const videoTimeBase = media?.probe.videoTimeBase;
-  const videoStartPts = media?.probe.videoStartPts;
-  const videoDurationTicks = media?.probe.videoDurationTicks;
-  const approximateDurationSeconds = media?.probe.approximateDurationSeconds;
-  const avgFrameRate = media?.probe.avgFrameRate;
-  const rFrameRate = media?.probe.rFrameRate;
-  const reportedFrameCount = media?.probe.reportedFrameCount;
 
-  // Stable ref callback for registering and unregistering video element in playback store with exact ownership
-  const videoRefCallback = useMemo(
-    () =>
-      createVideoRefCallback<HTMLVideoElement>({
-        videoRef,
-        getSource: () =>
-          mediaPath !== undefined &&
-          mediaSize !== undefined &&
-          mediaMtime !== undefined &&
-          videoTimeBase !== undefined
-            ? {
-                path: mediaPath,
-                size: mediaSize,
-                mtime: mediaMtime,
-                videoTimeBase,
-                videoStartPts: videoStartPts ?? null,
-                videoDurationTicks,
-                approximateDurationSeconds,
-                avgFrameRate,
-                rFrameRate,
-                reportedFrameCount,
-              }
-            : null,
-        attach,
-        detach,
-      }),
-    [
-      mediaPath,
-      mediaSize,
-      mediaMtime,
-      videoTimeBase,
-      videoStartPts,
-      videoDurationTicks,
-      approximateDurationSeconds,
-      avgFrameRate,
-      rFrameRate,
-      reportedFrameCount,
-      attach,
-      detach,
-    ],
+  const videoSrc = useMemo(
+    () => (mediaPath === undefined ? undefined : convertFileSrc(mediaPath)),
+    [mediaPath],
   );
+
+  // Registers and unregisters the video element in the playback store with exact ownership.
+  //
+  // The callback identity must stay stable for the whole life of the component. It must not
+  // follow the media object: a re-import of the file that is already open builds a new media
+  // object with the same revision key, so React would detach and re-attach the same element
+  // against the same node, and the store would re-anchor calibration at the position that
+  // element had already reached (ADR 003). Mark In would then write a wrong PTS while the
+  // store still reports `ready`. The source and the store actions are therefore read when the
+  // callback runs, not captured when it is built.
+  const ownerRef = useRef<((element: HTMLVideoElement | null) => void) | null>(null);
+
+  // The owner is built on the first invocation, which React makes while it attaches the node.
+  // Do not move this factory into useMemo: a useMemo body is inlined into render, so the
+  // accessors below would count as a ref reaching a function during render and
+  // `react-hooks/refs` would reject it. A useCallback body runs only when React invokes the
+  // callback, which is also the only time the accessors read or write videoRef.current.
+  const videoRefCallback = useCallback((element: HTMLVideoElement | null) => {
+    ownerRef.current ??= createVideoRefCallback<HTMLVideoElement>({
+      getElement: () => videoRef.current,
+      setElement: (node) => {
+        videoRef.current = node;
+      },
+      getSource: () => toPlaybackSource(mediaStore.getState().media),
+      attach: (source, node) => playbackStore.getState().attach(source, node),
+      detach: (sourceRevisionKey, node) =>
+        playbackStore.getState().detach(sourceRevisionKey, node),
+    });
+    ownerRef.current(element);
+  }, []);
 
   // Register requestVideoFrameCallback lifecycle loop (ADR 003)
   useEffect(() => {
@@ -201,14 +269,7 @@ export function PreviewPane() {
         }
       }
     };
-  }, [
-    sourceRevisionKey,
-    media,
-    videoError,
-    sourceGuard,
-    syncPresentedFrame,
-    syncPresentationUnavailable,
-  ]);
+  }, [sourceRevisionKey, media, videoError, sourceGuard]);
 
   const handleTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>) => {
     if (!sourceGuard.isActive(sourceRevisionKey) || !media) {
@@ -224,17 +285,6 @@ export function PreviewPane() {
     setVideoError(true);
   };
 
-  // Compute timecodes: source-relative HH:MM:SS.mmm for ready inferred PTS, approximate browser time otherwise
-  const currentTimeDisplay = media
-    ? formatPreviewCurrentTime(
-        presentedFrame,
-        calibrationStatus,
-        media.probe.videoStartPts,
-        media.probe.videoTimeBase,
-        approximateBrowserTime,
-      )
-    : "00:00:00.000";
-
   const totalTimeDisplay = media
     ? formatPreviewTotalDuration(
         media.probe.approximateDurationSeconds,
@@ -242,10 +292,6 @@ export function PreviewPane() {
         media.probe.videoTimeBase,
       )
     : "00:00:00.000";
-  const isCurrentTimeApproximate = isPreviewTimeApproximate(
-    calibrationStatus,
-    presentedFrame,
-  );
 
   return (
     <section className="flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground select-none">
@@ -271,7 +317,7 @@ export function PreviewPane() {
                   key={sourceRevisionKey}
                   playsInline
                   preload="metadata"
-                  src={convertFileSrc(media.path)}
+                  src={videoSrc}
                   aria-label={t("preview.videoPlayerLabel", {
                     fileName: media.fileName,
                   })}
@@ -404,9 +450,14 @@ export function PreviewPane() {
       {/* Preview Bottom Row: Timecode and View Controls */}
       <div className="flex shrink-0 items-center justify-between px-1 pt-2">
         <div className="flex items-center gap-1.5 font-mono text-xs">
-          <span className="font-medium text-primary">{currentTimeDisplay}</span>
-          {media && isCurrentTimeApproximate && (
-            <span className="text-preview-muted">{t("preview.approximate")}</span>
+          {media ? (
+            <PreviewTimecode
+              videoStartPts={media.probe.videoStartPts}
+              videoTimeBase={media.probe.videoTimeBase}
+              approximateBrowserTime={approximateBrowserTime}
+            />
+          ) : (
+            <span className="font-medium text-primary">00:00:00.000</span>
           )}
           <span className="text-preview-muted">/</span>
           <span className="text-preview-muted">{totalTimeDisplay}</span>

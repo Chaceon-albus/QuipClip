@@ -45,8 +45,11 @@ describe("Video Ref Ownership & Binding Helper", () => {
     const store = createPlaybackStore();
     const videoRef: { current: PlaybackMediaElement | null } = { current: null };
 
-    const callback = createVideoRefCallback({
-      videoRef,
+    const callback = createVideoRefCallback<PlaybackMediaElement>({
+      getElement: () => videoRef.current,
+      setElement: (element) => {
+        videoRef.current = element;
+      },
       getSource: () => sourceA,
       attach: store.getState().attach,
       detach: store.getState().detach,
@@ -64,8 +67,11 @@ describe("Video Ref Ownership & Binding Helper", () => {
     const store = createPlaybackStore();
     const videoRef: { current: PlaybackMediaElement | null } = { current: null };
 
-    const callback = createVideoRefCallback({
-      videoRef,
+    const callback = createVideoRefCallback<PlaybackMediaElement>({
+      getElement: () => videoRef.current,
+      setElement: (element) => {
+        videoRef.current = element;
+      },
       getSource: () => sourceA,
       attach: store.getState().attach,
       detach: store.getState().detach,
@@ -84,15 +90,21 @@ describe("Video Ref Ownership & Binding Helper", () => {
     const store = createPlaybackStore();
     const videoRef: { current: PlaybackMediaElement | null } = { current: null };
 
-    const callback1 = createVideoRefCallback({
-      videoRef,
+    const callback1 = createVideoRefCallback<PlaybackMediaElement>({
+      getElement: () => videoRef.current,
+      setElement: (element) => {
+        videoRef.current = element;
+      },
       getSource: () => sourceA,
       attach: store.getState().attach,
       detach: store.getState().detach,
     });
 
-    const callback2 = createVideoRefCallback({
-      videoRef,
+    const callback2 = createVideoRefCallback<PlaybackMediaElement>({
+      getElement: () => videoRef.current,
+      setElement: (element) => {
+        videoRef.current = element;
+      },
       getSource: () => sourceA,
       attach: store.getState().attach,
       detach: store.getState().detach,
@@ -134,8 +146,11 @@ describe("Video Ref Ownership & Binding Helper", () => {
     const store = createPlaybackStore();
     const videoRef: { current: PlaybackMediaElement | null } = { current: null };
 
-    const callback = createVideoRefCallback({
-      videoRef,
+    const callback = createVideoRefCallback<PlaybackMediaElement>({
+      getElement: () => videoRef.current,
+      setElement: (element) => {
+        videoRef.current = element;
+      },
       getSource: () => sourceA,
       attach: store.getState().attach,
       detach: store.getState().detach,
@@ -172,8 +187,11 @@ describe("Video Ref Ownership & Binding Helper", () => {
 
     let currentSource = sourceA;
 
-    const callback1 = createVideoRefCallback({
-      videoRef,
+    const callback1 = createVideoRefCallback<PlaybackMediaElement>({
+      getElement: () => videoRef.current,
+      setElement: (element) => {
+        videoRef.current = element;
+      },
       getSource: () => currentSource,
       attach: store.getState().attach,
       detach: store.getState().detach,
@@ -185,8 +203,11 @@ describe("Video Ref Ownership & Binding Helper", () => {
 
     // Switch media to source B
     currentSource = sourceB;
-    const callback2 = createVideoRefCallback({
-      videoRef,
+    const callback2 = createVideoRefCallback<PlaybackMediaElement>({
+      getElement: () => videoRef.current,
+      setElement: (element) => {
+        videoRef.current = element;
+      },
       getSource: () => currentSource,
       attach: store.getState().attach,
       detach: store.getState().detach,
@@ -211,8 +232,11 @@ describe("Video Ref Ownership & Binding Helper", () => {
     // Initial source object
     const sourceInstance1: PlaybackSource = { ...sourceA };
 
-    const callback1 = createVideoRefCallback({
-      videoRef,
+    const callback1 = createVideoRefCallback<PlaybackMediaElement>({
+      getElement: () => videoRef.current,
+      setElement: (element) => {
+        videoRef.current = element;
+      },
       getSource: () => sourceInstance1,
       attach: store.getState().attach,
       detach: store.getState().detach,
@@ -233,12 +257,19 @@ describe("Video Ref Ownership & Binding Helper", () => {
 
     // Step 2: Media re-imported producing equivalent media with new source object & callback2
     const sourceInstance2: PlaybackSource = { ...sourceA };
-    const callback2 = createVideoRefCallback({
-      videoRef,
+    const callback2 = createVideoRefCallback<PlaybackMediaElement>({
+      getElement: () => videoRef.current,
+      setElement: (element) => {
+        videoRef.current = element;
+      },
       getSource: () => sourceInstance2,
       attach: store.getState().attach,
       detach: store.getState().detach,
     });
+
+    // The user played to 42.5s before the re-import, and the element keeps its position
+    el1.currentTime = 42.5;
+    store.getState().syncPresentedFrame(identityA, 42.5, 1063, el1);
 
     // React calls callback1(null)
     callback1(null);
@@ -251,5 +282,11 @@ describe("Video Ref Ownership & Binding Helper", () => {
     expect(videoRef.current).toBe(el1);
     expect(store.getState().isAttached).toBe(true);
     expect(store.getState().isReady).toBe(true); // Synchronously restored!
+
+    // The next frame callback reports where the element already stands. It must not become the
+    // calibration anchor of videoStartPts (ADR 003 step 4).
+    store.getState().syncPresentedFrame(identityA, 42.5, 1064, el1);
+    expect(store.getState().presentedFrame).toBeNull();
+    expect(store.getState().calibrationStatus).toBe("unavailable");
   });
 });

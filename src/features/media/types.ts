@@ -21,6 +21,7 @@ export const BACKEND_IMPORT_MEDIA_ERROR_CODES = [
   "ffprobeSpawnFailed",
   "ffprobeProcessFailed",
   "ffprobeParseFailed",
+  "ffprobeTimedOut",
   "assetScopeDenied",
   "commandExecutionFailed",
 ] as const;
@@ -81,6 +82,8 @@ export class ImportMediaError extends Error {
  * Metadata for the primary audio stream extracted during media probing.
  */
 export type AudioProbe = {
+  /** The absolute stream index of this audio stream (0..=4_294_967_295). */
+  index: number;
   /** Audio codec name (e.g. "aac", "opus", "pcm_s16le"), or null if unspecified. */
   codec: string | null;
   /** Audio sampling rate in Hertz (e.g. 44100, 48000, 1..=4_294_967_295), or null if unspecified. */
@@ -97,6 +100,8 @@ export type MediaProbe = {
   formatNames: string[];
   /** Descriptive long name for the container format, or null if unspecified. */
   formatLongName: string | null;
+  /** The container start time, from `format.start_time`, as an exact signed Rational, or null if unstated. */
+  formatStartTime?: Rational | null;
   /** Primary video codec identifier (e.g. "h264", "hevc", "prores", "vp9"). */
   videoCodec: string;
   /** Profile name of the video stream (e.g. "High", "Main 10"), or null if unstated. */
