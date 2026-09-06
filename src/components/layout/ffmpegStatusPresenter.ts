@@ -8,7 +8,34 @@
 import {
   BACKEND_CAPABILITY_PROBE_ERROR_CODES,
   type FfmpegState,
+  type FfmpegStoreState,
 } from "@/features/ffmpeg/types";
+
+/**
+ * Picks exactly the state this presenter reads out of the ffmpeg store.
+ *
+ * Every consumer pairs it with `useShallow`, so a store write that changes only an action
+ * identity or a field the presenter ignores no longer re-renders the component and re-runs
+ * `presentFfmpegStatus`. It returns a new object on each call by design; the shallow
+ * comparison, not the object identity, is what settles the equality.
+ */
+export function selectFfmpegState(state: FfmpegStoreState): FfmpegState {
+  return {
+    status: state.status,
+    runId: state.runId,
+    paths: state.paths,
+    origin: state.origin,
+    version: state.version,
+    license: state.license,
+    hwaccels: state.hwaccels,
+    results: state.results,
+    done: state.done,
+    total: state.total,
+    source: state.source,
+    error: state.error,
+    inspected: state.inspected,
+  };
+}
 
 export type FfmpegStatusLineKey =
   | "ffmpeg.status.locating"
@@ -165,10 +192,13 @@ export function presentFfmpegStatus(
 
       if (state.inspected) {
         for (const candidate of state.inspected) {
-          pushDetail(detail, "ffmpeg.detail.searchedPair", {
+          // One complete key per origin. The origin class is an application-defined value,
+          // not diagnostic text, so it must not reach the message as a raw wire token
+          // (ADR 011), and a whole key per origin avoids assembling the sentence from a
+          // translated fragment.
+          pushDetail(detail, `ffmpeg.detail.searchedPair.${candidate.origin}`, {
             path: candidate.ffmpeg,
             probe: candidate.ffprobe,
-            origin: candidate.origin,
           });
         }
       }

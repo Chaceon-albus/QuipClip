@@ -39,7 +39,7 @@ export const zhCN: TranslationCatalog = {
     loading: "正在加载媒体...",
     videoPlayerLabel: "视频预览：{{fileName}}",
     decodeError: "原生播放失败，预览此格式需要生成代理文件。",
-    approximate: "约",
+    approximate: "（近似）",
     zoom: {
       fit: "适应窗口",
       zoom50: "50%",
@@ -62,12 +62,12 @@ export const zhCN: TranslationCatalog = {
       markOutDetail: "标记出点（不含）",
       markOutAria: "标记出点（不含）",
       split: "分割",
-      splitDetail: "裁剪片段",
+      splitDetail: "在播放头处分割",
       splitAria: "分割片段",
       play: "播放",
       pause: "暂停",
-      previousStep: "向后微调",
-      nextStep: "向前微调",
+      previousStep: "上一帧",
+      nextStep: "下一帧",
     },
   },
   timeline: {
@@ -88,6 +88,8 @@ export const zhCN: TranslationCatalog = {
     ffprobeSpawnFailed: "启动 ffprobe 进程失败。",
     ffprobeProcessFailed: "ffprobe 检测媒体文件失败。",
     ffprobeParseFailed: "解析媒体检测输出失败。",
+    ffprobeTimedOut:
+      "ffprobe 未在限定时间内响应。该文件可能位于已停止响应的驱动器或共享位置上。",
     assetScopeDenied: "资源协议拒绝访问该媒体文件。",
     commandExecutionFailed: "媒体导入命令执行失败。",
     dialogFailed: "打开文件选择对话框失败。",
@@ -106,6 +108,9 @@ export const zhCN: TranslationCatalog = {
   },
   settings: {
     title: "设置",
+    resetDamaged: "重置设置",
+    resetDamagedHint:
+      "无法读取设置文件。重置会将其重命名为 settings.invalid.json，然后写入全新的默认设置。",
     language: {
       label: "语言",
       system: "系统默认",
@@ -132,6 +137,9 @@ export const zhCN: TranslationCatalog = {
       empty: "暂无预设。",
       limitReached: "已达到 {{max}} 个预设的上限。",
       unsaved: "未保存的更改",
+      discardPrompt: "放弃未保存的更改并切换到其他预设？",
+      discardConfirm: "放弃更改",
+      discardCancel: "继续编辑",
       nameLabel: "名称",
       containerLabel: "容器",
       videoEncoderLabel: "视频编码器",
@@ -155,8 +163,10 @@ export const zhCN: TranslationCatalog = {
     encoder: {
       available: "可用",
       unavailable: "不可用",
-      unknown: "未检测",
-      optionLabel: "{{name}}（{{availability}}）",
+      unknown: "未探测",
+      optionLabelAvailable: "{{name}}（可用）",
+      optionLabelUnavailable: "{{name}}（不可用）",
+      optionLabelUnknown: "{{name}}（未探测）",
       reasonNotListed: "此 FFmpeg 版本不包含该编码器。",
       reasonFailed: "该编码器在本机测试失败。",
       reasonTimedOut: "编码器未及时响应。",
@@ -185,17 +195,21 @@ export const zhCN: TranslationCatalog = {
   ffmpeg: {
     status: {
       locating: "正在查找 FFmpeg...",
-      probing: "正在检测 FFmpeg（{{done}}/{{total}}）...",
+      probing: "正在探测 FFmpeg（{{done}}/{{total}}）...",
       ready: "FFmpeg {{version}}（{{tested}} 个编码器中 {{working}} 个可用）",
       missing: "未找到 FFmpeg",
-      failed: "FFmpeg 检测失败",
+      failed: "FFmpeg 探测失败",
     },
     detail: {
       title: "FFmpeg 详情",
       program: "程序：{{path}}",
       version: "版本：{{version}}",
       searched: "已搜索：{{path}}",
-      searchedPair: "已搜索：{{path}}（ffprobe：{{probe}}，来源：{{origin}}）",
+      searchedPair: {
+        configured: "已搜索：{{path}}（ffprobe：{{probe}}，来源：已配置的路径）",
+        path: "已搜索：{{path}}（ffprobe：{{probe}}，来源：系统 PATH）",
+        appData: "已搜索：{{path}}（ffprobe：{{probe}}，来源：应用程序数据目录）",
+      },
       raw: "{{detail}}",
       origin: {
         configured: "来源：已配置的路径",
@@ -223,7 +237,7 @@ export const zhCN: TranslationCatalog = {
     encoderListParseFailed: "解析 FFmpeg 编码器列表失败。",
     cacheUnavailable: "FFmpeg 能力缓存不可用。",
     commandExecutionFailed: "执行 FFmpeg 能力探测命令失败。",
-    unknown: "检测 FFmpeg 时发生未知错误。",
+    unknown: "探测 FFmpeg 时发生未知错误。",
   },
   settingsError: {
     appDataUnavailable: "应用程序数据目录不可用。",
@@ -251,8 +265,8 @@ export const zhCN: TranslationCatalog = {
       finished: "导出已成功完成。",
       canceled: "导出已取消。",
       canceling: "正在取消...",
-      cancelingNote: "如果导出已进入发布阶段，取消可能无法阻止生成输出文件。",
-      cancelingNotePublishing: "导出已进入发布阶段，取消无法阻止生成输出文件。",
+      cancelingNote: "如果导出已进入完成阶段，取消可能无法阻止生成输出文件。",
+      cancelingNotePublishing: "导出已进入完成阶段，取消无法阻止生成输出文件。",
     },
   },
   exportError: {
@@ -261,8 +275,10 @@ export const zhCN: TranslationCatalog = {
     presetNotFound: "未找到所选的导出预设。",
     ffmpegPairMissing: "未找到所需的 FFmpeg 或 ffprobe 可执行文件。",
     ffprobeSpawnFailed: "启动 ffprobe 进程失败。",
-    ffprobeProcessFailed: "ffprobe 检查媒体文件失败。",
-    ffprobeParseFailed: "解析媒体探测输出失败。",
+    ffprobeProcessFailed: "ffprobe 检测媒体文件失败。",
+    ffprobeParseFailed: "解析媒体检测输出失败。",
+    ffprobeTimedOut:
+      "ffprobe 未在限定时间内响应。该文件可能位于已停止响应的驱动器或共享位置上。",
     noSegments: "没有标记用于导出的片段。",
     tooManySegments: "标记用于导出的片段过多（最多 100 个）。",
     invalidSegment: "一个或多个导出片段具有无效的起点或终点。",
@@ -274,6 +290,7 @@ export const zhCN: TranslationCatalog = {
     outputEqualsSource: "导出目标不能与源文件相同。",
     outputNotWritable: "目标文件夹不可写入。",
     sourceFrameRateUnknown: "无法确定源视频的帧率。",
+    sourceAudioRateUnknown: "无法确定源音频的采样率，因此无法精确剪切音频。",
     encoderUnavailable: "当前系统缺少所需的编码器。",
     ffmpegSpawnFailed: "启动 FFmpeg 进程失败。",
     ffmpegProcessFailed: "FFmpeg 在视频导出期间失败。",

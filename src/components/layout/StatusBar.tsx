@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useShallow } from "zustand/react/shallow";
 import { Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,7 +23,11 @@ import {
   type LanguagePreference,
 } from "@/i18n";
 import { cn } from "@/lib/utils";
-import { presentFfmpegStatus, type FfmpegStatusView } from "./ffmpegStatusPresenter";
+import {
+  presentFfmpegStatus,
+  selectFfmpegState,
+  type FfmpegStatusView,
+} from "./ffmpegStatusPresenter";
 import { createLanguageMenuController } from "./languageMenuController";
 
 const toneClasses: Record<FfmpegStatusView["tone"], string> = {
@@ -63,7 +68,7 @@ export function StatusBar() {
   }, [i18n, controller]);
 
   const probeStartedRef = useRef(false);
-  const ffmpeg = useFfmpegStore();
+  const ffmpeg = useFfmpegStore(useShallow(selectFfmpegState));
   const startProbe = useFfmpegStore((state) => state.startProbe);
 
   // Probe ffmpeg readiness once on mount with StrictMode guard
@@ -115,8 +120,11 @@ export function StatusBar() {
       ? media.probe.rFrameRate.n / media.probe.rFrameRate.d
       : null;
 
-  const formattedWidth = numberFormatter.format(width);
-  const formattedHeight = numberFormatter.format(height);
+  // A frame size is a technical identifier, not a counted quantity, so it keeps its defined
+  // format and never takes digit grouping: 1920 × 1080, never 1,920 × 1,080. The frame rate
+  // below IS a measured quantity and stays with `Intl`.
+  const formattedWidth = String(width);
+  const formattedHeight = String(height);
   const formattedFps = fpsNumber === null ? null : numberFormatter.format(fpsNumber);
   const statusLineText = (
     t as (key: string, options?: Record<string, string>) => string

@@ -59,7 +59,7 @@ export const en = {
       markOutDetail: "Mark Out (Exclusive)",
       markOutAria: "Mark Out Point (Exclusive)",
       split: "Split",
-      splitDetail: "Cut Clip",
+      splitDetail: "Split at Playhead",
       splitAria: "Split Segment",
       play: "Play",
       pause: "Pause",
@@ -85,6 +85,8 @@ export const en = {
     ffprobeSpawnFailed: "Failed to start the ffprobe process.",
     ffprobeProcessFailed: "ffprobe failed to inspect the media file.",
     ffprobeParseFailed: "Failed to parse media probe output.",
+    ffprobeTimedOut:
+      "ffprobe did not answer in time. The file might be on a drive or a share that stopped responding.",
     assetScopeDenied: "Access to the media file was denied by the asset protocol.",
     commandExecutionFailed: "The media import command failed to execute.",
     dialogFailed: "Failed to open the file selection dialog.",
@@ -103,6 +105,9 @@ export const en = {
   },
   settings: {
     title: "Settings",
+    resetDamaged: "Reset Settings",
+    resetDamagedHint:
+      "The settings file cannot be read. A reset renames it to settings.invalid.json and writes fresh defaults.",
     language: {
       label: "Language",
       system: "System Default",
@@ -129,6 +134,9 @@ export const en = {
       empty: "No presets yet.",
       limitReached: "Limit of {{max}} presets reached.",
       unsaved: "Unsaved changes",
+      discardPrompt: "Discard the unsaved changes and switch to another preset?",
+      discardConfirm: "Discard",
+      discardCancel: "Keep Editing",
       nameLabel: "Name",
       containerLabel: "Container",
       videoEncoderLabel: "Video Encoder",
@@ -153,7 +161,9 @@ export const en = {
       available: "Available",
       unavailable: "Unavailable",
       unknown: "Not checked",
-      optionLabel: "{{name}} ({{availability}})",
+      optionLabelAvailable: "{{name}} (Available)",
+      optionLabelUnavailable: "{{name}} (Unavailable)",
+      optionLabelUnknown: "{{name}} (Not checked)",
       reasonNotListed: "This FFmpeg build does not include the encoder.",
       reasonFailed: "The encoder failed its test on this machine.",
       reasonTimedOut: "The encoder did not respond in time.",
@@ -192,7 +202,12 @@ export const en = {
       program: "Program: {{path}}",
       version: "Version: {{version}}",
       searched: "Searched: {{path}}",
-      searchedPair: "Searched: {{path}} (ffprobe: {{probe}}, origin: {{origin}})",
+      searchedPair: {
+        configured: "Searched: {{path}} (ffprobe: {{probe}}, origin: Configured path)",
+        path: "Searched: {{path}} (ffprobe: {{probe}}, origin: System PATH)",
+        appData:
+          "Searched: {{path}} (ffprobe: {{probe}}, origin: Application data directory)",
+      },
       raw: "{{detail}}",
       origin: {
         configured: "Origin: Configured path",
@@ -263,6 +278,8 @@ export const en = {
     ffprobeSpawnFailed: "Failed to start the ffprobe process.",
     ffprobeProcessFailed: "ffprobe failed to inspect the media file.",
     ffprobeParseFailed: "Failed to parse media probe output.",
+    ffprobeTimedOut:
+      "ffprobe did not answer in time. The file might be on a drive or a share that stopped responding.",
     noSegments: "No segments are marked for export.",
     tooManySegments: "Too many segments are marked for export (maximum is 100).",
     invalidSegment: "One or more export segments have invalid start or end points.",
@@ -274,6 +291,8 @@ export const en = {
     outputEqualsSource: "The export destination cannot be the same as the source file.",
     outputNotWritable: "The destination folder cannot be written to.",
     sourceFrameRateUnknown: "The source video frame rate could not be determined.",
+    sourceAudioRateUnknown:
+      "The source audio sample rate could not be determined, so the audio cannot be cut exactly.",
     encoderUnavailable: "The required encoder is not available on this system.",
     ffmpegSpawnFailed: "Failed to start the FFmpeg process.",
     ffmpegProcessFailed: "FFmpeg failed during video export.",

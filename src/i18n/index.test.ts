@@ -22,7 +22,13 @@ import {
   zhCN,
   type PreferenceStorage,
 } from "./index";
-import { SETTINGS_ERROR_CODES } from "@/features/settings/types";
+import { EXPORT_ERROR_CODES } from "@/features/export/types";
+import { IMPORT_MEDIA_ERROR_CODES } from "@/features/media/types";
+import {
+  BACKEND_SETTINGS_ERROR_CODES,
+  FRONTEND_SETTINGS_ERROR_CODES,
+  SETTINGS_ERROR_CODES,
+} from "@/features/settings/types";
 
 /**
  * Creates an in-memory PreferenceStorage for isolated testing.
@@ -830,6 +836,37 @@ describe("system language resolution and environment independence", () => {
     expect(resolveSystemLanguage(["", "   ", "???"])).toBe(FALLBACK_LANGUAGE);
   });
 
+  // BLOCKING 11-F1: ADR 011 names `navigator.languages` as the only source and requires
+  // `en` when no entry matches. An empty or absent list holds no matching entry, so it must
+  // resolve to `en` rather than fall back to `navigator.language`.
+  it("returns English when navigator.languages is empty or absent", () => {
+    const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+
+    try {
+      Object.defineProperty(globalThis, "navigator", {
+        value: { languages: [], language: "zh-TW" },
+        configurable: true,
+        writable: true,
+        enumerable: true,
+      });
+      expect(resolveSystemLanguage(undefined)).toBe(FALLBACK_LANGUAGE);
+
+      Object.defineProperty(globalThis, "navigator", {
+        value: { language: "zh-TW" },
+        configurable: true,
+        writable: true,
+        enumerable: true,
+      });
+      expect(resolveSystemLanguage(undefined)).toBe(FALLBACK_LANGUAGE);
+    } finally {
+      if (originalDescriptor) {
+        Object.defineProperty(globalThis, "navigator", originalDescriptor);
+      } else {
+        delete (globalThis as { navigator?: unknown }).navigator;
+      }
+    }
+  });
+
   it("restores original navigator property descriptor faithfully in tests", () => {
     const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
 
@@ -1217,7 +1254,7 @@ describe("application shell localization and status bar formatting", () => {
       "Mark Out Point (Exclusive)",
     );
     expect(instance.t("transport.action.split")).toBe("Split");
-    expect(instance.t("transport.action.splitDetail")).toBe("Cut Clip");
+    expect(instance.t("transport.action.splitDetail")).toBe("Split at Playhead");
     expect(instance.t("transport.action.splitAria")).toBe("Split Segment");
     expect(instance.t("transport.action.play")).toBe("Play");
     expect(instance.t("transport.action.previousStep")).toBe("Nudge Backward");
@@ -1279,11 +1316,14 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.encoder.unavailable")).toBe("Unavailable");
     expect(instance.t("settings.encoder.unknown")).toBe("Not checked");
     expect(
-      instance.t("settings.encoder.optionLabel", {
-        name: "libx264",
-        availability: "Available",
-      }),
+      instance.t("settings.encoder.optionLabelAvailable", { name: "libx264" }),
     ).toBe("libx264 (Available)");
+    expect(
+      instance.t("settings.encoder.optionLabelUnavailable", { name: "libx264" }),
+    ).toBe("libx264 (Unavailable)");
+    expect(instance.t("settings.encoder.optionLabelUnknown", { name: "libx264" })).toBe(
+      "libx264 (Not checked)",
+    );
     expect(instance.t("settings.encoder.reasonNotListed")).toBe(
       "This FFmpeg build does not include the encoder.",
     );
@@ -1349,12 +1389,12 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.markOutDetail")).toBe("标记出点（不含）");
     expect(instance.t("transport.action.markOutAria")).toBe("标记出点（不含）");
     expect(instance.t("transport.action.split")).toBe("分割");
-    expect(instance.t("transport.action.splitDetail")).toBe("裁剪片段");
+    expect(instance.t("transport.action.splitDetail")).toBe("在播放头处分割");
     expect(instance.t("transport.action.splitAria")).toBe("分割片段");
     expect(instance.t("transport.action.play")).toBe("播放");
-    expect(instance.t("transport.action.previousStep")).toBe("向后微调");
-    expect(instance.t("transport.action.nextStep")).toBe("向前微调");
-    expect(instance.t("preview.approximate")).toBe("约");
+    expect(instance.t("transport.action.previousStep")).toBe("上一帧");
+    expect(instance.t("transport.action.nextStep")).toBe("下一帧");
+    expect(instance.t("preview.approximate")).toBe("（近似）");
 
     // Dialog
     expect(instance.t("dialog.videoFilter")).toBe("视频文件");
@@ -1409,13 +1449,16 @@ describe("application shell localization and status bar formatting", () => {
     // Settings: encoder availability
     expect(instance.t("settings.encoder.available")).toBe("可用");
     expect(instance.t("settings.encoder.unavailable")).toBe("不可用");
-    expect(instance.t("settings.encoder.unknown")).toBe("未检测");
+    expect(instance.t("settings.encoder.unknown")).toBe("未探测");
     expect(
-      instance.t("settings.encoder.optionLabel", {
-        name: "libx264",
-        availability: "可用",
-      }),
+      instance.t("settings.encoder.optionLabelAvailable", { name: "libx264" }),
     ).toBe("libx264（可用）");
+    expect(
+      instance.t("settings.encoder.optionLabelUnavailable", { name: "libx264" }),
+    ).toBe("libx264（不可用）");
+    expect(instance.t("settings.encoder.optionLabelUnknown", { name: "libx264" })).toBe(
+      "libx264（未探测）",
+    );
     expect(instance.t("settings.encoder.reasonNotListed")).toBe(
       "此 FFmpeg 版本不包含该编码器。",
     );
@@ -1485,9 +1528,33 @@ describe("application shell localization and status bar formatting", () => {
   });
 });
 
+describe("mediaError and exportError message catalog parity", () => {
+  // The two error vocabularies grow when the backend gains a code. A code with no message
+  // renders as a raw key, so every entry of both lists is asserted here rather than only the
+  // ones a presenter test happens to reach.
+  it("defines non-empty strings in both catalogs for every import media error code", () => {
+    for (const code of IMPORT_MEDIA_ERROR_CODES) {
+      expect(en.mediaError[code].trim().length).toBeGreaterThan(0);
+      expect(zhCN.mediaError[code].trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it("defines non-empty strings in both catalogs for every export error code", () => {
+    for (const code of EXPORT_ERROR_CODES) {
+      expect(en.exportError[code].trim().length).toBeGreaterThan(0);
+      expect(zhCN.exportError[code].trim().length).toBeGreaterThan(0);
+    }
+  });
+});
+
 describe("settingsError message catalog parity", () => {
   it("defines non-empty strings in en.settingsError and zhCN.settingsError for every error code", () => {
-    expect(SETTINGS_ERROR_CODES.length).toBe(14);
+    // Guards the loop itself: an empty or truncated vocabulary would otherwise pass every
+    // assertion below. The count is derived from the two lists it concatenates plus the single
+    // "unknown" fallback, so a new backend code cannot break this test.
+    expect(SETTINGS_ERROR_CODES.length).toBe(
+      BACKEND_SETTINGS_ERROR_CODES.length + FRONTEND_SETTINGS_ERROR_CODES.length + 1,
+    );
     for (const code of SETTINGS_ERROR_CODES) {
       const enText = en.settingsError[code];
       const zhText = zhCN.settingsError[code];

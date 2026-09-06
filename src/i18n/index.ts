@@ -42,15 +42,15 @@ export const resources = {
 
 /**
  * Safely accesses navigator.languages without throwing if navigator is undefined.
+ *
+ * ADR 011 names `navigator.languages` as the only source, and requires `en` when no entry
+ * matches a supported language. An absent or empty list holds no matching entry, so it
+ * resolves to `en`. It does NOT fall back to `navigator.language`, which would resolve a
+ * different language than the record states.
  */
 function getSystemLanguagesFromEnvironment(): readonly string[] {
-  if (typeof navigator !== "undefined") {
-    if (Array.isArray(navigator.languages) && navigator.languages.length > 0) {
-      return navigator.languages.map((l) => String(l));
-    }
-    if (typeof navigator.language === "string" && navigator.language.length > 0) {
-      return [navigator.language];
-    }
+  if (typeof navigator !== "undefined" && Array.isArray(navigator.languages)) {
+    return navigator.languages.map((l) => String(l));
   }
   return [];
 }
@@ -179,6 +179,12 @@ export function setStoredPreference(
 /**
  * Creates and asynchronously initializes a standalone i18next runtime instance.
  * Useful for isolated test suites or independent rendering contexts.
+ *
+ * It does NOT call `.use(initReactI18next)`. That plugin calls react-i18next's
+ * `setI18n`, which replaces the process-wide default instance, so every mounted
+ * `useTranslation()` would switch to this instance and the running application would change
+ * language. A React caller must wrap its tree in `<I18nextProvider i18n={instance}>`
+ * instead, which is what makes the instance isolated in the react-i18next sense too.
  */
 export async function createI18nInstance(
   options?: I18nRuntimeOptions,
@@ -188,7 +194,7 @@ export async function createI18nInstance(
   const resolvedLanguage = resolveLanguage(preference, options?.systemLanguages);
 
   const instance = i18next.createInstance();
-  await instance.use(initReactI18next).init({
+  await instance.init({
     lng: resolvedLanguage,
     fallbackLng: FALLBACK_LANGUAGE,
     resources,

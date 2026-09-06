@@ -16,7 +16,14 @@ mediaQuery.addEventListener("change", (event) => {
 });
 
 async function bootstrap(): Promise<void> {
-  await initI18n();
+  // The render must not sit on the success path of the localization init. i18next falls
+  // back to the key text when no catalog loaded, so a rejection still leaves a usable
+  // interface, while skipping the render leaves an empty window with no way to recover.
+  try {
+    await initI18n();
+  } catch (error) {
+    console.error("Failed to initialize localization:", error);
+  }
 
   const rootElement = document.getElementById("root");
   if (rootElement) {

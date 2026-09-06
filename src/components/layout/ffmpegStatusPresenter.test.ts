@@ -488,43 +488,39 @@ describe("presentFfmpegStatus", () => {
             mono: false,
           },
           {
-            key: "ffmpeg.detail.searchedPair",
+            key: "ffmpeg.detail.searchedPair.configured",
             values: {
               path: "/Users/user/.config/quipclip/bin/ffmpeg",
               probe: "/Users/user/.config/quipclip/bin/ffprobe",
-              origin: "configured",
             },
-            id: "ffmpeg.detail.searchedPair#1",
+            id: "ffmpeg.detail.searchedPair.configured#1",
             mono: false,
           },
           {
-            key: "ffmpeg.detail.searchedPair",
+            key: "ffmpeg.detail.searchedPair.path",
             values: {
               path: "/opt/homebrew/bin/ffmpeg",
               probe: "/opt/homebrew/bin/ffprobe",
-              origin: "path",
             },
-            id: "ffmpeg.detail.searchedPair#2",
+            id: "ffmpeg.detail.searchedPair.path#2",
             mono: false,
           },
           {
-            key: "ffmpeg.detail.searchedPair",
+            key: "ffmpeg.detail.searchedPair.path",
             values: {
               path: "/usr/local/bin/ffmpeg",
               probe: "/usr/local/bin/ffprobe",
-              origin: "path",
             },
-            id: "ffmpeg.detail.searchedPair#3",
+            id: "ffmpeg.detail.searchedPair.path#3",
             mono: false,
           },
           {
-            key: "ffmpeg.detail.searchedPair",
+            key: "ffmpeg.detail.searchedPair.appData",
             values: {
               path: "/Users/user/Library/Application Support/quipclip/ffmpeg",
               probe: "/Users/user/Library/Application Support/quipclip/ffprobe",
-              origin: "appData",
             },
-            id: "ffmpeg.detail.searchedPair#4",
+            id: "ffmpeg.detail.searchedPair.appData#4",
             mono: false,
           },
         ],
@@ -819,7 +815,7 @@ describe("presentFfmpegStatus", () => {
       const view = presentFfmpegStatus(state, format);
       const ids = view.detail.map((entry) => entry.id);
 
-      // Several entries share the "ffmpeg.detail.searchedPair" key; ids must still be
+      // Several entries share the "ffmpeg.detail.searchedPair.path" key; ids must still be
       // pairwise distinct, so the set of ids is exactly as large as the detail array.
       expect(new Set(ids).size).toBe(view.detail.length);
     });
