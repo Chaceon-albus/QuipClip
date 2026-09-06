@@ -28,7 +28,8 @@ keys. The key hierarchy states the component and intent, such as `timeline.actio
 Components must not use complete English sentences as keys.
 
 The application setting has three values: `system`, `en`, and `zh-CN`. Its default is
-`system`. The application persists this setting outside the project file. The settings
+`system`. The application persists this setting outside the project file, in the web view
+under the `localStorage` key `quipclip.language_preference`. The settings
 UI uses `Language` and `语言` as its labels. It uses `System Default` and `系统默认` for
 the `system` option. Both catalogs show the language names as the autonyms `English` and
 `简体中文`.

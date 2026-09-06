@@ -24,14 +24,16 @@ Hold TypeScript at 5.9. `typescript-eslint` caps its peer range below 6.1.
 ```
 src/            React frontend
   components/ui/    shadcn output. Generated code.
-  components/       layout, preview, timeline, transport
-  features/         media, timeline, ffmpeg, export, project
+  components/       export, layout, preview, settings, timeline, transport
+  features/         export, ffmpeg, media, playback, settings, timeline
+  i18n/             the catalogs and the language resolver
   lib/              rational math, timecode, Tauri bindings
-  stores/           Zustand slices
   styles/           globals.css holds the palette
+  types/            the project document types
   assets/brand/     the icon master
 src-tauri/      Rust backend
-  src/ffmpeg/       locate, download, probe, capabilities, export
+  src/ffmpeg/       locate, probe, capabilities, export
+  src/settings/     the settings file
   src/fsutil.rs     atomic file replacement
   src/project/      the project file
   src/time.rs       the Rational type
@@ -88,9 +90,9 @@ ffmpeg lifecycle. Those four parts carry the accuracy requirement of the product
 Read the `dev-workflow` skill. It gives the routing rules, the review loop, the gate, and
 the commit rules.
 
-Short form: the main agent orchestrates and reviews. `agy` writes the frontend. A subagent
-with the newest Claude Opus at medium reasoning writes the Rust. A different agent reviews
-at high reasoning. The main agent commits.
+Short form: the main agent orchestrates, runs the gate, and commits. `agy` writes the
+frontend. A subagent with the newest Claude Opus at medium reasoning writes the Rust. A
+separate agent, never the writing agent, reviews at high reasoning.
 
 Every delegated command runs the newest model its vendor offers. Never pin a model version
 in a document. ADR 008 states the rule.

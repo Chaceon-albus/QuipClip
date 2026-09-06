@@ -124,10 +124,9 @@ file lock is a larger change than the fault deserves.
 The application reads a damaged or unreadable cache file as a miss. It does not report an
 error for that file. The probe result reaches the frontend even when the cache write fails.
 
-**Executable resolution.** The first implementation does not read a configured path from
-the application settings. ADR 005 puts that path first in the resolution order. The
-application has no settings storage yet. Until it has one, the probe resolves the
-executables through `PATH` and the application data directory.
+**Executable resolution.** The probe resolves the executables in the ADR 005 order: the path
+configured in the settings file of ADR 013, then `PATH`, then the application data directory.
+The first implementation of this record predated settings storage and used only the last two.
 
 When the application does not find the executables, the `failed` payload names each
 candidate that it inspected, in search order. Each candidate holds the `ffmpeg` path, the
@@ -136,7 +135,15 @@ macOS that order includes the two Homebrew directories from ADR 012.
 
 ## Consequences
 
-- The export dialog never offers an encoder that fails at the first frame.
+- An input or output error while a smoke test runs ends the whole probe run and reports
+  `ffmpegSpawnFailed`. It does not answer `failed` for the encoder. `Failed` means the encoder
+  ran and did not work. An error that stops the test from running measured nothing, and a
+  resource exhaustion part way through a run would otherwise report every remaining candidate
+  as broken.
+- The export dialog marks an encoder that fails at the first frame. ADR 013 settles the
+  presentation: the interface compares each preset against the capability report and marks
+  it, rather than removing the encoder from the list, because a preset can name an encoder
+  this machine does not have.
 - The first probe costs a few seconds of background work. Later runs read a JSON file.
 - The tested set is a fixed list, so a new encoder needs a code change. That is deliberate.
   A probe of every listed encoder would run for a long time and would test encoders that no
@@ -154,8 +161,7 @@ macOS that order includes the two Homebrew directories from ADR 012.
 - One damaged entry discards every entry in the file. The reader parses the list as a
   unit. This is deliberate, because a miss costs one probe and a per-entry reader costs
   more code than that.
-- No caller supplies a configured path until settings storage exists. A user whose ffmpeg
-  is outside `PATH` and the application data directory cannot point the application at it.
-  ADR 005 keeps that step first in the order, and it returns with the settings storage.
+- A user whose ffmpeg is outside `PATH` and the application data directory points the
+  application at it through the settings file of ADR 013.
 - The decoder parser and the filter parser have tests but no caller. The milestone that
   adds the first caller also adds the command that feeds them.

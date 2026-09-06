@@ -10,9 +10,9 @@ are no effects.
 
 ## Status
 
-Early. Import, playback, PTS-based marking, and the source timeline are implemented.
-QuipClip also finds `ffmpeg` and reports which encoders work on your machine. Export is not
-implemented yet.
+Early. Import, playback, PTS-based marking, the source timeline, and export are
+implemented. QuipClip also finds `ffmpeg` and reports which encoders work on your machine.
+It does not yet download `ffmpeg`, and it does not yet save a project file.
 
 ## How it works
 
@@ -23,8 +23,9 @@ implemented yet.
 - The preview infers source PTS from browser-presented frames through a calibrated linear
   mapping. When precise mapping is unavailable, playback remains available and edit actions
   are disabled.
-- Segments use half-open `[inPts, outPts)` boundaries. A future renderer will seek and
-  decode each source accurately before it normalizes and joins the segments.
+- Segments use half-open `[inPts, outPts)` boundaries. The renderer seeks each input, cuts
+  on the raw source PTS with `trim`, then normalizes and joins the segments in project
+  order.
 
 ## ffmpeg
 
@@ -33,10 +34,10 @@ QuipClip does not bundle `ffmpeg`. It looks in this order:
 1. A path you set in the application settings.
 2. Your `PATH`.
 3. Its own application data directory.
-4. It asks you, and then downloads a copy.
+4. It asks you, and then downloads a copy. This step is planned; it is not implemented.
 
-After it finds the programs, it tests which encoders work on your machine, and offers only
-those.
+After it finds the programs, it tests which encoders work on your machine, and marks the
+ones that do not work.
 
 ## Build
 

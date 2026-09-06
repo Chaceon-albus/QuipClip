@@ -19,23 +19,25 @@ source key that makes that possible. Multi-track is out of scope and stays out o
 Each record states context, decision, and consequences. They are the source of truth. This
 document summarizes them and shows how the parts fit together.
 
-| Record                                                                                                      | Subject                                                       |
-| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| [`001-tauri-react-typescript-shell.md`](../.agents/decisions/001-tauri-react-typescript-shell.md)           | Tauri v2, React 19, TypeScript, Vite, Tailwind 4, shadcn/ui   |
-| [`002-rational-time-model.md`](../.agents/decisions/002-rational-time-model.md)                             | Source video PTS, exact time bases, half-open segments        |
-| [`003-hybrid-preview-decoding.md`](../.agents/decisions/003-hybrid-preview-decoding.md)                     | Native preview, proxy fallback, calibrated PTS inference      |
-| [`004-single-pass-filter-complex-export.md`](../.agents/decisions/004-single-pass-filter-complex-export.md) | Accurate source seek, timestamp resolution, normalization     |
-| [`005-ffmpeg-acquisition.md`](../.agents/decisions/005-ffmpeg-acquisition.md)                               | PATH, then app data, then a download the user agreed to       |
-| [`006-encoder-capability-probing.md`](../.agents/decisions/006-encoder-capability-probing.md)               | List the encoders, then smoke-test them, then cache           |
-| [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md) | One source-PTS timeline with ordered half-open segments       |
-| [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)   | Delegated writing, independent review                         |
-| [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                 | One reviewed unit, one commit, no push                        |
-| [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                             | Version 1 JSON with exact source-PTS boundaries               |
-| [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                             | English and Simplified Chinese interface with a saved setting |
-| [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)         | Homebrew path fallback for macOS GUI applications             |
-| [`013-application-settings-file.md`](../.agents/decisions/013-application-settings-file.md)                 | One settings file for the ffmpeg path and the export presets  |
-| [`014-export-cut-with-trim-after-seek.md`](../.agents/decisions/014-export-cut-with-trim-after-seek.md)     | Seeked input, trim on raw source PTS, one process, one output |
-| [`015-windows-atomic-replace-retry.md`](../.agents/decisions/015-windows-atomic-replace-retry.md)           | Layered Windows rename with a bounded retry                   |
+| Record                                                                                                                  | Subject                                                       |
+| ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| [`001-tauri-react-typescript-shell.md`](../.agents/decisions/001-tauri-react-typescript-shell.md)                       | Tauri v2, React 19, TypeScript, Vite, Tailwind 4, shadcn/ui   |
+| [`002-rational-time-model.md`](../.agents/decisions/002-rational-time-model.md)                                         | Source video PTS, exact time bases, half-open segments        |
+| [`003-hybrid-preview-decoding.md`](../.agents/decisions/003-hybrid-preview-decoding.md)                                 | Native preview, proxy fallback, calibrated PTS inference      |
+| [`004-single-pass-filter-complex-export.md`](../.agents/decisions/004-single-pass-filter-complex-export.md)             | Accurate source seek, timestamp resolution, normalization     |
+| [`005-ffmpeg-acquisition.md`](../.agents/decisions/005-ffmpeg-acquisition.md)                                           | PATH, then app data, then a download the user agreed to       |
+| [`006-encoder-capability-probing.md`](../.agents/decisions/006-encoder-capability-probing.md)                           | List the encoders, then smoke-test them, then cache           |
+| [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md)             | One source-PTS timeline with ordered half-open segments       |
+| [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)               | Delegated writing, independent review                         |
+| [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                             | One reviewed unit, one commit, no push                        |
+| [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                                         | Version 1 JSON with exact source-PTS boundaries               |
+| [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                                         | English and Simplified Chinese interface with a saved setting |
+| [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)                     | Homebrew path fallback for macOS GUI applications             |
+| [`013-application-settings-file.md`](../.agents/decisions/013-application-settings-file.md)                             | One settings file for the ffmpeg path and the export presets  |
+| [`014-export-cut-with-trim-after-seek.md`](../.agents/decisions/014-export-cut-with-trim-after-seek.md)                 | Seeked input, trim on raw source PTS, one process, one output |
+| [`015-windows-atomic-replace-retry.md`](../.agents/decisions/015-windows-atomic-replace-retry.md)                       | Layered Windows rename with a bounded retry                   |
+| [`016-export-orchestration.md`](../.agents/decisions/016-export-orchestration.md)                                       | One export at a time, one event, a 30-second publication wait |
+| [`017-export-lifetime-across-application-exit.md`](../.agents/decisions/017-export-lifetime-across-application-exit.md) | A quit cancels a running export and waits a bounded time      |
 
 ## Shape
 
@@ -45,7 +47,8 @@ document summarizes them and shows how the parts fit together.
 |                                                             |
 |  AppShell -> TitleBar | Preview | Transport | Timeline | Bar |
 |                  |          |                    |          |
-|  Zustand stores: media, timeline, playback, ffmpeg, export  |
+|  Zustand stores: media, timeline, playback, ffmpeg,         |
+|                  settings, export                           |
 |                  |                                          |
 |  lib/time.ts  (Rational, PTS, checked browser conversions) |
 +------------------|------------------------------------------+
@@ -54,7 +57,8 @@ document summarizes them and shows how the parts fit together.
 |  Rust backend    v                                          |
 |                                                             |
 |  commands/   the IPC surface                                |
-|  ffmpeg/     locate, download, probe, capabilities, export  |
+|  ffmpeg/     locate, probe, capabilities, export            |
+|  settings/   the settings file                              |
 |  fsutil.rs   atomic file replacement                        |
 |  project/    the .qcproj file                               |
 |  time.rs     Rational and decimal-string timestamp types    |
@@ -171,13 +175,29 @@ only the segments, so the user can watch what the export will contain.
 See ADR 004 and ADR 014.
 
 ADR 004 gives the semantic steps. ADR 014 selects the command shape from measurements on
-ffmpeg 9.0.1. The renderer is not written yet.
+ffmpeg 9.0.1. ADR 016 adds the orchestration. The renderer is written, and `start_export`
+and `cancel_export` are registered commands.
 
-One `ffmpeg` process writes one output. It opens one input for each segment, and it seeks
-each input to `inPts * videoTimeBase - formatStartTime - SEEK_MARGIN_SECONDS`. Each input
-carries `-copyts`, which keeps the raw source PTS visible to the filter graph. Each segment
-chain cuts with `trim` and `atrim` on those raw PTS values. It then resets the timestamps
-and normalizes the streams. The chains end in `concat`, in project array order.
+One `ffmpeg` process writes one output. One `-copyts`, placed once before the first input,
+keeps the raw source PTS visible to the filter graph on every input. The renderer seeks each
+input to `inPts * videoTimeBase - formatStartTime - SEEK_MARGIN_SECONDS`, clamps that value
+at zero, and omits `-ss` when the result is zero. Each segment chain cuts with `trim` and
+`atrim` on those raw PTS values. Each audio chain pins its input link to the source sample
+rate with an `aformat` before `atrim`. Under the second shape below, that pin is emitted once,
+in front of `asplit`, because the chains share one input link. Each chain then resets the timestamps and normalizes
+the streams. The chains end in `concat`, in project array order.
+
+The renderer has two graph shapes. It opens one input for each segment while the assembled
+command line stays inside the platform budget. It otherwise opens one input, seeks once, and
+divides that input with `split` and `asplit`.
+
+One export runs at a time, and a second request is refused. A cancel that arrives during the
+encode kills the child at the next poll. A cancel is also tested twice where it decides
+publication: once before `ffmpeg` starts, and once after the process exits and before the
+rename. See ADR 016.
+
+An application exit cancels a running export and waits a bounded time for it to end, so a quit
+does not leave `ffmpeg` encoding into a temporary file that nothing will remove. See ADR 017.
 
 The seek supplies the speed. The trim supplies the exactness. An input seek alone is not
 frame-exact: on MPEG-TS a seek lands only on key frames, and it can land after the target.
@@ -199,22 +219,26 @@ source edit points.
 
 See ADR 005, ADR 006, and ADR 012.
 
-Resolution order: the configured path, then `PATH`, then `<app_data>/bin`, then a download
-the user agreed to. `app_data_dir()` from the Tauri path API already follows the Windows and
-the macOS convention, so no code builds those paths by hand.
+Resolution order: the configured path, then `PATH`, then `<app_data>/bin`. ADR 005 adds a
+fourth step, a download the user agreed to. That step is not implemented.
+`app_data_dir()` from the Tauri path API already follows the Windows and the macOS
+convention, so no code builds those paths by hand.
 
 On macOS, the `PATH` lookup appends `/opt/homebrew/bin` and `/usr/local/bin` after the
 directories from the process `PATH`. This rule lets GUI applications find a standard
 Homebrew installation without starting a login shell.
 
-The download manifest pins a URL and a SHA-256 per target. Windows and macOS need different
-sources, because the Windows build server publishes no macOS asset.
+ADR 005 specifies a download manifest that pins a URL and a SHA-256 per target, because the
+Windows build server publishes no macOS asset. Neither the manifest nor the installer exists
+yet.
 
 After the programs resolve, a background job finds out which encoders work. It lists them,
 then runs a fraction-of-a-second encode with each candidate, because a listed hardware
 encoder fails on a machine without that hardware. The tests run one after another, because
 two hardware tests that run together compete for the same encoder hardware. One lock holds
-that phase for the whole application, so two runs never test an encoder at the same time.
+one test at a time for the whole application, so two runs never test an encoder at the same
+time. The lock is not a phase lock: two runs interleave their tests, and each test still runs
+alone.
 
 The job reports through one Tauri event named `ffmpeg:capability-probe`. Each payload
 carries the `runId` that the starting command returned. The backend does not cancel a
@@ -332,12 +356,13 @@ The frontend explicitly projects each runtime `Source` into `PersistedSource`. T
 projection lists each persisted field. It does not use object spread as a serialization
 filter.
 
-The project file is `.qcproj`, which is versioned JSON. See ADR 010. Version 1 does not
-write one. The user imports the sources in each session, so the segments last for one
-session, and the export presets live in the settings file instead. Rust keeps the reader and
-the writer, and nothing calls them. It stores absolute and
-relative source paths. It also stores `activeSourceId`. Runtime proxy and browser state do
-not enter the file.
+The project file is `.qcproj`, which is versioned JSON. See ADR 010. The document stores
+absolute and relative source paths, and it stores `activeSourceId`. Runtime proxy and browser
+state do not enter the file.
+
+Version 1 writes no project file. The user imports the sources in each session, so the
+segments last for one session, and the export presets live in the settings file instead. Rust
+keeps `load_project` and `save_project` registered, and nothing calls them.
 
 The unreleased schema remains version 1 after this direct replacement. Old frame-grid
 version 1 files fail normal structural validation. QuipClip has no migration or legacy

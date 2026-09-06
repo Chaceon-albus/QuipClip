@@ -1,6 +1,9 @@
 # 015. Replace a file on Windows through a layered rename
 
 - Status: Accepted
+- Amended by: ADR 016, which gives `PendingOutput::commit` its production caller, sizes the
+  export publication wait at 30 seconds, records the cancel-before-rename rule, and caps each
+  retry wait at one second.
 - Date: 2026-09-05
 - Deciders: capric98
 
@@ -76,8 +79,10 @@ encode**.
 
 ## Decision
 
-Windows `replace_file` resolves both paths one time, above the loop, and then makes up to 10
-attempts (`MAXIMUM_REPLACE_ATTEMPTS`) in two layers.
+Windows `replace_file` resolves both paths one time, above the loop, and then makes one
+attempt for the first rename and one more for each wait the caller's budget affords, in two
+layers. `DEFAULT_REPLACE_BUDGET` affords nine waits, so ten attempts.
+`MAXIMUM_REPLACE_ATTEMPTS` is a separate guard rail at 1000. It is not the schedule.
 
 **Layer 1, the durable call.** `MoveFileExW` with
 `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`. Attempt 1 always uses it, and every later
@@ -142,6 +147,24 @@ Four tests hold this decision:
   that the call fails with code 5, and that the destination keeps its contents.
 
 The Unix arm does not change. The arm for other platforms does not change.
+
+### The Unix arm reports the rename, not the durability
+
+`fs::rename` is the step that publishes. The parent-directory sync that follows it only makes
+the publication survive a crash. A failure of that sync therefore must not be reported as a
+failed replacement, because the destination has already been replaced and every reader already
+sees the new contents.
+
+The Unix arm runs the directory sync for its effect and discards its error. An `Err` from
+`replace_file_within` continues to mean one thing: the rename did not happen and the
+destination is unchanged.
+
+The trade is explicit. A real durability failure is now silent. Every caller in this repository
+needs to know whether the destination changed, and none of them acts on whether the change is
+durable across a power loss. Reporting a completed settings save, a completed reset, or a
+completed export publication as a failure is the worse error: it sends the user to repeat work
+that already succeeded, and in the export case it hides that the file they chose has already
+been replaced.
 
 ## Consequences
 

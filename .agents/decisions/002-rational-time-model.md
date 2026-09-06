@@ -68,6 +68,13 @@ V1 precise editing requires separately editable presented frames to have disting
 presentation timestamps. QuipClip does not add a frame ordinal to disambiguate equal PTS
 values.
 
+Every conversion that rounds a time value breaks a tie away from zero. `round(-0.5)` is
+`-1` and `round(0.5)` is `1`. Both languages follow this one rule. TypeScript must not use
+`Math.round` on a value that can be negative, because the ECMAScript specification breaks
+that tie toward positive infinity, and an inferred PTS behind the calibration anchor is
+negative. A tie that rounds two ways gives a different edit point for the same distance
+forward and backward.
+
 All conversions between browser numbers and PTS ticks use checked helpers. A conversion
 rejects non-finite input and output. A number-to-tick conversion also rejects an unsafe
 integer result. A tick-to-number conversion subtracts the source origin with `BigInt`

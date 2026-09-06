@@ -33,8 +33,10 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
    first frame arrives as PTS 297. With `-copyts`, it arrives as PTS 128000. That is the
    value that ffprobe reports as `start_pts`.
 2. The shift that occurs without `-copyts` is the container `start_time`, not the video
-   stream `start_time`. The two values differ when the audio stream starts first. They
-   differed in every fixture.
+   stream `start_time`. The two values differed in every fixture. Each fixture had an audio
+   stream that starts before the video stream, so the measurement does not establish whether
+   any other condition also separates the two values. Treat any file as capable of a non-zero
+   container start time.
 3. The filter input link time base is equal to the video stream time base. The measured
    values were 1/12800, 1/15360, 1/1000, and 1/30000.
 4. The audio filter input link time base is `1/sample_rate`. The measurement covers
@@ -150,12 +152,15 @@ Each segment has this chain:
 
 ```
 [<i>:<videoStreamIndex>]trim=start_pts=<in>:end_pts=<out>,setpts=PTS-STARTPTS,
-     fps=<rate>,scale=<w>:<h>,setsar=1,format=yuv420p[v<i>];
-[<i>:<audioStreamIndex>]atrim=start_pts=<in>:end_pts=<out>,asetpts=PTS-STARTPTS,
+     fps=<rate>[,scale=<w>:<h>,setsar=1],format=yuv420p[v<i>];
+[<i>:<audioStreamIndex>]aformat=sample_rates=<sourceRate>,
+     atrim=start_pts=<in>:end_pts=<out>,asetpts=PTS-STARTPTS,
      aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a<i>];
 ```
 
-The chains end in `concat`, in project array order.
+The chains end in `concat`, in project array order. `scale` and `setsar=1` appear only when
+the preset gives an explicit resolution, and the leading `aformat` pins the input link to the
+source sample rate, as the decision text above requires.
 
 Each chain names an absolute stream index. It must not use the short specifiers `[<i>:v]`
 and `[<i>:a]`.
@@ -259,5 +264,9 @@ The renderer decodes the original media. It must not decode a preview proxy.
 - `SEEK_MARGIN_SECONDS` needs a test against a real capture from a content delivery
   network.
 - A variable-frame-rate output mode is an addition. It is not a change to the interface.
+- The plan refuses a source whose audio stream reports no usable sample rate, with
+  `sourceAudioRateUnknown`. The boundary formula above needs that rate, so a missing one cannot
+  be planned around. Dropping the track instead would write a file with no sound and report a
+  success.
 - Version 1 exports one source, so a segment without audio cannot occur between segments
   with audio. The silence generation that ADR 004 requires belongs to the multi-source work.
