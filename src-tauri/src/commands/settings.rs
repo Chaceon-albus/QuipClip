@@ -610,17 +610,29 @@ mod tests {
     #[test]
     fn restore_default_presets_reports_the_same_code_load_does_for_an_unreadable_path() {
         // A directory occupying the settings file's name makes `fs::read` inside
-        // `settings::load` fail before `settings::restore_default_presets` ever reaches a
-        // write. `load_settings_with` and `restore_default_presets_with` hit that same read,
-        // so they must report the same code for it.
+        // `settings::load` fail before `restore_default_presets` reaches a write, so both
+        // commands must report the same code for it. Which code differs by platform: Unix
+        // reports a kind that is not `PermissionDenied`, so `map_io_error` consults the
+        // `IoOperation` and answers `ReadFailed`; Windows reports `PermissionDenied`, an arm
+        // that ignores the operation. The exact code is therefore pinned below on Unix only,
+        // where it is the one check that catches `restore_default_presets_with` switching to
+        // `IoOperation::Write`; pinning it on Windows would fail at run time, not break the
+        // build. `maps_io_failures_without_generated_english_details` pins both branches of
+        // `map_io_error` on every platform, but not the operation any caller passes to it.
         let directory = TestDirectory::new();
         fs::create_dir(directory.path.join(settings::SETTINGS_FILE_NAME)).unwrap();
 
         let load_error = load_settings_with(&directory.path).unwrap_err();
         let restore_error = restore_default_presets_with(&directory.path).unwrap_err();
 
+        assert_eq!(load_error.code, restore_error.code);
+        assert!(matches!(
+            load_error.code,
+            SettingsCommandErrorCode::ReadFailed | SettingsCommandErrorCode::PermissionDenied,
+        ));
+        // Unix only, for the reason given above.
+        #[cfg(unix)]
         assert_eq!(load_error.code, SettingsCommandErrorCode::ReadFailed);
-        assert_eq!(restore_error.code, SettingsCommandErrorCode::ReadFailed);
     }
 
     #[test]
