@@ -33,10 +33,18 @@ function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
 /**
  * Builds a settings document for tests. `ffmpegPath` and `activePresetId` are omitted
  * entirely unless an override supplies them, matching ADR 013's "absent when unset" rule.
+ *
+ * `revision` defaults to a distinctive non-zero value on purpose. Every `toStrictEqual`
+ * comparison in this file builds its expected document through this same helper, so a
+ * `revision` an editor dropped or rebuilt as 0 fails those comparisons instead of passing
+ * because both sides happened to be 0.
  */
+const TEST_REVISION = 7;
+
 function createSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     schemaVersion: 1,
+    revision: TEST_REVISION,
     presets: [],
     ...overrides,
   };
@@ -418,6 +426,54 @@ describe("schemaVersion", () => {
     expect(updatePreset(settings, createPreset("a")).schemaVersion).toBe(1);
     expect(deletePreset(settings, "a").schemaVersion).toBe(1);
     expect(setActivePreset(settings, null).schemaVersion).toBe(1);
+  });
+});
+
+describe("revision", () => {
+  it("rides along unchanged through every editor, including every no-op path", () => {
+    // `revision` is the ADR 013 compare-and-swap token. An editor that rebuilt the document
+    // instead of spreading it would drop the key, and the save built on the result would
+    // either fail `isSettings` or compare a revision nothing wrote. Every editor and every
+    // no-op path is checked, because one rebuilt branch is enough to lose it.
+    const settings = createSettings({
+      presets: [createPreset("a"), createPreset("b")],
+      activePresetId: "a",
+      revision: 41,
+    });
+
+    for (const result of [
+      addPreset(settings, createPreset("c")),
+      updatePreset(settings, createPreset("a", { name: "New" })),
+      updatePreset(settings, createPreset("does-not-exist")),
+      deletePreset(settings, "a"),
+      deletePreset(settings, "b"),
+      deletePreset(settings, "does-not-exist"),
+      setActivePreset(settings, "b"),
+      setActivePreset(settings, "does-not-exist"),
+      setActivePreset(settings, null),
+    ]) {
+      expect(result.revision).toBe(41);
+    }
+  });
+
+  it("survives deleting the last preset, where activePresetId is dropped", () => {
+    const settings = createSettings({
+      presets: [createPreset("a")],
+      activePresetId: "a",
+      revision: 3,
+    });
+
+    const result = deletePreset(settings, "a");
+
+    expect(result.revision).toBe(3);
+    expect("activePresetId" in result).toBe(false);
+  });
+
+  it("keeps revision 0, the value a document written before the field existed loads as", () => {
+    const settings = createSettings({ presets: [createPreset("a")], revision: 0 });
+
+    expect(addPreset(settings, createPreset("b")).revision).toBe(0);
+    expect("revision" in addPreset(settings, createPreset("b"))).toBe(true);
   });
 });
 

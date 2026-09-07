@@ -76,26 +76,27 @@ export interface FfmpegPathControllerOptions {
 
 /**
  * Builds the next settings document from `settings`, replacing only `ffmpegPath` and
- * preserving `schemaVersion`, `presets`, and `activePresetId` exactly.
+ * preserving every other key exactly.
  *
- * ADR 013: an unset optional key is ABSENT, never an empty string and never null. Passing
- * `undefined` for `ffmpegPath` (the clear case) omits the key entirely. Rust rejects a blank
- * path with `InvalidFfmpegPath`, so writing `""` would fail the save and leave the user unable
- * to clear the setting at all.
+ * This SPREADS the loaded document rather than rebuilding it field by field, matching
+ * `buildSettings` in `@/features/settings/presetDocument`. `revision`, the ADR 013
+ * compare-and-swap token, is why that matters: a rebuilt document would drop it, `isSettings`
+ * in the store would then refuse the document before the IPC ever ran, and setting an ffmpeg
+ * path would silently stop working. The spread also carries any key a later schema adds.
+ *
+ * ADR 013: an unset optional key is ABSENT, never an empty string and never null. `ffmpegPath`
+ * is therefore deleted first and written back only when it is not undefined, so the clear case
+ * omits the key entirely. Rust rejects a blank path with `InvalidFfmpegPath`, so writing `""`
+ * would fail the save and leave the user unable to clear the setting at all.
  */
 function buildNextSettings(
   settings: Settings,
   ffmpegPath: string | undefined,
 ): Settings {
-  const next: Settings = {
-    schemaVersion: settings.schemaVersion,
-    presets: settings.presets,
-  };
+  const next: Settings = { ...settings };
+  delete next.ffmpegPath;
   if (ffmpegPath !== undefined) {
     next.ffmpegPath = ffmpegPath;
-  }
-  if (settings.activePresetId !== undefined) {
-    next.activePresetId = settings.activePresetId;
   }
   return next;
 }

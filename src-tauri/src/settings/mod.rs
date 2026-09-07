@@ -53,6 +53,35 @@ pub struct Settings {
     /// The schema version this document claims. Must equal [`CURRENT_SCHEMA_VERSION`] to
     /// pass [`validate_settings`].
     pub schema_version: u32,
+    /// The compare-and-swap token [`save`] uses to refuse a save built on a document another
+    /// process has already replaced; see ADR 013.
+    ///
+    /// This is a counter, not a format version. [`validate_settings`] accepts every value:
+    /// no revision is invalid. [`SETTINGS_LOCK`] is per-process and therefore cannot order
+    /// two processes' writes, so [`save`] compares the revision the caller's document carried
+    /// on disk against the revision the file holds now, and writes that value plus one.
+    ///
+    /// `#[serde(default)]` reads a document written before this field existed as revision 0,
+    /// which is also what [`defaults::seeded_settings`] carries, so the first save over such a
+    /// file compares 0 against 0 and succeeds. The key is always serialized -- no
+    /// `skip_serializing_if` -- so every save from the second onward compares a value that was
+    /// really written.
+    ///
+    /// [`reset`] renames the file aside and writes fresh seeds, but it carries the revision the
+    /// moved-aside document held forward, so the count continues across a reset rather than
+    /// restarting at 1. It has to: a value the file can hold twice is a value a stale holder
+    /// can meet again, and the comparison would accept it.
+    ///
+    /// One case a counter cannot close: a file deleted outside the application. The next
+    /// process creates a file at revision 1, and a copy of QuipClip still holding a document
+    /// from revision 1 of the deleted file would be accepted. Closing that needs a per-file
+    /// instance nonce, which this field is not; see ADR 013.
+    ///
+    /// `u32`, not `u64`: the whole range sits inside the JavaScript safe-integer bound, so
+    /// this crosses the command boundary as a plain JSON number and needs no canonical-string
+    /// encoding of the kind `Pts` requires.
+    #[serde(default)]
+    pub revision: u32,
     /// An explicit ffmpeg location the user configured, ahead of every other entry in the
     /// ADR 005 resolution order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -389,6 +418,9 @@ impl Error for SettingsValidationError {}
 /// name shape, the encoder-name security rule, the quality and resolution ranges, the
 /// safe-integer bounds on a custom frame rate, and the two cross-references
 /// (`active_preset_id` naming a preset, and every preset id being unique).
+///
+/// [`Settings::revision`] is deliberately not checked. It is a compare-and-swap counter, not a
+/// format version, so no value of it is invalid; [`save`] is what compares it.
 pub fn validate_settings(settings: &Settings) -> Result<(), SettingsValidationError> {
     if settings.schema_version != CURRENT_SCHEMA_VERSION {
         return Err(SettingsValidationError::SchemaVersion {
@@ -551,6 +583,18 @@ pub enum SettingsFileError {
     /// [`save`] refused to write because the file that already exists at the destination
     /// could not be read back. The bytes on disk are left exactly as they were.
     Unreadable,
+    /// [`save`] refused to write because the document the caller edited is no longer the
+    /// document on disk: another window or another QuipClip process saved in between. The
+    /// bytes on disk are left exactly as they were, so the other change is not lost.
+    ///
+    /// `expected` is the revision the caller's document carried, and `found` is the revision
+    /// the file holds now. Both are a Rust-side diagnostic: the command layer drops them, the
+    /// way serde's message is dropped for [`Self::Json`], because the only recovery is to
+    /// reload and re-apply the edit and no number changes that.
+    Conflict {
+        expected: u32,
+        found: u32,
+    },
     /// [`reset`] failed to rename the existing settings file to [`INVALID_SETTINGS_FILE_NAME`]
     /// before writing fresh seeds, for a reason other than the file being absent.
     ///
@@ -575,6 +619,10 @@ impl fmt::Display for SettingsFileError {
                 formatter,
                 "the existing settings file could not be read; refusing to overwrite it"
             ),
+            Self::Conflict { expected, found } => write!(
+                formatter,
+                "the settings file moved from revision {expected} to revision {found} after this copy loaded it; refusing to overwrite it"
+            ),
             Self::Backup(error) => write!(formatter, "settings backup failed: {error}"),
         }
     }
@@ -586,7 +634,7 @@ impl Error for SettingsFileError {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
             Self::Validation(error) => Some(error),
-            Self::FutureSchemaVersion { .. } | Self::Unreadable => None,
+            Self::FutureSchemaVersion { .. } | Self::Unreadable | Self::Conflict { .. } => None,
             Self::Backup(error) => Some(error),
         }
     }
@@ -634,7 +682,27 @@ struct FfmpegPathProbe {
     ffmpeg_path: Option<String>,
 }
 
+/// A narrow, permissive probe of just the `revision` field, used by [`reset`] to carry the
+/// count across the rename that moves the old document aside.
+///
+/// Permissive for the same reason [`FfmpegPathProbe`] is, and more urgently: the document
+/// [`reset`] moves aside is usually the one the strict [`load`] refused, so a reader that
+/// insisted on a whole valid [`Settings`] would find no revision to continue from in exactly
+/// the case [`reset`] exists for. It ignores `schemaVersion` too: a document from a later
+/// build still counts its saves with this same field, and a revision is not less true for
+/// sitting beside keys this build does not know.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RevisionProbe {
+    #[serde(default)]
+    revision: u32,
+}
+
 /// One process-wide lock over the settings file's write path.
+///
+/// Process-wide is all it is. Two QuipClip processes take two separate `Mutex` values, so this
+/// lock cannot order their writes at all; [`Settings::revision`] and the compare-and-swap in
+/// [`save_locked`] are what stop process B's save from silently discarding process A's presets.
 ///
 /// [`save`], [`restore_default_presets`], and [`reset`] each take this lock exactly once and
 /// then do their work through a private `*_locked` helper or by calling [`load`] (which takes
@@ -707,7 +775,8 @@ pub fn load(app_data_directory: &Path) -> Result<LoadedSettings, SettingsFileErr
 }
 
 /// Validate and save `settings` to `app_data_directory`, refusing to overwrite a file this
-/// build cannot read back.
+/// build cannot read back, or one another process has replaced since the caller loaded it, and
+/// return the document that reached disk.
 ///
 /// This is the data-loss guard and the single most important behaviour in this module. A
 /// capability cache miss (see `ffmpeg::capabilities::cache`) costs one extra probe on the
@@ -716,7 +785,8 @@ pub fn load(app_data_directory: &Path) -> Result<LoadedSettings, SettingsFileErr
 /// through the strict [`load`] -- the same reader a later launch would use -- before writing
 /// anything:
 /// - nothing exists yet ([`load`]'s "no file" outcome): proceed.
-/// - [`load`] succeeds: proceed.
+/// - [`load`] succeeds: proceed when the revision it read equals the revision `settings`
+///   carries, and return [`SettingsFileError::Conflict`] otherwise.
 /// - [`load`] fails for any reason -- corrupt JSON, a failed [`validate_settings`], or a
 ///   schema version above [`CURRENT_SCHEMA_VERSION`] -- return [`SettingsFileError::Unreadable`]
 ///   and leave the bytes on disk exactly as they were. ADR 013 requires this: a document a
@@ -725,10 +795,16 @@ pub fn load(app_data_directory: &Path) -> Result<LoadedSettings, SettingsFileErr
 ///   only "is this JSON" would miss both cases, so the guard reuses the strict reader rather
 ///   than re-implementing a weaker check of its own.
 ///
+/// **`settings.revision` is the basis of the caller's edit, not the value that gets written.**
+/// A caller hands this the document it loaded and edited, carrying the revision that document
+/// had on disk. This writes that revision plus one, and the return value is the only place the
+/// new revision appears: a caller that needs it must read it from there, never from the value
+/// it sent.
+///
 /// `app_data_directory` is created first when it does not exist yet.
-pub fn save(app_data_directory: &Path, settings: &Settings) -> Result<(), SettingsFileError> {
+pub fn save(app_data_directory: &Path, settings: &Settings) -> Result<Settings, SettingsFileError> {
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-    save_locked(app_data_directory, settings)
+    save_locked(app_data_directory, settings, None)
 }
 
 /// The body of [`save`], factored out so [`restore_default_presets`] and [`reset`] can reuse
@@ -738,20 +814,64 @@ pub fn save(app_data_directory: &Path, settings: &Settings) -> Result<(), Settin
 /// This calls [`load`] directly rather than the public [`save`] to run its overwrite guard:
 /// [`load`] takes no lock of its own (see [`SETTINGS_LOCK`]), so calling it here is safe even
 /// though [`save_locked`] already holds the lock.
-fn save_locked(app_data_directory: &Path, settings: &Settings) -> Result<(), SettingsFileError> {
+///
+/// That one read answers both questions this function has to ask: whether the existing file is
+/// readable at all, and whether it is still the document the caller based its edit on. The
+/// compare-and-swap therefore costs no extra syscall. It also uses no filesystem fact:
+/// HFS+ records mtime at one-second granularity and SMB/FAT at two, so two saves inside one
+/// tick would be indistinguishable -- which is exactly the race being defended against -- an
+/// NTP step moves mtime backwards, and the file size is blind to a rename of equal length.
+///
+/// `previous_life_revision` is for [`reset`] alone, which removes the file and then writes into
+/// the missing path: it names the revision the removed document held, so the count continues
+/// instead of restarting at a value the file has held before. Every other caller passes `None`,
+/// which means "a first save here starts the count at 1".
+fn save_locked(
+    app_data_directory: &Path,
+    settings: &Settings,
+    previous_life_revision: Option<u32>,
+) -> Result<Settings, SettingsFileError> {
     validate_settings(settings)?;
 
-    match load(app_data_directory) {
-        Ok(_) => {}
-        Err(SettingsFileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+    let found_revision = match load(app_data_directory) {
+        // No file exists yet, so there is nothing a comparison could protect. A first save
+        // ignores the caller's revision entirely.
+        Ok(loaded) if loaded.seeded => None,
+        Ok(loaded) => Some(loaded.settings.revision),
+        Err(SettingsFileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
         Err(_) => return Err(SettingsFileError::Unreadable),
-    }
+    };
+
+    let next_revision = match found_revision {
+        // A genuine first save starts at 1. When the caller names the revision this file's
+        // previous life ended at, the count continues from there instead, so no revision is
+        // reused across the rename that ended that life.
+        None => previous_life_revision.map_or(1, |previous| previous.wrapping_add(1)),
+        // `wrapping_add`, not `saturating_add`. Neither is reachable at 4.29 billion saves,
+        // but a saturated counter would stop changing at the top, and a revision that never
+        // changes silently disables this comparison for the rest of the file's life. Wrapping
+        // keeps every save a change.
+        Some(found) if found == settings.revision => found.wrapping_add(1),
+        Some(found) => {
+            return Err(SettingsFileError::Conflict {
+                expected: settings.revision,
+                found,
+            });
+        }
+    };
+
+    // The written document differs from the validated one only in `revision`, and
+    // `validate_settings` accepts every revision, so validating the input above covers this.
+    let written = Settings {
+        revision: next_revision,
+        ..settings.clone()
+    };
 
     let path = app_data_directory.join(SETTINGS_FILE_NAME);
     fs::create_dir_all(app_data_directory)?;
-    let json = crate::fsutil::to_pretty_json_line(settings)?;
+    let json = crate::fsutil::to_pretty_json_line(&written)?;
     crate::fsutil::write_bytes_atomically(&path, &json)?;
-    Ok(())
+    Ok(written)
 }
 
 /// Restore every seeded default preset, keeping every other preset, `ffmpegPath`, and
@@ -764,6 +884,12 @@ fn save_locked(app_data_directory: &Path, settings: &Settings) -> Result<(), Set
 /// 013 calls out by name. When `activePresetId` is absent afterwards and the preset list is
 /// non-empty, this sets it to the first seed so restoring presets from an empty library still
 /// leaves one selected.
+///
+/// This needs no compare-and-swap handling of its own. It carries the whole document it loaded
+/// forward into [`save_locked`], so [`Settings::revision`] rides along inside that document and
+/// the comparison compares the value this function really read -- which is precisely why the
+/// token lives in the document rather than beside it as a second argument. The return value is
+/// [`save_locked`]'s, so it carries the bumped revision rather than the one that was read.
 pub fn restore_default_presets(app_data_directory: &Path) -> Result<Settings, SettingsFileError> {
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
 
@@ -784,8 +910,7 @@ pub fn restore_default_presets(app_data_directory: &Path) -> Result<Settings, Se
         }
     }
 
-    save_locked(app_data_directory, &settings)?;
-    Ok(settings)
+    save_locked(app_data_directory, &settings, None)
 }
 
 /// Move a damaged settings file aside and write fresh seeds.
@@ -796,10 +921,22 @@ pub fn restore_default_presets(app_data_directory: &Path) -> Result<Settings, Se
 /// than the source file being absent, this returns that error and writes nothing, leaving the
 /// original file in place. A missing settings file is not an error: it is treated the same as
 /// [`load`]'s "no file yet" outcome, and this simply writes the seeds.
+///
+/// The revision the moved-aside document held is read BEFORE the rename and carried into the
+/// save, so the count continues across the reset. Restarting at 1 would make 1 a value the
+/// file holds twice, and a copy of QuipClip still holding a document from before the reset
+/// would then pass the comparison and undo it; see [`Settings::revision`]. The read is
+/// permissive ([`RevisionProbe`]), because the document being reset is usually one the strict
+/// [`load`] refused.
 pub fn reset(app_data_directory: &Path) -> Result<Settings, SettingsFileError> {
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
 
     let path = app_data_directory.join(SETTINGS_FILE_NAME);
+    let previous_life_revision = fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RevisionProbe>(&bytes).ok())
+        .map(|probe| probe.revision);
+
     let backup_path = app_data_directory.join(INVALID_SETTINGS_FILE_NAME);
     match fs::rename(&path, &backup_path) {
         Ok(()) => {}
@@ -807,9 +944,18 @@ pub fn reset(app_data_directory: &Path) -> Result<Settings, SettingsFileError> {
         Err(error) => return Err(SettingsFileError::Backup(error)),
     }
 
+    // The `save_locked` below reaches its "no file" arm on purpose: the rename above has just
+    // moved the old document aside, so nothing is left for a compare-and-swap to protect, and
+    // `previous_life_revision` rather than the file is what continues the count.
+    //
+    // One race remains. If another process creates a file between the rename and that read,
+    // the seeds carry revision 0 while a first save writes 1, so `save_locked` almost always
+    // reports a `Conflict` -- which is honest, and a second reset succeeds. "Almost": a save
+    // that wraps at `u32::MAX` writes 0, and against that one file this reset would compare
+    // 0 against 0 and write the seeds instead of refusing. That costs the other process's
+    // write, not the user's library, and it needs 4.29 billion saves to reach.
     let settings = defaults::seeded_settings();
-    save_locked(app_data_directory, &settings)?;
-    Ok(settings)
+    save_locked(app_data_directory, &settings, previous_life_revision)
 }
 
 /// The configured ffmpeg path, or `None` for any problem reading it.
@@ -867,9 +1013,13 @@ mod tests {
         }
     }
 
+    /// A document at revision 0, the value a first save compares against and the value
+    /// `defaults::seeded_settings` carries. A test that needs a saved revision reads it from
+    /// what `save` returned, never from a literal it built.
     fn sample_settings(presets: Vec<Preset>) -> Settings {
         Settings {
             schema_version: CURRENT_SCHEMA_VERSION,
+            revision: 0,
             ffmpeg_path: None,
             presets,
             active_preset_id: None,
@@ -885,6 +1035,7 @@ mod tests {
 
         let settings = Settings {
             schema_version: CURRENT_SCHEMA_VERSION,
+            revision: 7,
             ffmpeg_path: Some("/opt/homebrew/bin/ffmpeg".to_owned()),
             presets: vec![source_preset, custom_preset],
             active_preset_id: Some("source-preset".to_owned()),
@@ -892,6 +1043,7 @@ mod tests {
 
         let value = serde_json::to_value(&settings).unwrap();
         assert_eq!(value["schemaVersion"], serde_json::json!(1));
+        assert_eq!(value["revision"], serde_json::json!(7));
         assert_eq!(
             value["presets"][0]["videoEncoder"],
             serde_json::json!("libx264")
@@ -1473,11 +1625,17 @@ mod tests {
     fn save_then_load_round_trips_with_a_trailing_newline_and_no_leftover_temporary() {
         let directory = TestDirectory::new();
         let settings = sample_settings(vec![sample_preset("preset-1")]);
-        save(&directory.path, &settings).unwrap();
+        let saved = save(&directory.path, &settings).unwrap();
+
+        // The comparison is against what `save` RETURNED, not against what it was given: the
+        // document that reached disk carries the bumped revision, and the caller's copy still
+        // carries the revision its edit was based on.
+        assert_eq!(settings.revision, 0);
+        assert_eq!(saved.revision, 1);
 
         let loaded = load(&directory.path).unwrap();
         assert!(!loaded.seeded);
-        assert_eq!(loaded.settings, settings);
+        assert_eq!(loaded.settings, saved);
 
         let path = directory.path.join(SETTINGS_FILE_NAME);
         assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
@@ -1541,10 +1699,212 @@ mod tests {
         assert!(!nested.exists());
 
         let settings = sample_settings(vec![sample_preset("preset-1")]);
-        save(&nested, &settings).unwrap();
+        let saved = save(&nested, &settings).unwrap();
 
         assert!(nested.join(SETTINGS_FILE_NAME).is_file());
-        assert_eq!(load(&nested).unwrap().settings, settings);
+        assert_eq!(load(&nested).unwrap().settings, saved);
+    }
+
+    // -- The compare-and-swap on `Settings::revision`. --
+
+    #[test]
+    fn a_save_built_on_a_stale_document_is_refused_and_the_other_copys_presets_survive() {
+        // This is the test that would have caught the fault. `SETTINGS_LOCK` is per-process,
+        // so two QuipClip processes take two separate locks and the lock cannot order their
+        // writes; before the revision comparison existed, the second save below silently
+        // discarded every preset the first one had added.
+        let directory = TestDirectory::new();
+
+        // Copy A saves document A, landing it at revision 1.
+        let first = sample_settings(vec![sample_preset("preset-a")]);
+        let saved_first = save(&directory.path, &first).unwrap();
+        assert_eq!(saved_first.revision, 1);
+
+        // Copy B loads that document. This is the copy that goes stale.
+        let stale = load(&directory.path).unwrap().settings;
+        assert_eq!(stale.revision, 1);
+
+        // Copy A loads, edits, and saves, landing the file at revision 2.
+        let mut edited = load(&directory.path).unwrap().settings;
+        edited.presets.push(sample_preset("preset-added-by-a"));
+        let saved_second = save(&directory.path, &edited).unwrap();
+        assert_eq!(saved_second.revision, 2);
+
+        // Copy B now saves the document it loaded before that. It still carries revision 1
+        // and a different preset list, so it must be refused.
+        let mut stale_edit = stale;
+        stale_edit.presets.push(sample_preset("preset-added-by-b"));
+        let error = save(&directory.path, &stale_edit).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SettingsFileError::Conflict {
+                    expected: 1,
+                    found: 2
+                }
+            ),
+            "got {error:?}"
+        );
+
+        // The bytes on disk still hold copy A's revision-2 preset list.
+        let on_disk = load(&directory.path).unwrap().settings;
+        assert_eq!(on_disk, saved_second);
+        let ids: Vec<&str> = on_disk
+            .presets
+            .iter()
+            .map(|preset| preset.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["preset-a", "preset-added-by-a"]);
+    }
+
+    #[test]
+    fn each_save_bumps_the_revision_and_returns_the_document_it_wrote() {
+        let directory = TestDirectory::new();
+        let mut document = sample_settings(vec![sample_preset("preset-1")]);
+
+        // Each round feeds back the document the previous save RETURNED, which is the only
+        // place the new revision appears. Feeding back the value that was sent would be
+        // refused as a conflict from the second round onward.
+        for expected_revision in 1..=3 {
+            document = save(&directory.path, &document).unwrap();
+            assert_eq!(document.revision, expected_revision);
+            assert_eq!(load(&directory.path).unwrap().settings, document);
+        }
+    }
+
+    #[test]
+    fn a_first_save_into_a_missing_file_ignores_the_callers_revision() {
+        let directory = TestDirectory::new();
+        let mut settings = sample_settings(vec![sample_preset("preset-1")]);
+        settings.revision = 4_000;
+
+        // Nothing exists yet, so there is nothing a comparison could protect: the caller's
+        // revision is ignored rather than reported as a conflict, and the count starts at 1.
+        let saved = save(&directory.path, &settings).unwrap();
+        assert_eq!(saved.revision, 1);
+        assert_eq!(load(&directory.path).unwrap().settings, saved);
+    }
+
+    #[test]
+    fn a_document_written_without_the_revision_key_loads_as_zero_and_saves_once() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        // A document from a build before this field existed. `#[serde(default)]` reads it as
+        // revision 0, which is also what `sample_settings` and `defaults::seeded_settings`
+        // carry, so the first save over it compares 0 against 0 and succeeds.
+        let settings = sample_settings(vec![sample_preset("preset-1")]);
+        let mut value = serde_json::to_value(&settings).unwrap();
+        value.as_object_mut().unwrap().remove("revision");
+        assert!(!value.as_object().unwrap().contains_key("revision"));
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let loaded = load(&directory.path).unwrap();
+        assert!(!loaded.seeded);
+        assert_eq!(loaded.settings.revision, 0);
+
+        let saved = save(&directory.path, &loaded.settings).unwrap();
+        assert_eq!(saved.revision, 1);
+        assert_eq!(load(&directory.path).unwrap().settings, saved);
+    }
+
+    #[test]
+    fn restore_carries_the_revision_it_read_and_returns_the_bumped_one() {
+        // `restore_default_presets` needs no token handling of its own: it carries the whole
+        // loaded document forward into `save_locked`, so the revision rides along inside it.
+        let directory = TestDirectory::new();
+        let settings = sample_settings(vec![sample_preset("user-preset")]);
+        let saved = save(&directory.path, &settings).unwrap();
+        assert_eq!(saved.revision, 1);
+
+        let restored = restore_default_presets(&directory.path).unwrap();
+        assert_eq!(restored.revision, 2);
+        assert_eq!(load(&directory.path).unwrap().settings, restored);
+    }
+
+    #[test]
+    fn reset_continues_the_count_from_the_document_it_moved_aside() {
+        // A reset must not hand back a revision the file has held before: a copy of QuipClip
+        // still holding a document from before the reset would pass the comparison and undo
+        // it. `u32::MAX` wraps to 0, which is a value no stale holder can be carrying either,
+        // because a save writes 0 only by wrapping.
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        for (revision, expected) in [(1_u32, 2_u32), (12_345, 12_346), (u32::MAX, 0)] {
+            let existing = Settings {
+                revision,
+                ..sample_settings(vec![sample_preset("preset-1")])
+            };
+            fs::write(&path, serde_json::to_vec(&existing).unwrap()).unwrap();
+
+            let after_reset = reset(&directory.path).unwrap();
+            assert_eq!(
+                after_reset.revision, expected,
+                "reset over revision {revision}"
+            );
+            assert_eq!(load(&directory.path).unwrap().settings, after_reset);
+        }
+    }
+
+    #[test]
+    fn a_document_held_from_before_a_reset_cannot_be_saved_over_the_reset() {
+        // The ABA sequence the continued count closes. Process B loads the file, process A
+        // resets it, and B then saves the document it was holding. B's revision was current
+        // before the reset, so a reset that restarted the count at 1 would accept it and
+        // silently undo A's reset.
+        let directory = TestDirectory::new();
+        let held_by_b = save(
+            &directory.path,
+            &sample_settings(vec![sample_preset("preset-b")]),
+        )
+        .unwrap();
+        assert_eq!(held_by_b.revision, 1);
+
+        let after_reset = reset(&directory.path).unwrap();
+        assert_eq!(after_reset.revision, 2);
+
+        let error = save(&directory.path, &held_by_b).unwrap_err();
+        assert!(matches!(
+            error,
+            SettingsFileError::Conflict {
+                expected: 1,
+                found: 2
+            }
+        ));
+        // The seeds A's reset wrote are still on disk, untouched.
+        assert_eq!(load(&directory.path).unwrap().settings, after_reset);
+    }
+
+    #[test]
+    fn validate_settings_accepts_every_revision() {
+        // No revision is invalid: this is a compare-and-swap counter, not a format version.
+        for revision in [0, 1, u32::MAX] {
+            let settings = Settings {
+                revision,
+                ..sample_settings(vec![sample_preset("preset-1")])
+            };
+            assert!(
+                validate_settings(&settings).is_ok(),
+                "rejected revision {revision}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_revision_key_is_always_serialized() {
+        // No `skip_serializing_if`: every save from the second onward has to compare a value
+        // that was really written, so revision 0 must reach the file as an explicit key too.
+        for revision in [0, 1, u32::MAX] {
+            let settings = Settings {
+                revision,
+                ..sample_settings(vec![])
+            };
+            let value = serde_json::to_value(&settings).unwrap();
+            assert_eq!(
+                value["revision"],
+                serde_json::json!(revision),
+                "revision {revision} was not serialized"
+            );
+        }
     }
 
     #[test]
@@ -1743,6 +2103,7 @@ mod tests {
         let directory = TestDirectory::new();
         let empty = Settings {
             schema_version: CURRENT_SCHEMA_VERSION,
+            revision: 0,
             ffmpeg_path: None,
             presets: vec![],
             active_preset_id: None,
@@ -1764,8 +2125,17 @@ mod tests {
     fn restore_default_presets_on_a_missing_file_creates_it_with_the_seeds() {
         let directory = TestDirectory::new();
         let restored = restore_default_presets(&directory.path).unwrap();
-        assert_eq!(restored, defaults::seeded_settings());
+        // The seeds, at the revision a first save writes: `restore_default_presets` loaded a
+        // missing file, so `save_locked` took its "no file" arm and started the count at 1.
+        assert_eq!(
+            restored,
+            Settings {
+                revision: 1,
+                ..defaults::seeded_settings()
+            }
+        );
         assert!(directory.path.join(SETTINGS_FILE_NAME).is_file());
+        assert_eq!(load(&directory.path).unwrap().settings, restored);
     }
 
     #[test]
@@ -1789,7 +2159,7 @@ mod tests {
             .map(|index| sample_preset(&format!("preset-{index}")))
             .collect();
         let settings = sample_settings(full_presets);
-        save(&directory.path, &settings).unwrap();
+        let saved = save(&directory.path, &settings).unwrap();
 
         let seed_count = defaults::default_presets().len();
         let error = restore_default_presets(&directory.path).unwrap_err();
@@ -1799,8 +2169,9 @@ mod tests {
                 if count == MAX_PRESETS + seed_count
         ));
 
-        // Nothing was written: the file on disk still holds the un-restored settings.
-        assert_eq!(load(&directory.path).unwrap().settings, settings);
+        // Nothing was written: the file on disk still holds the un-restored settings, at the
+        // revision the save that put them there returned.
+        assert_eq!(load(&directory.path).unwrap().settings, saved);
     }
 
     #[test]
@@ -1825,26 +2196,37 @@ mod tests {
         fs::write(&path, &original_bytes).unwrap();
 
         let settings = reset(&directory.path).unwrap();
-        assert_eq!(settings, defaults::seeded_settings());
+        // The seeds at revision 1: these bytes are not JSON, so the probe finds no revision
+        // to continue from and the save that follows starts the count at 1.
+        assert_eq!(
+            settings,
+            Settings {
+                revision: 1,
+                ..defaults::seeded_settings()
+            }
+        );
 
         let backup_path = directory.path.join(INVALID_SETTINGS_FILE_NAME);
         assert_eq!(fs::read(&backup_path).unwrap(), original_bytes);
 
         let loaded = load(&directory.path).unwrap();
         assert!(!loaded.seeded);
-        assert_eq!(loaded.settings, defaults::seeded_settings());
+        assert_eq!(loaded.settings, settings);
     }
 
     #[test]
     fn reset_with_no_existing_file_just_writes_seeds() {
         let directory = TestDirectory::new();
         let settings = reset(&directory.path).unwrap();
-        assert_eq!(settings, defaults::seeded_settings());
-        assert!(!directory.path.join(INVALID_SETTINGS_FILE_NAME).exists());
         assert_eq!(
-            load(&directory.path).unwrap().settings,
-            defaults::seeded_settings()
+            settings,
+            Settings {
+                revision: 1,
+                ..defaults::seeded_settings()
+            }
         );
+        assert!(!directory.path.join(INVALID_SETTINGS_FILE_NAME).exists());
+        assert_eq!(load(&directory.path).unwrap().settings, settings);
     }
 
     #[test]
@@ -1904,8 +2286,8 @@ mod tests {
         assert!(SETTINGS_LOCK.is_poisoned());
 
         let settings = sample_settings(vec![sample_preset("preset-1")]);
-        save(&directory.path, &settings).unwrap();
-        assert_eq!(load(&directory.path).unwrap().settings, settings);
+        let saved = save(&directory.path, &settings).unwrap();
+        assert_eq!(load(&directory.path).unwrap().settings, saved);
     }
 
     #[test]
@@ -1958,6 +2340,17 @@ mod tests {
         assert!(SettingsFileError::Unreadable
             .to_string()
             .contains("could not be read"));
+
+        let conflict = SettingsFileError::Conflict {
+            expected: 4,
+            found: 5,
+        };
+        let conflict_message = conflict.to_string();
+        assert!(
+            conflict_message.contains("revision 4") && conflict_message.contains("revision 5"),
+            "message was: {conflict_message}"
+        );
+        assert!(conflict.source().is_none());
 
         let backup_error = SettingsFileError::Backup(io::Error::other("boom"));
         assert!(backup_error.to_string().contains("backup failed"));

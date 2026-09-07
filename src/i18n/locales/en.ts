@@ -253,6 +253,8 @@ export const en = {
     futureSchemaVersion: "The settings file is from a newer version of QuipClip.",
     settingsUnreadable:
       "The existing settings file could not be read, so it was not overwritten.",
+    settingsConflict:
+      "Another window or another copy of QuipClip saved the settings after this copy loaded them. This save was refused so that the other change is not lost. The settings shown are now the ones on disk. Apply your change again.",
     backupFailed: "Failed to back up the existing settings file.",
     invalidPath: "The configured FFmpeg path is invalid.",
     commandExecutionFailed: "The settings command failed to execute.",

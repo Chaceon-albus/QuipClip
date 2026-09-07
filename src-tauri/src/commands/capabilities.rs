@@ -895,6 +895,7 @@ mod tests {
         let app_data = base.join("app-data");
         let settings = crate::settings::Settings {
             schema_version: crate::settings::CURRENT_SCHEMA_VERSION,
+            revision: 0,
             ffmpeg_path: Some(configured.to_string_lossy().into_owned()),
             presets: vec![],
             active_preset_id: None,

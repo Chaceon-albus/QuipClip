@@ -52,6 +52,7 @@ describe("Settings Types & Wire Constants", () => {
         "unsafeSettingsValue",
         "futureSchemaVersion",
         "settingsUnreadable",
+        "settingsConflict",
         "backupFailed",
         "invalidPath",
         "commandExecutionFailed",

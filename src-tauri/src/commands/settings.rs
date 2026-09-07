@@ -58,6 +58,7 @@ settings_error_codes! {
     UnsafeSettingsValue => "unsafeSettingsValue",
     FutureSchemaVersion => "futureSchemaVersion",
     SettingsUnreadable => "settingsUnreadable",
+    SettingsConflict => "settingsConflict",
     BackupFailed => "backupFailed",
     InvalidPath => "invalidPath",
     CommandExecutionFailed => "commandExecutionFailed",
@@ -145,17 +146,17 @@ pub async fn save_settings(
         .map_err(|_| generated_error(SettingsCommandErrorCode::CommandExecutionFailed))?
 }
 
-/// The body of [`save_settings`]. `settings::save` writes exactly the document it validates,
-/// with no normalization, so the value that reached disk is `new_settings` itself; returning it
-/// after a successful save avoids a redundant re-read while still honoring the "return what
-/// reached disk" contract.
+/// The body of [`save_settings`]. `settings::save` writes the document it validates with one
+/// change of its own -- it bumps `revision`, the ADR 013 compare-and-swap token -- and returns
+/// what it wrote, so this returns that value and never `new_settings`. Returning the input
+/// would hand the interface the revision it sent, which is one behind the file on disk, and its
+/// very next save would then be refused as a `settingsConflict`.
 fn save_settings_with(
     app_data_directory: &Path,
     new_settings: Settings,
 ) -> Result<Settings, SettingsCommandError> {
     settings::save(app_data_directory, &new_settings)
-        .map_err(|error| map_settings_error(error, IoOperation::Write))?;
-    Ok(new_settings)
+        .map_err(|error| map_settings_error(error, IoOperation::Write))
 }
 
 /// Restore every ADR 013 seed preset over the current library, keeping every other preset,
@@ -263,6 +264,12 @@ fn map_settings_error(error: SettingsFileError, operation: IoOperation) -> Setti
         }
         SettingsFileError::Unreadable => {
             SettingsCommandError::new(SettingsCommandErrorCode::SettingsUnreadable)
+        }
+        // The two revision numbers are dropped here, the way serde's message is dropped for
+        // `Json` just above: they are a Rust-side diagnostic, and the frontend's only recovery
+        // is to reload the settings and re-apply the edit, which no number changes.
+        SettingsFileError::Conflict { .. } => {
+            SettingsCommandError::new(SettingsCommandErrorCode::SettingsConflict)
         }
         // `load`, `save`, and `restore_default_presets` never construct `Backup`: only
         // `settings::reset`'s own rename does, and `map_reset_error` handles that case before
@@ -392,9 +399,12 @@ mod tests {
         }
     }
 
+    /// A document at revision 0, the value a first save compares against; see
+    /// `settings::save`.
     fn sample_settings(presets: Vec<settings::Preset>) -> Settings {
         Settings {
             schema_version: settings::CURRENT_SCHEMA_VERSION,
+            revision: 0,
             ffmpeg_path: None,
             presets,
             active_preset_id: None,
@@ -434,6 +444,7 @@ mod tests {
                 "invalidSettings",
                 "permissionDenied",
                 "readFailed",
+                "settingsConflict",
                 "settingsUnreadable",
                 "unsafeSettingsValue",
                 "writeFailed",
@@ -668,6 +679,43 @@ mod tests {
         let reloaded_after_reset = load_settings_with(&reset_directory.path).unwrap();
         assert!(!reloaded_after_reset.seeded);
         assert_eq!(reloaded_after_reset.settings, reset);
+    }
+
+    #[test]
+    fn a_stale_save_maps_to_settings_conflict_and_drops_both_revision_numbers() {
+        let directory = TestDirectory::new();
+        let sent = sample_settings(vec![sample_preset("preset-1")]);
+        let saved = settings::save(&directory.path, &sent).unwrap();
+        // A second save lands the file at revision 2, leaving `saved` -- at revision 1 -- as
+        // the stale copy a window that has not reloaded would still be holding.
+        settings::save(&directory.path, &saved).unwrap();
+
+        let error = save_settings_with(&directory.path, saved).unwrap_err();
+
+        assert_eq!(error.code, SettingsCommandErrorCode::SettingsConflict);
+        // The two revision numbers are dropped at this layer: they are a Rust-side
+        // diagnostic, and the only recovery is to reload and re-apply the edit.
+        assert_eq!(error.detail, None);
+        assert_eq!(error.field, None);
+        assert_eq!(error.value, None);
+        assert_eq!(error.found_schema_version, None);
+        assert_eq!(error.supported_schema_version, None);
+    }
+
+    #[test]
+    fn save_returns_the_bumped_document_rather_than_the_one_it_was_given() {
+        // `save_settings_with` must return what `settings::save` wrote, not its input.
+        // Returning the input would hand the interface a revision one behind the file, and
+        // its very next save would be refused as a conflict.
+        let directory = TestDirectory::new();
+        let sent = sample_settings(vec![sample_preset("preset-1")]);
+        let returned = save_settings_with(&directory.path, sent.clone()).unwrap();
+
+        assert_eq!(sent.revision, 0);
+        assert_eq!(returned.revision, 1);
+        // The interface can save again straight from the returned document.
+        let again = save_settings_with(&directory.path, returned).unwrap();
+        assert_eq!(again.revision, 2);
     }
 
     #[test]

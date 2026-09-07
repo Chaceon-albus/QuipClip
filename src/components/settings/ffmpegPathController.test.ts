@@ -29,10 +29,18 @@ function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
 /**
  * Builds a settings document for tests. `ffmpegPath` and `activePresetId` are omitted
  * entirely unless an override supplies them, matching ADR 013's "absent when unset" rule.
+ *
+ * `revision` defaults to a distinctive non-zero value on purpose. Zero is specifically what a
+ * document written before the field existed reads as, so a fixture that used it would conflate
+ * the two cases, and a `revision` the controller dropped or rebuilt as 0 would pass a
+ * comparison it should fail. Matches the helper in `presetDocument.test.ts`.
  */
+const TEST_REVISION = 7;
+
 function createSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     schemaVersion: 1,
+    revision: TEST_REVISION,
     presets: [],
     ...overrides,
   };
@@ -461,6 +469,7 @@ describe("FfmpegPathController", () => {
       expect("ffmpegPath" in sent).toBe(false);
       expect(sent).toStrictEqual({
         schemaVersion: 1,
+        revision: TEST_REVISION,
         presets: [],
         activePresetId: "p1",
       });
@@ -483,7 +492,70 @@ describe("FfmpegPathController", () => {
       expect(saveSettings).toHaveBeenCalledTimes(1);
       const sent = saveSettings.mock.calls[0]?.[0] as Settings;
       expect("ffmpegPath" in sent).toBe(false);
-      expect(sent).toStrictEqual({ schemaVersion: 1, presets: [] });
+      expect(sent).toStrictEqual({
+        schemaVersion: 1,
+        revision: TEST_REVISION,
+        presets: [],
+      });
+    });
+  });
+
+  // `revision` is the ADR 013 compare-and-swap token. `buildNextSettings` used to rebuild the
+  // document field by field, which DROPPED it: `isSettings` in the store would then refuse the
+  // document before the IPC ever ran, so setting or clearing an ffmpeg path would silently
+  // stop working. These pin the token onto the document the controller actually sends.
+  describe("revision", () => {
+    it("carries revision through a choose() path change", async () => {
+      const settings = createSettings({ revision: 41 });
+      const saveSettings = vi
+        .fn()
+        .mockImplementation((next: Settings) => Promise.resolve(next));
+      const controller = createFfmpegPathController({
+        getSettings: () => settings,
+        saveSettings,
+        startProbe: vi.fn().mockResolvedValue(undefined),
+        openDialog: vi.fn().mockResolvedValue("/opt/ffmpeg/bin/ffmpeg"),
+      });
+
+      expect(await controller.choose("file")).toBe(true);
+      const sent = saveSettings.mock.calls[0]?.[0] as Settings;
+      expect(sent.revision).toBe(41);
+    });
+
+    it("carries revision through a clear()", async () => {
+      const settings = createSettings({ ffmpegPath: "/usr/bin/ffmpeg", revision: 41 });
+      const saveSettings = vi
+        .fn()
+        .mockImplementation((next: Settings) => Promise.resolve(next));
+      const controller = createFfmpegPathController({
+        getSettings: () => settings,
+        saveSettings,
+        startProbe: vi.fn().mockResolvedValue(undefined),
+      });
+
+      expect(await controller.clear()).toBe(true);
+      const sent = saveSettings.mock.calls[0]?.[0] as Settings;
+      expect(sent.revision).toBe(41);
+    });
+
+    it("keeps revision 0, the value a pre-revision document loads as", async () => {
+      // 0 must ride along as 0, not be treated as missing and replaced by a fresh counter:
+      // Rust compares the value it was sent, so inventing one would fail the save.
+      const settings = createSettings({ revision: 0 });
+      const saveSettings = vi
+        .fn()
+        .mockImplementation((next: Settings) => Promise.resolve(next));
+      const controller = createFfmpegPathController({
+        getSettings: () => settings,
+        saveSettings,
+        startProbe: vi.fn().mockResolvedValue(undefined),
+        openDialog: vi.fn().mockResolvedValue("/opt/ffmpeg/bin/ffmpeg"),
+      });
+
+      expect(await controller.choose("file")).toBe(true);
+      const sent = saveSettings.mock.calls[0]?.[0] as Settings;
+      expect(sent.revision).toBe(0);
+      expect("revision" in sent).toBe(true);
     });
   });
 

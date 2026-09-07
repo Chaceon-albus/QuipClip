@@ -6,6 +6,8 @@
  * - Serialized write queue to prevent out-of-order write races (ADR 013).
  * - Monotonic counter for latest-request-wins semantics (ADR 008).
  * - Optimistic save with rollback to last confirmed document on failure.
+ * - Compare-and-swap revision re-based onto the last confirmed document at send time, and one
+ *   re-read after a `settingsConflict` so the session is not left on a spent revision.
  * - public serializable store state with closure-held queue and counters.
  */
 
@@ -65,6 +67,47 @@ export function createSettingsStore(
   let lastConfirmedSettings: Settings | null = initialState?.settings ?? null;
 
   return createStore<SettingsStoreState>()((set) => {
+    // A `settingsConflict` leaves `lastConfirmedSettings` holding a revision the file has
+    // moved past, so every later write in the session would rebuild from it and be refused
+    // again. This queues one re-read to put the session back on the document the other writer
+    // left. The file is readable by definition in this arm -- the conflict came from a
+    // successful read -- so the re-read cannot fail for the reason the write did.
+    //
+    // The error stays published, and the status stays `error`. The write did not reach disk,
+    // and clearing the message would leave the user looking at a screen that changed under
+    // them with nothing to say why.
+    const rebaseAfterConflict = (requestId: number, error: SettingsError): void => {
+      if (error.code !== "settingsConflict") {
+        return;
+      }
+
+      const runRebase = async (): Promise<void> => {
+        try {
+          const result = validateLoadSettingsResult(await loadSettingsFn());
+
+          // A newer request was issued while this re-read was in flight; its own outcome is
+          // the authoritative one, so this leaves both the state and `lastConfirmedSettings`
+          // to it.
+          if (requestId !== latestRequestId) {
+            return;
+          }
+
+          lastConfirmedSettings = result.settings;
+          set({
+            status: "error",
+            settings: result.settings,
+            seeded: result.seeded,
+            error,
+          });
+        } catch {
+          // The rollback the caller already published stands, and so does the error that
+          // describes what happened to the user's edit.
+        }
+      };
+
+      writeQueue = writeQueue.then(runRebase, runRebase).catch(() => {});
+    };
+
     const load = async (): Promise<LoadSettingsResult | null> => {
       const requestId = ++latestRequestId;
       set({
@@ -143,7 +186,25 @@ export function createSettingsStore(
 
       const runWrite = async (): Promise<Settings | null> => {
         try {
-          const saved = await saveSettingsFn(next);
+          // Re-base the revision onto the last confirmed document immediately before the
+          // send. `next` was built from `state.settings`, which is optimistically published
+          // above and therefore carries a revision an in-flight write has already spent: a
+          // second edit made inside one round trip would otherwise be refused as a conflict
+          // with another copy of QuipClip, which would be a lie about this window's own
+          // write. The queue serializes writes, so by the time this runs
+          // `lastConfirmedSettings` holds the revision the file really has. A genuine
+          // cross-process conflict still fails, which is the whole point of the token.
+          const payload =
+            lastConfirmedSettings === null
+              ? next
+              : { ...next, revision: lastConfirmedSettings.revision };
+
+          // `saved`, not `payload`. Rust bumps `revision` -- the ADR 013 compare-and-swap
+          // token -- inside the document it returns, so adopting the return value is what
+          // carries the new revision into `lastConfirmedSettings` and into published state.
+          // Republishing what was sent would leave the interface one revision behind the file
+          // and the next save would be refused.
+          const saved = await saveSettingsFn(payload);
           const validated = validateSettings(saved);
           lastConfirmedSettings = validated;
 
@@ -168,6 +229,8 @@ export function createSettingsStore(
               error: normalized,
             });
           }
+
+          rebaseAfterConflict(requestId, normalized);
 
           return null;
         }
@@ -213,6 +276,8 @@ export function createSettingsStore(
             });
           }
 
+          rebaseAfterConflict(requestId, normalized);
+
           return null;
         }
       };
@@ -256,6 +321,8 @@ export function createSettingsStore(
               error: normalized,
             });
           }
+
+          rebaseAfterConflict(requestId, normalized);
 
           return null;
         }

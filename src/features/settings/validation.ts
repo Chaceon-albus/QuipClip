@@ -168,6 +168,13 @@ export function isSettings(value: unknown): value is Settings {
   if (s.schemaVersion !== SETTINGS_SCHEMA_VERSION) {
     return false;
   }
+  // `revision` is REQUIRED, not optional: Rust always serializes the key, so a document
+  // without it is not a document this build wrote. Accepting it as absent would let a
+  // document with no compare-and-swap token through, and the save built on it would either
+  // be refused or compare a revision nothing wrote (ADR 013).
+  if (!isNonNegativeU32(s.revision)) {
+    return false;
+  }
   if (s.ffmpegPath !== undefined && typeof s.ffmpegPath !== "string") {
     return false;
   }

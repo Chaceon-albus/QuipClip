@@ -108,6 +108,9 @@ pub fn default_presets() -> Vec<Preset> {
 pub fn seeded_settings() -> Settings {
     Settings {
         schema_version: CURRENT_SCHEMA_VERSION,
+        // Revision 0, the same value `#[serde(default)]` gives a document written before that
+        // field existed, so the first save over either compares 0 against 0 and succeeds.
+        revision: 0,
         ffmpeg_path: None,
         presets: default_presets(),
         active_preset_id: Some(DEFAULT_H264_MP4_ID.to_owned()),

@@ -33,10 +33,17 @@ function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
 /**
  * Builds a settings document for tests. `ffmpegPath` and `activePresetId` are omitted
  * entirely unless an override supplies them, matching ADR 013's "absent when unset" rule.
+ *
+ * `revision` defaults to a distinctive non-zero value on purpose. Zero is specifically what a
+ * document written before the field existed reads as, so a fixture that used it would conflate
+ * the two cases. Matches the helper in `presetDocument.test.ts`.
  */
+const TEST_REVISION = 7;
+
 function createSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     schemaVersion: 1,
+    revision: TEST_REVISION,
     presets: [],
     ...overrides,
   };

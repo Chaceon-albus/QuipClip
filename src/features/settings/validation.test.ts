@@ -302,6 +302,7 @@ describe("Settings Validation & Normalization", () => {
     it("accepts valid settings with presets and optional keys absent", () => {
       const settings: Settings = {
         schemaVersion: 1,
+        revision: 0,
         presets: [createValidPreset()],
       };
       expect(isSettings(settings)).toBe(true);
@@ -310,6 +311,7 @@ describe("Settings Validation & Normalization", () => {
     it("accepts valid settings with all optional keys populated", () => {
       const settings: Settings = {
         schemaVersion: 1,
+        revision: 12,
         ffmpegPath: "/usr/local/bin/ffmpeg",
         presets: [createValidPreset()],
         activePresetId: "default-h264-mp4",
@@ -320,6 +322,7 @@ describe("Settings Validation & Normalization", () => {
     it("accepts a dangling activePresetId that names no preset", () => {
       const settingsWithDanglingId = {
         schemaVersion: 1,
+        revision: 0,
         presets: [createValidPreset({ id: "preset-a" })],
         activePresetId: "non-existent-preset-id",
       };
@@ -327,6 +330,7 @@ describe("Settings Validation & Normalization", () => {
 
       const emptyPresetsWithDanglingId = {
         schemaVersion: 1,
+        revision: 0,
         presets: [],
         activePresetId: "orphan-id",
       };
@@ -336,6 +340,7 @@ describe("Settings Validation & Normalization", () => {
     it("rejects presets: 'nope'", () => {
       const invalid = {
         schemaVersion: 1,
+        revision: 0,
         presets: "nope",
       };
       expect(isSettings(invalid)).toBe(false);
@@ -344,6 +349,7 @@ describe("Settings Validation & Normalization", () => {
     it("rejects ffmpegPath: 3", () => {
       const invalid = {
         schemaVersion: 1,
+        revision: 0,
         presets: [],
         ffmpegPath: 3,
       };
@@ -351,15 +357,40 @@ describe("Settings Validation & Normalization", () => {
     });
 
     it("rejects schemaVersion other than 1", () => {
-      expect(isSettings({ schemaVersion: 2, presets: [] })).toBe(false);
-      expect(isSettings({ schemaVersion: 0, presets: [] })).toBe(false);
-      expect(isSettings({ schemaVersion: "1", presets: [] })).toBe(false);
+      expect(isSettings({ schemaVersion: 2, revision: 0, presets: [] })).toBe(false);
+      expect(isSettings({ schemaVersion: 0, revision: 0, presets: [] })).toBe(false);
+      expect(isSettings({ schemaVersion: "1", revision: 0, presets: [] })).toBe(false);
+    });
+
+    it("requires revision, so a document this build did not write is rejected", () => {
+      // Rust always serializes the key (ADR 013), so an absent `revision` means the document
+      // did not come from this build. Accepting it would let a save go out with no
+      // compare-and-swap token.
+      expect(isSettings({ schemaVersion: 1, presets: [] })).toBe(false);
+      expect(isSettings({ schemaVersion: 1, revision: undefined, presets: [] })).toBe(
+        false,
+      );
+    });
+
+    it("rejects a revision that is not a u32 counter", () => {
+      for (const revision of [-1, 1.5, 4_294_967_296, "1", null, Number.NaN]) {
+        expect(isSettings({ schemaVersion: 1, revision, presets: [] })).toBe(false);
+      }
+    });
+
+    it("accepts revision 0 and the whole u32 range", () => {
+      // No revision is invalid: this is a counter, not a format version, and it wraps at the
+      // top of the u32 range rather than saturating.
+      for (const revision of [0, 1, 4_294_967_295]) {
+        expect(isSettings({ schemaVersion: 1, revision, presets: [] })).toBe(true);
+      }
     });
 
     it("rejects non-string activePresetId", () => {
       expect(
         isSettings({
           schemaVersion: 1,
+          revision: 0,
           presets: [],
           activePresetId: 123,
         }),
@@ -369,6 +400,7 @@ describe("Settings Validation & Normalization", () => {
     it("rejects if any preset is invalid", () => {
       const invalid = {
         schemaVersion: 1,
+        revision: 0,
         presets: [createValidPreset(), { ...createValidPreset(), container: "webm" }],
       };
       expect(isSettings(invalid)).toBe(false);
@@ -385,14 +417,14 @@ describe("Settings Validation & Normalization", () => {
     it("accepts valid load settings results", () => {
       expect(
         isLoadSettingsResult({
-          settings: { schemaVersion: 1, presets: [] },
+          settings: { schemaVersion: 1, revision: 0, presets: [] },
           seeded: true,
         }),
       ).toBe(true);
 
       expect(
         isLoadSettingsResult({
-          settings: { schemaVersion: 1, presets: [createValidPreset()] },
+          settings: { schemaVersion: 1, revision: 3, presets: [createValidPreset()] },
           seeded: false,
         }),
       ).toBe(true);
@@ -401,14 +433,14 @@ describe("Settings Validation & Normalization", () => {
     it("rejects invalid load settings results", () => {
       expect(
         isLoadSettingsResult({
-          settings: { schemaVersion: 2, presets: [] },
+          settings: { schemaVersion: 2, revision: 0, presets: [] },
           seeded: true,
         }),
       ).toBe(false);
 
       expect(
         isLoadSettingsResult({
-          settings: { schemaVersion: 1, presets: [] },
+          settings: { schemaVersion: 1, revision: 0, presets: [] },
           seeded: "true",
         }),
       ).toBe(false);
@@ -418,7 +450,7 @@ describe("Settings Validation & Normalization", () => {
   });
 
   describe("Error code type guards", () => {
-    it("validates BackendSettingsErrorCode for all 12 backend codes", () => {
+    it("validates BackendSettingsErrorCode for every backend code", () => {
       for (const code of BACKEND_SETTINGS_ERROR_CODES) {
         expect(isBackendSettingsErrorCode(code)).toBe(true);
         expect(isSettingsErrorCode(code)).toBe(true);
@@ -443,18 +475,18 @@ describe("Settings Validation & Normalization", () => {
 
   describe("Throwing validators", () => {
     it("validateSettings returns valid settings or throws TypeError", () => {
-      const valid: Settings = { schemaVersion: 1, presets: [] };
+      const valid: Settings = { schemaVersion: 1, revision: 0, presets: [] };
       expect(validateSettings(valid)).toBe(valid);
 
-      expect(() => validateSettings({ schemaVersion: 2, presets: [] })).toThrow(
-        TypeError,
-      );
+      expect(() =>
+        validateSettings({ schemaVersion: 2, revision: 0, presets: [] }),
+      ).toThrow(TypeError);
       expect(() => validateSettings(null)).toThrow(TypeError);
     });
 
     it("validateLoadSettingsResult returns valid result or throws TypeError", () => {
       const valid = {
-        settings: { schemaVersion: 1, presets: [] } as Settings,
+        settings: { schemaVersion: 1, revision: 0, presets: [] } as Settings,
         seeded: true,
       };
       expect(validateLoadSettingsResult(valid)).toBe(valid);

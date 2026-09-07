@@ -935,6 +935,7 @@ mod tests {
     fn sample_settings(active: Option<&str>, presets: Vec<Preset>) -> Settings {
         Settings {
             schema_version: crate::settings::CURRENT_SCHEMA_VERSION,
+            revision: 0,
             ffmpeg_path: None,
             presets,
             active_preset_id: active.map(str::to_owned),

@@ -35,9 +35,18 @@ function createValidPreset(overrides: Partial<Preset> = {}): Preset {
   };
 }
 
+/**
+ * `revision` is a distinctive non-zero value on purpose. These fixtures stand for a document
+ * that crossed the IPC boundary, and zero is specifically what a document written before the
+ * field existed reads as, so using it here would conflate the two cases and leave a future
+ * test about that case unwritable.
+ */
+const TEST_REVISION = 7;
+
 function createValidSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     schemaVersion: 1,
+    revision: TEST_REVISION,
     ffmpegPath: undefined,
     presets: [createValidPreset()],
     activePresetId: "default-h264-mp4",

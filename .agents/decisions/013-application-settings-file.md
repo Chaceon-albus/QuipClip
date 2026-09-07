@@ -121,6 +121,54 @@ an unmounted volume did not answer. The interface writes the path and then start
 capability probe of ADR 006. That probe already reports the origin, the version, and the
 working encoders, and it already names the two file names it looked for.
 
+### A save compares a revision, so two processes cannot lose a preset library
+
+The settings lock is a `Mutex` inside one process. Two QuipClip processes take two separate
+locks, so the lock cannot order their writes. Before this, the second writer's document simply
+replaced the first writer's, and every preset the first writer added was gone — the loss this
+record says nothing can rebuild.
+
+The document carries a `revision`, a `u32` counter. A save writes the caller's revision plus
+one, and refuses with `settingsConflict` when the value on disk is not the value the caller's
+edit was based on. The comparison costs no extra read: `save_locked` already re-reads the
+document for the damaged-file guard above, so one read now answers both questions.
+
+`u32`, not a timestamp. Modification time is recorded at one-second granularity on HFS+ and two
+on SMB, so two saves inside one tick would be indistinguishable — which is the race being
+defended against. A clock can also move backwards, and a size is blind to an edit of equal
+length. `u32` rather than `u64` because the whole range fits inside the safe integer range of a
+JavaScript number, so unlike a PTS it needs no string encoding.
+
+The counter wraps rather than saturating. Neither is reachable at four billion saves, but a
+saturated counter would stop changing at the ceiling, and a revision that never changes disables
+the comparison silently for the rest of the file's life.
+
+A document written before the field existed reads as revision 0, which is what the seeded
+document also carries, so the first save over such a file compares 0 against 0 and succeeds. The
+key is always written, so every save after the first compares a value that was really stored.
+
+**The count continues across a reset.** A token has to be unique for the life of the file, not
+only monotonic between two adjacent writes. A reset that restarted the count at 1 would make 1 a
+value the file can hold twice: a process holding a document from before the reset would then be
+accepted, and it would silently undo the reset. So `reset` reads the revision of the document it
+is about to move aside and continues from it. That read is permissive rather than strict,
+because the document a reset moves aside is usually the one the strict reader refused, and a
+strict read would find no revision to continue from in exactly the case a reset exists for.
+
+**One case a counter cannot close.** If the file is deleted outside the application, the next
+process creates a new one at revision 1, and a stale holder at revision 1 is accepted. Closing
+that needs a per-file instance identifier, which this decision does not add.
+
+**The token must ride along, not be rebuilt.** Any writer that assembles a settings document
+field by field drops the revision, and the next save then compares a value the file never held.
+Every writer therefore copies the loaded document and changes what it means to change. Two sites
+had to be corrected when this landed, and both were found by making the field required rather
+than optional.
+
+**A conflict re-reads the file.** The refusal leaves the interface holding a revision the file
+has moved past, so without a re-read every later save in that session would conflict again. The
+store re-reads on that code alone, keeps the error visible, and reports what is now on screen.
+
 ## Consequences
 
 - A user can point the application at any ffmpeg, and `ExecutableOrigin::Configured` already

@@ -254,6 +254,8 @@ export const zhCN: TranslationCatalog = {
     unsafeSettingsValue: "设置值超出安全限制。",
     futureSchemaVersion: "设置文件来自更高版本的 QuipClip。",
     settingsUnreadable: "无法读取现有设置文件，因此未覆盖它。",
+    settingsConflict:
+      "在此副本加载设置之后，另一个窗口或另一个 QuipClip 副本保存了设置。为避免丢失该更改，本次保存已被拒绝。当前显示的设置已是磁盘上的设置。请重新应用您的更改。",
     backupFailed: "备份现有设置文件失败。",
     invalidPath: "配置的 FFmpeg 路径无效。",
     commandExecutionFailed: "执行设置命令失败。",

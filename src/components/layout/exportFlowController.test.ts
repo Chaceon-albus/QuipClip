@@ -46,10 +46,15 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
 
 /**
  * Builds a settings document whose active preset is the supplied preset.
+ *
+ * `revision` is a distinctive non-zero value on purpose: this fixture stands for a document
+ * loaded from disk, and zero is specifically what a document written before the field existed
+ * reads as, so using it here would conflate the two cases.
  */
 function createSettings(preset: Preset): Settings {
   return {
     schemaVersion: 1,
+    revision: 7,
     activePresetId: preset.id,
     presets: [preset],
   };

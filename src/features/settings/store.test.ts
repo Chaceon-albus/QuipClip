@@ -24,6 +24,7 @@ function createValidPreset(overrides: Partial<Preset> = {}): Preset {
 function createValidSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     schemaVersion: 1,
+    revision: 0,
     ffmpegPath: undefined,
     presets: [createValidPreset()],
     activePresetId: "default-h264-mp4",
@@ -203,6 +204,135 @@ describe("Settings Store", () => {
       expect(store.getState().settings?.ffmpegPath).toBe("/opt/homebrew/bin/ffmpeg");
       expect(store.getState().status).toBe("ready");
       expect(store.getState().error).toBeNull();
+    });
+
+    it("4a. The bumped revision propagates from each command's return value", async () => {
+      // The store needs no revision handling of its own: it already assigns
+      // `lastConfirmedSettings` and published state from each command's return value, and
+      // Rust bumps `revision` in exactly that value (ADR 013). This pins that, because a
+      // store that republished the document it SENT would leave the interface one revision
+      // behind the file and every later save would be refused as a `settingsConflict`.
+      const sentDoc = createValidSettings({ revision: 4 });
+
+      const store = createSettingsStore({
+        saveSettings: vi.fn().mockResolvedValue(createValidSettings({ revision: 5 })),
+        restoreDefaultPresets: vi
+          .fn()
+          .mockResolvedValue(createValidSettings({ revision: 6 })),
+        resetSettings: vi.fn().mockResolvedValue(createValidSettings({ revision: 1 })),
+      });
+
+      const saved = await store.getState().saveSettings(sentDoc);
+      expect(saved?.revision).toBe(5);
+      expect(store.getState().settings?.revision).toBe(5);
+
+      const restored = await store.getState().restoreDefaultPresets();
+      expect(restored?.revision).toBe(6);
+      expect(store.getState().settings?.revision).toBe(6);
+
+      const afterReset = await store.getState().resetSettings();
+      expect(afterReset?.revision).toBe(1);
+      expect(store.getState().settings?.revision).toBe(1);
+    });
+
+    it("4b. A settingsConflict rejection rolls back to the last confirmed document", async () => {
+      // A genuine cross-process conflict: this save is refused whatever revision it carries,
+      // which is the case the token exists for. The store surfaces the code and puts the
+      // confirmed document back. The re-read that follows fails here, so the rollback is what
+      // the user is left looking at.
+      const confirmed = createValidSettings({ revision: 9 });
+      const store = createSettingsStore(
+        {
+          saveSettings: vi
+            .fn()
+            .mockRejectedValue(new SettingsError({ code: "settingsConflict" })),
+          loadSettings: vi
+            .fn()
+            .mockRejectedValue(new SettingsError({ code: "readFailed" })),
+        },
+        { status: "ready", settings: confirmed },
+      );
+
+      const result = await store
+        .getState()
+        .saveSettings(createValidSettings({ revision: 9, activePresetId: undefined }));
+
+      expect(result).toBeNull();
+      expect(store.getState().status).toBe("error");
+      expect(store.getState().error?.code).toBe("settingsConflict");
+      expect(store.getState().settings).toEqual(confirmed);
+    });
+
+    it("4c. A settingsConflict re-reads the file, and the next save is not refused again", async () => {
+      // Without the re-read, `lastConfirmedSettings` keeps a revision the file has moved
+      // past, so every later save in the session rebuilds from it and conflicts again -- the
+      // session is wedged until the dialog is closed and reopened, which no message says.
+      const confirmed = createValidSettings({ revision: 9 });
+      const onDisk = createValidSettings({ revision: 12, activePresetId: undefined });
+      const saveSettings = vi
+        .fn()
+        .mockRejectedValueOnce(new SettingsError({ code: "settingsConflict" }))
+        .mockImplementation((next: Settings) =>
+          Promise.resolve({ ...next, revision: next.revision + 1 }),
+        );
+      const loadSettings = vi
+        .fn()
+        .mockResolvedValue({ settings: onDisk, seeded: false });
+      const store = createSettingsStore(
+        { saveSettings, loadSettings },
+        { status: "ready", settings: confirmed },
+      );
+
+      await store
+        .getState()
+        .saveSettings(createValidSettings({ revision: 9, ffmpegPath: "/opt/ffmpeg" }));
+
+      // The re-read is queued behind the failed write, so it lands one turn later. The error
+      // stays published: the edit did not reach disk, and the message is what says so.
+      await vi.waitFor(() => {
+        expect(store.getState().settings).toEqual(onDisk);
+      });
+      expect(store.getState().status).toBe("error");
+      expect(store.getState().error?.code).toBe("settingsConflict");
+
+      const retried = await store
+        .getState()
+        .saveSettings(createValidSettings({ revision: 12, ffmpegPath: "/opt/ffmpeg" }));
+      expect(retried?.revision).toBe(13);
+      expect(store.getState().status).toBe("ready");
+    });
+
+    it("4d. A second edit made inside one round trip is re-based, not refused", async () => {
+      // `settings` is published optimistically, so between the send and the reply it carries a
+      // revision the in-flight write is about to spend. Both settings controllers read the
+      // document to edit from exactly there, and their pending gates are per-controller, so
+      // one click in each section inside one round trip reaches this. Sending the spent
+      // revision would report another copy of QuipClip as the writer, which would be false.
+      const confirmed = createValidSettings({ revision: 3 });
+      const sent: Settings[] = [];
+      const saveSettings = vi.fn((next: Settings) => {
+        sent.push(next);
+        return Promise.resolve({ ...next, revision: next.revision + 1 });
+      });
+      const store = createSettingsStore(
+        { saveSettings },
+        { status: "ready", settings: confirmed },
+      );
+
+      const first = store
+        .getState()
+        .saveSettings({ ...confirmed, ffmpegPath: "/first" });
+      const optimistic = store.getState().settings ?? confirmed;
+      expect(optimistic.revision).toBe(3);
+      const second = store
+        .getState()
+        .saveSettings({ ...optimistic, activePresetId: undefined });
+      await Promise.all([first, second]);
+
+      expect(sent.map((document) => document.revision)).toEqual([3, 4]);
+      expect(store.getState().status).toBe("ready");
+      expect(store.getState().error).toBeNull();
+      expect(store.getState().settings?.revision).toBe(5);
     });
 
     it("5. loadSettings() rejection leaves settings null and status 'error'", async () => {

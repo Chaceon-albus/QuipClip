@@ -56,13 +56,18 @@ export function findPreset(settings: Settings, id: string): Preset | undefined {
 }
 
 /**
- * Builds a fresh `Settings` document from the given presets and active preset id, carrying
- * `schemaVersion` through unchanged and preserving `ffmpegPath` exactly: present stays
- * present with the same value, absent stays absent.
+ * Builds the next `Settings` document from the given presets and active preset id.
  *
- * `activePresetId` is written only when it is not undefined, so callers that pass `undefined`
- * get a document where the key is absent, never present with an undefined value (ADR 013,
- * RULE 2).
+ * This SPREADS the loaded document rather than rebuilding it field by field, so every key
+ * the caller loaded rides along untouched. `revision`, the ADR 013 compare-and-swap token,
+ * is why that matters: a rebuilt document would drop it, and the save built on the result
+ * would either fail the frontend validator or compare a revision nothing wrote. Every editor
+ * in this module goes through here, so one spread covers all of them.
+ *
+ * `activePresetId` is deleted first and then written only when it is not undefined, so
+ * callers that pass `undefined` get a document where the key is absent, never present with an
+ * undefined value (ADR 013, RULE 2). `ffmpegPath` is preserved exactly by the spread: present
+ * stays present with the same value, absent stays absent.
  */
 function buildSettings(
   settings: Settings,
@@ -70,12 +75,10 @@ function buildSettings(
   activePresetId: string | undefined,
 ): Settings {
   const next: Settings = {
-    schemaVersion: settings.schemaVersion,
+    ...settings,
     presets,
   };
-  if (settings.ffmpegPath !== undefined) {
-    next.ffmpegPath = settings.ffmpegPath;
-  }
+  delete next.activePresetId;
   if (activePresetId !== undefined) {
     next.activePresetId = activePresetId;
   }

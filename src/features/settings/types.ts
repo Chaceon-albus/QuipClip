@@ -83,6 +83,21 @@ export type Preset = {
  */
 export type Settings = {
   schemaVersion: 1;
+  /**
+   * The compare-and-swap token Rust uses to refuse a save built on a document another
+   * window or another copy of QuipClip has already replaced (ADR 013).
+   *
+   * A counter, not a format version: no value of it is invalid. It is REQUIRED here, so a
+   * document without it is not a document this build wrote. Rust stores it as a `u32`, whose
+   * whole range fits inside `Number.MAX_SAFE_INTEGER`, so it crosses as a plain number and
+   * needs no canonical-string encoding.
+   *
+   * The value a document carries is the BASIS of the edit, never the value that will be
+   * written. `save_settings` writes that value plus one and returns the document it wrote, so
+   * the next save must start from the RETURNED document. Sending back the value that was sent
+   * is refused with the `settingsConflict` code.
+   */
+  revision: number;
   ffmpegPath?: string;
   presets: Preset[];
   activePresetId?: string;
@@ -101,6 +116,7 @@ export const BACKEND_SETTINGS_ERROR_CODES = [
   "unsafeSettingsValue",
   "futureSchemaVersion",
   "settingsUnreadable",
+  "settingsConflict",
   "backupFailed",
   "invalidPath",
   "commandExecutionFailed",
