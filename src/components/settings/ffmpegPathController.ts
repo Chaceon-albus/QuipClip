@@ -269,6 +269,38 @@ export class FfmpegPathController {
   }
 
   /**
+   * Forces a fresh capability probe past the cache for the current FFmpeg configuration.
+   *
+   * The cache key already holds the binary's path, version, size and mtime (ADR 006), so an
+   * upgraded ffmpeg misses the cache on its own. The case this control exists for is the one
+   * the key cannot see — the SAME binary on a machine that changed underneath it, such as a
+   * GPU driver installed so `h264_nvenc` now works. A cached answer is exactly wrong there.
+   *
+   * Reuses the same pendingCount gate, refusing while a choose, clear, or another reprobe is
+   * in flight. Reports pending for its duration.
+   */
+  async reprobe(): Promise<boolean> {
+    if (this.pendingCount > 0) {
+      return false;
+    }
+
+    if (!this.getSettingsFn()) {
+      return false;
+    }
+
+    this.pendingCount++;
+    this.notify();
+
+    try {
+      await this.startProbeFn(true);
+      return true;
+    } finally {
+      this.pendingCount--;
+      this.notify();
+    }
+  }
+
+  /**
    * Updates the displayed path from `settings`. A `null` document yields `path: null`.
    *
    * Called by the view layer on mount and whenever the settings store's document changes, so

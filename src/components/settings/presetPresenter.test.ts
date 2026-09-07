@@ -14,6 +14,7 @@ import {
   presentEncoderOption,
   presentEncoderSelect,
   presentNumericField,
+  presentPresetEncoderMark,
   presentPresetIssue,
   presentPresetIssues,
   presentQualityKind,
@@ -170,14 +171,31 @@ describe("presetPresenter", () => {
       });
     });
 
-    it("maps unknown with no reasonKey", () => {
+    it("maps unknown with reason notTested to settings.encoder.reasonNotTested and tone neutral", () => {
       expect(
         presentEncoderOption({
           name: "libx264",
           availability: "unknown",
+          reason: "notTested",
         }),
       ).toStrictEqual({
         availabilityKey: "settings.encoder.unknown",
+        reasonKey: "settings.encoder.reasonNotTested",
+        tone: "neutral",
+      });
+    });
+
+    it("maps unknown with reason notProbed to settings.encoder.reasonNotProbed and tone neutral", () => {
+      expect(
+        presentEncoderOption({
+          name: "libx264",
+          availability: "unknown",
+          reason: "notProbed",
+        }),
+      ).toStrictEqual({
+        availabilityKey: "settings.encoder.unknown",
+        reasonKey: "settings.encoder.reasonNotProbed",
+        tone: "neutral",
       });
     });
 
@@ -191,6 +209,7 @@ describe("presetPresenter", () => {
       ).toStrictEqual({
         availabilityKey: "settings.encoder.unavailable",
         reasonKey: "settings.encoder.reasonNotListed",
+        tone: "warning",
       });
     });
 
@@ -204,6 +223,7 @@ describe("presetPresenter", () => {
       ).toStrictEqual({
         availabilityKey: "settings.encoder.unavailable",
         reasonKey: "settings.encoder.reasonFailed",
+        tone: "warning",
       });
     });
 
@@ -217,6 +237,7 @@ describe("presetPresenter", () => {
       ).toStrictEqual({
         availabilityKey: "settings.encoder.unavailable",
         reasonKey: "settings.encoder.reasonTimedOut",
+        tone: "warning",
       });
     });
   });
@@ -276,7 +297,28 @@ describe("presetPresenter", () => {
           },
         ],
         currentReasonKey: "settings.encoder.reasonFailed",
+        currentReasonTone: "warning",
       });
+    });
+
+    it("returns currentReasonKey and currentReasonTone when the selected encoder is unknown", () => {
+      const state = createProbeState({ status: "ready", results: [] });
+
+      const result = presentEncoderSelect(state, "video", "libvpx-vp9");
+
+      expect(result.currentReasonKey).toBe("settings.encoder.reasonNotTested");
+      expect(result.currentReasonTone).toBe("neutral");
+    });
+
+    // The row badge drops `notProbed`, the editor keeps it: here the user asked about this one
+    // preset, so "not checked yet" answers the question instead of repeating a global fact.
+    it("keeps the notProbed reason line for the selected encoder while the probe runs", () => {
+      const state = createProbeState({ status: "probing", results: [] });
+
+      const result = presentEncoderSelect(state, "video", "libx264");
+
+      expect(result.currentReasonKey).toBe("settings.encoder.reasonNotProbed");
+      expect(result.currentReasonTone).toBe("neutral");
     });
 
     it("omits currentReasonKey entirely when there is no matching current option", () => {
@@ -322,6 +364,132 @@ describe("presetPresenter", () => {
         "aac",
         CUSTOM_ENCODER_VALUE,
       ]);
+    });
+  });
+
+  describe("presentPresetEncoderMark", () => {
+    const preset = { videoEncoder: "libx264", audioEncoder: "aac" };
+
+    it("returns null when both encoders are known to work", () => {
+      const state = createProbeState({
+        status: "ready",
+        results: [
+          { name: "libx264", kind: "video", listed: true, status: "works" },
+          { name: "aac", kind: "audio", listed: true, status: "works" },
+        ],
+      });
+
+      expect(presentPresetEncoderMark(state, preset)).toBeNull();
+    });
+
+    it("marks an unavailable video encoder with the warning tone", () => {
+      const state = createProbeState({
+        status: "ready",
+        results: [
+          { name: "libx264", kind: "video", listed: true, status: "failed" },
+          { name: "aac", kind: "audio", listed: true, status: "works" },
+        ],
+      });
+
+      expect(presentPresetEncoderMark(state, preset)).toStrictEqual({
+        encoderName: "libx264",
+        availability: "unavailable",
+        tone: "warning",
+        badgeKey: "settings.encoder.unavailable",
+        titleKey: "settings.preset.encoderMarkTitle",
+        titleValues: { name: "libx264" },
+        reasonKey: "settings.encoder.reasonFailed",
+      });
+    });
+
+    it("marks an untested audio encoder with the neutral tone when the video encoder works", () => {
+      const state = createProbeState({
+        status: "ready",
+        results: [{ name: "libx264", kind: "video", listed: true, status: "works" }],
+      });
+
+      expect(presentPresetEncoderMark(state, preset)).toStrictEqual({
+        encoderName: "aac",
+        availability: "unknown",
+        tone: "neutral",
+        badgeKey: "settings.encoder.unknown",
+        titleKey: "settings.preset.encoderMarkTitle",
+        titleValues: { name: "aac" },
+        reasonKey: "settings.encoder.reasonNotTested",
+      });
+    });
+
+    // One badge on one line: the row reports the video encoder and never both.
+    it("reports the video encoder only when both encoders are unavailable", () => {
+      const state = createProbeState({
+        status: "ready",
+        results: [
+          { name: "libx264", kind: "video", listed: false, status: "notListed" },
+          { name: "aac", kind: "audio", listed: true, status: "timedOut" },
+        ],
+      });
+
+      const mark = presentPresetEncoderMark(state, preset);
+
+      expect(mark?.encoderName).toBe("libx264");
+      expect(mark?.reasonKey).toBe("settings.encoder.reasonNotListed");
+      expect(mark?.tone).toBe("warning");
+    });
+
+    // Severity beats slot order. The video encoder is absent from a finished report, so nothing
+    // is known about it; the audio encoder carries a verdict the probe actually reached. Naming
+    // the video encoder here would show a neutral badge for a preset that will fail on export.
+    it("reports the audio encoder when it is unavailable and the video encoder is only unknown", () => {
+      const state = createProbeState({
+        status: "ready",
+        results: [
+          { name: "libfdk_aac", kind: "audio", listed: false, status: "notListed" },
+        ],
+      });
+
+      expect(
+        presentPresetEncoderMark(state, {
+          videoEncoder: "libvpx-vp9",
+          audioEncoder: "libfdk_aac",
+        }),
+      ).toStrictEqual({
+        encoderName: "libfdk_aac",
+        availability: "unavailable",
+        tone: "warning",
+        badgeKey: "settings.encoder.unavailable",
+        titleKey: "settings.preset.encoderMarkTitle",
+        titleValues: { name: "libfdk_aac" },
+        reasonKey: "settings.encoder.reasonNotListed",
+      });
+    });
+
+    // A missing report holds for every name at once, so marking on it badges every row and
+    // singles out none. The editor's reason line still carries `notProbed`.
+    it.each(["idle", "locating", "probing", "missing", "failed"] as const)(
+      "returns null while the probe has not reported, with status %s",
+      (status) => {
+        const state = createProbeState({ status, results: [] });
+
+        expect(presentPresetEncoderMark(state, preset)).toBeNull();
+      },
+    );
+
+    // Severity still wins: a real verdict on one encoder outranks the other being unprobed.
+    it("reports an unavailable encoder even when the other one is not probed", () => {
+      const state = createProbeState({
+        status: "probing",
+        results: [{ name: "libx264", kind: "video", listed: true, status: "failed" }],
+      });
+
+      expect(presentPresetEncoderMark(state, preset)).toStrictEqual({
+        encoderName: "libx264",
+        availability: "unavailable",
+        tone: "warning",
+        badgeKey: "settings.encoder.unavailable",
+        titleKey: "settings.preset.encoderMarkTitle",
+        titleValues: { name: "libx264" },
+        reasonKey: "settings.encoder.reasonFailed",
+      });
     });
   });
 
@@ -403,10 +571,15 @@ describe("presetPresenter", () => {
       "settings.encoder.available",
       "settings.encoder.unavailable",
       "settings.encoder.unknown",
-      // all three reason keys
+      // all three unavailable reason keys
       "settings.encoder.reasonNotListed",
       "settings.encoder.reasonFailed",
       "settings.encoder.reasonTimedOut",
+      // both unknown reason keys
+      "settings.encoder.reasonNotTested",
+      "settings.encoder.reasonNotProbed",
+      // the preset row's encoder mark
+      "settings.preset.encoderMarkTitle",
       // all three quality kinds
       "settings.quality.crf",
       "settings.quality.bitrate",

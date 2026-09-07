@@ -148,6 +148,26 @@ export function FfmpegPathSection() {
         >
           {t("settings.ffmpeg.clear")}
         </Button>
+        {/* Sits next to the path it re-reads and directly above the capability block it
+            refreshes. Disabled while a choose, a clear, or another reprobe is in flight
+            (`view.pending`), and also while a probe started elsewhere is still running:
+            `startProbe` has nothing to add to a probe already in progress. */}
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={
+            view.ready
+              ? view.pending ||
+                ffmpeg.status === "locating" ||
+                ffmpeg.status === "probing"
+              : true
+          }
+          onClick={() => {
+            void controller.reprobe();
+          }}
+        >
+          {t("settings.ffmpeg.reprobe")}
+        </Button>
       </div>
 
       <p className="text-xs text-muted-foreground">{t("settings.ffmpeg.hint")}</p>

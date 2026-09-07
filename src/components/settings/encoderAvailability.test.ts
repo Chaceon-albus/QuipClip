@@ -32,33 +32,36 @@ function createResult(
 describe("encoderAvailability", () => {
   describe("getEncoderAvailability", () => {
     describe("the false-negative flash", () => {
-      it("yields unknown for absent encoder when status is probing", () => {
+      it("yields unknown with reason notProbed for absent encoder when status is probing", () => {
         const state = createState({ status: "probing", results: [] });
         const option = getEncoderAvailability(state, "libx264");
 
         expect(option).toStrictEqual({
           name: "libx264",
           availability: "unknown",
+          reason: "notProbed",
         });
       });
 
-      it("yields unknown for absent encoder when status is idle", () => {
+      it("yields unknown with reason notProbed for absent encoder when status is idle", () => {
         const state = createState({ status: "idle", results: [] });
         const option = getEncoderAvailability(state, "libx264");
 
         expect(option).toStrictEqual({
           name: "libx264",
           availability: "unknown",
+          reason: "notProbed",
         });
       });
 
-      it("yields unknown for absent encoder when status is locating", () => {
+      it("yields unknown with reason notProbed for absent encoder when status is locating", () => {
         const state = createState({ status: "locating", results: [] });
         const option = getEncoderAvailability(state, "libx264");
 
         expect(option).toStrictEqual({
           name: "libx264",
           availability: "unknown",
+          reason: "notProbed",
         });
       });
     });
@@ -157,40 +160,65 @@ describe("encoderAvailability", () => {
     });
 
     describe("absent encoders across lifecycle statuses", () => {
-      it("marks absent encoder unavailable with reason notListed when ready", () => {
+      // An absent name is NOT a statement about the build. `results` only ever holds the fixed
+      // set of tested encoders, and the parsed `-encoders` listing never crosses the IPC
+      // boundary, so a finished probe that never mentioned this name never asked about it.
+      it("marks absent encoder unknown with reason notTested when ready", () => {
         const state = createState({ status: "ready", results: [] });
         const option = getEncoderAvailability(state, "libx264");
 
         expect(option).toStrictEqual({
           name: "libx264",
-          availability: "unavailable",
-          reason: "notListed",
+          availability: "unknown",
+          reason: "notTested",
         });
       });
 
-      it("marks absent encoder unknown when status is missing", () => {
+      // The reported bug: typing a custom encoder name the probe does not test made the
+      // interface claim this FFmpeg build lacks it, while the export using it worked.
+      it("reports a name outside the tested set as unknown, never unavailable", () => {
+        const state = createState({
+          status: "ready",
+          results: [
+            createResult("libx264", "video", "works"),
+            createResult("aac", "audio", "works"),
+          ],
+        });
+
+        const option = getEncoderAvailability(state, "libvpx-vp9");
+
+        expect(option).toStrictEqual({
+          name: "libvpx-vp9",
+          availability: "unknown",
+          reason: "notTested",
+        });
+      });
+
+      it("marks absent encoder unknown with reason notProbed when status is missing", () => {
         const state = createState({ status: "missing", results: [] });
         const option = getEncoderAvailability(state, "libx264");
 
         expect(option).toStrictEqual({
           name: "libx264",
           availability: "unknown",
+          reason: "notProbed",
         });
       });
 
-      it("marks absent encoder unknown when status is failed", () => {
+      it("marks absent encoder unknown with reason notProbed when status is failed", () => {
         const state = createState({ status: "failed", results: [] });
         const option = getEncoderAvailability(state, "libx264");
 
         expect(option).toStrictEqual({
           name: "libx264",
           availability: "unknown",
+          reason: "notProbed",
         });
       });
     });
 
     describe("reason key contract", () => {
-      it("ensures available and unknown options carry NO reason key at all", () => {
+      it("ensures an available option carries NO reason key, and an unknown one carries an unknown reason", () => {
         const availableOption = getEncoderAvailability(
           createState({
             status: "ready",
@@ -211,11 +239,14 @@ describe("encoderAvailability", () => {
         expect(unknownOption).toStrictEqual({
           name: "libx264",
           availability: "unknown",
+          reason: "notProbed",
         });
-        expect("reason" in unknownOption).toBe(false);
       });
     });
 
+    // This is the case that proves `notListed` still means a claim about the build: the name is
+    // PRESENT in `results` with a backend `notListed` status, so the listing step really did
+    // read this build's own `-encoders` output and not find it.
     describe("exact-name matching", () => {
       it("distinguishes colliding encoder names using exact matching", () => {
         const state = createState({
@@ -255,15 +286,15 @@ describe("encoderAvailability", () => {
 
         expect(options[0]).toStrictEqual({
           name: "h264_videotoolbox",
-          availability: "unavailable",
-          reason: "notListed",
+          availability: "unknown",
+          reason: "notTested",
         });
 
         expect(options).toStrictEqual([
           {
             name: "h264_videotoolbox",
-            availability: "unavailable",
-            reason: "notListed",
+            availability: "unknown",
+            reason: "notTested",
           },
           {
             name: "libx264",
@@ -288,6 +319,7 @@ describe("encoderAvailability", () => {
           {
             name: "hevc_videotoolbox",
             availability: "unknown",
+            reason: "notProbed",
           },
           {
             name: "libx264",
@@ -407,8 +439,8 @@ describe("encoderAvailability", () => {
         expect(options).toStrictEqual([
           {
             name: "libx264",
-            availability: "unavailable",
-            reason: "notListed",
+            availability: "unknown",
+            reason: "notTested",
           },
         ]);
       });
@@ -423,6 +455,7 @@ describe("encoderAvailability", () => {
           {
             name: "libx264",
             availability: "unknown",
+            reason: "notProbed",
           },
         ]);
       });
@@ -475,8 +508,8 @@ describe("encoderAvailability", () => {
         expect(options[0].name).toBe("libx264 ");
         expect(options[0]).toStrictEqual({
           name: "libx264 ",
-          availability: "unavailable",
-          reason: "notListed",
+          availability: "unknown",
+          reason: "notTested",
         });
         expect(options[1]).toStrictEqual({
           name: "libx264",

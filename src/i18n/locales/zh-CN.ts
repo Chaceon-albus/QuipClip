@@ -124,6 +124,7 @@ export const zhCN: TranslationCatalog = {
       chooseFolder: "选择文件夹...",
       chooseFile: "选择文件...",
       clear: "清除",
+      reprobe: "重新探测 FFmpeg",
       hint: "可以选择文件夹，也可以选择单个文件；建议选择同时包含 FFmpeg 和 FFprobe 的文件夹。",
     },
     preset: {
@@ -134,6 +135,7 @@ export const zhCN: TranslationCatalog = {
       restoreDefaults: "恢复默认预设",
       setActive: "设为当前预设",
       activeBadge: "当前",
+      encoderMarkTitle: "编码器：{{name}}",
       empty: "暂无预设。",
       limitReached: "已达到 {{max}} 个预设的上限。",
       unsaved: "未保存的更改",
@@ -170,6 +172,9 @@ export const zhCN: TranslationCatalog = {
       reasonNotListed: "此 FFmpeg 版本不包含该编码器。",
       reasonFailed: "该编码器在本机测试失败。",
       reasonTimedOut: "编码器未及时响应。",
+      reasonNotTested:
+        "QuipClip 仅探测一组固定的编码器，此名称不在其中。此 FFmpeg 版本是否包含它，需在导出使用时才能确定。",
+      reasonNotProbed: "能力探测尚未报告此编码器的结果。",
       customLabel: "自定义编码器名称",
       customHint:
         "请使用 1 到 64 个字符。以字母或数字开头，后续只能使用字母、数字、下划线、句点或连字符。",

@@ -311,6 +311,131 @@ describe("FfmpegPathController", () => {
     });
   });
 
+  // reprobe() re-runs the capability probe for the SAME configuration, so it must always force
+  // past the cache: the cache key cannot see a machine that changed under an unchanged binary.
+  describe("reprobe()", () => {
+    it("calls startProbe with force === true and writes nothing", async () => {
+      const settings = createSettings({ ffmpegPath: "/usr/bin/ffmpeg" });
+      const startProbe = vi.fn().mockResolvedValue(undefined);
+      const saveSettings = vi.fn();
+      const openDialog = vi.fn();
+      const controller = createFfmpegPathController({
+        getSettings: () => settings,
+        saveSettings,
+        startProbe,
+        openDialog,
+      });
+
+      const result = await controller.reprobe();
+
+      expect(result).toBe(true);
+      expect(startProbe).toHaveBeenCalledTimes(1);
+      expect(startProbe).toHaveBeenCalledWith(true);
+      expect(saveSettings).not.toHaveBeenCalled();
+      expect(openDialog).not.toHaveBeenCalled();
+    });
+
+    it("returns false, starting no probe, when there is no settings document yet", async () => {
+      const startProbe = vi.fn();
+      const controller = createFfmpegPathController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+        startProbe,
+        openDialog: vi.fn(),
+      });
+
+      expect(await controller.reprobe()).toBe(false);
+      expect(startProbe).not.toHaveBeenCalled();
+    });
+
+    it("returns false, starting no second probe, while a clear() is in flight", async () => {
+      const settings = createSettings({ ffmpegPath: "/usr/bin/ffmpeg" });
+      const saveDeferred = createDeferred<Settings | null>();
+      const startProbe = vi.fn().mockResolvedValue(undefined);
+      const controller = createFfmpegPathController({
+        getSettings: () => settings,
+        saveSettings: vi.fn().mockReturnValue(saveDeferred.promise),
+        startProbe,
+        openDialog: vi.fn(),
+      });
+
+      const clearing = controller.clear();
+      const result = await controller.reprobe();
+
+      expect(result).toBe(false);
+      expect(startProbe).not.toHaveBeenCalled();
+
+      saveDeferred.resolve(createSettings());
+      await clearing;
+    });
+
+    it("refuses a second reprobe while the first is still running", async () => {
+      const settings = createSettings({ ffmpegPath: "/usr/bin/ffmpeg" });
+      const probe = createDeferred<undefined>();
+      const startProbe = vi.fn().mockReturnValue(probe.promise);
+      const controller = createFfmpegPathController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+        startProbe,
+        openDialog: vi.fn(),
+      });
+
+      const first = controller.reprobe();
+      const second = await controller.reprobe();
+
+      expect(second).toBe(false);
+      expect(startProbe).toHaveBeenCalledTimes(1);
+
+      probe.resolve(undefined);
+      expect(await first).toBe(true);
+    });
+
+    it("reports pending for the duration of the probe and clears it afterwards", async () => {
+      const settings = createSettings({ ffmpegPath: "/usr/bin/ffmpeg" });
+      const probe = createDeferred<undefined>();
+      const views: boolean[] = [];
+      const controller = createFfmpegPathController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+        startProbe: vi.fn().mockReturnValue(probe.promise),
+        openDialog: vi.fn(),
+        onChange: (view) => views.push(view.pending),
+      });
+
+      const running = controller.reprobe();
+
+      expect(controller.getView().pending).toBe(true);
+
+      probe.resolve(undefined);
+      await running;
+
+      expect(controller.getView().pending).toBe(false);
+      expect(views).toStrictEqual([true, false]);
+    });
+
+    // `startProbe` is the only collaborator reprobe() awaits, and the production one catches
+    // everything and resolves, so this drives the `finally` the same way the choose() case above
+    // does: a stuck `pending` would disable all four buttons for the rest of the session.
+    it("releases pending back to false when startProbe rejects", async () => {
+      const settings = createSettings({ ffmpegPath: "/usr/bin/ffmpeg" });
+      const probe = createDeferred<undefined>();
+      const controller = createFfmpegPathController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+        startProbe: vi.fn().mockReturnValue(probe.promise),
+        openDialog: vi.fn(),
+      });
+
+      const promise = controller.reprobe();
+      expect(controller.getView().pending).toBe(true);
+
+      probe.reject(new Error("boom"));
+
+      await expect(promise).rejects.toThrow("boom");
+      expect(controller.getView().pending).toBe(false);
+    });
+  });
+
   // RULE 3 -- clearing means the key is ABSENT: not an empty string, not null. Rust rejects a
   // blank path with InvalidFfmpegPath, so writing "" would make the setting impossible to clear.
   describe("RULE 3: clear() produces a document with no ffmpegPath key", () => {

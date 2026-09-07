@@ -121,6 +121,7 @@ export const en = {
       chooseFolder: "Choose Folder...",
       chooseFile: "Choose File...",
       clear: "Clear",
+      reprobe: "Re-check FFmpeg",
       hint: "Choose a folder or a single file. A folder that holds both FFmpeg and FFprobe is preferred.",
     },
     preset: {
@@ -131,6 +132,7 @@ export const en = {
       restoreDefaults: "Restore Defaults",
       setActive: "Set Active",
       activeBadge: "Active",
+      encoderMarkTitle: "Encoder: {{name}}",
       empty: "No presets yet.",
       limitReached: "Limit of {{max}} presets reached.",
       unsaved: "Unsaved changes",
@@ -167,6 +169,9 @@ export const en = {
       reasonNotListed: "This FFmpeg build does not include the encoder.",
       reasonFailed: "The encoder failed its test on this machine.",
       reasonTimedOut: "The encoder did not respond in time.",
+      reasonNotTested:
+        "QuipClip tests a fixed set of encoders, and this name is not in it. Whether this FFmpeg build has it is unknown until an export uses it.",
+      reasonNotProbed: "The capability probe has not reported on this encoder yet.",
       customLabel: "Custom Encoder Name",
       customHint:
         "Use 1 to 64 characters. Start with a letter or digit. After that, use only letters, digits, underscores, periods, or hyphens.",

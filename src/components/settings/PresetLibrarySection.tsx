@@ -10,6 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useFfmpegStore } from "@/features/ffmpeg";
 import type { FfmpegState } from "@/features/ffmpeg/types";
 import { settingsStore } from "@/features/settings/store";
@@ -33,6 +34,7 @@ import {
   presentContainer,
   presentEncoderSelect,
   presentNumericField,
+  presentPresetEncoderMark,
   presentPresetIssues,
   presentQualityKind,
 } from "./presetPresenter";
@@ -114,7 +116,14 @@ function PresetEditor({
           </SelectContent>
         </Select>
         {videoSelect.currentReasonKey ? (
-          <p className="text-xs text-warning">
+          <p
+            className={cn(
+              "text-xs",
+              videoSelect.currentReasonTone === "warning"
+                ? "text-warning"
+                : "text-muted-foreground",
+            )}
+          >
             {translate(videoSelect.currentReasonKey)}
           </p>
         ) : null}
@@ -155,7 +164,14 @@ function PresetEditor({
           </SelectContent>
         </Select>
         {audioSelect.currentReasonKey ? (
-          <p className="text-xs text-warning">
+          <p
+            className={cn(
+              "text-xs",
+              audioSelect.currentReasonTone === "warning"
+                ? "text-warning"
+                : "text-muted-foreground",
+            )}
+          >
             {translate(audioSelect.currentReasonKey)}
           </p>
         ) : null}
@@ -387,9 +403,9 @@ export function PresetLibrarySection() {
     options?: Record<string, string | number>,
   ) => string;
 
-  // Only `status` and `results` reach `presentEncoderSelect`. Selecting the two fields with
-  // a shallow comparison keeps a capability-probe write that touches neither from
-  // re-rendering the whole preset library.
+  // Only `status` and `results` reach `presentEncoderSelect` and `presentPresetEncoderMark`.
+  // Selecting the two fields with a shallow comparison keeps a capability-probe write that
+  // touches neither from re-rendering the whole preset library.
   const ffmpegState = useFfmpegStore(
     useShallow((state) => ({ status: state.status, results: state.results })),
   );
@@ -521,32 +537,69 @@ export function PresetLibrarySection() {
         <p className="text-xs text-muted-foreground">{t("settings.preset.empty")}</p>
       ) : (
         <div className="max-h-36 space-y-1 overflow-y-auto rounded-md border border-border p-1">
-          {view.presets.map((preset) => (
-            <div
-              key={preset.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => handleActivateRow(preset.id)}
-              onKeyDown={(e) => {
-                if (isActivationKey(e.key)) {
-                  handleActivateRow(preset.id);
-                }
-              }}
-              className={cn(
-                "flex cursor-pointer items-center justify-between rounded px-2.5 py-1.5 text-xs transition-colors",
-                preset.id === view.selectedPresetId
-                  ? "bg-accent font-medium text-accent-foreground"
-                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
-              )}
-            >
-              <span className="truncate">{preset.name}</span>
-              {preset.id === view.activePresetId ? (
-                <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-                  {t("settings.preset.activeBadge")}
-                </span>
-              ) : null}
-            </div>
-          ))}
+          {view.presets.map((preset) => {
+            const encoderMark = presentPresetEncoderMark(ffmpegState, preset);
+            return (
+              <div
+                key={preset.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => handleActivateRow(preset.id)}
+                onKeyDown={(e) => {
+                  if (isActivationKey(e.key)) {
+                    handleActivateRow(preset.id);
+                  }
+                }}
+                className={cn(
+                  "flex cursor-pointer items-center justify-between rounded px-2.5 py-1.5 text-xs transition-colors",
+                  preset.id === view.selectedPresetId
+                    ? "bg-accent font-medium text-accent-foreground"
+                    : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
+                )}
+              >
+                <span className="truncate">{preset.name}</span>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {encoderMark ? (
+                    <Tooltip>
+                      {/* The badge stays out of the tab order: the row around it is already
+                          `role="button"` with `tabIndex={0}`, and a focusable child would nest
+                          one interactive control inside another. The tooltip opens on a pointer
+                          or on focus, so it reaches a mouse only; the `sr-only` span carries the
+                          same encoder name and reason into the row's accessible name, where a
+                          keyboard or screen-reader user reads them. */}
+                      <TooltipTrigger asChild>
+                        <span
+                          tabIndex={-1}
+                          className={cn(
+                            "rounded px-1.5 py-0.5 text-[10px] font-semibold",
+                            encoderMark.tone === "warning"
+                              ? "bg-warning/10 text-warning"
+                              : "bg-muted text-muted-foreground",
+                          )}
+                        >
+                          {translate(encoderMark.badgeKey)}
+                          <span className="sr-only">
+                            {` ${translate(encoderMark.titleKey, encoderMark.titleValues)} ${translate(encoderMark.reasonKey)}`}
+                          </span>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className="flex-col items-start gap-1">
+                        <p className="font-semibold">
+                          {translate(encoderMark.titleKey, encoderMark.titleValues)}
+                        </p>
+                        <p>{translate(encoderMark.reasonKey)}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  {preset.id === view.activePresetId ? (
+                    <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                      {t("settings.preset.activeBadge")}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
