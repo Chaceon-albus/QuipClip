@@ -7,7 +7,11 @@ import {
   useMediaStore,
   type MediaStoreState,
 } from "@/features/media";
-import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
+import {
+  isPlaybackPositionApproximate,
+  usePlaybackStore,
+  type PlaybackStoreState,
+} from "@/features/playback";
 import {
   calculatePendingInRegionLayout,
   calculatePercentFromPts,
@@ -47,6 +51,8 @@ function getGeneratedSourceId(path: string): string {
 const selectMedia = (state: MediaStoreState) => state.media;
 const selectPresentedFrame = (state: PlaybackStoreState) => state.presentedFrame;
 const selectCalibrationStatus = (state: PlaybackStoreState) => state.calibrationStatus;
+const selectApproximateBrowserTimeSeconds = (state: PlaybackStoreState) =>
+  state.approximateBrowserTimeSeconds;
 const selectIsAttached = (state: PlaybackStoreState) => state.isAttached;
 const selectIsReady = (state: PlaybackStoreState) => state.isReady;
 const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
@@ -67,6 +73,9 @@ export function TimelinePanel({
   const media = useMediaStore(selectMedia);
   const presentedFrame = usePlaybackStore(selectPresentedFrame);
   const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
+  const approximateBrowserTimeSeconds = usePlaybackStore(
+    selectApproximateBrowserTimeSeconds,
+  );
   const isAttached = usePlaybackStore(selectIsAttached);
   const isReady = usePlaybackStore(selectIsReady);
   const seekToPts = usePlaybackStore(selectSeekToPts);
@@ -120,7 +129,20 @@ export function TimelinePanel({
     return generateRulerMarkers(totalDurationSeconds);
   }, [totalDurationSeconds]);
 
-  // Current elapsed presentation seconds relative to videoStartPts
+  // True while the playhead position below comes from the browser clock. The playhead takes
+  // no visual mark for it: the status bar carries the marking, and marking it twice would
+  // make a working playhead look broken.
+  const isPositionApproximate = isPlaybackPositionApproximate(
+    calibrationStatus,
+    presentedFrame,
+  );
+
+  // Current elapsed presentation seconds relative to videoStartPts, and the approximate
+  // browser clock otherwise. A source that never calibrates has no inferred PTS for its whole
+  // session, and a frozen 0 would leave the playhead at the left edge while the picture plays.
+  // Both branches report seconds elapsed from the start of the source, the axis the whole
+  // ruler uses: the store subtracts the origin of the browser media timeline from the
+  // approximate clock, and `onApproximateSeek` adds it back (ADR 003).
   const currentElapsedSeconds = useMemo(() => {
     if (
       calibrationStatus === "ready" &&
@@ -136,8 +158,8 @@ export function TimelinePanel({
         ) ?? 0
       );
     }
-    return 0;
-  }, [calibrationStatus, presentedFrame, media]);
+    return approximateBrowserTimeSeconds ?? 0;
+  }, [calibrationStatus, presentedFrame, media, approximateBrowserTimeSeconds]);
 
   /**
    * Seeks to the timeline position under a client X coordinate.
@@ -293,6 +315,7 @@ export function TimelinePanel({
                   className="pointer-events-none absolute top-0 bottom-0 z-30 flex -translate-x-1/2 flex-col items-center"
                   style={{ left: playhead.left }}
                   aria-label={t("timeline.playhead")}
+                  data-approximate={isPositionApproximate}
                 >
                   <div className="h-2 w-3 rounded-b-xs bg-timeline-playhead shadow-xs" />
                   <div className="h-full w-0.5 bg-timeline-playhead" />
@@ -377,6 +400,7 @@ export function TimelinePanel({
                       <div
                         className="pointer-events-none absolute inset-y-0 z-30 flex -translate-x-1/2 flex-col items-center"
                         style={{ left: playhead.left }}
+                        data-approximate={isPositionApproximate}
                       >
                         <div className="h-full w-0.5 bg-timeline-playhead shadow-xs" />
                       </div>

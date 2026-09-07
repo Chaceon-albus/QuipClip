@@ -107,6 +107,11 @@ export const en = {
     projectResolutionDefault: "Project Resolution: 1920 × 1080",
     sourceNominalRate: "Source Nominal Rate: {{fps}} fps",
     sourceNominalRateUnavailable: "Source Nominal Rate: —",
+    approximatePosition: "Approximate position",
+    approximatePositionDetail:
+      "The playhead follows the browser clock, not the exact frame timestamp.",
+    approximatePositionMarks:
+      "Mark In, Mark Out, and Split stay unavailable until the exact frame timestamp is known.",
     settings: "Settings",
   },
   settings: {

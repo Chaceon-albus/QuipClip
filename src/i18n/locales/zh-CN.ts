@@ -110,6 +110,10 @@ export const zhCN: TranslationCatalog = {
     projectResolutionDefault: "项目分辨率：1920 × 1080",
     sourceNominalRate: "源标称帧率：{{fps}} fps",
     sourceNominalRateUnavailable: "源标称帧率：—",
+    approximatePosition: "近似位置",
+    approximatePositionDetail: "播放头跟随浏览器时钟，而不是精确的帧时间戳。",
+    approximatePositionMarks:
+      "在获知精确的帧时间戳之前，标记入点、标记出点和分割保持不可用。",
     settings: "设置",
   },
   settings: {

@@ -45,6 +45,7 @@ const {
   syncPresentedFrame,
   syncPresentationUnavailable,
   syncBrowserDuration,
+  syncBrowserTime,
   syncPlay,
   syncPause,
   syncEnded,
@@ -73,21 +74,23 @@ function toPlaybackSource(media: ImportMediaResult | null): PlaybackSource | nul
 }
 
 /**
- * Current preview timecode. It subscribes to `presentedFrame` on its own, so the surrounding
- * pane does not re-render once for every presented video frame.
+ * Current preview timecode. It subscribes to `presentedFrame` and to the approximate clock on
+ * its own, so the surrounding pane, and with it the `<video>` element, does not re-render once
+ * for every presented video frame or every `timeupdate`.
  */
 function PreviewTimecode({
   videoStartPts,
   videoTimeBase,
-  approximateBrowserTime,
 }: {
   videoStartPts: Pts | null;
   videoTimeBase: Rational;
-  approximateBrowserTime: number;
 }) {
   const { t } = useTranslation();
   const presentedFrame = usePlaybackStore((s) => s.presentedFrame);
   const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
+  const approximateBrowserTimeSeconds = usePlaybackStore(
+    (s) => s.approximateBrowserTimeSeconds,
+  );
 
   // Source-relative HH:MM:SS.mmm for a ready inferred PTS, approximate browser time otherwise
   const currentTimeDisplay = formatPreviewCurrentTime(
@@ -95,7 +98,7 @@ function PreviewTimecode({
     calibrationStatus,
     videoStartPts,
     videoTimeBase,
-    approximateBrowserTime,
+    approximateBrowserTimeSeconds ?? 0,
   );
 
   return (
@@ -117,19 +120,14 @@ export function PreviewPane() {
   const playbackError = usePlaybackStore((s) => s.error);
 
   const sourceRevisionKey = getSourceRevisionKey(media);
-  const [previousRevisionKey, setPreviousRevisionKey] = useState(sourceRevisionKey);
   const [previousMedia, setPreviousMedia] = useState(media);
   const [videoError, setVideoError] = useState(false);
-  const [approximateBrowserTime, setApproximateBrowserTime] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [sourceGuard] = useState(() => createSourceLifecycleGuard());
 
-  // Reset the approximate clock synchronously when source identity changes
-  if (previousRevisionKey !== sourceRevisionKey) {
-    setPreviousRevisionKey(sourceRevisionKey);
-    setApproximateBrowserTime(0);
-  }
+  // The approximate clock needs no render-phase reset here. `attach` and `detach` null the
+  // store field, which also covers an element replaced without a media change.
 
   // Clear a decode error for every new media object, including a re-import of the same file,
   // which keeps its revision key. Otherwise the import reports success and the pane keeps the
@@ -275,7 +273,7 @@ export function PreviewPane() {
     if (!sourceGuard.isActive(sourceRevisionKey) || !media) {
       return;
     }
-    setApproximateBrowserTime(e.currentTarget.currentTime);
+    syncBrowserTime(sourceRevisionKey, e.currentTarget);
   };
 
   const handleVideoError = () => {
@@ -454,7 +452,6 @@ export function PreviewPane() {
             <PreviewTimecode
               videoStartPts={media.probe.videoStartPts}
               videoTimeBase={media.probe.videoTimeBase}
-              approximateBrowserTime={approximateBrowserTime}
             />
           ) : (
             <span className="font-medium text-primary">00:00:00.000</span>

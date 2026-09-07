@@ -160,7 +160,15 @@ editing for that source.
 
 Media without `start_pts` can still play. Missing `start_pts`, missing RVFC support, or an
 invalid conversion disables precise edit actions. Browser `currentTime` then supplies an
-explicitly approximate display and seek fallback. QuipClip does not use
+explicitly approximate display and seek fallback, for the preview timecode and for the timeline
+playhead alike. The status bar names the position as approximate, and it is the only place that
+explains why the mark actions are unavailable.
+
+The browser clock is a position on the browser media timeline, which does not always start at
+zero, while every other value on the ruler is elapsed time from the start of the source. The
+playback store therefore subtracts the timeline origin it reads at `loadedmetadata` before it
+publishes the value, and adds it back for an approximate seek, so both axes agree. That origin
+is the same reading the calibration anchor guard already trusts. QuipClip does not use
 `seekable.start(0)` as the source timestamp origin.
 
 V1 navigation buttons request a nominal frame interval. They use `avg_frame_rate`, then

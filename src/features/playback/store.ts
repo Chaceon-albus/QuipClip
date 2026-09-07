@@ -93,6 +93,14 @@ export function createPlaybackStore(
   // first moment the browser reports the true start of the media timeline, which ADR 003 does
   // not require to be 0. Used only by the anchor guard.
   let anchorBaselineTime: number | null = null;
+  // Start of the browser media timeline, which ADR 003 does not require to be 0. It is taken
+  // when metadata loads, the one moment the browser reports that start and nothing has moved
+  // the element, and it is the same reading the anchor guard takes as its baseline. The
+  // approximate clock subtracts it and seekApproximate adds it, so the browser clock and the
+  // inferred source PTS report one axis: seconds elapsed from the start of the source. It
+  // stays 0 until metadata loads, and it never reads seekable.start(0), which ADR 003 refuses
+  // as a timestamp origin.
+  let browserTimelineOriginSeconds = 0;
   // True when the element was seeked after the attach and before the calibration anchor was
   // taken. The frame such a seek presents is not the frame videoStartPts names.
   let seekedBeforeCalibration = false;
@@ -104,6 +112,7 @@ export function createPlaybackStore(
     presentedFrame: initialState?.presentedFrame ?? null,
     calibrationStatus: initialState?.calibrationStatus ?? "unavailable",
     runtimeBrowserDurationSeconds: initialState?.runtimeBrowserDurationSeconds ?? null,
+    approximateBrowserTimeSeconds: initialState?.approximateBrowserTimeSeconds ?? null,
     isPlaying: initialState?.isPlaying ?? false,
     isAttached: initialState?.isAttached ?? false,
     isReady: initialState?.isReady ?? false,
@@ -175,12 +184,16 @@ export function createPlaybackStore(
           : null;
       attachedStartTime = startTime;
       anchorBaselineTime = startTime;
+      // The position an element holds before its metadata loads does not report the start of
+      // the media timeline, so the origin waits for syncReady.
+      browserTimelineOriginSeconds = 0;
       seekedBeforeCalibration = false;
 
       set({
         presentedFrame: null,
         calibrationStatus: initialCalibrationStatus,
         runtimeBrowserDurationSeconds: null,
+        approximateBrowserTimeSeconds: null,
         isPlaying: false,
         isAttached: true,
         isReady: isElementReady,
@@ -216,12 +229,14 @@ export function createPlaybackStore(
       lastInferredPts = null;
       attachedStartTime = null;
       anchorBaselineTime = null;
+      browserTimelineOriginSeconds = 0;
       seekedBeforeCalibration = false;
 
       set({
         presentedFrame: null,
         calibrationStatus: "unavailable",
         runtimeBrowserDurationSeconds: null,
+        approximateBrowserTimeSeconds: null,
         isPlaying: false,
         isAttached: false,
         isReady: false,
@@ -246,6 +261,9 @@ export function createPlaybackStore(
       // and nothing has moved the element, so a source whose timeline starts away from 0 still
       // calibrates (ADR 003). No seek can precede this point, because every seek action of the
       // store requires isReady, and this call is what grants it.
+      //
+      // The same reading is the origin of the browser media timeline, which the approximate
+      // clock subtracts to reach the source-elapsed axis.
       if (
         calibratedMediaTime === null &&
         !seekedBeforeCalibration &&
@@ -253,6 +271,7 @@ export function createPlaybackStore(
         Number.isFinite(element.currentTime)
       ) {
         anchorBaselineTime = element.currentTime;
+        browserTimelineOriginSeconds = Math.max(0, element.currentTime);
       }
 
       set({ isReady: true });
@@ -526,7 +545,10 @@ export function createPlaybackStore(
         return;
       }
 
-      let target = seconds;
+      // The caller passes seconds elapsed from the start of the source, the axis the ruler and
+      // the approximate clock both use, so the origin of the browser media timeline goes back
+      // on before the element is moved.
+      let target = seconds + browserTimelineOriginSeconds;
       if (state.runtimeBrowserDurationSeconds !== null) {
         target = Math.min(target, state.runtimeBrowserDurationSeconds);
       }
@@ -549,6 +571,9 @@ export function createPlaybackStore(
         seekedBeforeCalibration = true;
       }
 
+      // Do not update the approximate clock optimistically after assigning currentTime, for
+      // the same reason the inferred PTS waits for RVFC: the element's own `seeked` event
+      // reports the position it reached.
       set({ isPlaying: false, error: null, presentedFrame: null });
     },
 
@@ -725,6 +750,30 @@ export function createPlaybackStore(
       });
     },
 
+    syncBrowserTime: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
+      if (
+        !attachedSource ||
+        attachedElement !== element ||
+        getSourceRevisionKey(attachedSource) !== sourceRevisionKey
+      ) {
+        return;
+      }
+      const time = element.currentTime;
+      // Report seconds elapsed from the start of the source, not the raw position on the
+      // browser media timeline, so this clock and an inferred source PTS name one axis. The
+      // origin is 0 until metadata loads, which leaves the raw position unchanged.
+      const next =
+        typeof time === "number" && Number.isFinite(time) && time >= 0
+          ? Math.max(0, time - browserTimelineOriginSeconds)
+          : null;
+      // `timeupdate` fires while the element is paused on some browsers, so an identical
+      // write would notify every subscriber for nothing.
+      if (get().approximateBrowserTimeSeconds === next) {
+        return;
+      }
+      set({ approximateBrowserTimeSeconds: next });
+    },
+
     syncPlay: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
       if (!attachedSource || !attachedElement) {
         return;
@@ -796,6 +845,7 @@ export function createPlaybackStore(
       lastInferredPts = null;
       attachedStartTime = null;
       anchorBaselineTime = null;
+      browserTimelineOriginSeconds = 0;
       seekedBeforeCalibration = false;
       // precisionDeniedSources is kept: ADR 003 denies precise editing for the source, and a
       // source keeps the same revision key until the file on disk changes.
@@ -804,6 +854,7 @@ export function createPlaybackStore(
         presentedFrame: null,
         calibrationStatus: "unavailable",
         runtimeBrowserDurationSeconds: null,
+        approximateBrowserTimeSeconds: null,
         isPlaying: false,
         isAttached: false,
         isReady: false,

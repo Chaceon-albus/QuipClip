@@ -17,6 +17,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { useFfmpegStore } from "@/features/ffmpeg";
 import { useMediaStore } from "@/features/media";
+import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
 import {
   getLanguagePreference,
   getResolvedLanguage,
@@ -29,8 +30,21 @@ import {
   type FfmpegStatusView,
 } from "./ffmpegStatusPresenter";
 import { createLanguageMenuController } from "./languageMenuController";
+import {
+  presentPlaybackHint,
+  selectCalibrationStatus,
+  selectHasReadySource,
+  type PlaybackHintView,
+} from "./playbackHintPresenter";
 
-const toneClasses: Record<FfmpegStatusView["tone"], string> = {
+/**
+ * Tone of any line this footer renders. It is the union of the tones of both presenters, so
+ * each presenter's tone is checked against its own type and neither can break the other by
+ * renaming a member of its union.
+ */
+type StatusBarTone = FfmpegStatusView["tone"] | PlaybackHintView["tone"];
+
+const toneClasses: Record<StatusBarTone, string> = {
   neutral: "text-muted-foreground",
   ready: "text-muted-foreground",
   warning: "text-warning",
@@ -112,6 +126,19 @@ export function StatusBar() {
     [ffmpeg, listFormatter, numberFormatter],
   );
 
+  const hasMedia = media !== null;
+  // The playback store notifies once per presented frame. One primitive selector per fact,
+  // the way TransportBar reads the same store, keeps this footer off that render path without
+  // allocating a state object for each notification.
+  const hasReadySource = usePlaybackStore((state: PlaybackStoreState) =>
+    selectHasReadySource(state, hasMedia),
+  );
+  const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
+  const playbackHint = useMemo(
+    () => presentPlaybackHint({ hasReadySource, calibrationStatus }),
+    [hasReadySource, calibrationStatus],
+  );
+
   const width = media ? media.probe.width : 1920;
   const height = media ? media.probe.height : 1080;
   const fpsNumber = media?.probe.avgFrameRate
@@ -179,6 +206,34 @@ export function StatusBar() {
             ))}
           </TooltipContent>
         </Tooltip>
+
+        {/*
+         * Approximate-position hint. The timeline playhead carries no visual mark for this
+         * state, so this line is the only place that reports it.
+         */}
+        {playbackHint && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                tabIndex={0}
+                role="button"
+                aria-label={t(playbackHint.lineKey)}
+                className={cn(
+                  "cursor-default rounded-sm focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none",
+                  toneClasses[playbackHint.tone],
+                )}
+                data-tone={playbackHint.tone}
+              >
+                {t(playbackHint.lineKey)}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-md flex-col items-start gap-1 text-xs">
+              {playbackHint.detail.map((key) => (
+                <p key={key}>{t(key)}</p>
+              ))}
+            </TooltipContent>
+          </Tooltip>
+        )}
       </div>
 
       {/* Right: Settings button and Language dropdown menu */}

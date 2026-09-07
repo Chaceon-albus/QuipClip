@@ -110,6 +110,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(state.presentedFrame).toBeNull();
       expect(state.calibrationStatus).toBe("unavailable");
       expect(state.runtimeBrowserDurationSeconds).toBeNull();
+      expect(state.approximateBrowserTimeSeconds).toBeNull();
       expect(state.isPlaying).toBe(false);
       expect(state.isAttached).toBe(false);
       expect(state.isReady).toBe(false);
@@ -730,6 +731,215 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().seekApproximate(-1);
       expect(video.currentTime).toBe(0);
       expect(video.pauseCalls).toBe(0);
+    });
+  });
+
+  describe("Approximate Browser Time Clock", () => {
+    it("stores only a finite non-negative browser time", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 3.5 });
+      store.getState().attach(sourceA, video);
+
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(3.5);
+
+      video.currentTime = Number.NaN;
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBeNull();
+
+      video.currentTime = 4;
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(4);
+
+      video.currentTime = -1;
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBeNull();
+    });
+
+    it("refuses a write for the wrong revision key or a different element", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 2 });
+      const otherVideo = createFakeVideo({ initialCurrentTime: 9 });
+      store.getState().attach(sourceA, video);
+
+      store.getState().syncBrowserTime(identityB, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBeNull();
+
+      store.getState().syncBrowserTime(identityA, otherVideo);
+      expect(store.getState().approximateBrowserTimeSeconds).toBeNull();
+
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(2);
+    });
+
+    it("skips an identical write, because timeupdate also fires while paused", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 2 });
+      store.getState().attach(sourceA, video);
+      store.getState().syncBrowserTime(identityA, video);
+
+      const listener = vi.fn();
+      const unsubscribe = store.subscribe(listener);
+
+      store.getState().syncBrowserTime(identityA, video);
+      store.getState().syncBrowserTime(identityA, video);
+      expect(listener).not.toHaveBeenCalled();
+
+      video.currentTime = 2.04;
+      store.getState().syncBrowserTime(identityA, video);
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      unsubscribe();
+    });
+
+    it("nulls the clock on attach, detach and reset", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 2 });
+
+      store.getState().attach(sourceA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBeNull();
+
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(2);
+
+      store.getState().detach(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBeNull();
+
+      const secondVideo = createFakeVideo({ initialCurrentTime: 5 });
+      store.getState().attach(sourceA, secondVideo);
+      store.getState().syncBrowserTime(identityA, secondVideo);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(5);
+
+      store.getState().reset();
+      expect(store.getState().approximateBrowserTimeSeconds).toBeNull();
+    });
+
+    // A decode error does not move the clock, so syncUnready must leave it alone.
+    it("keeps the clock through syncUnready", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      // The element plays past the start of the timeline before it fails to decode
+      video.currentTime = 2;
+      store.getState().syncBrowserTime(identityA, video);
+
+      store.getState().syncUnready(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(2);
+    });
+
+    // The element's own `seeked` event reports the position it reached, exactly as RVFC
+    // reports the presented frame instead of seekToPts updating presentedFrame.
+    it("does not write the clock from seekApproximate", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 10 });
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      store.getState().syncBrowserDuration(identityA, video);
+
+      store.getState().seekApproximate(4);
+      expect(video.currentTime).toBe(4);
+      expect(store.getState().approximateBrowserTimeSeconds).toBeNull();
+
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(4);
+    });
+  });
+
+  // ADR 003 does not require the browser media timeline to start at 0, and every other
+  // position the timeline reports is seconds elapsed from the start of the source. The clock
+  // and the approximate seek carry the origin so both sit on that one axis.
+  describe("Browser Timeline Origin", () => {
+    /**
+     * Mounts a source whose browser media timeline starts at `origin`.
+     *
+     * React creates the node, so the element reports 0 at attach time; the browser moves
+     * currentTime to the start of the timeline when metadata loads, which is the reading
+     * syncReady takes.
+     */
+    function attachWithOrigin(
+      store: ReturnType<typeof createPlaybackStore>,
+      origin: number,
+      duration?: number,
+    ) {
+      const video = createFakeVideo({ duration });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      video.currentTime = origin;
+      store.getState().syncReady(identityA, video);
+      return video;
+    }
+
+    it("keeps the raw position while metadata has not loaded", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 5 });
+      store.getState().attach(sourceA, video);
+
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(5);
+    });
+
+    it("reports elapsed source seconds for a timeline that starts away from 0", () => {
+      const store = createPlaybackStore();
+      const video = attachWithOrigin(store, 5, 65);
+
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(0);
+
+      video.currentTime = 12;
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(7);
+    });
+
+    it("offsets an approximate seek by the origin, so the seek and the clock agree", () => {
+      const store = createPlaybackStore();
+      const video = attachWithOrigin(store, 5, 65);
+      store.getState().syncBrowserDuration(identityA, video);
+
+      store.getState().seekApproximate(10);
+      expect(video.currentTime).toBe(15);
+
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(10);
+    });
+
+    it("clamps an offset approximate seek to the browser duration", () => {
+      const store = createPlaybackStore();
+      const video = attachWithOrigin(store, 5, 65);
+      store.getState().syncBrowserDuration(identityA, video);
+
+      store.getState().seekApproximate(100);
+      expect(video.currentTime).toBe(65);
+    });
+
+    // The three seek actions null presentedFrame, so a calibrated source falls back to this
+    // clock for the length of every seek. A missing origin would jump the playhead forward
+    // and snap it back when RVFC lands.
+    it("agrees with the inferred PTS of a calibrated source at the same position", () => {
+      const store = createPlaybackStore();
+      const video = attachWithOrigin(store, 5, 65);
+
+      store.getState().syncPresentedFrame(identityA, 5, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      // videoStartPts of sourceA, which is elapsed second 0 of the source
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(0);
+    });
+
+    it("takes the origin again for the next attachment", () => {
+      const store = createPlaybackStore();
+      const video = attachWithOrigin(store, 5, 65);
+      store.getState().syncBrowserTime(identityA, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(0);
+
+      store.getState().detach(identityA, video);
+      const secondVideo = attachWithOrigin(store, 2);
+
+      secondVideo.currentTime = 3;
+      store.getState().syncBrowserTime(identityA, secondVideo);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(1);
     });
   });
 

@@ -8,7 +8,11 @@
 
 import { ptsElapsedSeconds, ticksToSeconds } from "@/lib/time";
 import type { Pts, Rational, TickCount } from "@/types/project";
-import type { CalibrationStatus, PresentedFrame } from "@/features/playback";
+import {
+  isPlaybackPositionApproximate,
+  type CalibrationStatus,
+  type PresentedFrame,
+} from "@/features/playback";
 
 /**
  * Formats a non-negative floating-point seconds value as `HH:MM:SS.mmm`.
@@ -149,12 +153,17 @@ export function formatPreviewCurrentTime(
   return formatApproximateTime(approximateBrowserTime);
 }
 
-/** Returns true when the preview clock is using browser time instead of inferred source PTS. */
+/**
+ * Returns true when the preview clock is using browser time instead of inferred source PTS.
+ *
+ * Delegates to the playback feature, so the preview, the timeline, and the status bar cannot
+ * drift apart on what "approximate" means.
+ */
 export function isPreviewTimeApproximate(
   calibrationStatus: CalibrationStatus,
   presentedFrame: PresentedFrame | null,
 ): boolean {
-  return calibrationStatus !== "ready" || presentedFrame === null;
+  return isPlaybackPositionApproximate(calibrationStatus, presentedFrame);
 }
 
 /**

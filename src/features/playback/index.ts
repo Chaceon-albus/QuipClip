@@ -4,4 +4,5 @@
 
 export * from "./types";
 export * from "./store";
+export * from "./presentation";
 export * from "./refOwnership";

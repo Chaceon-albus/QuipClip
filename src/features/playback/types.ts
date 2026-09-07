@@ -70,6 +70,17 @@ export interface PlaybackState {
   readonly calibrationStatus: CalibrationStatus;
   /** Finite browser-reported duration used only for runtime layout and approximate seeking. */
   readonly runtimeBrowserDurationSeconds: number | null;
+  /**
+   * Finite non-negative `HTMLMediaElement.currentTime` of the attached element, on the browser
+   * media timeline, or null while no element reports a usable position.
+   *
+   * This is a presentation clock, never an edit position, and it must never become project
+   * state: ADR 003 permits browser `currentTime` to drive an approximate clock and denies it
+   * an edit point. `canMarkIn`, `canMarkOut`, and `canSplitCurrentSegment` are the three
+   * predicates that keep it out. Each requires `calibrationStatus === "ready"` and reads its
+   * PTS from `presentedFrame`, so none of them can reach this field.
+   */
+  readonly approximateBrowserTimeSeconds: number | null;
   /** True when video is currently playing. */
   readonly isPlaying: boolean;
   /** True when a media element is attached. */
@@ -165,6 +176,12 @@ export interface PlaybackActions {
     sourceRevisionKey: string,
     element: PlaybackMediaElement,
   ) => void;
+
+  /**
+   * Reads and stores the finite non-negative browser `currentTime` for the matching source.
+   * Skips an identical write, because `timeupdate` also fires while the element is paused.
+   */
+  syncBrowserTime: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
    * Synchronizes play state when the matching video element emits an onPlay event.
