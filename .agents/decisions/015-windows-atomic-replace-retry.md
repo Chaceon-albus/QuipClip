@@ -110,6 +110,53 @@ counts as protected, because a check that protects a file must not open layer 2 
 that it cannot read. A destination that the check confirms as read-only reports at once. No
 later attempt can change that answer.
 
+### The refusal holds on Unix too, and the destination keeps its permissions
+
+The refusal above was stated as product behaviour and implemented only on Windows. `rename(2)`
+needs write and execute permission on the parent directory, not on the destination file, so on
+macOS a `chmod 444` destination was silently replaced. The Unix arm now reads the same attribute
+the Windows arm reads, through one `symlink_metadata` of the final component, and refuses before
+it calls anything.
+
+**What the attribute means, and what it does not.** `Permissions::readonly()` on Unix is true
+only when no write bit is set for anyone. That is the right test for the condition this record
+names, a file the user protected, and it is the same attribute Windows reads, so the two
+platforms refuse the same file. It is not a test of whether QuipClip can write the file: a
+destination owned by another user with mode `0o644` is not read-only by this test and is
+replaced. Closing that gap needs a write-capability probe, which this decision refuses. Root
+opens a `0o444` file for writing successfully, so a probe would permit overwriting a file the
+user protected, and a probe can block indefinitely on a destination that is a FIFO.
+
+**The Finder's Locked box is a different mechanism.** It sets `UF_IMMUTABLE`, not the permission
+bits, so a Locked file keeps `0o644` and this guard never fires on it. BSD `rename(2)` refuses it
+with `EPERM`, which carries a raw operating-system code and therefore keeps its diagnostic where
+the synthetic refusal cannot. The two are not one behaviour. Making them alike would be a
+separate decision.
+
+**The refusal is synthetic, and that costs the diagnostic.** No system call is made, so there is
+no operating-system error to report. `map_io_error` keeps a diagnostic only for an error carrying
+a raw code, so the report is the code alone. That is accepted: `permissionDenied` is the complete
+account of a refusal nothing was asked about. Faking `EACCES` with `from_raw_os_error` would
+claim a `rename(2)` that never ran, and a reader following that code into a system-call trace
+would find no such call.
+
+**A replacement carries the destination's permission bits.** A replacement writes a fresh inode,
+so without this a settings file the user narrowed to `0o600` came back at `0o666 & !umask` after
+the first save, and nothing reported it. The mode is read where the temporary file is created, so
+the confidentiality holds for the whole transit and not only after the rename. That matters most
+on the export path, where `ffmpeg` writes an entire encode into the reservation before the rename
+occurs. One bit is added that the destination may not have: the owner write bit, without which a
+`0o444` destination would produce a reservation `ffmpeg` cannot open. `umask` can only clear
+bits, never set them, so the file in transit can be narrower than the destination and never
+wider. A missing destination keeps the previous behaviour exactly.
+
+**The refusal still fires after the encode, not before it.** `PendingOutput::commit` is where it
+lands, so a protected export destination costs the whole render and reports
+`outputRenameFailed` with no diagnostic. The destination preflight in `ffmpeg::export::plan` is
+the stage that should reject such a destination ahead of the render, and its own rationale
+already says so for other conditions. It does not read the mode today. That is a known gap, not a
+decision to leave it.
+
 `replace_file` moves to a further attempt only for the four codes in the table above. It reports
 every other error at the attempt that raises it. It waits before each attempt after the first.
 The first wait is 1 millisecond, and each wait is two times the wait before it. The last wait is

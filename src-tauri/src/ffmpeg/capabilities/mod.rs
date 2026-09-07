@@ -139,6 +139,13 @@ pub struct Candidate {
 ///
 /// The set is fixed by decision, not discovered from a listing: a probe of every listed
 /// encoder would run for a long time and would test encoders that no export preset offers.
+///
+/// **Editing this list requires bumping [`cache::CACHE_SCHEMA_VERSION`].** The on-disk capability
+/// cache is keyed by the ffmpeg binary and by that version, and **not** by the contents of this
+/// list, so a release that adds a candidate here without bumping it serves a `ready` report
+/// written before the new name existed, with that name missing. The interface then tells the user
+/// that QuipClip tests a fixed set of encoders and this name is not in it -- for an encoder
+/// QuipClip does test.
 pub const TESTED_ENCODERS: [Candidate; 12] = [
     Candidate {
         name: "h264_nvenc",

@@ -267,15 +267,49 @@ impl PendingOutput {
     /// project file and the settings, so this is the behaviour the rest of the application is
     /// consistent with rather than a quirk of the export.
     ///
+    /// # A read-only destination is refused, and its permissions are kept
+    ///
+    /// [`crate::fsutil::replace_file_within`] refuses to replace a `destination` that is a
+    /// regular file with no write bit set for anybody -- a `chmod 444` file -- on both platforms
+    /// (ADR 015). The encode is finished and then discarded, so a planning stage that can reject
+    /// such a destination ahead of the render should; this is the last line of defence, not the
+    /// place to find out. `plan.rs`'s destination preflight is that stage, and its own comment
+    /// gives this exact rationale; it does not read the mode today.
+    ///
+    /// A file the Finder's Locked box protects is **not** this case. That checkbox sets
+    /// `UF_IMMUTABLE` (`chflags uchg`) and leaves the permission bits alone, so a Locked file
+    /// keeps its `0o644` and `Permissions::readonly()` answers false. The guard never fires on
+    /// it. What refuses it is BSD `rename(2)` itself, which returns `EPERM` when the destination
+    /// carries the immutable flag -- a real error with a raw operating-system code, so unlike the
+    /// refusal above it keeps its diagnostic. Do not read the two as one behaviour: whether they
+    /// should be alike is a decision for the ADR, not for this comment.
+    ///
+    /// A `destination` that already exists keeps its own permission bits across the replacement.
+    /// The reservation is also *created* at those bits rather than at `0o666 & !umask`, so the
+    /// encode `ffmpeg` writes into it is never wider than the file it is aimed at, not even while
+    /// it is being written. So re-exporting over a file the user narrowed does not widen it, and
+    /// does not expose it in transit either.
+    ///
     /// # Errors
     ///
-    /// Returns the `io::Error` from the rename, reported by the renderer as
+    /// Returns the `io::Error` from the publication, reported by the renderer as
     /// [`super::ExportErrorCode::OutputRenameFailed`]. A failure leaves `destination` exactly as
     /// it was, and the temporary file is still deleted, because `self` is consumed here and its
-    /// guard is disarmed only after the rename has succeeded. Only the rename can fail this call:
-    /// the Unix arm of [`crate::fsutil::replace_file_within`] runs its parent-directory fsync
-    /// after the rename has already published, and does not report a failure of that step,
-    /// because the published file is at `destination` either way.
+    /// guard is disarmed only after the publication has succeeded.
+    ///
+    /// Three steps of the publication can fail. The rename itself is one. The second is the
+    /// read-only refusal above, which happens before any rename; it is the one error the Unix arm
+    /// of [`crate::fsutil::replace_file_within`] manufactures rather than reports, and it carries
+    /// no raw operating-system code, so `commands::export` drops its message and reports the code
+    /// alone (ADR 011). The third is on Windows only: that arm resolves both paths through
+    /// `absolute_path_without_following_file` above its retry loop, and that step canonicalizes
+    /// the parent directory -- a failure there is a real operating-system error -- and
+    /// manufactures an `InvalidInput` of its own for a path with no file name, whose message the
+    /// same raw-code guard drops for the same reason.
+    ///
+    /// The remaining two steps report nothing. The Unix arm's parent-directory fsync runs after
+    /// the rename has already published, and its permission copy runs before the rename and costs
+    /// the mode rather than the publication, so neither one can fail this call.
     pub fn commit(self) -> io::Result<()> {
         self.commit_within(EXPORT_PUBLISH_BUDGET)
     }
@@ -296,9 +330,11 @@ impl PendingOutput {
     ///
     /// # Errors
     ///
-    /// Exactly [`PendingOutput::commit`]'s: the `io::Error` from the rename, with `destination`
-    /// left as it was and the temporary file still removed. A failed parent-directory fsync on
-    /// Unix is not one of them; it costs durability across a crash and not the publication.
+    /// Exactly [`PendingOutput::commit`]'s: the `io::Error` from the rename, or the refusal to
+    /// replace a read-only `destination` that precedes it, with `destination` left as it was and
+    /// the temporary file still removed. Neither of the Unix arm's other two steps is one of
+    /// them: a failed parent-directory fsync costs durability across a crash and not the
+    /// publication, and a failed copy of `destination`'s permission bits costs the mode.
     pub fn commit_within(mut self, budget: Duration) -> io::Result<()> {
         replace_file_within(self.cleanup.path(), &self.destination, budget)?;
         // The disarm buys little on this path, and is kept because it is honest and free: the

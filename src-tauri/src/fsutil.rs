@@ -59,6 +59,10 @@ pub fn to_pretty_json_line<T: Serialize + ?Sized>(value: &T) -> serde_json::Resu
 ///
 /// An error leaves `path` untouched: the temporary file is removed on every failure path, and
 /// nothing is renamed over `path` unless the write and the sync both succeeded.
+///
+/// A read-only `path` is one of those errors, reported as `PermissionDenied` on both platforms
+/// (ADR 015), and a `path` that already exists keeps its permission bits across the replacement.
+/// [`replace_file_within`] holds both rules and the reasons for them.
 pub fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let (temporary_path, mut temporary_file) = create_temporary_file(path)?;
     let mut cleanup = TemporaryFileCleanup::new(temporary_path);
@@ -86,22 +90,54 @@ pub fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// `io::Error::new` never does, and `capabilities::cache::write` discards its whole `Result`.
 /// ADR 011 forbids user-facing English coming out of Rust in any case, so the message is free
 /// to stay generic.
+///
+/// **On Unix the temporary file is created at `path`'s own mode, not at `0o666 & !umask`.**
+/// [`replace_file_within`] carries `path`'s mode onto the temporary file before the rename, so
+/// the *final* state was already right; without this the *transit* was not. The new bytes are
+/// written and synced into the temporary file before that copy runs, so a settings file the user
+/// narrowed to `0o600` had its new contents world-readable for the length of the write, and an
+/// export was far worse: [`reserve_temporary_path`] hands the reservation to `ffmpeg`, which
+/// writes the whole encode into it, so a render aimed at a `0o600` destination stayed
+/// world-readable for the minutes or hours the encode took. Reading the mode here closes that
+/// window.
+///
+/// Three details of what is passed to `open`:
+/// - the owner write bit is always added. The process, or the `ffmpeg` child in the export case,
+///   must be able to write the file it just created, and a `destination` with no owner write bit
+///   -- `0o444`, or the group-only `0o460` -- would otherwise produce a reservation nothing can
+///   write. This is the one bit the transit may hold that the destination does not, and it grants
+///   nothing to anybody but the owner, who is writing the file in any case;
+/// - only the low nine bits are passed. POSIX does not define `open`'s treatment of the set-id
+///   and sticky bits, so those are left to the pre-rename copy, which uses `chmod`;
+/// - `umask` still applies to a mode passed to `open`, and it can only clear bits, never set
+///   them. So this can land narrower than `path` but never wider, and the copy in
+///   [`replace_file_within`] is what widens it back before the rename.
+///
+/// A missing `path` keeps the historic behaviour exactly: there is no mode to read, no `mode` is
+/// passed, and the file arrives at `0o666 & !umask`. Narrowing that case to `0o600` would make
+/// every newly exported video owner-only, which is a product decision this function does not own.
 fn create_temporary_file(path: &Path) -> io::Result<(PathBuf, File)> {
     let directory = parent_directory(path);
     let file_name = path.file_name().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "missing destination file name")
     })?;
+    // Read once, above the loop: a retry changes neither the destination nor its mode.
+    #[cfg(unix)]
+    let destination_mode = destination_creation_mode(path);
     for _ in 0..100 {
         let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut temporary_name = OsString::from(".");
         temporary_name.push(file_name);
         temporary_name.push(format!(".tmp-{}-{sequence}", std::process::id()));
         let temporary_path = directory.join(temporary_name);
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-        {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(mode) = destination_mode {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
+        }
+        match options.open(&temporary_path) {
             Ok(file) => return Ok((temporary_path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
@@ -220,21 +256,89 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 /// Replace `destination` with `source` in one atomic step, waiting up to `budget` for a
 /// transient sharing failure to clear.
 ///
-/// A plain rename is already atomic on Unix, so this only adds the directory fsync that makes
-/// the rename itself durable across a crash. `budget` is unused here: `rename(2)` is safe under
-/// concurrency, so there is nothing on this platform to wait out.
+/// A plain rename is already atomic on Unix, so this adds three things and no more: a refusal to
+/// overwrite a read-only `destination`, a copy of `destination`'s permission bits onto `source`,
+/// and the directory fsync that makes the rename itself durable across a crash. `budget` is unused
+/// here: `rename(2)` is safe under concurrency, so there is nothing on this platform to wait out.
+///
+/// **A read-only `destination` is refused before the rename.** ADR 015 states that refusal as
+/// product behaviour, and `rename(2)` does not supply it: it needs the write and search
+/// permissions on the parent *directory*, not any permission on the destination file, so a
+/// `chmod 444` destination is replaced without complaint. So this reads `destination` and reports
+/// `PermissionDenied` when it is a regular file with no write bit set for anybody -- exactly what
+/// `Permissions::readonly()` answers, and exactly the attribute the Windows arm reads through
+/// `destination_is_read_only`, so the two platforms refuse the same file. (That name is
+/// `#[cfg(windows)]`, so it is not linked here.)
+///
+/// The read is `symlink_metadata`, not `metadata`, for the reason
+/// `destination_is_read_only` gives: `rename(2)` never resolves the destination's final
+/// component either, so the mode that decides this is the mode on that component. A `destination`
+/// that is a symlink to a read-only file is therefore replaced, and the file it pointed at keeps
+/// its contents.
+///
+/// Anything that is not a regular file -- a directory, a symlink, a missing path -- is left for
+/// `rename(2)` to report. Inventing an error for those cases would replace a kernel error that
+/// names the real condition with a worse one.
+///
+/// **This is not a test of whether this process can write `destination`, and it does not try to
+/// be.** A destination owned by another user with mode `0o644` is not read-only by this test, yet
+/// this process cannot write it either, and `rename(2)` replaces it anyway. Closing that gap needs
+/// a capability probe -- `OpenOptions::new().write(true).open(destination)` -- and this refuses
+/// one for two reasons. It would diverge from the Windows arm, because root opens a `0o444` file
+/// for writing successfully and would therefore be permitted to overwrite exactly the file the
+/// user protected, which is the case this guard exists for. And a `destination` that is a FIFO
+/// would block that open indefinitely, turning a rename into a hang.
+///
+/// **The refusal is the one error this arm manufactures**, because no system call was made and
+/// so there is no operating-system error to report. It is not the only one the module
+/// manufactures: [`create_temporary_file`] makes two more, for a `path` with no file name and for
+/// 100 straight name collisions, and on Windows `absolute_path_without_following_file` makes a
+/// third. The discipline below is the same for all four, and `create_temporary_file` states it
+/// for its own pair. That costs the diagnostic: `map_io_error` in
+/// `commands/settings.rs`, `commands/project.rs`, and the `commit` mapping in
+/// `commands/export.rs` all keep a detail only when the error carries a raw operating-system code
+/// (ADR 011), and this error carries none. The cost is accepted rather than papered over. Do not
+/// reach for `io::Error::from_raw_os_error(13)`: that would claim `EACCES` came from a `rename(2)`
+/// that never ran, and a reader following the code into a system-call trace would find no such
+/// call. The `permissionDenied` code every caller already reports is the exact and complete
+/// account of this refusal -- there is nothing a kernel could add, because no kernel was asked.
+///
+/// **`destination`'s permission bits are carried onto `source` before the rename.** A replacement
+/// writes a fresh inode, so without this step a settings file the user narrowed to `0o600` came
+/// back world-readable after the very first save, and nothing reported it, because the
+/// replacement succeeded. Only the low twelve bits are copied: `Metadata::permissions` on Unix
+/// carries the whole `st_mode` including the file-type bits, and POSIX leaves `chmod`'s treatment
+/// of bits outside `0o7777` unspecified.
+///
+/// It happens before the rename, not after. A `chmod` after the rename would leave a window in
+/// which a reader opening `destination` sees the temporary file's permissions instead of the
+/// ones it is meant to keep.
+///
+/// This is the second read of `destination`'s mode, and it is not a redundant one.
+/// [`create_temporary_file`] already read it, to *create* the temporary file at that mode rather
+/// than at `0o666 & !umask`, which is what keeps the new bytes from being world-readable while
+/// they are still being written. That read cannot be the last word: `umask` narrows a mode passed
+/// to `open`, the owner write bit is added there and has to come back off, the set-id and sticky
+/// bits are not passed to `open` at all, and `destination`'s mode may have changed since. This
+/// read is the authority, and it is deliberately the later of the two.
+///
+/// Its result is discarded, for the reason the parent-directory sync's result is discarded one
+/// line below the rename: the caller was promised a replacement, and a mode that could not be
+/// copied is a smaller loss than a settings save reported as a failure after it already
+/// succeeded.
 ///
 /// The rename is the step that publishes, and the directory fsync only adds durability across a
-/// crash. A failed fsync is therefore not reported: an `Err` from this function always means the
-/// rename itself failed and `destination` still holds what it held before. Reporting a failed
+/// crash. A failed fsync is therefore not reported: an `Err` from this function always means
+/// either the read-only refusal above or a failed rename, and `destination` still holds what it
+/// held before in both cases. Reporting a failed
 /// fsync would tell every caller that the replacement did not happen when it did -- a settings
 /// save, a settings reset that has already moved the old file aside, and an export publication
 /// that has already written the user's chosen path.
 ///
 /// The two platform arms are less symmetric than they look, and this is the arm a macOS
-/// developer reads. This one is two lines because `rename(2)` is also safe when two writers
-/// target one destination, and because the parent-directory fsync makes it durable. The Windows
-/// arm reaches the concurrency guarantee through two rename layers and a bounded retry, and
+/// developer reads. This one needs neither layer nor retry, because `rename(2)` is also safe when
+/// two writers target one destination, and the parent-directory fsync makes it durable. The
+/// Windows arm reaches the concurrency guarantee through two rename layers and a bounded retry, and
 /// reaches durability on every attempt that carries `MOVEFILE_WRITE_THROUGH` (ADR 015). Do not
 /// assume a change here has an equivalent there, or the reverse -- a `budget` that decides
 /// nothing here decides how long the call blocks there.
@@ -245,6 +349,35 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 /// [`reserve_temporary_path`] reserved, to move that output over the destination the user chose.
 #[cfg(unix)]
 pub fn replace_file_within(source: &Path, destination: &Path, _budget: Duration) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // One read serves both steps, and both steps look at the destination's own final component
+    // rather than whatever a symlink there points at.
+    if let Some(permissions) = destination_permissions(destination) {
+        if permissions.readonly() {
+            // The one error this arm manufactures -- `create_temporary_file` makes two more of
+            // its own. It carries no raw operating-system code, because no system call was made,
+            // and every caller therefore drops its message (ADR 011). The message is for a
+            // developer reading a log, not for the user.
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the destination is read-only",
+            ));
+        }
+        // Carry the destination's mode onto the temporary file *before* the rename, so no reader
+        // ever opens the destination and finds the temporary file's mode. The low twelve bits
+        // only: `permissions()` carries the file-type bits too, and POSIX leaves `chmod`
+        // undefined for those. A failure here costs the mode, not the replacement.
+        //
+        // `create_temporary_file` read this mode as well, to create the file at it. This read is
+        // the authority: it clears the owner write bit that read had to add, it carries the
+        // set-id bits `open` is not defined for, and if the destination's mode changed while the
+        // bytes were being written it is the later read that should win.
+        let _ = fs::set_permissions(
+            source,
+            fs::Permissions::from_mode(permissions.mode() & PERMISSION_BITS),
+        );
+    }
     fs::rename(source, destination)?;
     // The rename is complete and every reader already sees it. A failed directory open or fsync
     // costs durability across a crash; it does not undo the replacement, so it must not be
@@ -252,6 +385,58 @@ pub fn replace_file_within(source: &Path, destination: &Path, _budget: Duration)
     let _ = File::open(parent_directory(destination)).and_then(|directory| directory.sync_all());
     Ok(())
 }
+
+/// The `st_mode` bits `chmod` is defined for: the twelve permission and set-id bits.
+///
+/// [`replace_file_within`] masks with this before it copies a mode. `Metadata::permissions` on
+/// Unix carries the whole `st_mode`, file-type bits included, and POSIX leaves `chmod`'s
+/// behaviour unspecified for anything outside this mask.
+#[cfg(unix)]
+const PERMISSION_BITS: u32 = 0o7777;
+
+/// The permissions of `destination`, or `None` when `destination` is not a regular file.
+///
+/// This is the Unix counterpart of `destination_is_read_only`, and it answers for both of
+/// [`replace_file_within`]'s pre-rename steps: the read-only refusal and the mode copy.
+///
+/// The read is `symlink_metadata`, not `metadata`, because `rename(2)` never resolves the
+/// destination's final component. The mode that decides the refusal is the mode on that
+/// component, so following a link here would read the wrong file -- refusing a link that points
+/// at a read-only file while nothing protected would be touched, and overwriting a read-only link
+/// that points at a writable file.
+///
+/// `None` for a directory, for a symlink, for a missing path, and for an unreadable one. Each of
+/// those is left to `rename(2)`, which reports the real condition better than a guard here could
+/// guess it. Note the asymmetry with the Windows arm this is otherwise a mirror of: there an
+/// unreadable attribute is the *protected* answer, because layer 2 would ignore the attribute and
+/// succeed. Here there is no second layer to close, and a failed read means `rename(2)` is about
+/// to fail on the same path for the same reason and say so with a real error.
+#[cfg(unix)]
+fn destination_permissions(destination: &Path) -> Option<fs::Permissions> {
+    fs::symlink_metadata(destination)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_file())
+        .map(|metadata| metadata.permissions())
+}
+
+/// The `mode` [`create_temporary_file`] passes to `open` for a temporary file next to
+/// `destination`, or `None` when there is no mode to read.
+///
+/// `destination`'s own low nine bits, plus the owner write bit the process needs to write the
+/// file it just created. [`create_temporary_file`] carries why each of those three choices is
+/// what it is; `None` -- a missing, non-regular or unreadable `destination` -- means no `mode` is
+/// passed at all, so the file keeps the historic `0o666 & !umask`.
+#[cfg(unix)]
+fn destination_creation_mode(destination: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+
+    destination_permissions(destination)
+        .map(|permissions| (permissions.mode() & 0o777) | OWNER_WRITE_BIT)
+}
+
+/// `S_IWUSR`: the one bit [`create_temporary_file`] adds to the mode it reads.
+#[cfg(unix)]
+const OWNER_WRITE_BIT: u32 = 0o200;
 
 /// Replace `destination` with `source` in one atomic step, through two layered renames, waiting
 /// up to `budget` for a transient sharing failure to clear.
@@ -819,6 +1004,290 @@ mod tests {
             b"new contents",
             "the rename published, so the caller must not be told that it did not"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_destination_is_refused_rather_than_overwritten() {
+        // The Unix twin of the Windows test of the same name, and the guard's whole reason to
+        // exist: `rename(2)` needs the write and search permissions on the parent *directory*,
+        // not any permission on the destination file, so without this guard a `chmod 444`
+        // destination is replaced in silence on macOS (ADR 015).
+        //
+        // Note the difference from the Windows twin, and do not copy its restore dance:
+        // `remove_dir_all` deletes a 0o444 file inside a writable directory on Unix, so `Drop`
+        // cleans up whatever these assertions do and the mode needs no restoring first.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        fs::write(&destination, b"protected contents").unwrap();
+        let source = directory.path.join("source.tmp");
+        fs::write(&source, b"new contents").unwrap();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let error = replace_file(&source, &destination).unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::PermissionDenied,
+            "a read-only destination must be refused as PermissionDenied, got {error:?}"
+        );
+        assert_eq!(
+            error.raw_os_error(),
+            None,
+            "no system call was made, so the refusal carries no operating-system code and every \
+             caller drops its message (ADR 011)"
+        );
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"protected contents",
+            "the protected destination must keep its contents"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bytes_atomically_refuses_a_read_only_destination_and_leaves_no_temporary_file() {
+        // The refusal happens after `create_temporary_file`, so the cleanup guard is what keeps
+        // the settings folder clean when the destination is protected.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let path = directory.path.join("settings.json");
+        fs::write(&path, b"protected contents").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let error = write_bytes_atomically(&path, b"new contents").unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&path).unwrap(), b"protected contents");
+        let leftover = fs::read_dir(&directory.path)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().contains(".tmp-"));
+        assert!(!leftover, "the refused write must leave no temporary file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replacement_carries_the_destinations_permission_bits() {
+        // A replacement writes a fresh inode, so without the copy a settings file the user
+        // narrowed came back wider after the very first save, with no error to notice.
+        //
+        // The mode is 0o470 rather than the obvious 0o600, and every bit of it is chosen so that
+        // the assertion is red if either half of the mode handling is deleted:
+        // - the group execute bit is one `0o666 & !umask` can never produce, so the test does not
+        //   depend on this machine's umask. Under `umask 077` a 0o600 assertion passes with the
+        //   whole mode copy deleted, which is what made the earlier version of this test vacuous;
+        // - no owner write bit, which is the one bit `create_temporary_file` adds to the mode it
+        //   creates the temporary file at. So the temporary file is 0o670 here, and only the
+        //   pre-rename copy can bring it back to 0o470;
+        // - one write bit for the group, because a mode with no write bit for anybody is
+        //   `readonly()` and would be refused instead of replaced.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let path = directory.path.join("settings.json");
+        fs::write(&path, b"old contents").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o470)).unwrap();
+
+        write_bytes_atomically(&path, b"new contents").unwrap();
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o470,
+            "the replacement must carry the mode the user set"
+        );
+        // Without this the test would pass on a replacement that did nothing at all.
+        assert_eq!(fs::read(&path).unwrap(), b"new contents");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_temporary_file_is_created_at_the_destinations_own_mode() {
+        // The other half of the promise the mode copy makes. The copy fixes the destination's
+        // final state; this fixes the transit. Without it the new bytes are written and synced
+        // into a `0o666 & !umask` file, so a settings file narrowed to 0o600 is world-readable
+        // for the length of the write -- and on the export path, where ffmpeg writes the whole
+        // encode into the reservation, for the length of the encode.
+        //
+        // `reserve_temporary_path` is what makes this observable: it hands the path back rather
+        // than keeping the window inside one call.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        fs::write(&destination, b"old contents").unwrap();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let reserved = reserve_temporary_path(&destination).unwrap();
+
+        assert_eq!(
+            fs::metadata(&reserved).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the reservation ffmpeg writes the encode into must not be wider than the \
+             destination it is aimed at"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_temporary_file_next_to_a_destination_with_no_owner_write_bit_is_still_writable() {
+        // Why `create_temporary_file` adds the owner write bit to the mode it reads. A 0o470
+        // destination is not `readonly()` -- the group write bit is set -- so it is replaced, not
+        // refused, and an export aimed at it must therefore work. Created at a bare 0o470 the
+        // reservation would be one nothing can write, and ffmpeg would fail to open its own
+        // output with a diagnostic pointing nowhere near the cause.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        fs::write(&destination, b"old contents").unwrap();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o470)).unwrap();
+
+        let reserved = reserve_temporary_path(&destination).unwrap();
+
+        // Stand in for the ffmpeg child: a fresh handle on the reserved path, the way ffmpeg
+        // opens it, rather than the handle this process already had.
+        let mut file = OpenOptions::new().write(true).open(&reserved).unwrap();
+        file.write_all(b"ffmpeg output").unwrap();
+        drop(file);
+        assert_eq!(fs::read(&reserved).unwrap(), b"ffmpeg output");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_temporary_file_for_a_missing_destination_keeps_the_default_creation_mode() {
+        // A missing destination has no mode to read, so the historic `0o666 & !umask` must
+        // survive unchanged: narrowing this case to 0o600 would silently make every newly
+        // exported video owner-only, which is not a change this module may make on its own.
+        //
+        // The expected mode comes from a `File::create` next to it rather than from a literal,
+        // because `File::create` opens with the same 0o666 the umask then narrows. That keeps the
+        // assertion exact on every machine without reading the umask.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        let default_mode = {
+            let witness = directory.path.join("witness.txt");
+            File::create(&witness).unwrap();
+            fs::metadata(&witness).unwrap().permissions().mode() & 0o777
+        };
+
+        let reserved = reserve_temporary_path(&destination).unwrap();
+
+        assert_eq!(
+            fs::metadata(&reserved).unwrap().permissions().mode() & 0o777,
+            default_mode,
+            "a missing destination must leave the creation mode exactly as it was"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replacement_into_a_missing_destination_needs_no_mode_to_carry() {
+        // There is nothing to read a mode from, so the guard must stay out of the way rather
+        // than manufacture an error. No exact mode is asserted: the temporary file arrives with
+        // `0o666 & !umask`, and umask varies by machine.
+        let directory = TestDirectory::new();
+        let path = directory.path.join("settings.json");
+
+        write_bytes_atomically(&path, b"new contents").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new contents");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_that_is_a_symlink_to_a_read_only_file_is_still_replaced() {
+        // This pins that the guard reads the link and not its target. `rename(2)` replaces the
+        // link itself, so the protected file the link pointed at is never touched -- and a guard
+        // that followed the link would refuse a replacement that harms nothing.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let target = directory.path.join("target.txt");
+        fs::write(&target, b"protected contents").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+        let destination = directory.path.join("link.txt");
+        std::os::unix::fs::symlink(&target, &destination).unwrap();
+        let source = directory.path.join("source.tmp");
+        fs::write(&source, b"new contents").unwrap();
+
+        replace_file(&source, &destination).unwrap();
+
+        assert!(
+            !fs::symlink_metadata(&destination)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link must have been replaced by the new regular file"
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"new contents");
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"protected contents",
+            "the file the link pointed at must be untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_this_user_can_write_is_not_read_only_and_is_replaced() {
+        // The documented gap, in a test rather than only in prose. `Permissions::readonly()` is
+        // true only when no write bit is set for anybody, which is the attribute ADR 015 names
+        // and the same one the Windows arm reads. A 0o644 destination is therefore replaced.
+        //
+        // That is the near half of the documented gap. The far half -- a 0o644 destination owned
+        // by somebody else, which this process cannot write at all and which `rename(2)`
+        // replaces anyway -- is not exercised here, because an unprivileged test cannot create a
+        // file it does not own. `replace_file_within`'s documentation carries that case, and why
+        // closing it would need a capability probe this module refuses.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        fs::write(&destination, b"old contents").unwrap();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o644)).unwrap();
+        let source = directory.path.join("source.tmp");
+        fs::write(&source, b"new contents").unwrap();
+
+        replace_file(&source, &destination).unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), b"new contents");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_that_is_a_directory_reports_the_operating_systems_own_error() {
+        // The regular-file filter is what keeps the synthetic refusal out of the way of a real
+        // kernel error. A raw operating-system code is the proof that the kernel answered: it is
+        // also what every caller needs to keep the diagnostic (ADR 011).
+        //
+        // The `chmod 0o555` is what makes this test about the filter rather than about
+        // `rename(2)`. `create_dir` yields `0o777 & !umask` = 0o755, which is not `readonly()`,
+        // so with the filter deleted the guard would fall through to the rename anyway and the
+        // assertion below would still pass. At 0o555 the directory has no write bit for anybody,
+        // so a guard that did not filter on the file type would refuse it synthetically and this
+        // test turns red.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("output.mp4");
+        fs::create_dir(&destination).unwrap();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o555)).unwrap();
+        let source = directory.path.join("source.tmp");
+        fs::write(&source, b"new contents").unwrap();
+
+        let error = replace_file(&source, &destination).unwrap_err();
+
+        assert!(
+            error.raw_os_error().is_some(),
+            "a directory destination must report the kernel's own error, got {error:?}"
+        );
+        assert!(destination.is_dir(), "the destination must be untouched");
     }
 
     #[test]

@@ -701,9 +701,23 @@ where
     });
     // `commit` is `commit_within(EXPORT_PUBLISH_BUDGET)`. Naming the budget here as well would
     // put one policy in two places, and `output.rs` states that `commit` is its only caller.
-    pending.commit().map_err(|error| {
-        ExportCommandError::with_detail(ExportErrorCode::OutputRenameFailed, error.to_string())
-    })?;
+    // Keep the diagnostic only when a raw operating-system code proves the operating system
+    // wrote it. `fsutil` manufactures more than one error on this path: the Unix refusal to
+    // overwrite a read-only destination, where no system call ran, and on Windows an
+    // `InvalidInput` from the path resolution above the retry loop. Every one of them carries a
+    // Rust-authored English message, which ADR 011 keeps out of the interface, and none carries a
+    // raw code, so this one guard covers them all. `outputRenameFailed` is the whole account of
+    // those cases on its own. `commands/settings.rs`'s `map_io_error` and `commands/project.rs`
+    // apply the same guard.
+    pending
+        .commit()
+        .map_err(|error| match error.raw_os_error() {
+            Some(_) => ExportCommandError::with_detail(
+                ExportErrorCode::OutputRenameFailed,
+                error.to_string(),
+            ),
+            None => ExportCommandError::new(ExportErrorCode::OutputRenameFailed),
+        })?;
 
     Ok(frames)
 }
@@ -1717,5 +1731,66 @@ mod tests {
             .borrow()
             .iter()
             .any(|event| matches!(event, ExportEvent::Publishing { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rename_failure_with_no_operating_system_code_carries_no_detail() {
+        // `fsutil::replace_file_within` manufactures exactly one error: the Unix refusal to
+        // overwrite a read-only destination (ADR 015). No system call ran, so it carries no raw
+        // operating-system code, and its message is Rust-authored English that ADR 011 keeps out
+        // of the interface. Without the guard on this mapping that sentence reaches the frontend
+        // as `detail` and is shown to the user untranslated.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("out.mp4");
+        fs::write(&destination, b"protected contents").unwrap();
+        let plan = sample_plan(&destination);
+        let pending = PendingOutput::reserve(&destination).unwrap();
+        let reserved = pending.path().to_path_buf();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o444)).unwrap();
+        let prepared = PreparedExport {
+            preset_id: "active".to_owned(),
+            plan,
+            ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
+            arguments: vec![],
+            pending,
+        };
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+
+        let error = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |_event| {},
+            |_request, _on_progress| {
+                Ok(ExportProcessOutcome {
+                    status: ExportProcessStatus::Exited {
+                        code: Some(0),
+                        success: true,
+                    },
+                    stderr: Vec::new(),
+                    last_progress: Some(sample_snapshot(Some(30))),
+                })
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::OutputRenameFailed);
+        assert_eq!(
+            error.detail, None,
+            "a synthetic error's Rust-authored message must not reach the interface"
+        );
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"protected contents",
+            "the protected destination must keep its contents"
+        );
+        assert!(
+            !reserved.exists(),
+            "a failed commit must still remove the reservation"
+        );
     }
 }

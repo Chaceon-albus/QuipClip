@@ -42,6 +42,11 @@ const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const STDOUT_CAPTURE_LIMIT: usize = 16 * 1024 * 1024;
 
 /// The largest number of stderr bytes one probe retains, matching the smoke path's cap.
+///
+/// This is a **head** cap: [`read_capped`] keeps the first 8 KiB. `capabilities::smoke`'s
+/// `STDERR_CAPTURE_LIMIT` is the same head cap of the same size, and `ffmpeg::export::process`'s
+/// is a **tail** cap. The three are separate constants on purpose: they no longer bound the same
+/// end of a stream, so one shared constant would assert an equality that is not true.
 const STDERR_CAPTURE_LIMIT: usize = 8 * 1024;
 
 /// Normalized media facts needed by the editor and later capability checks.
