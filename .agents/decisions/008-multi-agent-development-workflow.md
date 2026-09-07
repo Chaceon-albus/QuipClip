@@ -66,10 +66,16 @@ can exit zero and write nothing. On any failure, use the fallback. Say which fal
 - The main agent owns orchestration, the ADRs, `docs/architecture.md`, the verification
   gate, and every commit. A writing subagent never runs `git commit`.
 
-**Gate.** Run `pnpm format:check` from the repository root. Then run `pnpm lint`,
-`pnpm typecheck`, `pnpm build`, and `pnpm test`. Run `cargo fmt --check` and
-`cargo clippy --all-targets -- -D warnings` inside `src-tauri/`. Run the strictest part of
-the gate that the current tree supports.
+**Gate.** The `dev-workflow` skill states the gate, in section 5. It is the only
+normative copy. This record deliberately does not restate the commands: four documents
+each carried their own copy once, they disagreed about `cargo test`, and ADR 009 condition
+3 gave no way to tell which one a commit had met.
+
+One rule from that gate belongs in a record rather than in a skill, because it is a
+decision and not an operating detail. `cargo test` is required when the unit changed any
+file under `src-tauri/`, and the main agent may skip it otherwise. Continuous integration
+runs `cargo test` and `pnpm test` on every push and every pull request, on both shipping
+platforms, so a skipped local run delays the signal and does not lose it.
 
 The operating detail lives in the `dev-workflow` skill at
 `.agents/skills/dev-workflow/SKILL.md`, not in `AGENTS.md`. `AGENTS.md` loads on every

@@ -395,4 +395,9 @@ pnpm lint && pnpm typecheck && pnpm build && pnpm test
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
+The `dev-workflow` skill states the commit gate, in section 5, and it is the only
+normative copy. `cargo test` is part of that gate when a unit changed any file under
+`src-tauri/`. Continuous integration runs every command above on `windows-latest` and
+`macos-latest`, for every push to `main` and every pull request.
+
 TypeScript is held at 5.9, because `typescript-eslint` caps its peer range below 6.1.

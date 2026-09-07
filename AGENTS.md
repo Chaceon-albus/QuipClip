@@ -57,7 +57,11 @@ pnpm icons                # regenerate src-tauri/icons from the brand SVG
 cd src-tauri
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
+cargo test                # required when the unit changed anything under src-tauri/
 ```
+
+This is a reference list, not the gate. The `dev-workflow` skill states the gate in
+section 5, and it is the only normative copy.
 
 ## Rules
 

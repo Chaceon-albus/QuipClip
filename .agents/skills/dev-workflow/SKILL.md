@@ -92,7 +92,11 @@ risk.
 
 ## 5. Verify
 
-Run the gate from the repository root:
+This section is the gate. `AGENTS.md`, `docs/architecture.md` and ADR 008 point here
+rather than restating it, because four copies drifted into four different gates once
+already.
+
+Run this from the repository root, every time:
 
 ```bash
 pnpm format:check
@@ -100,8 +104,16 @@ pnpm lint && pnpm typecheck && pnpm build && pnpm test
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 
-Run the strictest part of the gate that the current tree supports. A gate step that does
-not exist yet is not a failure.
+Then run `cargo test` inside `src-tauri/` **when the unit changed any file under
+`src-tauri/`**. When the unit changed no Rust, the main agent may skip it.
+
+The reason the skip is safe, and the reason it is only a skip: `.github/workflows/ci.yml`
+runs `cargo test` and `pnpm test` on every push to `main`, on every pull request, and on
+demand, on `windows-latest` and on `macos-latest`. A local run that is skipped therefore
+delays the signal. It does not lose it. Nothing else in this list may be skipped, because
+nothing else is cheap enough for the delay to be worth it.
+
+A gate step that does not exist yet is not a failure.
 
 ## 6. Commit
 
@@ -109,7 +121,7 @@ Commit when all four conditions hold:
 
 1. The unit is complete.
 2. The review raised no blocking finding.
-3. The gate passed.
+3. The gate in section 5 passed.
 4. `git status --porcelain` lists only the files of this unit.
 
 Message format:
