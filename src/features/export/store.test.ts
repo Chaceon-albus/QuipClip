@@ -763,6 +763,180 @@ describe("Media Export Store", () => {
       expect(store.getState().status).not.toBe("failed");
       expect(store.getState().error).toBeNull();
     });
+
+    it("cancels by export slot while preparing has produced no run id", async () => {
+      // The fault this closes: `start_export` claims the single export slot, prepares -- a
+      // re-probe alone is bounded at 30 seconds -- and answers with the run id only
+      // afterward. For that window the store holds no id, so `cancelExport` has nothing to
+      // name and the user could not stop a run that was already holding the slot.
+      const startDeferred = createDeferred<ExportStart>();
+      const mockCancel = vi.fn();
+      const mockCancelActive = vi.fn().mockResolvedValue(true);
+
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () => startDeferred.promise,
+        cancelExport: mockCancel,
+        cancelActiveExport: mockCancelActive,
+      });
+
+      const startPromise = store.getState().startExport(createValidRequest());
+      await Promise.resolve();
+      expect(store.getState().status).toBe("preparing");
+      expect(store.getState().runId).toBeNull();
+
+      const result = await store.getState().cancelExport();
+
+      expect(result).toBe(true);
+      expect(mockCancelActive).toHaveBeenCalledTimes(1);
+      expect(mockCancelActive).toHaveBeenCalledWith();
+      expect(mockCancel).not.toHaveBeenCalled();
+
+      startDeferred.resolve(createValidStartResult());
+      await startPromise;
+    });
+
+    it("cancels by run id as soon as preparing has one, never by slot", async () => {
+      const mockCancel = vi.fn().mockResolvedValue(true);
+      const mockCancelActive = vi.fn();
+
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () =>
+          Promise.resolve(createValidStartResult({ runId: "run-named" })),
+        cancelExport: mockCancel,
+        cancelActiveExport: mockCancelActive,
+      });
+
+      await store.getState().startExport(createValidRequest());
+      expect(store.getState().runId).toBe("run-named");
+
+      const result = await store.getState().cancelExport();
+
+      expect(result).toBe(true);
+      expect(mockCancel).toHaveBeenCalledWith("run-named");
+      expect(mockCancelActive).not.toHaveBeenCalled();
+    });
+
+    it("does not cancel by slot in a status with no run to stop", async () => {
+      const mockCancelActive = vi.fn();
+      const store = createExportStore(
+        {
+          cancelExport: vi.fn(),
+          cancelActiveExport: mockCancelActive,
+        },
+        { status: "failed" },
+      );
+
+      expect(await store.getState().cancelExport()).toBe(false);
+      expect(mockCancelActive).not.toHaveBeenCalled();
+    });
+
+    it("reports a slot cancel that rejects while the start is still in flight", async () => {
+      const startDeferred = createDeferred<ExportStart>();
+      const mockCancelActive = vi.fn().mockRejectedValue(new Error("IPC failed"));
+
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () => startDeferred.promise,
+        cancelExport: vi.fn(),
+        cancelActiveExport: mockCancelActive,
+      });
+
+      void store.getState().startExport(createValidRequest());
+      await Promise.resolve();
+
+      expect(await store.getState().cancelExport()).toBe(false);
+      expect(store.getState().status).toBe("failed");
+      expect(store.getState().error?.code).toBe("unknown");
+    });
+
+    it("does not report a slot cancel that rejects after the store was reset", async () => {
+      // The dismissal path: the dialog fires the cancel and resets without awaiting it. A
+      // failure that landed afterward would put an error back on a dialog the user closed.
+      const cancelDeferred = createDeferred<boolean>();
+      const startDeferred = createDeferred<ExportStart>();
+
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () => startDeferred.promise,
+        cancelExport: vi.fn(),
+        cancelActiveExport: () => cancelDeferred.promise,
+      });
+
+      void store.getState().startExport(createValidRequest());
+      await Promise.resolve();
+
+      const cancelPromise = store.getState().cancelExport();
+      store.getState().reset();
+      cancelDeferred.reject(new Error("IPC failed"));
+
+      expect(await cancelPromise).toBe(false);
+      expect(store.getState().status).toBe("idle");
+      expect(store.getState().error).toBeNull();
+    });
+
+    it("does not report a slot cancel that rejects after a reset and a new start", async () => {
+      // "preparing" with no run id is not an identity: every start passes through it. A
+      // rejection matched on the status alone would land in the run that started after the
+      // reset, and `reportError` would invalidate that start's request id -- leaving a live
+      // run the store holds no id for and the by-slot path itself would then refuse.
+      const cancelDeferred = createDeferred<boolean>();
+      const secondStart = createDeferred<ExportStart>();
+      const secondRequest = createValidRequest({ outputPath: "/media/output-2.mp4" });
+      // Key the deferred by request, not by call order. The first start is superseded while it
+      // still awaits the subscription, so it returns before it ever reaches the command: a
+      // queue shifted once per call would hand the first run's deferred to the second run and
+      // leave this test awaiting a promise nothing resolves.
+      const mockStart = vi.fn((request: ExportRequest) => {
+        if (request.outputPath !== secondRequest.outputPath) {
+          return Promise.reject(new Error("the superseded start reached the command"));
+        }
+        return secondStart.promise;
+      });
+      const mockCancelActive = vi
+        .fn()
+        .mockImplementationOnce(() => cancelDeferred.promise)
+        .mockImplementationOnce(() => Promise.resolve(true));
+
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: mockStart,
+        cancelExport: vi.fn(),
+        cancelActiveExport: mockCancelActive,
+      });
+
+      void store.getState().startExport(createValidRequest());
+      await Promise.resolve();
+
+      const cancelPromise = store.getState().cancelExport();
+      store.getState().reset();
+
+      const secondStartPromise = store.getState().startExport(secondRequest);
+      await Promise.resolve();
+      expect(store.getState().status).toBe("preparing");
+      expect(store.getState().runId).toBeNull();
+
+      cancelDeferred.reject(new Error("IPC failed"));
+      expect(await cancelPromise).toBe(false);
+
+      // The stale rejection belongs to the run the reset discarded, not to this one.
+      expect(store.getState().status).toBe("preparing");
+      expect(store.getState().error).toBeNull();
+
+      // The new run stays cancellable by slot ...
+      expect(await store.getState().cancelExport()).toBe(true);
+      expect(mockCancelActive).toHaveBeenCalledTimes(2);
+
+      // ... and still learns its run id, so it is cancellable by id afterward.
+      secondStart.resolve(createValidStartResult({ runId: "run-2" }));
+      await secondStartPromise;
+      expect(store.getState().runId).toBe("run-2");
+
+      // Only the surviving run reached the command.
+      expect(mockStart).toHaveBeenCalledTimes(1);
+      expect(mockStart).toHaveBeenCalledWith(secondRequest);
+    });
   });
 
   describe("reportError Action", () => {

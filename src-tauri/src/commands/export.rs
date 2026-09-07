@@ -328,6 +328,38 @@ pub async fn cancel_export(
     Ok(registry.cancel(&run_id))
 }
 
+/// Ask whichever run holds the export slot to stop, and report whether there was one.
+///
+/// This serves the one window [`cancel_export`] cannot. [`start_export`] claims the slot,
+/// prepares, and answers with the run id only afterward, and preparation includes a re-probe
+/// bounded at [`crate::ffmpeg::probe::PROBE_TIMEOUT`], which is 30 seconds. For that whole
+/// window the frontend holds no id, so it has nothing to name to [`cancel_export`] and the user
+/// cannot stop a run that is already holding the single export slot.
+///
+/// # Why cancelling without naming a run is correct here
+///
+/// The registry holds one run at a time (ADR 016), so the slot identifies a run as
+/// unambiguously as the id does. The frontend reaches this path only while its own
+/// `startExport` is in flight and has produced no id, so by construction the run holding the
+/// slot in that window is the one it just started: no other export could have claimed the slot,
+/// because this one has not released it.
+///
+/// A request that lands after preparation finished is harmless rather than wrong. It names the
+/// same run -- the worker holds the slot for the rest of the run -- and the worker reads the
+/// flag again before `ffmpeg` spawns and once more before the rename, which is ADR 016's
+/// cancel-tested-twice rule. So the late request stops the run the user meant, at the next
+/// point the run tests the flag.
+///
+/// `false` means the slot was free and nothing was set. As with [`cancel_export`], the
+/// frontend must not render that as "there was nothing to cancel": it means only that no
+/// export holds the slot at this instant.
+#[tauri::command]
+pub async fn cancel_active_export(
+    registry: tauri::State<'_, Arc<ExportRegistry>>,
+) -> Result<bool, ExportCommandError> {
+    Ok(registry.cancel_active().is_some())
+}
+
 /// Resolve the ffmpeg executable pair for an export: the configured path from settings, if
 /// any, ahead of `PATH` and the application data directory, per ADR 005's resolution order.
 ///
@@ -375,6 +407,15 @@ where
     // Read the same way `ExportSlot::is_canceled` reads it, so the ordering pairs with
     // `ExportRegistry::cancel`'s store.
     let canceled = || cancel.load(std::sync::atomic::Ordering::SeqCst);
+
+    // Before the first step, which already reaches outside the process: `discover` walks `PATH`
+    // and inspects each candidate, and an entry on a share that has stopped answering holds
+    // that inspection for as long as the operating system lets it. A cancel that arrives before
+    // the command even reached the blocking pool then ends the run at the first step rather
+    // than the third.
+    if canceled() {
+        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+    }
 
     let executables = discover(app_data_directory)
         .map_err(|_| ExportCommandError::new(ExportErrorCode::FfmpegPairMissing))?;
@@ -1488,14 +1529,60 @@ mod tests {
     }
 
     #[test]
+    fn a_cancel_before_preparation_starts_ends_it_without_discovering_ffmpeg() {
+        // The twin of the pre-re-probe test below, at the other end. `start_export` claims the
+        // slot before it hands preparation to the blocking pool, so a cancel can already be set
+        // when the first step runs. That step is `discover`, which walks `PATH` and inspects
+        // each candidate; an entry on a share that stopped answering holds it. Reading the flag
+        // only later would spend that time for an answer nobody wants.
+        let directory = TestDirectory::new();
+        let discovered = RefCell::new(false);
+        let request = ExportRequestWire {
+            source_path: "/media/source.mp4".to_owned(),
+            output_path: directory
+                .path
+                .join("out.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            segments: vec![ExportSegmentBoundaryWire {
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            preset_id: None,
+        };
+
+        let error = prepare_export_with(
+            &request,
+            &directory.path,
+            &AtomicBool::new(true),
+            |_| {
+                *discovered.borrow_mut() = true;
+                unreachable!()
+            },
+            |_| unreachable!(),
+            |_, _| unreachable!(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::Canceled);
+        assert!(!*discovered.borrow());
+    }
+
+    #[test]
     fn a_cancel_before_the_re_probe_ends_preparation_without_spawning_ffprobe() {
         // The run holds the export slot for the whole of preparation, and the re-probe alone
         // can spend `PROBE_TIMEOUT`. A cancel read only after preparation returned would spend
         // that time for an answer nobody wants, which is what holds an application quit past
         // its budget.
+        //
+        // The flag is set from inside `load`, after `discover` has already run, so this test
+        // reaches the pre-re-probe check rather than the one at the top of preparation. A flag
+        // that started out set would stop the run at that first check and leave this one
+        // untested.
         let directory = TestDirectory::new();
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
+        let cancel = AtomicBool::new(false);
         let probed = RefCell::new(false);
         let request = ExportRequestWire {
             source_path: source.to_string_lossy().into_owned(),
@@ -1514,7 +1601,7 @@ mod tests {
         let error = prepare_export_with(
             &request,
             &directory.path,
-            &AtomicBool::new(true),
+            &cancel,
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -1523,6 +1610,7 @@ mod tests {
                 })
             },
             |_| {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(LoadedSettings {
                     settings: sample_settings(Some("active"), vec![sample_preset("active")]),
                     seeded: false,

@@ -20,6 +20,7 @@ export const BACKEND_COMMANDS = {
   RESET_SETTINGS: "reset_settings",
   START_EXPORT: "start_export",
   CANCEL_EXPORT: "cancel_export",
+  CANCEL_ACTIVE_EXPORT: "cancel_active_export",
 } as const;
 
 export type BackendCommand = (typeof BACKEND_COMMANDS)[keyof typeof BACKEND_COMMANDS];

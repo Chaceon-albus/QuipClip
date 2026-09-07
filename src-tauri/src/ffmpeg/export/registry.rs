@@ -38,6 +38,11 @@
 //! makes a late call a no-op instead of a cancellation of the wrong export. That comparison
 //! is string equality, so the whole guarantee rests on run ids never repeating within one
 //! process; see [`ExportRegistry::begin`] for that requirement and for how to satisfy it.
+//!
+//! [`ExportRegistry::cancel_active`] is the one exception, and it names the run by the slot it
+//! occupies instead. It exists because a caller cannot pass an id it has not been given yet,
+//! and it carries no staleness protection at all; its own documentation states what a caller
+//! must know before it uses it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -224,6 +229,36 @@ impl ExportRegistry {
         // argument to convince themselves the flag is delivered.
         export.cancel.store(true, Ordering::SeqCst);
         true
+    }
+
+    /// Ask whichever run holds the slot to stop, and return its identifier. `None` when the
+    /// slot is free, and in that case nothing is set at all.
+    ///
+    /// This is [`ExportRegistry::cancel`] without the id comparison, and it exists for the one
+    /// window in which a caller cannot name the run: `commands::export::start_export` claims
+    /// the slot, prepares, and answers with the run id only afterward, so for the whole of
+    /// preparation -- a re-probe alone is bounded at [`crate::ffmpeg::probe::PROBE_TIMEOUT`],
+    /// which is 30 seconds -- the frontend holds no id to pass to [`ExportRegistry::cancel`].
+    ///
+    /// # Why dropping the comparison is safe here, and only here
+    ///
+    /// This module's staleness discipline rests on the `run_id` comparison, so removing it
+    /// removes that protection: a request that arrives late cancels whatever run holds the slot
+    /// rather than nothing. The slot is only an unambiguous name for a run because the registry
+    /// holds exactly one at a time; it is not a *stable* name, because the run behind it
+    /// changes. A caller must therefore have its own reason to believe the run it means is the
+    /// one holding the slot right now. `commands::export::cancel_active_export` states that
+    /// reason, and it is the only caller.
+    ///
+    /// Everything [`ExportRegistry::cancel`] says about its `true` applies to a `Some` here,
+    /// including the obligation on the process stage to read the flag once more before it
+    /// publishes an output.
+    pub fn cancel_active(&self) -> Option<String> {
+        let active = self.lock();
+        let export = active.as_ref()?;
+        // The same store as `ExportRegistry::cancel`, for the reason given there.
+        export.cancel.store(true, Ordering::SeqCst);
+        Some(export.run_id.clone())
     }
 
     /// The identifier of the export that currently holds the slot, or `None` when the slot
@@ -526,6 +561,52 @@ mod tests {
             "a stale cancel must never cancel the export that replaced its run"
         );
         drop(first);
+    }
+
+    #[test]
+    fn cancel_active_names_the_run_holding_the_slot_and_sets_its_flag() {
+        // The window this method exists for: `start_export` has claimed the slot and has not
+        // yet answered with the run id, so the caller has no id to compare against.
+        let registry = registry();
+        let slot = registry.begin("run-1").expect("the slot starts free");
+
+        assert_eq!(registry.cancel_active().as_deref(), Some("run-1"));
+        assert!(
+            slot.is_canceled(),
+            "cancel_active must set the very flag the matching begin returned"
+        );
+    }
+
+    #[test]
+    fn cancel_active_reports_nothing_when_the_slot_is_free() {
+        let registry = registry();
+
+        assert_eq!(registry.cancel_active(), None);
+    }
+
+    #[test]
+    fn cancel_active_after_a_release_names_whichever_run_holds_the_slot_now() {
+        // A second call must read the slot again rather than remember what the first one
+        // found. Between the two the first run releases the slot and a second run claims it,
+        // so a stale answer here would cancel a run that is no longer there or report one that
+        // is.
+        let registry = registry();
+        let first = registry.begin("run-1").expect("the slot starts free");
+
+        assert_eq!(registry.cancel_active().as_deref(), Some("run-1"));
+
+        drop(first);
+        assert_eq!(
+            registry.cancel_active(),
+            None,
+            "a released slot holds no run to cancel"
+        );
+
+        let second = registry
+            .begin("run-2")
+            .expect("the slot is free after the first run released it");
+        assert_eq!(registry.cancel_active().as_deref(), Some("run-2"));
+        assert!(second.is_canceled());
     }
 
     #[test]

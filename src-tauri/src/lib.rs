@@ -39,6 +39,7 @@ pub fn run() {
             commands::capabilities::start_capability_probe,
             commands::export::start_export,
             commands::export::cancel_export,
+            commands::export::cancel_active_export,
             commands::media::import_media,
             commands::project::load_project,
             commands::project::save_project,

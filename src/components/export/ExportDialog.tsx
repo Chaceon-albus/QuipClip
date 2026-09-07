@@ -66,6 +66,10 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
   // holding a plain boolean, makes the canceling state derived: a new export carries a
   // new run id, so the flag stops applying the moment the flow restarts.
   const [cancelingRunId, setCancelingRunId] = useState<string | null>(null);
+  // Holds the cancel the user asked for in the one phase that has no run id to key it to.
+  // `isCancelOutstanding` is keyed to a run id and cannot see this one, so the dialog holds it
+  // itself and scopes it below to the phase it can apply in.
+  const [unnamedCancelPending, setUnnamedCancelPending] = useState(false);
 
   const status = useExportStore((state) => state.status);
   const runId = useExportStore((state) => state.runId);
@@ -75,8 +79,20 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
 
   // All three derived values live in a pure module, so their rules carry their own tests.
   const isRunning = isExportDismissalRefused({ status, runId });
-  const canceling = isCancelOutstanding({ status, runId, cancelingRunId });
-  const cancelEnabled = isCancelEnabled({ status, runId, cancelingRunId });
+  // The by-slot cancel names no run, so the flag above stands in for the run id. Scope it to
+  // the phase it applies in, the way `isCancelOutstanding` is scoped by the run id: it stops
+  // applying as soon as the store learns an id or leaves "preparing".
+  const unnamedCanceling =
+    unnamedCancelPending && status === "preparing" && runId === null;
+  const canceling =
+    isCancelOutstanding({ status, runId, cancelingRunId }) || unnamedCanceling;
+  const cancelEnabled =
+    isCancelEnabled({ status, runId, cancelingRunId }) && !unnamedCanceling;
+  // The footer offers Cancel in every phase where a run is in progress. "preparing" with no
+  // run id is one of them: it stays dismissable, but Cancel now reaches the backend there, so
+  // offering Close alone would hide the control that phase most needs. An outstanding unnamed
+  // cancel keeps the button in place while it is disabled, instead of swapping it for Close.
+  const showCancel = isRunning || cancelEnabled || unnamedCanceling;
 
   const resolvedLanguage = getResolvedLanguage(i18n);
   const numberFormatter = useMemo(
@@ -86,9 +102,22 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
 
   const errorView = presentExportError(error);
 
+  // Walking away during "preparing" before the backend answered used to orphan the run: the
+  // store never learned the run id, so it could never name one to cancel. It no longer has to
+  // name one -- the store cancels by slot in that phase -- so every dismissal path asks the
+  // backend to stop before it resets. Fired and not awaited, because the dialog closes at once
+  // and the store owns whatever the backend answers.
+  const cancelUnnamedRun = () => {
+    if (status === "preparing" && runId === null) {
+      void cancelExport();
+    }
+  };
+
   const handleClose = () => {
+    cancelUnnamedRun();
     onOpenChange(false);
     setCancelingRunId(null);
+    setUnnamedCancelPending(false);
     reset();
   };
 
@@ -97,7 +126,9 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
       if (isRunning) {
         return;
       }
+      cancelUnnamedRun();
       setCancelingRunId(null);
+      setUnnamedCancelPending(false);
       reset();
     }
     onOpenChange(nextOpen);
@@ -105,6 +136,12 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
 
   const handleCancel = async () => {
     setCancelingRunId(runId);
+    if (runId === null) {
+      // The store cancels by slot here and writes no state on success, so the acknowledgement
+      // has to come from the dialog. Without it the user waits out the rest of preparation --
+      // up to 30 seconds for a re-probe -- with the button still reading "Cancel".
+      setUnnamedCancelPending(true);
+    }
     await cancelExport();
   };
 
@@ -116,7 +153,7 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
       case "preparing":
         return (
           <div className="py-2 text-sm text-muted-foreground">
-            {t("export.status.preparing")}
+            {canceling ? t("export.status.canceling") : t("export.status.preparing")}
           </div>
         );
 
@@ -229,19 +266,16 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
         {renderContent()}
 
         <DialogFooter>
-          {/* Reads the same `isRunning` rule as every other exit, so the phase that has no
-              run id yet offers Close rather than a Cancel that stays disabled. */}
-          {isRunning ? (
+          {showCancel ? (
             <Button
               variant="outline"
               onClick={() => void handleCancel()}
-              // `runId` is null from the start of "preparing" until the backend answers
-              // with one, and `cancelExport` returns false without reaching the backend
-              // while it is null. During "publishing" the backend already ran its last
-              // cancel test (ADR 016), so a cancel there cannot stop the rename either.
-              // In both phases the button would report a cancel that never happened
-              // while the export still writes the file. `isCancelEnabled` holds both
-              // rules.
+              // Only "publishing" disables it now. The backend already ran its last cancel
+              // test before it emitted the event that puts the interface into that phase
+              // (ADR 016), so a cancel there cannot stop the rename, and the button would
+              // report a cancel that never happened while the export still writes the file.
+              // "preparing" with no run id is enabled: the store cancels by export slot when
+              // it holds no id. `isCancelEnabled` holds both rules.
               disabled={!cancelEnabled}
             >
               {canceling ? t("export.status.canceling") : t("common.cancel")}

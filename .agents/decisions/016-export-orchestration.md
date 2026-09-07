@@ -135,6 +135,42 @@ requires `-y`. Without it, `ffmpeg` refuses the existing file, prints an error, 
 status zero**. A command that trusted the exit status would rename an empty file over the video of
 the user. The frame count is the only signal that separates the two outcomes.
 
+### A cancel during preparation names the slot, not the run
+
+`start_export` answers with the `runId` only after preparation, and preparation includes a
+re-probe bounded at `PROBE_TIMEOUT`, which is 30 seconds. For that whole window the interface
+held no identifier, and `cancel_export` matches on identifier equality, so the user could not
+stop a run that was already holding the single export slot. The cancel flag itself was never
+the problem: `prepare_export_with` has read it between its steps since it gained the parameter.
+Only the ability to ask was missing.
+
+`cancel_active_export` asks by slot. `ExportRegistry::cancel_active` sets the flag on whichever
+run holds the slot and reports which one it was. The interface calls it only while it is in the
+preparing phase with no identifier of its own, from the Cancel button and from a dismissal.
+
+This is safe because the registry holds one run. The interface reaches that path only while its
+own start is in flight and has produced no identifier, so the run holding the slot in that
+window is the one it started. A request that arrives after preparation finished changes nothing
+that matters, because the worker reads the flag again before `ffmpeg` starts and again before
+the rename, which is the rule above.
+
+`cancel_active` is the one method on the registry that names a run without being given its
+identifier, so it carries no protection against a stale request. The interface supplies that
+protection instead, by asking only in the one phase where the answer cannot be another run.
+
+**The release is not immediate.** The flag is tested between the steps of preparation and never
+inside one, and a test cannot shorten a step that has already started. So the slot frees at the
+next test, which can be as late as the end of the current step: up to `PROBE_TIMEOUT` for the
+re-probe, and unbounded while executable discovery walks a `PATH` entry on a share that stopped
+answering. A retry inside that window is still refused with `exportAlreadyRunning`. This
+decision accepts that. Bounding discovery is separate work.
+
+**Dismissing the dialog during preparation now cancels.** That phase stays dismissable, and the
+reason has inverted. It was dismissable because a cancel was impossible and refusing the
+dismissal would have given the interface a state it could enter and not leave; the cost was an
+orphaned run that kept encoding, held the slot, and refused the next export. The dismissal now
+asks the run to stop first, so leaving is an escape rather than the orphan.
+
 ## Consequences
 
 - The four steps of the product work end to end: import, preview, mark and export.

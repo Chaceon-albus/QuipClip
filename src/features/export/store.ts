@@ -11,7 +11,7 @@
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import type { UnlistenFn } from "@/lib/ipc";
-import { cancelExport, startExport } from "./client";
+import { cancelActiveExport, cancelExport, startExport } from "./client";
 import { subscribeExportProgress } from "./events";
 import {
   ExportError,
@@ -36,6 +36,11 @@ export interface ExportStoreDependencies {
    */
   cancelExport?: (runId: string) => Promise<boolean>;
   /**
+   * Function to cancel whichever run holds the backend export slot, for the window in which
+   * this store holds no run id. Defaults to `cancelActiveExport`.
+   */
+  cancelActiveExport?: () => Promise<boolean>;
+  /**
    * Function to subscribe to backend export progress events. Defaults to `subscribeExportProgress`.
    */
   subscribeExportProgress?: (
@@ -58,6 +63,7 @@ export function createExportStore(
 ): StoreApi<ExportStoreState> {
   const startExportFn = dependencies.startExport ?? startExport;
   const cancelExportFn = dependencies.cancelExport ?? cancelExport;
+  const cancelActiveExportFn = dependencies.cancelActiveExport ?? cancelActiveExport;
   const subscribeExportProgressFn =
     dependencies.subscribeExportProgress ?? subscribeExportProgress;
 
@@ -68,7 +74,7 @@ export function createExportStore(
   let pendingEvents: ExportProgressEvent[] = [];
   let awaitingRunId = false;
 
-  return createStore<ExportStoreState>()((set) => {
+  return createStore<ExportStoreState>()((set, get) => {
     function handleEvent(event: ExportProgressEvent): void {
       if (awaitingRunId && !activeRunId) {
         pendingEvents.push(event);
@@ -218,7 +224,38 @@ export function createExportStore(
       cancelExport: async (): Promise<boolean> => {
         const runId = activeRunId;
         if (!runId) {
-          return false;
+          // "preparing" with no run id is the one phase where a cancel is still meaningful
+          // without one. `start_export` claims the single export slot, prepares -- a re-probe
+          // alone is bounded at 30 seconds -- and answers with the run id only afterward, so
+          // there is nothing to name yet and the run is already holding the slot. The backend
+          // cancels by slot instead; `cancel_active_export` carries the argument for why the
+          // run holding the slot in this window is the one this store just started. Every
+          // other status with no run id has no run to stop.
+          if (get().status !== "preparing") {
+            return false;
+          }
+          // The identity of a start that has no run id yet is its request id. Snapshot it
+          // here, the way the by-id path below snapshots the run id, so the rejection is
+          // matched against the start it was made for. "preparing" alone is not an identity:
+          // every start passes through it, so a store that was reset AND started again would
+          // take a stale rejection into a run this call knows nothing about.
+          const requestId = latestRequestId;
+          try {
+            return await cancelActiveExportFn();
+          } catch (err) {
+            // Report only while the store is still waiting on the same start. A run that
+            // reported its id in the meantime is tracked and can be cancelled again, a store
+            // that was reset or started again has moved on, and a start that failed on its
+            // own already shows the better error.
+            if (
+              requestId === latestRequestId &&
+              !activeRunId &&
+              get().status === "preparing"
+            ) {
+              reportError(err);
+            }
+            return false;
+          }
         }
         try {
           return await cancelExportFn(runId);

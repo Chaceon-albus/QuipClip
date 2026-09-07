@@ -11,13 +11,13 @@ const OTHER_RUN_ID = "run-xyz-789";
 
 describe("isExportDismissalRefused", () => {
   // BLOCKING 08-F1: "preparing" before the backend answers is the one progress phase with
-  // no run to protect. Refusing it too left the interface with a state it could enter and
-  // could not leave, because `isCancelEnabled` also refuses while `runId` is null.
+  // no run to protect. Dismissal now cancels the run by its export slot rather than orphaning
+  // it, so this allowance is a real exit and the Cancel button is offered beside it.
   it("permits dismissal during preparing while no run id exists", () => {
     expect(isExportDismissalRefused({ status: "preparing", runId: null })).toBe(false);
     expect(
       isCancelEnabled({ status: "preparing", runId: null, cancelingRunId: null }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("refuses dismissal once a run exists, and for running and publishing", () => {
@@ -70,20 +70,29 @@ describe("isCancelOutstanding", () => {
 });
 
 describe("isCancelEnabled", () => {
-  it("keeps the button disabled while no run id is known, in every status", () => {
+  it("keeps the button disabled while no run id is known, except while preparing", () => {
+    // "preparing" is the exception, and the reason the store no longer needs an id there:
+    // `cancel_active_export` stops whichever run holds the single export slot, which in that
+    // window is the run this store just started.
     for (const status of EXPORT_STATUSES) {
+      const expected = status === "preparing";
       expect(isCancelEnabled({ status, runId: null, cancelingRunId: null })).toBe(
-        false,
+        expected,
       );
       expect(isCancelEnabled({ status, runId: null, cancelingRunId: RUN_ID })).toBe(
-        false,
+        expected,
       );
     }
   });
 
-  it("keeps the button disabled during publishing, even with a run id", () => {
+  it("keeps the button disabled during publishing, with a run id and without one", () => {
+    // Unchanged by the cancel-by-slot work: the backend runs its last cancel test before it
+    // emits the event that puts the interface into this phase (ADR 016).
     expect(
       isCancelEnabled({ status: "publishing", runId: RUN_ID, cancelingRunId: null }),
+    ).toBe(false);
+    expect(
+      isCancelEnabled({ status: "publishing", runId: null, cancelingRunId: null }),
     ).toBe(false);
   });
 
