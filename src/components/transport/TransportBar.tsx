@@ -9,6 +9,8 @@ import {
   Scissors,
   SkipBack,
   SkipForward,
+  SquarePlus,
+  Trash2,
   Undo2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -19,8 +21,9 @@ import { playbackStore, usePlaybackStore } from "@/features/playback";
 import {
   canMarkIn,
   canMarkOut,
-  canSplitWithBounds,
-  getSegmentBounds,
+  canSplitCurrentSegment,
+  findCurrentSegment,
+  getCurrentSegmentTarget,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
@@ -46,9 +49,12 @@ const selectCanRedo = (s: TimelineStoreState) => s.canRedo;
 const selectPendingInPts = (s: TimelineStoreState) => s.pendingInPts;
 const selectSegments = (s: TimelineStoreState) => s.segments;
 const selectSourceId = (s: TimelineStoreState) => s.sourceId;
+const selectCurrentSegmentId = (s: TimelineStoreState) => s.currentSegmentId;
 const selectMarkIn = (s: TimelineStoreState) => s.markIn;
 const selectMarkOut = (s: TimelineStoreState) => s.markOut;
 const selectSplit = (s: TimelineStoreState) => s.split;
+const selectNewSegment = (s: TimelineStoreState) => s.newSegment;
+const selectDeleteSegment = (s: TimelineStoreState) => s.deleteSegment;
 const selectUndo = (s: TimelineStoreState) => s.undo;
 const selectRedo = (s: TimelineStoreState) => s.redo;
 
@@ -61,9 +67,12 @@ export function TransportBar() {
   const pendingInPts = useTimelineStore(selectPendingInPts);
   const segments = useTimelineStore(selectSegments);
   const sourceId = useTimelineStore(selectSourceId);
+  const currentSegmentId = useTimelineStore(selectCurrentSegmentId);
   const markIn = useTimelineStore(selectMarkIn);
   const markOut = useTimelineStore(selectMarkOut);
   const split = useTimelineStore(selectSplit);
+  const newSegment = useTimelineStore(selectNewSegment);
+  const deleteSegment = useTimelineStore(selectDeleteSegment);
   const undo = useTimelineStore(selectUndo);
   const redo = useTimelineStore(selectRedo);
 
@@ -81,22 +90,35 @@ export function TransportBar() {
     isValidNominalRate(media?.probe.avgFrameRate) ||
     isValidNominalRate(media?.probe.rFrameRate);
 
-  // Parsed once per segments change, so the per-frame split test stays cheap.
-  const segmentBounds = useMemo(() => getSegmentBounds(segments), [segments]);
+  // Every segment action names this target instead of guessing from the playhead.
+  const currentSegment = useMemo(
+    () => findCurrentSegment(segments, currentSegmentId, sourceId),
+    [segments, currentSegmentId, sourceId],
+  );
+  // Parsed once per change of the target, so the per-frame boundary tests stay cheap.
+  const currentTarget = useMemo(
+    () => getCurrentSegmentTarget(currentSegment),
+    [currentSegment],
+  );
 
   const isMarkInEnabled = usePlaybackStore((s) =>
-    canMarkIn(s.calibrationStatus, s.presentedFrame, hasActiveSource),
+    canMarkIn(s.calibrationStatus, s.presentedFrame, hasActiveSource, currentTarget),
   );
   const isMarkOutEnabled = usePlaybackStore((s) =>
-    canMarkOut(s.calibrationStatus, s.presentedFrame, pendingInPts, hasActiveSource),
+    canMarkOut(
+      s.calibrationStatus,
+      s.presentedFrame,
+      pendingInPts,
+      hasActiveSource,
+      currentTarget,
+    ),
   );
   const isSplitEnabled = usePlaybackStore((s) =>
-    canSplitWithBounds(
-      segmentBounds,
+    canSplitCurrentSegment(
+      currentTarget,
       s.calibrationStatus,
       s.presentedFrame,
       hasActiveSource,
-      sourceId ?? undefined,
     ),
   );
 
@@ -105,6 +127,10 @@ export function TransportBar() {
   const isMarkInDisabled = !isMarkInEnabled;
   const isMarkOutDisabled = !isMarkOutEnabled;
   const isSplitDisabled = !isSplitEnabled;
+  // Nothing is in progress when no segment is current and no In mark is pending.
+  const isNewSegmentDisabled =
+    !hasActiveSource || (currentSegment === null && pendingInPts === null);
+  const isDeleteSegmentDisabled = !hasActiveSource || currentSegment === null;
 
   return (
     <section className="flex h-[72px] shrink-0 items-center justify-center border-y border-border bg-card px-4 select-none">
@@ -215,7 +241,48 @@ export function TransportBar() {
 
         <Separator orientation="vertical" className="h-8 bg-border" />
 
-        {/* Group 3: Playback Controls (Previous / Next nominal step, Play/Pause) */}
+        {/* Group 3: Current segment (New / Delete, icon over label) */}
+        <div className="flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                disabled={isNewSegmentDisabled}
+                onClick={newSegment}
+                className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                aria-label={t("transport.action.newSegmentAria")}
+              >
+                <SquarePlus className="size-4" />
+                <span className="text-[10px] leading-none font-medium">
+                  {t("transport.action.newSegment")}
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("transport.action.newSegmentAria")}</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                disabled={isDeleteSegmentDisabled}
+                onClick={deleteSegment}
+                className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                aria-label={t("transport.action.deleteSegmentAria")}
+              >
+                <Trash2 className="size-4" />
+                <span className="text-[10px] leading-none font-medium">
+                  {t("transport.action.deleteSegment")}
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("transport.action.deleteSegmentAria")}</TooltipContent>
+          </Tooltip>
+        </div>
+
+        <Separator orientation="vertical" className="h-8 bg-border" />
+
+        {/* Group 4: Playback Controls (Previous / Next nominal step, Play/Pause) */}
         <div className="flex items-center gap-2">
           <Tooltip>
             <TooltipTrigger asChild>

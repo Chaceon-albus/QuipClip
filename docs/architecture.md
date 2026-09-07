@@ -348,6 +348,12 @@ Mark In stores the inferred PTS of the displayed frame. Mark Out stores the curr
 the first excluded frame. Split creates adjacent half-open segments. Exact inclusion of the
 final source frame needs discovery of its following boundary.
 
+One segment is current, and every edit action names it rather than inferring a target from the
+playhead. Mark In and Mark Out adjust its boundaries; New Segment ends it so the next Mark In
+starts a fresh one; clicking a segment makes it current; Delete Segment removes it and leaves
+nothing current. Segments may therefore overlap without ambiguity. While a current segment
+resolves, there is no pending In mark. See ADR 007.
+
 `Source.id` is stable project identity. A separate revision key uses path, size, and
 modification time for runtime invalidation and replacement warnings. Source or revision
 changes do not erase canonical segments.

@@ -12,7 +12,6 @@ import {
   elapsedSecondsToPts,
   isPtsString,
   isValidSegmentRange,
-  isPtsInsideSegment,
   ptsElapsedSeconds,
   segmentDurationTicks,
   ticksToSeconds,
@@ -20,26 +19,36 @@ import {
 import type { Pts, Rational, Segment, TickCount } from "@/types/project";
 import type { CalibrationStatus, PresentedFrame } from "@/features/playback";
 
+/** The current segment together with its index in the project array. */
+export interface CurrentSegmentRef {
+  readonly index: number;
+  readonly segment: Segment;
+}
+
 /**
- * Finds the index of a completed segment that strictly contains `pts` as an interior PTS (ADR 007).
- * Formula: `isPtsInsideSegment(pts, seg.inPts, seg.outPts)` (inPts < pts < outPts).
- * If `sourceId` is provided, also ensures `seg.sourceId === sourceId`.
- * Returns -1 if no segment strictly contains `pts`.
+ * Resolves the segment every segment operation names as its target.
+ *
+ * Returns null for a null identifier, an unknown identifier, or a segment of another
+ * source. The last case matters: Mark In and Mark Out on a foreign segment would compare
+ * a PTS across time bases, which ADR 002 forbids.
  */
-export function findSplittableSegmentIndex(
+export function findCurrentSegment(
   segments: readonly Segment[],
-  pts: Pts,
-  sourceId?: string,
-): number {
-  if (!isPtsString(pts)) {
-    return -1;
+  currentSegmentId: string | null,
+  activeSourceId: string | null | undefined,
+): CurrentSegmentRef | null {
+  if (currentSegmentId === null || !activeSourceId) {
+    return null;
   }
-  return segments.findIndex((seg) => {
-    if (sourceId !== undefined && seg.sourceId !== sourceId) {
-      return false;
-    }
-    return isPtsInsideSegment(pts, seg.inPts, seg.outPts);
-  });
+  const index = segments.findIndex((seg) => seg.id === currentSegmentId);
+  if (index === -1) {
+    return null;
+  }
+  const segment = segments[index];
+  if (segment.sourceId !== activeSourceId) {
+    return null;
+  }
+  return { index, segment };
 }
 
 /**
@@ -67,74 +76,93 @@ export function splitSegment(
 }
 
 /**
- * Checks whether the Mark In button/action should be enabled.
- * Enabled only when calibration is ready, a presented frame with valid inferred PTS is present, and an active source exists.
+ * Reads the inferred PTS of a presented frame, but only while the whole presentation
+ * state can produce a canonical edit boundary.
  */
-export function canMarkIn(
+function markablePts(
   calibrationStatus: CalibrationStatus,
   presentedFrame: PresentedFrame | null,
   hasActiveSource: boolean,
-): boolean {
-  return (
-    hasActiveSource &&
-    calibrationStatus === "ready" &&
-    presentedFrame !== null &&
-    isPtsString(presentedFrame.inferredSourcePts)
-  );
-}
-
-/**
- * Checks whether the Mark Out button/action should be enabled.
- * Enabled only when an In mark is pending, calibration is ready, presented frame is present,
- * and current inferred PTS is strictly greater than pending In PTS (inPts < outPts).
- * Does not allow equal inPts/outPts (ADR 002).
- */
-export function canMarkOut(
-  calibrationStatus: CalibrationStatus,
-  presentedFrame: PresentedFrame | null,
-  pendingInPts: Pts | null,
-  hasActiveSource: boolean,
-): boolean {
-  if (
-    !hasActiveSource ||
-    calibrationStatus !== "ready" ||
-    presentedFrame === null ||
-    pendingInPts === null ||
-    !isPtsString(presentedFrame.inferredSourcePts) ||
-    !isPtsString(pendingInPts)
-  ) {
-    return false;
-  }
-  return isValidSegmentRange(pendingInPts, presentedFrame.inferredSourcePts);
-}
-
-/**
- * Checks whether the Split button/action should be enabled.
- * Enabled only when calibration is ready, a presented frame is present, an active source exists,
- * and the current inferred PTS is strictly inside an existing segment for the active source (ADR 007).
- */
-export function canSplit(
-  segments: readonly Segment[],
-  calibrationStatus: CalibrationStatus,
-  presentedFrame: PresentedFrame | null,
-  hasActiveSource: boolean,
-  activeSourceId?: string,
-): boolean {
+): Pts | null {
   if (
     !hasActiveSource ||
     calibrationStatus !== "ready" ||
     presentedFrame === null ||
     !isPtsString(presentedFrame.inferredSourcePts)
   ) {
+    return null;
+  }
+  return presentedFrame.inferredSourcePts;
+}
+
+/**
+ * Checks whether the Mark In button/action should be enabled.
+ *
+ * With no current segment, Mark In creates a pending mark, so it is enabled whenever
+ * calibration is ready, a presented frame with a valid inferred PTS is present, and an
+ * active source exists.
+ *
+ * With a current segment, Mark In instead moves that segment's In boundary, so it is
+ * enabled only while the move would change the segment and would still leave
+ * `inPts < outPts` (ADR 002). A current segment whose stored PTS does not parse admits no
+ * move, so Mark In is disabled: the store reads the same state as "adjust" and would
+ * reject the mark.
+ */
+export function canMarkIn(
+  calibrationStatus: CalibrationStatus,
+  presentedFrame: PresentedFrame | null,
+  hasActiveSource: boolean,
+  currentTarget?: CurrentSegmentTarget | null,
+): boolean {
+  const pts = markablePts(calibrationStatus, presentedFrame, hasActiveSource);
+  if (pts === null) {
     return false;
   }
-  return (
-    findSplittableSegmentIndex(
-      segments,
-      presentedFrame.inferredSourcePts,
-      activeSourceId,
-    ) !== -1
-  );
+  if (!currentTarget?.hasSegment) {
+    return true;
+  }
+  if (currentTarget.bounds === null) {
+    return false;
+  }
+  const value = BigInt(pts);
+  return value !== currentTarget.bounds.lo && value < currentTarget.bounds.hi;
+}
+
+/**
+ * Checks whether the Mark Out button/action should be enabled.
+ *
+ * With no current segment, Mark Out completes the pending In mark, so it needs a pending
+ * mark and an inferred PTS strictly greater than it. Equal `inPts` and `outPts` stay
+ * rejected (ADR 002).
+ *
+ * With a current segment, Mark Out instead moves that segment's Out boundary, so it is
+ * enabled only while the move would change the segment and would still leave
+ * `inPts < outPts`. The store invariant keeps `pendingInPts` null in this case, so the
+ * pending mark is not consulted, and an unparseable segment disables the action for the
+ * same reason as in `canMarkIn`.
+ */
+export function canMarkOut(
+  calibrationStatus: CalibrationStatus,
+  presentedFrame: PresentedFrame | null,
+  pendingInPts: Pts | null,
+  hasActiveSource: boolean,
+  currentTarget?: CurrentSegmentTarget | null,
+): boolean {
+  const pts = markablePts(calibrationStatus, presentedFrame, hasActiveSource);
+  if (pts === null) {
+    return false;
+  }
+  if (currentTarget?.hasSegment) {
+    if (currentTarget.bounds === null) {
+      return false;
+    }
+    const value = BigInt(pts);
+    return value !== currentTarget.bounds.hi && currentTarget.bounds.lo < value;
+  }
+  if (pendingInPts === null || !isPtsString(pendingInPts)) {
+    return false;
+  }
+  return isValidSegmentRange(pendingInPts, pts);
 }
 
 /** Exact half-open bounds of one segment, parsed once so a per-frame test can reuse them. */
@@ -165,32 +193,56 @@ export function getSegmentBounds(segments: readonly Segment[]): SegmentBounds[] 
 }
 
 /**
- * Same result as `canSplit`, evaluated against precomputed bounds.
- * Costs one BigInt construction plus one comparison per segment, so it is cheap enough
- * to run on every presented frame.
+ * Checks whether the Split button/action should be enabled.
+ * Enabled only when calibration is ready, a presented frame is present, an active source
+ * exists, and the inferred PTS is strictly inside the current segment (ADR 007).
+ *
+ * Costs one BigInt construction and two comparisons, so it is cheap enough to run on
+ * every presented frame.
  */
-export function canSplitWithBounds(
-  bounds: readonly SegmentBounds[],
+export function canSplitCurrentSegment(
+  currentTarget: CurrentSegmentTarget | null | undefined,
   calibrationStatus: CalibrationStatus,
   presentedFrame: PresentedFrame | null,
   hasActiveSource: boolean,
-  activeSourceId?: string,
 ): boolean {
-  if (
-    !hasActiveSource ||
-    calibrationStatus !== "ready" ||
-    presentedFrame === null ||
-    !isPtsString(presentedFrame.inferredSourcePts)
-  ) {
+  const pts = markablePts(calibrationStatus, presentedFrame, hasActiveSource);
+  const bounds = currentTarget?.bounds ?? null;
+  if (pts === null || bounds === null) {
     return false;
   }
-  const value = BigInt(presentedFrame.inferredSourcePts);
-  return bounds.some(
-    (bound) =>
-      (activeSourceId === undefined || bound.sourceId === activeSourceId) &&
-      bound.lo < value &&
-      value < bound.hi,
-  );
+  const value = BigInt(pts);
+  return bounds.lo < value && value < bounds.hi;
+}
+
+/**
+ * The target of a segment action: whether a segment is current, and its exact bounds.
+ *
+ * The two facts are separate fields because the predicates must tell "no current segment"
+ * apart from "a current segment whose stored PTS does not parse". Both leave `bounds`
+ * null, but the first enables Mark In and the second cannot enable any boundary move.
+ */
+export interface CurrentSegmentTarget {
+  /** True while a segment of the active source is current. */
+  readonly hasSegment: boolean;
+  /** Exact half-open bounds, or null when a stored PTS is malformed. */
+  readonly bounds: SegmentBounds | null;
+}
+
+/**
+ * Resolves the target of a segment action, parsing its bounds when the stored PTS pair is
+ * canonical. An unordered pair is kept, because `lo < pts && pts < hi` rejects it.
+ */
+export function getCurrentSegmentTarget(
+  current: CurrentSegmentRef | null | undefined,
+): CurrentSegmentTarget {
+  if (!current) {
+    return { hasSegment: false, bounds: null };
+  }
+  return {
+    hasSegment: true,
+    bounds: getSegmentBounds([current.segment])[0] ?? null,
+  };
 }
 
 export interface ActiveSourceSegmentEntry {

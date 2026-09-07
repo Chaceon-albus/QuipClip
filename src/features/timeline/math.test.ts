@@ -11,10 +11,10 @@ import {
   calculateTotalDurationRational,
   canMarkIn,
   canMarkOut,
-  canSplit,
-  canSplitWithBounds,
-  findSplittableSegmentIndex,
+  canSplitCurrentSegment,
+  findCurrentSegment,
   getActiveSourceSegmentEntries,
+  getCurrentSegmentTarget,
   getSegmentBounds,
   getTimelineDurationSeconds,
   splitSegment,
@@ -39,6 +39,10 @@ describe("timeline PTS editing", () => {
     expect(canMarkIn("calibrating", frame("20"), true)).toBe(false);
     expect(canMarkIn("unavailable", frame("20"), true)).toBe(false);
     expect(canMarkIn("ready", null, true)).toBe(false);
+    // No current segment: Mark In starts a pending mark, so it stays enabled.
+    expect(canMarkIn("ready", frame("20"), true, getCurrentSegmentTarget(null))).toBe(
+      true,
+    );
   });
 
   it("uses the presented PTS itself as the exclusive Out boundary", () => {
@@ -47,12 +51,99 @@ describe("timeline PTS editing", () => {
     expect(canMarkOut("ready", frame("19"), pts("20"), true)).toBe(false);
   });
 
-  it("finds and splits only strict interior PTS for the active source", () => {
-    expect(findSplittableSegmentIndex(segments, pts("-50"), "source-a")).toBe(0);
-    expect(findSplittableSegmentIndex(segments, pts("-100"), "source-a")).toBe(-1);
-    expect(findSplittableSegmentIndex(segments, pts("0"), "source-a")).toBe(-1);
-    expect(canSplit(segments, "ready", frame("75"), true, "source-a")).toBe(true);
-    expect(canSplit(segments, "ready", frame("0"), true, "source-a")).toBe(false);
+  it("resolves the current segment only for a known ID of the active source", () => {
+    expect(findCurrentSegment(segments, "b", "source-a")).toEqual({
+      index: 1,
+      segment: segments[1],
+    });
+    expect(findCurrentSegment(segments, null, "source-a")).toBeNull();
+    expect(findCurrentSegment(segments, "missing", "source-a")).toBeNull();
+    // Segment "c" belongs to source-b. ADR 002 forbids reading its PTS on this timeline.
+    expect(findCurrentSegment(segments, "c", "source-a")).toBeNull();
+    expect(findCurrentSegment(segments, "b", null)).toBeNull();
+  });
+
+  it("parses the current segment bounds and rejects a malformed PTS", () => {
+    const target = getCurrentSegmentTarget(
+      findCurrentSegment(segments, "b", "source-a"),
+    );
+    expect(target).toEqual({
+      hasSegment: true,
+      bounds: { sourceId: "source-a", lo: 50n, hi: 100n },
+    });
+    expect(getCurrentSegmentTarget(null)).toEqual({ hasSegment: false, bounds: null });
+    // A current segment that cannot be parsed is still a current segment.
+    expect(
+      getCurrentSegmentTarget({
+        index: 0,
+        segment: {
+          id: "bad",
+          sourceId: "source-a",
+          inPts: pts("01"),
+          outPts: pts("100"),
+        },
+      }),
+    ).toEqual({ hasSegment: true, bounds: null });
+  });
+
+  it("disables every boundary action on a current segment that cannot be parsed", () => {
+    // The store reads this state as "adjust the current segment" and rejects the mark,
+    // so an enabled button here would do nothing.
+    const target = getCurrentSegmentTarget({
+      index: 0,
+      segment: {
+        id: "bad",
+        sourceId: "source-a",
+        inPts: pts("01"),
+        outPts: pts("100"),
+      },
+    });
+
+    expect(canMarkIn("ready", frame("60"), true, target)).toBe(false);
+    expect(canMarkOut("ready", frame("60"), null, true, target)).toBe(false);
+    // A pending mark cannot rescue it either: the store never holds both at once.
+    expect(canMarkOut("ready", frame("60"), pts("20"), true, target)).toBe(false);
+    expect(canSplitCurrentSegment(target, "ready", frame("60"), true)).toBe(false);
+  });
+
+  it("moves a boundary only while it changes the segment and keeps inPts < outPts", () => {
+    // The current segment is "b", the half-open interval [50, 100).
+    const target = getCurrentSegmentTarget(
+      findCurrentSegment(segments, "b", "source-a"),
+    );
+
+    expect(canMarkIn("ready", frame("60"), true, target)).toBe(true);
+    // An earlier In point is a legal move; only an empty result is forbidden.
+    expect(canMarkIn("ready", frame("-5"), true, target)).toBe(true);
+    expect(canMarkIn("ready", frame("50"), true, target)).toBe(false);
+    expect(canMarkIn("ready", frame("100"), true, target)).toBe(false);
+    expect(canMarkIn("ready", frame("120"), true, target)).toBe(false);
+
+    // The store invariant keeps the pending mark null while a segment is current.
+    expect(canMarkOut("ready", frame("90"), null, true, target)).toBe(true);
+    expect(canMarkOut("ready", frame("200"), null, true, target)).toBe(true);
+    expect(canMarkOut("ready", frame("100"), null, true, target)).toBe(false);
+    expect(canMarkOut("ready", frame("50"), null, true, target)).toBe(false);
+    expect(canMarkOut("ready", frame("20"), null, true, target)).toBe(false);
+  });
+
+  it("splits only a strict interior PTS of the current segment", () => {
+    // The current segment is "a", the half-open interval [-100, 0).
+    const target = getCurrentSegmentTarget(
+      findCurrentSegment(segments, "a", "source-a"),
+    );
+
+    expect(canSplitCurrentSegment(target, "ready", frame("-50"), true)).toBe(true);
+    expect(canSplitCurrentSegment(target, "ready", frame("-100"), true)).toBe(false);
+    expect(canSplitCurrentSegment(target, "ready", frame("0"), true)).toBe(false);
+    // A PTS inside a different segment is not a split point of the current one.
+    expect(canSplitCurrentSegment(target, "ready", frame("75"), true)).toBe(false);
+    expect(canSplitCurrentSegment(null, "ready", frame("-50"), true)).toBe(false);
+    expect(canSplitCurrentSegment(target, "calibrating", frame("-50"), true)).toBe(
+      false,
+    );
+    expect(canSplitCurrentSegment(target, "ready", null, true)).toBe(false);
+    expect(canSplitCurrentSegment(target, "ready", frame("-50"), false)).toBe(false);
 
     const [left, right] = splitSegment(segments[0], pts("-25"), "right");
     expect(left).toEqual({
@@ -101,39 +192,11 @@ describe("timeline PTS editing", () => {
       { sourceId: "source-a", lo: 200n, hi: 200n },
     ]);
     // An unordered pair survives the parse but can never contain a PTS.
-    expect(
-      canSplitWithBounds(
-        getSegmentBounds(malformed),
-        "ready",
-        frame("200"),
-        true,
-        "source-a",
-      ),
-    ).toBe(false);
-  });
-
-  it("agrees with canSplit for every case the bounds path replaces", () => {
-    const bounds = getSegmentBounds(segments);
-    const cases: Array<[Parameters<typeof canSplit>[1], string, boolean, string]> = [
-      ["ready", "75", true, "source-a"],
-      ["ready", "0", true, "source-a"],
-      ["ready", "-50", true, "source-a"],
-      ["ready", "-50", true, "source-b"],
-      ["calibrating", "75", true, "source-a"],
-      ["ready", "75", false, "source-a"],
-    ];
-    for (const [status, value, hasActiveSource, activeSourceId] of cases) {
-      expect(
-        canSplitWithBounds(
-          bounds,
-          status,
-          frame(value),
-          hasActiveSource,
-          activeSourceId,
-        ),
-      ).toBe(canSplit(segments, status, frame(value), hasActiveSource, activeSourceId));
-    }
-    expect(canSplitWithBounds(bounds, "ready", null, true, "source-a")).toBe(false);
+    const unordered = getCurrentSegmentTarget(
+      findCurrentSegment(malformed, "empty", "source-a"),
+    );
+    expect(unordered.bounds).toEqual({ sourceId: "source-a", lo: 200n, hi: 200n });
+    expect(canSplitCurrentSegment(unordered, "ready", frame("200"), true)).toBe(false);
   });
 });
 

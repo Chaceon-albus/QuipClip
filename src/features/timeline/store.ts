@@ -2,15 +2,18 @@
  * Timeline store managing single-source timeline state, mark-in/out editing,
  * segment splitting, undo/redo history stacks, and active source transitions.
  *
+ * Every segment operation names its target through `currentSegmentId`, so no operation
+ * has to guess a segment from the playhead.
+ *
  * Implements ADR 002 (rational time / exclusive out points) and
  * ADR 007 (single-track source-time timeline).
  */
 
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
-import { isPtsString, isValidSegmentRange } from "@/lib/time";
+import { isPtsInsideSegment, isPtsString, isValidSegmentRange } from "@/lib/time";
 import type { Pts, Segment } from "@/types/project";
-import { findSplittableSegmentIndex, splitSegment } from "./math";
+import { findCurrentSegment, splitSegment } from "./math";
 import type { TimelineState, TimelineStoreState } from "./types";
 
 /**
@@ -34,6 +37,7 @@ export function generateSegmentId(): string {
 interface TimelineHistoryEntry {
   segments: Segment[];
   pendingInPts: Pts | null;
+  currentSegmentId: string | null;
   /**
    * Active source identity at the time the entry was pushed.
    * The pending In mark is source-view state, so it is only restored while the
@@ -41,6 +45,20 @@ interface TimelineHistoryEntry {
    */
   sourceId: string | null;
   sourceRevisionKey: string | null;
+}
+
+/**
+ * Captures the restorable state of one edit. Every push site uses this factory, so the
+ * entry shape lives in one place.
+ */
+function historyEntry(state: TimelineState): TimelineHistoryEntry {
+  return {
+    segments: state.segments,
+    pendingInPts: state.pendingInPts,
+    currentSegmentId: state.currentSegmentId,
+    sourceId: state.sourceId,
+    sourceRevisionKey: state.sourceRevisionKey,
+  };
 }
 
 /**
@@ -60,6 +78,38 @@ function restorablePendingIn(
   }
 
   return entry.pendingInPts;
+}
+
+/**
+ * Reads the current segment identifier of a history entry, but only while the segment it
+ * names survives in the restored array and belongs to the source that is active now.
+ *
+ * Keyed on `sourceId` alone, and deliberately NOT on the revision key: canonical segments
+ * survive a revision change, while a pending PTS mark does not. That is why this rule and
+ * `restorablePendingIn` are asymmetric.
+ */
+function restorableCurrentSegmentId(
+  entry: TimelineHistoryEntry,
+  state: TimelineState,
+  restoredSegments: readonly Segment[],
+): string | null {
+  if (entry.currentSegmentId === null || entry.sourceId !== state.sourceId) {
+    return null;
+  }
+  return findCurrentSegment(restoredSegments, entry.currentSegmentId, state.sourceId)
+    ? entry.currentSegmentId
+    : null;
+}
+
+/** Replaces one segment in place, preserving the array order that is the export order. */
+function replaceSegmentAt(
+  segments: readonly Segment[],
+  index: number,
+  segment: Segment,
+): Segment[] {
+  const next = [...segments];
+  next[index] = segment;
+  return next;
 }
 
 /**
@@ -85,6 +135,7 @@ export function createTimelineStore(
     sourceRevisionKey: initialState?.sourceRevisionKey ?? null,
     segments: initialState?.segments ? [...initialState.segments] : [],
     pendingInPts: initialState?.pendingInPts ?? null,
+    currentSegmentId: initialState?.currentSegmentId ?? null,
     canUndo: initialState?.canUndo ?? false,
     canRedo: initialState?.canRedo ?? false,
 
@@ -128,42 +179,97 @@ export function createTimelineStore(
         return;
       }
 
-      set({ pendingInPts: pts });
+      const current = findCurrentSegment(
+        state.segments,
+        state.currentSegmentId,
+        state.sourceId,
+      );
+
+      // Nothing is current, so the mark starts a segment instead of adjusting one.
+      // No history entry: the pending mark is not yet a canonical edit.
+      if (current === null) {
+        set({ pendingInPts: pts });
+        return;
+      }
+
+      // A canonical PTS is a canonical decimal string (ADR 010), so string equality is
+      // exact. A repeated boundary must not fill the undo stack while the user scrubs.
+      if (pts === current.segment.inPts) {
+        return;
+      }
+      if (!isValidSegmentRange(pts, current.segment.outPts)) {
+        return;
+      }
+
+      undoStack.push(historyEntry(state));
+      redoStack = [];
+
+      set({
+        segments: replaceSegmentAt(state.segments, current.index, {
+          ...current.segment,
+          inPts: pts,
+        }),
+        canUndo: true,
+        canRedo: false,
+      });
     },
 
     markOut: (currentPts: Pts) => {
       const state = get();
-      if (!state.sourceId || state.pendingInPts === null || !isPtsString(currentPts)) {
+      if (!state.sourceId || !isPtsString(currentPts)) {
         return;
       }
 
+      const current = findCurrentSegment(
+        state.segments,
+        state.currentSegmentId,
+        state.sourceId,
+      );
+
+      if (current !== null) {
+        if (currentPts === current.segment.outPts) {
+          return;
+        }
+        if (!isValidSegmentRange(current.segment.inPts, currentPts)) {
+          return;
+        }
+
+        undoStack.push(historyEntry(state));
+        redoStack = [];
+
+        set({
+          segments: replaceSegmentAt(state.segments, current.index, {
+            ...current.segment,
+            outPts: currentPts,
+          }),
+          canUndo: true,
+          canRedo: false,
+        });
+        return;
+      }
+
+      if (state.pendingInPts === null) {
+        return;
+      }
       if (!isValidSegmentRange(state.pendingInPts, currentPts)) {
         return;
       }
 
-      const inPts = state.pendingInPts;
-      const outPts = currentPts;
-
-      const newSegment: Segment = {
+      const completedSegment: Segment = {
         id: generateId(),
         sourceId: state.sourceId,
-        inPts,
-        outPts,
+        inPts: state.pendingInPts,
+        outPts: currentPts,
       };
 
-      undoStack.push({
-        segments: state.segments,
-        pendingInPts: state.pendingInPts,
-        sourceId: state.sourceId,
-        sourceRevisionKey: state.sourceRevisionKey,
-      });
+      undoStack.push(historyEntry(state));
       redoStack = [];
 
-      const nextSegments = [...state.segments, newSegment];
-
+      // The completed segment becomes current, so the next Mark In or Split adjusts it.
       set({
-        segments: nextSegments,
+        segments: [...state.segments, completedSegment],
         pendingInPts: null,
+        currentSegmentId: completedSegment.id,
         canUndo: true,
         canRedo: false,
       });
@@ -175,38 +281,77 @@ export function createTimelineStore(
         return;
       }
 
-      const targetIndex = findSplittableSegmentIndex(
+      const current = findCurrentSegment(
         state.segments,
-        currentPts,
+        state.currentSegmentId,
         state.sourceId,
       );
-      if (targetIndex === -1) {
+      if (current === null) {
         return;
       }
 
-      const targetSeg = state.segments[targetIndex];
-      const [leftSeg, rightSeg] = splitSegment(targetSeg, currentPts, generateId());
+      const { index, segment } = current;
+      if (!isPtsInsideSegment(currentPts, segment.inPts, segment.outPts)) {
+        return;
+      }
 
-      undoStack.push({
-        segments: state.segments,
-        pendingInPts: state.pendingInPts,
-        sourceId: state.sourceId,
-        sourceRevisionKey: state.sourceRevisionKey,
-      });
+      // `splitSegment` gives the left half the original ID, so the current segment stays
+      // current with no selection write here, and undo restores the same target.
+      const [leftSeg, rightSeg] = splitSegment(segment, currentPts, generateId());
+
+      undoStack.push(historyEntry(state));
       redoStack = [];
 
-      const nextSegments = [
-        ...state.segments.slice(0, targetIndex),
-        leftSeg,
-        rightSeg,
-        ...state.segments.slice(targetIndex + 1),
-      ];
-
       set({
-        segments: nextSegments,
+        segments: [
+          ...state.segments.slice(0, index),
+          leftSeg,
+          rightSeg,
+          ...state.segments.slice(index + 1),
+        ],
         canUndo: true,
         canRedo: false,
       });
+    },
+
+    newSegment: () => {
+      // Both fields describe the segment being built, so both end together.
+      set({ currentSegmentId: null, pendingInPts: null });
+    },
+
+    deleteSegment: () => {
+      const state = get();
+      const current = findCurrentSegment(
+        state.segments,
+        state.currentSegmentId,
+        state.sourceId,
+      );
+      if (current === null) {
+        return;
+      }
+
+      undoStack.push(historyEntry(state));
+      redoStack = [];
+
+      // `filter` preserves array order, which is the export order (ADR 007). Nothing
+      // becomes current, so the next Delete or Split cannot act on an unnamed segment.
+      set({
+        segments: state.segments.filter((segment) => segment.id !== current.segment.id),
+        currentSegmentId: null,
+        canUndo: true,
+        canRedo: false,
+      });
+    },
+
+    selectSegment: (id: string) => {
+      const state = get();
+      if (findCurrentSegment(state.segments, id, state.sourceId) === null) {
+        return;
+      }
+
+      // Selection is not an edit, so it pushes no history entry. It clears the pending
+      // mark to hold the invariant that only one segment is ever in progress.
+      set({ currentSegmentId: id, pendingInPts: null });
     },
 
     undo: () => {
@@ -216,16 +361,16 @@ export function createTimelineStore(
 
       const state = get();
       const previous = undoStack.pop()!;
-      redoStack.push({
-        segments: state.segments,
-        pendingInPts: state.pendingInPts,
-        sourceId: state.sourceId,
-        sourceRevisionKey: state.sourceRevisionKey,
-      });
+      redoStack.push(historyEntry(state));
 
       set({
         segments: previous.segments,
         pendingInPts: restorablePendingIn(previous, state),
+        currentSegmentId: restorableCurrentSegmentId(
+          previous,
+          state,
+          previous.segments,
+        ),
         canUndo: undoStack.length > 0,
         canRedo: true,
       });
@@ -238,16 +383,12 @@ export function createTimelineStore(
 
       const state = get();
       const next = redoStack.pop()!;
-      undoStack.push({
-        segments: state.segments,
-        pendingInPts: state.pendingInPts,
-        sourceId: state.sourceId,
-        sourceRevisionKey: state.sourceRevisionKey,
-      });
+      undoStack.push(historyEntry(state));
 
       set({
         segments: next.segments,
         pendingInPts: restorablePendingIn(next, state),
+        currentSegmentId: restorableCurrentSegmentId(next, state, next.segments),
         canUndo: true,
         canRedo: redoStack.length > 0,
       });
@@ -265,6 +406,7 @@ export function createTimelineStore(
         sourceRevisionKey: null,
         segments: [],
         pendingInPts: null,
+        currentSegmentId: null,
         canUndo: false,
         canRedo: false,
       });

@@ -55,6 +55,42 @@ the common time base or segment timeline starts.
 
 Multi-track editing remains out of scope.
 
+### One current segment names the target of every edit
+
+The timeline holds a `currentSegmentId`. Mark In, Mark Out, Split and Delete act on the segment
+it names, and never on a segment inferred from the playhead position.
+
+The reason is a fault the earlier model could not avoid. Split resolved to the first entry of the
+array that contained the playhead, while the last such entry is the one painted on top, so with
+overlapping segments Split cut a segment the user could not see. No rule for choosing between
+overlapping segments fixes that. First-match and last-match are both guesses, and the user has no
+way to tell which segment a guess will pick.
+
+So the target is named rather than inferred, and overlapping segments become legal.
+
+Mark In and Mark Out adjust the current segment's boundaries. **New Segment** ends the current
+segment, so the next Mark In starts a fresh one; the first segment of a session needs no press.
+Clicking a segment on the timeline makes it current. **Delete Segment** removes it and leaves
+nothing current, because selecting a neighbour automatically would make an unseen segment the
+operand of the next Delete or Split, which is the ambiguity this rule removes.
+
+While a current segment resolves for the active source, there is no pending In mark. The two
+fields describe the same thing — the segment being built — so they never both hold a value.
+
+A split leaves the left half current. It already keeps the segment's identifier, so a split
+touches no selection field and undo restores the same target with no special case. The right half
+is the one under the playhead, so making it current would move the target under the operand the
+user just used.
+
+`currentSegmentId` restores through undo and redo only while the restored array still holds that
+segment and it belongs to the active source. That rule is keyed on the source alone and not on
+the source revision, unlike the pending In mark: segments survive a revision change and a pending
+timestamp does not.
+
+Clicking a segment selects it and does not seek. The playhead is the operand of every edit
+action, so a selection click that moved it would reintroduce the surprise this rule removes. The
+ruler is the click-to-seek surface.
+
 ## Consequences
 
 - The user can see each segment in its original source context.

@@ -55,6 +55,8 @@ const selectSeekNominal = (state: PlaybackStoreState) => state.seekNominal;
 const selectSegments = (state: TimelineStoreState) => state.segments;
 const selectPendingInPts = (state: TimelineStoreState) => state.pendingInPts;
 const selectSetSource = (state: TimelineStoreState) => state.setSource;
+const selectCurrentSegmentId = (state: TimelineStoreState) => state.currentSegmentId;
+const selectSelectSegment = (state: TimelineStoreState) => state.selectSegment;
 
 export function TimelinePanel({
   activeSourceId,
@@ -73,6 +75,8 @@ export function TimelinePanel({
   const segments = useTimelineStore(selectSegments);
   const pendingInPts = useTimelineStore(selectPendingInPts);
   const setSource = useTimelineStore(selectSetSource);
+  const currentSegmentId = useTimelineStore(selectCurrentSegmentId);
+  const selectSegment = useTimelineStore(selectSelectSegment);
 
   const sourceRevisionKey = getSourceRevisionKey(media);
   const sourceId = media ? (activeSourceId ?? getGeneratedSourceId(media.path)) : null;
@@ -135,14 +139,19 @@ export function TimelinePanel({
     return 0;
   }, [calibrationStatus, presentedFrame, media]);
 
-  const handleSeekClick = (e: React.MouseEvent<HTMLDivElement>) => {
+  /**
+   * Seeks to the timeline position under a client X coordinate.
+   *
+   * Takes the rectangle it maps against, so both click-to-seek surfaces of the panel, the
+   * ruler track and the seek slider, share one implementation.
+   */
+  const seekFromClientX = (clientX: number, rect: DOMRect) => {
     if (!canSeek || totalDurationSeconds === null) {
       return;
     }
-    const rect = e.currentTarget.getBoundingClientRect();
     if (canUsePreciseSeek && media?.probe.videoStartPts && media.probe.videoTimeBase) {
       const targetPts = calculatePtsFromClientX(
-        e.clientX,
+        clientX,
         rect.left,
         rect.width,
         totalDurationSeconds,
@@ -155,7 +164,7 @@ export function TimelinePanel({
       return;
     }
     const targetSeconds = calculateTimelineSecondsFromClientX(
-      e.clientX,
+      clientX,
       rect.left,
       rect.width,
       totalDurationSeconds,
@@ -163,6 +172,10 @@ export function TimelinePanel({
     if (targetSeconds !== null) {
       onApproximateSeek?.(targetSeconds);
     }
+  };
+
+  const handleSeekClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    seekFromClientX(e.clientX, e.currentTarget.getBoundingClientRect());
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -187,21 +200,30 @@ export function TimelinePanel({
     () => getActiveSourceSegmentEntries(segments, sourceId),
     [segments, sourceId],
   );
-  // None of the layout inputs depends on the playhead, so this must not rerun per frame.
+  // None of these inputs depends on the playhead, so this must not rerun per frame. The
+  // label and the number belong here for that reason: `t` is stable per language, so a
+  // catalog lookup per segment costs nothing here and would cost one per presented frame
+  // in the render body.
   const segmentLayouts = useMemo(
     () =>
-      activeSourceSegments.map(({ segment, projectIndex }) => ({
-        segment,
-        projectIndex,
-        layout: calculateSegmentLayout(
+      activeSourceSegments
+        .map(({ segment, projectIndex }) => ({
           segment,
-          media?.probe.videoStartPts,
-          media?.probe.videoTimeBase,
-          totalDurationSeconds,
-        ),
-      })),
-    [activeSourceSegments, media, totalDurationSeconds],
+          number: projectIndex + 1,
+          label: t("timeline.segment", { index: projectIndex + 1 }),
+          layout: calculateSegmentLayout(
+            segment,
+            media?.probe.videoStartPts,
+            media?.probe.videoTimeBase,
+            totalDurationSeconds,
+          ),
+        }))
+        // A zero-width overlay has no visible target. As a button it would also be a Tab
+        // stop with nothing to show, which reads as a dead key press.
+        .filter(({ layout }) => layout.widthPercent > 0),
+    [activeSourceSegments, media, totalDurationSeconds, t],
   );
+  const segmentListLabel = useMemo(() => t("timeline.segmentList"), [t]);
 
   // The pending In region does depend on the playhead, so it stays on the render path.
   const pendingRegion = calculatePendingInRegionLayout(
@@ -235,8 +257,22 @@ export function TimelinePanel({
             {/* Gutter header pinned sticky on the left */}
             <div className="sticky left-0 z-20 w-24 shrink-0 border-r border-timeline-divider bg-sidebar" />
 
-            {/* Ruler track with time markers and tick marks */}
-            <div className="relative flex-1 bg-timeline-ruler">
+            {/*
+             * Ruler track with time markers and tick marks, and the mouse click-to-seek
+             * surface of the panel. A segment button takes the clicks over its own span,
+             * so the track lane below is not a seek surface once segments cover the
+             * source. This rectangle has the same left edge and the same width as the
+             * track lane rectangle, so `seekFromClientX` maps a coordinate identically.
+             *
+             * Mouse only, by intent: the keyboard path stays on the single
+             * `role="slider"` element below. A second focus stop here would repeat the
+             * same arrow-key behaviour, and a focusable element with no role announces
+             * nothing.
+             */}
+            <div
+              onClick={canSeek ? handleSeekClick : undefined}
+              className={`relative flex-1 bg-timeline-ruler ${canSeek ? "cursor-pointer" : ""}`}
+            >
               {/* Timecode labels and ticks */}
               <div className="relative h-full w-full font-mono text-[10px]">
                 {markers.map((marker) => (
@@ -277,82 +313,113 @@ export function TimelinePanel({
             {/* Track lane container */}
             <div className="relative flex flex-1 items-center bg-timeline-track py-2">
               {media ? (
-                /* Canonical accessible seek surface: inner source surface spanning full extent with overlays */
-                <div
-                  role="slider"
-                  aria-label={t("timeline.seekSlider")}
-                  aria-disabled={!canSeek}
-                  aria-valuemin={0}
-                  aria-valuemax={isIndeterminate ? undefined : totalDurationSeconds}
-                  aria-valuenow={
-                    isIndeterminate || !Number.isFinite(currentElapsedSeconds)
-                      ? undefined
-                      : Math.max(
-                          0,
-                          Math.min(totalDurationSeconds, currentElapsedSeconds),
-                        )
-                  }
-                  tabIndex={canSeek ? 0 : undefined}
-                  onClick={canSeek ? handleSeekClick : undefined}
-                  onKeyDown={canSeek ? handleKeyDown : undefined}
-                  className={`relative h-full w-full ${canSeek ? "cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
-                >
-                  {/* Full-source background layer */}
-                  <div className="pointer-events-none absolute inset-0 flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-clip-video p-2 text-clip-foreground shadow-xs">
-                    <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-preview-surface text-preview-muted">
-                      <Film className="size-3.5" />
-                    </div>
-                    <span className="truncate text-xs font-medium">
-                      {media.fileName}
-                    </span>
-                  </div>
-
-                  {/* Completed segment overlays */}
-                  {segmentLayouts.map(({ segment: seg, projectIndex, layout }) => (
-                    <div
-                      key={seg.id}
-                      className="pointer-events-none absolute inset-y-1 z-10 flex items-center overflow-hidden rounded-md border-2 border-primary bg-primary/25 px-2 text-foreground shadow-xs backdrop-blur-xs"
-                      style={{
-                        left: layout.left,
-                        width: layout.width,
-                      }}
-                    >
-                      <span className="truncate font-mono text-[10px] font-semibold text-primary">
-                        #{projectIndex + 1}
+                /*
+                 * Shared geometry box. The seek slider and the segment layer are siblings
+                 * inside it, each spanning the same rectangle, so `inset-y-1` and the
+                 * left/width percentages resolve exactly as they did when the overlays
+                 * were children of the slider. Segments are interactive, and interactive
+                 * content cannot be nested inside a `role="slider"` element.
+                 */
+                <div className="relative h-full w-full">
+                  {/* Canonical accessible seek surface */}
+                  <div
+                    role="slider"
+                    aria-label={t("timeline.seekSlider")}
+                    aria-disabled={!canSeek}
+                    aria-valuemin={0}
+                    aria-valuemax={isIndeterminate ? undefined : totalDurationSeconds}
+                    aria-valuenow={
+                      isIndeterminate || !Number.isFinite(currentElapsedSeconds)
+                        ? undefined
+                        : Math.max(
+                            0,
+                            Math.min(totalDurationSeconds, currentElapsedSeconds),
+                          )
+                    }
+                    tabIndex={canSeek ? 0 : undefined}
+                    onClick={canSeek ? handleSeekClick : undefined}
+                    onKeyDown={canSeek ? handleKeyDown : undefined}
+                    className={`absolute inset-0 ${canSeek ? "cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
+                  >
+                    {/* Full-source background layer */}
+                    <div className="pointer-events-none absolute inset-0 flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-clip-video p-2 text-clip-foreground shadow-xs">
+                      <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-preview-surface text-preview-muted">
+                        <Film className="size-3.5" />
+                      </div>
+                      <span className="truncate text-xs font-medium">
+                        {media.fileName}
                       </span>
                     </div>
-                  ))}
 
-                  {/* Pending In active region preview overlay */}
-                  {pendingRegion && pendingRegion.isVisible && (
-                    <div
-                      className="pointer-events-none absolute inset-y-1 z-10 rounded-md border-2 border-dashed border-primary/80 bg-primary/15"
-                      style={{
-                        left: pendingRegion.left,
-                        width: pendingRegion.width,
-                      }}
-                    />
-                  )}
+                    {/* Pending In active region preview overlay */}
+                    {pendingRegion && pendingRegion.isVisible && (
+                      <div
+                        className="pointer-events-none absolute inset-y-1 z-20 rounded-md border-2 border-dashed border-primary/80 bg-primary/15"
+                        style={{
+                          left: pendingRegion.left,
+                          width: pendingRegion.width,
+                        }}
+                      />
+                    )}
 
-                  {/* Pending In vertical flag/marker */}
-                  {pendingInPercent !== null && (
-                    <div
-                      className="pointer-events-none absolute inset-y-0 z-20 flex -translate-x-1/2 flex-col items-center"
-                      style={{ left: `${pendingInPercent}%` }}
-                    >
-                      <div className="h-full w-0.5 bg-primary shadow-xs" />
-                    </div>
-                  )}
+                    {/* Pending In vertical flag/marker */}
+                    {pendingInPercent !== null && (
+                      <div
+                        className="pointer-events-none absolute inset-y-0 z-20 flex -translate-x-1/2 flex-col items-center"
+                        style={{ left: `${pendingInPercent}%` }}
+                      >
+                        <div className="h-full w-0.5 bg-primary shadow-xs" />
+                      </div>
+                    )}
 
-                  {/* Playhead vertical line spanning the track lane */}
-                  {!isIndeterminate && (
-                    <div
-                      className="pointer-events-none absolute inset-y-0 z-30 flex -translate-x-1/2 flex-col items-center"
-                      style={{ left: playhead.left }}
-                    >
-                      <div className="h-full w-0.5 bg-timeline-playhead shadow-xs" />
-                    </div>
-                  )}
+                    {/* Playhead vertical line spanning the track lane */}
+                    {!isIndeterminate && (
+                      <div
+                        className="pointer-events-none absolute inset-y-0 z-30 flex -translate-x-1/2 flex-col items-center"
+                        style={{ left: playhead.left }}
+                      >
+                        <div className="h-full w-0.5 bg-timeline-playhead shadow-xs" />
+                      </div>
+                    )}
+                  </div>
+
+                  {/*
+                   * Completed segment overlays. The layer takes the clicks of its buttons
+                   * only, so uncovered track stays a click-to-seek surface; over a
+                   * segment, the ruler track above is the seek surface. The `z-10` puts
+                   * this layer under the pending region and the playhead.
+                   */}
+                  <div
+                    role="group"
+                    aria-label={segmentListLabel}
+                    className="pointer-events-none absolute inset-0 z-10"
+                  >
+                    {segmentLayouts.map(({ segment: seg, number, label, layout }) => {
+                      // A string comparison at render time, so selection never rebuilds
+                      // the memoized layouts.
+                      const isCurrent = seg.id === currentSegmentId;
+                      return (
+                        <button
+                          key={seg.id}
+                          type="button"
+                          aria-pressed={isCurrent}
+                          aria-label={label}
+                          // Selecting does not seek: the playhead is the operand of Mark
+                          // In, Mark Out and Split, so a selection click must not move it.
+                          onClick={() => selectSegment(seg.id)}
+                          className={`pointer-events-auto absolute inset-y-1 flex items-center overflow-hidden rounded-md border-2 border-primary px-2 text-foreground shadow-xs backdrop-blur-xs ${isCurrent ? "bg-primary/45 ring-2 ring-ring" : "bg-primary/25"}`}
+                          style={{
+                            left: layout.left,
+                            width: layout.width,
+                          }}
+                        >
+                          <span className="truncate font-mono text-[10px] font-semibold text-primary">
+                            #{number}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               ) : (
                 /* Localized empty prompt */
