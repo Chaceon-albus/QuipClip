@@ -21,11 +21,12 @@
 //! The child gets two pipes, and both must be drained from the moment it spawns:
 //!
 //! - **stderr**, on its own thread, through
-//!   [`read_capped`](crate::ffmpeg::capabilities::smoke::read_capped). This is not a nicety.
-//!   A chatty `ffmpeg` fills the pipe's operating-system buffer and then blocks *inside a
-//!   write* before it can exit, so an undrained pipe turns a finished encode into a hang that
-//!   only cancellation can end. `read_capped` keeps reading past its cap for exactly this
-//!   reason, which is why it is `pub(crate)` and shared rather than copied here.
+//!   [`read_capped_tail`](crate::ffmpeg::capabilities::smoke::read_capped_tail). This is not a
+//!   nicety. A chatty `ffmpeg` fills the pipe's operating-system buffer and then blocks *inside
+//!   a write* before it can exit, so an undrained pipe turns a finished encode into a hang that
+//!   only cancellation can end. `read_capped_tail` keeps reading past its cap for exactly this
+//!   reason, which is why it is `pub(crate)` and shared with `read_capped` rather than copied
+//!   here. It retains the *last* bytes: `ffmpeg` writes its reason for stopping last.
 //! - **stdout**, on a second thread, parsed into [`ProgressSnapshot`] values and sent down an
 //!   unbounded channel. The supervising thread cannot read this pipe itself: `read_until`
 //!   blocks until `ffmpeg` writes a line, an encode can go seconds between progress blocks,
@@ -97,7 +98,7 @@
 //! once and every join returns immediately. The tests keep to the same rule.
 
 use super::{ProgressReader, ProgressSnapshot};
-use crate::ffmpeg::capabilities::smoke::{read_capped, stderr_tail};
+use crate::ffmpeg::capabilities::smoke::{read_capped_tail, stderr_tail};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -108,20 +109,22 @@ use std::time::Duration;
 
 /// The largest number of stderr bytes [`run_export_process`] retains from one export.
 ///
-/// The same 8 KiB the smoke path keeps, and kept the same way: [`read_capped`] retains the
-/// **first** 8 KiB and then keeps reading and discarding, so a chatty child is still drained
-/// and can never block on a full pipe.
+/// This is a **tail** cap: [`read_capped_tail`] keeps the **last** 8 KiB in a ring buffer and
+/// keeps reading past it, so a chatty child is still drained and can never block on a full
+/// pipe.
 ///
-/// Retaining the head has a cost worth stating plainly. `ffmpeg`'s reason for stopping is its
-/// last line, and on a build that floods stderr the capture fills long before that line is
-/// written, so the fatal message is discarded and no amount of tailing
-/// [`ExportProcessOutcome::stderr_detail`] can recover it. Two things keep that rare rather than
-/// routine: ADR 014 runs `ffmpeg` with `-loglevel error`, so a healthy export writes nothing
-/// here at all and a failing one writes a handful of lines, well inside the cap; and the
-/// frame-count comparison, not the stderr text, is what decides whether an export succeeded. The
-/// alternative -- a tail ring buffer that always holds the *last* 8 KiB -- would stop reusing
-/// [`read_capped`], whose drain-past-the-cap behaviour is exactly why it is shared rather than
-/// copied, so it is a deliberate follow-up rather than a change to make here.
+/// The tail is the end that carries the answer. `ffmpeg` writes its reason for stopping as its
+/// last line, so a head capture on a build that floods stderr discards the fatal message and no
+/// amount of tailing [`ExportProcessOutcome::stderr_detail`] can recover it. That matters beyond
+/// the diagnostic: ADR 016 defers the `encoderUnavailable` pre-check and leans on this text as
+/// its stand-in, which makes it the only thing in the export path that can explain a bad
+/// encoder. At `-loglevel error` (ADR 014) a run that reaches 8 KiB is repeating one line
+/// thousands of times, so the head is the least informative half exactly when it differs from
+/// the tail.
+///
+/// `capabilities::smoke`'s `STDERR_CAPTURE_LIMIT` and `ffmpeg::probe`'s are the same size and
+/// both bound a **head**. The three stay separate constants on purpose: they no longer bound
+/// the same end of a stream, so one shared constant would assert an equality that is not true.
 const STDERR_CAPTURE_LIMIT: usize = 8 * 1024;
 
 /// The largest number of stderr-tail bytes [`ExportProcessOutcome::stderr_detail`] returns.
@@ -210,7 +213,7 @@ pub enum ExportProcessStatus {
 pub struct ExportProcessOutcome {
     /// How the process ended.
     pub status: ExportProcessStatus,
-    /// Up to [`STDERR_CAPTURE_LIMIT`] bytes from the start of the child's stderr, captured on
+    /// Up to [`STDERR_CAPTURE_LIMIT`] bytes from the end of the child's stderr, captured on
     /// a separate thread while it ran.
     pub stderr: Vec<u8>,
     /// The last complete `-progress` block the child wrote, or `None` when it wrote none.
@@ -227,13 +230,13 @@ pub struct ExportProcessOutcome {
 }
 
 impl ExportProcessOutcome {
-    /// Up to [`STDERR_DETAIL_LIMIT`] bytes from the end of the *captured* stderr, as text.
+    /// Up to [`STDERR_DETAIL_LIMIT`] bytes from the end of the child's stderr, as text.
     ///
-    /// Read that qualifier literally. When the child wrote less than [`STDERR_CAPTURE_LIMIT`],
-    /// which is the ordinary case under `-loglevel error`, this really is the end of its stderr
-    /// and it holds the line that says why the encode stopped. When the capture hit the cap,
-    /// this is the tail of the retained *head*, and the fatal line is not in `stderr` at all for
-    /// this method to find; [`STDERR_CAPTURE_LIMIT`] documents that trade.
+    /// This is the end of the stream whether or not the capture hit its cap. The capture itself
+    /// is a tail ([`read_capped_tail`]), so a child that wrote less than
+    /// [`STDERR_CAPTURE_LIMIT`] leaves its whole stderr here to cut from, and one that wrote
+    /// more leaves its last 8 KiB -- either way the line that says why the encode stopped is
+    /// inside it.
     ///
     /// The cut itself is [`stderr_tail`], the same function the capability probe fills its own
     /// `detail` field with, so both paths cut on a UTF-8 character boundary the same way and
@@ -332,7 +335,7 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
         .stderr
         .take()
         .expect("stderr was requested as piped above");
-    let stderr_thread = thread::spawn(move || read_capped(stderr, STDERR_CAPTURE_LIMIT));
+    let stderr_thread = thread::spawn(move || read_capped_tail(stderr, STDERR_CAPTURE_LIMIT));
 
     let stdout = child
         .child_mut()
@@ -345,7 +348,7 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
         // already returned or is unwinding, and stopping the pump there would leave the pipe
         // undrained while the child is possibly still writing to it -- the hang described at
         // the top of this file. Draining to end of stream costs nothing and cannot block the
-        // child, which is the same discipline `read_capped` follows past its own cap.
+        // child, which is the same discipline `read_capped_tail` follows past its own cap.
         pump_progress(stdout, |snapshot| {
             let _ = progress_sender.send(snapshot);
         });
@@ -424,7 +427,7 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
 ///
 /// Split out of [`run_export_process`] so the byte-level behaviour can be tested with a plain
 /// [`std::io::Cursor`], with no process and no `ffmpeg` anywhere near it -- the same way
-/// `read_capped` is tested.
+/// `read_capped_tail` is tested.
 ///
 /// Nothing in here can fail upward, which is the point:
 ///
@@ -438,7 +441,7 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
 /// - A line longer than [`MAX_PROGRESS_LINE_BYTES`] is discarded rather than buffered. A
 ///   `read_until` with no bound grows one allocation until the allocator refuses, so a stream
 ///   that never writes a newline would take the application down; the twin of this pump on the
-///   stderr side is bounded by [`read_capped`], and this closes the asymmetry.
+///   stderr side is bounded by [`read_capped_tail`], and this closes the asymmetry.
 ///
 /// # What a bad byte actually costs
 ///
@@ -832,18 +835,27 @@ mod tests {
         )
     }
 
+    /// How many lines [`chatty_stderr_command`] writes to stderr.
+    const CHATTY_LINES: u32 = 500;
+
     /// A command that writes far more than [`STDERR_CAPTURE_LIMIT`] bytes to stderr.
     ///
-    /// 500 lines of 40 characters is roughly 20 KiB, comfortably past the 8 KiB cap.
+    /// 500 lines of about 40 characters is roughly 20 KiB, comfortably past the 8 KiB cap.
+    ///
+    /// Every line carries its own number, and that is what makes the capture test worth
+    /// anything: a flood of identical bytes reads the same from either end, so a head capture
+    /// and a tail capture would both satisfy a length-and-ASCII assertion. Numbered lines let
+    /// the test name which end survived.
     #[cfg(unix)]
     fn chatty_stderr_command() -> (PathBuf, Vec<String>) {
         (
             PathBuf::from("/bin/sh"),
             vec![
                 "-c".to_owned(),
-                "i=0; while [ $i -lt 500 ]; do \
-                 echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx >&2; i=$((i+1)); done"
-                    .to_owned(),
+                format!(
+                    "i=1; while [ $i -le {CHATTY_LINES} ]; do \
+                     echo line $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx >&2; i=$((i+1)); done"
+                ),
             ],
         )
     }
@@ -851,15 +863,18 @@ mod tests {
     /// The Windows counterpart of [`chatty_stderr_command`]. The `@` matters: command echo is
     /// on for a `for` body run from a command line, so without it the loop would also fill
     /// stdout with a copy of itself.
+    ///
+    /// The lines are numbered for the reason the Unix arm gives.
     #[cfg(windows)]
     fn chatty_stderr_command() -> (PathBuf, Vec<String>) {
         (
             PathBuf::from("cmd.exe"),
             vec![
                 "/c".to_owned(),
-                "for /l %i in (1,1,500) do \
-                 @echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 1>&2"
-                    .to_owned(),
+                format!(
+                    "for /l %i in (1,1,{CHATTY_LINES}) do \
+                     @echo line %i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 1>&2"
+                ),
             ],
         )
     }
@@ -1179,7 +1194,11 @@ mod tests {
     }
 
     #[test]
-    fn stderr_is_captured_and_capped_at_the_capture_limit() {
+    fn a_capped_stderr_capture_keeps_the_last_line_and_drops_the_first() {
+        // `ffmpeg` writes its reason for stopping last, so this is the claim that matters: a
+        // capture that filled up must hold the end of the stream. The earlier version of this
+        // test asserted only the length and that the bytes were ASCII, which a head capture and
+        // a tail capture satisfy alike, so it could not have caught the head/tail fault.
         let (program, arguments) = chatty_stderr_command();
 
         let (outcome, _) = run_to_completion(&program, &arguments);
@@ -1187,7 +1206,18 @@ mod tests {
         // Reaching this assertion at all is half the test: an undrained stderr pipe would
         // have blocked the child inside a write, and the run would never have finished.
         assert_eq!(outcome.stderr.len(), STDERR_CAPTURE_LIMIT);
-        assert!(outcome.stderr.iter().all(|byte| byte.is_ascii()));
+        let captured = String::from_utf8_lossy(&outcome.stderr);
+        assert!(
+            captured.contains(&format!(
+                "line {CHATTY_LINES} xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            )),
+            "the last line the child wrote must survive the cap"
+        );
+        // The full line body, not just `line 1`, which is a prefix of `line 100`.
+        assert!(
+            !captured.contains("line 1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+            "the capture is a tail, so the first line must have been dropped"
+        );
     }
 
     #[test]

@@ -406,7 +406,10 @@ fn run_ffmpeg_listing_within(
             return Err(ListingFailure {
                 code: CapabilityProbeErrorCode::FfmpegProcessFailed,
                 exit_code: code,
-                detail: capabilities::stderr_tail(&outcome.stderr, 512),
+                detail: capabilities::stderr_tail(
+                    &outcome.stderr,
+                    capabilities::PROBE_DETAIL_LIMIT,
+                ),
             });
         }
         capabilities::CommandStatus::TimedOut => {
@@ -415,7 +418,10 @@ fn run_ffmpeg_listing_within(
                 // The process was killed at the deadline, so it reported no exit code of its
                 // own.
                 exit_code: None,
-                detail: capabilities::stderr_tail(&outcome.stderr, 512),
+                detail: capabilities::stderr_tail(
+                    &outcome.stderr,
+                    capabilities::PROBE_DETAIL_LIMIT,
+                ),
             });
         }
     }

@@ -18,7 +18,7 @@ pub use listing::{
 };
 pub use smoke::{
     classify, run_smoke_report, run_smoke_test, run_with_timeout, smoke_arguments, stderr_tail,
-    CommandOutcome, CommandStatus, SmokeReport, StdoutCapture, SMOKE_TIMEOUT,
+    CommandOutcome, CommandStatus, SmokeReport, StdoutCapture, PROBE_DETAIL_LIMIT, SMOKE_TIMEOUT,
 };
 
 use serde::{Deserialize, Serialize};

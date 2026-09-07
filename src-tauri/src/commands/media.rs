@@ -1,5 +1,6 @@
 //! Media import validation and probing.
 
+use crate::ffmpeg::capabilities::PROBE_DETAIL_LIMIT;
 use crate::ffmpeg::{self, FfmpegPaths, MediaProbe, ProbeError};
 use crate::settings;
 use serde::Serialize;
@@ -256,12 +257,26 @@ pub(crate) fn map_probe_error(error: ProbeError) -> ImportMediaError {
     }
 }
 
+/// Cut the last [`PROBE_DETAIL_LIMIT`] bytes of an `ffprobe` stderr capture into text, or
+/// `None` when the capture is empty.
+///
+/// [`ffmpeg::capabilities::stderr_tail`] does the work rather than a `str::from_utf8` of its
+/// own. `from_utf8` discards the whole diagnostic for one invalid byte anywhere in it, so an
+/// `ffprobe` running under a non-UTF-8 locale reported nothing at all; `stderr_tail` walks
+/// forward to a character boundary and repairs the rest with `from_utf8_lossy`, so a mangled
+/// byte costs a character instead of the diagnostic. It returns `None` for empty input, which
+/// is the empty case, so this needs no branch of its own.
+///
+/// The capture this reads is a **head**: `ffmpeg::probe` keeps its first bytes, and stays on
+/// that end deliberately. An `ffprobe` runs once, briefly, at `-v error`, so it cannot build up
+/// the per-frame flood that made the export runner move to a tail capture.
+///
+/// The bound is [`PROBE_DETAIL_LIMIT`] itself, not a second constant holding the same number.
+/// An import failure and a capability probe failure fill the same `detail: Option<String>` on
+/// the same IPC boundary for the same purpose — a diagnostic a user copies into a bug report,
+/// never the message the interface shows (ADR 011) — so they are one policy with one name.
 fn diagnostic_text(bytes: &[u8]) -> Option<String> {
-    if bytes.is_empty() {
-        None
-    } else {
-        std::str::from_utf8(bytes).ok().map(str::to_owned)
-    }
+    ffmpeg::capabilities::stderr_tail(bytes, PROBE_DETAIL_LIMIT)
 }
 
 #[cfg(test)]
@@ -543,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_failure_preserves_only_valid_raw_ffprobe_stderr() {
+    fn parse_failure_repairs_and_bounds_raw_ffprobe_stderr() {
         let source = || {
             ProbeParseError::Json(serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err())
         };
@@ -556,14 +571,43 @@ mod tests {
             source: source(),
             stderr: Vec::new(),
         });
+        // This test used to assert `None` here, pinning the fault: one invalid byte anywhere
+        // discarded the whole diagnostic, so an `ffprobe` under a non-UTF-8 locale reported
+        // nothing a user could read. A repaired diagnostic is worth more than no diagnostic.
         let invalid = map_probe_error(ProbeError::Parse {
             source: source(),
-            stderr: vec![0xff, 0xfe],
+            stderr: b"cannot open \xff\xfe.mkv".to_vec(),
+        });
+        let long = map_probe_error(ProbeError::Parse {
+            source: source(),
+            stderr: vec![b'x'; PROBE_DETAIL_LIMIT * 4],
+        });
+        // The same length in bytes no byte of which is valid UTF-8. The limit cuts input bytes,
+        // and the lossy repair then expands each one into a three-byte `U+FFFD`, so this is the
+        // real bound on what crosses the wire.
+        let long_invalid = map_probe_error(ProbeError::Parse {
+            source: source(),
+            stderr: vec![0xff; PROBE_DETAIL_LIMIT * 4],
         });
 
         assert_eq!(valid.detail.as_deref(), Some("raw ffprobe diagnostic"));
         assert_eq!(empty.detail, None);
-        assert_eq!(invalid.detail, None);
+        let invalid_detail = invalid
+            .detail
+            .expect("an invalid byte must not cost the whole detail");
+        assert!(invalid_detail.contains('\u{fffd}'));
+        assert!(invalid_detail.starts_with("cannot open "));
+        assert!(invalid_detail.ends_with(".mkv"));
+        // `<=`, not `==`: the limit bounds the input bytes the cut keeps, and the ASCII fixture
+        // is the case where those two counts happen to agree.
+        let long_detail = long.detail.expect("a long stderr still has a detail");
+        assert!(long_detail.len() <= PROBE_DETAIL_LIMIT);
+        assert_eq!(long_detail, "x".repeat(PROBE_DETAIL_LIMIT));
+        let long_invalid_detail = long_invalid
+            .detail
+            .expect("an all-invalid stderr still has a detail");
+        assert_eq!(long_invalid_detail.len(), 3 * PROBE_DETAIL_LIMIT);
+        assert_eq!(long_invalid_detail.chars().count(), PROBE_DETAIL_LIMIT);
     }
 
     #[test]

@@ -28,6 +28,12 @@ pub const SMOKE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// The largest number of stderr bytes [`run_with_timeout`] retains from a smoke test.
+///
+/// This is a **head** cap: [`read_capped`] keeps the first 8 KiB. `ffmpeg::probe`'s
+/// `STDERR_CAPTURE_LIMIT` is the same head cap for the same reason, and
+/// `ffmpeg::export::process`'s is a **tail** cap of the same size. The three are separate
+/// constants on purpose: they no longer bound the same end of a stream, so one shared
+/// constant would assert an equality that is not true.
 const STDERR_CAPTURE_LIMIT: usize = 8 * 1024;
 
 /// The largest number of stdout bytes [`run_with_timeout`] retains for a caller that asked
@@ -40,9 +46,17 @@ const STDERR_CAPTURE_LIMIT: usize = 8 * 1024;
 /// process can make this process hold.
 const STDOUT_CAPTURE_LIMIT: usize = 1024 * 1024;
 
-/// The largest number of stderr-tail bytes [`run_smoke_report`] keeps in a [`SmokeReport`]'s
-/// `detail` field.
-const SMOKE_DETAIL_LIMIT: usize = 512;
+/// The largest number of stderr-tail *input* bytes a probe failure puts in a `detail` field.
+///
+/// [`run_smoke_report`] bounds [`SmokeReport::detail`] with it, the listing step bounds its own
+/// failure detail with it, and the media import command bounds its `ffprobe` diagnostic with it.
+/// All three fill the same wire field for the same purpose, so this is one policy with one name
+/// rather than the same number written three times.
+///
+/// The bound is on the bytes [`stderr_tail`] cuts, not on the text it returns. Lossy repair
+/// turns each invalid byte into a three-byte `U+FFFD`, so a capture of nothing but invalid
+/// bytes crosses the wire as up to three times this many bytes.
+pub const PROBE_DETAIL_LIMIT: usize = 512;
 
 /// One lock, held for one smoke test at a time, for the whole application.
 ///
@@ -325,10 +339,10 @@ pub(crate) fn kill_and_reap(child: &mut Child) -> io::Result<()> {
 /// discarding until the pipe closes, so a chatty process is fully drained and can never
 /// block on a full pipe buffer waiting for a reader that stopped early.
 ///
-/// The export process runner (ADR 004, ADR 014) is a second caller of this function: it
-/// must drain a long-running ffmpeg process's stderr without blocking, and that
-/// keep-reading-after-the-cap behaviour is exactly why this function is shared rather than
-/// duplicated there.
+/// The callers are the ones whose first bytes are the informative ones: the smoke test,
+/// which fails on its first line, and `ffmpeg::probe`, which runs `ffprobe` once, briefly,
+/// at `-v error`. A caller that needs the *last* bytes instead uses [`read_capped_tail`],
+/// which keeps this same drain discipline.
 pub(crate) fn read_capped(mut reader: impl Read, cap: usize) -> Vec<u8> {
     let mut captured = Vec::new();
     let mut buffer = [0_u8; 4096];
@@ -348,6 +362,72 @@ pub(crate) fn read_capped(mut reader: impl Read, cap: usize) -> Vec<u8> {
     captured
 }
 
+/// Read `reader` to end of stream, retaining only the last `cap` bytes.
+///
+/// [`read_capped`]'s twin, and it keeps that function's drain discipline exactly: the loop
+/// reads until the pipe closes rather than stopping at `cap`. That property is what makes
+/// the pair belong side by side. A chatty `ffmpeg` fills the pipe's operating-system buffer
+/// and blocks *inside a write* before it can exit, so a reader that stopped at the cap would
+/// turn a finished encode into a hang that only cancellation ends.
+///
+/// The export process runner (ADR 004, ADR 014) is the caller. `ffmpeg` writes its reason for
+/// stopping as its *last* line, so a head capture on a build that floods stderr discards the
+/// one line the diagnostic exists to carry; ADR 016 leans on that text as the stand-in for the
+/// deferred `encoderUnavailable` pre-check.
+///
+/// The ring buffer is allocated once, at `cap` bytes, and never grows: a process that writes
+/// gigabytes to stderr costs `cap` bytes of memory, not its own output. `cap` is only rounded
+/// down to at most `cap` bytes retained, never up, and a `cap` of zero retains nothing while
+/// still draining.
+pub(crate) fn read_capped_tail(mut reader: impl Read, cap: usize) -> Vec<u8> {
+    let mut ring = vec![0_u8; cap];
+    // The index the next byte goes to, which is also the index of the oldest retained byte
+    // once the ring has wrapped. `filled` saturates at `cap` and says how much of the ring
+    // holds real data.
+    let mut next = 0_usize;
+    let mut filled = 0_usize;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                // Still a `continue`, not a `break`: a zero cap must drain like any other.
+                if cap == 0 {
+                    continue;
+                }
+                // A single read can be larger than the ring. Only its own last `cap` bytes
+                // could survive, so the earlier ones are dropped here rather than written
+                // over themselves below.
+                let chunk = if count > cap {
+                    &buffer[count - cap..count]
+                } else {
+                    &buffer[..count]
+                };
+                // Two copies, because a chunk that runs off the end of the ring wraps to the
+                // front. The second is empty whenever it does not.
+                let head = chunk.len().min(cap - next);
+                ring[next..next + head].copy_from_slice(&chunk[..head]);
+                ring[..chunk.len() - head].copy_from_slice(&chunk[head..]);
+                next = (next + chunk.len()) % cap;
+                filled = (filled + chunk.len()).min(cap);
+            }
+            Err(ref error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    if filled < cap {
+        // The stream was shorter than the ring, so it never wrapped and the bytes are already
+        // in order from index zero.
+        ring.truncate(filled);
+        return ring;
+    }
+    // The oldest byte is at `next`, so rotating it to the front puts the ring in stream order.
+    // A stream of exactly `cap` bytes leaves `next` at zero, where this is a no-op rather than
+    // a full rotation.
+    ring.rotate_left(next);
+    ring
+}
+
 /// The outcome of one smoke test, together with the diagnostic detail a failure leaves
 /// behind.
 ///
@@ -361,7 +441,7 @@ pub struct SmokeReport {
     pub status: EncoderStatus,
     /// The process's exit code, when it ran to completion before the deadline.
     pub exit_code: Option<i32>,
-    /// Up to [`SMOKE_DETAIL_LIMIT`] bytes of the process's stderr tail, when it produced any.
+    /// Up to [`PROBE_DETAIL_LIMIT`] bytes of the process's stderr tail, when it produced any.
     pub detail: Option<String>,
 }
 
@@ -393,7 +473,7 @@ pub fn run_smoke_report(ffmpeg: &Path, encoder: &str, kind: CodecKind) -> io::Re
         CommandStatus::Exited { code, .. } => code,
         CommandStatus::TimedOut => None,
     };
-    let detail = stderr_tail(&outcome.stderr, SMOKE_DETAIL_LIMIT);
+    let detail = stderr_tail(&outcome.stderr, PROBE_DETAIL_LIMIT);
     Ok(SmokeReport {
         status,
         exit_code,
@@ -662,6 +742,165 @@ mod tests {
         assert_eq!(captured.len(), 8 * 1024);
         // The load-bearing half: the reader must be consumed to the end, not abandoned at the cap.
         assert_eq!(cursor.position() as usize, data.len());
+    }
+
+    #[test]
+    fn read_capped_tail_keeps_the_last_bytes_and_still_drains_past_the_cap() {
+        // The fault this function exists for: ffmpeg writes its reason for stopping last, so a
+        // capture that filled up early must hold the end of the stream, not its beginning.
+        let mut data = vec![b'x'; 32 * 1024];
+        data.extend_from_slice(b"the error that stopped the encode");
+        let mut cursor = std::io::Cursor::new(data.clone());
+
+        let captured = read_capped_tail(&mut cursor, 8 * 1024);
+
+        assert_eq!(captured.len(), 8 * 1024);
+        assert_eq!(captured, data[data.len() - 8 * 1024..]);
+        assert!(captured.ends_with(b"the error that stopped the encode"));
+        // The load-bearing half, exactly as for `read_capped`: a reader that stopped at the cap
+        // would leave a chatty child blocked inside a write on a full pipe.
+        assert_eq!(cursor.position() as usize, data.len());
+    }
+
+    #[test]
+    fn read_capped_tail_keeps_a_stream_shorter_than_the_cap_whole() {
+        let data = b"short".to_vec();
+        let captured = read_capped_tail(std::io::Cursor::new(data.clone()), 1024);
+        assert_eq!(captured, data);
+    }
+
+    #[test]
+    fn read_capped_tail_keeps_a_stream_of_exactly_the_cap_in_order() {
+        // A `Cursor` answers a read of exactly `cap` bytes in one go, so the loop runs once, the
+        // second copy is empty, and the ring never wraps. This pins the no-wrap path at its
+        // boundary: `filled` reaches `cap`, so the exit is the rotate rather than the truncate,
+        // and it must return the stream unrotated. The wrapped case that also ends at index zero
+        // is `read_capped_tail_wraps_a_cap_that_is_not_a_multiple_of_the_read_buffer`.
+        let data: Vec<u8> = (0..=255_u8).collect();
+        let captured = read_capped_tail(std::io::Cursor::new(data.clone()), data.len());
+        assert_eq!(captured, data);
+    }
+
+    #[test]
+    fn read_capped_tail_wraps_a_cap_that_is_not_a_multiple_of_the_read_buffer() {
+        // 4096 is the read buffer. A cap of 5000 puts the second read's chunk across the end of
+        // the ring, which is the two-part copy no power-of-two cap exercises. 20000 is four whole
+        // wraps of 5000, so the ring is full and `next` has come back round to zero: this is the
+        // wrapped case where the rotate must still be a no-op.
+        let data: Vec<u8> = (0..20_000_u32).map(|value| value as u8).collect();
+        let captured = read_capped_tail(std::io::Cursor::new(data.clone()), 5000);
+        assert_eq!(captured, data[data.len() - 5000..]);
+    }
+
+    #[test]
+    fn read_capped_tail_is_correct_when_the_reader_answers_one_byte_at_a_time() {
+        // A pipe hands back whatever has arrived, which can be a single byte. Every read then
+        // advances the ring index by one, so an off-by-one there shows up as a rotated result.
+        struct OneByteAtATime<'a> {
+            remaining: &'a [u8],
+        }
+        impl Read for OneByteAtATime<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                match self.remaining.split_first() {
+                    Some((byte, rest)) if !buffer.is_empty() => {
+                        buffer[0] = *byte;
+                        self.remaining = rest;
+                        Ok(1)
+                    }
+                    _ => Ok(0),
+                }
+            }
+        }
+
+        let data: Vec<u8> = (0..100_u8).collect();
+        let captured = read_capped_tail(OneByteAtATime { remaining: &data }, 7);
+
+        assert_eq!(captured, data[data.len() - 7..]);
+    }
+
+    #[test]
+    fn read_capped_tail_keeps_the_end_of_a_read_larger_than_the_whole_ring() {
+        // One read hands back more bytes than the ring holds, so only that read's own last `cap`
+        // bytes can survive. No production caller reaches this today — the read buffer is 4096
+        // and the export runner asks for 8 KiB — but the branch is index arithmetic, and this is
+        // the only thing standing between it and a future edit. A `Cursor` fills the whole 4096
+        // buffer in one read, so a cap of 100 puts `count` far above `cap`.
+        let data: Vec<u8> = (0..4096_u32).map(|value| value as u8).collect();
+
+        let captured = read_capped_tail(std::io::Cursor::new(data.clone()), 100);
+
+        assert_eq!(captured, data[data.len() - 100..]);
+    }
+
+    #[test]
+    fn read_capped_tail_retains_nothing_for_a_zero_cap_and_still_drains() {
+        // A zero cap is the degenerate ring: nothing is kept, no modulo runs, and the rotate on
+        // the empty vector must not panic. The drain still has to happen, because a caller that
+        // wants no diagnostic must not leave the child blocked inside a write.
+        let data = vec![b'x'; 32 * 1024];
+        let mut cursor = std::io::Cursor::new(data.clone());
+
+        let captured = read_capped_tail(&mut cursor, 0);
+
+        assert!(captured.is_empty());
+        assert_eq!(cursor.position() as usize, data.len());
+    }
+
+    #[test]
+    fn read_capped_tail_loses_no_byte_to_an_interrupted_read() {
+        // A signal can interrupt a read on a pipe before any byte moves. The arm retries, so the
+        // interruption must cost nothing at all, neither a byte nor a ring position.
+        struct InterruptsOnce<'a> {
+            remaining: &'a [u8],
+            interrupted: bool,
+        }
+        impl Read for InterruptsOnce<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                let count = self.remaining.len().min(buffer.len());
+                buffer[..count].copy_from_slice(&self.remaining[..count]);
+                self.remaining = &self.remaining[count..];
+                Ok(count)
+            }
+        }
+
+        let data: Vec<u8> = (0..200_u32).map(|value| value as u8).collect();
+        let captured = read_capped_tail(
+            InterruptsOnce {
+                remaining: &data,
+                interrupted: false,
+            },
+            1024,
+        );
+
+        assert_eq!(captured, data);
+    }
+
+    #[test]
+    fn read_capped_tail_keeps_what_it_read_before_a_mid_stream_error() {
+        // The pipe can fail part way through, which ends the loop. What arrived before the
+        // failure is still the best diagnostic available, so it must survive the exit rather
+        // than be discarded with the error.
+        struct FailsAfterOneChunk {
+            sent: bool,
+        }
+        impl Read for FailsAfterOneChunk {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.sent {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
+                self.sent = true;
+                buffer[..5].copy_from_slice(b"early");
+                Ok(5)
+            }
+        }
+
+        let captured = read_capped_tail(FailsAfterOneChunk { sent: false }, 1024);
+
+        assert_eq!(captured, b"early".to_vec());
     }
 
     #[test]
