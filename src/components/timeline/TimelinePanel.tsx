@@ -2,7 +2,7 @@ import { useLayoutEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Film } from "lucide-react";
 import {
-  generateSourceId,
+  getGeneratedSourceId,
   getSourceRevisionKey,
   useMediaStore,
   type MediaStoreState,
@@ -34,18 +34,6 @@ export interface TimelinePanelProps {
   runtimeBrowserDurationSeconds?: number | null;
   /** Browser-time seek request used when calibrated PTS seeking is unavailable. */
   onApproximateSeek?: (seconds: number) => void;
-}
-
-const generatedSourceIdsByPath = new Map<string, string>();
-
-function getGeneratedSourceId(path: string): string {
-  const existing = generatedSourceIdsByPath.get(path);
-  if (existing) {
-    return existing;
-  }
-  const generated = generateSourceId();
-  generatedSourceIdsByPath.set(path, generated);
-  return generated;
 }
 
 const selectMedia = (state: MediaStoreState) => state.media;
@@ -88,7 +76,9 @@ export function TimelinePanel({
   const selectSegment = useTimelineStore(selectSelectSegment);
 
   const sourceRevisionKey = getSourceRevisionKey(media);
-  const sourceId = media ? (activeSourceId ?? getGeneratedSourceId(media.path)) : null;
+  // The generated ID is keyed by the revision key, not by the path, so a file that changed on
+  // disk becomes a new source and its old marks stop matching the active source.
+  const sourceId = media ? (activeSourceId ?? getGeneratedSourceId(media)) : null;
 
   // Synchronize active media source with the timeline store
   useLayoutEffect(() => {

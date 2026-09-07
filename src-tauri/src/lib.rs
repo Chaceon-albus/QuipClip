@@ -41,6 +41,7 @@ pub fn run() {
             commands::export::cancel_export,
             commands::export::cancel_active_export,
             commands::media::import_media,
+            commands::media::read_source_revision,
             commands::project::load_project,
             commands::project::save_project,
             commands::settings::load_settings,

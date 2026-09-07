@@ -25,6 +25,7 @@ import {
   normalizeImportMediaError,
   U32_MAX,
   validateImportMediaResult,
+  validateSourceRevision,
 } from "./validation";
 import type { FrameCount, Pts, TickCount } from "@/types/project";
 
@@ -581,6 +582,55 @@ describe("Media Validation & Normalization", () => {
       ).toThrow(TypeError);
       expect(() =>
         validateImportMediaResult(createValidImportResult({ mtime: NaN })),
+      ).toThrow(TypeError);
+    });
+  });
+
+  describe("validateSourceRevision", () => {
+    const revision = {
+      path: "/videos/clip.mp4",
+      size: 5_242_880,
+      mtime: 1_724_976_000,
+    };
+
+    it("accepts the three facts and drops anything else", () => {
+      expect(
+        validateSourceRevision({ ...revision, probe: { videoCodec: "h264" } }),
+      ).toStrictEqual(revision);
+    });
+
+    it("accepts an empty file and a modification time before the epoch", () => {
+      expect(validateSourceRevision({ ...revision, size: 0 }).size).toBe(0);
+      expect(validateSourceRevision({ ...revision, mtime: -1 }).mtime).toBe(-1);
+    });
+
+    it("rejects a non-object payload", () => {
+      expect(() => validateSourceRevision(null)).toThrow(TypeError);
+      expect(() => validateSourceRevision("path")).toThrow(TypeError);
+    });
+
+    it("rejects a missing or non-string path", () => {
+      expect(() => validateSourceRevision({ size: 1, mtime: 1 })).toThrow(TypeError);
+      expect(() => validateSourceRevision({ ...revision, path: 123 })).toThrow(
+        TypeError,
+      );
+    });
+
+    it("rejects a size or mtime that is absent, negative, or not a safe integer", () => {
+      expect(() => validateSourceRevision({ path: revision.path, mtime: 1 })).toThrow(
+        TypeError,
+      );
+      expect(() => validateSourceRevision({ ...revision, size: -1 })).toThrow(
+        TypeError,
+      );
+      expect(() => validateSourceRevision({ ...revision, size: 1.5 })).toThrow(
+        TypeError,
+      );
+      expect(() => validateSourceRevision({ ...revision, mtime: NaN })).toThrow(
+        TypeError,
+      );
+      expect(() =>
+        validateSourceRevision({ ...revision, mtime: Number.MAX_VALUE }),
       ).toThrow(TypeError);
     });
   });

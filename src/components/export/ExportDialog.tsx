@@ -9,7 +9,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { runExportFlow } from "@/components/layout/exportFlowController";
 import { useExportStore } from "@/features/export";
+import { openMediaFileDialog } from "@/features/media";
 import { getResolvedLanguage } from "@/i18n";
 import {
   isCancelEnabled,
@@ -21,6 +23,22 @@ import { presentExportError } from "./exportErrorPresenter";
 export interface ExportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+
+  /**
+   * Resumes a refused export, past the replacement confirmation, to the save dialog.
+   *
+   * Defaults to re-running the export flow with the replacement check skipped. Injected so
+   * this panel never has to know how an export starts.
+   */
+  onExportAnyway?: () => void;
+
+  /**
+   * Opens the media dialog so the user can import the file again.
+   *
+   * Defaults to `openMediaFileDialog`, the same action the File menu uses. Injected so an
+   * error panel never reaches into the media store.
+   */
+  onReimport?: () => void;
 }
 
 /**
@@ -60,7 +78,12 @@ function ExportProgress({ formatter }: { formatter: Intl.NumberFormat }) {
   );
 }
 
-export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
+export function ExportDialog({
+  open,
+  onOpenChange,
+  onExportAnyway,
+  onReimport,
+}: ExportDialogProps) {
   const { t, i18n } = useTranslation();
   // Holds the run the user asked to cancel. Keying the flag to a run id, instead of
   // holding a plain boolean, makes the canceling state derived: a new export carries a
@@ -134,6 +157,36 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
     onOpenChange(nextOpen);
   };
 
+  // The replacement confirmation is not a failure the user can only close: it carries its own
+  // three actions, so the standard footer is replaced while it shows.
+  const isSourceRevisionConfirmation =
+    status === "failed" && error?.code === "sourceRevisionChanged";
+
+  // Resumes the export the check refused. The store is reset and the modal closed first, so the
+  // flow reaches the native save dialog with no stale confirmation behind it; the flow re-opens
+  // the modal itself once there is something to show.
+  const handleExportAnyway = () => {
+    handleClose();
+    if (onExportAnyway) {
+      onExportAnyway();
+      return;
+    }
+    void runExportFlow({
+      setModalOpen: onOpenChange,
+      filterName: t("dialog.videoFilter"),
+      skipSourceRevisionCheck: true,
+    });
+  };
+
+  const handleReimport = () => {
+    handleClose();
+    if (onReimport) {
+      onReimport();
+      return;
+    }
+    void openMediaFileDialog({ filterName: t("dialog.videoFilter") });
+  };
+
   const handleCancel = async () => {
     setCancelingRunId(runId);
     if (runId === null) {
@@ -201,6 +254,19 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
 
       case "failed":
       case "canceled": {
+        if (isSourceRevisionConfirmation) {
+          return (
+            <div className="py-2">
+              <div
+                role="alert"
+                className="rounded-md border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400"
+              >
+                {t("exportError.sourceRevisionChanged")}
+              </div>
+            </div>
+          );
+        }
+
         const fallbackKey =
           status === "canceled" ? "exportError.canceled" : "exportError.unknown";
         const key = errorView?.key ?? fallbackKey;
@@ -266,7 +332,19 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
         {renderContent()}
 
         <DialogFooter>
-          {showCancel ? (
+          {isSourceRevisionConfirmation ? (
+            <>
+              <Button variant="outline" onClick={handleClose}>
+                {t("common.cancel")}
+              </Button>
+              <Button variant="outline" onClick={handleReimport}>
+                {t("export.action.reimport")}
+              </Button>
+              <Button onClick={handleExportAnyway}>
+                {t("export.action.exportAnyway")}
+              </Button>
+            </>
+          ) : showCancel ? (
             <Button
               variant="outline"
               onClick={() => void handleCancel()}

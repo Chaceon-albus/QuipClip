@@ -17,11 +17,24 @@ import {
   type ExportStatus,
   type OpenExportSaveDialogOptions,
 } from "@/features/export";
-import { mediaStore } from "@/features/media";
+import {
+  isSameSourceRevision,
+  mediaStore,
+  readSourceRevision,
+  type MediaSourceRevisionDescriptor,
+} from "@/features/media";
 import { settingsStore } from "@/features/settings";
 import type { Settings } from "@/features/settings/types";
 import { timelineStore } from "@/features/timeline";
 import type { Segment } from "@/types/project";
+
+/**
+ * The media facts the export flow reads: the source path, the name the default output name is
+ * derived from, and the revision the marked segments belong to.
+ */
+export type MediaFlowDescriptor = MediaSourceRevisionDescriptor & {
+  fileName?: string;
+};
 
 /**
  * Dependency injection options for configuring export flow execution.
@@ -47,8 +60,25 @@ export interface ExportFlowControllerOptions {
 
   /**
    * Provider for current media state. Defaults to `mediaStore.getState().media`.
+   *
+   * `size` and `mtime` are part of the shape because the replacement check compares them:
+   * they are the revision of the file the segments were marked against (ADR 010).
    */
-  getMedia?: () => { path: string; fileName?: string } | null;
+  getMedia?: () => MediaFlowDescriptor | null;
+
+  /**
+   * Reads the revision of the source file as it is on disk right now.
+   * Defaults to the `read_source_revision` client.
+   */
+  readSourceRevision?: (path: string) => Promise<MediaSourceRevisionDescriptor>;
+
+  /**
+   * Skips the replacement check for this run.
+   *
+   * Set by the "Export anyway" action of the confirmation the check raises. The user has
+   * already been told the file changed, so asking again would be a loop.
+   */
+  skipSourceRevisionCheck?: boolean;
 
   /**
    * Provider for timeline segments. Defaults to `timelineStore.getState().segments`.
@@ -100,7 +130,11 @@ export class ExportFlowController {
   private readonly openSaveDialogFn: (
     options: OpenExportSaveDialogOptions,
   ) => Promise<string | null>;
-  private readonly getMediaFn: () => { path: string; fileName?: string } | null;
+  private readonly getMediaFn: () => MediaFlowDescriptor | null;
+  private readonly readSourceRevisionFn: (
+    path: string,
+  ) => Promise<MediaSourceRevisionDescriptor>;
+  private readonly skipSourceRevisionCheck: boolean;
   private readonly getSegmentsFn: () => readonly Segment[];
   private readonly getSourceIdFn: () => string | null;
   private readonly getSettingsFn: () => Settings | null;
@@ -117,6 +151,8 @@ export class ExportFlowController {
     this.filterName = options.filterName;
     this.openSaveDialogFn = options.openSaveDialog ?? openExportSaveDialog;
     this.getMediaFn = options.getMedia ?? (() => mediaStore.getState().media);
+    this.readSourceRevisionFn = options.readSourceRevision ?? readSourceRevision;
+    this.skipSourceRevisionCheck = options.skipSourceRevisionCheck ?? false;
     this.getSegmentsFn =
       options.getSegments ?? (() => timelineStore.getState().segments);
     this.getSourceIdFn =
@@ -139,6 +175,11 @@ export class ExportFlowController {
    *
    * 1. If an export is already preparing, running, or publishing, re-opens modal immediately.
    * 2. Resolves current settings, awaiting loadSettings if absent and re-reading the STORE afterwards.
+   * 2a. Reads the active source id and the segments, then, if any segment is marked against
+   *    that source, stats the source file and compares its revision against the one those
+   *    segments were marked against. On a mismatch it raises the `sourceRevisionChanged`
+   *    confirmation and stops. This runs BEFORE the save dialog, so the user is never asked to
+   *    name a file for an export that may then be refused.
    * 3. Opens native save dialog with preset container and filterName.
    * 4. If save dialog returns null, checks store status: if "failed", re-opens modal with dialogFailed;
    *    if not failed (cancel), leaves modal closed and reports nothing.
@@ -170,6 +211,17 @@ export class ExportFlowController {
     const container = activePreset?.container ?? "mp4";
 
     const media = this.getMediaFn();
+    const activeSourceId = this.getSourceIdFn();
+    const segments = this.getSegmentsFn();
+
+    if (!(await this.sourceRevisionStillMatches(media, activeSourceId, segments))) {
+      // A confirmation, not a terminal failure. The dialog offers Export anyway, Re-import,
+      // and Cancel, and "Export anyway" re-runs this flow with the check skipped.
+      this.reportErrorFn(new ExportError({ code: "sourceRevisionChanged" }));
+      this.setModalOpen(true);
+      return false;
+    }
+
     const defaultName = media?.fileName
       ? `${media.fileName.replace(/\.[^/.]+$/, "")}_export.${container}`
       : undefined;
@@ -198,9 +250,6 @@ export class ExportFlowController {
       return false;
     }
 
-    const activeSourceId = this.getSourceIdFn();
-    const segments = this.getSegmentsFn();
-
     const request = this.buildRequestFn({
       media,
       outputPath,
@@ -220,6 +269,47 @@ export class ExportFlowController {
     this.setModalOpen(true);
     void this.startExportFn(request);
     return true;
+  }
+
+  /**
+   * Reports whether the source file on disk is still the revision the segments were marked
+   * against.
+   *
+   * Answers true whenever no mismatch was actually observed. With no media loaded there is
+   * nothing to compare, and a read that FAILS is not a mismatch: a deleted file, a path that
+   * is no longer a regular file, and a share that stopped answering are all reported by the
+   * backend preflight with a translated code of their own, and claiming "the file changed" for
+   * one of them would be a positive claim this check never made.
+   *
+   * It also answers true when no segment carries the active source id. The confirmation says
+   * the marked segments may no longer name the same frames, and nothing marked against this
+   * revision is nothing a replacement can invalidate. Such a run has to end at `noSegments`
+   * from the request builder, and the user must reach that in one dialog rather than name an
+   * output file on the way to it.
+   */
+  private async sourceRevisionStillMatches(
+    media: MediaFlowDescriptor | null,
+    activeSourceId: string | null,
+    segments: readonly Segment[],
+  ): Promise<boolean> {
+    if (this.skipSourceRevisionCheck || !media) {
+      return true;
+    }
+    // The same match the request builder applies, so the two agree on what "marked against
+    // the active source" means.
+    if (
+      !activeSourceId ||
+      !segments.some((segment) => segment.sourceId === activeSourceId)
+    ) {
+      return true;
+    }
+    let actual: MediaSourceRevisionDescriptor;
+    try {
+      actual = await this.readSourceRevisionFn(media.path);
+    } catch {
+      return true;
+    }
+    return isSameSourceRevision(media, actual);
   }
 }
 

@@ -5,8 +5,38 @@ import {
   runExportFlow,
 } from "./exportFlowController";
 import type { ExportRequest } from "@/features/export";
+import type { MediaSourceRevisionDescriptor } from "@/features/media";
 import type { Preset, Settings } from "@/features/settings/types";
 import type { Pts, Segment } from "@/types/project";
+import type { MediaFlowDescriptor } from "./exportFlowController";
+
+/**
+ * Builds the media facts the flow reads. `size` and `mtime` are part of the shape because the
+ * flow compares them against the file on disk before it opens the save dialog: they are the
+ * revision the marked segments belong to (ADR 010).
+ */
+function createMedia(
+  path: string,
+  fileName: string,
+  revision: Partial<MediaSourceRevisionDescriptor> = {},
+): MediaFlowDescriptor {
+  return { path, fileName, size: 4096, mtime: 1_700_000_000, ...revision };
+}
+
+/**
+ * A reader that answers the revision the media already holds, so the file on disk is
+ * unchanged. Every test that loads media injects one: the default reader is the real IPC
+ * client, and a test must never depend on what an absent backend answers.
+ */
+function createMatchingReader(
+  media: MediaFlowDescriptor,
+): (path: string) => Promise<MediaSourceRevisionDescriptor> {
+  return vi.fn().mockResolvedValue({
+    path: media.path,
+    size: media.size,
+    mtime: media.mtime,
+  });
+}
 
 /**
  * Builds a timeline segment. `inPts` and `outPts` are canonical decimal strings
@@ -68,6 +98,7 @@ describe("ExportFlowController", () => {
     const openSaveDialog = vi.fn().mockResolvedValue(null);
     // A cancel leaves the store status untouched.
     const getExportStatus = vi.fn().mockReturnValue("idle" as const);
+    const media = createMedia("/path/to/video.mp4", "video.mp4");
 
     const controller = createExportFlowController({
       setModalOpen,
@@ -77,7 +108,8 @@ describe("ExportFlowController", () => {
       getExportStatus,
       filterName: "Video Files",
       getSettings: () => createSettings(createPreset()),
-      getMedia: () => ({ path: "/path/to/video.mp4", fileName: "video.mp4" }),
+      getMedia: () => media,
+      readSourceRevision: createMatchingReader(media),
     });
 
     const result = await controller.run();
@@ -100,6 +132,7 @@ describe("ExportFlowController", () => {
       storeStatus = "failed";
       return Promise.resolve(null);
     });
+    const media = createMedia("/path/to/video.mp4", "video.mp4");
 
     const controller = new ExportFlowController({
       setModalOpen,
@@ -108,7 +141,8 @@ describe("ExportFlowController", () => {
       getExportStatus: () => storeStatus,
       filterName: "Video Files",
       getSettings: () => createSettings(createPreset()),
-      getMedia: () => ({ path: "/path/to/video.mp4", fileName: "video.mp4" }),
+      getMedia: () => media,
+      readSourceRevision: createMatchingReader(media),
     });
 
     const result = await controller.run();
@@ -150,13 +184,15 @@ describe("ExportFlowController", () => {
     const openSaveDialog = vi.fn().mockResolvedValue("/path/to/export.mp4");
 
     // Media is loaded, but the timeline holds no segment for the active source.
+    const media = createMedia("/media/sample.mp4", "sample.mp4");
     const controller = createExportFlowController({
       setModalOpen,
       reportError,
       startExport,
       openSaveDialog,
       getExportStatus: () => "idle",
-      getMedia: () => ({ path: "/media/sample.mp4", fileName: "sample.mp4" }),
+      getMedia: () => media,
+      readSourceRevision: createMatchingReader(media),
       getSegments: () => [],
       getSourceId: () => "source-1",
       filterName: "Video Files",
@@ -217,6 +253,7 @@ describe("ExportFlowController", () => {
     const openSaveDialog = vi.fn().mockResolvedValue("/destination/rendered.mp4");
 
     const sourceId = "source-clip-1";
+    const media = createMedia("/media/source.mp4", "source.mp4");
 
     // Three segments for the active source in deliberate non-chronological array
     // order, plus one segment for another source. Array order is export order (ADR 007).
@@ -242,7 +279,8 @@ describe("ExportFlowController", () => {
       startExport,
       openSaveDialog,
       getExportStatus: () => "idle",
-      getMedia: () => ({ path: "/media/source.mp4", fileName: "source.mp4" }),
+      getMedia: () => media,
+      readSourceRevision: createMatchingReader(media),
       getSegments: () => segments,
       getSourceId: () => sourceId,
       getSettings: () => settings,
@@ -295,6 +333,7 @@ describe("ExportFlowController", () => {
       );
       return Promise.resolve(null);
     });
+    const media = createMedia("/in/clip.mov", "clip.mov");
 
     await runExportFlow({
       setModalOpen,
@@ -304,7 +343,8 @@ describe("ExportFlowController", () => {
       filterName: "Video Files",
       getExportStatus: () => "idle",
       getSettings: () => currentSettings,
-      getMedia: () => ({ path: "/in/clip.mov", fileName: "clip.mov" }),
+      getMedia: () => media,
+      readSourceRevision: createMatchingReader(media),
       getSourceId: () => "src-1",
       getSegments: () => [createSegment("s1", "src-1", "0", "100")],
     });
@@ -316,6 +356,235 @@ describe("ExportFlowController", () => {
         defaultName: "clip_export.mov",
       }),
     );
+  });
+
+  describe("the source replacement check", () => {
+    it("a changed file raises the confirmation and never reaches the save dialog", async () => {
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const startExport = vi.fn();
+      const openSaveDialog = vi.fn();
+      const media = createMedia("/media/source.mp4", "source.mp4");
+      // The file was re-encoded in place: same path, different bytes and a later mtime. The
+      // stored PTS values now name different frames.
+      const readSourceRevision = vi.fn().mockResolvedValue({
+        path: media.path,
+        size: media.size + 1,
+        mtime: media.mtime + 60,
+      });
+
+      const result = await runExportFlow({
+        setModalOpen,
+        reportError,
+        startExport,
+        openSaveDialog,
+        readSourceRevision,
+        getExportStatus: () => "idle",
+        getMedia: () => media,
+        getSourceId: () => "src-1",
+        getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+        getSettings: () => createSettings(createPreset()),
+        filterName: "Video Files",
+      });
+
+      expect(result).toBe(false);
+      expect(readSourceRevision).toHaveBeenCalledWith("/media/source.mp4");
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "sourceRevisionChanged" }),
+      );
+      expect(setModalOpen).toHaveBeenCalledWith(true);
+      // The point of checking before the save dialog: the user is never asked to name a file
+      // for an export that is then refused.
+      expect(openSaveDialog).not.toHaveBeenCalled();
+      expect(startExport).not.toHaveBeenCalled();
+    });
+
+    it("an mtime change alone is a mismatch", async () => {
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const openSaveDialog = vi.fn();
+      const media = createMedia("/media/source.mp4", "source.mp4");
+      const touched = { ...media, mtime: media.mtime + 1 };
+
+      const result = await runExportFlow({
+        setModalOpen,
+        reportError,
+        openSaveDialog,
+        readSourceRevision: vi.fn().mockResolvedValue(touched),
+        getExportStatus: () => "idle",
+        getMedia: () => media,
+        getSourceId: () => "src-1",
+        getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+        getSettings: () => createSettings(createPreset()),
+        filterName: "Video Files",
+      });
+
+      expect(result).toBe(false);
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "sourceRevisionChanged" }),
+      );
+      expect(openSaveDialog).not.toHaveBeenCalled();
+    });
+
+    it("skipSourceRevisionCheck proceeds to the save dialog without reading the file", async () => {
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const startExport = vi.fn().mockResolvedValue(null);
+      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mp4");
+      const media = createMedia("/media/source.mp4", "source.mp4");
+      const readSourceRevision = vi.fn();
+
+      const result = await runExportFlow({
+        setModalOpen,
+        reportError,
+        startExport,
+        openSaveDialog,
+        readSourceRevision,
+        skipSourceRevisionCheck: true,
+        getExportStatus: () => "idle",
+        getMedia: () => media,
+        getSourceId: () => "src-1",
+        getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+        getSettings: () => createSettings(createPreset()),
+        filterName: "Video Files",
+      });
+
+      expect(result).toBe(true);
+      expect(readSourceRevision).not.toHaveBeenCalled();
+      expect(openSaveDialog).toHaveBeenCalledOnce();
+      expect(startExport).toHaveBeenCalledOnce();
+      expect(reportError).not.toHaveBeenCalled();
+    });
+
+    it("a read that FAILS is not a mismatch and the flow proceeds", async () => {
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const startExport = vi.fn().mockResolvedValue(null);
+      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mp4");
+      const media = createMedia("/media/source.mp4", "source.mp4");
+      // A deleted file, a path that is no longer a regular file, and a share that stopped
+      // answering all end here. Each already has its own translated code from the backend
+      // preflight, so claiming "the file changed" would be a claim this check never made.
+      const readSourceRevision = vi.fn().mockRejectedValue({ code: "pathNotFound" });
+
+      const result = await runExportFlow({
+        setModalOpen,
+        reportError,
+        startExport,
+        openSaveDialog,
+        readSourceRevision,
+        getExportStatus: () => "idle",
+        getMedia: () => media,
+        getSourceId: () => "src-1",
+        getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+        getSettings: () => createSettings(createPreset()),
+        filterName: "Video Files",
+      });
+
+      expect(result).toBe(true);
+      expect(readSourceRevision).toHaveBeenCalledOnce();
+      expect(openSaveDialog).toHaveBeenCalledOnce();
+      expect(startExport).toHaveBeenCalledOnce();
+      expect(reportError).not.toHaveBeenCalled();
+    });
+
+    it("a changed file with nothing marked reports noSegments and never confirms", async () => {
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const startExport = vi.fn();
+      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mp4");
+      const media = createMedia("/media/source.mp4", "source.mp4");
+      // The file changed under a project that marked nothing: a cloud-sync agent or a
+      // recorder still writing it is enough.
+      const readSourceRevision = vi.fn().mockResolvedValue({
+        path: media.path,
+        size: media.size + 1,
+        mtime: media.mtime + 60,
+      });
+
+      const result = await runExportFlow({
+        setModalOpen,
+        reportError,
+        startExport,
+        openSaveDialog,
+        readSourceRevision,
+        getExportStatus: () => "idle",
+        getMedia: () => media,
+        getSourceId: () => "src-1",
+        getSegments: () => [],
+        getSettings: () => createSettings(createPreset()),
+        filterName: "Video Files",
+      });
+
+      expect(result).toBe(false);
+      // The confirmation says the marked segments may no longer name the same frames, and
+      // with none marked that is a claim about state that does not exist. The run ends where
+      // an unchanged file with no segments ends, and the user sees one error rather than a
+      // confirmation whose "Export anyway" leads to the same one.
+      expect(readSourceRevision).not.toHaveBeenCalled();
+      expect(reportError).toHaveBeenCalledOnce();
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "noSegments" }),
+      );
+      expect(startExport).not.toHaveBeenCalled();
+    });
+
+    it("segments marked against another source do not raise the confirmation", async () => {
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mp4");
+      const media = createMedia("/media/source.mp4", "source.mp4");
+      const readSourceRevision = vi.fn().mockResolvedValue({
+        path: media.path,
+        size: media.size + 1,
+        mtime: media.mtime + 60,
+      });
+
+      const result = await runExportFlow({
+        setModalOpen,
+        reportError,
+        openSaveDialog,
+        readSourceRevision,
+        getExportStatus: () => "idle",
+        getMedia: () => media,
+        getSourceId: () => "src-1",
+        getSegments: () => [createSegment("s1", "src-other", "0", "100")],
+        getSettings: () => createSettings(createPreset()),
+        filterName: "Video Files",
+      });
+
+      expect(result).toBe(false);
+      expect(readSourceRevision).not.toHaveBeenCalled();
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "noSegments" }),
+      );
+    });
+
+    it("a null media never reads a revision, and fails later on the request instead", async () => {
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mp4");
+      const readSourceRevision = vi.fn();
+
+      const result = await runExportFlow({
+        setModalOpen,
+        reportError,
+        openSaveDialog,
+        readSourceRevision,
+        getExportStatus: () => "idle",
+        getMedia: () => null,
+        getSourceId: () => null,
+        getSegments: () => [],
+        getSettings: () => createSettings(createPreset()),
+        filterName: "Video Files",
+      });
+
+      expect(result).toBe(false);
+      expect(readSourceRevision).not.toHaveBeenCalled();
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "sourceNotFound" }),
+      );
+    });
   });
 
   it("opens modal immediately without opening save dialog if an export is already active", async () => {

@@ -40,3 +40,56 @@ export function getSourceRevisionKey(
   }
   return `${media.path}:${media.size}:${media.mtime}`;
 }
+
+/**
+ * Reports whether two revision descriptors name the same revision of the same file.
+ *
+ * The comparison is the canonical revision key itself, so "same source" has exactly one
+ * definition across the generated source ID, the export-time replacement check, and the
+ * architecture document. An unavailable descriptor on either side is never "the same": an
+ * empty key states that nothing is known, not that the two agree.
+ */
+export function isSameSourceRevision(
+  expected: MediaSourceRevisionDescriptor | null | undefined,
+  actual: MediaSourceRevisionDescriptor | null | undefined,
+): boolean {
+  const expectedKey = getSourceRevisionKey(expected);
+  return expectedKey !== "" && expectedKey === getSourceRevisionKey(actual);
+}
+
+/**
+ * Session-scoped generated source IDs, keyed by the FULL revision key.
+ *
+ * Keyed by the revision key and not by the path, deliberately. A stale entry keyed by path
+ * handed a re-opened, re-encoded file the ID its old segments carry, so those segments still
+ * matched the active source and the next export cut them from frames they no longer name. A
+ * changed file is therefore a new source here, and its marks stop belonging to the active
+ * source: they stay in the project array (ADR 007 forbids erasing them), and the timeline
+ * renders empty. A touch, a copy to another disk, or a restore from a backup change the key
+ * without changing a byte and strand the marks the same way.
+ *
+ * It is a map and not a one-slot memo, so opening A, then B, then A again restores A's ID.
+ */
+const generatedSourceIdsByRevisionKey = new Map<string, string>();
+
+/**
+ * Returns the generated source ID for one revision of one file, creating it on first sight.
+ *
+ * @param media Media revision descriptor or null/undefined.
+ * @returns The ID held for that revision, or null when no media is available.
+ */
+export function getGeneratedSourceId(
+  media: MediaSourceRevisionDescriptor | null | undefined,
+): string | null {
+  const revisionKey = getSourceRevisionKey(media);
+  if (revisionKey === "") {
+    return null;
+  }
+  const existing = generatedSourceIdsByRevisionKey.get(revisionKey);
+  if (existing) {
+    return existing;
+  }
+  const generated = generateSourceId();
+  generatedSourceIdsByRevisionKey.set(revisionKey, generated);
+  return generated;
+}

@@ -285,6 +285,10 @@ export const zhCN: TranslationCatalog = {
       cancelingNote: "如果导出已进入完成阶段，取消可能无法阻止生成输出文件。",
       cancelingNotePublishing: "导出已进入完成阶段，取消无法阻止生成输出文件。",
     },
+    action: {
+      exportAnyway: "仍然导出",
+      reimport: "重新导入",
+    },
   },
   exportError: {
     appDataUnavailable: "应用程序数据目录不可用。",
@@ -317,6 +321,8 @@ export const zhCN: TranslationCatalog = {
     commandExecutionFailed: "执行导出命令失败。",
     exportAlreadyRunning: "已有导出任务正在运行。",
     dialogFailed: "打开导出保存对话框失败。",
+    sourceRevisionChanged:
+      "打开之后，磁盘上的视频文件已更改。已标记的片段可能不再指向相同的帧。",
     unknown: "导出过程中发生未知错误。",
   },
 };

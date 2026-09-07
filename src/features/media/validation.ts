@@ -10,6 +10,7 @@ import {
   validateApproximateDuration,
 } from "@/lib/time";
 import type { Rational } from "@/types/project";
+import type { MediaSourceRevisionDescriptor } from "./sourceIdentity";
 import {
   BACKEND_IMPORT_MEDIA_ERROR_CODES,
   IMPORT_MEDIA_ERROR_CODES,
@@ -244,6 +245,37 @@ export function isMediaProbe(value: unknown): value is MediaProbe {
     return false;
   }
   return true;
+}
+
+/**
+ * Validates an unknown payload against the `read_source_revision` response schema.
+ *
+ * The bounds are the ones `validateImportMediaResult` applies to the same three facts, because
+ * the two payloads carry the same fields from the same Rust validation.
+ * Throws a TypeError if the payload does not conform to the expected shape.
+ */
+export function validateSourceRevision(value: unknown): MediaSourceRevisionDescriptor {
+  if (typeof value !== "object" || value === null) {
+    throw new TypeError("Invalid source revision: payload must be a non-null object");
+  }
+
+  const r = value as Record<string, unknown>;
+  if (typeof r.path !== "string") {
+    throw new TypeError("Invalid source revision: path must be a string");
+  }
+  if (
+    typeof r.size !== "number" ||
+    !Number.isSafeInteger(r.size) ||
+    r.size < 0 ||
+    typeof r.mtime !== "number" ||
+    !Number.isSafeInteger(r.mtime)
+  ) {
+    throw new TypeError(
+      "Invalid source revision: size and mtime must be safe integers",
+    );
+  }
+
+  return { path: r.path, size: r.size, mtime: r.mtime };
 }
 
 /**

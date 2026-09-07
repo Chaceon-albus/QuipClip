@@ -287,6 +287,10 @@ export const en = {
       cancelingNotePublishing:
         "The export is already finishing. The cancel cannot prevent the output file.",
     },
+    action: {
+      exportAnyway: "Export Anyway",
+      reimport: "Re-import",
+    },
   },
   exportError: {
     appDataUnavailable: "The application data directory is unavailable.",
@@ -321,6 +325,8 @@ export const en = {
     commandExecutionFailed: "The export command failed to execute.",
     exportAlreadyRunning: "An export is already running.",
     dialogFailed: "Failed to open the export save dialog.",
+    sourceRevisionChanged:
+      "The video file on disk changed after it was opened. The marked segments may no longer name the same frames.",
     unknown: "An unknown error occurred during export.",
   },
 } as const;

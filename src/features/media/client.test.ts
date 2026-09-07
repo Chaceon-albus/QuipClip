@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { BACKEND_COMMANDS, invokeCommand, type BackendCommand } from "@/lib/ipc";
-import { importMedia } from "./client";
+import { importMedia, readSourceRevision } from "./client";
 import {
   BACKEND_IMPORT_MEDIA_ERROR_CODES,
   ImportMediaError,
@@ -203,6 +203,45 @@ describe("Media Import Client", () => {
       code: "unknown",
       detail: undefined,
       exitCode: undefined,
+    });
+  });
+
+  describe("readSourceRevision", () => {
+    it("invokes read_source_revision with the path and returns the three facts", async () => {
+      const mockInvoke = vi.fn().mockResolvedValue({
+        path: "/Users/test/Videos/clip.mp4",
+        size: 5242880,
+        mtime: 1724976000,
+      });
+
+      const revision = await readSourceRevision("/Users/test/Videos/clip.mp4", {
+        invoke: mockInvoke,
+      });
+
+      expect(mockInvoke).toHaveBeenCalledWith(BACKEND_COMMANDS.READ_SOURCE_REVISION, {
+        path: "/Users/test/Videos/clip.mp4",
+      });
+      expect(revision).toStrictEqual({
+        path: "/Users/test/Videos/clip.mp4",
+        size: 5242880,
+        mtime: 1724976000,
+      });
+    });
+
+    it("normalizes a backend rejection into an ImportMediaError with its stable code", async () => {
+      const mockInvoke = vi.fn().mockRejectedValue({ code: "pathNotFound" });
+
+      const promise = readSourceRevision("/gone.mp4", { invoke: mockInvoke });
+      await expect(promise).rejects.toBeInstanceOf(ImportMediaError);
+      await expect(promise).rejects.toMatchObject({ code: "pathNotFound" });
+    });
+
+    it("normalizes a malformed success response rather than answering a partial revision", async () => {
+      const mockInvoke = vi.fn().mockResolvedValue({ path: "/clip.mp4", size: 1 });
+
+      const promise = readSourceRevision("/clip.mp4", { invoke: mockInvoke });
+      await expect(promise).rejects.toBeInstanceOf(ImportMediaError);
+      await expect(promise).rejects.toMatchObject({ code: "unknown" });
     });
   });
 });

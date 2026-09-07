@@ -23,6 +23,19 @@ pub struct ImportMediaResult {
     pub probe: MediaProbe,
 }
 
+/// The revision facts of one media file, and nothing else.
+///
+/// This is the payload of [`read_source_revision`]. It carries no probe: the frontend compares
+/// it against the revision of the file it imported, and a comparison of path, size, and
+/// modification time needs no stream facts (ADR 010).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRevision {
+    pub path: String,
+    pub size: u64,
+    pub mtime: i64,
+}
+
 /// Stable error names translated by the frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +154,32 @@ where
         size: media.size,
         mtime: media.mtime,
         probe,
+    })
+}
+
+/// Read the revision facts of one already-imported media file.
+///
+/// A stat, and nothing more. It runs no `ffprobe` and grants no asset scope: it opens nothing
+/// for the web view, so widening the asset scope here would be a grant with no reader.
+///
+/// The refusals are [`validate_media`]'s own, so an invalid path, a file that is gone, a path
+/// that is no longer a regular file, and metadata outside the safe-integer range are decided in
+/// the one place `import_media` decides them and are reported with the same
+/// [`ImportMediaErrorCode`] values the frontend already translates.
+#[tauri::command]
+pub async fn read_source_revision(path: String) -> Result<SourceRevision, ImportMediaError> {
+    tauri::async_runtime::spawn_blocking(move || read_source_revision_blocking(&path))
+        .await
+        .map_err(|_| generated_error(ImportMediaErrorCode::CommandExecutionFailed))?
+}
+
+/// The body of [`read_source_revision`], off the async runtime so a test can reach it.
+fn read_source_revision_blocking(path: &str) -> Result<SourceRevision, ImportMediaError> {
+    let media = validate_media(path)?;
+    Ok(SourceRevision {
+        path: media.path_text,
+        size: media.size,
+        mtime: media.mtime,
     })
 }
 
@@ -341,6 +380,66 @@ mod tests {
             assert_eq!(error.code, expected);
             assert!(!*called.borrow());
         }
+    }
+
+    #[test]
+    fn a_revision_read_refuses_the_same_paths_the_import_refuses() {
+        let directory = TestDirectory::new();
+        for (path, expected) in [
+            ("".to_owned(), ImportMediaErrorCode::InvalidPath),
+            (
+                directory
+                    .path
+                    .join("missing.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
+                ImportMediaErrorCode::PathNotFound,
+            ),
+            (
+                directory.path.to_string_lossy().into_owned(),
+                ImportMediaErrorCode::PathNotFile,
+            ),
+        ] {
+            let error = read_source_revision_blocking(&path).unwrap_err();
+            assert_eq!(error.code, expected);
+        }
+    }
+
+    #[test]
+    fn a_revision_read_reports_the_canonical_path_and_the_byte_length() {
+        let directory = TestDirectory::new();
+        let media_path = directory.file("clip.mp4", b"media");
+        let canonical = media_path.canonicalize().unwrap();
+
+        let revision = read_source_revision_blocking(media_path.to_str().unwrap()).unwrap();
+
+        assert_eq!(revision.path, canonical.to_str().unwrap());
+        assert_eq!(revision.size, 5);
+        assert_eq!(
+            revision.mtime,
+            unix_seconds(fs::metadata(&canonical).unwrap().modified().unwrap()).unwrap()
+        );
+    }
+
+    /// Every field of `SourceRevision` is one word, so `rename_all = "camelCase"` renames
+    /// nothing today and this test cannot exercise it. The attribute is carried for the day a
+    /// two-word field arrives; the field count below is what would fail if a probe fact were
+    /// added.
+    #[test]
+    fn a_revision_serializes_exactly_the_three_revision_facts() {
+        let directory = TestDirectory::new();
+        let media_path = directory.file("clip.mp4", b"media");
+
+        let revision = read_source_revision_blocking(media_path.to_str().unwrap()).unwrap();
+        let value = serde_json::to_value(&revision).unwrap();
+
+        assert_eq!(value["size"], 5);
+        assert_eq!(value["mtime"], revision.mtime);
+        assert!(value["path"].is_string());
+        // The comparison needs three facts. Anything else here would be a fact the frontend
+        // could start to depend on, and this command runs no `ffprobe` to produce one.
+        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert!(value.get("probe").is_none());
     }
 
     #[test]

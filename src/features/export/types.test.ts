@@ -132,8 +132,21 @@ describe("Export Types & Wire Constants", () => {
       ]);
     });
 
-    it("contains the frontend dialog error code", () => {
-      expect(FRONTEND_EXPORT_ERROR_CODES).toEqual(["dialogFailed"]);
+    it("contains the frontend-generated error codes", () => {
+      expect(FRONTEND_EXPORT_ERROR_CODES).toEqual([
+        "dialogFailed",
+        "sourceRevisionChanged",
+      ]);
+    });
+
+    // The parity test above asserts set equality with the Rust vocabulary, so a frontend code
+    // that leaked into the backend list would fail it. This states the invariant directly, so
+    // the reason a future reader must not move a code between the two lists is written down
+    // next to the lists themselves.
+    it("shares no code with the backend vocabulary", () => {
+      for (const code of FRONTEND_EXPORT_ERROR_CODES) {
+        expect(BACKEND_EXPORT_ERROR_CODES as readonly string[]).not.toContain(code);
+      }
     });
 
     // The literal above pins the content, so a count here would only restate it with a number

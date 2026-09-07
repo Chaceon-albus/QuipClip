@@ -13,6 +13,7 @@ import { listen as tauriListen } from "@tauri-apps/api/event";
  */
 export const BACKEND_COMMANDS = {
   IMPORT_MEDIA: "import_media",
+  READ_SOURCE_REVISION: "read_source_revision",
   START_CAPABILITY_PROBE: "start_capability_probe",
   LOAD_SETTINGS: "load_settings",
   SAVE_SETTINGS: "save_settings",

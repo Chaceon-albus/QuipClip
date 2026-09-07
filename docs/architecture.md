@@ -362,9 +362,19 @@ starts a fresh one; clicking a segment makes it current; Delete Segment removes 
 nothing current. Segments may therefore overlap without ambiguity. While a current segment
 resolves, there is no pending In mark. See ADR 007.
 
-`Source.id` is stable project identity. A separate revision key uses path, size, and
-modification time for runtime invalidation and replacement warnings. Source or revision
-changes do not erase canonical segments.
+`Source.id` is stable project identity. A separate revision key of path, size, and
+modification time drives runtime invalidation and the replacement warning. The generated
+source id is keyed by that revision key, so a file changed in place becomes a new source and
+the segments marked against the old one stop matching it. Source or revision changes do not
+erase canonical segments: they stay in the project array, and they stop belonging to the
+active source.
+
+Before an export, the frontend re-reads the file's size and modification time through a
+stat-only command that runs no `ffprobe`, and compares them against the revision the segments
+were marked against. A mismatch raises a confirmation the user can override, because a change
+that altered no frame timing is possible and only the user knows. A read that fails is not a
+mismatch: a deleted file, a path that is no longer a regular file, and a share that stopped
+answering are each already reported by the export preflight with their own codes.
 
 The frontend explicitly projects each runtime `Source` into `PersistedSource`. The
 projection lists each persisted field. It does not use object spread as a serialization
