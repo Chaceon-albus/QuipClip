@@ -579,6 +579,9 @@ mod tests {
         #[cfg(windows)]
         {
             let mut permissions = fs::metadata(&path).unwrap().permissions();
+            // The lint warns that this makes a file world writable on Unix. This arm is
+            // Windows-only, where clearing the attribute is the whole of it.
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             fs::set_permissions(&path, permissions).unwrap();
         }
