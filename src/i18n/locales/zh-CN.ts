@@ -310,6 +310,7 @@ export const zhCN: TranslationCatalog = {
     outputDirectoryMissing: "导出目标文件夹不存在。",
     outputEqualsSource: "导出目标不能与源文件相同。",
     outputNotWritable: "目标文件夹不可写入。",
+    outputReadOnly: "目标文件为只读。请解除只读保护，或导出为其他文件名。",
     sourceFrameRateUnknown: "无法确定源视频的帧率。",
     sourceAudioRateUnknown: "无法确定源音频的采样率，因此无法精确剪切音频。",
     encoderUnavailable: "当前系统缺少所需的编码器。",

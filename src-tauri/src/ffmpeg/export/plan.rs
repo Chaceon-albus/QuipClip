@@ -116,7 +116,21 @@ pub enum PathFacts {
     /// The path does not exist.
     Absent,
     /// The path exists and is a regular file, with this identity.
-    File { identity: PathIdentity },
+    ///
+    /// `read_only` is the attribute [`crate::fsutil::replace_file_within`] refuses a
+    /// destination on (ADR 015): on Unix, no write bit set for anybody; on Windows, the
+    /// read-only attribute. It is read from the path's own final component, never from a
+    /// symlink's target, because the rename that publishes the export never resolves that
+    /// component either -- so a symlinked destination reports the link's attribute and is
+    /// replaced, exactly as `replace_file_within` replaces it. An attribute that could not be
+    /// read is `false`: `replace_file_within` treats an unreadable attribute as no confirmed
+    /// refusal on both platforms, and this preflight must not refuse a file that the
+    /// publication would accept. [`build_plan`] reads this only in the destination position; a
+    /// read-only source is an ordinary source, since the renderer only reads it.
+    File {
+        identity: PathIdentity,
+        read_only: bool,
+    },
     /// The path exists and is a directory.
     Directory,
     /// The path exists but is neither a regular file nor a directory (for example, a
@@ -146,10 +160,12 @@ pub enum PathFacts {
 ///    -- [`ExportErrorCode::OutputPathInvalid`].
 /// 10. `destination` and `source` name the same file --
 ///     [`ExportErrorCode::OutputEqualsSource`].
-/// 11. The preset's frame rate is [`FrameRateSetting::Source`] but the probe has neither a
+/// 11. `destination` exists as a regular file the user protected against writing --
+///     [`ExportErrorCode::OutputReadOnly`].
+/// 12. The preset's frame rate is [`FrameRateSetting::Source`] but the probe has neither a
 ///     valid `avg_frame_rate` nor `r_frame_rate`, or the resolved rate is not strictly
 ///     positive -- [`ExportErrorCode::SourceFrameRateUnknown`].
-/// 12. The probe reports an audio stream whose sample rate is absent, not positive, or
+/// 13. The probe reports an audio stream whose sample rate is absent, not positive, or
 ///     larger than `u32` -- [`ExportErrorCode::SourceAudioRateUnknown`].
 ///
 /// `destination` must be absolute for the same reason `source` must: a CWD-relative path
@@ -235,10 +251,37 @@ pub fn build_plan(
 
     let same_identity = matches!(
         (source_facts, destination_facts),
-        (PathFacts::File { identity: a }, PathFacts::File { identity: b }) if a == b
+        (PathFacts::File { identity: a, .. }, PathFacts::File { identity: b, .. }) if a == b
     );
     if source == destination || same_identity {
         return Err(ExportErrorCode::OutputEqualsSource);
+    }
+
+    // The same argument as the check above, for the other file the rename can refuse. ADR 015
+    // makes `fsutil::replace_file_within` refuse to replace a destination the user protected,
+    // on both platforms, and `PendingOutput::commit`'s own documentation asks a planning stage
+    // to reject such a destination ahead of the render. This is that stage: without the check
+    // here, a user who protected their output file waits out the whole encode and then reads
+    // `outputRenameFailed`, and the cleanup guard deletes the render on the way out.
+    //
+    // `read_only` is the very attribute the replacement guard reads, taken from the
+    // destination's own final component, so the preflight and the publication cannot disagree
+    // about which files are refused; `PathFacts::File` carries what that means, including why
+    // an unreadable attribute reads as `false` here. This runs after the same-file check on
+    // purpose: a destination that *is* the source is the more dangerous condition and the more
+    // specific report, whether or not the source happens to be protected.
+    //
+    // The late guard in `commit` stays. This check closes the common path, where the user
+    // protected the file before the export started; the file can still be protected between
+    // this check and the rename, and that window is what the late guard is for.
+    if matches!(
+        destination_facts,
+        PathFacts::File {
+            read_only: true,
+            ..
+        }
+    ) {
+        return Err(ExportErrorCode::OutputReadOnly);
     }
 
     let probe = request.probe;
@@ -613,6 +656,16 @@ mod tests {
     fn present_file(identity: u128) -> PathFacts {
         PathFacts::File {
             identity: PathIdentity::new(identity),
+            read_only: false,
+        }
+    }
+
+    /// A regular file the user protected against writing: the same file as
+    /// [`present_file`], with the one attribute `fsutil::replace_file_within` refuses on.
+    fn present_read_only_file(identity: u128) -> PathFacts {
+        PathFacts::File {
+            identity: PathIdentity::new(identity),
+            read_only: true,
         }
     }
 
@@ -902,6 +955,59 @@ mod tests {
         facts.insert(PathBuf::from(DESTINATION), present_file(7));
         let plan = plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts).unwrap();
         assert_eq!(plan.destination, PathBuf::from(DESTINATION));
+    }
+
+    // -- preflight: a protected destination ------------------------------------------------
+
+    #[test]
+    fn a_read_only_destination_is_rejected_with_output_read_only() {
+        // The refusal this check exists for. `fsutil::replace_file_within` refuses this file at
+        // the rename (ADR 015), so without the check the user sits through the whole encode and
+        // then reads `outputRenameFailed` while the cleanup guard deletes the render.
+        let mut facts = valid_path_facts();
+        facts.insert(PathBuf::from(DESTINATION), present_read_only_file(7));
+        let error =
+            plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts).unwrap_err();
+        assert_eq!(error, ExportErrorCode::OutputReadOnly);
+    }
+
+    #[test]
+    fn a_destination_that_does_not_exist_yet_is_never_refused_as_read_only() {
+        // The ordinary case: a first export has nothing at the destination at all, and there is
+        // no attribute to refuse it on. `valid_path_facts` already reports `DESTINATION` as
+        // absent, so this states the requirement rather than discovering it.
+        let plan = plan_with(
+            &[boundary(0, 1)],
+            &sample_probe(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+        assert_eq!(plan.destination, PathBuf::from(DESTINATION));
+    }
+
+    #[test]
+    fn a_read_only_source_does_not_refuse_the_export() {
+        // The attribute is read in the destination position only. The renderer only reads the
+        // source, so a user whose source is protected -- a file on a read-only volume, or one
+        // they deliberately locked -- must still be able to export from it.
+        let mut facts = valid_path_facts();
+        facts.insert(PathBuf::from(SOURCE), present_read_only_file(1));
+        let plan = plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts).unwrap();
+        assert_eq!(plan.source, PathBuf::from(SOURCE));
+    }
+
+    #[test]
+    fn a_read_only_destination_that_is_the_source_reports_output_equals_source() {
+        // Check order, stated as a test: the same-file refusal is the more dangerous condition
+        // and the more specific report, so it must win over the read-only refusal rather than
+        // depend on which check a later edit happens to put first.
+        let mut facts = valid_path_facts();
+        facts.insert(PathBuf::from(SOURCE), present_read_only_file(42));
+        facts.insert(PathBuf::from(DESTINATION), present_read_only_file(42));
+        let error =
+            plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts).unwrap_err();
+        assert_eq!(error, ExportErrorCode::OutputEqualsSource);
     }
 
     // -- preflight: frame rate ------------------------------------------------------------

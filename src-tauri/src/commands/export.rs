@@ -29,7 +29,10 @@
 //!    order is the one with a destination whose parent directory is missing, because that is
 //!    the destination the two orders answer differently: `build_plan` reports
 //!    `outputDirectoryMissing`, and a reservation attempted first fails as
-//!    `outputNotWritable`.
+//!    `outputNotWritable`. A destination the user protected against writing is the same
+//!    obligation from the other side: the reservation succeeds on it too, because it only
+//!    touches the parent directory, and `build_plan` rejects it as `outputReadOnly` rather than
+//!    letting the rename discard a finished encode.
 //! 2. [`choose_graph_shape`] and [`build_arguments`] both receive [`PendingOutput::path`],
 //!    never `plan.destination`. ffmpeg writes the reservation, and the rename that publishes
 //!    the destination happens after the process has exited.
@@ -294,7 +297,7 @@ pub async fn start_export(
         )
     })
     .await
-    .map_err(|_| ExportCommandError::new(ExportErrorCode::CommandExecutionFailed))??;
+    .map_err(|error| join_failure(&error))??;
 
     // The last read before the worker takes over, for a cancel that landed after preparation
     // passed its own checks. Returning here drops `prepared`, which deletes the reserved
@@ -357,7 +360,21 @@ pub async fn cancel_export(
 pub async fn cancel_active_export(
     registry: tauri::State<'_, Arc<ExportRegistry>>,
 ) -> Result<bool, ExportCommandError> {
-    Ok(registry.cancel_active().is_some())
+    Ok(registry.cancel_active())
+}
+
+/// Report a blocking-task join failure as `commandExecutionFailed`, carrying what went wrong.
+///
+/// A join failure is not an enumerable condition, so ADR 011 keeps its diagnostic. The value the
+/// one caller passes is a `JoinError`, and its `Display` says whether the task **panicked** or was
+/// **cancelled** -- two different faults with two different investigations, and the bare code
+/// tells them apart not at all.
+///
+/// The parameter is `&impl Display` rather than the concrete error type because a `JoinError`
+/// cannot be constructed outside tokio, so a test can only reach this mapping with a stand-in. The
+/// test that does so proves the text is carried, not that tokio produced it.
+fn join_failure(error: &impl std::fmt::Display) -> ExportCommandError {
+    ExportCommandError::with_detail(ExportErrorCode::CommandExecutionFailed, error.to_string())
 }
 
 /// Resolve the ffmpeg executable pair for an export: the configured path from settings, if
@@ -420,11 +437,19 @@ where
     let executables = discover(app_data_directory)
         .map_err(|_| ExportCommandError::new(ExportErrorCode::FfmpegPairMissing))?;
 
-    // The settings failure carries no detail. `SettingsFileError` renders an English sentence
-    // that names internal file structure, and ADR 011 keeps that out of a payload the
-    // frontend translates; every other generated failure in this crate does the same.
-    let loaded = load(app_data_directory)
-        .map_err(|_| ExportCommandError::new(ExportErrorCode::SettingsUnreadable))?;
+    // The settings failure carries its diagnostic. ADR 011 decides that by the condition, not by
+    // the origin of the string: what the interface renders is always the localized code, and a
+    // detail is supplementary text a user copies into a bug report. `SettingsFileError` has seven
+    // variants -- an I/O failure, a serde parse error that names a line and a column, a validation
+    // refusal, a schema version from the future, an unreadable existing file, a revision conflict,
+    // and a failed backup -- and every one of them arrives here as `settingsUnreadable`, because
+    // the export has no separate recovery for any of them. Without the text, a permission denial
+    // and a parse error at line 12 are indistinguishable in a report. `commands/settings.rs` has
+    // its own codes for these on its own surface; this surface has one, and the detail is the only
+    // thing that tells the seven apart.
+    let loaded = load(app_data_directory).map_err(|error| {
+        ExportCommandError::with_detail(ExportErrorCode::SettingsUnreadable, error.to_string())
+    })?;
     let preset = resolve_preset(&loaded.settings, request.preset_id.as_deref())?;
 
     let source = PathBuf::from(&request.source_path);
@@ -466,6 +491,15 @@ where
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
 
+    // This mapping keeps its diagnostic, and that is deliberate. Do not extend the raw
+    // operating-system-code guard from the `commit` mapping in `run_export_with` to here. ADR 011
+    // decides the question by the condition, not by the origin of the string: `reserve` creates a
+    // temporary file next to the destination, and that can fail in ways not worth a code each and
+    // not predictable in advance -- no space, a quota, a name the filesystem refuses, 100
+    // consecutive name collisions, a generated name past the platform's limit. `outputNotWritable`
+    // alone cannot tell two of those apart in a bug report. `commit`'s guard is the other case in
+    // the same record: a refusal QuipClip decides for itself about an enumerable condition, where
+    // the code is the whole account and a Rust-authored sentence adds nothing.
     let pending = PendingOutput::reserve(&plan.destination).map_err(|error| {
         ExportCommandError::with_detail(ExportErrorCode::OutputNotWritable, error.to_string())
     })?;
@@ -1530,6 +1564,97 @@ mod tests {
     }
 
     #[test]
+    fn preparation_rejects_a_read_only_destination_in_preflight() {
+        // The whole path this check exists for, through the real `inspect_path` rather than a
+        // fixed table: a destination the user protected must be refused before anything is
+        // reserved and before ffmpeg is spawned. Without it, `fsutil::replace_file_within`
+        // refuses the same file at the rename, and the user pays for the whole encode first --
+        // see `a_rename_failure_with_no_operating_system_code_carries_no_detail`, which drives
+        // that late refusal with this same destination.
+        //
+        // `set_readonly(true)` is what makes this run on both platforms: it clears every write bit
+        // on Unix and sets the read-only attribute on Windows, and `Permissions::readonly` is what
+        // both arms of `replace_file_within` read. Protecting the file takes one call on both
+        // platforms; releasing it again does not, so the restore below is split by platform.
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let destination = directory.path.join("out.mp4");
+        fs::write(&destination, b"a previous export the user protected").unwrap();
+        let mut permissions = fs::metadata(&destination).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&destination, permissions).unwrap();
+        let request = ExportRequestWire {
+            source_path: source.to_string_lossy().into_owned(),
+            output_path: destination.to_string_lossy().into_owned(),
+            segments: vec![ExportSegmentBoundaryWire {
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            preset_id: None,
+        };
+
+        let result = prepare_export_with(
+            &request,
+            &directory.path,
+            &AtomicBool::new(false),
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_| {
+                Ok(LoadedSettings {
+                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
+                    seeded: false,
+                })
+            },
+            |_, _| Ok(sample_probe()),
+        );
+
+        // Release the file before the assertions, so a failing assertion cannot leave a file that
+        // defeats `TestDirectory`'s own cleanup on Windows, where `remove_dir_all` refuses a
+        // read-only file. `set_readonly(false)` is the right call for that on Windows, where the
+        // attribute is the whole of it, but not on Unix, where it would set every write bit and
+        // leave the file world-writable; an explicit 0o644 restores an ordinary mode instead and
+        // is all `remove_dir_all` needs. `fsutil::replace_file_within` splits its own permission
+        // work the same way, and for the same reason.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut permissions = fs::metadata(&destination).unwrap().permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(&destination, permissions).unwrap();
+        }
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("a protected destination must be refused before the encode"),
+        };
+        assert_eq!(error.code, ExportErrorCode::OutputReadOnly);
+        // The refusal happens before the reservation, so nothing was created beside the
+        // destination and there is no temporary file for a guard to clean up.
+        let leftovers = fs::read_dir(&directory.path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"a previous export the user protected",
+            "the protected destination must keep its contents"
+        );
+    }
+
+    #[test]
     fn a_cancel_before_preparation_starts_ends_it_without_discovering_ffmpeg() {
         // The twin of the pre-re-probe test below, at the other end. `start_export` claims the
         // slot before it hands preparation to the blocking pool, so a cancel can already be set
@@ -1710,6 +1835,82 @@ mod tests {
 
         assert_eq!(error.code, ExportErrorCode::FfmpegPairMissing);
         assert_eq!(error.detail, None);
+    }
+
+    #[test]
+    fn an_unreadable_settings_file_reports_one_code_and_carries_which_fault_it_was() {
+        // `SettingsFileError` has seven variants and this surface has one code for all of them,
+        // because the export has no separate recovery for any. The detail is therefore the only
+        // thing that tells them apart in a bug report, which is why the two below must not read
+        // the same. `commands/settings.rs` gives these separate codes on its own surface; that is
+        // not this surface, and the amended ADR 011 decides the question by the condition rather
+        // than by which process authored the string.
+        let directory = TestDirectory::new();
+        let mut details = Vec::new();
+        for failure in [
+            SettingsFileError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "raw operating system diagnostic",
+            )),
+            SettingsFileError::Unreadable,
+        ] {
+            let expected = failure.to_string();
+            let failure = RefCell::new(Some(failure));
+            let probed = RefCell::new(false);
+            let request = ExportRequestWire {
+                source_path: "/media/source.mp4".to_owned(),
+                output_path: directory
+                    .path
+                    .join("out.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
+                segments: vec![],
+                preset_id: None,
+            };
+
+            let error = prepare_export_with(
+                &request,
+                &directory.path,
+                &AtomicBool::new(false),
+                |_| {
+                    Ok(FfmpegPaths {
+                        ffmpeg: directory.path.join("ffmpeg"),
+                        ffprobe: directory.path.join("ffprobe"),
+                        origin: ExecutableOrigin::Path,
+                    })
+                },
+                |_| Err(failure.borrow_mut().take().unwrap()),
+                |_, _| {
+                    *probed.borrow_mut() = true;
+                    unreachable!()
+                },
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ExportErrorCode::SettingsUnreadable);
+            assert_eq!(error.detail.as_deref(), Some(expected.as_str()));
+            assert!(!*probed.borrow());
+            details.push(error.detail.unwrap());
+        }
+
+        // The two faults really are distinguishable, which is the whole point of carrying the
+        // text. Asserting each detail against its own source message alone would still pass if
+        // every variant rendered one indistinguishable sentence.
+        assert_ne!(details[0], details[1]);
+        assert!(details[0].contains("raw operating system diagnostic"));
+    }
+
+    // A `JoinError` cannot be constructed outside tokio, so the stand-in below is the closest a
+    // test can get to the real value. It holds the mapping: a panic and a cancellation are two
+    // faults, and `commandExecutionFailed` alone cannot tell a reader which one happened.
+    #[test]
+    fn a_join_failure_carries_the_reason_the_task_did_not_finish() {
+        let error = join_failure(&"task 12 was cancelled");
+
+        assert_eq!(error.code, ExportErrorCode::CommandExecutionFailed);
+        assert_eq!(error.detail.as_deref(), Some("task 12 was cancelled"));
+        assert_eq!(error.exit_code, None);
+        assert_eq!(error.encoder, None);
     }
 
     #[test]

@@ -374,6 +374,21 @@ export_error_codes! {
     /// Produced by `commands::export::prepare_export_with`: the destination directory
     /// rejected the reserved temporary file ([`output::PendingOutput::reserve`]).
     OutputNotWritable => "outputNotWritable",
+    /// Produced by [`plan::build_plan`]: the destination already exists as a regular file the
+    /// user protected against writing, so ADR 015's refusal in
+    /// [`crate::fsutil::replace_file_within`] would reject the publication.
+    ///
+    /// This is a separate code from [`ExportErrorCode::OutputNotWritable`] because the two
+    /// name different things and offer the user different ways out. That code is the
+    /// destination *directory* refusing a new file, and its message says so in both catalogs;
+    /// this one is one protected file inside a directory that accepts writes, where the way
+    /// out is to clear the protection or to choose another name, not to choose another folder.
+    ///
+    /// The plan refuses it rather than leaving it to [`output::PendingOutput::commit`]: the
+    /// reservation only touches the destination's parent, so the whole encode would otherwise
+    /// run and then be discarded at the final rename. The late guard in `commit` still stands,
+    /// for a file that is protected after this check and before the rename.
+    OutputReadOnly => "outputReadOnly",
     /// Produced by [`plan::build_plan`]: the preset asks for the source's own frame rate
     /// but the probe reports neither a valid `avg_frame_rate` nor `r_frame_rate`, or the
     /// resolved frame rate (from either the probe or an explicit preset rate) is not
@@ -475,6 +490,7 @@ mod tests {
                 "outputEqualsSource",
                 "outputNotWritable",
                 "outputPathInvalid",
+                "outputReadOnly",
                 "outputRenameFailed",
                 "presetNotFound",
                 "settingsUnreadable",

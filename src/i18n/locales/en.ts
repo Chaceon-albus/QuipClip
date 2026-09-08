@@ -312,6 +312,8 @@ export const en = {
     outputDirectoryMissing: "The export destination folder does not exist.",
     outputEqualsSource: "The export destination cannot be the same as the source file.",
     outputNotWritable: "The destination folder cannot be written to.",
+    outputReadOnly:
+      "The destination file is read-only. Unlock it, or export to a different file name.",
     sourceFrameRateUnknown: "The source video frame rate could not be determined.",
     sourceAudioRateUnknown:
       "The source audio sample rate could not be determined, so the audio cannot be cut exactly.",

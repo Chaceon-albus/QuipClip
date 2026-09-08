@@ -123,7 +123,7 @@ pub async fn import_media(
         )
     })
     .await
-    .map_err(|_| generated_error(ImportMediaErrorCode::CommandExecutionFailed))?
+    .map_err(|error| join_failure(&error))?
 }
 
 fn import_media_with<ConfiguredPath, Discover, Probe, Allow>(
@@ -146,7 +146,14 @@ where
         .map_err(|_| generated_error(ImportMediaErrorCode::FfmpegPairMissing))?;
     let probe = probe(&executables.ffprobe, &media.path).map_err(map_probe_error)?;
 
-    allow(&media.path).map_err(|_| generated_error(ImportMediaErrorCode::AssetScopeDenied))?;
+    // The scope denial carries its diagnostic. `import_media`'s closure stringifies the Tauri
+    // error on purpose, and a denial is not an enumerable condition: the scope layer refuses a
+    // pattern for reasons this command does not decide and cannot list. ADR 011 keeps the text
+    // there -- the interface still renders the localized `assetScopeDenied`, and the string is
+    // only what a user copies into a bug report.
+    allow(&media.path).map_err(|detail| {
+        ImportMediaError::with_detail(ImportMediaErrorCode::AssetScopeDenied, detail)
+    })?;
 
     Ok(ImportMediaResult {
         path: media.path_text,
@@ -170,7 +177,7 @@ where
 pub async fn read_source_revision(path: String) -> Result<SourceRevision, ImportMediaError> {
     tauri::async_runtime::spawn_blocking(move || read_source_revision_blocking(&path))
         .await
-        .map_err(|_| generated_error(ImportMediaErrorCode::CommandExecutionFailed))?
+        .map_err(|error| join_failure(&error))?
 }
 
 /// The body of [`read_source_revision`], off the async runtime so a test can reach it.
@@ -237,8 +244,31 @@ fn map_canonicalize_error(error: io::Error) -> ImportMediaError {
     ImportMediaError::with_detail(code, error.to_string())
 }
 
+/// A failure QuipClip decides for itself about a condition it can enumerate, where the code is
+/// the whole account and there is nothing a diagnostic could add (ADR 011).
+///
+/// Two codes reach this: `appDataUnavailable`, which says the platform gave the application no
+/// data directory, and `ffmpegPairMissing`, which says discovery found no `ffmpeg` and `ffprobe`
+/// pair. No system call produced either answer.
 fn generated_error(code: ImportMediaErrorCode) -> ImportMediaError {
     ImportMediaError::new(code)
+}
+
+/// Report a blocking-task join failure as `commandExecutionFailed`, carrying what went wrong.
+///
+/// A join failure is not an enumerable condition, so ADR 011 keeps its diagnostic. The value both
+/// callers pass is a `JoinError`, and its `Display` says whether the task **panicked** or was
+/// **cancelled** -- two different faults with two different investigations, and the bare code
+/// tells them apart not at all.
+///
+/// The parameter is `&impl Display` rather than the concrete error type because a `JoinError`
+/// cannot be constructed outside tokio, so a test can only reach this mapping with a stand-in. The
+/// test that does so proves the text is carried, not that tokio produced it.
+fn join_failure(error: &impl std::fmt::Display) -> ImportMediaError {
+    ImportMediaError::with_detail(
+        ImportMediaErrorCode::CommandExecutionFailed,
+        error.to_string(),
+    )
 }
 
 fn unix_seconds(time: SystemTime) -> Result<i64, ImportMediaError> {
@@ -638,22 +668,40 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code, ImportMediaErrorCode::AssetScopeDenied);
-        assert_eq!(error.detail, None);
+        // This assertion used to be `None`, pinning the rule the amended ADR 011 retires: the
+        // string was dropped because Rust authored it. A scope denial is not an enumerable set of
+        // conditions, so the text is the only thing that says which pattern the scope refused and
+        // why. The interface still renders the localized `assetScopeDenied`.
+        assert_eq!(error.detail.as_deref(), Some("scope rejected pattern"));
     }
 
+    // The two codes that stay bare, and the reason is the condition rather than the origin: each
+    // is one thing QuipClip decided for itself, with no system call behind it, so the code is the
+    // whole account. `assetScopeDenied` and `commandExecutionFailed` were in this list until they
+    // gained a diagnostic each; the two tests above and below hold them now.
     #[test]
-    fn generated_errors_never_expose_internal_english_details() {
+    fn a_failure_about_an_enumerable_condition_carries_no_diagnostic() {
         for code in [
             ImportMediaErrorCode::AppDataUnavailable,
             ImportMediaErrorCode::FfmpegPairMissing,
-            ImportMediaErrorCode::AssetScopeDenied,
-            ImportMediaErrorCode::CommandExecutionFailed,
         ] {
             let error = generated_error(code);
             assert_eq!(error.code, code);
             assert_eq!(error.detail, None);
             assert_eq!(error.exit_code, None);
         }
+    }
+
+    // A `JoinError` cannot be constructed outside tokio, so the stand-in below is the closest a
+    // test can get to the real value. It holds the mapping: a panic and a cancellation are two
+    // faults, and `commandExecutionFailed` alone cannot tell a reader which one happened.
+    #[test]
+    fn a_join_failure_carries_the_reason_the_task_did_not_finish() {
+        let error = join_failure(&"task 12 panicked");
+
+        assert_eq!(error.code, ImportMediaErrorCode::CommandExecutionFailed);
+        assert_eq!(error.detail.as_deref(), Some("task 12 panicked"));
+        assert_eq!(error.exit_code, None);
     }
 
     #[test]

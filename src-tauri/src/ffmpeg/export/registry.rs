@@ -231,8 +231,17 @@ impl ExportRegistry {
         true
     }
 
-    /// Ask whichever run holds the slot to stop, and return its identifier. `None` when the
-    /// slot is free, and in that case nothing is set at all.
+    /// Ask whichever run holds the slot to stop, and report whether there was one. `false` when
+    /// the slot is free, and in that case nothing is set at all.
+    ///
+    /// This reports a `bool` rather than the run's identifier because no caller needs the name.
+    /// `commands::export::cancel_active_export` is the only one, and it answers the frontend with
+    /// whether a flag was set; returning the id meant cloning a `String` inside the critical
+    /// section for a value that was then discarded. The clone could not simply move below the
+    /// guard, since the id is borrowed from the data the guard protects, so the work is removed
+    /// instead of relocated. A caller that needs the name of the run holding the slot has
+    /// [`ExportRegistry::active_run_id`], which exists for exactly that and states what a snapshot
+    /// of it is worth.
     ///
     /// This is [`ExportRegistry::cancel`] without the id comparison, and it exists for the one
     /// window in which a caller cannot name the run: `commands::export::start_export` claims
@@ -250,15 +259,17 @@ impl ExportRegistry {
     /// one holding the slot right now. `commands::export::cancel_active_export` states that
     /// reason, and it is the only caller.
     ///
-    /// Everything [`ExportRegistry::cancel`] says about its `true` applies to a `Some` here,
+    /// Everything [`ExportRegistry::cancel`] says about its `true` applies to a `true` here,
     /// including the obligation on the process stage to read the flag once more before it
     /// publishes an output.
-    pub fn cancel_active(&self) -> Option<String> {
+    pub fn cancel_active(&self) -> bool {
         let active = self.lock();
-        let export = active.as_ref()?;
+        let Some(export) = active.as_ref() else {
+            return false;
+        };
         // The same store as `ExportRegistry::cancel`, for the reason given there.
         export.cancel.store(true, Ordering::SeqCst);
-        Some(export.run_id.clone())
+        true
     }
 
     /// The identifier of the export that currently holds the slot, or `None` when the slot
@@ -564,13 +575,15 @@ mod tests {
     }
 
     #[test]
-    fn cancel_active_names_the_run_holding_the_slot_and_sets_its_flag() {
+    fn cancel_active_cancels_the_run_holding_the_slot_and_sets_its_flag() {
         // The window this method exists for: `start_export` has claimed the slot and has not
-        // yet answered with the run id, so the caller has no id to compare against.
+        // yet answered with the run id, so the caller has no id to compare against. The flag
+        // assertion is what identifies the run that was canceled, now that the method reports
+        // only whether one was.
         let registry = registry();
         let slot = registry.begin("run-1").expect("the slot starts free");
 
-        assert_eq!(registry.cancel_active().as_deref(), Some("run-1"));
+        assert!(registry.cancel_active());
         assert!(
             slot.is_canceled(),
             "cancel_active must set the very flag the matching begin returned"
@@ -581,31 +594,37 @@ mod tests {
     fn cancel_active_reports_nothing_when_the_slot_is_free() {
         let registry = registry();
 
-        assert_eq!(registry.cancel_active(), None);
+        assert!(!registry.cancel_active());
     }
 
     #[test]
-    fn cancel_active_after_a_release_names_whichever_run_holds_the_slot_now() {
+    fn cancel_active_after_a_release_cancels_whichever_run_holds_the_slot_now() {
         // A second call must read the slot again rather than remember what the first one
         // found. Between the two the first run releases the slot and a second run claims it,
         // so a stale answer here would cancel a run that is no longer there or report one that
-        // is.
+        // is. Which run each call reached is asserted through the two runs' own flags: the
+        // second run must end canceled, and the first run's release must leave the middle call
+        // with nothing to set.
         let registry = registry();
         let first = registry.begin("run-1").expect("the slot starts free");
 
-        assert_eq!(registry.cancel_active().as_deref(), Some("run-1"));
+        assert!(registry.cancel_active());
+        assert!(first.is_canceled(), "the first call reached the first run");
 
         drop(first);
-        assert_eq!(
-            registry.cancel_active(),
-            None,
+        assert!(
+            !registry.cancel_active(),
             "a released slot holds no run to cancel"
         );
 
         let second = registry
             .begin("run-2")
             .expect("the slot is free after the first run released it");
-        assert_eq!(registry.cancel_active().as_deref(), Some("run-2"));
+        assert!(
+            !second.is_canceled(),
+            "the call made while the slot was free must not have set the next run's flag"
+        );
+        assert!(registry.cancel_active());
         assert!(second.is_canceled());
     }
 

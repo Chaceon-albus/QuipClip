@@ -119,6 +119,7 @@ describe("Export Types & Wire Constants", () => {
         "outputDirectoryMissing",
         "outputEqualsSource",
         "outputNotWritable",
+        "outputReadOnly",
         "sourceFrameRateUnknown",
         "sourceAudioRateUnknown",
         "encoderUnavailable",

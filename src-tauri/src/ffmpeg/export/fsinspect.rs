@@ -48,6 +48,10 @@
 //! same way a missing identity would. The destination is the case that matters, since the user
 //! picks it fresh on every export, while `commands::media::import_media` has already canonicalized
 //! the source before any export can plan it.
+//!
+//! **The one fact that does not follow a symlink** is the read-only attribute
+//! [`PathFacts::File`] carries, because the rename that publishes the export does not follow one
+//! either. [`read_only_attribute`] holds that rule and why the two facts differ.
 
 use super::{PathFacts, PathIdentity};
 use std::fs;
@@ -58,10 +62,11 @@ use std::path::Path;
 ///
 /// Pass this to [`super::plan::build_plan`] as its `inspect` argument. It is called three times
 /// for one plan -- for the source, for the destination's parent directory, and for the destination
-/// itself -- so it must stay cheap: one `stat`, plus one open-and-close on Windows for a path that
-/// turns out to be a regular file. Only a regular file needs an identity, which is why the lookup
-/// is guarded here rather than left to [`classify`]: a directory would otherwise pay for a handle
-/// nothing reads.
+/// itself -- so it must stay cheap: one `stat`, plus a second `stat` and, on Windows, one
+/// open-and-close for a path that turns out to be a regular file. Only a regular file needs an
+/// identity or a read-only attribute, which is why both lookups are guarded here rather than left
+/// to [`classify`]: a directory would otherwise pay for a handle nothing reads and a `stat` nothing
+/// consults.
 ///
 /// [`classify`] holds the mapping itself, and its doc comment gives the full table.
 #[must_use]
@@ -69,11 +74,47 @@ pub fn inspect_path(path: &Path) -> PathFacts {
     // fs::metadata follows symlinks; fs::symlink_metadata would not, and the PathFacts contract
     // requires the target's identity, not the link's.
     let metadata = fs::metadata(path);
-    let identity = match &metadata {
-        Ok(metadata) if metadata.is_file() => read_identity(path, metadata),
-        Ok(_) | Err(_) => None,
+    let (identity, read_only) = match &metadata {
+        Ok(metadata) if metadata.is_file() => {
+            (read_identity(path, metadata), read_only_attribute(path))
+        }
+        Ok(_) | Err(_) => (None, false),
     };
-    classify(metadata.as_ref().map_err(io::Error::kind), identity)
+    classify(
+        metadata.as_ref().map_err(io::Error::kind),
+        identity,
+        read_only,
+    )
+}
+
+/// Whether the export publication would refuse `path` as a protected destination.
+///
+/// This is the one fact in this module that is read from `fs::symlink_metadata` rather than
+/// [`fs::metadata`], and the asymmetry with the identity above is deliberate: the two facts answer
+/// two different questions. An identity has to name the file the export would really write, so it
+/// follows a link. This attribute has to be the one [`crate::fsutil::replace_file_within`] reads
+/// before the rename that publishes -- and that function reads the destination's own final
+/// component, on both platforms, because neither `rename(2)` nor `MoveFileExW` resolves it. Reading
+/// the target instead would refuse a symlinked destination that points at a read-only file, which
+/// the publication replaces without complaint, leaving the file it pointed at untouched.
+///
+/// `Permissions::readonly()` is exactly the test both arms of `replace_file_within` apply: on Unix
+/// it answers "no write bit is set for anybody", the `chmod 444` case ADR 015 names; on Windows it
+/// reads the read-only attribute. No file-type filter is applied here, and none is needed:
+/// [`inspect_path`] calls this only for a path [`fs::metadata`] already reported as a regular file,
+/// and [`super::plan::build_plan`] consults the answer only in the destination position, after it
+/// has already refused a destination that is a directory or a device node.
+///
+/// **An attribute that cannot be read is `false`.** `replace_file_within` refuses only a *confirmed*
+/// read-only destination -- the Unix arm leaves an unreadable mode to `rename(2)`, and the Windows
+/// arm requires `Some(true)` before it gives up -- so answering `true` here would make this
+/// preflight refuse an export the publication would have completed. The direction is safe for the
+/// same reason the late guard still exists: a file this preflight let through is checked again at
+/// the rename.
+fn read_only_attribute(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.permissions().readonly())
+        .unwrap_or(false)
 }
 
 /// Turn one `stat` result and one identity lookup into the fact `build_plan` reads.
@@ -87,7 +128,8 @@ pub fn inspect_path(path: &Path) -> PathFacts {
 ///   and skips the same-file comparison for it, so "I could not read this path" must never be
 ///   spelled the same way as "there is nothing here";
 /// - the path is a directory -- [`PathFacts::Directory`], whatever `identity` holds;
-/// - the path is a regular file and `identity` is `Some` -- [`PathFacts::File`];
+/// - the path is a regular file and `identity` is `Some` -- [`PathFacts::File`], carrying
+///   `read_only` as [`read_only_attribute`] answered it;
 /// - the path is a regular file and `identity` is `None` -- [`PathFacts::Other`], the failure rule
 ///   this module's doc comment states;
 /// - the path is anything else, such as a device node, a socket, or a named pipe --
@@ -110,6 +152,7 @@ pub fn inspect_path(path: &Path) -> PathFacts {
 fn classify(
     metadata: Result<&fs::Metadata, io::ErrorKind>,
     identity: Option<PathIdentity>,
+    read_only: bool,
 ) -> PathFacts {
     let metadata = match metadata {
         Ok(metadata) => metadata,
@@ -123,7 +166,10 @@ fn classify(
         return PathFacts::Other;
     }
     match identity {
-        Some(identity) => PathFacts::File { identity },
+        Some(identity) => PathFacts::File {
+            identity,
+            read_only,
+        },
         None => PathFacts::Other,
     }
 }
@@ -339,9 +385,18 @@ mod tests {
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// The identity `inspect_path` reports for a path the test expects to be a regular file.
+    ///
+    /// `read_only` is ignored by name rather than by `..`: this helper exists to extract the one
+    /// fact its callers compare, and every test that cares about the attribute asserts on the
+    /// whole `PathFacts::File` value instead. Naming the field also means a third fact added to
+    /// the variant breaks this pattern, which is the point -- the next reader has to decide
+    /// whether the new fact belongs here rather than have it absorbed silently.
     fn identity_of(path: &Path) -> PathIdentity {
         match inspect_path(path) {
-            PathFacts::File { identity } => identity,
+            PathFacts::File {
+                identity,
+                read_only: _,
+            } => identity,
             other => panic!(
                 "expected {} to report a file, got {other:?}",
                 path.display()
@@ -462,7 +517,7 @@ mod tests {
     #[test]
     fn classify_maps_only_not_found_to_absent_and_every_other_stat_error_to_other() {
         assert_eq!(
-            classify(Err(io::ErrorKind::NotFound), None),
+            classify(Err(io::ErrorKind::NotFound), None, false),
             PathFacts::Absent
         );
         for kind in [
@@ -471,11 +526,106 @@ mod tests {
             io::ErrorKind::Other,
         ] {
             assert_eq!(
-                classify(Err(kind), None),
+                classify(Err(kind), None, false),
                 PathFacts::Other,
                 "a {kind:?} stat must not read as an empty path"
             );
         }
+    }
+
+    #[test]
+    fn a_writable_file_reports_a_file_that_is_not_read_only() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join("destination.mp4");
+        fs::write(&path, b"a previous export").unwrap();
+        assert_eq!(
+            inspect_path(&path),
+            PathFacts::File {
+                identity: identity_of(&path),
+                read_only: false,
+            }
+        );
+    }
+
+    // The attribute the export preflight refuses a destination on, read from a real file on both
+    // platforms: `set_readonly(true)` maps to clearing every write bit on Unix and to setting the
+    // read-only attribute on Windows, which is what `Permissions::readonly` answers on each.
+    //
+    // The file is released before the assertion runs, so a failing assertion cannot leave a file
+    // that defeats `TestDirectory`'s own cleanup on Windows, where `remove_dir_all` refuses a
+    // read-only file. Protecting it takes one call on both platforms; releasing it again does not,
+    // so that step is split by platform below.
+    #[test]
+    fn a_read_only_file_reports_a_file_that_is_read_only() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join("destination.mp4");
+        fs::write(&path, b"a protected export").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        let facts = inspect_path(&path);
+
+        // On Windows clearing the attribute is the whole operation. On Unix `set_readonly(false)`
+        // would set every write bit and leave the file world-writable, so set an ordinary 0o644
+        // instead -- which is all `remove_dir_all` needs. `fsutil::replace_file_within` splits its
+        // own permission work the same way, and for the same reason.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(&path, permissions).unwrap();
+        }
+        match facts {
+            PathFacts::File { read_only, .. } => assert!(
+                read_only,
+                "a protected destination must be reported as read-only, or the export plans and \
+                 the whole encode is discarded at the rename"
+            ),
+            other => panic!("expected a file, got {other:?}"),
+        }
+    }
+
+    // A symlinked destination is replaced by `fsutil::replace_file_within`, which never resolves
+    // the destination's final component, so the preflight must not refuse the link for its
+    // target's attribute. This is the one place the two facts diverge: the identity follows the
+    // link, the read-only attribute does not.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_read_only_file_reports_the_targets_identity_and_is_not_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = TestDirectory::new();
+        let target = directory.path.join("protected.mp4");
+        fs::write(&target, b"a protected file").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+        let link = directory.path.join("destination.mp4");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert_eq!(
+            inspect_path(&link),
+            PathFacts::File {
+                identity: identity_of(&target),
+                read_only: false,
+            }
+        );
+    }
+
+    // The failure rule for this fact, stated where no permission bit is needed: any `stat` that
+    // does not answer -- here because nothing is at the path -- must read as not read-only, so
+    // this preflight never refuses an export the publication would have completed. `inspect_path`
+    // reports such a path as `Absent` or `Other` in any case, so this asserts on the helper
+    // itself, which is where the rule lives.
+    #[test]
+    fn a_read_only_attribute_that_cannot_be_read_is_not_a_refusal() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join("nothing-was-ever-written-here.mp4");
+        assert!(!read_only_attribute(&path));
     }
 
     // The other fail-closed rule. It is unreachable through inspect_path on Unix, where dev and
@@ -488,15 +638,25 @@ mod tests {
         let file = fs::metadata(&path).unwrap();
         let folder = fs::metadata(&directory.path).unwrap();
         let identity = PathIdentity::new(7);
-        assert_eq!(classify(Ok(&file), None), PathFacts::Other);
+        assert_eq!(classify(Ok(&file), None, false), PathFacts::Other);
         assert_eq!(
-            classify(Ok(&file), Some(identity)),
-            PathFacts::File { identity }
+            classify(Ok(&file), Some(identity), false),
+            PathFacts::File {
+                identity,
+                read_only: false
+            }
         );
         assert_eq!(
-            classify(Ok(&folder), None),
+            classify(Ok(&file), Some(identity), true),
+            PathFacts::File {
+                identity,
+                read_only: true
+            }
+        );
+        assert_eq!(
+            classify(Ok(&folder), None, true),
             PathFacts::Directory,
-            "a directory never needed an identity"
+            "a directory never needed an identity, and carries no read-only fact either"
         );
     }
 

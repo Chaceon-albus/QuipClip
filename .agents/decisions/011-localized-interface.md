@@ -46,7 +46,29 @@ technical identifiers, and raw `ffmpeg` output keep their original format.
 
 Rust and Tauri commands return stable error codes and named values for errors that the
 application generates. They do not return user-facing sentences. The frontend translates
-these errors. It may append unchanged operating-system or `ffmpeg` diagnostic text.
+these errors. It may append unchanged diagnostic text beside the translated message.
+
+**The diagnostic may come from Rust as well as from the operating system or `ffmpeg`.** The
+rule that matters is which string the interface renders as its message, not which process
+produced the other one. The localized code is always the message. A diagnostic is supplementary
+text a user copies into a bug report, and it is never translated, so its origin does not change
+what the user is told.
+
+Whether to carry one is decided by the condition, not by the origin:
+
+- A condition the application can enumerate has a code of its own, and that code is the whole
+  account. A refusal QuipClip decides for itself — a read-only destination, a revision that does
+  not match — needs no sentence beside it, because no system call was made and there is nothing
+  a diagnostic could add that the code does not already say.
+- A condition whose failure modes cannot be enumerated carries its diagnostic. Creating a
+  temporary file, walking a directory, or spawning a process can fail in ways that are not worth
+  a code each and are not predictable in advance. Dropping the text there leaves the user and a
+  bug report with a bare code and no way to tell two different faults apart.
+
+The earlier reading of this record dropped every diagnostic that did not carry a raw
+operating-system code, on the ground that a Rust-authored string is untranslated English. That
+protected nothing the first rule above does not already protect, and it discarded the only detail
+some corner cases produce.
 
 Each translation change must maintain message-key parity across catalogs. Plural forms
 follow the CLDR rules that `i18next` applies to each language. The parity check normalizes

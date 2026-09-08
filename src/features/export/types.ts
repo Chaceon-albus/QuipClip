@@ -58,6 +58,7 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "outputDirectoryMissing",
   "outputEqualsSource",
   "outputNotWritable",
+  "outputReadOnly",
   "sourceFrameRateUnknown",
   "sourceAudioRateUnknown",
   "encoderUnavailable",

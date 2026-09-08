@@ -938,6 +938,15 @@ pub fn reset(app_data_directory: &Path) -> Result<Settings, SettingsFileError> {
         .map(|probe| probe.revision);
 
     let backup_path = app_data_directory.join(INVALID_SETTINGS_FILE_NAME);
+    // A plain `fs::rename`, and therefore exempt from the read-only refusal ADR 015 puts in
+    // `fsutil::replace_file_within`: a rename needs permission on the directory, not on the file,
+    // so a settings file the user protected is still moved aside here. ADR 013's "A reset is
+    // exempt from the read-only refusal" records that this is deliberate. `reset` is the only
+    // escape from a settings file this build cannot read, and it is reachable only after a load
+    // has already failed, so a refusal here would leave the user with no route back except
+    // deleting the file from a terminal -- the dead end this recovery action exists to prevent.
+    // Do not route this through the guarded helper. The `save_locked` below, which writes the
+    // fresh document, does go through it.
     match fs::rename(&path, &backup_path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}

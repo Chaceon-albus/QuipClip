@@ -169,6 +169,22 @@ than optional.
 has moved past, so without a re-read every later save in that session would conflict again. The
 store re-reads on that code alone, keeps the error visible, and reports what is now on screen.
 
+### A reset is exempt from the read-only refusal
+
+ADR 015 makes QuipClip refuse to replace a file the user protected, on both platforms. `reset`
+does not go through that path: it moves the damaged file aside with a plain rename, which needs
+permission on the directory and not on the file.
+
+That exemption is deliberate. `reset` is the only escape from a settings file this build cannot
+read, and it is reachable from the interface only after a load has already failed. A read-only
+damaged file that also refused the reset would leave the user with no route back except deleting
+the file from a terminal — the dead end this record's own recovery action exists to prevent. A
+protection that can lock the application out of its own recovery is worse than the write it
+prevents.
+
+The write that follows the rename does go through the guarded path, so the fresh document is
+still written safely.
+
 ## Consequences
 
 - A user can point the application at any ffmpeg, and `ExecutableOrigin::Configured` already
