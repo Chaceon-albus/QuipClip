@@ -39,6 +39,7 @@ document summarizes them and shows how the parts fit together.
 | [`016-export-orchestration.md`](../.agents/decisions/016-export-orchestration.md)                                           | One export at a time, one event, a 30-second publication wait |
 | [`017-export-lifetime-across-application-exit.md`](../.agents/decisions/017-export-lifetime-across-application-exit.md)     | A quit cancels a running export and waits a bounded time      |
 | [`018-windows-child-processes-without-a-console.md`](../.agents/decisions/018-windows-child-processes-without-a-console.md) | Every child process starts with no Windows console window     |
+| [`019-scrub-audio-on-frame-step.md`](../.agents/decisions/019-scrub-audio-on-frame-step.md)                                 | A frame step plays a short audio burst at the new position    |
 
 ## Shape
 
@@ -176,6 +177,19 @@ is the same reading the calibration anchor guard already trusts. QuipClip does n
 V1 navigation buttons request a nominal frame interval. They use `avg_frame_rate`, then
 `r_frame_rate`. RVFC reports the frame that the browser actually presented. Exact adjacent
 frame stepping needs future frame-boundary discovery or another decoder.
+
+A frame step also plays a short piece of the sound at the new position, because the picture
+alone frequently does not identify the correct frame. A second, hidden `<audio>` element
+carries the same asset URL as the preview element. One controller in
+`src/features/playback/scrubAudio.ts` seeks that element and plays it for 50 milliseconds.
+Only `seekNominal` starts a burst. Every other playback action stops one, so a cue and the
+real playback never sound together.
+
+The controller starts its stop timer on the `playing` event, because the element needs as
+long to seek and to start as the burst lasts. A held key that steps forward extends the
+current burst instead of a restart, so the sound stays continuous. The element is mounted
+only for a source that has an audio stream, and only after the calibration status leaves
+`calibrating`. It therefore cannot delay the calibration anchor. See ADR 019.
 
 The current _Source_ preview plays the whole file. A future _Program_ preview will play
 only the segments, so the user can watch what the export will contain.
