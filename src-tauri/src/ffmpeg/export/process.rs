@@ -99,9 +99,10 @@
 
 use super::{ProgressReader, ProgressSnapshot};
 use crate::ffmpeg::capabilities::smoke::{read_capped_tail, stderr_tail};
+use crate::procutil::command_without_console;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -314,7 +315,7 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
     // progress callback most of all -- and a bare `Child` local would survive that unwind as an
     // orphaned encoder; see [`ChildGuard`].
     let mut child = ChildGuard::new(
-        Command::new(ffmpeg)
+        command_without_console(ffmpeg)
             .args(arguments)
             // ADR 004 and ADR 014 both put `-nostdin` on the command line, and this null
             // stdin says the same thing a second way. The flag stops `ffmpeg` prompting; the
@@ -735,7 +736,7 @@ mod tests {
     /// make the answer wrong. Neither platform reuses an id that quickly in practice.
     #[cfg(unix)]
     fn process_is_gone(pid: u64) -> bool {
-        !Command::new("/bin/ps")
+        !command_without_console("/bin/ps")
             .args(["-p", &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -750,7 +751,7 @@ mod tests {
     /// output rather than in the status.
     #[cfg(windows)]
     fn process_is_gone(pid: u64) -> bool {
-        let output = Command::new("tasklist.exe")
+        let output = command_without_console("tasklist.exe")
             .args(["/FI", &format!("PID eq {pid}"), "/NH"])
             .stdin(Stdio::null())
             .output()

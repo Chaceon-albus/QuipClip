@@ -1,6 +1,7 @@
 //! ffprobe execution and normalization for imported media.
 
 use crate::ffmpeg::capabilities::smoke::{kill_and_reap, read_capped};
+use crate::procutil::command_without_console;
 use crate::time::{FrameCount, Pts, Rational, TickCount};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,7 +10,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -316,7 +317,7 @@ fn run_probe_process(
     timeout: Duration,
     poll: Duration,
 ) -> io::Result<ProbeRun> {
-    let mut child = Command::new(program)
+    let mut child = command_without_console(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

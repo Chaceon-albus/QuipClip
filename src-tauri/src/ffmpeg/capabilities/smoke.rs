@@ -11,9 +11,10 @@
 //! requires ffmpeg to be installed.
 
 use super::{CodecKind, EncoderStatus};
+use crate::procutil::command_without_console;
 use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -232,7 +233,7 @@ pub fn run_with_timeout(
     poll: Duration,
     stdout: StdoutCapture,
 ) -> io::Result<CommandOutcome> {
-    let mut child = Command::new(program)
+    let mut child = command_without_console(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(match stdout {
@@ -712,7 +713,7 @@ mod tests {
         // the child ended between the last poll and the kill. It must read as success and
         // must not block, because the two drain-thread joins are behind it.
         let program = std::env::current_exe().expect("the test binary has a path");
-        let mut child = Command::new(program)
+        let mut child = command_without_console(program)
             .arg("--list")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

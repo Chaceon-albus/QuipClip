@@ -1,3 +1,7 @@
 # Keep the bar high on a small codebase. Raise these only with a reason.
 too-many-arguments-threshold = 8
 type-complexity-threshold = 350
+# ADR 018: a child process starts through `procutil::command_without_console`, which is the only
+# place that may call this and holds the only `#[allow(clippy::disallowed_methods)]` for it. A spawn
+# anywhere else shows a console window on Windows and gives a macOS build no signal at all.
+disallowed-methods = ["std::process::Command::new"]
