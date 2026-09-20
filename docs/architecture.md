@@ -188,8 +188,12 @@ real playback never sound together.
 The controller starts its stop timer on the `playing` event, because the element needs as
 long to seek and to start as the burst lasts. A held key that steps forward extends the
 current burst instead of a restart, so the sound stays continuous. The element is mounted
-only for a source that has an audio stream, and only after the calibration status leaves
-`calibrating`. It therefore cannot delay the calibration anchor. See ADR 019.
+only for a source that has an audio stream, only while the playback store reports that it
+is attached to that same source revision, and only after the calibration status leaves
+`calibrating`. The identity test is what makes the gate correct: the render that first
+carries a new source still holds the store state of the previous one, so a boolean is
+stale exactly when it decides. The element therefore cannot delay the calibration anchor.
+See ADR 019.
 
 The current _Source_ preview plays the whole file. A future _Program_ preview will play
 only the segments, so the user can watch what the export will contain.

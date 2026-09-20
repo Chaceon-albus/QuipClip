@@ -77,9 +77,18 @@ already at the correct position. Without this rule a held key restarts the eleme
 continuously and the result is a stutter. A backward request always seeks, because audio
 does not play backwards.
 
-The element is mounted only when the probe reports an audio stream, and only after the
-calibration status leaves `calibrating`. The second condition prevents a second request
-stream during the interval in which ADR 003 takes the calibration anchor.
+The element is mounted only when the probe reports an audio stream, only while the
+playback store reports that it is attached to that same source revision, and only after
+the calibration status leaves `calibrating`. The last two conditions prevent a second
+request stream during the interval in which ADR 003 takes the calibration anchor.
+
+The second condition compares the source revision key. A boolean cannot serve. The render
+that first carries a new source still holds the store state of the previous source, so a
+boolean is stale exactly when it decides. React assigns `src` when it constructs the node,
+and a media element that is not in the document still fetches, so a node built on that
+render starts a second read of the new file before the store has attached to it. The store
+publishes the attached key in the same `set` as the calibration status, so no render sees
+the key of one source beside the calibration state of another.
 
 The cue is always on. There is no setting and no volume control.
 
