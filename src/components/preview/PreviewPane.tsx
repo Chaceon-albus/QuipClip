@@ -26,6 +26,7 @@ import {
 import {
   createVideoRefCallback,
   playbackStore,
+  scrubAudioController,
   usePlaybackStore,
   type PlaybackSource,
 } from "@/features/playback";
@@ -118,6 +119,10 @@ export function PreviewPane() {
   const error = useMediaStore((s) => s.error);
 
   const playbackError = usePlaybackStore((s) => s.error);
+  const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
+  const attachedSourceRevisionKey = usePlaybackStore(
+    (s) => s.attachedSourceRevisionKey,
+  );
 
   const sourceRevisionKey = getSourceRevisionKey(media);
   const [previousMedia, setPreviousMedia] = useState(media);
@@ -187,6 +192,33 @@ export function PreviewPane() {
         playbackStore.getState().detach(sourceRevisionKey, node),
     });
     ownerRef.current(element);
+  }, []);
+
+  // Registers and unregisters the hidden scrub audio element with exact ownership (ADR 019).
+  // The callback identity is stable for the life of the component. The closure holds the element
+  // it attached, and the controller's own `attached !== element` guard rejects a detach for an
+  // element it does not hold.
+  const scrubOwnerRef = useRef<((element: HTMLAudioElement | null) => void) | null>(
+    null,
+  );
+
+  const scrubAudioRefCallback = useCallback((element: HTMLAudioElement | null) => {
+    scrubOwnerRef.current ??= (() => {
+      let ownedElement: HTMLAudioElement | null = null;
+      return (node: HTMLAudioElement | null) => {
+        if (node) {
+          ownedElement = node;
+          scrubAudioController.attach(node);
+        } else {
+          const elToDetach = ownedElement;
+          ownedElement = null;
+          if (elToDetach) {
+            scrubAudioController.detach(elToDetach);
+          }
+        }
+      };
+    })();
+    scrubOwnerRef.current(element);
   }, []);
 
   // Register requestVideoFrameCallback lifecycle loop (ADR 003)
@@ -357,6 +389,34 @@ export function PreviewPane() {
                   }}
                 />
               )}
+
+              {/* Hidden audio element for scrub bursts on frame step (ADR 019).
+                  Gated on:
+                  1. media.probe.audio: null when the source has no audio stream. Mount nothing then.
+                  2. !videoError: web view could not decode the source. Mount nothing then.
+                  3. attachedSourceRevisionKey === sourceRevisionKey: the identity comparison keeps
+                     React from constructing the node at all, React assigns `src` at construction
+                     so a fetch would start before insertion, and a boolean such as isAttached
+                     cannot serve because the render that first carries a new source still holds
+                     the previous source store state.
+                  4. calibrationStatus !== "calibrating": keeps the element out until the calibration
+                     anchor is taken by the first requestVideoFrameCallback (ADR 003), preventing a
+                     competing range request during that window. A source whose calibration resolves
+                     straight to "unavailable" mounts at attach time, which is correct because such a
+                     source has no anchor to protect. */}
+              {media.probe.audio &&
+                !videoError &&
+                attachedSourceRevisionKey === sourceRevisionKey &&
+                calibrationStatus !== "calibrating" && (
+                  <audio
+                    ref={scrubAudioRefCallback}
+                    key={`scrub-${sourceRevisionKey}`}
+                    preload="auto"
+                    src={videoSrc}
+                    aria-hidden="true"
+                    className="hidden"
+                  />
+                )}
 
               {/* Restrained Overlay when replacement media is loading */}
               {status === "loading" && (

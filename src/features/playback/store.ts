@@ -15,6 +15,7 @@ import {
   ptsToMediaTime,
 } from "@/lib/time";
 import type { Pts, Rational } from "@/types/project";
+import { scrubAudioController } from "./scrubAudio";
 import type {
   CalibrationStatus,
   PlaybackMediaElement,
@@ -115,6 +116,7 @@ export function createPlaybackStore(
     approximateBrowserTimeSeconds: initialState?.approximateBrowserTimeSeconds ?? null,
     isPlaying: initialState?.isPlaying ?? false,
     isAttached: initialState?.isAttached ?? false,
+    attachedSourceRevisionKey: initialState?.attachedSourceRevisionKey ?? null,
     isReady: initialState?.isReady ?? false,
     error: initialState?.error ?? null,
 
@@ -196,6 +198,7 @@ export function createPlaybackStore(
         approximateBrowserTimeSeconds: null,
         isPlaying: false,
         isAttached: true,
+        attachedSourceRevisionKey: newIdentity,
         isReady: isElementReady,
         error: null,
       });
@@ -214,6 +217,8 @@ export function createPlaybackStore(
       if (attachedElement !== element) {
         return;
       }
+
+      scrubAudioController.stop();
 
       playSessionId++;
       try {
@@ -239,6 +244,7 @@ export function createPlaybackStore(
         approximateBrowserTimeSeconds: null,
         isPlaying: false,
         isAttached: false,
+        attachedSourceRevisionKey: null,
         isReady: false,
       });
     },
@@ -324,6 +330,8 @@ export function createPlaybackStore(
       // Optimistically update playing state and clear previous error
       set({ isPlaying: true, error: null });
 
+      scrubAudioController.stop();
+
       let result: Promise<void> | void;
       try {
         result = targetElement.play();
@@ -368,6 +376,8 @@ export function createPlaybackStore(
     },
 
     pause: () => {
+      scrubAudioController.stop();
+
       if (!attachedSource || !attachedElement) {
         set({ isPlaying: false });
         return;
@@ -383,6 +393,8 @@ export function createPlaybackStore(
     },
 
     seekToPts: (targetPts: Pts) => {
+      scrubAudioController.stop();
+
       const state = get();
       if (
         !attachedSource ||
@@ -525,6 +537,8 @@ export function createPlaybackStore(
         seekedBeforeCalibration = true;
       }
 
+      scrubAudioController.request(targetTime, deltaFrames > 0 ? 1 : -1);
+
       // Do not update inferred PTS optimistically after assigning currentTime.
       set({
         isPlaying: false,
@@ -534,6 +548,8 @@ export function createPlaybackStore(
     },
 
     seekApproximate: (seconds: number) => {
+      scrubAudioController.stop();
+
       const state = get();
       if (
         !attachedElement ||
@@ -829,6 +845,7 @@ export function createPlaybackStore(
     },
 
     reset: () => {
+      scrubAudioController.stop();
       playSessionId++;
       if (attachedElement) {
         try {
@@ -857,6 +874,7 @@ export function createPlaybackStore(
         approximateBrowserTimeSeconds: null,
         isPlaying: false,
         isAttached: false,
+        attachedSourceRevisionKey: null,
         isReady: false,
         error: null,
       });

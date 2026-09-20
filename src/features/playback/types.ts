@@ -85,6 +85,14 @@ export interface PlaybackState {
   readonly isPlaying: boolean;
   /** True when a media element is attached. */
   readonly isAttached: boolean;
+  /**
+   * Revision key of the source the store is attached to, or null when nothing is attached.
+   *
+   * A component cannot infer this from `isAttached`: the render that first carries a new
+   * source still sees the previous source's store state, so a boolean is stale exactly when
+   * it matters (ADR 019).
+   */
+  readonly attachedSourceRevisionKey: string | null;
   /** True when the attached element has loaded metadata (readyState >= HAVE_METADATA). */
   readonly isReady: boolean;
   /** Local playback or seek error code, or null. */

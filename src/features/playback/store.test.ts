@@ -1,6 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from "vitest";
 import { getSourceRevisionKey } from "@/features/media";
 import type { Pts } from "@/types/project";
+import { scrubAudioController } from "./scrubAudio";
 import { createPlaybackStore, getNominalFrameRate } from "./store";
 import type { PlaybackMediaElement, PlaybackSource } from "./types";
 
@@ -113,6 +122,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(state.approximateBrowserTimeSeconds).toBeNull();
       expect(state.isPlaying).toBe(false);
       expect(state.isAttached).toBe(false);
+      expect(state.attachedSourceRevisionKey).toBeNull();
       expect(state.isReady).toBe(false);
       expect(state.error).toBeNull();
     });
@@ -142,6 +152,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().calibrationStatus).toBe("unavailable");
       expect(store.getState().isPlaying).toBe(false);
       expect(store.getState().isAttached).toBe(false);
+      expect(store.getState().attachedSourceRevisionKey).toBeNull();
       expect(store.getState().isReady).toBe(false);
       expect(store.getState().error).toBeNull();
     });
@@ -154,6 +165,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().attach(sourceA, video);
       expect(store.getState().isAttached).toBe(true);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityA);
       expect(store.getState().isReady).toBe(false);
       expect(store.getState().calibrationStatus).toBe("calibrating");
       expect(store.getState().presentedFrame).toBeNull();
@@ -237,6 +249,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().detach(identityA, video);
       expect(store.getState().isAttached).toBe(false);
+      expect(store.getState().attachedSourceRevisionKey).toBeNull();
       expect(store.getState().isReady).toBe(false);
       expect(store.getState().isPlaying).toBe(false);
       expect(store.getState().calibrationStatus).toBe("unavailable");
@@ -249,6 +262,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().attach(sourceA, readyVideo);
       expect(store.getState().isAttached).toBe(true);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityA);
       expect(store.getState().isReady).toBe(true);
     });
 
@@ -263,11 +277,13 @@ describe("Playback Store & PTS Presentation Engine", () => {
       // Detach called with wrong element
       store.getState().detach(identityA, video2);
       expect(store.getState().isAttached).toBe(true);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityA);
       expect(store.getState().isReady).toBe(true);
 
       // Detach called with wrong source identity
       store.getState().detach(identityB, video1);
       expect(store.getState().isAttached).toBe(true);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityA);
       expect(store.getState().isReady).toBe(true);
     });
 
@@ -288,7 +304,43 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().presentedFrame).toBeNull();
       expect(store.getState().isPlaying).toBe(false);
       expect(store.getState().isAttached).toBe(true);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityB);
       expect(store.getState().isReady).toBe(false);
+    });
+
+    it("tracks attachedSourceRevisionKey across attach, detach, and reset", () => {
+      const store = createPlaybackStore();
+      const video1 = createFakeVideo();
+      const video2 = createFakeVideo();
+
+      expect(store.getState().attachedSourceRevisionKey).toBeNull();
+
+      store.getState().attach(sourceA, video1);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityA);
+
+      // Re-attaching same source and element preserves attachedSourceRevisionKey
+      store.getState().attach(sourceA, video1);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityA);
+
+      // Guarded detach does not clear attachedSourceRevisionKey
+      store.getState().detach(identityB, video1);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityA);
+      store.getState().detach(identityA, video2);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityA);
+
+      // Matching detach clears attachedSourceRevisionKey
+      store.getState().detach(identityA, video1);
+      expect(store.getState().attachedSourceRevisionKey).toBeNull();
+
+      // Replacement updates attachedSourceRevisionKey
+      store.getState().attach(sourceA, video1);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityA);
+      store.getState().attach(sourceB, video2);
+      expect(store.getState().attachedSourceRevisionKey).toBe(identityB);
+
+      // Reset clears attachedSourceRevisionKey
+      store.getState().reset();
+      expect(store.getState().attachedSourceRevisionKey).toBeNull();
     });
   });
 
@@ -1529,6 +1581,222 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().presentedFrame).toBeNull();
 
       unsubscribe();
+    });
+  });
+
+  describe("Scrub Audio Controller Integration (ADR 019)", () => {
+    let requestSpy: MockInstance<typeof scrubAudioController.request>;
+    let stopSpy: MockInstance<typeof scrubAudioController.stop>;
+
+    beforeEach(() => {
+      requestSpy = vi.spyOn(scrubAudioController, "request");
+      stopSpy = vi.spyOn(scrubAudioController, "stop");
+    });
+
+    afterEach(() => {
+      requestSpy.mockRestore();
+      stopSpy.mockRestore();
+    });
+
+    it("calls request with the same target seconds assigned to the element and direction 1 on forward seekNominal", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 2.0 });
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+
+      // sourceA has fps25 ({ n: 25, d: 1 }), so 1 frame = 1/25 = 0.04s.
+      // Target time = 2.0 + 0.04 = 2.04s.
+      store.getState().seekNominal(1);
+
+      expect(video.currentTime).toBe(2.04);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenCalledWith(2.04, 1);
+    });
+
+    it("calls request with the same target seconds assigned to the element and direction -1 on backward seekNominal", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 2.0 });
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+
+      // sourceA has fps25 ({ n: 25, d: 1 }), so -1 frame = -0.04s.
+      // Target time = 2.0 - 0.04 = 1.96s.
+      store.getState().seekNominal(-1);
+
+      expect(video.currentTime).toBe(1.96);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenCalledWith(1.96, -1);
+    });
+
+    it("calls request with 0 and direction -1 when stepping backward clamps to 0", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 0.01 });
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+
+      // sourceA has fps25 (0.04s per frame). Stepping backward from 0.01 clamps to 0.
+      store.getState().seekNominal(-1);
+
+      expect(video.currentTime).toBe(0);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenCalledWith(0, -1);
+    });
+
+    it("calls request with approximateDurationSeconds and direction 1 when stepping forward clamps to upper bound", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 9.99 });
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+
+      // sourceA has approximateDurationSeconds 10.0 and fps25 (0.04s per frame).
+      // Stepping forward from 9.99 clamps to 10.0.
+      store.getState().seekNominal(1);
+
+      expect(video.currentTime).toBe(sourceA.approximateDurationSeconds);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenCalledWith(sourceA.approximateDurationSeconds, 1);
+    });
+
+    it("does not call request when the currentTime assignment throws", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({
+        initialCurrentTime: 2.0,
+        throwOnCurrentTimeSet: true,
+      });
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+
+      store.getState().seekNominal(1);
+
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(store.getState().error).toBe("seekFailed");
+    });
+
+    it("does not call request when seekNominal returns early with no usable frame rate or unready state", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 2.0 });
+
+      // 1. Source without usable frame rates
+      const noFpsSource: PlaybackSource = {
+        ...sourceA,
+        avgFrameRate: null,
+        rFrameRate: null,
+      };
+      const noFpsIdentity = getSourceRevisionKey(noFpsSource);
+      store.getState().attach(noFpsSource, video);
+      store.getState().syncReady(noFpsIdentity, video);
+
+      store.getState().seekNominal(1);
+      expect(requestSpy).not.toHaveBeenCalled();
+
+      // 2. Not ready
+      const storeUnready = createPlaybackStore();
+      const videoUnready = createFakeVideo({ initialCurrentTime: 2.0 });
+      storeUnready.getState().attach(sourceA, videoUnready);
+      storeUnready.getState().seekNominal(1);
+      expect(requestSpy).not.toHaveBeenCalled();
+
+      // 3. No media attached
+      const storeEmpty = createPlaybackStore();
+      storeEmpty.getState().seekNominal(1);
+      expect(requestSpy).not.toHaveBeenCalled();
+
+      // 4. Invalid delta frames
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      store.getState().seekNominal(0);
+      store.getState().seekNominal(1.5);
+      store.getState().seekNominal(Number.NaN);
+      expect(requestSpy).not.toHaveBeenCalled();
+    });
+
+    it("calls stop on play, pause, seekToPts, seekApproximate, detach and reset", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+
+      // 1. play calls stop before targetElement.play
+      stopSpy.mockClear();
+      video.play.mockClear();
+      store.getState().play();
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+      expect(stopSpy.mock.invocationCallOrder[0]).toBeLessThan(
+        video.play.mock.invocationCallOrder[0],
+      );
+
+      // 2. pause calls stop
+      stopSpy.mockClear();
+      store.getState().pause();
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+
+      // 3. seekToPts calls stop
+      stopSpy.mockClear();
+      store.getState().seekToPts("25" as Pts);
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+
+      // 4. seekApproximate calls stop
+      stopSpy.mockClear();
+      store.getState().seekApproximate(3.5);
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+
+      // Guarded detach: non-matching revision key or different element leaves stopSpy uncalled
+      const otherVideo = createFakeVideo();
+      stopSpy.mockClear();
+      store.getState().detach(identityB, video);
+      expect(stopSpy).not.toHaveBeenCalled();
+
+      stopSpy.mockClear();
+      store.getState().detach(identityA, otherVideo);
+      expect(stopSpy).not.toHaveBeenCalled();
+
+      // 5. detach calls stop
+      stopSpy.mockClear();
+      store.getState().detach(identityA, video);
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+
+      // 6. reset calls stop
+      store.getState().attach(sourceA, video);
+      stopSpy.mockClear();
+      store.getState().reset();
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("calls stop on seekToPts and seekApproximate even on early-return failure paths", () => {
+      const store = createPlaybackStore();
+
+      // Uncalibrated / unattached store: seekToPts returns early with seekFailed
+      stopSpy.mockClear();
+      store.getState().seekToPts("0" as Pts);
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+
+      // seekApproximate with invalid seconds returns early
+      stopSpy.mockClear();
+      store.getState().seekApproximate(-1);
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not call stop during seekNominal", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 2.0 });
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+
+      stopSpy.mockClear();
+      store.getState().seekNominal(1);
+      expect(stopSpy).not.toHaveBeenCalled();
+
+      store.getState().seekNominal(-1);
+      expect(stopSpy).not.toHaveBeenCalled();
     });
   });
 });
