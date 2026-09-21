@@ -25,6 +25,9 @@ export const zhCN: TranslationCatalog = {
       save: "保存",
       export: "导出...",
     },
+    action: {
+      export: "导出",
+    },
     project: {
       untitled: "未命名项目",
       saved: "已保存",

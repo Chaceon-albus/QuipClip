@@ -1227,6 +1227,7 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("titleBar.menu.openProject")).toBe("Open Project...");
     expect(instance.t("titleBar.menu.save")).toBe("Save");
     expect(instance.t("titleBar.menu.export")).toBe("Export...");
+    expect(instance.t("titleBar.action.export")).toBe("Export");
     expect(instance.t("titleBar.project.untitled")).toBe("Untitled Project");
     expect(instance.t("titleBar.project.saved")).toBe("Saved");
     expect(instance.t("window.minimize")).toBe("Minimize");
@@ -1364,6 +1365,7 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("titleBar.menu.openProject")).toBe("打开项目...");
     expect(instance.t("titleBar.menu.save")).toBe("保存");
     expect(instance.t("titleBar.menu.export")).toBe("导出...");
+    expect(instance.t("titleBar.action.export")).toBe("导出");
     expect(instance.t("titleBar.project.untitled")).toBe("未命名项目");
     expect(instance.t("titleBar.project.saved")).toBe("已保存");
     expect(instance.t("window.minimize")).toBe("最小化");

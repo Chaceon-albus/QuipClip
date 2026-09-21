@@ -22,6 +22,9 @@ export const en = {
       save: "Save",
       export: "Export...",
     },
+    action: {
+      export: "Export",
+    },
     project: {
       untitled: "Untitled Project",
       saved: "Saved",

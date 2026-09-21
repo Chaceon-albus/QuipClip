@@ -40,6 +40,7 @@ document summarizes them and shows how the parts fit together.
 | [`017-export-lifetime-across-application-exit.md`](../.agents/decisions/017-export-lifetime-across-application-exit.md)     | A quit cancels a running export and waits a bounded time      |
 | [`018-windows-child-processes-without-a-console.md`](../.agents/decisions/018-windows-child-processes-without-a-console.md) | Every child process starts with no Windows console window     |
 | [`019-scrub-audio-on-frame-step.md`](../.agents/decisions/019-scrub-audio-on-frame-step.md)                                 | A frame step plays a short audio burst at the new position    |
+| [`020-platform-title-bar-and-export-action.md`](../.agents/decisions/020-platform-title-bar-and-export-action.md)           | One title bar per platform, with the export action inside it  |
 
 ## Shape
 
