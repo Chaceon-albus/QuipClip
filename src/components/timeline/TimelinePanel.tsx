@@ -44,7 +44,6 @@ const selectApproximateBrowserTimeSeconds = (state: PlaybackStoreState) =>
 const selectIsAttached = (state: PlaybackStoreState) => state.isAttached;
 const selectIsReady = (state: PlaybackStoreState) => state.isReady;
 const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
-const selectSeekNominal = (state: PlaybackStoreState) => state.seekNominal;
 
 const selectSegments = (state: TimelineStoreState) => state.segments;
 const selectPendingInPts = (state: TimelineStoreState) => state.pendingInPts;
@@ -67,7 +66,6 @@ export function TimelinePanel({
   const isAttached = usePlaybackStore(selectIsAttached);
   const isReady = usePlaybackStore(selectIsReady);
   const seekToPts = usePlaybackStore(selectSeekToPts);
-  const seekNominal = usePlaybackStore(selectSeekNominal);
 
   const segments = useTimelineStore(selectSegments);
   const pendingInPts = useTimelineStore(selectPendingInPts);
@@ -190,22 +188,6 @@ export function TimelinePanel({
     seekFromClientX(e.clientX, e.currentTarget.getBoundingClientRect());
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!canUsePreciseSeek) {
-      return;
-    }
-    if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
-      e.preventDefault();
-      seekNominal(-1);
-    } else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
-      e.preventDefault();
-      seekNominal(1);
-    } else if (e.key === "Home" && media?.probe.videoStartPts) {
-      e.preventDefault();
-      seekToPts(media.probe.videoStartPts);
-    }
-  };
-
   const playhead = calculatePlayheadLayout(currentElapsedSeconds, totalDurationSeconds);
 
   const activeSourceSegments = useMemo(
@@ -276,10 +258,16 @@ export function TimelinePanel({
              * source. This rectangle has the same left edge and the same width as the
              * track lane rectangle, so `seekFromClientX` maps a coordinate identically.
              *
-             * Mouse only, by intent: the keyboard path stays on the single
-             * `role="slider"` element below. A second focus stop here would repeat the
-             * same arrow-key behaviour, and a focusable element with no role announces
-             * nothing.
+             * Mouse only, by intent: the keyboard path is the window-level layer, which
+             * answers wherever focus is. Two handlers for one behaviour would move the
+             * playhead two frames for one key press, and the capture phase gives the
+             * slider no way to yield — the global layer has already decided by the time
+             * a React handler runs.
+             *
+             * The seek surface below keeps `role="slider"`. The window layer serves Left
+             * and Right wherever the focus is, so a focused slider still steps and
+             * `aria-valuenow` still updates; Up, Down, Home and End are deliberately
+             * unbound, so the element does not implement the full ARIA slider key set.
              */}
             <div
               onClick={canSeek ? handleSeekClick : undefined}
@@ -351,7 +339,6 @@ export function TimelinePanel({
                     }
                     tabIndex={canSeek ? 0 : undefined}
                     onClick={canSeek ? handleSeekClick : undefined}
-                    onKeyDown={canSeek ? handleKeyDown : undefined}
                     className={`absolute inset-0 ${canSeek ? "cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
                   >
                     {/* Full-source background layer */}

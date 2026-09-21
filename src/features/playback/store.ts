@@ -28,7 +28,9 @@ import type {
  * Chooses valid avgFrameRate then rFrameRate for nominal navigation hints.
  * Returns null when neither frame rate is valid (ADR 003).
  */
-export function getNominalFrameRate(source: PlaybackSource): Rational | null {
+export function getNominalFrameRate(
+  source: Pick<PlaybackSource, "avgFrameRate" | "rFrameRate">,
+): Rational | null {
   if (
     source.avgFrameRate &&
     Number.isSafeInteger(source.avgFrameRate.n) &&
@@ -48,6 +50,16 @@ export function getNominalFrameRate(source: PlaybackSource): Rational | null {
     return source.rFrameRate;
   }
   return null;
+}
+
+/** True when the source reports a frame rate the nominal step can use. */
+export function hasNominalFrameRate(
+  source: Pick<PlaybackSource, "avgFrameRate" | "rFrameRate"> | null | undefined,
+): boolean {
+  if (!source) {
+    return false;
+  }
+  return getNominalFrameRate(source) !== null;
 }
 
 /**

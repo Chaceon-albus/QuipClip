@@ -1,5 +1,6 @@
 import { StatusBar } from "@/components/layout/StatusBar";
 import { TitleBar } from "@/components/layout/TitleBar";
+import { useKeyboardShortcuts } from "@/components/layout/useKeyboardShortcuts";
 import { PreviewPane } from "@/components/preview/PreviewPane";
 import { TimelinePanel } from "@/components/timeline/TimelinePanel";
 import { TransportBar } from "@/components/transport/TransportBar";
@@ -7,6 +8,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { usePlaybackStore } from "@/features/playback";
 
 export function AppShell() {
+  useKeyboardShortcuts();
+
   const runtimeBrowserDurationSeconds = usePlaybackStore(
     (state) => state.runtimeBrowserDurationSeconds,
   );

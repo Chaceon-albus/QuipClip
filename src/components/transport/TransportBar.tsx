@@ -3,12 +3,12 @@ import { useTranslation } from "react-i18next";
 import {
   ArrowLeftToLine,
   ArrowRightToLine,
+  ChevronLeft,
+  ChevronRight,
   Pause,
   Play,
   Redo2,
   Scissors,
-  SkipBack,
-  SkipForward,
   SquarePlus,
   Trash2,
   Undo2,
@@ -17,7 +17,11 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useMediaStore, type MediaStoreState } from "@/features/media";
-import { playbackStore, usePlaybackStore } from "@/features/playback";
+import {
+  hasNominalFrameRate,
+  playbackStore,
+  usePlaybackStore,
+} from "@/features/playback";
 import {
   canMarkIn,
   canMarkOut,
@@ -27,20 +31,6 @@ import {
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
-import { assertPositiveTimeBase } from "@/lib/time";
-import type { Rational } from "@/types/project";
-
-function isValidNominalRate(rate: Rational | null | undefined): boolean {
-  if (!rate) {
-    return false;
-  }
-  try {
-    assertPositiveTimeBase(rate);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 const selectMedia = (s: MediaStoreState) => s.media;
 
@@ -57,6 +47,22 @@ const selectNewSegment = (s: TimelineStoreState) => s.newSegment;
 const selectDeleteSegment = (s: TimelineStoreState) => s.deleteSegment;
 const selectUndo = (s: TimelineStoreState) => s.undo;
 const selectRedo = (s: TimelineStoreState) => s.redo;
+
+/**
+ * Keeps a mouse click from moving the focus to a transport button.
+ *
+ * The browser gives a button the focus on mouse down, so a cancelled mouse down
+ * leaves the focus where it was. The click still happens, because the browser sends
+ * a click on mouse up and does not test whether the mouse down was cancelled.
+ *
+ * The window shortcut layer takes Space from a focused button. Without this rule a
+ * user who pressed an edit action with the mouse and then pressed Space repeated
+ * that action instead of starting playback. The Tab order does not change: a button
+ * reached with the Tab key still takes the focus, and Enter still operates it.
+ */
+const preventFocusOnMouseDown = (event: React.MouseEvent<HTMLButtonElement>) => {
+  event.preventDefault();
+};
 
 export function TransportBar() {
   const { t } = useTranslation();
@@ -86,9 +92,7 @@ export function TransportBar() {
   const togglePlayback = playbackStore.getState().togglePlayback;
   const seekNominal = playbackStore.getState().seekNominal;
 
-  const hasNominalRate =
-    isValidNominalRate(media?.probe.avgFrameRate) ||
-    isValidNominalRate(media?.probe.rFrameRate);
+  const hasNominalRate = hasNominalFrameRate(media?.probe);
 
   // Every segment action names this target instead of guessing from the playhead.
   const currentSegment = useMemo(
@@ -140,6 +144,7 @@ export function TransportBar() {
           <Button
             variant="ghost"
             disabled={isUndoDisabled}
+            onMouseDown={preventFocusOnMouseDown}
             onClick={undo}
             className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label={t("transport.action.undo")}
@@ -152,6 +157,7 @@ export function TransportBar() {
           <Button
             variant="ghost"
             disabled={isRedoDisabled}
+            onMouseDown={preventFocusOnMouseDown}
             onClick={redo}
             className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label={t("transport.action.redo")}
@@ -170,6 +176,7 @@ export function TransportBar() {
           <Button
             variant="outline"
             disabled={isMarkInDisabled}
+            onMouseDown={preventFocusOnMouseDown}
             onClick={() => {
               // Read at click time: the store is the single source, and the click runs
               // after the render that enabled the button.
@@ -195,6 +202,7 @@ export function TransportBar() {
           <Button
             variant="outline"
             disabled={isMarkOutDisabled}
+            onMouseDown={preventFocusOnMouseDown}
             onClick={() => {
               const frame = playbackStore.getState().presentedFrame;
               if (frame) {
@@ -218,6 +226,7 @@ export function TransportBar() {
           <Button
             variant="outline"
             disabled={isSplitDisabled}
+            onMouseDown={preventFocusOnMouseDown}
             onClick={() => {
               const frame = playbackStore.getState().presentedFrame;
               if (frame) {
@@ -248,6 +257,7 @@ export function TransportBar() {
               <Button
                 variant="ghost"
                 disabled={isNewSegmentDisabled}
+                onMouseDown={preventFocusOnMouseDown}
                 onClick={newSegment}
                 className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label={t("transport.action.newSegmentAria")}
@@ -266,6 +276,7 @@ export function TransportBar() {
               <Button
                 variant="ghost"
                 disabled={isDeleteSegmentDisabled}
+                onMouseDown={preventFocusOnMouseDown}
                 onClick={deleteSegment}
                 className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label={t("transport.action.deleteSegmentAria")}
@@ -290,14 +301,15 @@ export function TransportBar() {
                 variant="ghost"
                 size="icon"
                 disabled={!hasActiveSource || !hasNominalRate}
+                onMouseDown={preventFocusOnMouseDown}
                 onClick={() => seekNominal(-1)}
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label={t("transport.action.previousStep")}
               >
-                <SkipBack className="size-4" />
+                <ChevronLeft className="size-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{t("transport.action.previousStep")}</TooltipContent>
+            <TooltipContent>{t("transport.action.previousStepHint")}</TooltipContent>
           </Tooltip>
 
           <Tooltip>
@@ -305,6 +317,7 @@ export function TransportBar() {
               <Button
                 size="icon"
                 disabled={!hasActiveSource}
+                onMouseDown={preventFocusOnMouseDown}
                 onClick={togglePlayback}
                 className="size-11 rounded-lg bg-primary text-primary-foreground shadow-xs hover:bg-primary-hover active:bg-primary-active"
                 aria-label={
@@ -319,7 +332,9 @@ export function TransportBar() {
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              {isPlaying ? t("transport.action.pause") : t("transport.action.play")}
+              {isPlaying
+                ? t("transport.action.pauseHint")
+                : t("transport.action.playHint")}
             </TooltipContent>
           </Tooltip>
 
@@ -329,14 +344,15 @@ export function TransportBar() {
                 variant="ghost"
                 size="icon"
                 disabled={!hasActiveSource || !hasNominalRate}
+                onMouseDown={preventFocusOnMouseDown}
                 onClick={() => seekNominal(1)}
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label={t("transport.action.nextStep")}
               >
-                <SkipForward className="size-4" />
+                <ChevronRight className="size-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{t("transport.action.nextStep")}</TooltipContent>
+            <TooltipContent>{t("transport.action.nextStepHint")}</TooltipContent>
           </Tooltip>
         </div>
       </div>

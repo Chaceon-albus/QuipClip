@@ -10,7 +10,7 @@ import {
 import { getSourceRevisionKey } from "@/features/media";
 import type { Pts } from "@/types/project";
 import { scrubAudioController } from "./scrubAudio";
-import { createPlaybackStore, getNominalFrameRate } from "./store";
+import { createPlaybackStore, getNominalFrameRate, hasNominalFrameRate } from "./store";
 import type { PlaybackMediaElement, PlaybackSource } from "./types";
 
 /**
@@ -715,6 +715,67 @@ describe("Playback Store & PTS Presentation Engine", () => {
           rFrameRate: null,
         }),
       ).toBeNull();
+    });
+
+    it("hasNominalFrameRate pure predicate validates presence of usable frame rate", () => {
+      // valid avgFrameRate -> true
+      expect(hasNominalFrameRate(sourceA)).toBe(true);
+      expect(
+        hasNominalFrameRate({
+          avgFrameRate: fps25,
+          rFrameRate: null,
+        }),
+      ).toBe(true);
+
+      // only rFrameRate valid -> true
+      expect(
+        hasNominalFrameRate({
+          avgFrameRate: null,
+          rFrameRate: fpsNtsc,
+        }),
+      ).toBe(true);
+
+      // both null -> false
+      expect(
+        hasNominalFrameRate({
+          avgFrameRate: null,
+          rFrameRate: null,
+        }),
+      ).toBe(false);
+
+      // {n:0,d:1} -> false
+      expect(
+        hasNominalFrameRate({
+          avgFrameRate: { n: 0, d: 1 },
+          rFrameRate: null,
+        }),
+      ).toBe(false);
+
+      // {n:1,d:0} -> false
+      expect(
+        hasNominalFrameRate({
+          avgFrameRate: { n: 1, d: 0 },
+          rFrameRate: null,
+        }),
+      ).toBe(false);
+
+      // non-safe-integer numerator -> false
+      expect(
+        hasNominalFrameRate({
+          avgFrameRate: { n: 29.97, d: 1 },
+          rFrameRate: null,
+        }),
+      ).toBe(false);
+      expect(
+        hasNominalFrameRate({
+          avgFrameRate: { n: Number.NaN, d: 1 },
+          rFrameRate: null,
+        }),
+      ).toBe(false);
+
+      // null and undefined input -> false
+      expect(hasNominalFrameRate(null)).toBe(false);
+      expect(hasNominalFrameRate(undefined)).toBe(false);
     });
 
     it("clamps nominal seek to lower bound 0 and does not update presentedFrame optimistically", () => {
