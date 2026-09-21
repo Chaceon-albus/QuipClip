@@ -173,79 +173,79 @@ export function TransportBar() {
 
         {/* Group 2: Mark points and cut tools (In, Out, Split) */}
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            disabled={isMarkInDisabled}
-            onMouseDown={preventFocusOnMouseDown}
-            onClick={() => {
-              // Read at click time: the store is the single source, and the click runs
-              // after the render that enabled the button.
-              const frame = playbackStore.getState().presentedFrame;
-              if (frame) {
-                markIn(frame.inferredSourcePts);
-              }
-            }}
-            className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
-            aria-label={t("transport.action.markInAria")}
-          >
-            <ArrowRightToLine className="size-4 text-muted-foreground" />
-            <div className="flex flex-col items-start leading-tight">
-              <span className="text-xs font-semibold">
-                {t("transport.action.markIn")}
-              </span>
-              <span className="text-[10px] text-muted-foreground">
-                {t("transport.action.markInDetail")}
-              </span>
-            </div>
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                disabled={isMarkInDisabled}
+                onMouseDown={preventFocusOnMouseDown}
+                onClick={() => {
+                  // Read at click time: the store is the single source, and the click runs
+                  // after the render that enabled the button.
+                  const frame = playbackStore.getState().presentedFrame;
+                  if (frame) {
+                    markIn(frame.inferredSourcePts);
+                  }
+                }}
+                className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
+                aria-label={t("transport.action.markInAria")}
+              >
+                <ArrowRightToLine className="size-4 text-muted-foreground" />
+                <span className="text-xs font-semibold">
+                  {t("transport.action.markIn")}
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("transport.action.markInAria")}</TooltipContent>
+          </Tooltip>
 
-          <Button
-            variant="outline"
-            disabled={isMarkOutDisabled}
-            onMouseDown={preventFocusOnMouseDown}
-            onClick={() => {
-              const frame = playbackStore.getState().presentedFrame;
-              if (frame) {
-                markOut(frame.inferredSourcePts);
-              }
-            }}
-            className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
-            aria-label={t("transport.action.markOutAria")}
-          >
-            <ArrowLeftToLine className="size-4 text-muted-foreground" />
-            <div className="flex flex-col items-start leading-tight">
-              <span className="text-xs font-semibold">
-                {t("transport.action.markOut")}
-              </span>
-              <span className="text-[10px] text-muted-foreground">
-                {t("transport.action.markOutDetail")}
-              </span>
-            </div>
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                disabled={isMarkOutDisabled}
+                onMouseDown={preventFocusOnMouseDown}
+                onClick={() => {
+                  const frame = playbackStore.getState().presentedFrame;
+                  if (frame) {
+                    markOut(frame.inferredSourcePts);
+                  }
+                }}
+                className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
+                aria-label={t("transport.action.markOutAria")}
+              >
+                <ArrowLeftToLine className="size-4 text-muted-foreground" />
+                <span className="text-xs font-semibold">
+                  {t("transport.action.markOut")}
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("transport.action.markOutAria")}</TooltipContent>
+          </Tooltip>
 
-          <Button
-            variant="outline"
-            disabled={isSplitDisabled}
-            onMouseDown={preventFocusOnMouseDown}
-            onClick={() => {
-              const frame = playbackStore.getState().presentedFrame;
-              if (frame) {
-                split(frame.inferredSourcePts);
-              }
-            }}
-            className="flex h-11 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
-            aria-label={t("transport.action.splitAria")}
-          >
-            <Scissors className="size-4 text-muted-foreground" />
-            <div className="flex flex-col items-start leading-tight">
-              <span className="text-xs font-semibold">
-                {t("transport.action.split")}
-              </span>
-              <span className="text-[10px] text-muted-foreground">
-                {t("transport.action.splitDetail")}
-              </span>
-            </div>
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                disabled={isSplitDisabled}
+                onMouseDown={preventFocusOnMouseDown}
+                onClick={() => {
+                  const frame = playbackStore.getState().presentedFrame;
+                  if (frame) {
+                    split(frame.inferredSourcePts);
+                  }
+                }}
+                className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
+                aria-label={t("transport.action.splitAria")}
+              >
+                <Scissors className="size-4 text-muted-foreground" />
+                <span className="text-xs font-semibold">
+                  {t("transport.action.split")}
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t("transport.action.splitAria")}</TooltipContent>
+          </Tooltip>
         </div>
 
         <Separator orientation="vertical" className="h-8 bg-border" />

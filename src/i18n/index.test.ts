@@ -957,7 +957,7 @@ describe("i18next runtime initialization and fallback behavior", () => {
     expect(instance.t("app.name")).toBe("QuipClip");
     expect(instance.t("titleBar.menu.file")).toBe("File");
     expect(instance.t("settings.language.label")).toBe("Language");
-    expect(instance.t("transport.action.markOut")).toBe("Out (Exclusive)");
+    expect(instance.t("transport.action.markOut")).toBe("Out");
     expect(
       instance.t("statusBar.projectResolution", {
         width: 1920,
@@ -976,7 +976,7 @@ describe("i18next runtime initialization and fallback behavior", () => {
     expect(instance.t("app.name")).toBe("QuipClip");
     expect(instance.t("titleBar.menu.file")).toBe("文件");
     expect(instance.t("settings.language.label")).toBe("语言");
-    expect(instance.t("transport.action.markOut")).toBe("出点（不含）");
+    expect(instance.t("transport.action.markOut")).toBe("出点");
     expect(
       instance.t("statusBar.projectResolution", {
         width: 1920,
@@ -1247,16 +1247,13 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.undo")).toBe("Undo");
     expect(instance.t("transport.action.redo")).toBe("Redo");
     expect(instance.t("transport.action.markIn")).toBe("In");
-    expect(instance.t("transport.action.markInDetail")).toBe("Mark In");
     expect(instance.t("transport.action.markInAria")).toBe("Mark In Point");
-    expect(instance.t("transport.action.markOut")).toBe("Out (Exclusive)");
-    expect(instance.t("transport.action.markOutDetail")).toBe("Mark Out (Exclusive)");
+    expect(instance.t("transport.action.markOut")).toBe("Out");
     expect(instance.t("transport.action.markOutAria")).toBe(
       "Mark Out Point (Exclusive)",
     );
     expect(instance.t("transport.action.split")).toBe("Split");
-    expect(instance.t("transport.action.splitDetail")).toBe("Split at Playhead");
-    expect(instance.t("transport.action.splitAria")).toBe("Split Segment");
+    expect(instance.t("transport.action.splitAria")).toBe("Split Segment at Playhead");
     expect(instance.t("transport.action.play")).toBe("Play");
     expect(instance.t("transport.action.playHint")).toBe("Play (Space)");
     expect(instance.t("transport.action.pauseHint")).toBe("Pause (Space)");
@@ -1393,14 +1390,11 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.undo")).toBe("撤销");
     expect(instance.t("transport.action.redo")).toBe("重做");
     expect(instance.t("transport.action.markIn")).toBe("入点");
-    expect(instance.t("transport.action.markInDetail")).toBe("标记入点");
     expect(instance.t("transport.action.markInAria")).toBe("标记入点");
-    expect(instance.t("transport.action.markOut")).toBe("出点（不含）");
-    expect(instance.t("transport.action.markOutDetail")).toBe("标记出点（不含）");
+    expect(instance.t("transport.action.markOut")).toBe("出点");
     expect(instance.t("transport.action.markOutAria")).toBe("标记出点（不含）");
     expect(instance.t("transport.action.split")).toBe("分割");
-    expect(instance.t("transport.action.splitDetail")).toBe("在播放头处分割");
-    expect(instance.t("transport.action.splitAria")).toBe("分割片段");
+    expect(instance.t("transport.action.splitAria")).toBe("在播放头处分割片段");
     expect(instance.t("transport.action.play")).toBe("播放");
     expect(instance.t("transport.action.playHint")).toBe("播放（空格键）");
     expect(instance.t("transport.action.pauseHint")).toBe("暂停（空格键）");
