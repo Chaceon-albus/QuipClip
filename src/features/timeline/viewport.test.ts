@@ -3,6 +3,7 @@ import {
   calculateAnchorRatio,
   calculateAnchoredScrollLeft,
   calculateContentWidthPx,
+  calculateFollowScrollLeft,
   calculateMaxZoom,
   calculateWheelZoomFactor,
   clampTimelineZoom,
@@ -10,6 +11,7 @@ import {
   MAX_TIMELINE_PIXELS_PER_SECOND,
   MAX_WHEEL_DELTA_PER_EVENT_PX,
   MIN_TIMELINE_ZOOM,
+  PLAYHEAD_FOLLOW_LEAD_FRACTION,
   TIMELINE_GUTTER_WIDTH_PX,
   TIMELINE_MIN_CONTENT_WIDTH_PX,
   TIMELINE_WHEEL_ZOOM_BASE,
@@ -25,6 +27,7 @@ describe("timeline viewport module", () => {
       expect(MAX_TIMELINE_PIXELS_PER_SECOND).toBe(200);
       expect(TIMELINE_WHEEL_ZOOM_BASE).toBe(1.25);
       expect(MAX_WHEEL_DELTA_PER_EVENT_PX).toBe(400);
+      expect(PLAYHEAD_FOLLOW_LEAD_FRACTION).toBe(0.1);
     });
   });
 
@@ -385,6 +388,414 @@ describe("timeline viewport module", () => {
 
           expect(Math.abs(recoveredRatio - targetRatio)).toBeLessThan(1e-9);
         }
+      }
+    });
+  });
+
+  describe("calculateFollowScrollLeft", () => {
+    it("returns null when the playhead is in the middle of the visible window", () => {
+      // laneLeftOffsetPx = 96, laneWidthPx = 1000
+      // playheadContentX = 96 + 0.5 * 1000 = 596
+      // scrollLeftPx = 200, viewportWidthPx = 1000 -> visible range [296, 1200]
+      expect(calculateFollowScrollLeft(50, 1000, 96, 200, 1000, 0.1)).toBeNull();
+    });
+
+    it("returns null when the playhead is exactly at the left edge or exactly at the right edge (inclusive)", () => {
+      // laneLeftOffsetPx = 100, laneWidthPx = 1000, scrollLeftPx = 300, viewportWidthPx = 500
+      // Visible range: [scrollLeft + laneLeftOffset, scrollLeft + viewportWidth] = [400, 800]
+      // Exactly at left edge (playheadContentX = 400):
+      // 100 + (percent / 100) * 1000 = 400 => percent = 30
+      expect(calculateFollowScrollLeft(30, 1000, 100, 300, 500, 0.1)).toBeNull();
+
+      // Exactly at right edge (playheadContentX = 800):
+      // 100 + (percent / 100) * 1000 = 800 => percent = 70
+      expect(calculateFollowScrollLeft(70, 1000, 100, 300, 500, 0.1)).toBeNull();
+
+      // Behind the sticky gutter (playheadContentX = 300 < 400): occluded, so follow is needed
+      expect(calculateFollowScrollLeft(20, 1000, 100, 300, 500, 0.1)).not.toBeNull();
+    });
+
+    it("returns a scrollLeft that puts the playhead at the lead fraction when past the right edge", () => {
+      // laneLeftOffsetPx = 100, laneWidthPx = 1000, playheadPercent = 80
+      // playheadContentX = 100 + 0.8 * 1000 = 900
+      // scrollLeftPx = 200, viewportWidthPx = 500 -> visible range [300, 700]
+      // Past right edge: 900 > 700
+      // leadOffset = Math.max(laneLeftOffsetPx, leadFraction * viewportWidthPx) = Math.max(100, 50) = 100
+      // targetScrollLeft = 900 - 100 = 800 (gutter clamp ensures playhead clears 100px gutter)
+      const result = calculateFollowScrollLeft(80, 1000, 100, 200, 500, 0.1);
+      expect(result).toBe(800);
+      expect(900 - result!).toBe(Math.max(100, 0.1 * 500));
+
+      // When leadFraction * viewportWidthPx > laneLeftOffsetPx:
+      // laneWidthPx = 2000, playheadPercent = 90 -> playheadContentX = 100 + 0.9 * 2000 = 1900
+      // scrollLeftPx = 200, viewportWidthPx = 1500 -> visible range [300, 1700]
+      // Past right edge: 1900 > 1700
+      // leadOffset = Math.max(100, 0.1 * 1500) = 150
+      // targetScrollLeft = 1900 - 150 = 1750
+      const wideResult = calculateFollowScrollLeft(90, 2000, 100, 200, 1500, 0.1);
+      expect(wideResult).toBe(1750);
+      expect(1900 - wideResult!).toBe(0.1 * 1500);
+    });
+
+    it("returns a scrollLeft that puts the playhead at the lead fraction when before the left edge", () => {
+      // laneLeftOffsetPx = 100, laneWidthPx = 1000, playheadPercent = 10
+      // playheadContentX = 100 + 0.1 * 1000 = 200
+      // scrollLeftPx = 500, viewportWidthPx = 500 -> visible range [600, 1000]
+      // Before left edge: 200 < 600
+      // leadOffset = Math.max(100, 0.1 * 500) = 100
+      // targetScrollLeft = 200 - 100 = 100
+      const result = calculateFollowScrollLeft(10, 1000, 100, 500, 500, 0.1);
+      expect(result).toBe(100);
+      expect(200 - result!).toBe(Math.max(100, 0.1 * 500));
+
+      // When leadFraction * viewportWidthPx > laneLeftOffsetPx:
+      // viewportWidthPx = 1500, scrollLeftPx = 1500 -> visible range [1600, 3000]
+      // Before left edge: 200 < 1600
+      // leadOffset = Math.max(100, 0.1 * 1500) = 150
+      // targetScrollLeft = 200 - 150 = 50
+      const wideResult = calculateFollowScrollLeft(10, 1000, 100, 1500, 1500, 0.1);
+      expect(wideResult).toBe(50);
+      expect(200 - wideResult!).toBe(0.1 * 1500);
+    });
+
+    it("clamps the returned scrollLeft so it never goes below 0", () => {
+      // laneLeftOffsetPx = 0, laneWidthPx = 1000, playheadPercent = 1
+      // playheadContentX = 10
+      // scrollLeftPx = 100, viewportWidthPx = 500 -> visible range [100, 600]
+      // Before left edge: 10 < 100
+      // targetScrollLeft before clamp: 10 - 0.1 * 500 = -40 -> clamped to 0
+      const result = calculateFollowScrollLeft(1, 1000, 0, 100, 500, 0.1);
+      expect(result).toBe(0);
+    });
+
+    it("returns null for playhead at percent 0 with scrollLeft 0", () => {
+      // laneLeftOffsetPx = 96, laneWidthPx = 1000, viewportWidthPx = 1000
+      // playheadContentX = 96, scrollLeftPx = 0 -> visible range [96, 1000]
+      expect(calculateFollowScrollLeft(0, 1000, 96, 0, 1000, 0.1)).toBeNull();
+
+      // Also when laneLeftOffsetPx is 0: playheadContentX = 0, exactly at left edge of [0, 1000]
+      expect(calculateFollowScrollLeft(0, 1000, 0, 0, 1000, 0.1)).toBeNull();
+    });
+
+    it("returns null for every invalid input", () => {
+      const valid = [50, 1000, 96, 0, 500, 0.1] as const;
+
+      // Non-finite playheadPercent
+      expect(
+        calculateFollowScrollLeft(
+          Number.NaN,
+          valid[1],
+          valid[2],
+          valid[3],
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          Infinity,
+          valid[1],
+          valid[2],
+          valid[3],
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          -Infinity,
+          valid[1],
+          valid[2],
+          valid[3],
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+
+      // Non-finite or non-positive laneWidthPx
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          Number.NaN,
+          valid[2],
+          valid[3],
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          Infinity,
+          valid[2],
+          valid[3],
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          -Infinity,
+          valid[2],
+          valid[3],
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(valid[0], 0, valid[2], valid[3], valid[4], valid[5]),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          -100,
+          valid[2],
+          valid[3],
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+
+      // Non-finite laneLeftOffsetPx
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          Number.NaN,
+          valid[3],
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          Infinity,
+          valid[3],
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          -Infinity,
+          valid[3],
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+
+      // Non-finite scrollLeftPx
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          Number.NaN,
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          Infinity,
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          -Infinity,
+          valid[4],
+          valid[5],
+        ),
+      ).toBeNull();
+
+      // Non-finite or non-positive viewportWidthPx
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          valid[3],
+          Number.NaN,
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          valid[3],
+          Infinity,
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          valid[3],
+          -Infinity,
+          valid[5],
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(valid[0], valid[1], valid[2], valid[3], 0, valid[5]),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          valid[3],
+          -500,
+          valid[5],
+        ),
+      ).toBeNull();
+
+      // Non-finite or out-of-range leadFraction
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          valid[3],
+          valid[4],
+          Number.NaN,
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          valid[3],
+          valid[4],
+          Infinity,
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          valid[3],
+          valid[4],
+          -Infinity,
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          valid[3],
+          valid[4],
+          -0.01,
+        ),
+      ).toBeNull();
+      expect(
+        calculateFollowScrollLeft(
+          valid[0],
+          valid[1],
+          valid[2],
+          valid[3],
+          valid[4],
+          1.01,
+        ),
+      ).toBeNull();
+    });
+
+    it("accepts valid boundary values 0 and 1 for leadFraction", () => {
+      // Playhead outside visible window:
+      // laneLeftOffsetPx = 96, laneWidthPx = 1000, playheadPercent = 80
+      // playheadContentX = 96 + 0.8 * 1000 = 896
+      // scrollLeftPx = 0, viewportWidthPx = 500 -> visible range [96, 500]
+      // 896 > 500 (past right edge)
+
+      // leadFraction = 0: leadPx = Math.max(96, 0 * 500) = 96 -> target = 896 - 96 = 800
+      expect(calculateFollowScrollLeft(80, 1000, 96, 0, 500, 0)).toBe(800);
+
+      // leadFraction = 1: leadPx = Math.max(96, 1 * 500) = 500 -> target = 896 - 500 = 396
+      expect(calculateFollowScrollLeft(80, 1000, 96, 0, 500, 1)).toBe(396);
+    });
+
+    it("satisfies round trip: applying the returned scrollLeft places the playhead inside the window at the lead fraction or gutter offset within 1e-9", () => {
+      const cases = [
+        // Past right edge cases
+        {
+          percent: 80,
+          laneWidth: 3000,
+          laneOffset: 96,
+          scrollLeft: 0,
+          viewportWidth: 1000,
+          leadFraction: 0.1,
+        },
+        {
+          percent: 95,
+          laneWidth: 5000,
+          laneOffset: 96,
+          scrollLeft: 1000,
+          viewportWidth: 1200,
+          leadFraction: 0.15,
+        },
+        // Before left edge cases
+        {
+          percent: 15,
+          laneWidth: 4000,
+          laneOffset: 96,
+          scrollLeft: 2000,
+          viewportWidth: 800,
+          leadFraction: 0.1,
+        },
+        {
+          percent: 5,
+          laneWidth: 10000,
+          laneOffset: 96,
+          scrollLeft: 3000,
+          viewportWidth: 1440,
+          leadFraction: 0.2,
+        },
+      ];
+
+      for (const tc of cases) {
+        const playheadContentX = tc.laneOffset + (tc.percent / 100) * tc.laneWidth;
+        const newScrollLeft = calculateFollowScrollLeft(
+          tc.percent,
+          tc.laneWidth,
+          tc.laneOffset,
+          tc.scrollLeft,
+          tc.viewportWidth,
+          tc.leadFraction,
+        );
+
+        expect(newScrollLeft).not.toBeNull();
+        const scrollLeft = newScrollLeft!;
+
+        // The playhead is inside the visible window (accounting for sticky gutter occlusion)
+        expect(playheadContentX).toBeGreaterThanOrEqual(scrollLeft + tc.laneOffset);
+        expect(playheadContentX).toBeLessThanOrEqual(scrollLeft + tc.viewportWidth);
+
+        // The playhead lands at Math.max(laneOffset, leadFraction * viewportWidth) within 1e-9
+        const expectedLeadPx = Math.max(
+          tc.laneOffset,
+          tc.leadFraction * tc.viewportWidth,
+        );
+        const actualLeadPx = playheadContentX - scrollLeft;
+        expect(Math.abs(actualLeadPx - expectedLeadPx)).toBeLessThan(1e-9);
       }
     });
   });

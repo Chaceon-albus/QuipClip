@@ -164,3 +164,56 @@ export function calculateWheelZoomFactor(deltaY: number, deltaMode: number): num
   );
   return TIMELINE_WHEEL_ZOOM_BASE ** (-clampedDelta / 100);
 }
+
+/** Where the playhead lands, as a fraction of the visible window, after a follow scroll. */
+export const PLAYHEAD_FOLLOW_LEAD_FRACTION = 0.1;
+
+/**
+ * Returns the scrollLeft that brings the playhead back into view, or null when the
+ * playhead is already visible and no scroll is needed.
+ *
+ * `laneLeftOffsetPx` is both where the lane starts and how much of the left edge of the
+ * viewport is covered by the sticky gutter, which is why it appears in both expressions:
+ * - A playhead is visible only when `playheadContentX >= scrollLeftPx + laneLeftOffsetPx`
+ *   and `playheadContentX <= scrollLeftPx + viewportWidthPx`.
+ * - When follow scrolls, the target places the playhead at
+ *   `Math.max(laneLeftOffsetPx, leadFraction * viewportWidthPx)` from the left edge of
+ *   the viewport, ensuring it clears the sticky gutter even if `leadFraction * viewportWidthPx`
+ *   is narrower than the gutter.
+ */
+export function calculateFollowScrollLeft(
+  playheadPercent: number,
+  laneWidthPx: number,
+  laneLeftOffsetPx: number,
+  scrollLeftPx: number,
+  viewportWidthPx: number,
+  leadFraction: number,
+): number | null {
+  if (
+    !Number.isFinite(playheadPercent) ||
+    !Number.isFinite(laneWidthPx) ||
+    !Number.isFinite(laneLeftOffsetPx) ||
+    !Number.isFinite(scrollLeftPx) ||
+    !Number.isFinite(viewportWidthPx) ||
+    !Number.isFinite(leadFraction) ||
+    laneWidthPx <= 0 ||
+    viewportWidthPx <= 0 ||
+    leadFraction < 0 ||
+    leadFraction > 1
+  ) {
+    return null;
+  }
+
+  const playheadContentX = laneLeftOffsetPx + (playheadPercent / 100) * laneWidthPx;
+  if (
+    playheadContentX >= scrollLeftPx + laneLeftOffsetPx &&
+    playheadContentX <= scrollLeftPx + viewportWidthPx
+  ) {
+    return null;
+  }
+
+  return Math.max(
+    0,
+    playheadContentX - Math.max(laneLeftOffsetPx, leadFraction * viewportWidthPx),
+  );
+}

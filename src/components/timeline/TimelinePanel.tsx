@@ -16,6 +16,7 @@ import {
   calculateAnchorRatio,
   calculateAnchoredScrollLeft,
   calculateContentWidthPx,
+  calculateFollowScrollLeft,
   calculateMaxZoom,
   calculatePendingInRegionLayout,
   calculatePercentFromPts,
@@ -28,6 +29,7 @@ import {
   getActiveSourceSegmentEntries,
   getTimelineDurationSeconds,
   useTimelineStore,
+  PLAYHEAD_FOLLOW_LEAD_FRACTION,
   TIMELINE_GUTTER_WIDTH_PX,
   type TimelineStoreState,
 } from "@/features/timeline";
@@ -55,6 +57,7 @@ const selectApproximateBrowserTimeSeconds = (state: PlaybackStoreState) =>
 const selectIsAttached = (state: PlaybackStoreState) => state.isAttached;
 const selectIsReady = (state: PlaybackStoreState) => state.isReady;
 const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
+const selectIsPlaying = (state: PlaybackStoreState) => state.isPlaying;
 
 const selectSegments = (state: TimelineStoreState) => state.segments;
 const selectPendingInPts = (state: TimelineStoreState) => state.pendingInPts;
@@ -77,6 +80,7 @@ export function TimelinePanel({
   const isAttached = usePlaybackStore(selectIsAttached);
   const isReady = usePlaybackStore(selectIsReady);
   const seekToPts = usePlaybackStore(selectSeekToPts);
+  const isPlaying = usePlaybackStore(selectIsPlaying);
 
   const segments = useTimelineStore(selectSegments);
   const pendingInPts = useTimelineStore(selectPendingInPts);
@@ -133,6 +137,25 @@ export function TimelinePanel({
   const lastWidthRef = useRef<number>(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const laneRef = useRef<HTMLDivElement | null>(null);
+
+  // scrollLeft is mirrored in a ref because reading scrollRef.current.scrollLeft
+  // on the per-frame effect path would force a synchronous layout on every frame.
+  // The per-frame path must cause zero forced layouts.
+  const scrollLeftRef = useRef<number>(0);
+  const userScrolledRef = useRef<boolean>(false);
+
+  const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const nextScrollLeft = event.currentTarget.scrollLeft;
+    // A scroll this component caused has already written the mirror, so a value that
+    // differs from the mirror is the user's. A flag cannot do this: `scrollLeft =` fires
+    // its event asynchronously, so a flag is cleared by whichever event arrives first
+    // rather than by the one that matches it, and a write that changes nothing fires no
+    // event at all and would leave the flag set forever.
+    if (nextScrollLeft !== scrollLeftRef.current) {
+      userScrolledRef.current = true;
+    }
+    scrollLeftRef.current = nextScrollLeft;
+  };
 
   useLayoutEffect(() => {
     const container = scrollRef.current;
@@ -243,6 +266,7 @@ export function TimelinePanel({
     );
 
     scrollEl.scrollLeft = nextScrollLeft;
+    scrollLeftRef.current = nextScrollLeft;
   }, [zoom]);
 
   // Clamp zoom when viewport width changes
@@ -260,6 +284,7 @@ export function TimelinePanel({
     setZoom(1);
     if (scrollRef.current) {
       scrollRef.current.scrollLeft = 0;
+      scrollLeftRef.current = 0;
     }
   }, [sourceId]);
 
@@ -349,6 +374,56 @@ export function TimelinePanel({
 
   const playhead = calculatePlayheadLayout(currentElapsedSeconds, totalDurationSeconds);
 
+  // Resumes follow when playback starts or resumes after a pause.
+  const wasPlayingRef = useRef<boolean>(isPlaying);
+  useEffect(() => {
+    if (isPlaying && !wasPlayingRef.current) {
+      userScrolledRef.current = false;
+    }
+    wasPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  // Follow the playhead during playback when it leaves the visible window.
+  useEffect(() => {
+    if (!isPlaying) {
+      return;
+    }
+
+    const scrollEl = scrollRef.current;
+    if (!scrollEl || viewportWidthPx <= 0) {
+      return;
+    }
+
+    const targetScrollLeft = calculateFollowScrollLeft(
+      playhead.percent,
+      laneWidthPx,
+      TIMELINE_GUTTER_WIDTH_PX,
+      scrollLeftRef.current,
+      viewportWidthPx,
+      PLAYHEAD_FOLLOW_LEAD_FRACTION,
+    );
+
+    if (targetScrollLeft === null) {
+      // Visible. Nothing to do, and the user's view has caught up with playback, so a
+      // suspension from an earlier pan is over.
+      userScrolledRef.current = false;
+      return;
+    }
+
+    if (userScrolledRef.current) {
+      // Outside the window, but the user put the view where it is. Leave it alone.
+      return;
+    }
+
+    const maxScrollLeftPx = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
+    const nextScrollLeft = Math.min(targetScrollLeft, maxScrollLeftPx);
+
+    if (scrollLeftRef.current !== nextScrollLeft) {
+      scrollEl.scrollLeft = nextScrollLeft;
+      scrollLeftRef.current = nextScrollLeft;
+    }
+  }, [isPlaying, laneWidthPx, playhead.percent, viewportWidthPx]);
+
   const activeSourceSegments = useMemo(
     () => getActiveSourceSegmentEntries(segments, sourceId),
     [segments, sourceId],
@@ -412,6 +487,7 @@ export function TimelinePanel({
        */}
       <div
         ref={scrollRef}
+        onScroll={handleScroll}
         className="flex min-h-0 flex-1 [scrollbar-gutter:stable] flex-col overflow-x-auto overflow-y-hidden overscroll-x-contain"
       >
         {/*
