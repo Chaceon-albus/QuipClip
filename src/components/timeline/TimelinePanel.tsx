@@ -408,13 +408,25 @@ export function TimelinePanel({
                           // Selecting does not seek: the playhead is the operand of Mark
                           // In, Mark Out and Split, so a selection click must not move it.
                           onClick={() => selectSegment(seg.id)}
-                          className={`pointer-events-auto absolute inset-y-1 flex items-center overflow-hidden rounded-md border-2 border-primary px-2 text-foreground shadow-xs backdrop-blur-xs ${isCurrent ? "bg-primary/45 ring-2 ring-ring" : "bg-primary/25"}`}
+                          // The overlay layer holding the segments is z-10, the pending-In
+                          // overlays are z-20, and the playhead is z-30. Applying z-20 to
+                          // the selected segment raises it above sibling segments so
+                          // overlapping segments do not obscure it, without covering the playhead.
+                          className={`pointer-events-auto absolute inset-y-1 flex items-center overflow-hidden rounded-md px-2 shadow-xs ${
+                            isCurrent
+                              ? "z-20 border-2 border-primary-active bg-primary text-primary-foreground ring-2 ring-primary-active ring-offset-2 ring-offset-clip-video"
+                              : "border-2 border-primary/45 bg-primary/20 text-foreground backdrop-blur-xs hover:border-primary/70 hover:bg-primary/30"
+                          }`}
                           style={{
                             left: layout.left,
                             width: layout.width,
                           }}
                         >
-                          <span className="truncate font-mono text-[10px] font-semibold text-primary">
+                          <span
+                            className={`truncate font-mono text-[10px] font-semibold ${
+                              isCurrent ? "text-primary-foreground" : "text-foreground"
+                            }`}
+                          >
                             #{number}
                           </span>
                         </button>
