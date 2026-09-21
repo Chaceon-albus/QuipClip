@@ -148,20 +148,19 @@ export function calculateRulerTickStepSeconds(
   return RULER_TICK_LADDER_SECONDS[RULER_TICK_LADDER_SECONDS.length - 1];
 }
 
-/**
- * Generates ruler markers on whole multiples of the chosen interval.
- * Returns an empty array when the duration or the width is unusable.
- */
-export function generateQuantizedRulerMarkers(
+/** Generates ruler markers for an already chosen tick interval. */
+export function generateRulerMarkersForStep(
   totalDurationSeconds: number | null | undefined,
-  laneWidthPx: number,
+  stepSeconds: number | null,
 ): RulerMarker[] {
-  const step = calculateRulerTickStepSeconds(totalDurationSeconds, laneWidthPx);
   if (
-    step === null ||
+    stepSeconds === null ||
     typeof totalDurationSeconds !== "number" ||
     !Number.isFinite(totalDurationSeconds) ||
-    totalDurationSeconds <= 0
+    totalDurationSeconds <= 0 ||
+    typeof stepSeconds !== "number" ||
+    !Number.isFinite(stepSeconds) ||
+    stepSeconds <= 0
   ) {
     return [];
   }
@@ -170,7 +169,7 @@ export function generateQuantizedRulerMarkers(
   let index = 0;
 
   while (true) {
-    const seconds = index * step;
+    const seconds = index * stepSeconds;
     if (seconds > totalDurationSeconds) {
       break;
     }
@@ -201,4 +200,16 @@ export function generateQuantizedRulerMarkers(
   }
 
   return markers;
+}
+
+/**
+ * Generates ruler markers on whole multiples of the chosen interval.
+ * Returns an empty array when the duration or the width is unusable.
+ */
+export function generateQuantizedRulerMarkers(
+  totalDurationSeconds: number | null | undefined,
+  laneWidthPx: number,
+): RulerMarker[] {
+  const step = calculateRulerTickStepSeconds(totalDurationSeconds, laneWidthPx);
+  return generateRulerMarkersForStep(totalDurationSeconds, step);
 }

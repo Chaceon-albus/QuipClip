@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Film } from "lucide-react";
 import {
@@ -13,19 +13,29 @@ import {
   type PlaybackStoreState,
 } from "@/features/playback";
 import {
+  calculateAnchorRatio,
+  calculateAnchoredScrollLeft,
+  calculateContentWidthPx,
+  calculateMaxZoom,
   calculatePendingInRegionLayout,
   calculatePercentFromPts,
   calculatePlayheadLayout,
   calculatePtsFromClientX,
   calculateSegmentLayout,
   calculateTimelineSecondsFromClientX,
+  calculateWheelZoomFactor,
+  clampTimelineZoom,
   getActiveSourceSegmentEntries,
   getTimelineDurationSeconds,
   useTimelineStore,
+  TIMELINE_GUTTER_WIDTH_PX,
   type TimelineStoreState,
 } from "@/features/timeline";
 import { ptsElapsedSeconds } from "@/lib/time";
-import { generateQuantizedRulerMarkers } from "./timelineMarkers";
+import {
+  calculateRulerTickStepSeconds,
+  generateRulerMarkersForStep,
+} from "./timelineMarkers";
 import { TimelineRuler } from "./TimelineRuler";
 
 export interface TimelinePanelProps {
@@ -114,12 +124,18 @@ export function TimelinePanel({
     onApproximateSeek !== undefined;
   const canSeek = canUsePreciseSeek || canUseApproximateSeek;
 
+  const [zoom, setZoom] = useState<number>(1);
+  const zoomRef = useRef<number>(1);
+  const maxZoomRef = useRef<number>(1);
+  const pendingAnchorRef = useRef<{ ratio: number; clientX: number } | null>(null);
+
   const [viewportWidthPx, setViewportWidthPx] = useState<number>(0);
   const lastWidthRef = useRef<number>(0);
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const laneRef = useRef<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
-    const container = scrollContainerRef.current;
+    const container = scrollRef.current;
     if (!container) {
       return;
     }
@@ -151,11 +167,114 @@ export function TimelinePanel({
     };
   }, []);
 
-  const laneWidthPx = Math.max(0, viewportWidthPx - 96);
+  const maxZoom = calculateMaxZoom(totalDurationSeconds, viewportWidthPx);
+
+  // Keeps zoomRef in sync for zoom updates outside the wheel handler (such as viewport clamp or source reset).
+  // The wheel handler cannot rely on this passive effect because wheel events are not flushed synchronously,
+  // so zoomRef is advanced synchronously in onWheel.
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(() => {
+    maxZoomRef.current = maxZoom;
+  }, [maxZoom]);
+
+  // Non-passive wheel listener allows preventDefault() on zoom gestures
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      if (maxZoomRef.current <= 1) return;
+      if (event.shiftKey) return;
+      // event.ctrlKey is deliberately NOT excluded because trackpad pinch gestures
+      // arrive as wheel events with event.ctrlKey = true. Handling them here and
+      // calling preventDefault() also suppresses the web view's own zoom over this panel.
+      // A gesture that is meaningfully horizontal belongs to the pan, and only a
+      // clearly vertical one is a zoom. Requiring clear vertical dominance prevents
+      // horizontal trackpad pans from being stolen by brief vertical jitter.
+      if (Math.abs(event.deltaX) > Math.abs(event.deltaY) * 0.5) return;
+      event.preventDefault();
+
+      const laneEl = laneRef.current;
+      if (!laneEl) return;
+
+      const rect = laneEl.getBoundingClientRect();
+      const ratio = calculateAnchorRatio(event.clientX, rect.left, rect.width);
+      const factor = calculateWheelZoomFactor(event.deltaY, event.deltaMode);
+      const currentZoom = zoomRef.current;
+      const nextZoom = clampTimelineZoom(currentZoom * factor, maxZoomRef.current);
+
+      if (nextZoom === currentZoom) return;
+
+      // The wheel event runs at ContinuousEventPriority and setZoom does not flush
+      // synchronously, so the passive useEffect([zoom]) cannot run in time for rapid wheel
+      // events or before another wheel event arrives. The handler must advance zoomRef
+      // synchronously so consecutive events do not read a stale zoom or leak an anchor.
+      zoomRef.current = nextZoom;
+      pendingAnchorRef.current = { ratio, clientX: event.clientX };
+      setZoom(nextZoom);
+    };
+
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // Write scrollLeft after React commits the new width so browser does not clamp against old scrollWidth
+  useLayoutEffect(() => {
+    const pendingAnchor = pendingAnchorRef.current;
+    pendingAnchorRef.current = null;
+    if (!pendingAnchor) return;
+
+    const scrollEl = scrollRef.current;
+    const laneEl = laneRef.current;
+    if (!scrollEl || !laneEl) return;
+
+    const rect = laneEl.getBoundingClientRect();
+    const maxScrollLeftPx = scrollEl.scrollWidth - scrollEl.clientWidth;
+
+    const nextScrollLeft = calculateAnchoredScrollLeft(
+      scrollEl.scrollLeft,
+      pendingAnchor.ratio,
+      pendingAnchor.clientX,
+      rect.left,
+      rect.width,
+      maxScrollLeftPx,
+    );
+
+    scrollEl.scrollLeft = nextScrollLeft;
+  }, [zoom]);
+
+  // Clamp zoom when viewport width changes
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setZoom((prevZoom) => {
+      const clamped = clampTimelineZoom(prevZoom, maxZoom);
+      return clamped !== prevZoom ? clamped : prevZoom;
+    });
+  }, [maxZoom]);
+
+  // Reset zoom and scrollLeft when active source changes
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setZoom(1);
+    if (scrollRef.current) {
+      scrollRef.current.scrollLeft = 0;
+    }
+  }, [sourceId]);
+
+  const laneWidthPx = Math.max(
+    0,
+    calculateContentWidthPx(zoom, viewportWidthPx) - TIMELINE_GUTTER_WIDTH_PX,
+  );
+
+  const step = useMemo(() => {
+    return calculateRulerTickStepSeconds(totalDurationSeconds, laneWidthPx);
+  }, [totalDurationSeconds, laneWidthPx]);
 
   const markers = useMemo(() => {
-    return generateQuantizedRulerMarkers(totalDurationSeconds, laneWidthPx);
-  }, [totalDurationSeconds, laneWidthPx]);
+    return generateRulerMarkersForStep(totalDurationSeconds, step);
+  }, [totalDurationSeconds, step]);
 
   // True while the playhead position below comes from the browser clock. The playhead takes
   // no visual mark for it: the status bar carries the marking, and marking it twice would
@@ -284,15 +403,32 @@ export function TimelinePanel({
 
   return (
     <section className="flex h-[180px] shrink-0 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
+      {/*
+       * scrollbar-gutter: stable reserves space for the horizontal scrollbar so the track row
+       * does not change height when the horizontal scrollbar appears at the first zoom and disappears at
+       * zoom 1. This costs a few pixels of height permanently on a platform with classic scrollbars.
+       * overscroll-behavior-x: contain stops a horizontal flick at the content edge from
+       * engaging the web view's rubber-band or back gesture.
+       */}
       <div
-        ref={scrollContainerRef}
-        className="flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-hidden"
+        ref={scrollRef}
+        className="flex min-h-0 flex-1 [scrollbar-gutter:stable] flex-col overflow-x-auto overflow-y-hidden overscroll-x-contain"
       >
-        <div className="flex min-w-[900px] flex-1 flex-col">
+        {/*
+         * Shared width ancestor for both the ruler row and track row.
+         * Putting the zoomed width on this shared ancestor ensures the ruler lane and
+         * the track lane span one rectangle by construction, which seekFromClientX depends on.
+         */}
+        <div
+          className="flex min-w-[900px] flex-1 flex-col"
+          style={{
+            width: `calc(${TIMELINE_GUTTER_WIDTH_PX}px + (100% - ${TIMELINE_GUTTER_WIDTH_PX}px) * ${zoom})`,
+          }}
+        >
           {/* Ruler Row (~28px tall) */}
           <div className="flex h-7 shrink-0 border-b border-timeline-divider">
             {/* Gutter header pinned sticky on the left */}
-            <div className="sticky left-0 z-20 w-24 shrink-0 border-r border-timeline-divider bg-sidebar" />
+            <div className="sticky left-0 z-40 w-[96px] shrink-0 border-r border-timeline-divider bg-sidebar" />
 
             {/*
              * Ruler track with time markers and tick marks, and the mouse click-to-seek
@@ -313,6 +449,7 @@ export function TimelinePanel({
              * unbound, so the element does not implement the full ARIA slider key set.
              */}
             <div
+              ref={laneRef}
               onClick={canSeek ? handleSeekClick : undefined}
               className={`relative flex-1 bg-timeline-ruler ${canSeek ? "cursor-pointer" : ""}`}
             >
@@ -339,7 +476,7 @@ export function TimelinePanel({
           {/* Single-Source Overview Track Row */}
           <div className="flex min-h-0 flex-1">
             {/* Left gutter (~96px wide) displaying Source Media lane header */}
-            <div className="sticky left-0 z-20 flex w-24 shrink-0 items-center border-r border-timeline-divider bg-sidebar px-3">
+            <div className="sticky left-0 z-40 flex w-[96px] shrink-0 items-center border-r border-timeline-divider bg-sidebar px-3">
               <span className="truncate text-xs font-semibold text-sidebar-foreground">
                 {t("timeline.sourceLane")}
               </span>

@@ -4,6 +4,7 @@ import {
   DEFAULT_RULER_MARKER_COUNT,
   generateQuantizedRulerMarkers,
   generateRulerMarkers,
+  generateRulerMarkersForStep,
   MAX_QUANTIZED_RULER_TICK_COUNT,
   MAX_RULER_MARKER_COUNT,
   MIN_RULER_MARKER_COUNT,
@@ -226,6 +227,16 @@ describe("Quantized Ruler Markers", () => {
       expect(calculateRulerTickStepSeconds(0.5, 1344)).toBe(1);
       expect(calculateRulerTickStepSeconds(0.1, 1000)).toBe(1);
     });
+
+    it("produces equal step values for two different lane widths inside the same rung", () => {
+      const threeHours = 10800;
+      // Both 1344 px and 1400 px fall into the 1800s rung (900s requires >= 1440 px)
+      const stepA = calculateRulerTickStepSeconds(threeHours, 1344);
+      const stepB = calculateRulerTickStepSeconds(threeHours, 1400);
+      expect(stepA).toBe(1800);
+      expect(stepB).toBe(1800);
+      expect(stepA).toBe(stepB);
+    });
   });
 
   describe("Indeterminate and Invalid Inputs", () => {
@@ -332,6 +343,44 @@ describe("Quantized Ruler Markers", () => {
         const markers = generateQuantizedRulerMarkers(10800, width);
         expect(markers.length).toBeLessThanOrEqual(MAX_QUANTIZED_RULER_TICK_COUNT);
       }
+    });
+  });
+
+  describe("generateRulerMarkersForStep", () => {
+    it("generates expected markers when stepSeconds is provided directly", () => {
+      const markers = generateRulerMarkersForStep(10.0, 2);
+      expect(markers).toHaveLength(6);
+      expect(markers[0]).toEqual({
+        timecode: "00:00:00.000",
+        seconds: 0,
+        percent: 0,
+        left: "0%",
+      });
+      expect(markers[5]).toEqual({
+        timecode: "00:00:10.000",
+        seconds: 10,
+        percent: 100,
+        left: "100%",
+      });
+    });
+
+    it("returns an empty array when stepSeconds is null, invalid, or non-positive", () => {
+      expect(generateRulerMarkersForStep(10.0, null)).toEqual([]);
+      expect(generateRulerMarkersForStep(10.0, 0)).toEqual([]);
+      expect(generateRulerMarkersForStep(10.0, -5)).toEqual([]);
+      expect(generateRulerMarkersForStep(10.0, NaN)).toEqual([]);
+      expect(generateRulerMarkersForStep(null, 2)).toEqual([]);
+      expect(generateRulerMarkersForStep(0, 2)).toEqual([]);
+      expect(generateRulerMarkersForStep(-10, 2)).toEqual([]);
+    });
+
+    it("matches generateQuantizedRulerMarkers output for the same step", () => {
+      const duration = 10800;
+      const width = 1344;
+      const step = calculateRulerTickStepSeconds(duration, width);
+      const markersFromStep = generateRulerMarkersForStep(duration, step);
+      const quantizedMarkers = generateQuantizedRulerMarkers(duration, width);
+      expect(markersFromStep).toEqual(quantizedMarkers);
     });
   });
 });

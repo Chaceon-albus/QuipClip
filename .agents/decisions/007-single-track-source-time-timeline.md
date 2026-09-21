@@ -91,6 +91,32 @@ Clicking a segment selects it and does not seek. The playhead is the operand of 
 action, so a selection click that moved it would reintroduce the surprise this rule removes. The
 ruler is the click-to-seek surface.
 
+### Zoom and pan are view state
+
+The zoom factor of the timeline is view state. It never enters the timeline store, the
+undo and redo stacks, or the project file. A factor of 1 fits the whole source extent in
+the panel. A larger factor makes the lane wider than the panel, and the panel scrolls
+horizontally. The factor returns to 1 when the active source changes.
+
+Two bounds apply. The lane is never narrower than the panel, so the minimum is 1. The
+maximum is the smaller of a ceiling on lane pixels and a ceiling on pixels for each second
+of source. An indeterminate source extent gives a maximum of 1, so a lane with no time axis
+cannot zoom, and the panel does not take the wheel gesture away from the page.
+
+Zoom changes the CSS width of the lane. It does not change the time axis. Every layout
+value stays a percentage of the source extent, so the layout helpers do not change, and the
+two inverse maps read the lane rectangle at the time of the event, so they do not change
+either.
+
+The ruler lane and the track lane must always span the same rectangle. Both are
+click-to-seek surfaces, and this record requires one coordinate to map to one time. One
+width on the element that holds both rows makes that true by construction, and not by
+agreement between two pieces of code. A later viewport model must keep that property.
+
+The wheel zooms, and it holds the time under the pointer in place. A gesture that is
+clearly horizontal pans instead, and so does the shift key with the wheel. The panel gives
+those gestures to the web view, which already scrolls the container.
+
 ## Consequences
 
 - The user can see each segment in its original source context.
@@ -98,3 +124,6 @@ ruler is the click-to-seek surface.
 - Project order and source position remain separate concepts.
 - Runtime caches cannot leak through generic object serialization.
 - A separate ordered list can support future cross-source reordering.
+- Zoom and pan need no change to the project file, the timeline store, or the layout
+  math.
+- A change to the way the lane takes its width must keep the two seek rectangles equal.
