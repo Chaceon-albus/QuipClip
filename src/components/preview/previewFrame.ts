@@ -8,11 +8,7 @@
 
 import { ptsElapsedSeconds, ticksToSeconds } from "@/lib/time";
 import type { Pts, Rational, TickCount } from "@/types/project";
-import {
-  isPlaybackPositionApproximate,
-  type CalibrationStatus,
-  type PresentedFrame,
-} from "@/features/playback";
+import type { CalibrationStatus, PresentedFrame } from "@/features/playback";
 
 /**
  * Formats a non-negative floating-point seconds value as `HH:MM:SS.mmm`.
@@ -154,16 +150,19 @@ export function formatPreviewCurrentTime(
 }
 
 /**
- * Returns true when the preview clock is using browser time instead of inferred source PTS.
+ * Returns true when the preview timecode badge should display the approximate marker.
  *
- * Delegates to the playback feature, so the preview, the timeline, and the status bar cannot
- * drift apart on what "approximate" means.
+ * Reports a source that has no exact position for as long as its calibration is not ready (`calibrationStatus !== "ready"`).
+ * Deliberately does NOT use `isPlaybackPositionApproximate`, because that predicate is also
+ * true for the moment between a seek and the frame callback that answers it, which would make
+ * the badge flicker on every frame step.
+ *
+ * @param calibrationStatus Calibration status of the active source.
  */
 export function isPreviewTimeApproximate(
   calibrationStatus: CalibrationStatus,
-  presentedFrame: PresentedFrame | null,
 ): boolean {
-  return isPlaybackPositionApproximate(calibrationStatus, presentedFrame);
+  return calibrationStatus !== "ready";
 }
 
 /**

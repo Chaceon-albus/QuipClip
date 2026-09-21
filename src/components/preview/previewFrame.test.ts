@@ -206,19 +206,14 @@ describe("Preview Frame Helpers & ADR 003 Math", () => {
   });
 
   describe("isPreviewTimeApproximate", () => {
-    const presented = {
-      mediaTime: 1,
-      inferredSourcePts: "25" as Pts,
-    };
-
     it("identifies calibration and unavailable fallbacks", () => {
-      expect(isPreviewTimeApproximate("calibrating", null)).toBe(true);
-      expect(isPreviewTimeApproximate("unavailable", null)).toBe(true);
+      expect(isPreviewTimeApproximate("calibrating")).toBe(true);
+      expect(isPreviewTimeApproximate("unavailable")).toBe(true);
     });
 
-    it("identifies a pending RVFC seek as browser fallback even while calibrated", () => {
-      expect(isPreviewTimeApproximate("ready", null)).toBe(true);
-      expect(isPreviewTimeApproximate("ready", presented)).toBe(false);
+    it("keeps a ready source non-approximate even when presentedFrame is null between a seek and its frame callback", () => {
+      // Locking down the frame step flicker regression: the badge depends on calibration status alone
+      expect(isPreviewTimeApproximate("ready")).toBe(false);
     });
   });
 

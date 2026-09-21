@@ -1,8 +1,10 @@
 /**
- * The single definition of "the reported playback position is approximate".
+ * Answers which clock the reported playback position comes from, driving the timeline
+ * playhead.
  *
- * The preview timecode, the timeline playhead, and the status bar hint all answer that
- * question, and they must answer it identically. See ADR 003.
+ * Whether the interface marks a position as approximate is a separate question answered
+ * by the calibration status, because the calibration status holds for a whole session while
+ * this predicate flips on every seek. See ADR 003.
  */
 
 import type { CalibrationStatus, PresentedFrame } from "./types";

@@ -105,7 +105,7 @@ function PreviewTimecode({
   return (
     <>
       <span className="font-medium text-primary">{currentTimeDisplay}</span>
-      {isPreviewTimeApproximate(calibrationStatus, presentedFrame) && (
+      {isPreviewTimeApproximate(calibrationStatus) && (
         <span className="text-preview-muted">{t("preview.approximate")}</span>
       )}
     </>

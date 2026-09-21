@@ -168,6 +168,15 @@ explicitly approximate display and seek fallback, for the preview timecode and f
 playhead alike. The status bar names the position as approximate, and it is the only place that
 explains why the mark actions are unavailable.
 
+Two questions look like one, and one predicate must not answer both. Which clock supplies
+the number is answered by `isPlaybackPositionApproximate`, which is also true for the one
+frame interval between a seek and the callback that answers it, because the store never
+updates the inferred PTS optimistically. Whether the interface marks the position for the
+user is answered by the calibration status alone. The preview badge and the status bar both
+take the second answer. A mark that took the first appeared and disappeared on every frame
+step, at the rate of the key repeat, and reported a condition that was over before the user
+could read it.
+
 The browser clock is a position on the browser media timeline, which does not always start at
 zero, while every other value on the ruler is elapsed time from the start of the source. The
 playback store therefore subtracts the timeline origin it reads at `loadedmetadata` before it

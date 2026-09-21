@@ -54,9 +54,9 @@ export function selectCalibrationStatus(state: PlaybackStoreState): CalibrationS
  * whose calibration is ready.
  *
  * The condition is the calibration status, not `isPlaybackPositionApproximate`. That
- * predicate is also true between a seek and the RVFC callback that answers it, which is
- * right for the preview timecode it decorates per frame, and wrong here: a calibrated source
- * would paint this warning for the length of every ruler click and every frame step. The
+ * predicate is also true between a seek and the RVFC callback that answers it. A calibrated
+ * source would then paint this warning for the length of every ruler click and every frame
+ * step. The preview timecode badge keys on the calibration status for the same reason. The
  * calibration status holds for a whole session, and it is the state that disables Mark In,
  * Mark Out, and Split.
  */
