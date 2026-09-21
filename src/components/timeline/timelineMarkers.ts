@@ -94,3 +94,111 @@ export function generateRulerMarkers(
 
   return markers;
 }
+
+/**
+ * Smallest gap in pixels between two ruler labels before they crowd.
+ *
+ * formatMillisecondsTimecode always emits the 12 characters of HH:MM:SS.mmm,
+ * which is roughly 72 pixels at text-[10px] in the mono font, and each label
+ * is centred with -translate-x-1/2.
+ */
+export const MIN_RULER_TICK_SPACING_PX = 120;
+
+/** Upper bound on generated ticks, so a very wide lane cannot flood the DOM. */
+export const MAX_QUANTIZED_RULER_TICK_COUNT = 400;
+
+/** The ladder of human-readable tick intervals, in seconds. */
+export const RULER_TICK_LADDER_SECONDS = [
+  1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400,
+] as const;
+
+/**
+ * Chooses the tick interval for a lane of the given pixel width.
+ * Returns null when the duration or the width cannot produce ticks.
+ */
+export function calculateRulerTickStepSeconds(
+  totalDurationSeconds: number | null | undefined,
+  laneWidthPx: number,
+): number | null {
+  if (
+    typeof totalDurationSeconds !== "number" ||
+    !Number.isFinite(totalDurationSeconds) ||
+    totalDurationSeconds <= 0 ||
+    typeof laneWidthPx !== "number" ||
+    !Number.isFinite(laneWidthPx) ||
+    laneWidthPx <= 0
+  ) {
+    return null;
+  }
+
+  for (const step of RULER_TICK_LADDER_SECONDS) {
+    const spacingPx = (step * laneWidthPx) / totalDurationSeconds;
+    const tickCount = totalDurationSeconds / step + 1;
+    if (
+      spacingPx >= MIN_RULER_TICK_SPACING_PX &&
+      tickCount <= MAX_QUANTIZED_RULER_TICK_COUNT
+    ) {
+      return step;
+    }
+  }
+
+  // For a duration beyond roughly 66 days (400 ticks * 14,400s ≈ 66.6 days), this
+  // fallback cannot cover the lane: the generator stops at 400 ticks and the ruler
+  // ends part-way across. No real video source reaches that, so this limit is left alone.
+  return RULER_TICK_LADDER_SECONDS[RULER_TICK_LADDER_SECONDS.length - 1];
+}
+
+/**
+ * Generates ruler markers on whole multiples of the chosen interval.
+ * Returns an empty array when the duration or the width is unusable.
+ */
+export function generateQuantizedRulerMarkers(
+  totalDurationSeconds: number | null | undefined,
+  laneWidthPx: number,
+): RulerMarker[] {
+  const step = calculateRulerTickStepSeconds(totalDurationSeconds, laneWidthPx);
+  if (
+    step === null ||
+    typeof totalDurationSeconds !== "number" ||
+    !Number.isFinite(totalDurationSeconds) ||
+    totalDurationSeconds <= 0
+  ) {
+    return [];
+  }
+
+  const markers: RulerMarker[] = [];
+  let index = 0;
+
+  while (true) {
+    const seconds = index * step;
+    if (seconds > totalDurationSeconds) {
+      break;
+    }
+
+    const percent =
+      seconds === totalDurationSeconds ? 100 : (seconds / totalDurationSeconds) * 100;
+    const roundedPercent = Math.round(percent * 10_000) / 10_000;
+    const left =
+      roundedPercent === 0
+        ? "0%"
+        : roundedPercent === 100
+          ? "100%"
+          : `${roundedPercent}%`;
+    const timecode = formatMillisecondsTimecode(seconds);
+
+    markers.push({
+      timecode,
+      percent,
+      left,
+      seconds,
+    });
+
+    if (markers.length >= MAX_QUANTIZED_RULER_TICK_COUNT) {
+      break;
+    }
+
+    index++;
+  }
+
+  return markers;
+}

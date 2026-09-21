@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  calculateRulerTickStepSeconds,
   DEFAULT_RULER_MARKER_COUNT,
+  generateQuantizedRulerMarkers,
   generateRulerMarkers,
+  MAX_QUANTIZED_RULER_TICK_COUNT,
   MAX_RULER_MARKER_COUNT,
   MIN_RULER_MARKER_COUNT,
   sanitizeMarkerCount,
@@ -203,6 +206,132 @@ describe("Timeline Ruler Markers Helper", () => {
         const markers = generateRulerMarkers(300, { markerCount: 500 });
         expect(markers).toHaveLength(MAX_RULER_MARKER_COUNT);
       });
+    });
+  });
+});
+
+describe("Quantized Ruler Markers", () => {
+  describe("Ladder Choice and Interval Selection", () => {
+    it("picks expected ladder steps for a 3-hour source across lane widths", () => {
+      const threeHours = 10800;
+      // 1344 px picks 1800 s
+      expect(calculateRulerTickStepSeconds(threeHours, 1344)).toBe(1800);
+      // 13440 px picks 120 s
+      expect(calculateRulerTickStepSeconds(threeHours, 13440)).toBe(120);
+      // 99904 px picks 30 s (400-tick cap forces it up from spacing-only answer)
+      expect(calculateRulerTickStepSeconds(threeHours, 99904)).toBe(30);
+    });
+
+    it("picks smallest ladder entry for durations shorter than the smallest ladder entry", () => {
+      expect(calculateRulerTickStepSeconds(0.5, 1344)).toBe(1);
+      expect(calculateRulerTickStepSeconds(0.1, 1000)).toBe(1);
+    });
+  });
+
+  describe("Indeterminate and Invalid Inputs", () => {
+    it("returns null and [] for invalid, non-positive, or non-finite inputs", () => {
+      // laneWidthPx <= 0 and non-finite
+      expect(calculateRulerTickStepSeconds(100, 0)).toBeNull();
+      expect(calculateRulerTickStepSeconds(100, -10)).toBeNull();
+      expect(calculateRulerTickStepSeconds(100, NaN)).toBeNull();
+      expect(calculateRulerTickStepSeconds(100, Infinity)).toBeNull();
+      expect(calculateRulerTickStepSeconds(100, -Infinity)).toBeNull();
+
+      expect(generateQuantizedRulerMarkers(100, 0)).toEqual([]);
+      expect(generateQuantizedRulerMarkers(100, -10)).toEqual([]);
+      expect(generateQuantizedRulerMarkers(100, NaN)).toEqual([]);
+      expect(generateQuantizedRulerMarkers(100, Infinity)).toEqual([]);
+      expect(generateQuantizedRulerMarkers(100, -Infinity)).toEqual([]);
+
+      // totalDurationSeconds null, undefined, 0, negative, and non-finite
+      expect(calculateRulerTickStepSeconds(null, 1344)).toBeNull();
+      expect(calculateRulerTickStepSeconds(undefined, 1344)).toBeNull();
+      expect(calculateRulerTickStepSeconds(0, 1344)).toBeNull();
+      expect(calculateRulerTickStepSeconds(-10, 1344)).toBeNull();
+      expect(calculateRulerTickStepSeconds(NaN, 1344)).toBeNull();
+      expect(calculateRulerTickStepSeconds(Infinity, 1344)).toBeNull();
+      expect(calculateRulerTickStepSeconds(-Infinity, 1344)).toBeNull();
+
+      expect(generateQuantizedRulerMarkers(null, 1344)).toEqual([]);
+      expect(generateQuantizedRulerMarkers(undefined, 1344)).toEqual([]);
+      expect(generateQuantizedRulerMarkers(0, 1344)).toEqual([]);
+      expect(generateQuantizedRulerMarkers(-10, 1344)).toEqual([]);
+      expect(generateQuantizedRulerMarkers(NaN, 1344)).toEqual([]);
+      expect(generateQuantizedRulerMarkers(Infinity, 1344)).toEqual([]);
+      expect(generateQuantizedRulerMarkers(-Infinity, 1344)).toEqual([]);
+    });
+  });
+
+  describe("Quantized Marker Properties and Invariants", () => {
+    it("places the first marker at 0% with 00:00:00.000", () => {
+      const markers = generateQuantizedRulerMarkers(10800, 1344);
+      expect(markers.length).toBeGreaterThan(0);
+      expect(markers[0]).toEqual({
+        seconds: 0,
+        percent: 0,
+        left: "0%",
+        timecode: "00:00:00.000",
+      });
+    });
+
+    it("ensures every marker lands on an exact multiple of the step", () => {
+      const duration = 10800;
+      const width = 1344;
+      const step = calculateRulerTickStepSeconds(duration, width)!;
+      expect(step).toBe(1800);
+
+      const markers = generateQuantizedRulerMarkers(duration, width);
+      for (const marker of markers) {
+        expect(marker.seconds % step).toBe(0);
+        expect(Number.isInteger(marker.seconds / step)).toBe(true);
+      }
+    });
+
+    it("ensures the last marker is <= totalDurationSeconds and is exactly 100% for whole multiples", () => {
+      // Whole multiple: 10800 s with step 1800 s
+      const markersWhole = generateQuantizedRulerMarkers(10800, 1344);
+      const lastWhole = markersWhole[markersWhole.length - 1];
+      expect(lastWhole.seconds).toBe(10800);
+      expect(lastWhole.percent).toBe(100);
+      expect(lastWhole.left).toBe("100%");
+
+      // Non-whole multiple: 10000 s with lane width 1344 px (step 900 s)
+      const markersNonWhole = generateQuantizedRulerMarkers(10000, 1344);
+      const lastNonWhole = markersNonWhole[markersNonWhole.length - 1];
+      expect(lastNonWhole.seconds).toBeLessThanOrEqual(10000);
+      expect(lastNonWhole.seconds).toBe(9900);
+      expect(lastNonWhole.percent).toBe(99);
+      expect(lastNonWhole.percent).toBeLessThan(100);
+      expect(lastNonWhole.left).toBe("99%");
+    });
+
+    it("has strictly increasing percent across markers", () => {
+      const markers = generateQuantizedRulerMarkers(10800, 1344);
+      for (let i = 1; i < markers.length; i++) {
+        expect(markers[i].percent).toBeGreaterThan(markers[i - 1].percent);
+      }
+    });
+
+    it("never exceeds MAX_QUANTIZED_RULER_TICK_COUNT across extremes", () => {
+      // Extremely wide lanes (extreme zoom-in)
+      const extremeWidths = [10_000, 99_904, 500_000, 1_000_000, 10_000_000];
+      for (const width of extremeWidths) {
+        const markers = generateQuantizedRulerMarkers(10800, width);
+        expect(markers.length).toBeLessThanOrEqual(MAX_QUANTIZED_RULER_TICK_COUNT);
+      }
+
+      // Very long source durations
+      const extremeDurations = [3600, 10800, 43200, 86400, 1_000_000, 10_000_000];
+      for (const duration of extremeDurations) {
+        const markers = generateQuantizedRulerMarkers(duration, 100_000);
+        expect(markers.length).toBeLessThanOrEqual(MAX_QUANTIZED_RULER_TICK_COUNT);
+      }
+
+      // Narrow lanes
+      for (const width of [10, 50, 100, 200]) {
+        const markers = generateQuantizedRulerMarkers(10800, width);
+        expect(markers.length).toBeLessThanOrEqual(MAX_QUANTIZED_RULER_TICK_COUNT);
+      }
     });
   });
 });

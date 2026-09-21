@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Film } from "lucide-react";
 import {
@@ -25,7 +25,8 @@ import {
   type TimelineStoreState,
 } from "@/features/timeline";
 import { ptsElapsedSeconds } from "@/lib/time";
-import { generateRulerMarkers } from "./timelineMarkers";
+import { generateQuantizedRulerMarkers } from "./timelineMarkers";
+import { TimelineRuler } from "./TimelineRuler";
 
 export interface TimelinePanelProps {
   /** Stable project source ID when project state already owns one. */
@@ -113,9 +114,48 @@ export function TimelinePanel({
     onApproximateSeek !== undefined;
   const canSeek = canUsePreciseSeek || canUseApproximateSeek;
 
+  const [viewportWidthPx, setViewportWidthPx] = useState<number>(0);
+  const lastWidthRef = useRef<number>(0);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const initialWidth = Math.round(container.clientWidth);
+    if (initialWidth > 0 && lastWidthRef.current !== initialWidth) {
+      lastWidthRef.current = initialWidth;
+      setViewportWidthPx(initialWidth);
+    }
+
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const roundedWidth = Math.round(entry.contentRect.width);
+      if (lastWidthRef.current !== roundedWidth) {
+        lastWidthRef.current = roundedWidth;
+        setViewportWidthPx(roundedWidth);
+      }
+    });
+
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  const laneWidthPx = Math.max(0, viewportWidthPx - 96);
+
   const markers = useMemo(() => {
-    return generateRulerMarkers(totalDurationSeconds);
-  }, [totalDurationSeconds]);
+    return generateQuantizedRulerMarkers(totalDurationSeconds, laneWidthPx);
+  }, [totalDurationSeconds, laneWidthPx]);
 
   // True while the playhead position below comes from the browser clock. The playhead takes
   // no visual mark for it: the status bar carries the marking, and marking it twice would
@@ -244,7 +284,10 @@ export function TimelinePanel({
 
   return (
     <section className="flex h-[180px] shrink-0 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
-      <div className="flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
+      <div
+        ref={scrollContainerRef}
+        className="flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-hidden"
+      >
         <div className="flex min-w-[900px] flex-1 flex-col">
           {/* Ruler Row (~28px tall) */}
           <div className="flex h-7 shrink-0 border-b border-timeline-divider">
@@ -275,16 +318,7 @@ export function TimelinePanel({
             >
               {/* Timecode labels and ticks */}
               <div className="relative h-full w-full font-mono text-[10px]">
-                {markers.map((marker) => (
-                  <div
-                    key={`${marker.seconds}-${marker.left}`}
-                    className="pointer-events-none absolute bottom-0 flex -translate-x-1/2 flex-col items-center gap-0.5"
-                    style={{ left: marker.left }}
-                  >
-                    <span className="text-muted-foreground">{marker.timecode}</span>
-                    <div className="h-1.5 w-px bg-timeline-divider" />
-                  </div>
-                ))}
+                <TimelineRuler markers={markers} />
               </div>
 
               {/* Playhead marker in ruler */}
