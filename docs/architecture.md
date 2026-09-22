@@ -19,29 +19,30 @@ source key that makes that possible. Multi-track is out of scope and stays out o
 Each record states context, decision, and consequences. They are the source of truth. This
 document summarizes them and shows how the parts fit together.
 
-| Record                                                                                                                      | Subject                                                       |
-| --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| [`001-tauri-react-typescript-shell.md`](../.agents/decisions/001-tauri-react-typescript-shell.md)                           | Tauri v2, React 19, TypeScript, Vite, Tailwind 4, shadcn/ui   |
-| [`002-rational-time-model.md`](../.agents/decisions/002-rational-time-model.md)                                             | Source video PTS, exact time bases, half-open segments        |
-| [`003-hybrid-preview-decoding.md`](../.agents/decisions/003-hybrid-preview-decoding.md)                                     | Native preview, proxy fallback, calibrated PTS inference      |
-| [`004-single-pass-filter-complex-export.md`](../.agents/decisions/004-single-pass-filter-complex-export.md)                 | Accurate source seek, timestamp resolution, normalization     |
-| [`005-ffmpeg-acquisition.md`](../.agents/decisions/005-ffmpeg-acquisition.md)                                               | PATH, then app data, then a download the user agreed to       |
-| [`006-encoder-capability-probing.md`](../.agents/decisions/006-encoder-capability-probing.md)                               | List the encoders, then smoke-test them, then cache           |
-| [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md)                 | One source-PTS timeline with ordered half-open segments       |
-| [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)                   | Delegated writing, independent review                         |
-| [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                                 | One reviewed unit, one commit, no push                        |
-| [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                                             | Version 1 JSON with exact source-PTS boundaries               |
-| [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                                             | English and Simplified Chinese interface with a saved setting |
-| [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)                         | Homebrew path fallback for macOS GUI applications             |
-| [`013-application-settings-file.md`](../.agents/decisions/013-application-settings-file.md)                                 | One settings file for the ffmpeg path and the export presets  |
-| [`014-export-cut-with-trim-after-seek.md`](../.agents/decisions/014-export-cut-with-trim-after-seek.md)                     | Seeked input, trim on raw source PTS, one process, one output |
-| [`015-windows-atomic-replace-retry.md`](../.agents/decisions/015-windows-atomic-replace-retry.md)                           | Layered Windows rename with a bounded retry                   |
-| [`016-export-orchestration.md`](../.agents/decisions/016-export-orchestration.md)                                           | One export at a time, one event, a 30-second publication wait |
-| [`017-export-lifetime-across-application-exit.md`](../.agents/decisions/017-export-lifetime-across-application-exit.md)     | A quit cancels a running export and waits a bounded time      |
-| [`018-windows-child-processes-without-a-console.md`](../.agents/decisions/018-windows-child-processes-without-a-console.md) | Every child process starts with no Windows console window     |
-| [`019-scrub-audio-on-frame-step.md`](../.agents/decisions/019-scrub-audio-on-frame-step.md)                                 | A frame step plays a short audio burst at the new position    |
-| [`020-platform-title-bar-and-export-action.md`](../.agents/decisions/020-platform-title-bar-and-export-action.md)           | One title bar per platform, with the export action inside it  |
-| [`021-window-level-keyboard-shortcuts.md`](../.agents/decisions/021-window-level-keyboard-shortcuts.md)                     | One window keyboard layer for play and the frame step         |
+| Record                                                                                                                                      | Subject                                                         |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| [`001-tauri-react-typescript-shell.md`](../.agents/decisions/001-tauri-react-typescript-shell.md)                                           | Tauri v2, React 19, TypeScript, Vite, Tailwind 4, shadcn/ui     |
+| [`002-rational-time-model.md`](../.agents/decisions/002-rational-time-model.md)                                                             | Source video PTS, exact time bases, half-open segments          |
+| [`003-hybrid-preview-decoding.md`](../.agents/decisions/003-hybrid-preview-decoding.md)                                                     | Native preview, proxy fallback, calibrated PTS inference        |
+| [`004-single-pass-filter-complex-export.md`](../.agents/decisions/004-single-pass-filter-complex-export.md)                                 | Accurate source seek, timestamp resolution, normalization       |
+| [`005-ffmpeg-acquisition.md`](../.agents/decisions/005-ffmpeg-acquisition.md)                                                               | PATH, then app data, then a download the user agreed to         |
+| [`006-encoder-capability-probing.md`](../.agents/decisions/006-encoder-capability-probing.md)                                               | List the encoders, then smoke-test them, then cache             |
+| [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md)                                 | One source-PTS timeline with ordered half-open segments         |
+| [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)                                   | Delegated writing, independent review                           |
+| [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                                                 | One reviewed unit, one commit, no push                          |
+| [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                                                             | Version 1 JSON with exact source-PTS boundaries                 |
+| [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                                                             | English and Simplified Chinese interface with a saved setting   |
+| [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)                                         | Homebrew path fallback for macOS GUI applications               |
+| [`013-application-settings-file.md`](../.agents/decisions/013-application-settings-file.md)                                                 | One settings file for the ffmpeg path and the export presets    |
+| [`014-export-cut-with-trim-after-seek.md`](../.agents/decisions/014-export-cut-with-trim-after-seek.md)                                     | Seeked input, trim on raw source PTS, one process, one output   |
+| [`015-windows-atomic-replace-retry.md`](../.agents/decisions/015-windows-atomic-replace-retry.md)                                           | Layered Windows rename with a bounded retry                     |
+| [`016-export-orchestration.md`](../.agents/decisions/016-export-orchestration.md)                                                           | One export at a time, one event, a 30-second publication wait   |
+| [`017-export-lifetime-across-application-exit.md`](../.agents/decisions/017-export-lifetime-across-application-exit.md)                     | A quit cancels a running export and waits a bounded time        |
+| [`018-windows-child-processes-without-a-console.md`](../.agents/decisions/018-windows-child-processes-without-a-console.md)                 | Every child process starts with no Windows console window       |
+| [`019-scrub-audio-on-frame-step.md`](../.agents/decisions/019-scrub-audio-on-frame-step.md)                                                 | A frame step plays a short audio burst at the new position      |
+| [`020-platform-title-bar-and-export-action.md`](../.agents/decisions/020-platform-title-bar-and-export-action.md)                           | One title bar per platform, with the export action inside it    |
+| [`021-window-level-keyboard-shortcuts.md`](../.agents/decisions/021-window-level-keyboard-shortcuts.md)                                     | One window keyboard layer for play and the frame step           |
+| [`022-playhead-scrub-display-target-and-coalesced-seeks.md`](../.agents/decisions/022-playhead-scrub-display-target-and-coalesced-seeks.md) | The playhead draws the seek target, and one seek runs at a time |
 
 ## Shape
 
@@ -193,8 +194,9 @@ A frame step also plays a short piece of the sound at the new position, because 
 alone frequently does not identify the correct frame. A second, hidden `<audio>` element
 carries the same asset URL as the preview element. One controller in
 `src/features/playback/scrubAudio.ts` seeks that element and plays it for 50 milliseconds.
-Only `seekNominal` starts a burst. Every other playback action stops one, so a cue and the
-real playback never sound together.
+`seekNominal` starts a burst, and so does a scrub seek during a drag of the playhead (ADR
+022). Every other playback action stops one, so a cue and the real playback never sound
+together.
 
 The controller starts its stop timer on the `playing` event, because the element needs as
 long to seek and to start as the burst lasts. A held key that steps forward extends the
@@ -205,6 +207,14 @@ is attached to that same source revision, and only after the calibration status 
 carries a new source still holds the store state of the previous one, so a boolean is
 stale exactly when it decides. The element therefore cannot delay the calibration anchor.
 See ADR 019.
+
+The playhead draws the target of the last seek request at once, before the video presents
+the frame. That target is for display only. The edit actions still wait for RVFC, so a mark
+always writes the PTS of the presented frame. The playback store runs one element seek at a
+time: a request that arrives while the element seeks replaces the queued request, and the
+`seeked` event starts it. Each seek therefore completes, and the picture changes during a
+drag. A drag uses `fastSeek` where the web view has it, and the release always ends with an
+exact seek. See ADR 022.
 
 The current _Source_ preview plays the whole file. A future _Program_ preview will play
 only the segments, so the user can watch what the export will contain.
