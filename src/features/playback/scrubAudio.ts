@@ -1,8 +1,11 @@
 /**
- * Scrub audio controller driving a hidden audio element for frame step sound cues.
+ * Scrub audio controller driving a hidden audio element for frame step and drag sound cues.
  *
  * Implements ADR 019: plays a short burst of audio at the new position when stepping
  * frames so the user can hear word boundaries or audio transients.
+ *
+ * Amends ADR 019 via ADR 022: playhead dragging serves as a second caller for audio bursts.
+ * The store, not the controller, tracks the drag direction and skips zero-distance moves.
  */
 
 /** Burst duration in seconds (50 ms), approximating one frame duration to provide an audible cue. */

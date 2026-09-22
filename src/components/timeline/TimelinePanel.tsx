@@ -19,6 +19,7 @@ import {
   isPlaybackPositionApproximate,
   usePlaybackStore,
   type PlaybackStoreState,
+  type SeekOptions,
 } from "@/features/playback";
 import {
   calculateAnchorRatio,
@@ -53,8 +54,8 @@ export interface TimelinePanelProps {
   activeSourceId?: string | null;
   /** Finite HTMLMediaElement.duration supplied by preview runtime state. */
   runtimeBrowserDurationSeconds?: number | null;
-  /** Browser-time seek request used when calibrated PTS seeking is unavailable. */
-  onApproximateSeek?: (seconds: number) => void;
+  /** Browser-time seek request used when calibrated PTS seeking is unavailable (ADR 022). */
+  onApproximateSeek?: (seconds: number, options?: SeekOptions) => void;
 }
 
 const selectMedia = (state: MediaStoreState) => state.media;
@@ -349,20 +350,21 @@ export function TimelinePanel({
   ]);
 
   /**
-   * Seeks to the timeline position under a client X coordinate.
+   * Seeks to the timeline position under a client X coordinate (ADR 022).
    *
    * Reads the rectangle from `laneRef.current` on every call, because the ruler lane and the
    * track lane share one left edge and one width by construction.
    *
-   * The `_phase` parameter is reserved for the later scrub-mode unit (ADR 022) to forward
-   * to seek actions for fastSeek and audio bursts.
+   * Passes `{ scrub: phase === "scrub" }` so playhead drag moves use fastSeek and audio bursts,
+   * while pointer down, pointer release, and a cancelled drag perform exact seeks.
    */
-  const seekFromClientX = (clientX: number, _phase: "scrub" | "final") => {
+  const seekFromClientX = (clientX: number, phase: "scrub" | "final") => {
     const laneEl = laneRef.current;
     if (!laneEl || !canSeek || totalDurationSeconds === null) {
       return;
     }
     const rect = laneEl.getBoundingClientRect();
+    const options: SeekOptions = { scrub: phase === "scrub" };
     if (canUsePreciseSeek && media?.probe.videoStartPts && media.probe.videoTimeBase) {
       const targetPts = calculatePtsFromClientX(
         clientX,
@@ -373,7 +375,7 @@ export function TimelinePanel({
         media.probe.videoTimeBase,
       );
       if (targetPts !== null) {
-        seekToPts(targetPts);
+        seekToPts(targetPts, options);
       }
       return;
     }
@@ -384,7 +386,7 @@ export function TimelinePanel({
       totalDurationSeconds,
     );
     if (targetSeconds !== null) {
-      onApproximateSeek?.(targetSeconds);
+      onApproximateSeek?.(targetSeconds, options);
     }
   };
 
@@ -405,7 +407,7 @@ export function TimelinePanel({
 
   useEffect(() => {
     return () => {
-      gestureRef.current?.cancel();
+      gestureRef.current?.dispose();
     };
   }, []);
 

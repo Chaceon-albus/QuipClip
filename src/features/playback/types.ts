@@ -30,9 +30,20 @@ export interface PlaybackMediaElement {
   play: () => Promise<void> | void;
   pause: () => void;
   currentTime: number;
+  fastSeek?: (time: number) => void;
   duration?: number;
   readyState?: number;
   seeking?: boolean;
+}
+
+/**
+ * Options for seek actions (ADR 022).
+ *
+ * `scrub`: true for each sample of a playhead drag; false or absent for a click
+ * and for the final seek of a drag.
+ */
+export interface SeekOptions {
+  readonly scrub?: boolean;
 }
 
 /**
@@ -153,8 +164,9 @@ export interface PlaybackActions {
   /**
    * Seeks to a target PTS in source video time base using checked inverse calibrated mapping.
    * Does not update inferred PTS optimistically after setting currentTime; waits for RVFC.
+   * Accepts optional SeekOptions for playhead scrubbing (ADR 022).
    */
-  seekToPts: (targetPts: Pts) => void;
+  seekToPts: (targetPts: Pts, options?: SeekOptions) => void;
 
   /**
    * Seeks by a nominal frame delta hint using valid avgFrameRate then rFrameRate.
@@ -162,8 +174,11 @@ export interface PlaybackActions {
    */
   seekNominal: (deltaFrames: number) => void;
 
-  /** Requests a checked browser-time seek without creating a canonical edit position. */
-  seekApproximate: (seconds: number) => void;
+  /**
+   * Requests a checked browser-time seek without creating a canonical edit position.
+   * Accepts optional SeekOptions for playhead scrubbing (ADR 022).
+   */
+  seekApproximate: (seconds: number, options?: SeekOptions) => void;
 
   /**
    * Synchronizes confirmed presented frame from requestVideoFrameCallback.

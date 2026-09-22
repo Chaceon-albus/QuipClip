@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createTimelineScrubGesture,
+  SCRUB_MOVE_THRESHOLD_PX,
   type TimelineScrubScheduler,
 } from "./timelineScrub";
 
@@ -206,7 +207,7 @@ describe("timelineScrub", () => {
     expect(onSample).not.toHaveBeenCalled();
   });
 
-  it("cancels pending frame and emits nothing on cancel", () => {
+  it("cancels pending frame and emits one final sample at the latest clientX on cancel after a move", () => {
     const scheduler = createFakeScheduler();
     const onSample = vi.fn();
     const gesture = createTimelineScrubGesture({ onSample, scheduler });
@@ -217,6 +218,43 @@ describe("timelineScrub", () => {
     onSample.mockClear();
 
     gesture.cancel(1);
+
+    expect(scheduler.hasPending()).toBe(false);
+    expect(gesture.isActive()).toBe(false);
+    expect(onSample).toHaveBeenCalledTimes(1);
+    expect(onSample).toHaveBeenCalledWith(120, "final");
+
+    // Flushing does nothing
+    scheduler.flush();
+    expect(onSample).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits nothing on cancel without a move", () => {
+    const scheduler = createFakeScheduler();
+    const onSample = vi.fn();
+    const gesture = createTimelineScrubGesture({ onSample, scheduler });
+
+    gesture.begin(1, 100);
+    onSample.mockClear();
+
+    gesture.cancel(1);
+
+    expect(gesture.isActive()).toBe(false);
+    expect(onSample).not.toHaveBeenCalled();
+    expect(scheduler.hasPending()).toBe(false);
+  });
+
+  it("cancels pending frame and emits nothing on dispose even after a move", () => {
+    const scheduler = createFakeScheduler();
+    const onSample = vi.fn();
+    const gesture = createTimelineScrubGesture({ onSample, scheduler });
+
+    gesture.begin(1, 100);
+    gesture.move(1, 120);
+    expect(scheduler.hasPending()).toBe(true);
+    onSample.mockClear();
+
+    gesture.dispose();
 
     expect(scheduler.hasPending()).toBe(false);
     expect(gesture.isActive()).toBe(false);
@@ -242,7 +280,7 @@ describe("timelineScrub", () => {
     expect(scheduler.hasPending()).toBe(true);
   });
 
-  it("allows cancel without pointerId to cancel pending frame and clear gesture on unmount", () => {
+  it("allows cancel without pointerId to cancel pending frame and emit final sample if moved", () => {
     const scheduler = createFakeScheduler();
     const onSample = vi.fn();
     const gesture = createTimelineScrubGesture({ onSample, scheduler });
@@ -256,7 +294,8 @@ describe("timelineScrub", () => {
 
     expect(scheduler.hasPending()).toBe(false);
     expect(gesture.isActive()).toBe(false);
-    expect(onSample).not.toHaveBeenCalled();
+    expect(onSample).toHaveBeenCalledTimes(1);
+    expect(onSample).toHaveBeenCalledWith(120, "final");
   });
 
   it("allows begin to work again after end and after cancel", () => {
@@ -341,6 +380,31 @@ describe("timelineScrub", () => {
     expect(gesture.isActive()).toBe(false);
   });
 
+  it("does not leave gesture active if onSample throws in cancel", () => {
+    const scheduler = createFakeScheduler();
+    let shouldThrow = false;
+    const onSample = vi.fn().mockImplementation(() => {
+      if (shouldThrow) {
+        throw new Error("cancel failure");
+      }
+    });
+    const gesture = createTimelineScrubGesture({ onSample, scheduler });
+
+    gesture.begin(1, 100);
+    gesture.move(1, 120);
+    shouldThrow = true;
+    expect(() => gesture.cancel(1)).toThrow("cancel failure");
+    expect(gesture.isActive()).toBe(false);
+
+    // Verify next gesture works
+    shouldThrow = false;
+    gesture.begin(1, 200);
+    expect(gesture.isActive()).toBe(true);
+    expect(onSample).toHaveBeenLastCalledWith(200, "final");
+    gesture.end(1, 200);
+    expect(gesture.isActive()).toBe(false);
+  });
+
   it("uses globalThis.requestAnimationFrame and cancelAnimationFrame in default scheduler", () => {
     const rafStub = vi.fn<(cb: () => void) => number>().mockReturnValue(777);
     const cafStub = vi.fn<(handle: number) => void>();
@@ -393,7 +457,7 @@ describe("timelineScrub", () => {
     expect(onSample).not.toHaveBeenCalled();
   });
 
-  it("ignores move, end, and cancel when gesture is not active", () => {
+  it("ignores move, end, cancel, and dispose when gesture is not active", () => {
     const scheduler = createFakeScheduler();
     const onSample = vi.fn();
     const gesture = createTimelineScrubGesture({ onSample, scheduler });
@@ -402,9 +466,115 @@ describe("timelineScrub", () => {
     gesture.end(1, 100);
     gesture.cancel(1);
     gesture.cancel();
+    gesture.dispose();
 
     expect(onSample).not.toHaveBeenCalled();
     expect(scheduler.hasPending()).toBe(false);
     expect(gesture.isActive()).toBe(false);
+  });
+
+  describe("movement threshold (SCRUB_MOVE_THRESHOLD_PX)", () => {
+    it("exports SCRUB_MOVE_THRESHOLD_PX as 3", () => {
+      expect(SCRUB_MOVE_THRESHOLD_PX).toBe(3);
+    });
+
+    it("a 1-2 px jitter click emits exactly one 'final' sample", () => {
+      const scheduler = createFakeScheduler();
+      const onSample = vi.fn();
+      const gesture = createTimelineScrubGesture({ onSample, scheduler });
+
+      gesture.begin(1, 100);
+      expect(onSample).toHaveBeenCalledTimes(1);
+      expect(onSample).toHaveBeenCalledWith(100, "final");
+
+      // Jitter moves under threshold (1-2 px delta)
+      gesture.move(1, 101); // +1 px
+      gesture.move(1, 102); // +2 px
+      gesture.move(1, 99); // -1 px
+      gesture.move(1, 98.5); // -1.5 px
+      expect(scheduler.hasPending()).toBe(false);
+      expect(onSample).toHaveBeenCalledTimes(1);
+
+      // Release under the threshold emits nothing (pointer-down seek already happened)
+      gesture.end(1, 101);
+      expect(onSample).toHaveBeenCalledTimes(1);
+      expect(gesture.isActive()).toBe(false);
+      expect(scheduler.hasPending()).toBe(false);
+    });
+
+    it("cancel under the movement threshold emits nothing", () => {
+      const scheduler = createFakeScheduler();
+      const onSample = vi.fn();
+      const gesture = createTimelineScrubGesture({ onSample, scheduler });
+
+      gesture.begin(1, 100);
+      expect(onSample).toHaveBeenCalledTimes(1);
+      expect(onSample).toHaveBeenCalledWith(100, "final");
+
+      gesture.move(1, 102);
+      expect(scheduler.hasPending()).toBe(false);
+
+      gesture.cancel(1);
+      expect(onSample).toHaveBeenCalledTimes(1);
+      expect(gesture.isActive()).toBe(false);
+    });
+
+    it("crossing the threshold starts scrub samples", () => {
+      const scheduler = createFakeScheduler();
+      const onSample = vi.fn();
+      const gesture = createTimelineScrubGesture({ onSample, scheduler });
+
+      gesture.begin(1, 100);
+      expect(onSample).toHaveBeenCalledTimes(1);
+      expect(onSample).toHaveBeenLastCalledWith(100, "final");
+
+      // Sub-threshold move ignored
+      gesture.move(1, 102);
+      expect(scheduler.hasPending()).toBe(false);
+      expect(onSample).toHaveBeenCalledTimes(1);
+
+      // Exactly at threshold: |103 - 100| >= 3 px
+      gesture.move(1, 103);
+      expect(scheduler.hasPending()).toBe(true);
+
+      scheduler.flush();
+      expect(onSample).toHaveBeenCalledTimes(2);
+      expect(onSample).toHaveBeenLastCalledWith(103, "scrub");
+    });
+
+    it("after crossing, moving back within 3 px of the start still scrubs", () => {
+      const scheduler = createFakeScheduler();
+      const onSample = vi.fn();
+      const gesture = createTimelineScrubGesture({ onSample, scheduler });
+
+      gesture.begin(1, 100);
+      expect(onSample).toHaveBeenCalledTimes(1);
+
+      // Cross threshold
+      gesture.move(1, 104);
+      expect(scheduler.hasPending()).toBe(true);
+      scheduler.flush();
+      expect(onSample).toHaveBeenCalledTimes(2);
+      expect(onSample).toHaveBeenLastCalledWith(104, "scrub");
+
+      // Move back within 3 px of start (e.g. 101, delta 1 px from 100)
+      gesture.move(1, 101);
+      expect(scheduler.hasPending()).toBe(true);
+      scheduler.flush();
+      expect(onSample).toHaveBeenCalledTimes(3);
+      expect(onSample).toHaveBeenLastCalledWith(101, "scrub");
+
+      // Move back to exact downClientX (100)
+      gesture.move(1, 100);
+      expect(scheduler.hasPending()).toBe(true);
+      scheduler.flush();
+      expect(onSample).toHaveBeenCalledTimes(4);
+      expect(onSample).toHaveBeenLastCalledWith(100, "scrub");
+
+      // Release emits final sample
+      gesture.end(1, 100);
+      expect(onSample).toHaveBeenCalledTimes(5);
+      expect(onSample).toHaveBeenLastCalledWith(100, "final");
+    });
   });
 });

@@ -23,6 +23,7 @@ import type {
   PlaybackSource,
   PlaybackState,
   PlaybackStoreState,
+  SeekOptions,
 } from "./types";
 
 /**
@@ -124,16 +125,88 @@ export function createPlaybackStore(
   // Queued seek target for coalescing rapid seeks. A media element aborts a running seek when
   // currentTime is assigned again, so a fast series of seeks never presents a frame; one seek
   // in flight with the latest request winning makes each seek complete (ADR 022).
-  let queuedSeek: { mediaTime: number } | null = null;
+  let queuedSeek: { mediaTime: number; scrub: boolean } | null = null;
+  // Last accepted seek request (queued or issued). Used to de-duplicate successive scrub samples
+  // that target the exact same media time, while never dropping an exact seek (ADR 022).
+  // It is also the key that keeps the target while a scrub seek is the last request, and the
+  // pending target for play and seekNominal.
+  let lastAcceptedSeek: { mediaTime: number; scrub: boolean } | null = null;
+  // Position of the last scrub audio burst request. Tracks drag direction and skips audio on
+  // zero-distance moves (ADR 019, ADR 022).
+  let lastScrubAudioTarget: number | null = null;
 
   return createStore<PlaybackStoreState>()((set, get) => {
+    /**
+     * Issues a seek to the media element (ADR 022).
+     *
+     * A scrub seek uses `fastSeek` when available to jump to a nearby keyframe, allowing
+     * long-GOP sources to present frames more quickly during a drag. An exact seek (click
+     * or final release of a drag) ALWAYS assigns `currentTime` so playback lands on the exact
+     * target frame.
+     */
+    const issueSeek = (
+      element: PlaybackMediaElement,
+      entry: { mediaTime: number; scrub: boolean },
+    ): void => {
+      if (entry.scrub && typeof element.fastSeek === "function") {
+        element.fastSeek(entry.mediaTime);
+      } else {
+        element.currentTime = entry.mediaTime;
+      }
+    };
+
+    /**
+     * Requests an audio burst for a scrub seek that has been issued to the element (ADR 022).
+     *
+     * Audio is requested only when a seek is issued to the element rather than when queued,
+     * so that the burst cadence follows the picture decoding cadence. Direction reflects
+     * the sign of the movement from the last burst target (1 for forward or initial, -1 for backward).
+     * Zero-distance moves are skipped.
+     */
+    const requestScrubBurst = (mediaTime: number): void => {
+      let direction: 1 | -1;
+      if (lastScrubAudioTarget === null) {
+        direction = 1;
+      } else if (mediaTime > lastScrubAudioTarget) {
+        direction = 1;
+      } else if (mediaTime < lastScrubAudioTarget) {
+        direction = -1;
+      } else {
+        return;
+      }
+      lastScrubAudioTarget = mediaTime;
+      scrubAudioController.request(mediaTime, direction);
+    };
+
     // A media element aborts a running seek when currentTime is assigned again, so a fast series
     // of seeks never presents a frame; one seek in flight with the latest request winning makes
     // each seek complete (ADR 022).
     const dispatchSeek = (
       element: PlaybackMediaElement,
       mediaTime: number,
+      scrub: boolean,
     ): boolean => {
+      // Duplicate rule (ADR 022): drop a SCRUB request (no dispatch, no state change)
+      // when its mediaTime equals the last accepted request's mediaTime, whether that
+      // request was a scrub or exact.
+      // An exact request is NEVER dropped, even when its time equals the previous
+      // scrub target, because fastSeek lands on a keyframe rather than the target frame.
+      if (
+        scrub &&
+        lastAcceptedSeek !== null &&
+        lastAcceptedSeek.mediaTime === mediaTime
+      ) {
+        return false;
+      }
+
+      lastAcceptedSeek = { mediaTime, scrub };
+      if (!scrub) {
+        // Exact seeks record their mediaTime as the baseline for scrub audio, so the first
+        // scrub after pointer down measures its direction from pointer-down time and a zero
+        // move makes no sound (ADR 022).
+        lastScrubAudioTarget = mediaTime;
+      }
+
       playSessionId++;
       try {
         element.pause();
@@ -142,16 +215,17 @@ export function createPlaybackStore(
       }
 
       if (element.seeking === true) {
-        queuedSeek = { mediaTime };
+        queuedSeek = { mediaTime, scrub };
         return true;
       }
 
       try {
-        element.currentTime = mediaTime;
+        issueSeek(element, { mediaTime, scrub });
         queuedSeek = null;
-        return true;
       } catch {
         queuedSeek = null;
+        lastAcceptedSeek = null;
+        lastScrubAudioTarget = null;
         set({
           isPlaying: false,
           error: "seekFailed",
@@ -160,6 +234,11 @@ export function createPlaybackStore(
         });
         return false;
       }
+
+      if (scrub) {
+        requestScrubBurst(mediaTime);
+      }
+      return true;
     };
 
     return {
@@ -248,6 +327,8 @@ export function createPlaybackStore(
         browserTimelineOriginSeconds = 0;
         seekedBeforeCalibration = false;
         queuedSeek = null;
+        lastAcceptedSeek = null;
+        lastScrubAudioTarget = null;
 
         set({
           presentedFrame: null,
@@ -278,6 +359,7 @@ export function createPlaybackStore(
         }
 
         scrubAudioController.stop();
+        lastScrubAudioTarget = null;
 
         playSessionId++;
         try {
@@ -296,6 +378,7 @@ export function createPlaybackStore(
         browserTimelineOriginSeconds = 0;
         seekedBeforeCalibration = false;
         queuedSeek = null;
+        lastAcceptedSeek = null;
 
         set({
           presentedFrame: null,
@@ -358,6 +441,8 @@ export function createPlaybackStore(
         }
 
         queuedSeek = null;
+        lastAcceptedSeek = null;
+        lastScrubAudioTarget = null;
         playSessionId++;
         try {
           attachedElement.pause();
@@ -386,12 +471,18 @@ export function createPlaybackStore(
           return;
         }
 
-        if (queuedSeek !== null) {
-          const nextMediaTime = queuedSeek.mediaTime;
+        const pending =
+          queuedSeek ?? (lastAcceptedSeek?.scrub === true ? lastAcceptedSeek : null);
+        if (pending !== null) {
+          const nextMediaTime = pending.mediaTime;
           queuedSeek = null;
           try {
+            // A queued seek or issued scrub seek must be flushed as EXACT before playing, so
+            // playback starts at the last target and not at a keyframe (ADR 022).
             attachedElement.currentTime = nextMediaTime;
           } catch {
+            lastAcceptedSeek = null;
+            lastScrubAudioTarget = null;
             set({
               isPlaying: false,
               error: "seekFailed",
@@ -400,6 +491,7 @@ export function createPlaybackStore(
             });
             return;
           }
+          lastAcceptedSeek = null;
         }
 
         const currentSession = ++playSessionId;
@@ -409,6 +501,8 @@ export function createPlaybackStore(
         // Optimistically update playing state and clear previous error
         set({ isPlaying: true, error: null });
 
+        lastAcceptedSeek = null;
+        lastScrubAudioTarget = null;
         scrubAudioController.stop();
 
         let result: Promise<void> | void;
@@ -455,6 +549,7 @@ export function createPlaybackStore(
       },
 
       pause: () => {
+        lastScrubAudioTarget = null;
         scrubAudioController.stop();
 
         if (!attachedSource || !attachedElement) {
@@ -471,8 +566,11 @@ export function createPlaybackStore(
         set({ isPlaying: false });
       },
 
-      seekToPts: (targetPts: Pts) => {
-        scrubAudioController.stop();
+      seekToPts: (targetPts: Pts, options?: SeekOptions) => {
+        const scrub = options?.scrub === true;
+        if (!scrub) {
+          scrubAudioController.stop();
+        }
 
         const state = get();
         if (
@@ -484,6 +582,8 @@ export function createPlaybackStore(
           attachedSource.videoStartPts === null
         ) {
           queuedSeek = null;
+          lastAcceptedSeek = null;
+          lastScrubAudioTarget = null;
           playSessionId++;
           try {
             attachedElement?.pause();
@@ -496,6 +596,8 @@ export function createPlaybackStore(
 
         if (!isPtsString(targetPts)) {
           queuedSeek = null;
+          lastAcceptedSeek = null;
+          lastScrubAudioTarget = null;
           playSessionId++;
           try {
             attachedElement.pause();
@@ -515,6 +617,8 @@ export function createPlaybackStore(
 
         if (targetMediaTime === null) {
           queuedSeek = null;
+          lastAcceptedSeek = null;
+          lastScrubAudioTarget = null;
           playSessionId++;
           try {
             attachedElement.pause();
@@ -533,6 +637,8 @@ export function createPlaybackStore(
 
         if (rawElapsed === null) {
           queuedSeek = null;
+          lastAcceptedSeek = null;
+          lastScrubAudioTarget = null;
           playSessionId++;
           try {
             attachedElement.pause();
@@ -543,7 +649,7 @@ export function createPlaybackStore(
           return;
         }
 
-        if (!dispatchSeek(attachedElement, targetMediaTime)) {
+        if (!dispatchSeek(attachedElement, targetMediaTime, scrub)) {
           return;
         }
 
@@ -584,7 +690,9 @@ export function createPlaybackStore(
           return;
         }
 
-        const currentBrowserTime = queuedSeek?.mediaTime ?? attachedElement.currentTime;
+        const pending =
+          queuedSeek ?? (lastAcceptedSeek?.scrub === true ? lastAcceptedSeek : null);
+        const currentBrowserTime = pending?.mediaTime ?? attachedElement.currentTime;
         if (
           typeof currentBrowserTime !== "number" ||
           !Number.isFinite(currentBrowserTime)
@@ -604,7 +712,9 @@ export function createPlaybackStore(
           targetTime = Math.min(targetTime, attachedSource.approximateDurationSeconds);
         }
 
-        if (!dispatchSeek(attachedElement, targetTime)) {
+        // seekNominal stays exact (it assigns currentTime through the helper with scrub false).
+        // Its existing audio request stays unchanged (ADR 019, ADR 022).
+        if (!dispatchSeek(attachedElement, targetTime, false)) {
           return;
         }
 
@@ -629,8 +739,11 @@ export function createPlaybackStore(
         });
       },
 
-      seekApproximate: (seconds: number) => {
-        scrubAudioController.stop();
+      seekApproximate: (seconds: number, options?: SeekOptions) => {
+        const scrub = options?.scrub === true;
+        if (!scrub) {
+          scrubAudioController.stop();
+        }
 
         const state = get();
         if (
@@ -654,7 +767,7 @@ export function createPlaybackStore(
           return;
         }
 
-        if (!dispatchSeek(attachedElement, target)) {
+        if (!dispatchSeek(attachedElement, target, scrub)) {
           return;
         }
 
@@ -694,7 +807,16 @@ export function createPlaybackStore(
           return;
         }
 
-        const settled = attachedElement.seeking !== true && queuedSeek === null;
+        // A scrub seek (fastSeek) lands on a keyframe rather than the target frame.
+        // Clearing seekTargetSeconds when it settles would jump the playhead and timecode
+        // from the pointer to that keyframe (possibly seconds away). Therefore, clearing
+        // additionally requires lastAcceptedSeek?.scrub !== true (ADR 022). The target is
+        // then cleared when the exact seek at release settles. Failure and reset paths
+        // still clear it unconditionally.
+        const settled =
+          attachedElement.seeking !== true &&
+          queuedSeek === null &&
+          lastAcceptedSeek?.scrub !== true;
 
         // Write the unavailable state only when it is not already the state, or when
         // clearing a non-null seek target once settled (ADR 022). RVFC fires for every
@@ -907,22 +1029,31 @@ export function createPlaybackStore(
         }
 
         if (queuedSeek !== null) {
-          const nextMediaTime = queuedSeek.mediaTime;
+          const nextEntry = queuedSeek;
           queuedSeek = null;
           try {
-            element.currentTime = nextMediaTime;
+            issueSeek(element, nextEntry);
           } catch {
+            lastAcceptedSeek = null;
+            lastScrubAudioTarget = null;
             set({
               isPlaying: false,
               error: "seekFailed",
               seekTargetSeconds: null,
               presentedFrame: null,
             });
+            return;
+          }
+          if (nextEntry.scrub) {
+            requestScrubBurst(nextEntry.mediaTime);
           }
         } else if (
+          lastAcceptedSeek?.scrub !== true &&
           get().calibrationStatus !== "ready" &&
           get().seekTargetSeconds !== null
         ) {
+          // In non-ready calibration states, seeked clears the display target once settled,
+          // but a scrub seek must not clear it because fastSeek lands on a keyframe (ADR 022).
           set({ seekTargetSeconds: null });
         }
       },
@@ -983,6 +1114,7 @@ export function createPlaybackStore(
 
       reset: () => {
         scrubAudioController.stop();
+        lastScrubAudioTarget = null;
         playSessionId++;
         if (attachedElement) {
           try {
@@ -1002,6 +1134,7 @@ export function createPlaybackStore(
         browserTimelineOriginSeconds = 0;
         seekedBeforeCalibration = false;
         queuedSeek = null;
+        lastAcceptedSeek = null;
         // precisionDeniedSources is kept: ADR 003 denies precise editing for the source, and a
         // source keeps the same revision key until the file on disk changes.
 

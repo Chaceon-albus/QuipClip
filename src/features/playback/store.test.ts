@@ -32,23 +32,49 @@ function createFakeVideo(options?: {
   duration?: number;
   seeking?: boolean;
   autoSeeking?: boolean;
+  fastSeek?: ((time: number) => void) | boolean;
+  throwOnFastSeek?: boolean;
 }): PlaybackMediaElement & {
   playCalls: number;
   pauseCalls: number;
   readyState: number;
   seeking: boolean;
   throwOnCurrentTimeSet: boolean;
+  currentTimeSets: number;
+  fastSeek?: ReturnType<typeof vi.fn>;
   play: ReturnType<typeof vi.fn>;
   pause: ReturnType<typeof vi.fn>;
 } {
   let currentTimeVal = options?.initialCurrentTime ?? 0;
   let readyStateVal = options?.readyState ?? 0;
   let seekingVal = options?.seeking ?? false;
+  let currentTimeSets = 0;
+
+  const fastSeekSpy =
+    options?.fastSeek !== undefined && options?.fastSeek !== false
+      ? vi.fn((val: number) => {
+          if (options?.throwOnFastSeek) {
+            throw new DOMException(
+              "The element cannot be seeked in its current state.",
+              "InvalidStateError",
+            );
+          }
+          if (typeof options.fastSeek === "function") {
+            options.fastSeek(val);
+          }
+          if (options?.autoSeeking !== false) {
+            seekingVal = true;
+          }
+        })
+      : undefined;
 
   const fake = {
     playCalls: 0,
     pauseCalls: 0,
     throwOnCurrentTimeSet: options?.throwOnCurrentTimeSet ?? false,
+    get currentTimeSets() {
+      return currentTimeSets;
+    },
     get readyState() {
       return readyStateVal;
     },
@@ -66,6 +92,7 @@ function createFakeVideo(options?: {
     },
     duration: options?.duration ?? Number.NaN,
     set currentTime(val: number) {
+      currentTimeSets++;
       if (fake.throwOnCurrentTimeSet) {
         throw new DOMException(
           "The element cannot be seeked in its current state.",
@@ -77,6 +104,7 @@ function createFakeVideo(options?: {
         seekingVal = true;
       }
     },
+    ...(fastSeekSpy ? { fastSeek: fastSeekSpy } : {}),
     play: vi.fn(() => {
       fake.playCalls++;
       if (options?.playImpl) {
@@ -2309,6 +2337,715 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().seekTargetSeconds).toBeNull();
 
       elapsedSpy.mockRestore();
+    });
+  });
+
+  describe("Scrub Mode: Keyframe Preview & Audio (ADR 022)", () => {
+    let requestSpy: MockInstance<typeof scrubAudioController.request>;
+    let stopSpy: MockInstance<typeof scrubAudioController.stop>;
+
+    beforeEach(() => {
+      requestSpy = vi.spyOn(scrubAudioController, "request");
+      stopSpy = vi.spyOn(scrubAudioController, "stop");
+    });
+
+    afterEach(() => {
+      requestSpy.mockRestore();
+      stopSpy.mockRestore();
+    });
+
+    it("scrub seek with fastSeek available calls fastSeek and does not assign currentTime; without fastSeek it assigns currentTime", () => {
+      // 1. With fastSeek: calls fastSeek and does NOT assign currentTime
+      const storeWithFast = createPlaybackStore();
+      const videoWithFast = createFakeVideo({ fastSeek: true });
+      storeWithFast.getState().attach(sourceA, videoWithFast);
+      videoWithFast.readyState = 1;
+      storeWithFast.getState().syncReady(identityA, videoWithFast);
+      storeWithFast.getState().syncPresentedFrame(identityA, 0.0, 1, videoWithFast);
+
+      storeWithFast.getState().seekApproximate(3.0, { scrub: true });
+      expect(videoWithFast.fastSeek).toHaveBeenCalledTimes(1);
+      expect(videoWithFast.fastSeek).toHaveBeenCalledWith(3.0);
+      expect(videoWithFast.currentTimeSets).toBe(0);
+      expect(videoWithFast.currentTime).toBe(0.0);
+      expect(videoWithFast.seeking).toBe(true);
+
+      // 2. Without fastSeek: falls back to assigning currentTime
+      const storeWithoutFast = createPlaybackStore();
+      const videoWithoutFast = createFakeVideo();
+      storeWithoutFast.getState().attach(sourceA, videoWithoutFast);
+      videoWithoutFast.readyState = 1;
+      storeWithoutFast.getState().syncReady(identityA, videoWithoutFast);
+      storeWithoutFast
+        .getState()
+        .syncPresentedFrame(identityA, 0.0, 1, videoWithoutFast);
+
+      storeWithoutFast.getState().seekApproximate(3.0, { scrub: true });
+      expect(videoWithoutFast.fastSeek).toBeUndefined();
+      expect(videoWithoutFast.currentTimeSets).toBe(1);
+      expect(videoWithoutFast.currentTime).toBe(3.0);
+      expect(videoWithoutFast.seeking).toBe(true);
+    });
+
+    it("exact seek never calls fastSeek", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // exact seekApproximate (options omitted)
+      store.getState().seekApproximate(2.0);
+      expect(video.fastSeek).not.toHaveBeenCalled();
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(2.0);
+
+      // exact seekApproximate (scrub: false)
+      fireSeeked(store, identityA, video);
+      store.getState().seekApproximate(3.0, { scrub: false });
+      expect(video.fastSeek).not.toHaveBeenCalled();
+      expect(video.currentTimeSets).toBe(2);
+      expect(video.currentTime).toBe(3.0);
+
+      // exact seekToPts
+      fireSeeked(store, identityA, video);
+      store.getState().seekToPts("25" as Pts); // 1.0s
+      expect(video.fastSeek).not.toHaveBeenCalled();
+      expect(video.currentTimeSets).toBe(3);
+      expect(video.currentTime).toBe(1.0);
+
+      // exact seekNominal
+      fireSeeked(store, identityA, video);
+      store.getState().seekNominal(1);
+      expect(video.fastSeek).not.toHaveBeenCalled();
+      expect(video.currentTimeSets).toBe(4);
+      expect(video.currentTime).toBeCloseTo(1.04, 5);
+    });
+
+    it("a scrub seek queued while seeking, then flushed by seeked, uses fastSeek at flush time", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      video.seeking = true;
+
+      // Scrub seek while seeking -> queued
+      store.getState().seekApproximate(4.0, { scrub: true });
+      expect(video.fastSeek).not.toHaveBeenCalled();
+      expect(video.currentTimeSets).toBe(0);
+
+      // Flushed by seeked
+      fireSeeked(store, identityA, video);
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.fastSeek).toHaveBeenCalledWith(4.0);
+      expect(video.currentTimeSets).toBe(0);
+    });
+
+    it("an exact seek to the same time as the previous scrub seek is not dropped (it assigns currentTime)", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // Scrub seek to 2.5 uses fastSeek
+      store.getState().seekApproximate(2.5, { scrub: true });
+      expect(video.fastSeek).toHaveBeenCalledWith(2.5);
+      expect(video.currentTimeSets).toBe(0);
+
+      fireSeeked(store, identityA, video);
+
+      // Exact seek to same time 2.5 (e.g. pointer release of drag gesture)
+      store.getState().seekApproximate(2.5, { scrub: false });
+      // Must not be dropped: assigns currentTime!
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(2.5);
+    });
+
+    it("drag release: scrub seek issued (fastSeek), then an exact seekToPts while seeking (queued), then fireSeeked flushes it: currentTime assigned once more and fastSeek not called again", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // Scrub seek issued (uses fastSeek)
+      store.getState().seekToPts("25" as Pts, { scrub: true });
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.fastSeek).toHaveBeenCalledWith(1.0);
+      expect(video.currentTimeSets).toBe(0);
+      expect(video.seeking).toBe(true);
+
+      // Exact seekToPts while seeking -> queued
+      store.getState().seekToPts("50" as Pts);
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.currentTimeSets).toBe(0);
+
+      // Flushed by seeked: currentTime is assigned once more and fastSeek is not called again
+      fireSeeked(store, identityA, video);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(2.0);
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+    });
+
+    it("drag release flushed by play() instead: currentTime assigned, fastSeek not called again", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // Scrub seek issued (uses fastSeek)
+      store.getState().seekToPts("25" as Pts, { scrub: true });
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.fastSeek).toHaveBeenCalledWith(1.0);
+      expect(video.currentTimeSets).toBe(0);
+      expect(video.seeking).toBe(true);
+
+      // Exact seekToPts while seeking -> queued
+      store.getState().seekToPts("50" as Pts);
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.currentTimeSets).toBe(0);
+
+      // Flushed by play() instead: currentTime assigned, fastSeek not called
+      store.getState().play();
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(2.0);
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.playCalls).toBe(1);
+    });
+
+    it("a queued scrub replaced by an exact seek is flushed as exact", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      video.seeking = true;
+
+      // First request: scrub seek queued
+      store.getState().seekApproximate(3.0, { scrub: true });
+      expect(video.fastSeek).not.toHaveBeenCalled();
+      expect(video.currentTimeSets).toBe(0);
+
+      // Replaced by exact seek while still seeking
+      store.getState().seekApproximate(4.0, { scrub: false });
+      expect(video.fastSeek).not.toHaveBeenCalled();
+      expect(video.currentTimeSets).toBe(0);
+
+      // Flushed by seeked: flushed as exact
+      fireSeeked(store, identityA, video);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(4.0);
+      expect(video.fastSeek).not.toHaveBeenCalled();
+    });
+
+    it("a settled scrub seek (RVFC after seeked, and for a non-ready source, seeked) does NOT clear seekTargetSeconds; the settled exact seek after it DOES clear it", () => {
+      // 1. Ready source: RVFC after seeked does not clear seekTargetSeconds for scrub, but clears for exact
+      const storeReady = createPlaybackStore();
+      const videoReady = createFakeVideo({ fastSeek: true });
+      storeReady.getState().attach(sourceA, videoReady);
+      videoReady.readyState = 1;
+      storeReady.getState().syncReady(identityA, videoReady);
+      storeReady.getState().syncPresentedFrame(identityA, 0.0, 1, videoReady);
+
+      // Scrub seek to 2.0
+      storeReady.getState().seekApproximate(2.0, { scrub: true });
+      expect(storeReady.getState().seekTargetSeconds).toBe(2.0);
+
+      // Seeked fires
+      fireSeeked(storeReady, identityA, videoReady);
+      expect(storeReady.getState().seekTargetSeconds).toBe(2.0);
+
+      // RVFC fires for presented frame: settled scrub seek does NOT clear seekTargetSeconds
+      storeReady.getState().syncPresentedFrame(identityA, 2.0, 2, videoReady);
+      expect(storeReady.getState().seekTargetSeconds).toBe(2.0);
+
+      // Exact seek to 2.5
+      storeReady.getState().seekApproximate(2.5, { scrub: false });
+      expect(storeReady.getState().seekTargetSeconds).toBe(2.5);
+
+      // Seeked fires
+      fireSeeked(storeReady, identityA, videoReady);
+      expect(storeReady.getState().seekTargetSeconds).toBe(2.5);
+
+      // RVFC fires: settled exact seek DOES clear seekTargetSeconds
+      storeReady.getState().syncPresentedFrame(identityA, 2.5, 3, videoReady);
+      expect(storeReady.getState().seekTargetSeconds).toBeNull();
+
+      // 2. Non-ready source: seeked does not clear seekTargetSeconds for scrub, but clears for exact
+      const storeUnready = createPlaybackStore();
+      const videoUnready = createFakeVideo({ fastSeek: true });
+      const unreadySource: PlaybackSource = {
+        ...sourceA,
+        videoStartPts: null, // calibration unavailable
+      };
+      const unreadyIdentity = getSourceRevisionKey(unreadySource);
+      storeUnready.getState().attach(unreadySource, videoUnready);
+      videoUnready.readyState = 1;
+      storeUnready.getState().syncReady(unreadyIdentity, videoUnready);
+      expect(storeUnready.getState().calibrationStatus).toBe("unavailable");
+
+      // Scrub seek to 3.0
+      storeUnready.getState().seekApproximate(3.0, { scrub: true });
+      expect(storeUnready.getState().seekTargetSeconds).toBe(3.0);
+
+      // Seeked fires: non-ready settled scrub seek does NOT clear seekTargetSeconds
+      fireSeeked(storeUnready, unreadyIdentity, videoUnready);
+      expect(storeUnready.getState().seekTargetSeconds).toBe(3.0);
+
+      // Exact seek to 3.0
+      storeUnready.getState().seekApproximate(3.0, { scrub: false });
+      expect(storeUnready.getState().seekTargetSeconds).toBe(3.0);
+
+      // Seeked fires: settled exact seek DOES clear seekTargetSeconds
+      fireSeeked(storeUnready, unreadyIdentity, videoUnready);
+      expect(storeUnready.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("a repeated scrub request with the same time as the previous accepted scrub is dropped, proving drop in queued state", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // 1. Not seeking: scrub to 2.0 is accepted
+      store.getState().seekApproximate(2.0, { scrub: true });
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.fastSeek).toHaveBeenCalledWith(2.0);
+
+      // Repeated scrub with same time is dropped (no dispatch, no state change)
+      video.seeking = false;
+      const stateWriteSpy = vi.fn();
+      const unsubscribe = store.subscribe(stateWriteSpy);
+
+      store.getState().seekApproximate(2.0, { scrub: true });
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.currentTimeSets).toBe(0);
+      expect(stateWriteSpy).not.toHaveBeenCalled();
+
+      // 2. While seeking: issue scrub to 1.0 (T), queue scrub to 3.0 (U)
+      video.seeking = true;
+      store.getState().seekApproximate(3.0, { scrub: true });
+      expect(stateWriteSpy).toHaveBeenCalledTimes(1);
+      expect(store.getState().seekTargetSeconds).toBe(3.0);
+      stateWriteSpy.mockClear();
+
+      // Repeated scrub to 3.0 (U) while seeking is dropped: no state write occurs
+      store.getState().seekApproximate(3.0, { scrub: true });
+      expect(stateWriteSpy).not.toHaveBeenCalled();
+
+      // Flushing flushes U exactly once
+      fireSeeked(store, identityA, video);
+      expect(video.fastSeek).toHaveBeenCalledTimes(2);
+      expect(video.fastSeek).toHaveBeenLastCalledWith(3.0);
+
+      unsubscribe();
+    });
+
+    it("the audio request happens when a scrub seek is issued, not when it is queued; the direction is correct for forward and backward moves; no request for a zero move", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // 1. Audio request does NOT happen when queued
+      video.seeking = true;
+      store.getState().seekApproximate(2.0, { scrub: true });
+      expect(requestSpy).not.toHaveBeenCalled();
+
+      // 2. Audio request happens when flushed (issued) on seeked. Initial move has direction 1.
+      fireSeeked(store, identityA, video);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenCalledWith(2.0, 1);
+
+      // 3. Forward move to 3.0 (issued directly since not seeking) -> direction 1
+      video.seeking = false;
+      store.getState().seekApproximate(3.0, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(2);
+      expect(requestSpy).toHaveBeenLastCalledWith(3.0, 1);
+
+      // 4. Backward move to 1.5 -> direction -1
+      video.seeking = false;
+      store.getState().seekApproximate(1.5, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(3);
+      expect(requestSpy).toHaveBeenLastCalledWith(1.5, -1);
+
+      // 5. Zero move: duplicate scrub request with same time is dropped, so no audio request
+      video.seeking = false;
+      store.getState().seekApproximate(1.5, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it("makes the zero-move audio branch reachable: issue scrub T, queue scrub U, queue scrub T, flush: no audio request", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // 1. Issue scrub T (2.0) directly: requests audio burst at 2.0 with direction 1
+      video.seeking = false;
+      store.getState().seekApproximate(2.0, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenCalledWith(2.0, 1);
+      expect(video.seeking).toBe(true);
+
+      // 2. Queue scrub U (3.0): queued while seeking, no audio request yet
+      store.getState().seekApproximate(3.0, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+
+      // 3. Queue scrub T (2.0): replaces U with T, not dropped because last was U (3.0)
+      store.getState().seekApproximate(2.0, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+
+      // 4. Flush queued seek (which is 2.0, equal to lastScrubAudioTarget 2.0)
+      // Hits mediaTime === lastScrubAudioTarget branch in requestScrubBurst: zero-move skips audio!
+      fireSeeked(store, identityA, video);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("exact accepted seek sets lastScrubAudioTarget so first scrub measures direction from pointer down and zero move makes no sound", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // Pointer down: exact seek to 2.0
+      store.getState().seekApproximate(2.0, { scrub: false });
+      expect(requestSpy).not.toHaveBeenCalled();
+
+      // First scrub after pointer down moves backward to 1.5 -> direction -1 from 2.0
+      video.seeking = false;
+      store.getState().seekApproximate(1.5, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenCalledWith(1.5, -1);
+
+      // Pointer down exact seek to 3.0
+      video.seeking = false;
+      store.getState().seekApproximate(3.0, { scrub: false });
+
+      // First scrub moves forward to 3.5 -> direction 1 from 3.0
+      video.seeking = false;
+      store.getState().seekApproximate(3.5, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(2);
+      expect(requestSpy).toHaveBeenLastCalledWith(3.5, 1);
+
+      // Pointer down exact seek to 4.0
+      video.seeking = false;
+      store.getState().seekApproximate(4.0, { scrub: false });
+
+      // Scrub to exactly 4.0 (zero move from pointer down): dropped as duplicate of last accepted, no audio
+      video.seeking = false;
+      store.getState().seekApproximate(4.0, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it("an exact seekToPts / seekApproximate stops the cue (scrubAudioController.stop is called), a scrub one does not", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // Scrub seekApproximate does not call stop()
+      stopSpy.mockClear();
+      video.seeking = false;
+      store.getState().seekApproximate(2.0, { scrub: true });
+      expect(stopSpy).not.toHaveBeenCalled();
+
+      // Scrub seekToPts does not call stop()
+      stopSpy.mockClear();
+      video.seeking = false;
+      store.getState().seekToPts("25" as Pts, { scrub: true });
+      expect(stopSpy).not.toHaveBeenCalled();
+
+      // Exact seekApproximate calls stop()
+      stopSpy.mockClear();
+      video.seeking = false;
+      store.getState().seekApproximate(3.0);
+      expect(stopSpy).toHaveBeenCalled();
+
+      // Exact seekToPts calls stop()
+      stopSpy.mockClear();
+      video.seeking = false;
+      store.getState().seekToPts("50" as Pts);
+      expect(stopSpy).toHaveBeenCalled();
+    });
+
+    it("play() flushing a queued scrub seek flushes as exact, does not request audio, and resets lastAcceptedSeek", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // Queue a scrub seek while seeking
+      video.seeking = true;
+      store.getState().seekApproximate(4.0, { scrub: true });
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(video.currentTimeSets).toBe(0);
+
+      // play() flushes the queued seek as EXACT (currentTime, not fastSeek)
+      stopSpy.mockClear();
+      store.getState().play();
+
+      // Flushed by play() must NOT request audio
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(stopSpy).toHaveBeenCalled();
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(4.0);
+      expect(video.fastSeek).not.toHaveBeenCalled();
+      expect(video.playCalls).toBe(1);
+
+      // play() resets lastAcceptedSeek to null, so a subsequent scrub seek at 4.0 is not dropped
+      video.seeking = false;
+      store.getState().seekApproximate(4.0, { scrub: true });
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.fastSeek).toHaveBeenCalledWith(4.0);
+    });
+
+    it("play() after an issued (not queued) fastSeek scrub assigns currentTime to the scrub target", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // Element is at 1.0s, not seeking
+      video.currentTime = 1.0;
+      video.seeking = false;
+      const initialSets = video.currentTimeSets;
+
+      // Issue a scrub seek while not seeking
+      store.getState().seekApproximate(4.0, { scrub: true });
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.fastSeek).toHaveBeenCalledWith(4.0);
+      expect(video.currentTimeSets).toBe(initialSets);
+      expect(video.currentTime).toBe(1.0);
+
+      // play() assigns currentTime to the pending scrub target (4.0) as an exact seek
+      stopSpy.mockClear();
+      requestSpy.mockClear();
+      store.getState().play();
+
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(stopSpy).toHaveBeenCalled();
+      expect(video.currentTimeSets).toBe(initialSets + 1);
+      expect(video.currentTime).toBe(4.0);
+      expect(video.playCalls).toBe(1);
+
+      // lastAcceptedSeek is cleared by play(), so a subsequent scrub seek at 4.0 is not dropped
+      video.seeking = false;
+      store.getState().seekApproximate(4.0, { scrub: true });
+      expect(video.fastSeek).toHaveBeenCalledTimes(2);
+      expect(video.fastSeek).toHaveBeenLastCalledWith(4.0);
+    });
+
+    it("seekNominal after an issued scrub steps from the scrub target, not from currentTime", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // Element is at 1.0s
+      video.currentTime = 1.0;
+      video.seeking = false;
+
+      // Issue a scrub seek to 4.0: fastSeek is called, currentTime remains 1.0
+      store.getState().seekApproximate(4.0, { scrub: true });
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.fastSeek).toHaveBeenCalledWith(4.0);
+      expect(video.currentTime).toBe(1.0);
+
+      // seekNominal(1 frame) should step from the pending scrub target (4.0), not currentTime (1.0).
+      // sourceA has 25fps (1 frame = 0.04s), so target should be 4.04s, not 1.04s.
+      video.seeking = false;
+      store.getState().seekNominal(1);
+      expect(video.currentTime).toBeCloseTo(4.04, 5);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(4.04, 5);
+
+      // Stepping backward (-2 frames = -0.08s) after an issued scrub to 4.0 steps to 3.92s
+      video.currentTime = 1.0;
+      video.seeking = false;
+      store.getState().seekApproximate(4.0, { scrub: true });
+      video.seeking = false;
+      store.getState().seekNominal(-2);
+      expect(video.currentTime).toBeCloseTo(3.92, 5);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(3.92, 5);
+    });
+
+    it("a throwing fastSeek results in seekFailed and clears seekTargetSeconds and presentedFrame", () => {
+      // 1. Issued immediately when not seeking
+      const store1 = createPlaybackStore();
+      const video1 = createFakeVideo({ fastSeek: true, throwOnFastSeek: true });
+      store1.getState().attach(sourceA, video1);
+      video1.readyState = 1;
+      store1.getState().syncReady(identityA, video1);
+      store1.getState().syncPresentedFrame(identityA, 0.0, 1, video1);
+
+      store1.getState().seekApproximate(2.0, { scrub: true });
+      expect(store1.getState().error).toBe("seekFailed");
+      expect(store1.getState().seekTargetSeconds).toBeNull();
+      expect(store1.getState().presentedFrame).toBeNull();
+      expect(store1.getState().isPlaying).toBe(false);
+
+      // 2. Flushed from queuedSeek
+      const store2 = createPlaybackStore();
+      const video2 = createFakeVideo({ fastSeek: true, throwOnFastSeek: true });
+      store2.getState().attach(sourceA, video2);
+      video2.readyState = 1;
+      store2.getState().syncReady(identityA, video2);
+      store2.getState().syncPresentedFrame(identityA, 0.0, 1, video2);
+
+      video2.seeking = true;
+      store2.getState().seekApproximate(3.0, { scrub: true });
+      expect(store2.getState().seekTargetSeconds).toBe(3.0);
+      expect(store2.getState().error).toBeNull();
+
+      fireSeeked(store2, identityA, video2);
+      expect(store2.getState().error).toBe("seekFailed");
+      expect(store2.getState().seekTargetSeconds).toBeNull();
+      expect(store2.getState().presentedFrame).toBeNull();
+      expect(store2.getState().isPlaying).toBe(false);
+    });
+
+    it("scrub seekToPts calls fastSeek and sets seekTargetSeconds with presentedFrame null", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().presentedFrame).not.toBeNull();
+
+      store.getState().seekToPts("50" as Pts, { scrub: true }); // 2.0s
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.fastSeek).toHaveBeenCalledWith(2.0);
+      expect(video.currentTimeSets).toBe(0);
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+      expect(store.getState().presentedFrame).toBeNull();
+    });
+
+    it("attach (including after reset or detach) and syncUnready reset closure state so a scrub at previous time is not dropped", () => {
+      // 1. Re-attaching after reset() resets closure state
+      const store1 = createPlaybackStore();
+      const video1 = createFakeVideo({ fastSeek: true });
+      store1.getState().attach(sourceA, video1);
+      video1.readyState = 1;
+      store1.getState().syncReady(identityA, video1);
+      store1.getState().syncPresentedFrame(identityA, 0.0, 1, video1);
+
+      store1.getState().seekApproximate(2.0, { scrub: true });
+      expect(video1.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video1.fastSeek).toHaveBeenCalledWith(2.0);
+
+      // Element finishes seek, then reset() is called
+      video1.seeking = false;
+      store1.getState().reset();
+      expect(store1.getState().seekTargetSeconds).toBeNull();
+
+      // Re-attach same source and element
+      store1.getState().attach(sourceA, video1);
+      video1.readyState = 1;
+      store1.getState().syncReady(identityA, video1);
+      store1.getState().syncPresentedFrame(identityA, 0.0, 1, video1);
+
+      // Scrub at the same time 2.0 is NOT dropped as duplicate
+      store1.getState().seekApproximate(2.0, { scrub: true });
+      expect(video1.fastSeek).toHaveBeenCalledTimes(2);
+      expect(video1.fastSeek).toHaveBeenLastCalledWith(2.0);
+
+      // 2. Re-attaching after detach() resets closure state
+      const store2 = createPlaybackStore();
+      const video2 = createFakeVideo({ fastSeek: true });
+      store2.getState().attach(sourceA, video2);
+      video2.readyState = 1;
+      store2.getState().syncReady(identityA, video2);
+      store2.getState().syncPresentedFrame(identityA, 0.0, 1, video2);
+
+      store2.getState().seekApproximate(3.0, { scrub: true });
+      expect(video2.fastSeek).toHaveBeenCalledTimes(1);
+
+      // Element finishes seek, then detach() is called
+      video2.seeking = false;
+      store2.getState().detach(identityA, video2);
+
+      // Re-attach
+      store2.getState().attach(sourceA, video2);
+      video2.readyState = 1;
+      store2.getState().syncReady(identityA, video2);
+      store2.getState().syncPresentedFrame(identityA, 0.0, 1, video2);
+
+      // Scrub at 3.0 is NOT dropped
+      store2.getState().seekApproximate(3.0, { scrub: true });
+      expect(video2.fastSeek).toHaveBeenCalledTimes(2);
+      expect(video2.fastSeek).toHaveBeenLastCalledWith(3.0);
+
+      // 3. syncUnready()
+      const store3 = createPlaybackStore();
+      const video3 = createFakeVideo({ fastSeek: true });
+      store3.getState().attach(sourceA, video3);
+      video3.readyState = 1;
+      store3.getState().syncReady(identityA, video3);
+      store3.getState().syncPresentedFrame(identityA, 0.0, 1, video3);
+
+      store3.getState().seekApproximate(4.0, { scrub: true });
+      expect(video3.fastSeek).toHaveBeenCalledTimes(1);
+
+      // Element finishes seek, then syncUnready() is called
+      video3.seeking = false;
+      store3.getState().syncUnready(identityA, video3);
+      expect(store3.getState().seekTargetSeconds).toBeNull();
+      store3.getState().syncReady(identityA, video3);
+
+      // Scrub at 4.0 is NOT dropped
+      store3.getState().seekApproximate(4.0, { scrub: true });
+      expect(video3.fastSeek).toHaveBeenCalledTimes(2);
+      expect(video3.fastSeek).toHaveBeenLastCalledWith(4.0);
+
+      // 4. attach() with a new element resets closure state
+      const store4 = createPlaybackStore();
+      const video4a = createFakeVideo({ fastSeek: true });
+      const video4b = createFakeVideo({ fastSeek: true });
+      store4.getState().attach(sourceA, video4a);
+      video4a.readyState = 1;
+      store4.getState().syncReady(identityA, video4a);
+      store4.getState().syncPresentedFrame(identityA, 0.0, 1, video4a);
+
+      store4.getState().seekApproximate(5.0, { scrub: true });
+      expect(video4a.fastSeek).toHaveBeenCalledTimes(1);
+
+      store4.getState().attach(sourceA, video4b);
+      video4b.readyState = 1;
+      store4.getState().syncReady(identityA, video4b);
+      store4.getState().syncPresentedFrame(identityA, 0.0, 1, video4b);
+
+      // Scrub at 5.0 is NOT dropped on video4b
+      store4.getState().seekApproximate(5.0, { scrub: true });
+      expect(video4b.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video4b.fastSeek).toHaveBeenCalledWith(5.0);
     });
   });
 });

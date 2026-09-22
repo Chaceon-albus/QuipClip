@@ -6,10 +6,10 @@
  *
  * A drag is an exact seek at pointer down ("final"), coalesced scrub samples
  * during the move (at most one "scrub" sample per animation frame), and an exact
- * seek at release ("final").
+ * seek at release or cancellation ("final").
  *
- * ADR 022: the next unit makes scrub samples use fastSeek, so a click must never
- * go through the scrub phase.
+ * Scrub samples use fastSeek when available, so a drag must never end on a
+ * keyframe.
  *
  * Pure logic without DOM or React dependencies.
  */
@@ -31,8 +31,12 @@ export interface TimelineScrubGesture {
   move(pointerId: number, clientX: number): void;
   end(pointerId: number, clientX: number): void;
   cancel(pointerId?: number): void;
+  dispose(): void;
   isActive(): boolean;
 }
+
+/** Movement threshold in CSS pixels before pointer movement counts as a drag (ADR 022). */
+export const SCRUB_MOVE_THRESHOLD_PX = 3;
 
 const defaultScheduler: TimelineScrubScheduler = {
   request: (cb: () => void) => globalThis.requestAnimationFrame(cb),
@@ -45,6 +49,7 @@ export function createTimelineScrubGesture(
   const { onSample, scheduler = defaultScheduler } = options;
 
   let activePointerId: number | null = null;
+  let downClientX = 0;
   let latestClientX = 0;
   let scheduledHandle: number | null = null;
   let hasMoved = false;
@@ -55,6 +60,7 @@ export function createTimelineScrubGesture(
         return;
       }
       activePointerId = pointerId;
+      downClientX = clientX;
       latestClientX = clientX;
       hasMoved = false;
       try {
@@ -70,7 +76,12 @@ export function createTimelineScrubGesture(
       if (activePointerId === null || pointerId !== activePointerId) {
         return;
       }
-      hasMoved = true;
+      if (!hasMoved) {
+        if (Math.abs(clientX - downClientX) < SCRUB_MOVE_THRESHOLD_PX) {
+          return;
+        }
+        hasMoved = true;
+      }
       latestClientX = clientX;
       if (scheduledHandle === null) {
         scheduledHandle = scheduler.request(() => {
@@ -109,6 +120,22 @@ export function createTimelineScrubGesture(
       if (pointerId !== undefined && pointerId !== activePointerId) {
         return;
       }
+      if (scheduledHandle !== null) {
+        scheduler.cancel(scheduledHandle);
+        scheduledHandle = null;
+      }
+      const moved = hasMoved;
+      hasMoved = false;
+      try {
+        if (moved) {
+          onSample(latestClientX, "final");
+        }
+      } finally {
+        activePointerId = null;
+      }
+    },
+
+    dispose(): void {
       if (scheduledHandle !== null) {
         scheduler.cancel(scheduledHandle);
         scheduledHandle = null;

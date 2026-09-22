@@ -58,6 +58,10 @@ The store clears the field when the seek settles:
   can still arrive, and a cleared field would move the playhead back.
 - In all other states, it clears the field on the `seeked` event when no seek is queued.
   The same event updates the approximate clock.
+- A scrub seek (see below) that settles does not clear the field. `fastSeek` lands on a
+  keyframe, not on the target, and a cleared field would move the playhead from the
+  pointer to that keyframe. The field is cleared when the exact seek at the end of the drag
+  settles.
 - `attach`, `detach`, `reset`, `syncUnready` and each failed seek clear the field.
 
 ### One seek at a time, and the latest request wins
@@ -65,7 +69,8 @@ The store clears the field when the seek settles:
 The store runs one element seek at a time. When a request arrives and the element reports
 `seeking`, the store does not assign `currentTime`. It keeps the request as the queued
 seek, and it replaces any older queued seek. The `seeked` event starts the queued seek.
-`play` starts a queued seek before it plays, so playback starts at the last target.
+`play` starts a queued seek as an exact seek before it plays, so playback starts at the
+last target and not at a keyframe.
 
 Each seek that starts also completes. The picture therefore changes during a drag, at the
 speed of the decoder.
@@ -73,6 +78,10 @@ speed of the decoder.
 `seekNominal` calculates its step from the queued target when one exists, and from
 `currentTime` when none exists. A held arrow key therefore continues from the last
 request.
+
+A scrub seek that already started also counts as the pending target while it is the last
+accepted request, because its `fastSeek` can land on a keyframe away from the target. `play`
+then assigns its time as an exact seek, and `seekNominal` calculates its step from it.
 
 ### Scrub mode: keyframes and sound during a drag
 
@@ -91,8 +100,11 @@ went to a keyframe, not to that time.
 
 A scrub seek plays a burst through the ADR 019 controller. The store requests the burst
 when the seek starts, and not when it queues the seek. The sound therefore has the same
-cadence as the picture. The direction is the sign of the move from the last burst target.
-The store makes no request for a zero move. The continuation rule of ADR 019 makes a slow
+cadence as the picture. The direction is the sign of the move from the last burst target,
+or from the last exact seek when that came later. The exact seek at pointer down is
+therefore the start point of the first burst of a drag. The store makes no request for a
+zero move. It also drops a scrub request that repeats the time of the last accepted
+request. The continuation rule of ADR 019 makes a slow
 forward drag sound continuous.
 
 This amends ADR 019. ADR 019 makes `seekNominal` the only action that requests a burst,
@@ -104,9 +116,13 @@ drag, still stops the burst.
 
 A primary-button pointer down on the ruler or on the uncovered track starts a gesture, and
 the surface captures the pointer. The gesture sends at most one sample for each animation
-frame. The playhead in the track row has a narrow hit area above the segments, so the user
+frame. A move counts only after the pointer is 3 CSS pixels or more from the pointer-down
+position. A click with a small jitter is therefore still one exact seek. The playhead in the track row has a narrow hit area above the segments, so the user
 can drag the playhead also when it is over a segment. A segment button keeps its click, and
 a click on it selects the segment without a seek.
+
+A drag that the browser cancels, or that ends because seeking stops being possible, sends
+one exact seek at the last pointer position. A drag therefore never ends on a keyframe.
 
 ## Consequences
 
@@ -127,6 +143,9 @@ a click on it selects the segment without a seek.
     ran. The last seek then landed on that same frame. The edit actions are enabled, and a
     mark writes the PTS of that frame, which is the frame on screen. The timecode shows the
     target, and the target is less than one frame from that frame.
+- During a drag on macOS, `presentedFrame` holds a keyframe while the target holds the
+  pointer position. The two can be a whole GOP apart. The exact seek at release ends that
+  state.
 - The `seeked` event can run after a newer seek started. `syncSeeked` therefore does
   nothing while the element reports `seeking`. The `seeked` event of the running seek
   starts the queued seek.
