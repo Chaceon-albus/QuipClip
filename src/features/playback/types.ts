@@ -32,6 +32,7 @@ export interface PlaybackMediaElement {
   currentTime: number;
   duration?: number;
   readyState?: number;
+  seeking?: boolean;
 }
 
 /**
@@ -81,6 +82,13 @@ export interface PlaybackState {
    * PTS from `presentedFrame`, so none of them can reach this field.
    */
   readonly approximateBrowserTimeSeconds: number | null;
+  /**
+   * Seconds elapsed from the start of the source (the ruler axis, the same axis as
+   * approximateBrowserTimeSeconds) of the last accepted seek request; display only; never
+   * an edit position; canMarkIn/canMarkOut/canSplitCurrentSegment never read it (ADR 003, ADR 022).
+   * Null when no seek is pending.
+   */
+  readonly seekTargetSeconds: number | null;
   /** True when video is currently playing. */
   readonly isPlaying: boolean;
   /** True when a media element is attached. */
@@ -190,6 +198,13 @@ export interface PlaybackActions {
    * Skips an identical write, because `timeupdate` also fires while the element is paused.
    */
   syncBrowserTime: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
+
+  /**
+   * Synchronizes state when the matching video element finishes a seek (onSeeked event).
+   * Dispatches the next queued seek if one is pending, or clears the display target when
+   * not in the ready state (ADR 022).
+   */
+  syncSeeked: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
    * Synchronizes play state when the matching video element emits an onPlay event.

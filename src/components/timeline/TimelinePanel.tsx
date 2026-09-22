@@ -8,6 +8,7 @@ import {
   type MediaStoreState,
 } from "@/features/media";
 import {
+  getDisplayedElapsedSeconds,
   isPlaybackPositionApproximate,
   usePlaybackStore,
   type PlaybackStoreState,
@@ -33,7 +34,6 @@ import {
   TIMELINE_GUTTER_WIDTH_PX,
   type TimelineStoreState,
 } from "@/features/timeline";
-import { ptsElapsedSeconds } from "@/lib/time";
 import {
   calculateRulerTickStepSeconds,
   generateRulerMarkersForStep,
@@ -54,6 +54,7 @@ const selectPresentedFrame = (state: PlaybackStoreState) => state.presentedFrame
 const selectCalibrationStatus = (state: PlaybackStoreState) => state.calibrationStatus;
 const selectApproximateBrowserTimeSeconds = (state: PlaybackStoreState) =>
   state.approximateBrowserTimeSeconds;
+const selectSeekTargetSeconds = (state: PlaybackStoreState) => state.seekTargetSeconds;
 const selectIsAttached = (state: PlaybackStoreState) => state.isAttached;
 const selectIsReady = (state: PlaybackStoreState) => state.isReady;
 const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
@@ -77,6 +78,7 @@ export function TimelinePanel({
   const approximateBrowserTimeSeconds = usePlaybackStore(
     selectApproximateBrowserTimeSeconds,
   );
+  const seekTargetSeconds = usePlaybackStore(selectSeekTargetSeconds);
   const isAttached = usePlaybackStore(selectIsAttached);
   const isReady = usePlaybackStore(selectIsReady);
   const seekToPts = usePlaybackStore(selectSeekToPts);
@@ -315,23 +317,28 @@ export function TimelinePanel({
   // Both branches report seconds elapsed from the start of the source, the axis the whole
   // ruler uses: the store subtracts the origin of the browser media timeline from the
   // approximate clock, and `onApproximateSeek` adds it back (ADR 003).
+  //
+  // When a seek is pending, seekTargetSeconds takes precedence over all other positions so
+  // the playhead tracks the target immediately (ADR 022).
   const currentElapsedSeconds = useMemo(() => {
-    if (
-      calibrationStatus === "ready" &&
-      presentedFrame !== null &&
-      media?.probe.videoStartPts &&
-      media?.probe.videoTimeBase
-    ) {
-      return (
-        ptsElapsedSeconds(
-          presentedFrame.inferredSourcePts,
-          media.probe.videoStartPts,
-          media.probe.videoTimeBase,
-        ) ?? 0
-      );
-    }
-    return approximateBrowserTimeSeconds ?? 0;
-  }, [calibrationStatus, presentedFrame, media, approximateBrowserTimeSeconds]);
+    return getDisplayedElapsedSeconds(
+      {
+        seekTargetSeconds,
+        presentedFrame,
+        calibrationStatus,
+        approximateBrowserTimeSeconds,
+      },
+      media?.probe.videoStartPts,
+      media?.probe.videoTimeBase,
+    );
+  }, [
+    seekTargetSeconds,
+    presentedFrame,
+    calibrationStatus,
+    approximateBrowserTimeSeconds,
+    media?.probe.videoStartPts,
+    media?.probe.videoTimeBase,
+  ]);
 
   /**
    * Seeks to the timeline position under a client X coordinate.

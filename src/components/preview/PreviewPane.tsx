@@ -47,6 +47,7 @@ const {
   syncPresentationUnavailable,
   syncBrowserDuration,
   syncBrowserTime,
+  syncSeeked,
   syncPlay,
   syncPause,
   syncEnded,
@@ -92,6 +93,7 @@ function PreviewTimecode({
   const approximateBrowserTimeSeconds = usePlaybackStore(
     (s) => s.approximateBrowserTimeSeconds,
   );
+  const seekTargetSeconds = usePlaybackStore((s) => s.seekTargetSeconds);
 
   // Source-relative HH:MM:SS.mmm for a ready inferred PTS, approximate browser time otherwise
   const currentTimeDisplay = formatPreviewCurrentTime(
@@ -100,6 +102,7 @@ function PreviewTimecode({
     videoStartPts,
     videoTimeBase,
     approximateBrowserTimeSeconds ?? 0,
+    seekTargetSeconds,
   );
 
   return (
@@ -368,7 +371,12 @@ export function PreviewPane() {
                     }
                   }}
                   onTimeUpdate={handleTimeUpdate}
-                  onSeeked={handleTimeUpdate}
+                  onSeeked={(e) => {
+                    handleTimeUpdate(e);
+                    if (sourceGuard.isActive(sourceRevisionKey)) {
+                      syncSeeked(sourceRevisionKey, e.currentTarget);
+                    }
+                  }}
                   onDurationChange={(e) => {
                     if (sourceGuard.isActive(sourceRevisionKey)) {
                       syncBrowserDuration(sourceRevisionKey, e.currentTarget);

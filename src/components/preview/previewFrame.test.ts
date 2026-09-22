@@ -203,6 +203,75 @@ describe("Preview Frame Helpers & ADR 003 Math", () => {
       const result = formatPreviewCurrentTime(null, "unavailable", null, tb25, 3.75);
       expect(result).toBe("00:00:03.750");
     });
+
+    it("formats seekTargetSeconds when ready and seek is pending", () => {
+      const presented = {
+        mediaTime: 1.0,
+        inferredSourcePts: "25" as Pts,
+      };
+      const result = formatPreviewCurrentTime(
+        presented,
+        "ready",
+        "0" as Pts,
+        tb25,
+        1.0,
+        4.5,
+      );
+      expect(result).toBe("00:00:04.500");
+    });
+
+    it("formats seekTargetSeconds of 0 when ready and seek is pending", () => {
+      const presented = {
+        mediaTime: 1.0,
+        inferredSourcePts: "25" as Pts,
+      };
+      const result = formatPreviewCurrentTime(
+        presented,
+        "ready",
+        "0" as Pts,
+        tb25,
+        1.0,
+        0,
+      );
+      expect(result).toBe("00:00:00.000");
+    });
+
+    it("formats seekTargetSeconds when calibrating and seek is pending", () => {
+      const result = formatPreviewCurrentTime(
+        null,
+        "calibrating",
+        "0" as Pts,
+        tb25,
+        2.5,
+        5.123,
+      );
+      expect(result).toBe("00:00:05.123");
+    });
+
+    it("formats seekTargetSeconds when unavailable and seek is pending", () => {
+      const result = formatPreviewCurrentTime(
+        null,
+        "unavailable",
+        null,
+        tb25,
+        3.75,
+        7.89,
+      );
+      expect(result).toBe("00:00:07.890");
+    });
+
+    it("falls through when seekTargetSeconds is null or negative", () => {
+      const presented = {
+        mediaTime: 1.0,
+        inferredSourcePts: "25" as Pts,
+      };
+      expect(
+        formatPreviewCurrentTime(presented, "ready", "0" as Pts, tb25, 1.0, null),
+      ).toBe("00:00:01.000");
+      expect(
+        formatPreviewCurrentTime(presented, "ready", "0" as Pts, tb25, 1.0, -1),
+      ).toBe("00:00:01.000");
+    });
   });
 
   describe("isPreviewTimeApproximate", () => {

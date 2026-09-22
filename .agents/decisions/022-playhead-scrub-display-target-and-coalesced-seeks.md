@@ -118,8 +118,16 @@ a click on it selects the segment without a seek.
   and a mark always writes the PTS of the presented frame.
 - A seek that lands on the frame that is already on screen may not cause an RVFC
   callback. In the `ready` state the target then stays until the next presented frame.
-  Before this decision, `presentedFrame` stayed null in the same condition, so the edit
-  behaviour does not change.
+  The `presentedFrame` can be null or not null in that condition:
+  - It is null when no frame arrived after the last request. The edit actions then stay
+    disabled, as they did before this decision.
+  - It is not null when an RVFC callback for an earlier seek arrived while the last seek
+    ran. The last seek then landed on that same frame. The edit actions are enabled, and a
+    mark writes the PTS of that frame, which is the frame on screen. The timecode shows the
+    target, and the target is less than one frame from that frame.
+- The `seeked` event can run after a newer seek started. `syncSeeked` therefore does
+  nothing while the element reports `seeking`. The `seeked` event of the running seek
+  starts the queued seek.
 - A drag during playback pauses it. The playback stays paused after the release.
 - The timeline does not scroll when a drag goes past the visible edge. That is a possible
   later step.

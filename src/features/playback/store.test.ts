@@ -8,9 +8,16 @@ import {
   type MockInstance,
 } from "vitest";
 import { getSourceRevisionKey } from "@/features/media";
+import { canMarkIn } from "@/features/timeline";
+import * as timeLib from "@/lib/time";
 import type { Pts } from "@/types/project";
 import { scrubAudioController } from "./scrubAudio";
-import { createPlaybackStore, getNominalFrameRate, hasNominalFrameRate } from "./store";
+import {
+  createPlaybackStore,
+  getNominalFrameRate,
+  hasNominalFrameRate,
+  type PlaybackStore,
+} from "./store";
 import type { PlaybackMediaElement, PlaybackSource } from "./types";
 
 /**
@@ -23,37 +30,52 @@ function createFakeVideo(options?: {
   throwOnCurrentTimeSet?: boolean;
   readyState?: number;
   duration?: number;
+  seeking?: boolean;
+  autoSeeking?: boolean;
 }): PlaybackMediaElement & {
   playCalls: number;
   pauseCalls: number;
   readyState: number;
+  seeking: boolean;
+  throwOnCurrentTimeSet: boolean;
   play: ReturnType<typeof vi.fn>;
   pause: ReturnType<typeof vi.fn>;
 } {
   let currentTimeVal = options?.initialCurrentTime ?? 0;
   let readyStateVal = options?.readyState ?? 0;
+  let seekingVal = options?.seeking ?? false;
 
   const fake = {
     playCalls: 0,
     pauseCalls: 0,
+    throwOnCurrentTimeSet: options?.throwOnCurrentTimeSet ?? false,
     get readyState() {
       return readyStateVal;
     },
     set readyState(val: number) {
       readyStateVal = val;
     },
+    get seeking() {
+      return seekingVal;
+    },
+    set seeking(val: boolean) {
+      seekingVal = val;
+    },
     get currentTime() {
       return currentTimeVal;
     },
     duration: options?.duration ?? Number.NaN,
     set currentTime(val: number) {
-      if (options?.throwOnCurrentTimeSet) {
+      if (fake.throwOnCurrentTimeSet) {
         throw new DOMException(
           "The element cannot be seeked in its current state.",
           "InvalidStateError",
         );
       }
       currentTimeVal = val;
+      if (options?.autoSeeking !== false) {
+        seekingVal = true;
+      }
     },
     play: vi.fn(() => {
       fake.playCalls++;
@@ -70,6 +92,18 @@ function createFakeVideo(options?: {
     }),
   };
   return fake;
+}
+
+/**
+ * Simulates the media element finishing a seek and dispatching the onSeeked event.
+ */
+function fireSeeked(
+  store: PlaybackStore,
+  sourceRevisionKey: string,
+  element: PlaybackMediaElement,
+): void {
+  element.seeking = false;
+  store.getState().syncSeeked(sourceRevisionKey, element);
 }
 
 /**
@@ -120,6 +154,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(state.calibrationStatus).toBe("unavailable");
       expect(state.runtimeBrowserDurationSeconds).toBeNull();
       expect(state.approximateBrowserTimeSeconds).toBeNull();
+      expect(state.seekTargetSeconds).toBeNull();
       expect(state.isPlaying).toBe(false);
       expect(state.isAttached).toBe(false);
       expect(state.attachedSourceRevisionKey).toBeNull();
@@ -138,9 +173,11 @@ describe("Playback Store & PTS Presentation Engine", () => {
         store.getState().seekToPts("0" as Pts);
         store.getState().seekNominal(1);
         store.getState().seekNominal(-1);
+        store.getState().seekApproximate(1);
         store.getState().syncReady("some-id", fakeVideo);
         store.getState().syncUnready("some-id", fakeVideo);
         store.getState().syncPresentedFrame("some-id", 0.0, 1, fakeVideo);
+        store.getState().syncSeeked("some-id", fakeVideo);
         store.getState().syncPlay("some-id", fakeVideo);
         store.getState().syncPause("some-id", fakeVideo);
         store.getState().syncEnded("some-id", fakeVideo);
@@ -643,7 +680,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
   describe("Nominal Seek Hints", () => {
     it("chooses avgFrameRate then rFrameRate and steps currentTime by nominal frame duration", () => {
       const store = createPlaybackStore();
-      const video = createFakeVideo();
+      const video = createFakeVideo({ autoSeeking: false });
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
@@ -979,6 +1016,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().attach(sourceA, video);
       video.readyState = 1;
       video.currentTime = origin;
+      video.seeking = false;
       store.getState().syncReady(identityA, video);
       return video;
     }
@@ -1858,6 +1896,419 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().seekNominal(-1);
       expect(stopSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("ADR 022: Playhead Scrub Display Target and Coalesced Seeks", () => {
+    it("assigns currentTime and sets seekTargetSeconds on a non-seeking element (precise path)", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+
+      store.getState().seekToPts("50" as Pts); // 50 / 25 = 2.0s
+      expect(video.currentTime).toBe(2.0);
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+      expect(video.seeking).toBe(true);
+    });
+
+    it("assigns currentTime and sets seekTargetSeconds on a non-seeking element on ruler axis with origin (approximate path)", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 65 });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      video.currentTime = 5;
+      video.seeking = false;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncBrowserDuration(identityA, video);
+
+      // Seek 10s on ruler axis
+      store.getState().seekApproximate(10);
+      // Browser element moves by 10 + 5 = 15
+      expect(video.currentTime).toBe(15);
+      // seekTargetSeconds is on the ruler axis: 15 - 5 = 10
+      expect(store.getState().seekTargetSeconds).toBe(10);
+    });
+
+    it("does not assign currentTime while element.seeking is true but sets the target, and replaces queue on subsequent seek", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 1.0 });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 1.0, 1, video);
+
+      // Seek is already in flight on the element
+      video.seeking = true;
+
+      // First seek request: target 75 (3.0s)
+      store.getState().seekToPts("75" as Pts);
+      expect(video.currentTime).toBe(1.0); // Not assigned!
+      expect(store.getState().seekTargetSeconds).toBe(3.0);
+
+      // Second seek request: target 100 (4.0s) - replaces queue (latest wins)
+      store.getState().seekToPts("100" as Pts);
+      expect(video.currentTime).toBe(1.0); // Still not assigned!
+      expect(store.getState().seekTargetSeconds).toBe(4.0);
+    });
+
+    it("syncSeeked applies the queued seek and keeps the target", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      video.seeking = true;
+      store.getState().seekToPts("75" as Pts);
+      store.getState().seekToPts("100" as Pts); // target 4.0s
+      expect(video.currentTime).toBe(0.0);
+
+      // Video finishes the previous seek
+      fireSeeked(store, identityA, video);
+
+      // Queued seek (4.0s) is now applied to currentTime, and target is preserved
+      expect(video.currentTime).toBe(4.0);
+      expect(store.getState().seekTargetSeconds).toBe(4.0);
+      expect(video.seeking).toBe(true);
+    });
+
+    it("in the ready state, an RVFC callback while seeking or while a seek is queued keeps the target; one after the seek settled clears it", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 0.0 });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+
+      // Seek while element is seeking
+      video.seeking = true;
+      store.getState().seekToPts("50" as Pts); // 2.0s
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+
+      // RVFC arrives while seeking = true -> target is kept
+      store.getState().syncPresentedFrame(identityA, 0.5, 2, video);
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+
+      // Next seek arrives, still seeking
+      store.getState().seekToPts("75" as Pts); // 3.0s
+      expect(store.getState().seekTargetSeconds).toBe(3.0);
+
+      // Seeked event fires and dispatches queued seek
+      fireSeeked(store, identityA, video);
+      expect(video.currentTime).toBe(3.0);
+      expect(video.seeking).toBe(true);
+
+      // RVFC arrives while new seek is in flight -> target kept
+      store.getState().syncPresentedFrame(identityA, 2.0, 3, video);
+      expect(store.getState().seekTargetSeconds).toBe(3.0);
+
+      // Seek settles
+      fireSeeked(store, identityA, video);
+      expect(store.getState().seekTargetSeconds).toBe(3.0);
+
+      // RVFC callback after seek settled clears seekTargetSeconds
+      store.getState().syncPresentedFrame(identityA, 3.0, 4, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("when not ready, syncSeeked with no queue clears the target", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 60 });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      // Mark calibration unavailable
+      store.getState().syncPresentationUnavailable(identityA, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+
+      store.getState().seekApproximate(5.0);
+      expect(store.getState().seekTargetSeconds).toBe(5.0);
+
+      // syncSeeked with no queued seek clears target when not ready
+      fireSeeked(store, identityA, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("play() applies a queued seek before play", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+
+      video.seeking = true;
+      store.getState().seekApproximate(4.0);
+      expect(video.currentTime).toBe(0.0);
+      expect(store.getState().seekTargetSeconds).toBe(4.0);
+
+      // play() should apply the queued seek before calling play()
+      store.getState().play();
+      expect(video.currentTime).toBe(4.0);
+      expect(video.playCalls).toBe(1);
+      // Target remains set for display until presentation settles
+      expect(store.getState().seekTargetSeconds).toBe(4.0);
+    });
+
+    it("detach, reset and a failed seek clear the target and the queue", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 1.0 });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 1.0, 1, video);
+
+      // 1. detach clears target and queue
+      video.seeking = true;
+      store.getState().seekToPts("50" as Pts);
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+      store.getState().detach(identityA, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      // 2. reset clears target and queue
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      video.seeking = true;
+      store.getState().seekApproximate(5.0);
+      expect(store.getState().seekTargetSeconds).toBe(5.0);
+      store.getState().reset();
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      // 3. failed seek clears target and queue
+      const throwingVideo = createFakeVideo({ throwOnCurrentTimeSet: true });
+      store.getState().attach(sourceA, throwingVideo);
+      throwingVideo.readyState = 1;
+      store.getState().syncReady(identityA, throwingVideo);
+      store.getState().seekApproximate(3.0);
+      expect(store.getState().error).toBe("seekFailed");
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("seekNominal builds on the queued target, not on currentTime", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video); // 25 fps, 1 frame = 0.04s
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      video.currentTime = 1.0;
+      video.seeking = false;
+
+      video.seeking = true;
+      // First step: 1 frame forward from currentTime 1.0 -> target 1.04s
+      store.getState().seekNominal(1);
+      expect(video.currentTime).toBe(1.0); // Not assigned because seeking === true
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(1.04, 5);
+
+      // Second step: 1 frame forward from queued target 1.04 -> target 1.08s
+      store.getState().seekNominal(1);
+      expect(video.currentTime).toBe(1.0);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(1.08, 5);
+
+      // Seeked event applies the latest target
+      fireSeeked(store, identityA, video);
+      expect(video.currentTime).toBeCloseTo(1.08, 5);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(1.08, 5);
+    });
+
+    it("presentedFrame stays null after a seek (ADR 003) and the edit predicates are unaffected", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ initialCurrentTime: 0.0 });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(store.getState().presentedFrame).not.toBeNull();
+      // With presentedFrame present, canMarkIn is true
+      expect(canMarkIn("ready", store.getState().presentedFrame, true)).toBe(true);
+
+      // Seek to PTS 50 (2.0s)
+      store.getState().seekToPts("50" as Pts);
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+
+      // presentedFrame stays null after a seek until RVFC fires (ADR 003)
+      expect(store.getState().presentedFrame).toBeNull();
+
+      // Edit predicates read presentedFrame only and remain disabled during pending seek
+      expect(canMarkIn("ready", store.getState().presentedFrame, true)).toBe(false);
+
+      // Seek settles
+      fireSeeked(store, identityA, video);
+
+      // Once RVFC presents the new frame, presentedFrame is restored and edit predicates become active
+      store.getState().syncPresentedFrame(identityA, 2.0, 2, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+      expect(canMarkIn("ready", store.getState().presentedFrame, true)).toBe(true);
+    });
+
+    it("a stale seeked that arrives while a newer seek is running does not assign currentTime and keeps the queue and the target", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // First seek is dispatched
+      store.getState().seekToPts("25" as Pts); // 1.0s
+      expect(video.currentTime).toBe(1.0);
+      expect(video.seeking).toBe(true);
+
+      // Newer seek is requested while element is seeking -> queued
+      store.getState().seekToPts("75" as Pts); // 3.0s
+      expect(video.currentTime).toBe(1.0);
+      expect(store.getState().seekTargetSeconds).toBe(3.0);
+
+      // A stale seeked task arrives while the element is still actively seeking (seeking === true)
+      store.getState().syncSeeked(identityA, video);
+      expect(video.currentTime).toBe(1.0);
+      expect(store.getState().seekTargetSeconds).toBe(3.0);
+
+      // When the running seek actually completes, fireSeeked dispatches the queued seek
+      fireSeeked(store, identityA, video);
+      expect(video.currentTime).toBe(3.0);
+      expect(store.getState().seekTargetSeconds).toBe(3.0);
+    });
+
+    it("syncUnready clears the target and the queue", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+
+      video.seeking = true;
+      store.getState().seekApproximate(5.0);
+      expect(store.getState().seekTargetSeconds).toBe(5.0);
+
+      store.getState().syncUnready(identityA, video);
+      expect(store.getState().isReady).toBe(false);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      // Later seeked event finds the queue empty
+      fireSeeked(store, identityA, video);
+      expect(video.currentTime).toBe(0.0);
+    });
+
+    it("attach of a new element clears the target and the queue", () => {
+      const store = createPlaybackStore();
+      const video1 = createFakeVideo();
+      store.getState().attach(sourceA, video1);
+      video1.readyState = 1;
+      store.getState().syncReady(identityA, video1);
+
+      video1.seeking = true;
+      store.getState().seekApproximate(6.0);
+      expect(store.getState().seekTargetSeconds).toBe(6.0);
+
+      const video2 = createFakeVideo();
+      store.getState().attach(sourceA, video2);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      video2.readyState = 1;
+      store.getState().syncReady(identityA, video2);
+      fireSeeked(store, identityA, video2);
+      expect(video2.currentTime).toBe(0.0);
+    });
+
+    it("syncSeeked ignores a foreign element and a stale sourceRevisionKey", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+
+      video.seeking = true;
+      store.getState().seekApproximate(8.0);
+      expect(store.getState().seekTargetSeconds).toBe(8.0);
+
+      // Ignored for stale sourceRevisionKey
+      store.getState().syncSeeked("stale-revision-key", video);
+      expect(video.currentTime).toBe(0.0);
+      expect(store.getState().seekTargetSeconds).toBe(8.0);
+
+      // Ignored for foreign element
+      const foreignVideo = createFakeVideo();
+      store.getState().syncSeeked(identityA, foreignVideo);
+      expect(video.currentTime).toBe(0.0);
+      expect(store.getState().seekTargetSeconds).toBe(8.0);
+
+      // Applies for matching element and key
+      fireSeeked(store, identityA, video);
+      expect(video.currentTime).toBe(8.0);
+      expect(store.getState().seekTargetSeconds).toBe(8.0);
+    });
+
+    it("play() with a queued seek whose assignment throws sets seekFailed and does not play", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      video.seeking = true;
+      store.getState().seekApproximate(4.0);
+      expect(store.getState().seekTargetSeconds).toBe(4.0);
+
+      video.throwOnCurrentTimeSet = true;
+      store.getState().play();
+
+      expect(store.getState().isPlaying).toBe(false);
+      expect(store.getState().error).toBe("seekFailed");
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame).toBeNull();
+      expect(video.playCalls).toBe(0);
+
+      // Queue is cleared; subsequent seeked should not try to re-apply
+      video.throwOnCurrentTimeSet = false;
+      fireSeeked(store, identityA, video);
+      expect(video.currentTime).toBe(0.0);
+    });
+
+    it("presentedFrame stays null when a seek is queued (not assigned)", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().presentedFrame).not.toBeNull();
+
+      video.seeking = true;
+      store.getState().seekToPts("50" as Pts);
+
+      expect(video.currentTime).toBe(0.0);
+      expect(store.getState().presentedFrame).toBeNull();
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+    });
+
+    it("seekToPts with an unconvertible elapsed value does not move the element", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      const elapsedSpy = vi
+        .spyOn(timeLib, "ptsElapsedSeconds")
+        .mockReturnValueOnce(null);
+
+      store.getState().seekToPts("50" as Pts);
+
+      expect(video.currentTime).toBe(0.0);
+      expect(store.getState().error).toBe("seekFailed");
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      elapsedSpy.mockRestore();
     });
   });
 });

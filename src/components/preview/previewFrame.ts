@@ -125,6 +125,7 @@ export function formatPreviewTotalDuration(
  * @param videoStartPts Source video start PTS.
  * @param videoTimeBase Source video time base.
  * @param approximateBrowserTime Fallback browser currentTime in seconds.
+ * @param seekTargetSeconds Pending seek target in seconds from the start of the source, or null (ADR 022).
  */
 export function formatPreviewCurrentTime(
   presentedFrame: PresentedFrame | null,
@@ -132,7 +133,16 @@ export function formatPreviewCurrentTime(
   videoStartPts: Pts | null | undefined,
   videoTimeBase: Rational | null | undefined,
   approximateBrowserTime: number,
+  seekTargetSeconds: number | null = null,
 ): string {
+  if (
+    typeof seekTargetSeconds === "number" &&
+    Number.isFinite(seekTargetSeconds) &&
+    seekTargetSeconds >= 0
+  ) {
+    return formatMillisecondsTimecode(seekTargetSeconds);
+  }
+
   if (
     calibrationStatus === "ready" &&
     presentedFrame !== null &&
