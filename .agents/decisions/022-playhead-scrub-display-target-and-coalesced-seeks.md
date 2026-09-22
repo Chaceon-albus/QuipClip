@@ -77,8 +77,10 @@ request.
 ### Scrub mode: keyframes and sound during a drag
 
 `seekToPts` and `seekApproximate` take the option `{ scrub: true }`. The timeline sets it
-for each sample of a drag, and clears it for the final seek when the user releases the
-pointer. A single click is a drag with no moves, so it also ends with an exact seek.
+for each sample during the move of a drag. It clears it for the seek at pointer down and
+for the seek at release. A click is therefore one exact seek, and it never goes through
+scrub mode. A drag is an exact seek at pointer down, scrub seeks during the move, and an
+exact seek at release.
 
 A scrub seek uses `HTMLMediaElement.fastSeek` when the element has it. `fastSeek` goes to
 a nearby keyframe, so a long-GOP source shows more pictures during a drag. WKWebView has

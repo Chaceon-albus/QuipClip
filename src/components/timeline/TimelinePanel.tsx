@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { Film } from "lucide-react";
 import {
@@ -39,6 +46,7 @@ import {
   generateRulerMarkersForStep,
 } from "./timelineMarkers";
 import { TimelineRuler } from "./TimelineRuler";
+import { createTimelineScrubGesture, type TimelineScrubGesture } from "./timelineScrub";
 
 export interface TimelinePanelProps {
   /** Stable project source ID when project state already owns one. */
@@ -343,13 +351,18 @@ export function TimelinePanel({
   /**
    * Seeks to the timeline position under a client X coordinate.
    *
-   * Takes the rectangle it maps against, so both click-to-seek surfaces of the panel, the
-   * ruler track and the seek slider, share one implementation.
+   * Reads the rectangle from `laneRef.current` on every call, because the ruler lane and the
+   * track lane share one left edge and one width by construction.
+   *
+   * The `_phase` parameter is reserved for the later scrub-mode unit (ADR 022) to forward
+   * to seek actions for fastSeek and audio bursts.
    */
-  const seekFromClientX = (clientX: number, rect: DOMRect) => {
-    if (!canSeek || totalDurationSeconds === null) {
+  const seekFromClientX = (clientX: number, _phase: "scrub" | "final") => {
+    const laneEl = laneRef.current;
+    if (!laneEl || !canSeek || totalDurationSeconds === null) {
       return;
     }
+    const rect = laneEl.getBoundingClientRect();
     if (canUsePreciseSeek && media?.probe.videoStartPts && media.probe.videoTimeBase) {
       const targetPts = calculatePtsFromClientX(
         clientX,
@@ -375,8 +388,62 @@ export function TimelinePanel({
     }
   };
 
-  const handleSeekClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    seekFromClientX(e.clientX, e.currentTarget.getBoundingClientRect());
+  const seekRef = useRef(seekFromClientX);
+  useLayoutEffect(() => {
+    seekRef.current = seekFromClientX;
+  });
+
+  const gestureRef = useRef<TimelineScrubGesture | null>(null);
+  const getGesture = useCallback(() => {
+    gestureRef.current ??= createTimelineScrubGesture({
+      onSample: (clientX, phase) => {
+        seekRef.current(clientX, phase);
+      },
+    });
+    return gestureRef.current;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      gestureRef.current?.cancel();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!canSeek || isIndeterminate || !media) {
+      gestureRef.current?.cancel();
+    }
+  }, [canSeek, isIndeterminate, media]);
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!canSeek || event.button !== 0 || !event.isPrimary) {
+      return;
+    }
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // setPointerCapture can throw for an inactive pointer.
+    }
+    getGesture().begin(event.pointerId, event.clientX);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    getGesture().move(event.pointerId, event.clientX);
+  };
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    try {
+      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Ignore release pointer capture failures.
+    }
+    getGesture().end(event.pointerId, event.clientX);
+  };
+
+  const handlePointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
+    getGesture().cancel(event.pointerId);
   };
 
   const playhead = calculatePlayheadLayout(currentElapsedSeconds, totalDurationSeconds);
@@ -514,13 +581,16 @@ export function TimelinePanel({
             <div className="sticky left-0 z-40 w-[96px] shrink-0 border-r border-timeline-divider bg-sidebar" />
 
             {/*
-             * Ruler track with time markers and tick marks, and the mouse click-to-seek
-             * surface of the panel. A segment button takes the clicks over its own span,
+             * Ruler track with time markers and tick marks, and the pointer scrub
+             * surface of the panel. A primary pointerdown starts a scrub gesture,
+             * capturing the pointer so dragging past the ruler keeps scrubbing.
+             * Segment buttons take the click over their own span to select the segment;
+             * a press-and-drag that starts on a segment neither selects a seek nor scrubs,
              * so the track lane below is not a seek surface once segments cover the
              * source. This rectangle has the same left edge and the same width as the
              * track lane rectangle, so `seekFromClientX` maps a coordinate identically.
              *
-             * Mouse only, by intent: the keyboard path is the window-level layer, which
+             * Pointer only, by intent: the keyboard path is the window-level layer, which
              * answers wherever focus is. Two handlers for one behaviour would move the
              * playhead two frames for one key press, and the capture phase gives the
              * slider no way to yield — the global layer has already decided by the time
@@ -533,8 +603,12 @@ export function TimelinePanel({
              */}
             <div
               ref={laneRef}
-              onClick={canSeek ? handleSeekClick : undefined}
-              className={`relative flex-1 bg-timeline-ruler ${canSeek ? "cursor-pointer" : ""}`}
+              onPointerDown={canSeek ? handlePointerDown : undefined}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerCancel}
+              onLostPointerCapture={handlePointerCancel}
+              className={`relative flex-1 touch-none bg-timeline-ruler ${canSeek ? "cursor-pointer" : ""}`}
             >
               {/* Timecode labels and ticks */}
               <div className="relative h-full w-full font-mono text-[10px]">
@@ -592,8 +666,12 @@ export function TimelinePanel({
                           )
                     }
                     tabIndex={canSeek ? 0 : undefined}
-                    onClick={canSeek ? handleSeekClick : undefined}
-                    className={`absolute inset-0 ${canSeek ? "cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
+                    onPointerDown={canSeek ? handlePointerDown : undefined}
+                    onPointerMove={handlePointerMove}
+                    onPointerUp={handlePointerUp}
+                    onPointerCancel={handlePointerCancel}
+                    onLostPointerCapture={handlePointerCancel}
+                    className={`absolute inset-0 touch-none ${canSeek ? "cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
                   >
                     {/* Full-source background layer */}
                     <div className="pointer-events-none absolute inset-0 flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-clip-video p-2 text-clip-foreground shadow-xs">
@@ -625,24 +703,13 @@ export function TimelinePanel({
                         <div className="h-full w-0.5 bg-primary shadow-xs" />
                       </div>
                     )}
-
-                    {/* Playhead vertical line spanning the track lane */}
-                    {!isIndeterminate && (
-                      <div
-                        className="pointer-events-none absolute inset-y-0 z-30 flex -translate-x-1/2 flex-col items-center"
-                        style={{ left: playhead.left }}
-                        data-approximate={isPositionApproximate}
-                      >
-                        <div className="h-full w-0.5 bg-timeline-playhead shadow-xs" />
-                      </div>
-                    )}
                   </div>
 
                   {/*
                    * Completed segment overlays. The layer takes the clicks of its buttons
-                   * only, so uncovered track stays a click-to-seek surface; over a
-                   * segment, the ruler track above is the seek surface. The `z-10` puts
-                   * this layer under the pending region and the playhead.
+                   * only, so uncovered track stays a seek surface; over a
+                   * segment, the ruler track above and the playhead hit area are the seek surfaces.
+                   * The `z-10` puts this layer under the pending region and the playhead.
                    */}
                   <div
                     role="group"
@@ -687,6 +754,31 @@ export function TimelinePanel({
                       );
                     })}
                   </div>
+
+                  {/*
+                   * Track playhead layer. Positioned after the segment group at z-30
+                   * so the 9px hit area is grabbable above segments.
+                   */}
+                  {!isIndeterminate && (
+                    <div className="pointer-events-none absolute inset-0 z-30">
+                      <div
+                        className="pointer-events-none absolute inset-y-0 flex -translate-x-1/2 flex-col items-center"
+                        style={{ left: playhead.left }}
+                        data-approximate={isPositionApproximate}
+                      >
+                        <div
+                          onPointerDown={canSeek ? handlePointerDown : undefined}
+                          onPointerMove={handlePointerMove}
+                          onPointerUp={handlePointerUp}
+                          onPointerCancel={handlePointerCancel}
+                          onLostPointerCapture={handlePointerCancel}
+                          className={`flex h-full w-[9px] touch-none items-center justify-center ${canSeek ? "pointer-events-auto cursor-ew-resize" : "pointer-events-none"}`}
+                        >
+                          <div className="h-full w-0.5 bg-timeline-playhead shadow-xs" />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 /* Localized empty prompt */
