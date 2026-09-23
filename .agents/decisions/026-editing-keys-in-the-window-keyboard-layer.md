@@ -86,6 +86,8 @@ or change nothing:
 - A seek to the frame that is already on screen, when no seek is pending. ADR 022 says
   that such a seek may bring no frame callback. Mark In and Mark Out would then stay
   disabled. Go to the start, and go to the In or Out point, do nothing in this case.
+  End does nothing when the element is already within half a nominal frame of the end,
+  because End seeks on the approximate clock and has no exact PTS to compare.
 - Home and End while the calibration is open. A seek in that window refuses precise
   editing for the attachment (ADR 021).
 
