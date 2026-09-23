@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
+import { Notice } from "@/components/common/Notice";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -145,7 +146,7 @@ function PresetEditor({
             className={cn(
               "text-xs",
               videoSelect.currentReasonTone === "warning"
-                ? "text-warning"
+                ? "text-warning-text"
                 : "text-muted-foreground",
             )}
           >
@@ -193,7 +194,7 @@ function PresetEditor({
             className={cn(
               "text-xs",
               audioSelect.currentReasonTone === "warning"
-                ? "text-warning"
+                ? "text-warning-text"
                 : "text-muted-foreground",
             )}
           >
@@ -439,11 +440,13 @@ function PresetEditor({
 
       {/* Issues */}
       {issues.length > 0 ? (
-        <div className="space-y-1 rounded-md border border-destructive/20 bg-destructive/10 p-2.5 text-xs text-destructive">
-          {issues.map((issue) => (
-            <p key={issue.id}>{translate(issue.key, issue.values)}</p>
-          ))}
-        </div>
+        <Notice tone="destructive">
+          <div className="space-y-1">
+            {issues.map((issue) => (
+              <p key={issue.id}>{translate(issue.key, issue.values)}</p>
+            ))}
+          </div>
+        </Notice>
       ) : null}
 
       {/* Actions */}
@@ -490,7 +493,7 @@ function PresetEditor({
           <Button
             variant="outline"
             size="sm"
-            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            className="text-destructive-text hover:bg-destructive/10 hover:text-destructive-text"
             disabled={view.pending}
             onClick={() => {
               void controller.deletePreset(draft.id);
@@ -616,27 +619,32 @@ export function PresetLibrarySection() {
       {/* The target above is cleared once the draft is clean, so a Save or a Cancel elsewhere
           in the editor leaves no stale prompt behind. */}
       {pendingSelectId !== null ? (
-        <div
-          role="alert"
-          className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning/30 bg-warning/10 p-2.5 text-xs"
-        >
-          <span>{t("settings.preset.discardPrompt")}</span>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                controller.select(pendingSelectId);
-                setPendingSelectId(null);
-              }}
-            >
-              {t("settings.preset.discardConfirm")}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => setPendingSelectId(null)}>
-              {t("settings.preset.discardCancel")}
-            </Button>
+        <Notice tone="warning" role="alert">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>{t("settings.preset.discardPrompt")}</span>
+            {/* Outline and ghost buttons inherit the text color. Reset it here so the
+                buttons do not take the warning color of the box. */}
+            <div className="flex items-center gap-2 text-foreground">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  controller.select(pendingSelectId);
+                  setPendingSelectId(null);
+                }}
+              >
+                {t("settings.preset.discardConfirm")}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setPendingSelectId(null)}
+              >
+                {t("settings.preset.discardCancel")}
+              </Button>
+            </div>
           </div>
-        </div>
+        </Notice>
       ) : null}
 
       {!view.ready ? (
@@ -681,7 +689,7 @@ export function PresetLibrarySection() {
                           className={cn(
                             "rounded px-1.5 py-0.5 text-[10px] font-semibold",
                             encoderMark.tone === "warning"
-                              ? "bg-warning/10 text-warning"
+                              ? "bg-warning/10 text-warning-text"
                               : "bg-muted text-muted-foreground",
                           )}
                         >

@@ -48,7 +48,7 @@ type StatusBarTone = FfmpegStatusView["tone"] | PlaybackHintView["tone"];
 const toneClasses: Record<StatusBarTone, string> = {
   neutral: "text-muted-foreground",
   ready: "text-muted-foreground",
-  warning: "text-warning",
+  warning: "text-warning-text",
 };
 
 export function StatusBar() {

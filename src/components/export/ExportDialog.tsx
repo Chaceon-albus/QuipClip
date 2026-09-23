@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { XIcon } from "lucide-react";
+import { Notice } from "@/components/common/Notice";
 import { ProgressBar } from "@/components/common/ProgressBar";
 import { Button } from "@/components/ui/button";
 import {
@@ -327,12 +328,9 @@ export function ExportDialog({
       case "finished":
         return (
           <div className="py-2">
-            <div
-              role="status"
-              className="rounded-md border border-success/20 bg-success/10 p-3 text-sm text-success"
-            >
+            <Notice tone="success" role="status">
               {t("export.status.finished")}
-            </div>
+            </Notice>
           </div>
         );
 
@@ -341,12 +339,9 @@ export function ExportDialog({
         if (isSourceRevisionConfirmation) {
           return (
             <div className="py-2">
-              <div
-                role="alert"
-                className="rounded-md border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400"
-              >
+              <Notice tone="warning" role="alert">
                 {t("exportError.sourceRevisionChanged")}
-              </div>
+              </Notice>
             </div>
           );
         }
@@ -358,10 +353,7 @@ export function ExportDialog({
 
         return (
           <div className="py-2">
-            <div
-              role="alert"
-              className="rounded-md border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive"
-            >
+            <Notice tone="destructive" role="alert">
               <p>
                 {(t as (k: string, opts?: Record<string, string | number>) => string)(
                   key,
@@ -373,7 +365,7 @@ export function ExportDialog({
                   {error.detail}
                 </pre>
               )}
-            </div>
+            </Notice>
           </div>
         );
       }

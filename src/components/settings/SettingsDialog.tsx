@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { XIcon } from "lucide-react";
+import { Notice } from "@/components/common/Notice";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -61,14 +62,11 @@ export function SettingsDialog({
         {/* Scrollable body keeps header, close button, and footer pinned */}
         <div className="-mx-4 min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-1">
           {errorView ? (
-            <div
-              role="alert"
-              className="rounded-md border border-destructive/20 bg-destructive/10 p-3 text-xs text-destructive"
-            >
+            <Notice tone="destructive" role="alert">
               {(
                 t as (key: string, options?: Record<string, string | number>) => string
               )(errorView.key, errorView.values)}
-            </div>
+            </Notice>
           ) : null}
 
           {canRecover ? (

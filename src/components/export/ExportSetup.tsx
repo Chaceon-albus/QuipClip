@@ -1,6 +1,7 @@
 import { Fragment, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
+import { Notice } from "@/components/common/Notice";
 import {
   Select,
   SelectContent,
@@ -81,12 +82,9 @@ export function ExportSetup({
     return (
       <div className="space-y-3 py-2">
         {errorView ? (
-          <div
-            role="alert"
-            className="rounded-md border border-destructive/20 bg-destructive/10 p-3 text-xs text-destructive"
-          >
+          <Notice tone="destructive" role="alert">
             {translate(errorView.key, errorView.values)}
-          </div>
+          </Notice>
         ) : null}
         <p className="text-xs text-muted-foreground">
           {t("export.setup.settingsErrorHint")}
@@ -99,12 +97,9 @@ export function ExportSetup({
     return (
       <div className="space-y-3 py-2">
         {blocker ? (
-          <div
-            role="alert"
-            className="rounded-md border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive"
-          >
+          <Notice tone="destructive" role="alert">
             <p>{translate(blocker.key, blocker.values)}</p>
-          </div>
+          </Notice>
         ) : null}
       </div>
     );
@@ -149,7 +144,7 @@ export function ExportSetup({
             className={cn(
               "mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold",
               encoderMark.tone === "warning"
-                ? "bg-warning/10 text-warning"
+                ? "bg-warning/10 text-warning-text"
                 : "bg-muted text-muted-foreground",
             )}
           >
@@ -166,12 +161,9 @@ export function ExportSetup({
 
       {/* Blocker alert if compatibility issue */}
       {blocker ? (
-        <div
-          role="alert"
-          className="rounded-md border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive"
-        >
+        <Notice tone="destructive" role="alert">
           <p>{translate(blocker.key, blocker.values)}</p>
-        </div>
+        </Notice>
       ) : null}
 
       {/* Preset summary definition list */}

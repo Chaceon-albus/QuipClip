@@ -339,8 +339,8 @@ export function PreviewPane() {
                   className="flex max-w-md flex-col items-center justify-center gap-2 p-4 text-center"
                   aria-live="polite"
                 >
-                  <AlertCircle className="size-6 shrink-0 text-amber-500" />
-                  <p className="text-xs font-medium text-amber-400">
+                  <AlertCircle className="size-6 shrink-0 text-warning" />
+                  <p className="text-xs font-medium text-warning">
                     {t("preview.decodeError")}
                   </p>
                 </div>

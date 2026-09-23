@@ -45,9 +45,13 @@
 
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-text: var(--destructive-text);
   --color-success: var(--success);
+  --color-success-text: var(--success-text);
   --color-warning: var(--warning);
+  --color-warning-text: var(--warning-text);
   --color-info: var(--info);
+  --color-info-text: var(--info-text);
 
   --color-surface-0: var(--surface-0);
   --color-surface-1: var(--surface-1);
@@ -196,6 +200,8 @@
 
   /* ---------------------------------------------------------
    * Semantic colors
+   *
+   * Use the base tokens for icons, fills and borders. Use the `-text` tokens for text.
    * --------------------------------------------------------- */
 
   --destructive: oklch(0.58 0.2 25);
@@ -204,6 +210,11 @@
   --success: oklch(0.58 0.13 145);
   --warning: oklch(0.68 0.14 82);
   --info: oklch(0.58 0.11 235);
+
+  --destructive-text: oklch(0.52 0.19 25);
+  --success-text: oklch(0.5 0.12 145);
+  --warning-text: oklch(0.49 0.11 72);
+  --info-text: oklch(0.5 0.11 235);
 
   /* ---------------------------------------------------------
    * Surface hierarchy
@@ -373,6 +384,11 @@
   --success: oklch(0.7 0.13 145);
   --warning: oklch(0.78 0.14 82);
   --info: oklch(0.7 0.11 235);
+
+  --destructive-text: oklch(0.64 0.2 25);
+  --success-text: oklch(0.7 0.13 145);
+  --warning-text: oklch(0.78 0.14 82);
+  --info-text: oklch(0.7 0.11 235);
 
   /* ---------------------------------------------------------
    * Surface hierarchy

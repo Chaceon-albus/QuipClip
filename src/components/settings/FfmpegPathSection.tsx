@@ -19,7 +19,7 @@ import {
 const toneClasses: Record<FfmpegStatusView["tone"], string> = {
   neutral: "text-muted-foreground",
   ready: "text-muted-foreground",
-  warning: "text-warning",
+  warning: "text-warning-text",
 };
 
 export function FfmpegPathSection() {
