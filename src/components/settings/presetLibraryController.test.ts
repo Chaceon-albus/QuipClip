@@ -5,7 +5,16 @@ import {
   DEFAULT_CUSTOM_RESOLUTION,
 } from "@/features/settings/presetDocument";
 import { DEFAULT_AUDIO_BITRATE_KBPS } from "@/features/settings/audioCodecs";
-import { defaultQualityValue, isValidEncoderName } from "@/features/settings/limits";
+import {
+  defaultQualityValue,
+  isValidEncoderName,
+  MAX_PRESET_NAME_CHARS,
+} from "@/features/settings/limits";
+import {
+  PRESET_NAME_SLOT,
+  type CopyNameForms,
+  type PresetNameForms,
+} from "@/features/settings/presetNaming";
 import type { Preset, Settings } from "@/features/settings/types";
 import {
   CUSTOM_ENCODER_VALUE,
@@ -60,6 +69,33 @@ function createSettings(overrides: Partial<Settings> = {}): Settings {
 function makeIdGenerator(): () => string {
   let counter = 0;
   return () => `id-${++counter}`;
+}
+
+/**
+ * The English name forms, as the component formats them from the catalog. The controller
+ * never imports i18next, so the tests pass plain functions.
+ */
+const NEW_NAME_FORMS: PresetNameForms = {
+  base: "New Preset",
+  numbered: (n) => `New Preset ${n}`,
+};
+
+const COPY_NAME_FORMS: CopyNameForms = {
+  base: `${PRESET_NAME_SLOT} Copy`,
+  numbered: (n) => `${PRESET_NAME_SLOT} Copy ${n}`,
+};
+
+/**
+ * Returns a `saveSettings` mock that accepts every document and makes it the current one, as
+ * the store's optimistic write does, together with a reader of the current document.
+ */
+function createAcceptingStore(initial: Settings) {
+  let settings = initial;
+  const saveSettings = vi.fn().mockImplementation((next: Settings) => {
+    settings = next;
+    return Promise.resolve(next);
+  });
+  return { getSettings: () => settings, saveSettings };
 }
 
 /**
@@ -687,17 +723,171 @@ describe("PresetLibraryController", () => {
         saveSettings,
       });
 
-      const result = await controller.addPreset("One too many");
+      const result = await controller.addPreset(NEW_NAME_FORMS);
 
-      expect(result).toBe(false);
+      expect(result).toBeNull();
       expect(saveSettings).not.toHaveBeenCalled();
     });
 
-    it("uses the injected id and the passed name, and selects the new preset", async () => {
-      let settings = createSettings({ presets: [createPreset("existing")] });
+    it("uses the injected id and the base name, selects the new preset, and resolves its id", async () => {
+      const store = createAcceptingStore(
+        createSettings({ presets: [createPreset("existing")] }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      const result = await controller.addPreset(NEW_NAME_FORMS);
+
+      expect(result).toBe("id-1");
+      expect(store.saveSettings).toHaveBeenCalledTimes(1);
+      const view = controller.getView();
+      expect(view.selectedPresetId).toBe("id-1");
+      expect(view.draft?.id).toBe("id-1");
+      expect(view.draft?.name).toBe("New Preset");
+      expect(view.dirty).toBe(false);
+      expect(view.pending).toBe(false);
+    });
+
+    it("numbers the name when the base name is taken, and fills a gap", async () => {
+      const store = createAcceptingStore(
+        createSettings({
+          presets: [
+            createPreset("a", { name: "New Preset" }),
+            createPreset("b", { name: "New Preset 3" }),
+          ],
+        }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      await controller.addPreset(NEW_NAME_FORMS);
+      await controller.addPreset(NEW_NAME_FORMS);
+
+      expect(store.getSettings().presets.map((preset) => preset.name)).toEqual([
+        "New Preset",
+        "New Preset 3",
+        "New Preset 2",
+        "New Preset 4",
+      ]);
+      expect(controller.getView().draft?.name).toBe("New Preset 4");
+    });
+
+    it("compares names case-sensitively and ignores their surrounding white space", async () => {
+      const store = createAcceptingStore(
+        createSettings({
+          presets: [
+            createPreset("a", { name: "new preset" }),
+            createPreset("b", { name: " New Preset " }),
+          ],
+        }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      await controller.addPreset(NEW_NAME_FORMS);
+
+      expect(controller.getView().draft?.name).toBe("New Preset 2");
+    });
+
+    it("returns null and performs no IPC when there is no settings document", async () => {
+      const saveSettings = vi.fn();
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings,
+      });
+
+      const result = await controller.addPreset(NEW_NAME_FORMS);
+
+      expect(result).toBeNull();
+      expect(saveSettings).not.toHaveBeenCalled();
+    });
+
+    // The selection of the new preset would discard the edit. The view settles the draft
+    // through the unsaved-changes prompt first, so a call over a dirty draft is a fault.
+    it("refuses with no IPC while the draft holds an unsaved edit, and keeps the edit", async () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const saveSettings = vi.fn();
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+        generateId: makeIdGenerator(),
+      });
+
+      controller.select("p1");
+      controller.setName("Unsaved edit");
+
+      const result = await controller.addPreset(NEW_NAME_FORMS);
+
+      expect(result).toBeNull();
+      expect(saveSettings).not.toHaveBeenCalled();
+      const view = controller.getView();
+      expect(view.selectedPresetId).toBe("p1");
+      expect(view.dirty).toBe(true);
+      expect(view.draft?.name).toBe("Unsaved edit");
+    });
+
+    // The two orders the unsaved-changes prompt uses before it adds: Discard cancels the
+    // draft, and Save and Switch saves it.
+    it("adds after the draft is cancelled or saved", async () => {
+      const store = createAcceptingStore(
+        createSettings({ presets: [createPreset("p1", { name: "Main" })] }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      controller.select("p1");
+      controller.setName("Discarded");
+      controller.cancelDraft();
+      await expect(controller.addPreset(NEW_NAME_FORMS)).resolves.toBe("id-1");
+
+      controller.select("p1");
+      controller.setName("Main saved");
+      await expect(controller.saveDraftBeforeLeaving()).resolves.toBe(true);
+      await expect(controller.addPreset(NEW_NAME_FORMS)).resolves.toBe("id-2");
+
+      expect(store.getSettings().presets.map((preset) => preset.name)).toEqual([
+        "Main saved",
+        "New Preset",
+        "New Preset 2",
+      ]);
+    });
+
+    it("returns null and keeps the selection when the write fails", async () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const saveSettings = vi.fn().mockResolvedValue(null);
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+        generateId: makeIdGenerator(),
+      });
+
+      controller.select("p1");
+
+      const result = await controller.addPreset(NEW_NAME_FORMS);
+
+      expect(result).toBeNull();
+      const view = controller.getView();
+      expect(view.selectedPresetId).toBe("p1");
+      expect(view.draft?.id).toBe("p1");
+      expect(view.pending).toBe(false);
+    });
+
+    // RULE 3: the fields of the current preset stay editable while the write is in flight.
+    // The selection of the new preset would then discard that edit with no prompt.
+    it("keeps the selection and an edit that lands while the write is in flight", async () => {
+      let settings = createSettings({ presets: [createPreset("p1")] });
+      const deferred = createDeferred<Settings | null>();
       const saveSettings = vi.fn().mockImplementation((next: Settings) => {
         settings = next;
-        return Promise.resolve(next);
+        return deferred.promise;
       });
       const controller = createPresetLibraryController({
         getSettings: () => settings,
@@ -705,27 +895,317 @@ describe("PresetLibraryController", () => {
         generateId: makeIdGenerator(),
       });
 
-      const result = await controller.addPreset("My Preset");
+      controller.select("p1");
+      const adding = controller.addPreset(NEW_NAME_FORMS);
+      expect(controller.getView().pending).toBe(true);
+      controller.setName("Typed during the write");
+      deferred.resolve(settings);
 
-      expect(result).toBe(true);
-      expect(saveSettings).toHaveBeenCalledTimes(1);
+      await expect(adding).resolves.toBeNull();
+      const view = controller.getView();
+      expect(view.selectedPresetId).toBe("p1");
+      expect(view.dirty).toBe(true);
+      expect(view.draft?.name).toBe("Typed during the write");
+      // The new preset is in the library all the same.
+      expect(settings.presets.map((preset) => preset.id)).toEqual(["p1", "id-1"]);
+    });
+  });
+
+  describe("duplicatePreset", () => {
+    it("appends a deep copy with a new id and the copy name, selects it, and resolves its id", async () => {
+      const source = createPreset("p1", {
+        name: "Main",
+        container: "mkv",
+        videoEncoder: "libx265",
+        audioEncoder: "flac",
+        audioSampleRate: 48000,
+        audioChannels: "stereo",
+        quality: { kind: "bitrate", value: 8000 },
+        resolution: { w: 1280, h: 720 },
+        frameRate: { n: 30000, d: 1001 },
+      });
+      delete source.audioBitrate;
+      const store = createAcceptingStore(
+        createSettings({ presets: [source, createPreset("p2")] }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      controller.select("p1");
+      const result = await controller.duplicatePreset("p1", COPY_NAME_FORMS);
+
+      expect(result).toBe("id-1");
+      expect(store.saveSettings).toHaveBeenCalledTimes(1);
+      const presets = store.getSettings().presets;
+      expect(presets.map((preset) => preset.id)).toEqual(["p1", "p2", "id-1"]);
+      const copy = presets[2];
+      expect(copy).toStrictEqual({ ...source, id: "id-1", name: "Main Copy" });
+      expect("audioBitrate" in copy).toBe(false);
+
+      // A deep copy: no nested object is shared with the source.
+      expect(copy.quality).not.toBe(source.quality);
+      expect(copy.resolution).not.toBe(source.resolution);
+      expect(copy.frameRate).not.toBe(source.frameRate);
+      expect(presets[0]).toBe(source);
+      expect(source.id).toBe("p1");
+      expect(source.name).toBe("Main");
+
       const view = controller.getView();
       expect(view.selectedPresetId).toBe("id-1");
       expect(view.draft?.id).toBe("id-1");
-      expect(view.draft?.name).toBe("My Preset");
+      expect(view.draft?.name).toBe("Main Copy");
+      expect(view.dirty).toBe(false);
     });
 
-    it("returns false and performs no IPC when there is no settings document", async () => {
+    it("gives every copy an id that no other preset has", async () => {
+      const store = createAcceptingStore(
+        createSettings({ presets: [createPreset("p1", { name: "Main" })] }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      await controller.duplicatePreset("p1", COPY_NAME_FORMS);
+      await controller.duplicatePreset("p1", COPY_NAME_FORMS);
+
+      const ids = store.getSettings().presets.map((preset) => preset.id);
+      expect(ids).toEqual(["p1", "id-1", "id-2"]);
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it("numbers the copy name when it is taken", async () => {
+      const store = createAcceptingStore(
+        createSettings({
+          presets: [
+            createPreset("p1", { name: "Main" }),
+            createPreset("p2", { name: "Main Copy" }),
+          ],
+        }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      await controller.duplicatePreset("p1", COPY_NAME_FORMS);
+      await controller.duplicatePreset("p1", COPY_NAME_FORMS);
+
+      expect(store.getSettings().presets.map((preset) => preset.name)).toEqual([
+        "Main",
+        "Main Copy",
+        "Main Copy 2",
+        "Main Copy 3",
+      ]);
+    });
+
+    it("fits the copy of a preset with the longest name into MAX_PRESET_NAME_CHARS", async () => {
+      const longName = "L".repeat(MAX_PRESET_NAME_CHARS);
+      const store = createAcceptingStore(
+        createSettings({ presets: [createPreset("p1", { name: longName })] }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      await controller.duplicatePreset("p1", COPY_NAME_FORMS);
+
+      const copyName = store.getSettings().presets[1].name;
+      expect([...copyName].length).toBe(MAX_PRESET_NAME_CHARS);
+      expect(copyName.endsWith(" Copy")).toBe(true);
+      expect(controller.getView().issues).toEqual([]);
+    });
+
+    it("keeps the active preset and every other key of the document", async () => {
+      const store = createAcceptingStore(
+        createSettings({
+          presets: [createPreset("p1", { name: "Main" })],
+          activePresetId: "p1",
+          ffmpegPath: "/opt/homebrew/bin",
+        }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      await controller.duplicatePreset("p1", COPY_NAME_FORMS);
+
+      const saved = store.getSettings();
+      expect(saved.activePresetId).toBe("p1");
+      expect(saved.ffmpegPath).toBe("/opt/homebrew/bin");
+      expect(saved.revision).toBe(TEST_REVISION);
+    });
+
+    it("copies a preset that is not the selected one", async () => {
+      const store = createAcceptingStore(
+        createSettings({
+          presets: [createPreset("p1"), createPreset("p2", { name: "Other" })],
+        }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      controller.select("p1");
+      const result = await controller.duplicatePreset("p2", COPY_NAME_FORMS);
+
+      expect(result).toBe("id-1");
+      expect(store.getSettings().presets[2].name).toBe("Other Copy");
+      expect(controller.getView().selectedPresetId).toBe("id-1");
+    });
+
+    // The copy is made from the stored preset, so it would not contain the edit on screen,
+    // and the selection of the copy would discard that edit.
+    it("refuses with no IPC while the draft holds an unsaved edit, and keeps the edit", async () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { name: "Main" })],
+      });
       const saveSettings = vi.fn();
       const controller = createPresetLibraryController({
-        getSettings: () => null,
+        getSettings: () => settings,
+        saveSettings,
+        generateId: makeIdGenerator(),
+      });
+
+      controller.select("p1");
+      controller.setName("Main edited");
+
+      const result = await controller.duplicatePreset("p1", COPY_NAME_FORMS);
+
+      expect(result).toBeNull();
+      expect(saveSettings).not.toHaveBeenCalled();
+      const view = controller.getView();
+      expect(view.selectedPresetId).toBe("p1");
+      expect(view.dirty).toBe(true);
+      expect(view.draft?.name).toBe("Main edited");
+    });
+
+    it("copies the saved edit once the draft is saved", async () => {
+      const store = createAcceptingStore(
+        createSettings({ presets: [createPreset("p1", { name: "Main" })] }),
+      );
+      const controller = createPresetLibraryController({
+        ...store,
+        generateId: makeIdGenerator(),
+      });
+
+      controller.select("p1");
+      controller.setName("Main edited");
+      controller.updateQualityValue("28");
+      await controller.saveDraft();
+
+      await expect(controller.duplicatePreset("p1", COPY_NAME_FORMS)).resolves.toBe(
+        "id-1",
+      );
+      const copy = store.getSettings().presets[1];
+      expect(copy.name).toBe("Main edited Copy");
+      expect(copy.quality).toEqual({ kind: "crf", value: 28 });
+    });
+
+    it("refuses with no IPC once the library holds MAX_PRESETS", async () => {
+      const presets = Array.from({ length: 100 }, (_, index) =>
+        createPreset(`p${index}`),
+      );
+      const settings = createSettings({ presets });
+      const saveSettings = vi.fn();
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
         saveSettings,
       });
 
-      const result = await controller.addPreset("Name");
-
-      expect(result).toBe(false);
+      await expect(
+        controller.duplicatePreset("p0", COPY_NAME_FORMS),
+      ).resolves.toBeNull();
       expect(saveSettings).not.toHaveBeenCalled();
+    });
+
+    it("refuses with no IPC when no preset has the id", async () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const saveSettings = vi.fn();
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+      });
+
+      await expect(
+        controller.duplicatePreset("missing", COPY_NAME_FORMS),
+      ).resolves.toBeNull();
+      expect(saveSettings).not.toHaveBeenCalled();
+    });
+
+    it("returns null and keeps the selection when the write fails", async () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const saveSettings = vi.fn().mockResolvedValue(null);
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+        generateId: makeIdGenerator(),
+      });
+
+      controller.select("p1");
+
+      const result = await controller.duplicatePreset("p1", COPY_NAME_FORMS);
+
+      expect(result).toBeNull();
+      const view = controller.getView();
+      expect(view.selectedPresetId).toBe("p1");
+      expect(view.dirty).toBe(false);
+      expect(view.pending).toBe(false);
+    });
+
+    it("reports pending while the write is in flight", async () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const deferred = createDeferred<Settings | null>();
+      const saveSettings = vi.fn().mockReturnValue(deferred.promise);
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+        generateId: makeIdGenerator(),
+      });
+
+      const duplicating = controller.duplicatePreset("p1", COPY_NAME_FORMS);
+      expect(controller.getView().pending).toBe(true);
+
+      deferred.resolve(settings);
+      await duplicating;
+      expect(controller.getView().pending).toBe(false);
+    });
+
+    // RULE 3, as for `addPreset`.
+    it("keeps the selection and an edit that lands while the write is in flight", async () => {
+      let settings = createSettings({
+        presets: [createPreset("p1", { name: "Main" })],
+      });
+      const deferred = createDeferred<Settings | null>();
+      const saveSettings = vi.fn().mockImplementation((next: Settings) => {
+        settings = next;
+        return deferred.promise;
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+        generateId: makeIdGenerator(),
+      });
+
+      controller.select("p1");
+      const duplicating = controller.duplicatePreset("p1", COPY_NAME_FORMS);
+      controller.setName("Typed during the write");
+      deferred.resolve(settings);
+
+      await expect(duplicating).resolves.toBeNull();
+      const view = controller.getView();
+      expect(view.selectedPresetId).toBe("p1");
+      expect(view.dirty).toBe(true);
+      expect(view.draft?.name).toBe("Typed during the write");
+      expect(settings.presets.map((preset) => preset.name)).toEqual([
+        "Main",
+        "Main Copy",
+      ]);
     });
   });
 
@@ -944,7 +1424,10 @@ describe("PresetLibraryController", () => {
       expect(() => controller.updateDraft({ name: "x" })).not.toThrow();
 
       await expect(controller.saveDraft()).resolves.toBe(false);
-      await expect(controller.addPreset("name")).resolves.toBe(false);
+      await expect(controller.addPreset(NEW_NAME_FORMS)).resolves.toBeNull();
+      await expect(
+        controller.duplicatePreset("id", COPY_NAME_FORMS),
+      ).resolves.toBeNull();
       await expect(controller.deletePreset("id")).resolves.toBe(false);
       await expect(controller.setActive("id")).resolves.toBe(false);
 

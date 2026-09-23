@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { createI18nInstance } from "@/i18n";
+import { MAX_PRESETS } from "@/features/settings/limits";
+import {
+  nextFreeCopyName,
+  PRESET_NAME_SLOT,
+  type CopyNameForms,
+} from "@/features/settings/presetNaming";
 import { en } from "@/i18n/locales/en";
 import {
   validatePresetFields,
@@ -30,6 +36,7 @@ import {
   presentPresetIssue,
   presentQualityKind,
   presentResolutionInvalid,
+  presentDuplicatePresetAction,
   presentSaveBlockedSummary,
 } from "./presetPresenter";
 
@@ -337,6 +344,109 @@ describe("presetPresenter", () => {
           options?: Record<string, string | number>,
         ) => string;
         expect(translate(summary!.key, summary!.values)).toBe(expected);
+      },
+    );
+  });
+
+  describe("presentDuplicatePresetAction", () => {
+    const clean = { canAdd: true, dirty: false, pending: false };
+
+    it("enables Duplicate with no reason for a clean draft and a library with room", () => {
+      expect(presentDuplicatePresetAction(clean)).toStrictEqual({
+        disabled: false,
+        reason: null,
+      });
+    });
+
+    it("disables Duplicate while the draft holds an unsaved edit and says why", () => {
+      expect(presentDuplicatePresetAction({ ...clean, dirty: true })).toStrictEqual({
+        disabled: true,
+        reason: { key: "settings.preset.duplicateBlockedUnsaved" },
+      });
+    });
+
+    it("disables Duplicate in a full library and gives the limit message that Add shows", () => {
+      expect(presentDuplicatePresetAction({ ...clean, canAdd: false })).toStrictEqual({
+        disabled: true,
+        reason: { key: "settings.preset.limitReached", values: { max: MAX_PRESETS } },
+      });
+    });
+
+    it("names the limit before the unsaved edit, because a save does not remove the limit", () => {
+      expect(
+        presentDuplicatePresetAction({ canAdd: false, dirty: true, pending: false })
+          .reason,
+      ).toStrictEqual({
+        key: "settings.preset.limitReached",
+        values: { max: MAX_PRESETS },
+      });
+    });
+
+    it("disables Duplicate with no reason while a write is in flight", () => {
+      expect(presentDuplicatePresetAction({ ...clean, pending: true })).toStrictEqual({
+        disabled: true,
+        reason: null,
+      });
+    });
+  });
+
+  // The controller receives the name forms already formatted, so these tests run the real
+  // catalogs through i18next. A formatted name is stored as user data (ADR 013), so it must
+  // hold the source name exactly: no HTML escape, and no other change.
+  describe("generated preset name forms", () => {
+    async function translatorFor(language: "en" | "zh-CN") {
+      const instance = await createI18nInstance({
+        initialPreference: language,
+        storage: null,
+        systemLanguages: [],
+      });
+      return instance.t as unknown as (
+        key: string,
+        options?: Record<string, string | number>,
+      ) => string;
+    }
+
+    it.each([
+      ["en", "New Preset", "New Preset 2", "Main Copy", "Main Copy 3"],
+      ["zh-CN", "新预设", "新预设 2", "Main 副本", "Main 副本 3"],
+    ] as const)(
+      "formats the %s forms",
+      async (language, newName, newNumbered, copyName, copyNumbered) => {
+        const translate = await translatorFor(language);
+
+        expect(translate("settings.preset.newName")).toBe(newName);
+        expect(translate("settings.preset.newNameNumbered", { n: 2 })).toBe(
+          newNumbered,
+        );
+        expect(translate("settings.preset.copyName", { name: "Main" })).toBe(copyName);
+        expect(
+          translate("settings.preset.copyNameNumbered", { name: "Main", n: 3 }),
+        ).toBe(copyNumbered);
+      },
+    );
+
+    // The component formats the copy forms with the name slot, as here, and the naming rule
+    // puts the source name in the slot. The source name never goes through i18next.
+    it.each([
+      ["en", "Copy"],
+      ["zh-CN", "副本"],
+    ] as const)(
+      "keeps the source name exactly in the %s copy forms",
+      async (language, word) => {
+        const translate = await translatorFor(language);
+        const forms: CopyNameForms = {
+          base: translate("settings.preset.copyName", { name: PRESET_NAME_SLOT }),
+          numbered: (n) =>
+            translate("settings.preset.copyNameNumbered", {
+              name: PRESET_NAME_SLOT,
+              n,
+            }),
+        };
+        const name = `A & <B> "C" 'D' {{n}} {{name}} $& $1`;
+
+        const first = nextFreeCopyName([name], name, forms);
+        expect(first).toBe(`${name} ${word}`);
+        expect(nextFreeCopyName([name, first], name, forms)).toBe(`${name} ${word} 2`);
       },
     );
   });
@@ -1101,6 +1211,9 @@ describe("presetPresenter", () => {
       "settings.field.notInteger",
       "settings.field.positive",
       "settings.field.containerMismatch",
+      // the Duplicate action
+      "settings.preset.duplicateBlockedUnsaved",
+      "settings.preset.limitReached",
       // audio preset controls
       "settings.preset.audioBitrateDefault",
       "settings.preset.audioBitrateValue",

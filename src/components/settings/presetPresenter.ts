@@ -12,6 +12,7 @@ import {
   isLosslessAudioEncoder,
 } from "@/features/settings/audioCodecs";
 import {
+  MAX_PRESETS,
   validatePresetFields,
   type PresetFieldIssue,
   type PresetFieldName,
@@ -38,10 +39,12 @@ import {
 // `presetLibraryController.test.ts` asserting it is never a valid encoder name). This module
 // re-exports the same value so display code can import it alongside the other presenter
 // exports without also reaching into the controller module.
-import { CUSTOM_ENCODER_VALUE } from "./presetLibraryController";
+import {
+  CUSTOM_ENCODER_VALUE,
+  type PresetLibraryView,
+} from "./presetLibraryController";
 
-export { MAX_PRESETS } from "@/features/settings/limits";
-export { CUSTOM_ENCODER_VALUE };
+export { CUSTOM_ENCODER_VALUE, MAX_PRESETS };
 
 /** Sentinel value for the "encoder default" choice in an audio bitrate `<Select>`. */
 export const AUDIO_BITRATE_DEFAULT_VALUE = "default";
@@ -203,6 +206,44 @@ export function presentSaveBlockedSummary(
     return null;
   }
   return { key: "settings.preset.saveBlocked", values: { count: issues.length } };
+}
+
+/** The state of the Duplicate button of the preset editor. */
+export type DuplicatePresetActionView = {
+  disabled: boolean;
+  /**
+   * Why Duplicate is off, or `null` when there is nothing to say. A write in flight disables
+   * the button for a moment only, so it gives no reason.
+   */
+  reason: MessageView | null;
+};
+
+/**
+ * Presents the Duplicate button of the preset editor. It follows the rules of
+ * `PresetLibraryController.duplicatePreset`, which refuses in the same states.
+ *
+ * - The library is full: the reason is the limit message that Add shows.
+ * - The draft holds an unsaved edit: the reason asks the user to save or cancel it. The copy
+ *   is made from the stored preset, so a copy made now would not contain the edit on screen,
+ *   and the selection of the copy would discard the edit.
+ * - A write is in flight: the button is off with no reason.
+ */
+export function presentDuplicatePresetAction(
+  view: Pick<PresetLibraryView, "canAdd" | "dirty" | "pending">,
+): DuplicatePresetActionView {
+  if (!view.canAdd) {
+    return {
+      disabled: true,
+      reason: { key: "settings.preset.limitReached", values: { max: MAX_PRESETS } },
+    };
+  }
+  if (view.dirty) {
+    return {
+      disabled: true,
+      reason: { key: "settings.preset.duplicateBlockedUnsaved" },
+    };
+  }
+  return { disabled: view.pending, reason: null };
 }
 
 /**

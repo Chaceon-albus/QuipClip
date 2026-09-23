@@ -31,12 +31,11 @@ import {
   CLEAN_PRESET_DRAFT_GUARD,
   decideCloseRequest,
   decidePromptSaveOutcome,
-  isElementRendered,
   pickPromptCancelFocus,
   pickPromptOpenFocus,
   presentUnsavedDraftPrompt,
+  toPromptFocusTarget,
   type PresetDraftGuard,
-  type PromptFocusTarget,
 } from "./presetDraftGuard";
 import { presentSettingsError } from "./settingsErrorPresenter";
 import { FfmpegPathSection } from "./FfmpegPathSection";
@@ -61,27 +60,6 @@ type ClosePrompt = {
 
 /** The section that holds the preset editor, which the unsaved-changes prompt is about. */
 const PRESETS_SECTION: SettingsSection = "presets";
-
-function toPromptFocusTarget(element: HTMLElement | null): PromptFocusTarget | null {
-  if (element === null) {
-    return null;
-  }
-  // Getters, because the rules read the element when the focus moves, not when it is wrapped.
-  return {
-    get isConnected() {
-      return element.isConnected;
-    },
-    get isRendered() {
-      return isElementRendered(element);
-    },
-    get isDisabled() {
-      return element.matches(":disabled");
-    },
-    focus: () => {
-      element.focus();
-    },
-  };
-}
 
 /** Gives the focus to Cancel, or to the prompt message while Cancel is disabled. */
 function focusPrompt(cancel: HTMLElement | null, message: HTMLElement | null): void {

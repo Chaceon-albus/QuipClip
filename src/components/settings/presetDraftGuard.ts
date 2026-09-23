@@ -4,11 +4,13 @@
  * The preset library reports its draft to the settings dialog as a `PresetDraftGuard`. The
  * dialog asks `decideCloseRequest` what a close request does. When the request cannot close
  * the dialog, the dialog shows the prompt that `presentUnsavedDraftPrompt` describes. The
- * preset library shows the same prompt when the user selects another preset.
+ * preset library shows the same prompt when the user selects another preset or adds one.
  *
- * The rules have no DOM and no React, so the tests need no document. They return translation
- * keys and values without calling the i18n runtime. The prompt message is one complete
- * catalog message, so no sentence is assembled from fragments (ADR 011).
+ * The rules have no DOM and no React, so the tests need no document. They read elements
+ * through narrow interfaces, and `toPromptFocusTarget` is the one adapter that wraps a DOM
+ * element for them. They return translation keys and values without calling the i18n
+ * runtime. The prompt message is one complete catalog message, so no sentence is assembled
+ * from fragments (ADR 011).
  */
 
 import type { PresetLibraryView } from "./presetLibraryController";
@@ -119,6 +121,25 @@ export function isUnsavedPresetRow(view: PresetLibraryView, presetId: string): b
 }
 
 /**
+ * What the user asked for in the preset library while the draft held an unsaved edit: a
+ * switch to another preset in the list, or a new preset from Add. Both select another preset,
+ * and a selection discards the draft, so both wait for the answer to the unsaved-changes
+ * prompt.
+ */
+export type PendingLeave =
+  { readonly kind: "select"; readonly id: string } | { readonly kind: "add" };
+
+/**
+ * The label key of the prompt button that saves the draft and then carries out `request`:
+ * "Save and Switch" for a switch to another preset, and "Save and Add" for Add.
+ */
+export function presentSaveAndLeaveLabel(request: PendingLeave): string {
+  return request.kind === "add"
+    ? "settings.preset.saveAndAdd"
+    : "settings.preset.saveAndSwitch";
+}
+
+/**
  * What the settings dialog does with a request to close it: from Escape, from the close
  * button in the header, or from the Close button in the footer.
  *
@@ -198,6 +219,32 @@ export function isElementRendered(element: RenderedElementProbe): boolean {
   return element.checkVisibility?.() ?? element.offsetParent !== null;
 }
 
+/**
+ * Wraps a DOM element for the focus rules, or returns null for no element. The members are
+ * getters, because the rules read the element when the focus moves, not when it is wrapped.
+ */
+export function toPromptFocusTarget(
+  element: HTMLElement | null,
+): PromptFocusTarget | null {
+  if (element === null) {
+    return null;
+  }
+  return {
+    get isConnected() {
+      return element.isConnected;
+    },
+    get isRendered() {
+      return isElementRendered(element);
+    },
+    get isDisabled() {
+      return element.matches(":disabled");
+    },
+    focus: () => {
+      element.focus();
+    },
+  };
+}
+
 function canTakeFocus<T extends PromptFocusTarget>(target: T | null): target is T {
   return (
     target !== null && target.isConnected && target.isRendered && !target.isDisabled
@@ -243,4 +290,49 @@ export function pickPromptCancelFocus<T extends PromptFocusTarget>(
     return returnFocus;
   }
   return canTakeFocus(fallback) ? fallback : null;
+}
+
+/**
+ * The narrow view of the element that holds the focus, so a test can pass a fake.
+ * `document.activeElement` satisfies it.
+ */
+export interface FocusHolderProbe {
+  readonly tagName: string;
+  getAttribute: (name: string) => string | null;
+}
+
+/**
+ * True when the focus rests on no control of the dialog:
+ *
+ * - No element, or the document body, holds the focus. The browser moves the focus to the
+ *   body when the focused button becomes disabled.
+ * - The dialog element itself holds the focus. Radix moves the focus there when the focused
+ *   element leaves the document, as the buttons of the unsaved-changes prompt do when the
+ *   prompt closes.
+ */
+export function isFocusLost(active: FocusHolderProbe | null): boolean {
+  if (active === null) {
+    return true;
+  }
+  return active.tagName === "BODY" || active.getAttribute("role") === "dialog";
+}
+
+/**
+ * Returns the button that takes the focus back after an Add or a Duplicate of the preset
+ * library that did not select a new preset, or null when the focus must stay where it is.
+ *
+ * The button is disabled while the write is in flight, so the focus is lost when the write
+ * ends (see `isFocusLost`). The button that started the action then takes it back, so a
+ * keyboard user can try again. An Add that the unsaved-changes prompt started has no button
+ * of its own left, because the prompt closed, and the caller passes the Add button.
+ *
+ * When the focus is on a control, the user moved it there during the write, for example into
+ * the name field, and it stays there. The button must also be able to take the focus again,
+ * so the caller calls this rule after the write, when the button is enabled.
+ */
+export function pickCreateFailureFocus<T extends PromptFocusTarget>(
+  button: T | null,
+  active: FocusHolderProbe | null,
+): T | null {
+  return isFocusLost(active) && canTakeFocus(button) ? button : null;
 }

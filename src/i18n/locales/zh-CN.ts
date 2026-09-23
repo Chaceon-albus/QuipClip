@@ -244,7 +244,12 @@ export const zhCN: TranslationCatalog = {
     preset: {
       section: "导出预设",
       newName: "新预设",
+      newNameNumbered: "新预设 {{n}}",
       add: "添加预设",
+      duplicate: "复制预设",
+      copyName: "{{name}} 副本",
+      copyNameNumbered: "{{name}} 副本 {{n}}",
+      duplicateBlockedUnsaved: "保存或取消更改后即可复制此预设。",
       delete: "删除预设",
       restoreDefaults: "恢复默认预设",
       setActive: "设为当前预设",
@@ -259,6 +264,7 @@ export const zhCN: TranslationCatalog = {
       discardConfirm: "放弃更改",
       discardCancel: "继续编辑",
       saveAndSwitch: "保存并切换",
+      saveAndAdd: "保存并添加",
       dontSave: "不保存",
       deleteDialog: {
         title: "删除预设“{{name}}”？",

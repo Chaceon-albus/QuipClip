@@ -259,7 +259,12 @@ export const en = {
     preset: {
       section: "Export Presets",
       newName: "New Preset",
+      newNameNumbered: "New Preset {{n}}",
       add: "Add Preset",
+      duplicate: "Duplicate Preset",
+      copyName: "{{name}} Copy",
+      copyNameNumbered: "{{name}} Copy {{n}}",
+      duplicateBlockedUnsaved: "Save or cancel your changes to duplicate this preset.",
       delete: "Delete Preset",
       restoreDefaults: "Restore Defaults",
       setActive: "Set Active",
@@ -274,6 +279,7 @@ export const en = {
       discardConfirm: "Discard Changes",
       discardCancel: "Keep Editing",
       saveAndSwitch: "Save and Switch",
+      saveAndAdd: "Save and Add",
       dontSave: "Don’t Save",
       deleteDialog: {
         title: "Delete preset “{{name}}”?",

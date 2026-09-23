@@ -33,6 +33,12 @@ import {
   DEFAULT_AUDIO_BITRATE_KBPS,
   isLosslessAudioEncoder,
 } from "@/features/settings/audioCodecs";
+import {
+  nextFreeCopyName,
+  nextFreePresetName,
+  type CopyNameForms,
+  type PresetNameForms,
+} from "@/features/settings/presetNaming";
 // Import the store MODULE directly, never the "@/features/settings" barrel. The barrel also
 // re-exports "./client", whose `saveSettings` is the raw IPC call that bypasses the store's
 // serialized write queue (ADR 013). Taking that export by mistake would let this controller's
@@ -184,10 +190,10 @@ export interface PresetLibraryControllerOptions {
  *
  * STALE-BASE HAZARD: `restoreDefaultPresets` publishes its restored document only after the
  * IPC call resolves, unlike `saveSettings`, which the store applies optimistically. A write
- * action (`saveDraft`, `addPreset`, `deletePreset`, `setActive`) called WHILE a restore is in
- * flight would compute its next document from the pre-restore library and could overwrite the
- * restore on disk. The view MUST disable every write action while `view.pending` is true;
- * `pending` is exposed on the view for exactly this purpose.
+ * action (`saveDraft`, `addPreset`, `duplicatePreset`, `deletePreset`, `setActive`) called
+ * WHILE a restore is in flight would compute its next document from the pre-restore library
+ * and could overwrite the restore on disk. The view MUST disable every write action while
+ * `view.pending` is true; `pending` is exposed on the view for exactly this purpose.
  */
 export class PresetLibraryController {
   private readonly getSettingsFn: () => Settings | null;
@@ -587,38 +593,70 @@ export class PresetLibraryController {
   }
 
   /**
-   * Creates a new preset named `name`, writes it, and selects it on success.
+   * Creates a new preset, writes it, and selects it on success.
    *
-   * Refuses and performs no IPC when `canAddPreset` is false for the current preset count.
-   * The name is a PARAMETER: this controller must not import i18next, so the component passes
-   * already-translated text. The stored name is then user data and is never translated again
-   * (ADR 013).
+   * The name is the first free name among `names.base`, `names.numbered(2)`, ... in the
+   * document this call writes (see `nextFreePresetName`). The forms are PARAMETERS: this
+   * controller must not import i18next, so the component passes already-translated text. The
+   * stored name is then user data and is never translated again (ADR 013).
+   *
+   * Resolves the id of the new preset when the write succeeded and the new preset is now
+   * selected, so the view can move the focus to its name. Resolves null otherwise.
+   *
+   * Refuses and performs no IPC when the settings document has not loaded, when
+   * `canAddPreset` is false for the current preset count, or when the draft holds an unsaved
+   * edit. Selecting the new preset would discard that edit, so the view must settle the draft
+   * first, through the unsaved-changes prompt.
    */
-  async addPreset(name: string): Promise<boolean> {
+  async addPreset(names: PresetNameForms): Promise<string | null> {
     const settings = this.getSettingsFn();
-    if (!settings || !canAddPreset(settings.presets.length)) {
-      return false;
+    if (!settings || !canAddPreset(settings.presets.length) || this.dirty) {
+      return null;
     }
 
-    const preset = createPresetDraft(this.generateIdFn(), name);
-    const next = addPresetToDocument(settings, preset);
+    const name = nextFreePresetName(
+      settings.presets.map((preset) => preset.name),
+      names.base,
+      names.numbered,
+    );
+    return this.writeNewPreset(settings, createPresetDraft(this.generateIdFn(), name));
+  }
 
-    this.pendingCount++;
-    this.notify();
-    let saved: Settings | null;
-    try {
-      saved = await this.saveSettingsFn(next);
-    } finally {
-      this.pendingCount--;
+  /**
+   * Creates a copy of the STORED preset with `id`, writes it, and selects the copy on success.
+   *
+   * The copy is a deep copy (`clonePreset`) with a new id from the id generator, so it shares
+   * no object with the source, and its id is unique in the document (ADR 013). It goes to the
+   * end of the library, as a new preset does. Its name is the first free name among
+   * `names.base`, `names.numbered(2)`, ..., each with the stored name of the source in its
+   * `PRESET_NAME_SLOT` (see `nextFreeCopyName`).
+   *
+   * Resolves the id of the copy when the write succeeded and the copy is now selected.
+   * Resolves null otherwise.
+   *
+   * Refuses and performs no IPC when the settings document has not loaded, when
+   * `canAddPreset` is false, when no preset has `id`, or when the draft holds an unsaved edit.
+   * The last rule has two reasons. The copy is made from the stored preset, so a copy made
+   * while the draft is dirty would not contain the edit on screen. And selecting the copy
+   * would discard that edit.
+   */
+  async duplicatePreset(id: string, names: CopyNameForms): Promise<string | null> {
+    const settings = this.getSettingsFn();
+    if (!settings || !canAddPreset(settings.presets.length) || this.dirty) {
+      return null;
+    }
+    const source = settings.presets.find((preset) => preset.id === id);
+    if (source === undefined) {
+      return null;
     }
 
-    if (saved === null) {
-      this.notify();
-      return false;
-    }
-
-    this.select(preset.id);
-    return true;
+    const name = nextFreeCopyName(
+      settings.presets.map((preset) => preset.name),
+      source.name,
+      names,
+    );
+    const copy: Preset = { ...clonePreset(source), id: this.generateIdFn(), name };
+    return this.writeNewPreset(settings, copy);
   }
 
   /**
@@ -765,6 +803,41 @@ export class PresetLibraryController {
    */
   dispose(): void {
     this.deactivate();
+  }
+
+  /**
+   * Appends `preset` to `settings`, writes the result, and selects `preset` on success. The
+   * shared tail of `addPreset` and `duplicatePreset`.
+   *
+   * Resolves the id of `preset` when it is now selected, and null when the write failed.
+   *
+   * RULE 3: it resolves null and keeps the selection when the draft became dirty while the
+   * write was in flight. The fields of the current preset stay editable during the write, and
+   * a selection now would discard that edit with no prompt. The new preset is in the library
+   * all the same, and the user can select it from the list.
+   */
+  private async writeNewPreset(
+    settings: Settings,
+    preset: Preset,
+  ): Promise<string | null> {
+    const next = addPresetToDocument(settings, preset);
+
+    this.pendingCount++;
+    this.notify();
+    let saved: Settings | null;
+    try {
+      saved = await this.saveSettingsFn(next);
+    } finally {
+      this.pendingCount--;
+    }
+
+    if (saved === null || this.dirty) {
+      this.notify();
+      return null;
+    }
+
+    this.select(preset.id);
+    return preset.id;
   }
 
   /**

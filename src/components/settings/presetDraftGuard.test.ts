@@ -8,11 +8,16 @@ import {
   decideCloseRequest,
   decidePromptSaveOutcome,
   isElementRendered,
+  isFocusLost,
   isUnsavedPresetRow,
+  pickCreateFailureFocus,
   pickPromptCancelFocus,
   pickPromptOpenFocus,
   presentPresetDraftStatus,
+  presentSaveAndLeaveLabel,
   presentUnsavedDraftPrompt,
+  toPromptFocusTarget,
+  type FocusHolderProbe,
   type PresetDraftStatus,
   type PromptFocusTarget,
 } from "./presetDraftGuard";
@@ -269,6 +274,7 @@ describe("presentUnsavedDraftPrompt", () => {
       "settings.preset.discardConfirm",
       "settings.preset.discardCancel",
       "settings.preset.saveAndSwitch",
+      "settings.preset.saveAndAdd",
       "settings.preset.unsaved",
       "common.cancel",
       "common.save",
@@ -390,5 +396,110 @@ describe("pickPromptCancelFocus", () => {
     expect(pickPromptCancelFocus(fakeTarget({ isConnected: false }), null)).toBeNull();
     expect(pickPromptCancelFocus(null, fakeTarget({ isRendered: false }))).toBeNull();
     expect(pickPromptCancelFocus(null, null)).toBeNull();
+  });
+});
+
+describe("presentSaveAndLeaveLabel", () => {
+  it("says Save and Switch for a switch to another preset", () => {
+    expect(presentSaveAndLeaveLabel({ kind: "select", id: "mine" })).toBe(
+      "settings.preset.saveAndSwitch",
+    );
+  });
+
+  it("says Save and Add for Add", () => {
+    expect(presentSaveAndLeaveLabel({ kind: "add" })).toBe(
+      "settings.preset.saveAndAdd",
+    );
+  });
+
+  it.each([
+    ["en", { kind: "select", id: "mine" }, "Save and Switch"],
+    ["en", { kind: "add" }, "Save and Add"],
+    ["zh-CN", { kind: "select", id: "mine" }, "保存并切换"],
+    ["zh-CN", { kind: "add" }, "保存并添加"],
+  ] as const)("labels the %s button for %o as %s", (language, request, expected) => {
+    const catalog = language === "en" ? en : zhCN;
+    expect(resolveCatalogKey(catalog, presentSaveAndLeaveLabel(request))).toBe(
+      expected,
+    );
+  });
+});
+
+/** A fake of `document.activeElement`. */
+function fakeHolder(tagName: string, role: string | null = null): FocusHolderProbe {
+  return {
+    tagName,
+    getAttribute: (name) => (name === "role" ? role : null),
+  };
+}
+
+describe("isFocusLost", () => {
+  it("is true when no element or the document body holds the focus", () => {
+    expect(isFocusLost(null)).toBe(true);
+    expect(isFocusLost(fakeHolder("BODY"))).toBe(true);
+  });
+
+  // Radix moves the focus to the dialog when the focused prompt button leaves the document.
+  it("is true when the dialog element itself holds the focus", () => {
+    expect(isFocusLost(fakeHolder("DIV", "dialog"))).toBe(true);
+  });
+
+  it("is false when a control holds the focus", () => {
+    expect(isFocusLost(fakeHolder("INPUT"))).toBe(false);
+    expect(isFocusLost(fakeHolder("BUTTON"))).toBe(false);
+    expect(isFocusLost(fakeHolder("DIV", "button"))).toBe(false);
+  });
+});
+
+describe("pickCreateFailureFocus", () => {
+  // The button was disabled during the write, and the browser moved the focus to the body.
+  it("returns the button when the focus is lost", () => {
+    const button = fakeTarget();
+    expect(pickCreateFailureFocus(button, fakeHolder("BODY"))).toBe(button);
+    expect(pickCreateFailureFocus(button, fakeHolder("DIV", "dialog"))).toBe(button);
+    expect(pickCreateFailureFocus(button, null)).toBe(button);
+  });
+
+  // The user moved the focus during the write, such as into the name field.
+  it("keeps the focus on a control", () => {
+    expect(pickCreateFailureFocus(fakeTarget(), fakeHolder("INPUT"))).toBeNull();
+  });
+
+  it("returns null when the button cannot take the focus", () => {
+    const body = fakeHolder("BODY");
+    expect(pickCreateFailureFocus(fakeTarget({ isDisabled: true }), body)).toBeNull();
+    expect(pickCreateFailureFocus(fakeTarget({ isConnected: false }), body)).toBeNull();
+    expect(pickCreateFailureFocus(fakeTarget({ isRendered: false }), body)).toBeNull();
+    expect(pickCreateFailureFocus(null, body)).toBeNull();
+  });
+});
+
+describe("toPromptFocusTarget", () => {
+  it("returns null for no element", () => {
+    expect(toPromptFocusTarget(null)).toBeNull();
+  });
+
+  // The rules read the element when the focus moves, so a button that is enabled after it was
+  // wrapped can take the focus.
+  it("reads the element each time a member is read, and focuses it", () => {
+    let disabled = true;
+    let focused = 0;
+    const element = {
+      isConnected: true,
+      offsetParent: {},
+      matches: (selector: string) => selector === ":disabled" && disabled,
+      focus: () => {
+        focused++;
+      },
+    };
+    const target = toPromptFocusTarget(element as unknown as HTMLElement);
+
+    expect(target?.isConnected).toBe(true);
+    expect(target?.isRendered).toBe(true);
+    expect(target?.isDisabled).toBe(true);
+    disabled = false;
+    expect(target?.isDisabled).toBe(false);
+    target?.focus();
+    expect(focused).toBe(1);
   });
 });
