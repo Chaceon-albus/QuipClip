@@ -407,7 +407,6 @@ export const en = {
       frames: "Frame {{frame}} of {{expectedFrames}}",
       speed: "{{speed}}×",
       publishing: "Finishing...",
-      finished: "Export completed successfully.",
       canceled: "The export was stopped.",
       canceling: "Stopping...",
       cancelingNote:
@@ -415,6 +414,11 @@ export const en = {
       cancelingNotePublishing:
         "The export is already finishing. It will still save the output file.",
       stopUnavailable: "The export is finishing. You cannot stop it now.",
+    },
+    finished: {
+      title: "Export finished",
+      folder: "In {{folder}}",
+      folderAndElapsed: "In {{folder}} · Took {{elapsed}}",
     },
     action: {
       chooseDestination: "Export…",
@@ -424,7 +428,22 @@ export const en = {
       stop: "Stop Export",
       stopConfirm: "Confirm Stop",
       hide: "Hide (export continues)",
+      revealMac: "Show in Finder",
+      revealWindows: "Show in File Explorer",
+      open: "Open",
+      done: "Done",
     },
+  },
+  exportOutputError: {
+    outputUnknown: "QuipClip has no record of the file from this export.",
+    outputMissing:
+      "The exported file is not in its saved location. It may have been moved, renamed, or deleted.",
+    outputNotVideo:
+      "QuipClip opens only files with a video extension (MP4, MOV, or MKV). Show the file, and then open it from its folder.",
+    revealFailed: "The system could not show the file.",
+    openFailed:
+      "The system could not open the file. Make sure that an application is set to open this file type.",
+    unknown: "QuipClip could not show or open the exported file.",
   },
   exportError: {
     appDataUnavailable: "The application data directory is unavailable.",

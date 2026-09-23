@@ -400,12 +400,16 @@ export const zhCN: TranslationCatalog = {
       frames: "{{frame}} / {{expectedFrames}} 帧",
       speed: "{{speed}}×",
       publishing: "正在完成...",
-      finished: "导出已成功完成。",
       canceled: "导出已停止。",
       canceling: "正在停止...",
       cancelingNote: "如果导出已进入完成阶段，仍可能生成输出文件。",
       cancelingNotePublishing: "导出正在完成，仍会生成输出文件。",
       stopUnavailable: "导出正在完成，现在无法停止。",
+    },
+    finished: {
+      title: "导出完成",
+      folder: "位于 {{folder}}",
+      folderAndElapsed: "位于 {{folder}} · 用时 {{elapsed}}",
     },
     action: {
       chooseDestination: "导出…",
@@ -415,7 +419,20 @@ export const zhCN: TranslationCatalog = {
       stop: "停止导出",
       stopConfirm: "确认停止",
       hide: "隐藏（导出继续）",
+      revealMac: "在访达中显示",
+      revealWindows: "在文件资源管理器中显示",
+      open: "打开",
+      done: "完成",
     },
+  },
+  exportOutputError: {
+    outputUnknown: "QuipClip 没有此次导出的文件记录。",
+    outputMissing: "导出的文件已不在保存位置，可能已被移动、重命名或删除。",
+    outputNotVideo:
+      "QuipClip 只打开带有视频扩展名（MP4、MOV 或 MKV）的文件。请先在文件夹中显示该文件，再从那里打开。",
+    revealFailed: "系统无法显示该文件。",
+    openFailed: "系统无法打开该文件。请确认已为此文件类型设置打开方式。",
+    unknown: "无法显示或打开导出的文件。",
   },
   exportError: {
     appDataUnavailable: "应用程序数据目录不可用。",

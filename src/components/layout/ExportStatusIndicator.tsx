@@ -1,14 +1,27 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
-import { CircleAlert, CircleCheck, CircleSlash, X } from "lucide-react";
+import {
+  CircleAlert,
+  CircleCheck,
+  CircleSlash,
+  FolderOpen,
+  Loader2,
+  X,
+} from "lucide-react";
 import { ProgressBar } from "@/components/common/ProgressBar";
+import { revealLabelKey } from "@/components/export/exportFinishedPresenter";
 import { formatRemaining } from "@/components/export/exportProgressPresenter";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useExportPanelStore, useExportStore } from "@/features/export";
+import {
+  useExportOutputActionStore,
+  useExportPanelStore,
+  useExportStore,
+} from "@/features/export";
 import { getResolvedLanguage } from "@/i18n";
+import { isMacOS } from "@/lib/platform";
 import { presentExportIndicator } from "./exportIndicatorPresenter";
 
 /**
@@ -19,17 +32,21 @@ import { presentExportIndicator } from "./exportIndicatorPresenter";
  * Renders nothing when the export dialog is open or when status is idle (ADR 025).
  *
  * Sizing follows the status bar rule: every control is 24px tall, a standalone icon button
- * is a 24px box with a 16px glyph, and an icon inline with text is 14px. The dismiss X gets
- * the full 24px box but keeps the 14px glyph, because it sits next to the result text it
- * dismisses. Each vertical separator is 16px tall, the height of a 16px glyph.
- * `data-vertical:self-center` replaces the Separator's own `self-stretch`, which puts an
- * item with a fixed height at the top of the row instead of at its centre.
+ * is a 24px box with a 16px glyph, and an icon inline with text is 14px. The dismiss X and
+ * the show-in-folder button of a finished run get the full 24px box but keep the 14px glyph,
+ * because they sit next to the result text they act on. Each vertical separator is 16px
+ * tall, the height of a 16px glyph. `data-vertical:self-center` replaces the Separator's own
+ * `self-stretch`, which puts an item with a fixed height at the top of the row instead of at
+ * its centre.
  */
 export function ExportStatusIndicator() {
   const { t, i18n } = useTranslation();
   const panelOpen = useExportPanelStore((state) => state.open);
   const show = useExportPanelStore((state) => state.show);
   const reset = useExportStore((state) => state.reset);
+  const runId = useExportStore((state) => state.runId);
+  const outputActionPending = useExportOutputActionStore((state) => state.pending);
+  const runOutputAction = useExportOutputActionStore((state) => state.run);
 
   const exportData = useExportStore(
     useShallow((state) => ({
@@ -169,6 +186,24 @@ export function ExportStatusIndicator() {
   };
 
   const config = finalConfig[view.kind];
+  const revealLabel = t(revealLabelKey(isMacOS()));
+  const canReveal = view.kind === "finished" && runId !== null;
+  const revealBusy =
+    outputActionPending !== null &&
+    outputActionPending.runId === runId &&
+    outputActionPending.action === "reveal";
+
+  // The status bar has no room for an error message. A failed request opens the dialog,
+  // which shows the message inline for this run.
+  const handleReveal = async () => {
+    if (runId === null) {
+      return;
+    }
+    const outcome = await runOutputAction("reveal", runId);
+    if (outcome === "failed") {
+      show();
+    }
+  };
 
   return (
     <>
@@ -193,6 +228,30 @@ export function ExportStatusIndicator() {
             <p>{t("statusBar.export.showHint")}</p>
           </TooltipContent>
         </Tooltip>
+        {canReveal && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent"
+                aria-label={revealLabel}
+                aria-busy={revealBusy || undefined}
+                onClick={() => void handleReveal()}
+              >
+                {revealBusy ? (
+                  <Loader2
+                    aria-hidden="true"
+                    className="size-3.5 animate-spin motion-reduce:animate-none"
+                  />
+                ) : (
+                  <FolderOpen className="size-3.5" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{revealLabel}</TooltipContent>
+          </Tooltip>
+        )}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button

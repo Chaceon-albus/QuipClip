@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
-import { CircleSlash, XIcon } from "lucide-react";
+import { CircleCheck, CircleSlash, Loader2, XIcon } from "lucide-react";
 import { DESTRUCTIVE_CONFIRM_CLASS } from "@/components/common/confirmDialogModel";
 import { Notice } from "@/components/common/Notice";
 import { ProgressBar } from "@/components/common/ProgressBar";
@@ -18,13 +18,24 @@ import {
   confirmExportFlow,
   runExportFlow,
 } from "@/components/layout/exportFlowController";
-import { useExportStore } from "@/features/export";
+import {
+  useExportOutputActionStore,
+  useExportStore,
+  type ExportOutputAction,
+} from "@/features/export";
 import { openMediaFileDialog } from "@/features/media";
 import { useSettingsStore } from "@/features/settings";
 import { getResolvedLanguage } from "@/i18n";
+import { isMacOS } from "@/lib/platform";
 import { ExportSetup } from "./ExportSetup";
 import { resolveExportDismissal } from "./exportCancelState";
 import { presentExportOutcome } from "./exportErrorPresenter";
+import {
+  elapsedAtFinish,
+  outputActionErrorKey,
+  presentFinishedExport,
+  revealLabelKey,
+} from "./exportFinishedPresenter";
 import { formatRemaining, presentExportProgress } from "./exportProgressPresenter";
 import { presentSetupBlocker, resolveSetupPresetId } from "./exportSetupPresenter";
 import {
@@ -210,22 +221,36 @@ export function ExportDialog({
   // so it is a ref and a change does not render the dialog again. This component stays
   // mounted while the dialog is hidden (ADR 025), so it sees every status change.
   const exportStartedAtRef = useRef<number | null>(null);
+  // The time the last export took, taken when its status became `finished`, or null. The
+  // finished panel shows it.
+  const [finishedElapsedMs, setFinishedElapsedMs] = useState<number | null>(null);
+  // The primary action of the finished panel. It takes the focus when that panel shows.
+  const doneButtonRef = useRef<HTMLButtonElement>(null);
   const stopNoteId = useId();
+  // Done names the result and a Show or Open error as its description.
+  const finishedNoticeId = useId();
+  const outputErrorId = useId();
 
   const status = useExportStore((state) => state.status);
   const runId = useExportStore((state) => state.runId);
+  const outputPath = useExportStore((state) => state.outputPath);
   const cancelRequested = useExportStore((state) => state.cancelRequested);
   const error = useExportStore((state) => state.error);
   const cancelExport = useExportStore((state) => state.cancelExport);
   const reset = useExportStore((state) => state.reset);
 
+  const outputActionPending = useExportOutputActionStore((state) => state.pending);
+  const outputActionFailure = useExportOutputActionStore((state) => state.failure);
+  const runOutputAction = useExportOutputActionStore((state) => state.run);
+
   useEffect(() => {
-    const startedAt = trackExportStart(
-      exportStartedAtRef.current,
-      status,
-      performance.now(),
-    );
+    const now = performance.now();
+    const previousStartedAt = exportStartedAtRef.current;
+    const startedAt = trackExportStart(previousStartedAt, status, now);
     exportStartedAtRef.current = startedAt;
+    // The change to `finished` clears the recorded start, so the time the export took is
+    // taken here, from the start that this change clears. No protocol field carries it.
+    setFinishedElapsedMs(elapsedAtFinish(previousStartedAt, status, now));
     // An armed state belongs to one run. When the run is no longer active, clear it, so a
     // later run can never start with the confirmation label from this one.
     if (startedAt === null) {
@@ -258,6 +283,14 @@ export function ExportDialog({
       window.removeEventListener("focus", refresh);
     };
   }, [stopArmedAt]);
+
+  // The finished panel replaces the footer of the run, so the button that had the focus is
+  // gone. Done takes the focus, as the default button of the result.
+  useEffect(() => {
+    if (open && status === "finished") {
+      doneButtonRef.current?.focus();
+    }
+  }, [open, status]);
 
   const settings = useSettingsStore((state) => state.settings);
   const effectivePresetId = resolveSetupPresetId(settings, requestedPresetId);
@@ -296,7 +329,29 @@ export function ExportDialog({
     setRequestedPresetId(null);
     setChoosingDestination(false);
     setStopArmedAt(null);
+    // The reset changes the run id, and that change clears the Show and Open state
+    // (`bindOutputActionsToExportRun`).
     reset();
+  };
+
+  // The state of Show and Open shows only for the run that it names.
+  const outputFailure =
+    outputActionFailure !== null && outputActionFailure.runId === runId
+      ? outputActionFailure
+      : null;
+  const busyOutputAction =
+    outputActionPending !== null && outputActionPending.runId === runId
+      ? outputActionPending.action
+      : null;
+  const canActOnOutput = runId !== null && outputPath !== null;
+
+  // The store ignores a second request for the run while one is in flight. The busy button
+  // stays enabled, with `aria-busy`, so it keeps the focus.
+  const handleOutputAction = (action: ExportOutputAction) => {
+    if (runId === null) {
+      return;
+    }
+    void runOutputAction(action, runId);
   };
 
   const dismiss = () => {
@@ -412,14 +467,62 @@ export function ExportDialog({
       case "publishing":
         return <ExportProgress />;
 
-      case "finished":
+      case "finished": {
+        const finished = presentFinishedExport(outputPath, finishedElapsedMs);
+        let location: string | null = null;
+        if (finished?.folderName) {
+          location =
+            finished.elapsed !== null
+              ? t("export.finished.folderAndElapsed", {
+                  folder: finished.folderName,
+                  elapsed: finished.elapsed,
+                })
+              : t("export.finished.folder", { folder: finished.folderName });
+        }
+        // `min-w-0` lets this grid item shrink below the width of the file name, so the name
+        // truncates instead of widening the dialog.
         return (
-          <div className="py-2">
-            <Notice tone="success" role="status">
-              {t("export.status.finished")}
+          <div className="min-w-0 space-y-2 py-2">
+            <Notice
+              id={finishedNoticeId}
+              tone="success"
+              role="status"
+              icon={CircleCheck}
+            >
+              <p className="font-medium">{t("export.finished.title")}</p>
+              {finished && (
+                // The stem truncates and the extension stays visible, as in the title bar.
+                <p
+                  className="mt-1 flex min-w-0 text-sm font-medium text-foreground"
+                  title={finished.fullPath}
+                >
+                  <span className="truncate">{finished.fileStem}</span>
+                  <span className="shrink-0">{finished.fileExtension}</span>
+                </p>
+              )}
+              {location && (
+                <p className="truncate text-xs text-muted-foreground" title={location}>
+                  {location}
+                </p>
+              )}
             </Notice>
+            {outputFailure && (
+              <div
+                id={outputErrorId}
+                role="alert"
+                className="text-xs text-destructive-text"
+              >
+                <p>{t(outputActionErrorKey(outputFailure.error.code))}</p>
+                {outputFailure.error.detail && (
+                  <p className="mt-1 font-mono break-all select-text">
+                    {outputFailure.error.detail}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         );
+      }
 
       case "failed":
       case "canceled": {
@@ -456,7 +559,7 @@ export function ExportDialog({
                 )}
               </p>
               {outcome.detail && (
-                <pre className="mt-2 max-h-32 overflow-y-auto font-mono text-xs whitespace-pre-wrap opacity-80 select-text">
+                <pre className="mt-2 max-h-32 overflow-y-auto font-mono text-xs whitespace-pre-wrap select-text">
                   {outcome.detail}
                 </pre>
               )}
@@ -478,10 +581,14 @@ export function ExportDialog({
           // tooltip opens on every focus that no pointer press on its trigger started, so the
           // tooltip would show on each open, and the first Escape would close the tooltip and
           // not the dialog. The dialog takes the focus instead, and Tab reaches the close
-          // button first.
+          // button first. A finished run gives the focus to Done, its default button.
           event.preventDefault();
-          if (event.currentTarget instanceof HTMLElement) {
-            event.currentTarget.focus();
+          const target =
+            status === "finished" && doneButtonRef.current
+              ? doneButtonRef.current
+              : event.currentTarget;
+          if (target instanceof HTMLElement) {
+            target.focus();
           }
         }}
       >
@@ -573,6 +680,50 @@ export function ExportDialog({
                 {t(stopView.labelKey)}
               </Button>
               <Button onClick={hideDialog}>{t("export.action.runInBackground")}</Button>
+            </>
+          ) : status === "finished" ? (
+            <>
+              {canActOnOutput && (
+                <>
+                  <Button
+                    variant="outline"
+                    aria-busy={busyOutputAction === "reveal" || undefined}
+                    onClick={() => handleOutputAction("reveal")}
+                  >
+                    {busyOutputAction === "reveal" && (
+                      <Loader2
+                        aria-hidden="true"
+                        className="animate-spin motion-reduce:animate-none"
+                      />
+                    )}
+                    {t(revealLabelKey(isMacOS()))}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    aria-busy={busyOutputAction === "open" || undefined}
+                    onClick={() => handleOutputAction("open")}
+                  >
+                    {busyOutputAction === "open" && (
+                      <Loader2
+                        aria-hidden="true"
+                        className="animate-spin motion-reduce:animate-none"
+                      />
+                    )}
+                    {t("export.action.open")}
+                  </Button>
+                </>
+              )}
+              <Button
+                ref={doneButtonRef}
+                aria-describedby={
+                  outputFailure
+                    ? `${finishedNoticeId} ${outputErrorId}`
+                    : finishedNoticeId
+                }
+                onClick={closeAndReset}
+              >
+                {t("export.action.done")}
+              </Button>
             </>
           ) : (
             <Button variant="outline" onClick={closeAndReset}>

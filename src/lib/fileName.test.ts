@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitFileName } from "./fileName";
+import { splitFilePath, splitFileName } from "./fileName";
 
 describe("splitFileName", () => {
   it.each([
@@ -30,5 +30,74 @@ describe("splitFileName", () => {
       const { stem, extension } = splitFileName(name);
       expect(stem + extension).toBe(name);
     }
+  });
+});
+
+describe("splitFilePath", () => {
+  it("splits a macOS path into the file name and its folder", () => {
+    expect(splitFilePath("/Users/me/Movies/clip-final.mp4")).toEqual({
+      name: "clip-final.mp4",
+      folderName: "Movies",
+    });
+  });
+
+  it("keeps a backslash inside a macOS file name", () => {
+    expect(splitFilePath("/Users/me/Movies/a\\b.mp4")).toEqual({
+      name: "a\\b.mp4",
+      folderName: "Movies",
+    });
+  });
+
+  it("gives the root as the folder of a file in the POSIX root", () => {
+    expect(splitFilePath("/out.mp4")).toEqual({ name: "out.mp4", folderName: "/" });
+  });
+
+  it("splits a Windows path on the backslash", () => {
+    expect(splitFilePath("C:\\Users\\me\\Videos\\output.mkv")).toEqual({
+      name: "output.mkv",
+      folderName: "Videos",
+    });
+  });
+
+  it("splits a Windows path that uses forward slashes", () => {
+    expect(splitFilePath("D:/exports/final.mp4")).toEqual({
+      name: "final.mp4",
+      folderName: "exports",
+    });
+  });
+
+  it("gives the drive root as the folder of a file at the top of a drive", () => {
+    expect(splitFilePath("C:\\out.mp4")).toEqual({
+      name: "out.mp4",
+      folderName: "C:\\",
+    });
+  });
+
+  it("gives the share as the folder of a file at the top of a UNC share", () => {
+    expect(splitFilePath("\\\\server\\share\\out.mp4")).toEqual({
+      name: "out.mp4",
+      folderName: "share",
+    });
+  });
+
+  it("skips doubled and trailing separators", () => {
+    expect(splitFilePath("/Users/me//Movies/out.mp4/")).toEqual({
+      name: "out.mp4",
+      folderName: "Movies",
+    });
+    expect(splitFilePath("C:\\Videos\\\\out.mp4\\")).toEqual({
+      name: "out.mp4",
+      folderName: "Videos",
+    });
+  });
+
+  it("names no folder for a bare file name", () => {
+    expect(splitFilePath("out.mp4")).toEqual({ name: "out.mp4", folderName: null });
+  });
+
+  it("gives null for a path with no segment", () => {
+    expect(splitFilePath("")).toBeNull();
+    expect(splitFilePath("/")).toBeNull();
+    expect(splitFilePath("\\\\")).toBeNull();
   });
 });

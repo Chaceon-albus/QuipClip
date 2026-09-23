@@ -30,7 +30,11 @@ describe("outputNameOf", () => {
     expect(outputNameOf("\\")).toBeNull();
     expect(outputNameOf("///")).toBeNull();
     expect(outputNameOf("\\\\\\")).toBeNull();
-    expect(outputNameOf("/\\//")).toBeNull();
+  });
+
+  it("keeps a backslash in the name of a POSIX path, as the finished panel does", () => {
+    expect(outputNameOf("/Users/me/Movies/a\\b.mp4")).toBe("a\\b.mp4");
+    expect(outputNameOf("/\\//")).toBe("\\");
   });
 
   it("extracts the last segment of a POSIX path", () => {

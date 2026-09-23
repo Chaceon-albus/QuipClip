@@ -5,6 +5,7 @@
  * The indicator is hidden when the export dialog is open or when status is idle.
  */
 
+import { splitFilePath } from "@/lib/fileName";
 import {
   presentExportProgress,
   type ExportProgressInput,
@@ -20,16 +21,15 @@ export type ExportIndicatorView =
   | { kind: "active"; progress: ExportProgressView; outputName: string | null }
   | { kind: "finished" | "failed" | "canceled"; outputName: string | null };
 
-/** The last path segment, split on "/" and "\\". Null for null or an empty result. */
+/**
+ * The file name of an output path, by the rule of `splitFilePath`, which the finished export
+ * panel also uses. Null for null or a path with no segment.
+ */
 export function outputNameOf(path: string | null): string | null {
   if (path === null) {
     return null;
   }
-  const segments = path.split(/[/\\]/).filter((segment) => segment.length > 0);
-  if (segments.length === 0) {
-    return null;
-  }
-  return segments[segments.length - 1] ?? null;
+  return splitFilePath(path)?.name ?? null;
 }
 
 /** Null when the panel is open or the status is idle (ADR 025). */
