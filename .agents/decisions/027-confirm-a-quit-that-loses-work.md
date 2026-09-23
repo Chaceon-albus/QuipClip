@@ -41,7 +41,8 @@ Every way to close goes through the same frontend decision.
 2. **The application quit.** On macOS the default Quit item sends `terminate:`. With tauri
    2.11 and tao 0.35 that raises only `RunEvent::Exit`, which cannot be prevented, and not
    `ExitRequested`. The application therefore supplies its own macOS menu: the default
-   menu, with the Quit item replaced by an item on `Cmd+Q` that calls `exit(0)`. That call
+   menu, with the Quit item replaced by an item on `Cmd+Q` that calls `exit(0)`, and with
+   the Show All item that the default menu leaves out. The `exit(0)` call
    raises `ExitRequested`. While a window is open and the quit is not confirmed, Rust calls
    `prevent_exit` and sends an event to the frontend. The frontend then runs the decision.
 3. **The decision.** If nothing would be lost, the frontend calls the `confirm_quit`
@@ -55,7 +56,8 @@ When no window is open, Rust never prevents the exit. The frontend could not ans
 
 The Dock Quit, a logout and the Windows end of session still raise only `RunEvent::Exit`.
 No dialog can run there. The handler of `RunEvent::Exit` therefore also cancels the export
-and waits its bounded time, as ADR 017 does. The cancel is safe to run twice.
+and waits, as ADR 017 does. Both handlers share one deadline, so an exit that passes
+through both still waits at most 5 seconds in total.
 
 ### Replacing the open video
 
