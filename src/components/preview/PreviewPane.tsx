@@ -8,11 +8,14 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { AlertCircle, Loader2 } from "lucide-react";
+import { AlertCircle, Film, Loader2 } from "lucide-react";
+import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
+import { Button } from "@/components/ui/button";
 import {
   getSourceRevisionKey,
   mediaStore,
   useMediaStore,
+  VIDEO_FILE_EXTENSIONS,
   type ImportMediaResult,
 } from "@/features/media";
 import {
@@ -22,7 +25,9 @@ import {
   usePlaybackStore,
   type PlaybackSource,
 } from "@/features/playback";
+import { cn } from "@/lib/utils";
 import type { Pts, Rational } from "@/types/project";
+import { formatSupportedVideoFormats } from "./previewEmptyState";
 import {
   createSourceLifecycleGuard,
   formatPreviewCurrentTime,
@@ -45,6 +50,10 @@ const {
   syncEnded,
   reset: resetPlayback,
 } = playbackStore.getState();
+
+// The format names in the empty state come from the list the file dialog filters on, so the
+// two cannot disagree.
+const SUPPORTED_VIDEO_FORMATS = formatSupportedVideoFormats(VIDEO_FILE_EXTENSIONS);
 
 /**
  * Builds the timing descriptor the playback store attaches, or null when no media is open.
@@ -112,6 +121,7 @@ export function PreviewPane() {
   const status = useMediaStore((s) => s.status);
   const media = useMediaStore((s) => s.media);
   const error = useMediaStore((s) => s.error);
+  const openMedia = useOpenMediaAction();
 
   const playbackError = usePlaybackStore((s) => s.error);
   const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
@@ -327,7 +337,13 @@ export function PreviewPane() {
     <section className="dark flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground scheme-dark select-none">
       {/* 16:9 Video Canvas Surface */}
       <div className="relative flex min-h-0 flex-1 items-center justify-center">
-        <div className="relative flex aspect-video h-full max-h-full w-auto max-w-full items-center justify-center overflow-hidden rounded-lg border border-preview-border bg-preview-surface shadow-xs">
+        {/* The frame takes a dashed border while it is empty, so it reads as a placeholder. */}
+        <div
+          className={cn(
+            "relative flex aspect-video h-full max-h-full w-auto max-w-full items-center justify-center overflow-hidden rounded-lg border border-preview-border bg-preview-surface shadow-xs",
+            !media && status === "idle" && "border-dashed",
+          )}
+        >
           {media ? (
             <>
               {/* Loaded Video Surface: Preserved during replacements or error states */}
@@ -500,10 +516,20 @@ export function PreviewPane() {
                 </div>
               )}
 
+              {/* Empty state: it says what to do and offers the File menu's Open Media action. */}
               {status === "idle" && (
-                <span className="text-xs text-preview-muted">
-                  {t("preview.noMedia")}
-                </span>
+                <div className="flex flex-col items-center gap-3 p-4 text-center">
+                  <div className="grid size-12 place-items-center rounded-xl border border-preview-border bg-preview-background text-preview-muted">
+                    <Film className="size-6" />
+                  </div>
+                  <h2 className="text-sm font-medium text-preview-foreground">
+                    {t("preview.empty.title")}
+                  </h2>
+                  <Button onClick={openMedia}>{t("preview.empty.openVideo")}</Button>
+                  <p className="text-xs text-preview-muted">
+                    {SUPPORTED_VIDEO_FORMATS}
+                  </p>
+                </div>
               )}
             </>
           )}

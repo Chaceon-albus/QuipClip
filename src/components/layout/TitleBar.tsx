@@ -11,9 +11,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
+import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { ExportDialog } from "@/components/export/ExportDialog";
 import { useExportPanelStore } from "@/features/export";
-import { openMediaFileDialog, useMediaStore } from "@/features/media";
+import { useMediaStore } from "@/features/media";
 import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { runExportFlow } from "./exportFlowController";
@@ -27,11 +28,8 @@ export function TitleBar() {
   const exportDialogOpen = useExportPanelStore((state) => state.open);
   const setExportDialogOpen = useExportPanelStore((state) => state.setOpen);
 
-  const handleOpenMedia = () => {
-    void openMediaFileDialog({
-      filterName: t("dialog.videoFilter"),
-    });
-  };
+  // The empty preview offers the same action through its Open button.
+  const handleOpenMedia = useOpenMediaAction();
 
   const handleExport = () => {
     void runExportFlow({

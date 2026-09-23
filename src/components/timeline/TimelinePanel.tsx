@@ -60,6 +60,7 @@ export interface TimelinePanelProps {
 }
 
 const selectMedia = (state: MediaStoreState) => state.media;
+const selectMediaStatus = (state: MediaStoreState) => state.status;
 const selectPresentedFrame = (state: PlaybackStoreState) => state.presentedFrame;
 const selectCalibrationStatus = (state: PlaybackStoreState) => state.calibrationStatus;
 const selectApproximateBrowserTimeSeconds = (state: PlaybackStoreState) =>
@@ -100,6 +101,7 @@ export function TimelinePanel({
 }: TimelinePanelProps = {}) {
   const { t } = useTranslation();
   const media = useMediaStore(selectMedia);
+  const mediaStatus = useMediaStore(selectMediaStatus);
   const presentedFrame = usePlaybackStore(selectPresentedFrame);
   const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
   const approximateBrowserTimeSeconds = usePlaybackStore(
@@ -666,6 +668,17 @@ export function TimelinePanel({
               </div>
 
               {/*
+               * An open source with no extent (ADR 007, step 4) has no ticks, no playhead
+               * and no click-to-seek. The note says why, in the place the ticks would be.
+               * It uses the same condition that hides the playhead.
+               */}
+              {media && isIndeterminate && (
+                <div className="pointer-events-none absolute inset-0 flex items-center px-2 text-2xs text-muted-foreground">
+                  {t("timeline.durationUnknown")}
+                </div>
+              )}
+
+              {/*
                * Pending In flag. One edge of the flag lies on the In boundary, the same
                * edge as the bracket in the track. The flag extends to the right of it, or
                * to the left of it when it does not fit before the end of the lane (see
@@ -900,10 +913,27 @@ export function TimelinePanel({
                     </div>
                   )}
                 </div>
+              ) : mediaStatus === "loading" ? (
+                /*
+                 * The first import is in progress. A pulsing bar takes the rectangle of the
+                 * source bar that replaces it. The preview announces the load, so the bar
+                 * is hidden from assistive technology. The track hover colour stands apart
+                 * from the track in both themes. The ruler colour does not: in the dark
+                 * theme it is only a little darker than the track, and the bar almost
+                 * disappears.
+                 */
+                <div
+                  aria-hidden="true"
+                  className="absolute inset-x-0 inset-y-2 animate-pulse rounded-lg bg-timeline-track-hover motion-reduce:animate-none"
+                />
               ) : (
-                /* Localized empty prompt */
-                <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
-                  {t("timeline.emptyPrompt")}
+                /*
+                 * Empty track. The dashed outline takes the rectangle of the source bar.
+                 * The message is smaller than the preview's empty state, which carries the
+                 * call to action, so the two do not compete.
+                 */
+                <div className="absolute inset-x-0 inset-y-2 flex items-center justify-center rounded-lg border border-dashed border-timeline-divider text-xs text-muted-foreground">
+                  {t("timeline.emptyHint")}
                 </div>
               )}
             </div>

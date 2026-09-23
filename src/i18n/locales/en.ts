@@ -35,7 +35,10 @@ export const en = {
     videoFilter: "Video Files",
   },
   preview: {
-    noMedia: "No media loaded",
+    empty: {
+      title: "Open a video to start marking segments",
+      openVideo: "Open Video...",
+    },
     loading: "Loading media...",
     videoPlayerLabel: "Video preview for {{fileName}}",
     decodeError: "Native playback failed. A proxy is required to preview this format.",
@@ -66,7 +69,8 @@ export const en = {
     },
   },
   timeline: {
-    emptyPrompt: "Open a video file to view the timeline",
+    emptyHint: "Marked segments appear here.",
+    durationUnknown: "Duration unknown — seeking is unavailable",
     sourceLane: "Source Media",
     playhead: "Playhead",
     seekSlider: "Timeline seek",

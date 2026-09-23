@@ -1354,7 +1354,10 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("window.close")).toBe("Close");
 
     // PreviewPane
-    expect(instance.t("preview.noMedia")).toBe("No media loaded");
+    expect(instance.t("preview.empty.title")).toBe(
+      "Open a video to start marking segments",
+    );
+    expect(instance.t("preview.empty.openVideo")).toBe("Open Video...");
 
     // TransportBar
     expect(instance.t("transport.action.undo")).toBe("Undo");
@@ -1385,6 +1388,10 @@ describe("application shell localization and status bar formatting", () => {
 
     // TimelinePanel
     expect(instance.t("timeline.sourceLane")).toBe("Source Media");
+    expect(instance.t("timeline.emptyHint")).toBe("Marked segments appear here.");
+    expect(instance.t("timeline.durationUnknown")).toBe(
+      "Duration unknown — seeking is unavailable",
+    );
 
     // Settings: FFmpeg location
     expect(instance.t("settings.ffmpeg.section")).toBe("FFmpeg Location");
@@ -1491,7 +1498,8 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("window.close")).toBe("关闭");
 
     // PreviewPane
-    expect(instance.t("preview.noMedia")).toBe("未加载媒体");
+    expect(instance.t("preview.empty.title")).toBe("打开视频，开始标记片段");
+    expect(instance.t("preview.empty.openVideo")).toBe("打开视频...");
 
     // TransportBar
     expect(instance.t("transport.action.undo")).toBe("撤销");
@@ -1518,6 +1526,8 @@ describe("application shell localization and status bar formatting", () => {
 
     // TimelinePanel
     expect(instance.t("timeline.sourceLane")).toBe("源媒体");
+    expect(instance.t("timeline.emptyHint")).toBe("标记的片段会显示在这里。");
+    expect(instance.t("timeline.durationUnknown")).toBe("无法确定时长，暂不可定位");
 
     // Settings: FFmpeg location
     expect(instance.t("settings.ffmpeg.section")).toBe("FFmpeg 位置");

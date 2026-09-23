@@ -38,7 +38,10 @@ export const zhCN: TranslationCatalog = {
     videoFilter: "视频文件",
   },
   preview: {
-    noMedia: "未加载媒体",
+    empty: {
+      title: "打开视频，开始标记片段",
+      openVideo: "打开视频...",
+    },
     loading: "正在加载媒体...",
     videoPlayerLabel: "视频预览：{{fileName}}",
     decodeError: "原生播放失败，预览此格式需要生成代理文件。",
@@ -69,7 +72,8 @@ export const zhCN: TranslationCatalog = {
     },
   },
   timeline: {
-    emptyPrompt: "打开视频文件以查看时间轴",
+    emptyHint: "标记的片段会显示在这里。",
+    durationUnknown: "无法确定时长，暂不可定位",
     sourceLane: "源媒体",
     playhead: "播放头",
     seekSlider: "时间轴定位",
