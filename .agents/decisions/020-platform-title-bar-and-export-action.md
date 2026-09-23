@@ -85,3 +85,11 @@ decision, as a private function, and no unit test covered it.
 - The title bar is the drag surface of the window. Every control added to it must
   take its own clicks. If a control does not, the user drags the window instead
   of operating the control.
+- (Added on 2026-09-23.) The centre of the title bar shows the open file name, with the
+  extension kept when the name is cut, and the number of segments. With no media, macOS
+  shows a muted "QuipClip" and Windows shows nothing, because its left area already names
+  the application. The native window title follows the file as "<file> — QuipClip", so
+  Mission Control, the Window menu, the task bar and Alt+Tab name the file, although no
+  platform draws that title in the window. This needs the `core:window:allow-set-title`
+  permission. The full path is in a hover tooltip only, because a focusable title would
+  stop the window drag.
