@@ -1,9 +1,13 @@
 /**
  * Pure export flow controller for QuipClip layout.
  *
- * Coordinates checking running export state, resolving settings with container
- * extension, opening the save dialog, assembling the export request from media
- * and timeline store states, and dispatching export initiation or reporting errors.
+ * Implements the two-step export flow per ADR 024:
+ * 1. Open step (`run`): checks active export status, resets terminal store states,
+ *    verifies media presence, validates that marked segments exist for the active source,
+ *    and runs the source disk revision check before opening the modal at the setup step.
+ * 2. Start step (`confirm`): validates the chosen preset, opens the native save dialog
+ *    with that preset's container extension, builds the export request, starts export rendering,
+ *    and updates activePresetId in settings if the preset changed.
  */
 
 import {
@@ -24,6 +28,7 @@ import {
   type MediaSourceRevisionDescriptor,
 } from "@/features/media";
 import { settingsStore } from "@/features/settings";
+import { setActivePreset } from "@/features/settings/presetDocument";
 import type { Settings } from "@/features/settings/types";
 import { timelineStore } from "@/features/timeline";
 import type { Segment } from "@/types/project";
@@ -119,10 +124,21 @@ export interface ExportFlowControllerOptions {
    * Request assembler function. Defaults to `buildExportRequest`.
    */
   buildRequest?: typeof buildExportRequest;
+
+  /**
+   * Resets the export store back to idle state. Defaults to `exportStore.getState().reset`.
+   */
+  reset?: () => void;
+
+  /**
+   * Asynchronous settings saver. Defaults to the store's `saveSettings` action to preserve
+   * write queue serialization. Never defaults to raw IPC saveSettings (ADR 013, ADR 024).
+   */
+  saveSettings?: (settings: Settings) => Promise<unknown>;
 }
 
 /**
- * Controller orchestrating the full export flow.
+ * Controller orchestrating the two-step export flow (ADR 024).
  */
 export class ExportFlowController {
   private readonly setModalOpen: (open: boolean) => void;
@@ -145,6 +161,8 @@ export class ExportFlowController {
   ) => Promise<ExportStart | null>;
   private readonly reportErrorFn: (error: unknown) => void;
   private readonly buildRequestFn: typeof buildExportRequest;
+  private readonly resetFn: () => void;
+  private readonly saveSettingsFn: (settings: Settings) => Promise<unknown>;
 
   constructor(options: ExportFlowControllerOptions) {
     this.setModalOpen = options.setModalOpen;
@@ -168,25 +186,26 @@ export class ExportFlowController {
     this.reportErrorFn =
       options.reportError ?? ((err) => exportStore.getState().reportError(err));
     this.buildRequestFn = options.buildRequest ?? buildExportRequest;
+    this.resetFn = options.reset ?? (() => exportStore.getState().reset());
+    this.saveSettingsFn =
+      options.saveSettings ??
+      ((settings) => settingsStore.getState().saveSettings(settings));
   }
 
   /**
-   * Executes the export flow.
+   * Executes the OPEN step of the export flow (ADR 024).
    *
-   * 1. If an export is already preparing, running, or publishing, re-opens modal immediately.
-   * 2. Resolves current settings, awaiting loadSettings if absent and re-reading the STORE afterwards.
-   * 2a. Reads the active source id and the segments, then, if any segment is marked against
-   *    that source, stats the source file and compares its revision against the one those
-   *    segments were marked against. On a mismatch it raises the `sourceRevisionChanged`
-   *    confirmation and stops. This runs BEFORE the save dialog, so the user is never asked to
-   *    name a file for an export that may then be refused.
-   * 3. Opens native save dialog with preset container and filterName.
-   * 4. If save dialog returns null, checks store status: if "failed", re-opens modal with dialogFailed;
-   *    if not failed (cancel), leaves modal closed and reports nothing.
-   * 5. Builds ExportRequest using timeline store's active sourceId and segments in array order.
-   * 6. If request is null: reports "noSegments" (if media loaded) or "sourceNotFound" (if no media),
-   *    and opens modal so the error is displayed.
-   * 7. On good path: opens modal and starts export.
+   * 1. If an export is already preparing, running, or publishing, re-opens modal immediately and returns false.
+   * 2. If the export store is in a terminal state (finished, failed, or canceled), resets it so the dialog
+   *    can display the setup step.
+   * 3. Resolves current settings, awaiting loadSettings if absent.
+   * 4. If no media is loaded, reports `sourceNotFound`, opens the modal, and returns false.
+   * 5. If no segment has the active source id, reports `noSegments`, opens the modal, and returns false.
+   *    This check runs ahead of the setup step and save dialog.
+   * 6. Stats the source file and compares its revision against the one segments were marked against.
+   *    On a mismatch, reports `sourceRevisionChanged` confirmation, opens the modal, and returns false.
+   * 7. On good path: calls `setModalOpen(true)` with the store at `idle` and returns true.
+   *    It must NOT open the save dialog.
    */
   async run(): Promise<boolean> {
     const currentStatus = this.getExportStatusFn();
@@ -199,20 +218,37 @@ export class ExportFlowController {
       return false;
     }
 
-    let settings = this.getSettingsFn();
-    if (!settings) {
-      await this.loadSettingsFn();
-      settings = this.getSettingsFn();
+    if (
+      currentStatus === "finished" ||
+      currentStatus === "failed" ||
+      currentStatus === "canceled"
+    ) {
+      this.resetFn();
     }
 
-    const activePreset = settings?.presets.find(
-      (preset) => preset.id === settings?.activePresetId,
-    );
-    const container = activePreset?.container ?? "mp4";
+    if (!this.getSettingsFn()) {
+      await this.loadSettingsFn();
+    }
 
     const media = this.getMediaFn();
+    if (!media) {
+      this.reportErrorFn(new ExportError({ code: "sourceNotFound" }));
+      this.setModalOpen(true);
+      return false;
+    }
+
     const activeSourceId = this.getSourceIdFn();
     const segments = this.getSegmentsFn();
+
+    // The same match buildExportRequest and sourceRevisionStillMatches use
+    if (
+      !activeSourceId ||
+      !segments.some((segment) => segment.sourceId === activeSourceId)
+    ) {
+      this.reportErrorFn(new ExportError({ code: "noSegments" }));
+      this.setModalOpen(true);
+      return false;
+    }
 
     if (!(await this.sourceRevisionStillMatches(media, activeSourceId, segments))) {
       // A confirmation, not a terminal failure. The dialog offers Export anyway, Re-import,
@@ -222,14 +258,46 @@ export class ExportFlowController {
       return false;
     }
 
+    this.setModalOpen(true);
+    return true;
+  }
+
+  /**
+   * Executes the START step of the export flow (ADR 024).
+   *
+   * 1. Reads settings through `getSettings` and finds the preset by id.
+   *    When missing, reports `presetNotFound` and returns false.
+   * 2. Opens the native save dialog with that preset's `container` and default name
+   *    `<source name>_export.<container>`.
+   * 3. When the save dialog throws, reports `dialogFailed`, keeps the modal open, and returns false.
+   * 4. When the user cancels (the dialog returns null), returns false and changes nothing (the dialog
+   *    stays on the setup step).
+   * 5. Re-reads media, segments, and the active source id, and builds the request with `presetId`.
+   *    A null request reports `noSegments` or `sourceNotFound`.
+   * 6. Calls `setModalOpen(true)` and `startExport(request)` without awaiting it.
+   * 7. Re-reads settings. When non-null and still containing `presetId` where
+   *    `presetId !== settings.activePresetId`, persists the choice via `saveSettings`.
+   *    The save is fire-and-forget; rejections are caught and ignored (ADR 024).
+   * 8. Returns true.
+   */
+  async confirm(presetId: string): Promise<boolean> {
+    const settings = this.getSettingsFn();
+    const preset = settings?.presets.find((p) => p.id === presetId);
+    if (!settings || !preset) {
+      this.reportErrorFn(new ExportError({ code: "presetNotFound" }));
+      this.setModalOpen(true);
+      return false;
+    }
+
+    const media = this.getMediaFn();
     const defaultName = media?.fileName
-      ? `${media.fileName.replace(/\.[^/.]+$/, "")}_export.${container}`
+      ? `${media.fileName.replace(/\.[^/.]+$/, "")}_export.${preset.container}`
       : undefined;
 
     let outputPath: string | null;
     try {
       outputPath = await this.openSaveDialogFn({
-        container,
+        container: preset.container,
         filterName: this.filterName,
         defaultName,
       });
@@ -242,25 +310,28 @@ export class ExportFlowController {
     }
 
     if (!outputPath) {
-      // BLOCKING 3: Distinguish cancel from failure.
-      // A cancel leaves status untouched (e.g. "idle"); a dialog failure leaves status "failed".
+      // If openExportSaveDialog failed and reported to the store, ensure modal shows it;
+      // otherwise on cancel leave modal as-is on the setup step.
       if (this.getExportStatusFn() === "failed") {
         this.setModalOpen(true);
       }
       return false;
     }
 
+    const currentMedia = this.getMediaFn();
+    const currentSegments = this.getSegmentsFn();
+    const currentSourceId = this.getSourceIdFn();
+
     const request = this.buildRequestFn({
-      media,
+      media: currentMedia,
       outputPath,
-      segments,
-      activeSourceId,
-      presetId: settings?.activePresetId,
+      segments: currentSegments,
+      activeSourceId: currentSourceId,
+      presetId,
     });
 
     if (!request) {
-      // BLOCKING 1: Report rejected request rather than silent no-op.
-      const code: ExportErrorCode = media ? "noSegments" : "sourceNotFound";
+      const code: ExportErrorCode = currentMedia ? "noSegments" : "sourceNotFound";
       this.reportErrorFn(new ExportError({ code }));
       this.setModalOpen(true);
       return false;
@@ -268,6 +339,19 @@ export class ExportFlowController {
 
     this.setModalOpen(true);
     void this.startExportFn(request);
+
+    const freshSettings = this.getSettingsFn();
+    if (
+      freshSettings &&
+      freshSettings.presets.some((p) => p.id === presetId) &&
+      presetId !== freshSettings.activePresetId
+    ) {
+      // Keep the catch because an injected saver can reject without failing the export.
+      void this.saveSettingsFn(setActivePreset(freshSettings, presetId)).catch(
+        () => {},
+      );
+    }
+
     return true;
   }
 
@@ -323,8 +407,18 @@ export function createExportFlowController(
 }
 
 /**
- * Convenience helper to run the export flow end-to-end.
+ * Convenience helper to run the export flow OPEN step.
  */
 export function runExportFlow(options: ExportFlowControllerOptions): Promise<boolean> {
   return new ExportFlowController(options).run();
+}
+
+/**
+ * Convenience helper to run the export flow START step with a chosen preset.
+ */
+export function confirmExportFlow(
+  options: ExportFlowControllerOptions,
+  presetId: string,
+): Promise<boolean> {
+  return new ExportFlowController(options).confirm(presetId);
 }

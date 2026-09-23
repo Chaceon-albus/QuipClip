@@ -289,6 +289,19 @@ export const zhCN: TranslationCatalog = {
   },
   export: {
     title: "导出视频",
+    setup: {
+      presetLabel: "预设",
+      qualityLabel: "质量",
+      value: "{{value}}",
+      qualityCrf: "CRF {{value}}",
+      qualityBitrate: "{{value}} kbps",
+      qualityScale: "质量系数 {{value}}",
+      audioBitrateLossless: "无损",
+      resolutionValue: "{{width}} × {{height}}",
+      frameRateValue: "{{value}} fps",
+      noPresets: "暂无导出预设。请在设置中添加。",
+      settingsErrorHint: "请打开“设置”修复或重置设置文件。",
+    },
     status: {
       preparing: "正在准备导出...",
       running: "正在导出...",
@@ -301,6 +314,7 @@ export const zhCN: TranslationCatalog = {
       cancelingNotePublishing: "导出已进入完成阶段，取消无法阻止生成输出文件。",
     },
     action: {
+      chooseDestination: "导出…",
       exportAnyway: "仍然导出",
       reimport: "重新导入",
     },

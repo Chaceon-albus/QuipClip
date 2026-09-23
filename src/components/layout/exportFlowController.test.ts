@@ -1,14 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  confirmExportFlow,
   createExportFlowController,
   ExportFlowController,
   runExportFlow,
+  type MediaFlowDescriptor,
 } from "./exportFlowController";
 import type { ExportRequest } from "@/features/export";
 import type { MediaSourceRevisionDescriptor } from "@/features/media";
 import type { Preset, Settings } from "@/features/settings/types";
 import type { Pts, Segment } from "@/types/project";
-import type { MediaFlowDescriptor } from "./exportFlowController";
 
 /**
  * Builds the media facts the flow reads. `size` and `mtime` are part of the shape because the
@@ -78,508 +79,67 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
 }
 
 /**
- * Builds a settings document whose active preset is the supplied preset.
- *
- * `revision` is a distinctive non-zero value on purpose: this fixture stands for a document
- * loaded from disk, and zero is specifically what a document written before the field existed
- * reads as, so using it here would conflate the two cases.
+ * Builds a settings document whose active preset is the supplied preset or activePresetId.
  */
-function createSettings(preset: Preset): Settings {
+function createSettings(presets: Preset[], activePresetId?: string): Settings {
   return {
     schemaVersion: 1,
     revision: 7,
-    activePresetId: preset.id,
-    presets: [preset],
+    activePresetId: activePresetId ?? presets[0]?.id,
+    presets,
   };
 }
 
 describe("ExportFlowController", () => {
-  it("cancelling the save dialog never opens the modal and never reports an error", async () => {
-    const setModalOpen = vi.fn();
-    const reportError = vi.fn();
-    const startExport = vi.fn();
-    const openSaveDialog = vi.fn().mockResolvedValue(null);
-    // A cancel leaves the store status untouched.
-    const getExportStatus = vi.fn().mockReturnValue("idle" as const);
-    const media = createMedia("/path/to/video.mp4", "video.mp4");
-
-    const controller = createExportFlowController({
-      setModalOpen,
-      reportError,
-      startExport,
-      openSaveDialog,
-      getExportStatus,
-      filterName: "Video Files",
-      getSettings: () => createSettings(createPreset()),
-      getMedia: () => media,
-      readSourceRevision: createMatchingReader(media),
-    });
-
-    const result = await controller.run();
-
-    expect(result).toBe(false);
-    expect(openSaveDialog).toHaveBeenCalledOnce();
-    expect(setModalOpen).not.toHaveBeenCalled();
-    expect(reportError).not.toHaveBeenCalled();
-    expect(startExport).not.toHaveBeenCalled();
-  });
-
-  it("a save-dialog FAILURE that left the store failed opens the modal", async () => {
-    const setModalOpen = vi.fn();
-    const startExport = vi.fn();
-
-    // `openExportSaveDialog` never rethrows. It reports a dialogFailed ExportError to
-    // the store and answers null, which leaves the store status "failed".
-    let storeStatus: "idle" | "failed" = "idle";
-    const openSaveDialog = vi.fn().mockImplementation(() => {
-      storeStatus = "failed";
-      return Promise.resolve(null);
-    });
-    const media = createMedia("/path/to/video.mp4", "video.mp4");
-
-    const controller = new ExportFlowController({
-      setModalOpen,
-      startExport,
-      openSaveDialog,
-      getExportStatus: () => storeStatus,
-      filterName: "Video Files",
-      getSettings: () => createSettings(createPreset()),
-      getMedia: () => media,
-      readSourceRevision: createMatchingReader(media),
-    });
-
-    const result = await controller.run();
-
-    expect(result).toBe(false);
-    expect(openSaveDialog).toHaveBeenCalledOnce();
-    expect(setModalOpen).toHaveBeenCalledWith(true);
-    expect(startExport).not.toHaveBeenCalled();
-  });
-
-  it("a save-dialog that throws an unexpected error reports dialogFailed and opens the modal", async () => {
-    const setModalOpen = vi.fn();
-    const reportError = vi.fn();
-    const startExport = vi.fn();
-    const openSaveDialog = vi.fn().mockRejectedValue(new Error("Dialog crashed"));
-
-    const result = await runExportFlow({
-      setModalOpen,
-      reportError,
-      startExport,
-      openSaveDialog,
-      getExportStatus: () => "idle",
-      filterName: "Video Files",
-      getSettings: () => createSettings(createPreset()),
-    });
-
-    expect(result).toBe(false);
-    expect(reportError).toHaveBeenCalledWith(
-      expect.objectContaining({ code: "dialogFailed" }),
-    );
-    expect(setModalOpen).toHaveBeenCalledWith(true);
-    expect(startExport).not.toHaveBeenCalled();
-  });
-
-  it("a null request opens the modal carrying noSegments rather than vanishing", async () => {
-    const setModalOpen = vi.fn();
-    const reportError = vi.fn();
-    const startExport = vi.fn();
-    const openSaveDialog = vi.fn().mockResolvedValue("/path/to/export.mp4");
-
-    // Media is loaded, but the timeline holds no segment for the active source.
-    const media = createMedia("/media/sample.mp4", "sample.mp4");
-    const controller = createExportFlowController({
-      setModalOpen,
-      reportError,
-      startExport,
-      openSaveDialog,
-      getExportStatus: () => "idle",
-      getMedia: () => media,
-      readSourceRevision: createMatchingReader(media),
-      getSegments: () => [],
-      getSourceId: () => "source-1",
-      filterName: "Video Files",
-      getSettings: () => createSettings(createPreset()),
-    });
-
-    const result = await controller.run();
-
-    expect(result).toBe(false);
-    expect(openSaveDialog).toHaveBeenCalledOnce();
-    expect(reportError).toHaveBeenCalledWith(
-      expect.objectContaining({ code: "noSegments" }),
-    );
-    expect(setModalOpen).toHaveBeenCalledWith(true);
-    expect(startExport).not.toHaveBeenCalled();
-  });
-
-  it("a null request when media is absent opens the modal carrying sourceNotFound", async () => {
-    const setModalOpen = vi.fn();
-    const reportError = vi.fn();
-    const startExport = vi.fn();
-    const openSaveDialog = vi.fn().mockResolvedValue("/path/to/export.mp4");
-
-    const controller = createExportFlowController({
-      setModalOpen,
-      reportError,
-      startExport,
-      openSaveDialog,
-      getExportStatus: () => "idle",
-      getMedia: () => null,
-      filterName: "Video Files",
-      getSegments: () => [],
-      getSourceId: () => null,
-      getSettings: () => createSettings(createPreset()),
-    });
-
-    const result = await controller.run();
-
-    expect(result).toBe(false);
-    expect(openSaveDialog).toHaveBeenCalledOnce();
-    expect(reportError).toHaveBeenCalledWith(
-      expect.objectContaining({ code: "sourceNotFound" }),
-    );
-    expect(setModalOpen).toHaveBeenCalledWith(true);
-    expect(startExport).not.toHaveBeenCalled();
-  });
-
-  it("the good path calls startExport with the segments in array order and the resolved preset id", async () => {
-    const setModalOpen = vi.fn();
-    const reportError = vi.fn();
-    const startExport = vi.fn().mockResolvedValue({
-      runId: "run-abc-123",
-      presetId: "custom-preset-id",
-      outputPath: "/destination/rendered.mp4",
-      segmentCount: 3,
-      totalDurationUs: 3_000_000,
-    });
-    const openSaveDialog = vi.fn().mockResolvedValue("/destination/rendered.mp4");
-
-    const sourceId = "source-clip-1";
-    const media = createMedia("/media/source.mp4", "source.mp4");
-
-    // Three segments for the active source in deliberate non-chronological array
-    // order, plus one segment for another source. Array order is export order (ADR 007).
-    const segments: Segment[] = [
-      createSegment("seg-1", sourceId, "1000", "2000"),
-      createSegment("seg-2", sourceId, "5000", "6000"),
-      createSegment("seg-foreign", "different-source", "10", "20"),
-      createSegment("seg-3", sourceId, "3000", "4000"),
-    ];
-
-    const settings = createSettings(
-      createPreset({
-        id: "custom-preset-id",
-        name: "Custom 1080p",
-        container: "mp4",
-        resolution: { w: 1920, h: 1080 },
-      }),
-    );
-
-    const controller = createExportFlowController({
-      setModalOpen,
-      reportError,
-      startExport,
-      openSaveDialog,
-      getExportStatus: () => "idle",
-      getMedia: () => media,
-      readSourceRevision: createMatchingReader(media),
-      getSegments: () => segments,
-      getSourceId: () => sourceId,
-      getSettings: () => settings,
-      filterName: "Video Files",
-    });
-
-    const result = await controller.run();
-
-    expect(result).toBe(true);
-    expect(openSaveDialog).toHaveBeenCalledWith({
-      container: "mp4",
-      filterName: "Video Files",
-      defaultName: "source_export.mp4",
-    });
-    expect(setModalOpen).toHaveBeenCalledWith(true);
-    expect(reportError).not.toHaveBeenCalled();
-
-    expect(startExport).toHaveBeenCalledOnce();
-    const passedRequest = startExport.mock.calls[0][0] as ExportRequest;
-    expect(passedRequest).toStrictEqual({
-      sourcePath: "/media/source.mp4",
-      outputPath: "/destination/rendered.mp4",
-      presetId: "custom-preset-id",
-      segments: [
-        { inPts: "1000", outPts: "2000" },
-        { inPts: "5000", outPts: "6000" },
-        { inPts: "3000", outPts: "4000" },
-      ],
-    });
-  });
-
-  it("re-reads store settings after awaiting loadSettings fallback", async () => {
-    const setModalOpen = vi.fn();
-    const startExport = vi.fn().mockResolvedValue(null);
-    const openSaveDialog = vi.fn().mockResolvedValue("/out/test.mov");
-
-    let currentSettings: Settings | null = null;
-    const loadSettings = vi.fn().mockImplementation(() => {
-      // The load populates the store. It answers null when superseded, so the
-      // controller must re-read the store rather than trust the return value.
-      currentSettings = createSettings(
-        createPreset({
-          id: "prores-preset",
-          name: "ProRes",
-          container: "mov",
-          videoEncoder: "prores_ks",
-          audioEncoder: "pcm_s16le",
-          quality: { kind: "bitrate", value: 50_000 },
-        }),
-      );
-      return Promise.resolve(null);
-    });
-    const media = createMedia("/in/clip.mov", "clip.mov");
-
-    await runExportFlow({
-      setModalOpen,
-      startExport,
-      openSaveDialog,
-      loadSettings,
-      filterName: "Video Files",
-      getExportStatus: () => "idle",
-      getSettings: () => currentSettings,
-      getMedia: () => media,
-      readSourceRevision: createMatchingReader(media),
-      getSourceId: () => "src-1",
-      getSegments: () => [createSegment("s1", "src-1", "0", "100")],
-    });
-
-    expect(loadSettings).toHaveBeenCalledOnce();
-    expect(openSaveDialog).toHaveBeenCalledWith(
-      expect.objectContaining({
-        container: "mov",
-        defaultName: "clip_export.mov",
-      }),
-    );
-  });
-
-  describe("the source replacement check", () => {
-    it("a changed file raises the confirmation and never reaches the save dialog", async () => {
+  describe("run (OPEN step)", () => {
+    it("run never calls the save dialog, and it opens the modal on the good path", async () => {
       const setModalOpen = vi.fn();
-      const reportError = vi.fn();
-      const startExport = vi.fn();
       const openSaveDialog = vi.fn();
-      const media = createMedia("/media/source.mp4", "source.mp4");
-      // The file was re-encoded in place: same path, different bytes and a later mtime. The
-      // stored PTS values now name different frames.
-      const readSourceRevision = vi.fn().mockResolvedValue({
-        path: media.path,
-        size: media.size + 1,
-        mtime: media.mtime + 60,
-      });
+      const startExport = vi.fn();
+      const reportError = vi.fn();
+      const media = createMedia("/media/video.mp4", "video.mp4");
+      const preset = createPreset();
 
-      const result = await runExportFlow({
+      const controller = createExportFlowController({
         setModalOpen,
-        reportError,
-        startExport,
         openSaveDialog,
-        readSourceRevision,
+        startExport,
+        reportError,
+        filterName: "Video Files",
         getExportStatus: () => "idle",
         getMedia: () => media,
-        getSourceId: () => "src-1",
-        getSegments: () => [createSegment("s1", "src-1", "0", "100")],
-        getSettings: () => createSettings(createPreset()),
-        filterName: "Video Files",
+        readSourceRevision: createMatchingReader(media),
+        getSourceId: () => "source-1",
+        getSegments: () => [createSegment("s1", "source-1", "0", "100")],
+        getSettings: () => createSettings([preset]),
       });
 
-      expect(result).toBe(false);
-      expect(readSourceRevision).toHaveBeenCalledWith("/media/source.mp4");
-      expect(reportError).toHaveBeenCalledWith(
-        expect.objectContaining({ code: "sourceRevisionChanged" }),
-      );
+      const result = await controller.run();
+
+      expect(result).toBe(true);
       expect(setModalOpen).toHaveBeenCalledWith(true);
-      // The point of checking before the save dialog: the user is never asked to name a file
-      // for an export that is then refused.
       expect(openSaveDialog).not.toHaveBeenCalled();
       expect(startExport).not.toHaveBeenCalled();
+      expect(reportError).not.toHaveBeenCalled();
     });
 
-    it("an mtime change alone is a mismatch", async () => {
+    it("run reports sourceNotFound before any save dialog when media is absent", async () => {
       const setModalOpen = vi.fn();
-      const reportError = vi.fn();
       const openSaveDialog = vi.fn();
-      const media = createMedia("/media/source.mp4", "source.mp4");
-      const touched = { ...media, mtime: media.mtime + 1 };
-
-      const result = await runExportFlow({
-        setModalOpen,
-        reportError,
-        openSaveDialog,
-        readSourceRevision: vi.fn().mockResolvedValue(touched),
-        getExportStatus: () => "idle",
-        getMedia: () => media,
-        getSourceId: () => "src-1",
-        getSegments: () => [createSegment("s1", "src-1", "0", "100")],
-        getSettings: () => createSettings(createPreset()),
-        filterName: "Video Files",
-      });
-
-      expect(result).toBe(false);
-      expect(reportError).toHaveBeenCalledWith(
-        expect.objectContaining({ code: "sourceRevisionChanged" }),
-      );
-      expect(openSaveDialog).not.toHaveBeenCalled();
-    });
-
-    it("skipSourceRevisionCheck proceeds to the save dialog without reading the file", async () => {
-      const setModalOpen = vi.fn();
       const reportError = vi.fn();
-      const startExport = vi.fn().mockResolvedValue(null);
-      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mp4");
-      const media = createMedia("/media/source.mp4", "source.mp4");
       const readSourceRevision = vi.fn();
 
       const result = await runExportFlow({
         setModalOpen,
-        reportError,
-        startExport,
         openSaveDialog,
+        reportError,
         readSourceRevision,
-        skipSourceRevisionCheck: true,
-        getExportStatus: () => "idle",
-        getMedia: () => media,
-        getSourceId: () => "src-1",
-        getSegments: () => [createSegment("s1", "src-1", "0", "100")],
-        getSettings: () => createSettings(createPreset()),
         filterName: "Video Files",
-      });
-
-      expect(result).toBe(true);
-      expect(readSourceRevision).not.toHaveBeenCalled();
-      expect(openSaveDialog).toHaveBeenCalledOnce();
-      expect(startExport).toHaveBeenCalledOnce();
-      expect(reportError).not.toHaveBeenCalled();
-    });
-
-    it("a read that FAILS is not a mismatch and the flow proceeds", async () => {
-      const setModalOpen = vi.fn();
-      const reportError = vi.fn();
-      const startExport = vi.fn().mockResolvedValue(null);
-      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mp4");
-      const media = createMedia("/media/source.mp4", "source.mp4");
-      // A deleted file, a path that is no longer a regular file, and a share that stopped
-      // answering all end here. Each already has its own translated code from the backend
-      // preflight, so claiming "the file changed" would be a claim this check never made.
-      const readSourceRevision = vi.fn().mockRejectedValue({ code: "pathNotFound" });
-
-      const result = await runExportFlow({
-        setModalOpen,
-        reportError,
-        startExport,
-        openSaveDialog,
-        readSourceRevision,
-        getExportStatus: () => "idle",
-        getMedia: () => media,
-        getSourceId: () => "src-1",
-        getSegments: () => [createSegment("s1", "src-1", "0", "100")],
-        getSettings: () => createSettings(createPreset()),
-        filterName: "Video Files",
-      });
-
-      expect(result).toBe(true);
-      expect(readSourceRevision).toHaveBeenCalledOnce();
-      expect(openSaveDialog).toHaveBeenCalledOnce();
-      expect(startExport).toHaveBeenCalledOnce();
-      expect(reportError).not.toHaveBeenCalled();
-    });
-
-    it("a changed file with nothing marked reports noSegments and never confirms", async () => {
-      const setModalOpen = vi.fn();
-      const reportError = vi.fn();
-      const startExport = vi.fn();
-      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mp4");
-      const media = createMedia("/media/source.mp4", "source.mp4");
-      // The file changed under a project that marked nothing: a cloud-sync agent or a
-      // recorder still writing it is enough.
-      const readSourceRevision = vi.fn().mockResolvedValue({
-        path: media.path,
-        size: media.size + 1,
-        mtime: media.mtime + 60,
-      });
-
-      const result = await runExportFlow({
-        setModalOpen,
-        reportError,
-        startExport,
-        openSaveDialog,
-        readSourceRevision,
-        getExportStatus: () => "idle",
-        getMedia: () => media,
-        getSourceId: () => "src-1",
-        getSegments: () => [],
-        getSettings: () => createSettings(createPreset()),
-        filterName: "Video Files",
-      });
-
-      expect(result).toBe(false);
-      // The confirmation says the marked segments may no longer name the same frames, and
-      // with none marked that is a claim about state that does not exist. The run ends where
-      // an unchanged file with no segments ends, and the user sees one error rather than a
-      // confirmation whose "Export anyway" leads to the same one.
-      expect(readSourceRevision).not.toHaveBeenCalled();
-      expect(reportError).toHaveBeenCalledOnce();
-      expect(reportError).toHaveBeenCalledWith(
-        expect.objectContaining({ code: "noSegments" }),
-      );
-      expect(startExport).not.toHaveBeenCalled();
-    });
-
-    it("segments marked against another source do not raise the confirmation", async () => {
-      const setModalOpen = vi.fn();
-      const reportError = vi.fn();
-      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mp4");
-      const media = createMedia("/media/source.mp4", "source.mp4");
-      const readSourceRevision = vi.fn().mockResolvedValue({
-        path: media.path,
-        size: media.size + 1,
-        mtime: media.mtime + 60,
-      });
-
-      const result = await runExportFlow({
-        setModalOpen,
-        reportError,
-        openSaveDialog,
-        readSourceRevision,
-        getExportStatus: () => "idle",
-        getMedia: () => media,
-        getSourceId: () => "src-1",
-        getSegments: () => [createSegment("s1", "src-other", "0", "100")],
-        getSettings: () => createSettings(createPreset()),
-        filterName: "Video Files",
-      });
-
-      expect(result).toBe(false);
-      expect(readSourceRevision).not.toHaveBeenCalled();
-      expect(reportError).toHaveBeenCalledWith(
-        expect.objectContaining({ code: "noSegments" }),
-      );
-    });
-
-    it("a null media never reads a revision, and fails later on the request instead", async () => {
-      const setModalOpen = vi.fn();
-      const reportError = vi.fn();
-      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mp4");
-      const readSourceRevision = vi.fn();
-
-      const result = await runExportFlow({
-        setModalOpen,
-        reportError,
-        openSaveDialog,
-        readSourceRevision,
         getExportStatus: () => "idle",
         getMedia: () => null,
         getSourceId: () => null,
         getSegments: () => [],
-        getSettings: () => createSettings(createPreset()),
-        filterName: "Video Files",
+        getSettings: () => createSettings([createPreset()]),
       });
 
       expect(result).toBe(false);
@@ -587,27 +147,738 @@ describe("ExportFlowController", () => {
       expect(reportError).toHaveBeenCalledWith(
         expect.objectContaining({ code: "sourceNotFound" }),
       );
+      expect(setModalOpen).toHaveBeenCalledWith(true);
+      expect(openSaveDialog).not.toHaveBeenCalled();
     });
-  });
 
-  it("opens modal immediately without opening save dialog if an export is already active", async () => {
-    for (const activeStatus of ["preparing", "running", "publishing"] as const) {
+    it("run reports noSegments before any save dialog when segments are absent", async () => {
       const setModalOpen = vi.fn();
       const openSaveDialog = vi.fn();
-      const startExport = vi.fn();
+      const reportError = vi.fn();
+      const media = createMedia("/media/sample.mp4", "sample.mp4");
 
       const result = await runExportFlow({
         setModalOpen,
         openSaveDialog,
-        startExport,
-        getExportStatus: () => activeStatus,
+        reportError,
         filterName: "Video Files",
+        getExportStatus: () => "idle",
+        getMedia: () => media,
+        readSourceRevision: createMatchingReader(media),
+        getSourceId: () => "source-1",
+        getSegments: () => [],
+        getSettings: () => createSettings([createPreset()]),
       });
 
       expect(result).toBe(false);
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "noSegments" }),
+      );
+      expect(setModalOpen).toHaveBeenCalledWith(true);
+      expect(openSaveDialog).not.toHaveBeenCalled();
+    });
+
+    it("run resets a terminal store status", async () => {
+      for (const terminalStatus of ["finished", "failed", "canceled"] as const) {
+        const setModalOpen = vi.fn();
+        const reset = vi.fn();
+        const media = createMedia("/media/video.mp4", "video.mp4");
+
+        const result = await runExportFlow({
+          setModalOpen,
+          reset,
+          filterName: "Video Files",
+          getExportStatus: () => terminalStatus,
+          getMedia: () => media,
+          readSourceRevision: createMatchingReader(media),
+          getSourceId: () => "source-1",
+          getSegments: () => [createSegment("s1", "source-1", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+        });
+
+        expect(reset).toHaveBeenCalledOnce();
+        expect(setModalOpen).toHaveBeenCalledWith(true);
+        expect(result).toBe(true);
+      }
+    });
+
+    it("awaits loadSettings fallback when settings are absent", async () => {
+      const setModalOpen = vi.fn();
+      let currentSettings: Settings | null = null;
+      const loadSettings = vi.fn().mockImplementation(() => {
+        currentSettings = createSettings([createPreset({ id: "loaded-preset" })]);
+        return Promise.resolve(null);
+      });
+      const media = createMedia("/media/clip.mp4", "clip.mp4");
+
+      const result = await runExportFlow({
+        setModalOpen,
+        loadSettings,
+        filterName: "Video Files",
+        getExportStatus: () => "idle",
+        getSettings: () => currentSettings,
+        getMedia: () => media,
+        readSourceRevision: createMatchingReader(media),
+        getSourceId: () => "src-1",
+        getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+      });
+
+      expect(result).toBe(true);
+      expect(loadSettings).toHaveBeenCalledOnce();
+      expect(setModalOpen).toHaveBeenCalledWith(true);
+    });
+
+    it("opens modal and returns true when loadSettings resolves but getSettings still returns null", async () => {
+      const setModalOpen = vi.fn();
+      const loadSettings = vi.fn().mockResolvedValue(null);
+      const media = createMedia("/media/clip.mp4", "clip.mp4");
+
+      const result = await runExportFlow({
+        setModalOpen,
+        loadSettings,
+        filterName: "Video Files",
+        getExportStatus: () => "idle",
+        getSettings: () => null,
+        getMedia: () => media,
+        readSourceRevision: createMatchingReader(media),
+        getSourceId: () => "src-1",
+        getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+      });
+
+      expect(result).toBe(true);
+      expect(loadSettings).toHaveBeenCalledOnce();
+      expect(setModalOpen).toHaveBeenCalledWith(true);
+    });
+
+    it("opens modal immediately without opening save dialog if an export is already active", async () => {
+      for (const activeStatus of ["preparing", "running", "publishing"] as const) {
+        const setModalOpen = vi.fn();
+        const openSaveDialog = vi.fn();
+        const startExport = vi.fn();
+
+        const result = await runExportFlow({
+          setModalOpen,
+          openSaveDialog,
+          startExport,
+          getExportStatus: () => activeStatus,
+          filterName: "Video Files",
+        });
+
+        expect(result).toBe(false);
+        expect(setModalOpen).toHaveBeenCalledWith(true);
+        expect(openSaveDialog).not.toHaveBeenCalled();
+        expect(startExport).not.toHaveBeenCalled();
+      }
+    });
+
+    describe("the source replacement check in run", () => {
+      it("a changed file raises the confirmation and never reaches the save dialog", async () => {
+        const setModalOpen = vi.fn();
+        const reportError = vi.fn();
+        const openSaveDialog = vi.fn();
+        const media = createMedia("/media/source.mp4", "source.mp4");
+        const readSourceRevision = vi.fn().mockResolvedValue({
+          path: media.path,
+          size: media.size + 1,
+          mtime: media.mtime + 60,
+        });
+
+        const result = await runExportFlow({
+          setModalOpen,
+          reportError,
+          openSaveDialog,
+          readSourceRevision,
+          getExportStatus: () => "idle",
+          getMedia: () => media,
+          getSourceId: () => "src-1",
+          getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+          filterName: "Video Files",
+        });
+
+        expect(result).toBe(false);
+        expect(readSourceRevision).toHaveBeenCalledWith("/media/source.mp4");
+        expect(reportError).toHaveBeenCalledWith(
+          expect.objectContaining({ code: "sourceRevisionChanged" }),
+        );
+        expect(setModalOpen).toHaveBeenCalledWith(true);
+        expect(openSaveDialog).not.toHaveBeenCalled();
+      });
+
+      it("an mtime change alone is a mismatch", async () => {
+        const setModalOpen = vi.fn();
+        const reportError = vi.fn();
+        const openSaveDialog = vi.fn();
+        const media = createMedia("/media/source.mp4", "source.mp4");
+        const touched = { ...media, mtime: media.mtime + 1 };
+
+        const result = await runExportFlow({
+          setModalOpen,
+          reportError,
+          openSaveDialog,
+          readSourceRevision: vi.fn().mockResolvedValue(touched),
+          getExportStatus: () => "idle",
+          getMedia: () => media,
+          getSourceId: () => "src-1",
+          getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+          filterName: "Video Files",
+        });
+
+        expect(result).toBe(false);
+        expect(reportError).toHaveBeenCalledWith(
+          expect.objectContaining({ code: "sourceRevisionChanged" }),
+        );
+        expect(openSaveDialog).not.toHaveBeenCalled();
+      });
+
+      it("skipSourceRevisionCheck proceeds to the setup step without reading the file", async () => {
+        const setModalOpen = vi.fn();
+        const reportError = vi.fn();
+        const openSaveDialog = vi.fn();
+        const media = createMedia("/media/source.mp4", "source.mp4");
+        const readSourceRevision = vi.fn();
+
+        const result = await runExportFlow({
+          setModalOpen,
+          reportError,
+          openSaveDialog,
+          readSourceRevision,
+          skipSourceRevisionCheck: true,
+          getExportStatus: () => "idle",
+          getMedia: () => media,
+          getSourceId: () => "src-1",
+          getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+          filterName: "Video Files",
+        });
+
+        expect(result).toBe(true);
+        expect(readSourceRevision).not.toHaveBeenCalled();
+        expect(setModalOpen).toHaveBeenCalledWith(true);
+        expect(openSaveDialog).not.toHaveBeenCalled();
+        expect(reportError).not.toHaveBeenCalled();
+      });
+
+      it("a read that FAILS is not a mismatch and the flow proceeds", async () => {
+        const setModalOpen = vi.fn();
+        const reportError = vi.fn();
+        const media = createMedia("/media/source.mp4", "source.mp4");
+        const readSourceRevision = vi.fn().mockRejectedValue({ code: "pathNotFound" });
+
+        const result = await runExportFlow({
+          setModalOpen,
+          reportError,
+          readSourceRevision,
+          getExportStatus: () => "idle",
+          getMedia: () => media,
+          getSourceId: () => "src-1",
+          getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+          filterName: "Video Files",
+        });
+
+        expect(result).toBe(true);
+        expect(readSourceRevision).toHaveBeenCalledOnce();
+        expect(setModalOpen).toHaveBeenCalledWith(true);
+        expect(reportError).not.toHaveBeenCalled();
+      });
+
+      it("a changed file with nothing marked reports noSegments and never confirms", async () => {
+        const setModalOpen = vi.fn();
+        const reportError = vi.fn();
+        const startExport = vi.fn();
+        const media = createMedia("/media/source.mp4", "source.mp4");
+        const readSourceRevision = vi.fn().mockResolvedValue({
+          path: media.path,
+          size: media.size + 1,
+          mtime: media.mtime + 60,
+        });
+
+        const result = await runExportFlow({
+          setModalOpen,
+          reportError,
+          startExport,
+          readSourceRevision,
+          getExportStatus: () => "idle",
+          getMedia: () => media,
+          getSourceId: () => "src-1",
+          getSegments: () => [],
+          getSettings: () => createSettings([createPreset()]),
+          filterName: "Video Files",
+        });
+
+        expect(result).toBe(false);
+        expect(readSourceRevision).not.toHaveBeenCalled();
+        expect(reportError).toHaveBeenCalledOnce();
+        expect(reportError).toHaveBeenCalledWith(
+          expect.objectContaining({ code: "noSegments" }),
+        );
+        expect(startExport).not.toHaveBeenCalled();
+      });
+
+      it("segments marked against another source do not raise the confirmation", async () => {
+        const setModalOpen = vi.fn();
+        const reportError = vi.fn();
+        const media = createMedia("/media/source.mp4", "source.mp4");
+        const readSourceRevision = vi.fn().mockResolvedValue({
+          path: media.path,
+          size: media.size + 1,
+          mtime: media.mtime + 60,
+        });
+
+        const result = await runExportFlow({
+          setModalOpen,
+          reportError,
+          readSourceRevision,
+          getExportStatus: () => "idle",
+          getMedia: () => media,
+          getSourceId: () => "src-1",
+          getSegments: () => [createSegment("s1", "src-other", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+          filterName: "Video Files",
+        });
+
+        expect(result).toBe(false);
+        expect(readSourceRevision).not.toHaveBeenCalled();
+        expect(reportError).toHaveBeenCalledWith(
+          expect.objectContaining({ code: "noSegments" }),
+        );
+      });
+    });
+  });
+
+  describe("confirm (START step)", () => {
+    it("confirm with a missing preset reports presetNotFound", async () => {
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const openSaveDialog = vi.fn();
+      const startExport = vi.fn();
+      const saveSettings = vi.fn();
+
+      const controller = new ExportFlowController({
+        setModalOpen,
+        reportError,
+        openSaveDialog,
+        startExport,
+        saveSettings,
+        filterName: "Video Files",
+        getSettings: () => createSettings([createPreset({ id: "p1" })]),
+      });
+
+      const result = await controller.confirm("non-existent-preset");
+
+      expect(result).toBe(false);
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "presetNotFound" }),
+      );
       expect(setModalOpen).toHaveBeenCalledWith(true);
       expect(openSaveDialog).not.toHaveBeenCalled();
       expect(startExport).not.toHaveBeenCalled();
-    }
+      expect(saveSettings).not.toHaveBeenCalled();
+    });
+
+    it("confirm uses the SELECTED preset's container for the extension and default name, not active preset's container", async () => {
+      const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mov");
+      const startExport = vi.fn().mockResolvedValue(null);
+      const media = createMedia("/media/clip.mp4", "clip.mp4");
+
+      const activePreset = createPreset({ id: "p-mp4", container: "mp4" });
+      const selectedPreset = createPreset({ id: "p-mov", container: "mov" });
+      const settings = createSettings([activePreset, selectedPreset], "p-mp4");
+
+      const controller = createExportFlowController({
+        setModalOpen: vi.fn(),
+        openSaveDialog,
+        startExport,
+        filterName: "Video Files",
+        getSettings: () => settings,
+        getMedia: () => media,
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      const result = await controller.confirm("p-mov");
+
+      expect(result).toBe(true);
+      expect(openSaveDialog).toHaveBeenCalledWith({
+        container: "mov",
+        filterName: "Video Files",
+        defaultName: "clip_export.mov",
+      });
+    });
+
+    it("confirm with the save dialog cancelled starts nothing and saves nothing", async () => {
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const startExport = vi.fn();
+      const saveSettings = vi.fn();
+      const openSaveDialog = vi.fn().mockResolvedValue(null);
+      const media = createMedia("/media/clip.mp4", "clip.mp4");
+
+      const p1 = createPreset({ id: "p1" });
+      const p2 = createPreset({ id: "p2" });
+      const settings = createSettings([p1, p2], "p1");
+
+      const controller = createExportFlowController({
+        setModalOpen,
+        reportError,
+        openSaveDialog,
+        startExport,
+        saveSettings,
+        filterName: "Video Files",
+        getExportStatus: () => "idle",
+        getSettings: () => settings,
+        getMedia: () => media,
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      const result = await controller.confirm("p2");
+
+      expect(result).toBe(false);
+      expect(openSaveDialog).toHaveBeenCalledOnce();
+      expect(setModalOpen).not.toHaveBeenCalled();
+      expect(reportError).not.toHaveBeenCalled();
+      expect(startExport).not.toHaveBeenCalled();
+      expect(saveSettings).not.toHaveBeenCalled();
+    });
+
+    it("confirm when save dialog throws reports dialogFailed, keeps modal open, and returns false", async () => {
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const startExport = vi.fn();
+      const openSaveDialog = vi.fn().mockRejectedValue(new Error("dialog crashed"));
+
+      const controller = createExportFlowController({
+        setModalOpen,
+        reportError,
+        openSaveDialog,
+        startExport,
+        filterName: "Video Files",
+        getSettings: () => createSettings([createPreset({ id: "p1" })]),
+      });
+
+      const result = await controller.confirm("p1");
+
+      expect(result).toBe(false);
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "dialogFailed" }),
+      );
+      expect(setModalOpen).toHaveBeenCalledWith(true);
+      expect(startExport).not.toHaveBeenCalled();
+    });
+
+    it("confirm when save dialog leaves status failed opens modal", async () => {
+      const setModalOpen = vi.fn();
+      let storeStatus: "idle" | "failed" = "idle";
+      const openSaveDialog = vi.fn().mockImplementation(() => {
+        storeStatus = "failed";
+        return Promise.resolve(null);
+      });
+
+      const controller = createExportFlowController({
+        setModalOpen,
+        openSaveDialog,
+        filterName: "Video Files",
+        getExportStatus: () => storeStatus,
+        getSettings: () => createSettings([createPreset({ id: "p1" })]),
+      });
+
+      const result = await controller.confirm("p1");
+
+      expect(result).toBe(false);
+      expect(openSaveDialog).toHaveBeenCalledOnce();
+      expect(setModalOpen).toHaveBeenCalledWith(true);
+    });
+
+    it("confirm passes presetId in the request and respects segment array order", async () => {
+      const startExport = vi.fn().mockResolvedValue(null);
+      const openSaveDialog = vi.fn().mockResolvedValue("/out/destination.mp4");
+      const media = createMedia("/media/source.mp4", "source.mp4");
+      const sourceId = "source-clip-1";
+
+      const segments: Segment[] = [
+        createSegment("seg-1", sourceId, "1000", "2000"),
+        createSegment("seg-2", sourceId, "5000", "6000"),
+        createSegment("seg-foreign", "other-source", "10", "20"),
+        createSegment("seg-3", sourceId, "3000", "4000"),
+      ];
+
+      const preset = createPreset({ id: "custom-p" });
+      const settings = createSettings([preset], "custom-p");
+
+      const setModalOpen = vi.fn();
+      const controller = createExportFlowController({
+        setModalOpen,
+        openSaveDialog,
+        startExport,
+        filterName: "Video Files",
+        getSettings: () => settings,
+        getMedia: () => media,
+        getSourceId: () => sourceId,
+        getSegments: () => segments,
+      });
+
+      const result = await controller.confirm("custom-p");
+
+      expect(result).toBe(true);
+      expect(setModalOpen).toHaveBeenCalledWith(true);
+      expect(startExport).toHaveBeenCalledOnce();
+      expect(setModalOpen.mock.invocationCallOrder[0]).toBeLessThan(
+        startExport.mock.invocationCallOrder[0],
+      );
+      const passedRequest = startExport.mock.calls[0][0] as ExportRequest;
+      expect(passedRequest).toStrictEqual({
+        sourcePath: "/media/source.mp4",
+        outputPath: "/out/destination.mp4",
+        presetId: "custom-p",
+        segments: [
+          { inPts: "1000", outPts: "2000" },
+          { inPts: "5000", outPts: "6000" },
+          { inPts: "3000", outPts: "4000" },
+        ],
+      });
+    });
+
+    it("confirm saves activePresetId when it differs, and does not save when it is equal", async () => {
+      const p1 = createPreset({ id: "p1" });
+      const p2 = createPreset({ id: "p2" });
+      const settings = createSettings([p1, p2], "p1");
+      const media = createMedia("/media/v.mp4", "v.mp4");
+
+      // Case 1: differs -> saves
+      const saveSettingsDiff = vi.fn().mockResolvedValue(null);
+      const controllerDiff = createExportFlowController({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+        startExport: vi.fn().mockResolvedValue(null),
+        saveSettings: saveSettingsDiff,
+        filterName: "Video Files",
+        getSettings: () => settings,
+        getMedia: () => media,
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      await controllerDiff.confirm("p2");
+      expect(saveSettingsDiff).toHaveBeenCalledOnce();
+      expect(saveSettingsDiff).toHaveBeenCalledWith(
+        expect.objectContaining({ activePresetId: "p2" }),
+      );
+
+      // Case 2: equal -> does not save
+      const saveSettingsSame = vi.fn().mockResolvedValue(null);
+      const controllerSame = createExportFlowController({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+        startExport: vi.fn().mockResolvedValue(null),
+        saveSettings: saveSettingsSame,
+        filterName: "Video Files",
+        getSettings: () => settings,
+        getMedia: () => media,
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      await controllerSame.confirm("p1");
+      expect(saveSettingsSame).not.toHaveBeenCalled();
+    });
+
+    it("a rejected settings save still leaves the export started", async () => {
+      const p1 = createPreset({ id: "p1" });
+      const p2 = createPreset({ id: "p2" });
+      const settings = createSettings([p1, p2], "p1");
+      const media = createMedia("/media/v.mp4", "v.mp4");
+
+      const startExport = vi.fn().mockResolvedValue(null);
+      const saveSettings = vi.fn().mockRejectedValue(new Error("conflict"));
+
+      const controller = createExportFlowController({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+        startExport,
+        saveSettings,
+        filterName: "Video Files",
+        getSettings: () => settings,
+        getMedia: () => media,
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      const result = await controller.confirm("p2");
+
+      expect(result).toBe(true);
+      expect(startExport).toHaveBeenCalledOnce();
+      expect(saveSettings).toHaveBeenCalledOnce();
+    });
+
+    it("confirm reads the settings store again after the save dialog and persists the fresh document", async () => {
+      const p1 = createPreset({ id: "p1" });
+      const p2 = createPreset({ id: "p2" });
+      const initialSettings = createSettings([p1, p2], "p1");
+      const updatedSettings = {
+        ...createSettings([p1, p2], "p1"),
+        revision: 12,
+      };
+
+      const getSettings = vi
+        .fn()
+        .mockReturnValueOnce(initialSettings)
+        .mockReturnValue(updatedSettings);
+      const saveSettings = vi.fn().mockResolvedValue(null);
+      const media = createMedia("/media/v.mp4", "v.mp4");
+
+      const controller = createExportFlowController({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+        startExport: vi.fn().mockResolvedValue(null),
+        saveSettings,
+        filterName: "Video Files",
+        getSettings,
+        getMedia: () => media,
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      const result = await controller.confirm("p2");
+
+      expect(result).toBe(true);
+      expect(getSettings).toHaveBeenCalledTimes(2);
+      expect(saveSettings).toHaveBeenCalledOnce();
+      expect(saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          revision: 12,
+          activePresetId: "p2",
+        }),
+      );
+    });
+
+    it("confirm skips saving active preset when the fresh document is null after save dialog", async () => {
+      const p1 = createPreset({ id: "p1" });
+      const p2 = createPreset({ id: "p2" });
+      const initialSettings = createSettings([p1, p2], "p1");
+
+      const getSettings = vi
+        .fn()
+        .mockReturnValueOnce(initialSettings)
+        .mockReturnValue(null);
+      const saveSettings = vi.fn().mockResolvedValue(null);
+      const media = createMedia("/media/v.mp4", "v.mp4");
+
+      const controller = createExportFlowController({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+        startExport: vi.fn().mockResolvedValue(null),
+        saveSettings,
+        filterName: "Video Files",
+        getSettings,
+        getMedia: () => media,
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      const result = await controller.confirm("p2");
+
+      expect(result).toBe(true);
+      expect(getSettings).toHaveBeenCalledTimes(2);
+      expect(saveSettings).not.toHaveBeenCalled();
+    });
+
+    it("confirm skips saving active preset when the fresh document no longer contains the preset", async () => {
+      const p1 = createPreset({ id: "p1" });
+      const p2 = createPreset({ id: "p2" });
+      const initialSettings = createSettings([p1, p2], "p1");
+      const updatedSettingsWithoutP2 = createSettings([p1], "p1");
+
+      const getSettings = vi
+        .fn()
+        .mockReturnValueOnce(initialSettings)
+        .mockReturnValue(updatedSettingsWithoutP2);
+      const saveSettings = vi.fn().mockResolvedValue(null);
+      const media = createMedia("/media/v.mp4", "v.mp4");
+
+      const controller = createExportFlowController({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+        startExport: vi.fn().mockResolvedValue(null),
+        saveSettings,
+        filterName: "Video Files",
+        getSettings,
+        getMedia: () => media,
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      const result = await controller.confirm("p2");
+
+      expect(result).toBe(true);
+      expect(getSettings).toHaveBeenCalledTimes(2);
+      expect(saveSettings).not.toHaveBeenCalled();
+    });
+
+    it("confirm reports sourceNotFound or noSegments if state became invalid after setup", async () => {
+      const preset = createPreset({ id: "p1" });
+      const settings = createSettings([preset], "p1");
+
+      // No media
+      const reportErrorNoMedia = vi.fn();
+      const setModalNoMedia = vi.fn();
+      const controllerNoMedia = createExportFlowController({
+        setModalOpen: setModalNoMedia,
+        reportError: reportErrorNoMedia,
+        openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+        filterName: "Video Files",
+        getSettings: () => settings,
+        getMedia: () => null,
+      });
+
+      const resNoMedia = await controllerNoMedia.confirm("p1");
+      expect(resNoMedia).toBe(false);
+      expect(reportErrorNoMedia).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "sourceNotFound" }),
+      );
+      expect(setModalNoMedia).toHaveBeenCalledWith(true);
+
+      // No segments
+      const media = createMedia("/media/v.mp4", "v.mp4");
+      const reportErrorNoSeg = vi.fn();
+      const setModalNoSeg = vi.fn();
+      const controllerNoSeg = createExportFlowController({
+        setModalOpen: setModalNoSeg,
+        reportError: reportErrorNoSeg,
+        openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+        filterName: "Video Files",
+        getSettings: () => settings,
+        getMedia: () => media,
+        getSourceId: () => "s1",
+        getSegments: () => [],
+      });
+
+      const resNoSeg = await controllerNoSeg.confirm("p1");
+      expect(resNoSeg).toBe(false);
+      expect(reportErrorNoSeg).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "noSegments" }),
+      );
+      expect(setModalNoSeg).toHaveBeenCalledWith(true);
+    });
+
+    it("confirmExportFlow helper invokes confirm with presetId", async () => {
+      const openSaveDialog = vi.fn().mockResolvedValue(null);
+      const preset = createPreset({ id: "p1" });
+
+      const result = await confirmExportFlow(
+        {
+          setModalOpen: vi.fn(),
+          openSaveDialog,
+          filterName: "Video Files",
+          getSettings: () => createSettings([preset]),
+        },
+        "p1",
+      );
+
+      expect(result).toBe(false);
+      expect(openSaveDialog).toHaveBeenCalledOnce();
+    });
   });
 });

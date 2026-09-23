@@ -9,23 +9,29 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { runExportFlow } from "@/components/layout/exportFlowController";
+import {
+  confirmExportFlow,
+  runExportFlow,
+} from "@/components/layout/exportFlowController";
 import { useExportStore } from "@/features/export";
 import { openMediaFileDialog } from "@/features/media";
+import { useSettingsStore } from "@/features/settings";
 import { getResolvedLanguage } from "@/i18n";
+import { ExportSetup } from "./ExportSetup";
 import {
   isCancelEnabled,
   isCancelOutstanding,
   isExportDismissalRefused,
 } from "./exportCancelState";
 import { presentExportError } from "./exportErrorPresenter";
+import { presentSetupBlocker, resolveSetupPresetId } from "./exportSetupPresenter";
 
 export interface ExportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 
   /**
-   * Resumes a refused export, past the replacement confirmation, to the save dialog.
+   * Resumes a refused export, past the replacement confirmation, to the setup step.
    *
    * Defaults to re-running the export flow with the replacement check skipped. Injected so
    * this panel never has to know how an export starts.
@@ -93,12 +99,25 @@ export function ExportDialog({
   // `isCancelOutstanding` is keyed to a run id and cannot see this one, so the dialog holds it
   // itself and scopes it below to the phase it can apply in.
   const [unnamedCancelPending, setUnnamedCancelPending] = useState(false);
+  // Holds the preset id requested by the user during the setup step. When null, the dialog
+  // falls back to the settings activePresetId or first preset (ADR 024).
+  const [requestedPresetId, setRequestedPresetId] = useState<string | null>(null);
+  // Guard against double clicks triggering multiple concurrent native save dialogs.
+  const [choosingDestination, setChoosingDestination] = useState(false);
 
   const status = useExportStore((state) => state.status);
   const runId = useExportStore((state) => state.runId);
   const error = useExportStore((state) => state.error);
   const cancelExport = useExportStore((state) => state.cancelExport);
   const reset = useExportStore((state) => state.reset);
+
+  const settings = useSettingsStore((state) => state.settings);
+  const effectivePresetId = resolveSetupPresetId(settings, requestedPresetId);
+  const selectedPreset =
+    settings?.presets.find((preset) => preset.id === effectivePresetId) ?? null;
+  const blocker = presentSetupBlocker(selectedPreset);
+  const exportDisabled =
+    effectivePresetId === null || blocker !== null || choosingDestination;
 
   // All three derived values live in a pure module, so their rules carry their own tests.
   const isRunning = isExportDismissalRefused({ status, runId });
@@ -141,6 +160,8 @@ export function ExportDialog({
     onOpenChange(false);
     setCancelingRunId(null);
     setUnnamedCancelPending(false);
+    setRequestedPresetId(null);
+    setChoosingDestination(false);
     reset();
   };
 
@@ -152,6 +173,8 @@ export function ExportDialog({
       cancelUnnamedRun();
       setCancelingRunId(null);
       setUnnamedCancelPending(false);
+      setRequestedPresetId(null);
+      setChoosingDestination(false);
       reset();
     }
     onOpenChange(nextOpen);
@@ -163,8 +186,8 @@ export function ExportDialog({
     status === "failed" && error?.code === "sourceRevisionChanged";
 
   // Resumes the export the check refused. The store is reset and the modal closed first, so the
-  // flow reaches the native save dialog with no stale confirmation behind it; the flow re-opens
-  // the modal itself once there is something to show.
+  // flow proceeds past the source revision check to the setup step with no stale confirmation behind it;
+  // the flow re-opens the modal itself at the setup step.
   const handleExportAnyway = () => {
     handleClose();
     if (onExportAnyway) {
@@ -187,6 +210,24 @@ export function ExportDialog({
     void openMediaFileDialog({ filterName: t("dialog.videoFilter") });
   };
 
+  const handleConfirmExport = async () => {
+    if (!effectivePresetId || exportDisabled) {
+      return;
+    }
+    setChoosingDestination(true);
+    try {
+      await confirmExportFlow(
+        {
+          setModalOpen: onOpenChange,
+          filterName: t("dialog.videoFilter"),
+        },
+        effectivePresetId,
+      );
+    } finally {
+      setChoosingDestination(false);
+    }
+  };
+
   const handleCancel = async () => {
     setCancelingRunId(runId);
     if (runId === null) {
@@ -201,7 +242,14 @@ export function ExportDialog({
   const renderContent = () => {
     switch (status) {
       case "idle":
-        return null;
+        return open ? (
+          <ExportSetup
+            selectedPresetId={effectivePresetId}
+            selectedPreset={selectedPreset}
+            blocker={blocker}
+            onSelect={setRequestedPresetId}
+          />
+        ) : null;
 
       case "preparing":
         return (
@@ -332,7 +380,21 @@ export function ExportDialog({
         {renderContent()}
 
         <DialogFooter>
-          {isSourceRevisionConfirmation ? (
+          {status === "idle" ? (
+            open ? (
+              <>
+                <Button variant="outline" onClick={handleClose}>
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  disabled={exportDisabled}
+                  onClick={() => void handleConfirmExport()}
+                >
+                  {t("export.action.chooseDestination")}
+                </Button>
+              </>
+            ) : null
+          ) : isSourceRevisionConfirmation ? (
             <>
               <Button variant="outline" onClick={handleClose}>
                 {t("common.cancel")}

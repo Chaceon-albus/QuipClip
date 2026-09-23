@@ -458,6 +458,16 @@ export type AudioSampleRateSelectView = {
 };
 
 /**
+ * Formats an audio sample rate in Hz to a localized kHz string (e.g. 48000 -> "48", 44100 -> "44.1").
+ */
+export function formatAudioSampleRateKHz(
+  sampleRateHz: number,
+  formatter: Intl.NumberFormat,
+): string {
+  return formatter.format(sampleRateHz / 1000);
+}
+
+/**
  * Builds the options for the audio sample rate `<Select>`.
  *
  * Displays "Same as Source" followed by standard sample rates in kHz (e.g. 44.1 kHz, 48 kHz).
@@ -483,7 +493,7 @@ export function presentAudioSampleRateSelect(
     options.push({
       value: String(rate),
       labelKey: "settings.preset.audioSampleRateValue",
-      labelValues: { value: formatter.format(rate / 1000) },
+      labelValues: { value: formatAudioSampleRateKHz(rate, formatter) },
     });
   }
 

@@ -289,6 +289,19 @@ export const en = {
   },
   export: {
     title: "Export Video",
+    setup: {
+      presetLabel: "Preset",
+      qualityLabel: "Quality",
+      value: "{{value}}",
+      qualityCrf: "CRF {{value}}",
+      qualityBitrate: "{{value}} kbps",
+      qualityScale: "Quality scale {{value}}",
+      audioBitrateLossless: "Lossless",
+      resolutionValue: "{{width}} × {{height}}",
+      frameRateValue: "{{value}} fps",
+      noPresets: "No export presets exist. Add one in Settings.",
+      settingsErrorHint: "Open Settings to repair or reset the settings file.",
+    },
     status: {
       preparing: "Preparing export...",
       running: "Exporting...",
@@ -303,6 +316,7 @@ export const en = {
         "The export is already finishing. The cancel cannot prevent the output file.",
     },
     action: {
+      chooseDestination: "Export…",
       exportAnyway: "Export Anyway",
       reimport: "Re-import",
     },
