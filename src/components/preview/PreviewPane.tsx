@@ -8,15 +8,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { AlertCircle, ChevronDown, Loader2, Maximize2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { AlertCircle, Loader2 } from "lucide-react";
 import {
   getSourceRevisionKey,
   mediaStore,
@@ -518,9 +510,10 @@ export function PreviewPane() {
         </div>
       </div>
 
-      {/* Preview Bottom Row: Timecode and View Controls */}
+      {/* Preview Bottom Row: Timecode. `h-6` holds the row at a fixed height, so the video
+          frame above keeps its size. */}
       <div className="flex shrink-0 items-center justify-between px-1 pt-2">
-        <div className="flex items-center gap-1.5 font-mono text-xs">
+        <div className="flex h-6 items-center gap-1.5 font-mono text-xs">
           {media ? (
             <PreviewTimecode
               videoStartPts={media.probe.videoStartPts}
@@ -531,43 +524,6 @@ export function PreviewPane() {
           )}
           <span className="text-preview-muted">/</span>
           <span className="text-preview-muted">{totalTimeDisplay}</span>
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild disabled>
-              <Button
-                variant="ghost"
-                size="xs"
-                disabled
-                className="h-6 gap-1 px-2 text-xs text-preview-muted hover:bg-preview-surface hover:text-preview-foreground"
-              >
-                {t("preview.zoom.fit")}
-                <ChevronDown className="size-3" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem>{t("preview.zoom.fit")}</DropdownMenuItem>
-              <DropdownMenuItem>{t("preview.zoom.zoom50")}</DropdownMenuItem>
-              <DropdownMenuItem>{t("preview.zoom.zoom100")}</DropdownMenuItem>
-              <DropdownMenuItem>{t("preview.zoom.zoom200")}</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                disabled
-                className="size-6 text-preview-muted hover:bg-preview-surface hover:text-preview-foreground"
-                aria-label={t("preview.action.toggleFullscreen")}
-              >
-                <Maximize2 className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t("preview.action.fullscreen")}</TooltipContent>
-          </Tooltip>
         </div>
       </div>
     </section>

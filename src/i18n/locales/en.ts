@@ -40,16 +40,6 @@ export const en = {
     videoPlayerLabel: "Video preview for {{fileName}}",
     decodeError: "Native playback failed. A proxy is required to preview this format.",
     approximate: "Approx.",
-    zoom: {
-      fit: "Fit",
-      zoom50: "50%",
-      zoom100: "100%",
-      zoom200: "200%",
-    },
-    action: {
-      fullscreen: "Fullscreen",
-      toggleFullscreen: "Toggle Fullscreen",
-    },
   },
   transport: {
     action: {

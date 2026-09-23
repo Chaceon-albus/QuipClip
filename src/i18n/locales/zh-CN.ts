@@ -43,16 +43,6 @@ export const zhCN: TranslationCatalog = {
     videoPlayerLabel: "视频预览：{{fileName}}",
     decodeError: "原生播放失败，预览此格式需要生成代理文件。",
     approximate: "（近似）",
-    zoom: {
-      fit: "适应窗口",
-      zoom50: "50%",
-      zoom100: "100%",
-      zoom200: "200%",
-    },
-    action: {
-      fullscreen: "全屏",
-      toggleFullscreen: "切换全屏",
-    },
   },
   transport: {
     action: {

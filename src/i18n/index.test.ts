@@ -1236,12 +1236,6 @@ describe("application shell localization and status bar formatting", () => {
 
     // PreviewPane
     expect(instance.t("preview.noMedia")).toBe("No media loaded");
-    expect(instance.t("preview.zoom.fit")).toBe("Fit");
-    expect(instance.t("preview.zoom.zoom50")).toBe("50%");
-    expect(instance.t("preview.zoom.zoom100")).toBe("100%");
-    expect(instance.t("preview.zoom.zoom200")).toBe("200%");
-    expect(instance.t("preview.action.toggleFullscreen")).toBe("Toggle Fullscreen");
-    expect(instance.t("preview.action.fullscreen")).toBe("Fullscreen");
 
     // TransportBar
     expect(instance.t("transport.action.undo")).toBe("Undo");
@@ -1379,12 +1373,6 @@ describe("application shell localization and status bar formatting", () => {
 
     // PreviewPane
     expect(instance.t("preview.noMedia")).toBe("未加载媒体");
-    expect(instance.t("preview.zoom.fit")).toBe("适应窗口");
-    expect(instance.t("preview.zoom.zoom50")).toBe("50%");
-    expect(instance.t("preview.zoom.zoom100")).toBe("100%");
-    expect(instance.t("preview.zoom.zoom200")).toBe("200%");
-    expect(instance.t("preview.action.toggleFullscreen")).toBe("切换全屏");
-    expect(instance.t("preview.action.fullscreen")).toBe("全屏");
 
     // TransportBar
     expect(instance.t("transport.action.undo")).toBe("撤销");
