@@ -8,10 +8,11 @@ export interface TimelineRulerProps {
 /**
  * Memoized ruler tick list component.
  *
- * This is required, not an optimisation. The tick count rises from 6 to as many as
- * 400, and TimelinePanel subscribes to presentedFrame, so it re-renders on every
- * presented frame during playback. Leaving up to 400 elements in that render body
- * would create and reconcile them about sixty times a second.
+ * The tick count rises from 6 to as many as 400. TimelinePanel does not render per
+ * presented frame, but it does render for changes that keep the markers, such as a
+ * change of the seek availability or of the media status. The memo keeps those renders
+ * from creating and reconciling up to 400 elements. Do not move the ticks into a layer
+ * that subscribes to the playback position.
  */
 export const TimelineRuler = memo(function TimelineRuler({
   markers,

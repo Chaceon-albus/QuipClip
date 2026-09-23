@@ -5,8 +5,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
-  type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
 import { Film } from "lucide-react";
@@ -17,8 +15,6 @@ import {
   type MediaStoreState,
 } from "@/features/media";
 import {
-  getDisplayedElapsedSeconds,
-  isPlaybackPositionApproximate,
   playbackStore,
   usePlaybackStore,
   type PlaybackStoreState,
@@ -28,25 +24,25 @@ import {
   calculateAnchorRatio,
   calculateAnchoredScrollLeft,
   calculateContentWidthPx,
-  calculateFollowScrollLeft,
   calculateMaxZoom,
-  calculatePausedFollow,
-  calculatePendingInRegionLayoutFromSeconds,
-  calculatePendingNavigation,
-  calculatePercentFromPts,
-  calculatePlayheadLayout,
   calculatePtsFromClientX,
-  calculateSegmentLayout,
   calculateTimelineSecondsFromClientX,
   calculateWheelZoomFactor,
   clampTimelineZoom,
-  getActiveSourceSegmentEntries,
   getTimelineDurationSeconds,
   useTimelineStore,
-  PLAYHEAD_FOLLOW_LEAD_FRACTION,
   TIMELINE_GUTTER_WIDTH_PX,
   type TimelineStoreState,
 } from "@/features/timeline";
+import { PendingInFlag, PendingInTrackMarks } from "./PendingInLayer";
+import { PlayheadFollow } from "./PlayheadFollow";
+import {
+  RulerPlayhead,
+  TimelineSeekSlider,
+  TrackPlayhead,
+  type ScrubSurfaceHandlers,
+} from "./PlayheadLayer";
+import { SegmentLayer } from "./SegmentLayer";
 import {
   calculateRulerTickStepSeconds,
   generateRulerMarkersForStep,
@@ -65,57 +61,25 @@ export interface TimelinePanelProps {
 
 const selectMedia = (state: MediaStoreState) => state.media;
 const selectMediaStatus = (state: MediaStoreState) => state.status;
-const selectPresentedFrame = (state: PlaybackStoreState) => state.presentedFrame;
 const selectCalibrationStatus = (state: PlaybackStoreState) => state.calibrationStatus;
-const selectApproximateBrowserTimeSeconds = (state: PlaybackStoreState) =>
-  state.approximateBrowserTimeSeconds;
-const selectSeekTargetSeconds = (state: PlaybackStoreState) => state.seekTargetSeconds;
 const selectIsAttached = (state: PlaybackStoreState) => state.isAttached;
 const selectIsReady = (state: PlaybackStoreState) => state.isReady;
 const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
-const selectIsPlaying = (state: PlaybackStoreState) => state.isPlaying;
 
-const selectSegments = (state: TimelineStoreState) => state.segments;
-const selectPendingInPts = (state: TimelineStoreState) => state.pendingInPts;
 const selectSetSource = (state: TimelineStoreState) => state.setSource;
-const selectCurrentSegmentId = (state: TimelineStoreState) => state.currentSegmentId;
-const selectSelectSegment = (state: TimelineStoreState) => state.selectSegment;
 
 /**
- * Places the pending In flag to the right of the In boundary, or to the left of it when the
- * flag does not fit between the boundary and the end of the lane.
+ * The timeline panel shell: the layout, the scroll container, the zoom and the viewport
+ * state, the pointer gesture, and the empty and loading states.
  *
- * The wrapper of the flag runs from the In boundary to the end of the lane, and it is a size
- * container. So `100cqw` is the space to the right of the boundary, and `100%` in a
- * translation is the width of the flag itself. When the flag fits, the difference is zero or
- * more, and `min` gives 0. When it does not fit, the scaled difference is a large negative
- * length, and `max` gives -100%, which puts the right edge of the flag on the boundary. The
- * factor turns a shortfall of a small fraction of a pixel into the full move, so the flag has
- * no position between the two placements. The rule compares the rendered width of the flag,
- * so it holds for a label of any length and needs no layout read in JavaScript.
+ * The shell subscribes to no value that changes per presented frame. The layers that draw
+ * the displayed position subscribe to it themselves: RulerPlayhead, TrackPlayhead, the
+ * `aria-valuenow` of TimelineSeekSlider, the pending In region, and PlayheadFollow, which
+ * holds the follow effects. SegmentLayer, the pending In flag and bracket, and the ruler
+ * ticks do not subscribe to it. So a presented frame renders only those small layers again.
+ * A layer that renders per frame takes its label as a prop, and a layer that does not
+ * reads the catalog itself.
  */
-const PENDING_IN_FLAG_PLACEMENT_STYLE: CSSProperties = {
-  transform: "translateX(max(-100%, min(0px, calc((100cqw - 100%) * 100000))))",
-};
-
-/**
- * Scrolls the timeline to a follow target, clamped to the scroll range, and keeps the mirror
- * of the scroll position truthful. The clamp reads the layout, but only when the view pages.
- */
-function applyFollowScrollLeft(
-  scrollEl: HTMLDivElement,
-  scrollLeftRef: RefObject<number>,
-  targetScrollLeft: number,
-): void {
-  const maxScrollLeftPx = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
-  const nextScrollLeft = Math.min(targetScrollLeft, maxScrollLeftPx);
-
-  if (scrollLeftRef.current !== nextScrollLeft) {
-    scrollEl.scrollLeft = nextScrollLeft;
-    scrollLeftRef.current = nextScrollLeft;
-  }
-}
-
 export function TimelinePanel({
   activeSourceId,
   runtimeBrowserDurationSeconds = null,
@@ -124,22 +88,12 @@ export function TimelinePanel({
   const { t } = useTranslation();
   const media = useMediaStore(selectMedia);
   const mediaStatus = useMediaStore(selectMediaStatus);
-  const presentedFrame = usePlaybackStore(selectPresentedFrame);
   const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
-  const approximateBrowserTimeSeconds = usePlaybackStore(
-    selectApproximateBrowserTimeSeconds,
-  );
-  const seekTargetSeconds = usePlaybackStore(selectSeekTargetSeconds);
   const isAttached = usePlaybackStore(selectIsAttached);
   const isReady = usePlaybackStore(selectIsReady);
   const seekToPts = usePlaybackStore(selectSeekToPts);
-  const isPlaying = usePlaybackStore(selectIsPlaying);
 
-  const segments = useTimelineStore(selectSegments);
-  const pendingInPts = useTimelineStore(selectPendingInPts);
   const setSource = useTimelineStore(selectSetSource);
-  const currentSegmentId = useTimelineStore(selectCurrentSegmentId);
-  const selectSegment = useTimelineStore(selectSelectSegment);
 
   const sourceRevisionKey = getSourceRevisionKey(media);
   // The generated ID is keyed by the revision key, not by the path, so a file that changed on
@@ -192,14 +146,14 @@ export function TimelinePanel({
   const laneRef = useRef<HTMLDivElement | null>(null);
 
   // scrollLeft is mirrored in a ref because reading scrollRef.current.scrollLeft
-  // on the per-frame effect path would force a synchronous layout on every frame.
-  // The per-frame path must cause zero forced layouts.
+  // on the per-frame effect path (PlayheadFollow) would force a synchronous layout on every
+  // frame. The per-frame path must cause zero forced layouts.
   const scrollLeftRef = useRef<number>(0);
   const userScrolledRef = useRef<boolean>(false);
 
   // The seek target that the last request of the pointer gesture left in the store, or null.
-  // seekFromClientX records it, and the paused follow compares and clears it through
-  // calculatePendingNavigation.
+  // seekFromClientX records it, and the paused follow in PlayheadFollow compares and clears it
+  // through calculatePendingNavigation.
   const gestureSeekTargetRef = useRef<number | null>(null);
 
   const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
@@ -336,14 +290,11 @@ export function TimelinePanel({
     });
   }, [maxZoom]);
 
-  // Reset zoom and scrollLeft when active source changes
+  // Reset zoom when the active source changes. PlayheadFollow resets scrollLeft for the same
+  // change, because that write must come before its follow effects in the commit.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setZoom(1);
-    if (scrollRef.current) {
-      scrollRef.current.scrollLeft = 0;
-      scrollLeftRef.current = 0;
-    }
   }, [sourceId]);
 
   const laneWidthPx = Math.max(
@@ -358,43 +309,6 @@ export function TimelinePanel({
   const markers = useMemo(() => {
     return generateRulerMarkersForStep(totalDurationSeconds, step);
   }, [totalDurationSeconds, step]);
-
-  // True while the playhead position below comes from the browser clock. The playhead takes
-  // no visual mark for it: the status bar carries the marking, and marking it twice would
-  // make a working playhead look broken.
-  const isPositionApproximate = isPlaybackPositionApproximate(
-    calibrationStatus,
-    presentedFrame,
-  );
-
-  // Current elapsed presentation seconds relative to videoStartPts, and the approximate
-  // browser clock otherwise. A source that never calibrates has no inferred PTS for its whole
-  // session, and a frozen 0 would leave the playhead at the left edge while the picture plays.
-  // Both branches report seconds elapsed from the start of the source, the axis the whole
-  // ruler uses: the store subtracts the origin of the browser media timeline from the
-  // approximate clock, and `onApproximateSeek` adds it back (ADR 003).
-  //
-  // When a seek is pending, seekTargetSeconds takes precedence over all other positions so
-  // the playhead tracks the target immediately (ADR 022).
-  const currentElapsedSeconds = useMemo(() => {
-    return getDisplayedElapsedSeconds(
-      {
-        seekTargetSeconds,
-        presentedFrame,
-        calibrationStatus,
-        approximateBrowserTimeSeconds,
-      },
-      media?.probe.videoStartPts,
-      media?.probe.videoTimeBase,
-    );
-  }, [
-    seekTargetSeconds,
-    presentedFrame,
-    calibrationStatus,
-    approximateBrowserTimeSeconds,
-    media?.probe.videoStartPts,
-    media?.probe.videoTimeBase,
-  ]);
 
   /**
    * Seeks to the timeline position under a client X coordinate (ADR 022).
@@ -465,12 +379,6 @@ export function TimelinePanel({
     };
   }, []);
 
-  useEffect(() => {
-    if (!canSeek || isIndeterminate || !media) {
-      gestureRef.current?.cancel();
-    }
-  }, [canSeek, isIndeterminate, media]);
-
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!canSeek || event.button !== 0 || !event.isPrimary) {
       return;
@@ -502,168 +410,18 @@ export function TimelinePanel({
     getGesture().cancel(event.pointerId);
   };
 
-  const playhead = calculatePlayheadLayout(currentElapsedSeconds, totalDurationSeconds);
+  // The pointer handlers of the three scrub surfaces: the ruler lane, the seek slider and
+  // the hit area of the track playhead.
+  const scrubHandlers: ScrubSurfaceHandlers = {
+    onPointerDown: canSeek ? handlePointerDown : undefined,
+    onPointerMove: handlePointerMove,
+    onPointerUp: handlePointerUp,
+    onPointerCancel: handlePointerCancel,
+    onLostPointerCapture: handlePointerCancel,
+  };
 
-  // Resumes follow when playback starts or resumes after a pause.
-  const wasPlayingRef = useRef<boolean>(isPlaying);
-  useEffect(() => {
-    if (isPlaying && !wasPlayingRef.current) {
-      userScrolledRef.current = false;
-    }
-    wasPlayingRef.current = isPlaying;
-  }, [isPlaying]);
-
-  // Follow the playhead during playback when it leaves the visible window.
-  useEffect(() => {
-    if (!isPlaying) {
-      return;
-    }
-
-    const scrollEl = scrollRef.current;
-    if (!scrollEl || viewportWidthPx <= 0) {
-      return;
-    }
-
-    const targetScrollLeft = calculateFollowScrollLeft(
-      playhead.percent,
-      laneWidthPx,
-      TIMELINE_GUTTER_WIDTH_PX,
-      scrollLeftRef.current,
-      viewportWidthPx,
-      PLAYHEAD_FOLLOW_LEAD_FRACTION,
-    );
-
-    if (targetScrollLeft === null) {
-      // Visible. Nothing to do, and the user's view has caught up with playback, so a
-      // suspension from an earlier pan is over.
-      userScrolledRef.current = false;
-      return;
-    }
-
-    if (userScrolledRef.current) {
-      // Outside the window, but the user put the view where it is. Leave it alone.
-      return;
-    }
-
-    applyFollowScrollLeft(scrollEl, scrollLeftRef, targetScrollLeft);
-  }, [isPlaying, laneWidthPx, playhead.percent, viewportWidthPx]);
-
-  // The displayed playhead position, in seconds, at the last run of the paused follow below.
-  // That follow acts only when this position changes. A zoom, a resize or a change of the
-  // source extent changes the geometry or the percent, and not this value, so none of them
-  // moves the view.
-  const lastElapsedSecondsRef = useRef<number>(currentElapsedSeconds);
-
-  // Follow the playhead while paused, when a navigation such as a frame step moves it out of
-  // the visible window. calculatePausedFollow states the conditions. A navigation is a
-  // deliberate move of the playhead, so it also ends a suspension from an earlier pan. A pan
-  // with no navigation changes no position, so this effect never undoes it.
-  useEffect(() => {
-    const previousElapsedSeconds = lastElapsedSecondsRef.current;
-    lastElapsedSecondsRef.current = currentElapsedSeconds;
-
-    const pending = calculatePendingNavigation(
-      seekTargetSeconds,
-      gestureSeekTargetRef.current,
-    );
-    gestureSeekTargetRef.current = pending.nextRecordedTarget;
-
-    if (isPlaying) {
-      // The playback follow above owns the view.
-      return;
-    }
-
-    const scrollEl = scrollRef.current;
-    if (!scrollEl || viewportWidthPx <= 0) {
-      return;
-    }
-
-    const decision = calculatePausedFollow({
-      playheadPercent: playhead.percent,
-      elapsedSeconds: currentElapsedSeconds,
-      previousElapsedSeconds,
-      isNavigationPending: pending.isNavigationPending,
-      isGestureActive: gestureRef.current?.isActive() === true,
-      laneWidthPx,
-      laneLeftOffsetPx: TIMELINE_GUTTER_WIDTH_PX,
-      scrollLeftPx: scrollLeftRef.current,
-      viewportWidthPx,
-      leadFraction: PLAYHEAD_FOLLOW_LEAD_FRACTION,
-    });
-
-    if (!decision.isNavigation) {
-      return;
-    }
-
-    userScrolledRef.current = false;
-    if (decision.scrollLeftPx !== null) {
-      applyFollowScrollLeft(scrollEl, scrollLeftRef, decision.scrollLeftPx);
-    }
-  }, [
-    currentElapsedSeconds,
-    isPlaying,
-    laneWidthPx,
-    playhead.percent,
-    seekTargetSeconds,
-    viewportWidthPx,
-  ]);
-
-  const activeSourceSegments = useMemo(
-    () => getActiveSourceSegmentEntries(segments, sourceId),
-    [segments, sourceId],
-  );
-  // None of these inputs depends on the playhead, so this must not rerun per frame. The
-  // label and the number belong here for that reason: `t` is stable per language, so a
-  // catalog lookup per segment costs nothing here and would cost one per presented frame
-  // in the render body.
-  const segmentLayouts = useMemo(
-    () =>
-      activeSourceSegments
-        .map(({ segment, projectIndex }) => ({
-          segment,
-          number: projectIndex + 1,
-          label: t("timeline.segment", { index: projectIndex + 1 }),
-          layout: calculateSegmentLayout(
-            segment,
-            media?.probe.videoStartPts,
-            media?.probe.videoTimeBase,
-            totalDurationSeconds,
-          ),
-        }))
-        // A zero-width overlay has no visible target. As a button it would also be a Tab
-        // stop with nothing to show, which reads as a dead key press.
-        .filter(({ layout }) => layout.widthPercent > 0),
-    [activeSourceSegments, media, totalDurationSeconds, t],
-  );
-  const segmentListLabel = useMemo(() => t("timeline.segmentList"), [t]);
-  const pendingInFlagLabel = useMemo(() => t("timeline.pendingInFlag"), [t]);
-
-  // The pending In region does depend on the playhead, so it stays on the render path. Its
-  // right edge is the position the playhead is drawn at, and not the presented frame. Each
-  // seek clears `presentedFrame` until the next RVFC callback, so a region drawn from it would
-  // disappear on every click, frame step and scrub sample (ADR 022). This is display only:
-  // Mark Out and the edit predicates still read `presentedFrame`.
-  const pendingRegion = calculatePendingInRegionLayoutFromSeconds(
-    pendingInPts,
-    currentElapsedSeconds,
-    media?.probe.videoStartPts,
-    media?.probe.videoTimeBase,
-    totalDurationSeconds,
-  );
-
-  const pendingInPercent =
-    pendingInPts !== null &&
-    media?.probe.videoStartPts &&
-    media?.probe.videoTimeBase &&
-    totalDurationSeconds &&
-    totalDurationSeconds > 0
-      ? calculatePercentFromPts(
-          pendingInPts,
-          media.probe.videoStartPts,
-          media.probe.videoTimeBase,
-          totalDurationSeconds,
-        )
-      : null;
+  const videoStartPts = media?.probe.videoStartPts;
+  const videoTimeBase = media?.probe.videoTimeBase;
 
   return (
     <section className="flex h-[180px] shrink-0 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
@@ -743,11 +501,7 @@ export function TimelinePanel({
              */}
             <div
               ref={laneRef}
-              onPointerDown={canSeek ? handlePointerDown : undefined}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              onPointerCancel={handlePointerCancel}
-              onLostPointerCapture={handlePointerCancel}
+              {...scrubHandlers}
               className={`relative flex-1 touch-none border-b border-timeline-divider bg-timeline-ruler ${canSeek ? "cursor-pointer" : ""}`}
             >
               {/* Timecode labels and ticks */}
@@ -766,66 +520,21 @@ export function TimelinePanel({
                 </div>
               )}
 
-              {/*
-               * Pending In flag. One edge of the flag lies on the In boundary, the same
-               * edge as the bracket in the track. The flag extends to the right of it, or
-               * to the left of it when it does not fit before the end of the lane (see
-               * PENDING_IN_FLAG_PLACEMENT_STYLE), so the flag stays whole and inside the
-               * lane, and it does not make the scroll area wider.
-               *
-               * The playhead at z-30 is drawn above the flag. Its head is 12px wide and
-               * centred, and its outline adds 1px, so it covers 7px on each side of the
-               * playhead. Right after Mark In the playhead lies on the In boundary, so the
-               * 8px padding on each side keeps the label clear of the head in both
-               * placements.
-               *
-               * The label is words, not a time code, so it takes the smallest text step,
-               * `text-2xs`, which gives Chinese its larger size. The fixed 12px line keeps
-               * the flag as tall as the playhead head in both languages.
-               *
-               * The flag is aria-hidden. It repeats the pending In mark in the track, which is
-               * also decorative, and a bare "In" read out of the ruler gives no position.
-               */}
-              {pendingInPercent !== null && (
-                <div
-                  aria-hidden="true"
-                  className="@container pointer-events-none absolute top-0 right-0 z-20"
-                  style={{ left: `${pendingInPercent}%` }}
-                >
-                  <span
-                    className="absolute top-0 left-0 rounded-b-sm bg-primary px-2 text-2xs leading-3 font-semibold whitespace-nowrap text-primary-foreground"
-                    style={PENDING_IN_FLAG_PLACEMENT_STYLE}
-                  >
-                    {pendingInFlagLabel}
-                  </span>
-                </div>
-              )}
+              {/* Pending In flag (see PendingInFlag) */}
+              <PendingInFlag
+                videoStartPts={videoStartPts}
+                videoTimeBase={videoTimeBase}
+                totalDurationSeconds={totalDurationSeconds}
+              />
 
-              {/*
-               * Playhead in the ruler: the upper part of one line that the track playhead
-               * continues below the divider. The line spans the full ruler height and the
-               * head lies over its top, both centred on the playhead position. The head is
-               * 12px wide, an even width like the 2px line, so its edges and its tip fall on
-               * the same pixel boundaries as the line. It is 12px tall, so it leaves most of
-               * a timecode label under the playhead visible.
-               *
-               * The outline is a 1px ring in the timeline background colour, so the line
-               * stays visible over a fill of a similar colour, such as the selected segment.
-               * It is a drop-shadow filter on this wrapper, and not a box-shadow, for two
-               * reasons: clip-path removes the head's own shadow, and one filter outlines the
-               * head and the line as one shape, with no gap below the tip. The ring has a
-               * left, a right and a lower edge only, the same ring as the track playhead.
-               */}
+              {/* Playhead in the ruler (see RulerPlayhead) */}
               {media && !isIndeterminate && (
-                <div
-                  className="pointer-events-none absolute inset-y-0 z-30 -translate-x-1/2 drop-shadow-[1px_0_0,-1px_0_0,0_1px_0] drop-shadow-timeline-background"
-                  style={{ left: playhead.left }}
-                  aria-label={t("timeline.playhead")}
-                  data-approximate={isPositionApproximate}
-                >
-                  <div className="h-full w-0.5 bg-timeline-playhead" />
-                  <div className="absolute top-0 left-1/2 h-3 w-3 -translate-x-1/2 bg-timeline-playhead [clip-path:polygon(0_0,100%_0,100%_50%,50%_100%,0_50%)]" />
-                </div>
+                <RulerPlayhead
+                  videoStartPts={videoStartPts}
+                  videoTimeBase={videoTimeBase}
+                  totalDurationSeconds={totalDurationSeconds}
+                  ariaLabel={t("timeline.playhead")}
+                />
               )}
             </div>
           </div>
@@ -855,31 +564,17 @@ export function TimelinePanel({
                  */
                 <div className="relative h-full w-full">
                   {/*
-                   * Canonical accessible seek surface. Its 8px vertical inset holds the
-                   * source bar, the pending In overlays, the hit area and the focus ring
-                   * clear of the ruler divider and of the lower panel edge.
+                   * Canonical accessible seek surface (see TimelineSeekSlider). The panel
+                   * creates its content here, so a render of the slider for a new position
+                   * does not render the source bar or the pending In marks again.
                    */}
-                  <div
-                    role="slider"
-                    aria-label={t("timeline.seekSlider")}
-                    aria-disabled={!canSeek}
-                    aria-valuemin={0}
-                    aria-valuemax={isIndeterminate ? undefined : totalDurationSeconds}
-                    aria-valuenow={
-                      isIndeterminate || !Number.isFinite(currentElapsedSeconds)
-                        ? undefined
-                        : Math.max(
-                            0,
-                            Math.min(totalDurationSeconds, currentElapsedSeconds),
-                          )
-                    }
-                    tabIndex={canSeek ? 0 : undefined}
-                    onPointerDown={canSeek ? handlePointerDown : undefined}
-                    onPointerMove={handlePointerMove}
-                    onPointerUp={handlePointerUp}
-                    onPointerCancel={handlePointerCancel}
-                    onLostPointerCapture={handlePointerCancel}
-                    className={`absolute inset-x-0 inset-y-2 touch-none ${canSeek ? "cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
+                  <TimelineSeekSlider
+                    videoStartPts={videoStartPts}
+                    videoTimeBase={videoTimeBase}
+                    totalDurationSeconds={totalDurationSeconds}
+                    ariaLabel={t("timeline.seekSlider")}
+                    canSeek={canSeek}
+                    scrubHandlers={scrubHandlers}
                   >
                     {/* Full-source background layer */}
                     <div className="pointer-events-none absolute inset-0 flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-clip-video p-2 text-clip-foreground shadow-xs">
@@ -891,114 +586,31 @@ export function TimelinePanel({
                       </span>
                     </div>
 
-                    {/* Pending In active region preview overlay */}
-                    {pendingRegion && pendingRegion.isVisible && (
-                      <div
-                        className="pointer-events-none absolute inset-y-1 z-20 rounded-md border-2 border-dashed border-primary/80 bg-primary/15"
-                        style={{
-                          left: pendingRegion.left,
-                          width: pendingRegion.width,
-                        }}
-                      />
-                    )}
+                    {/* Pending In region and bracket (see PendingInTrackMarks) */}
+                    <PendingInTrackMarks
+                      videoStartPts={videoStartPts}
+                      videoTimeBase={videoTimeBase}
+                      totalDurationSeconds={totalDurationSeconds}
+                    />
+                  </TimelineSeekSlider>
 
-                    {/*
-                     * Pending In mark: a "[" bracket whose left edge is the In boundary.
-                     * The In PTS is the inclusive left edge of its frame (ADR 002), so the
-                     * bracket opens to the right of the position and is not centred on it.
-                     * The shape keeps it apart from the playhead, a centred line that the
-                     * z-30 layer draws above it.
-                     */}
-                    {pendingInPercent !== null && (
-                      <div
-                        className="pointer-events-none absolute inset-y-0 z-20 w-1.5 rounded-l-[2px] border-y-2 border-l-2 border-primary"
-                        style={{ left: `${pendingInPercent}%` }}
-                      />
-                    )}
-                  </div>
+                  {/* Completed segment overlays (see SegmentLayer) */}
+                  <SegmentLayer
+                    sourceId={sourceId}
+                    videoStartPts={videoStartPts}
+                    videoTimeBase={videoTimeBase}
+                    totalDurationSeconds={totalDurationSeconds}
+                  />
 
-                  {/*
-                   * Completed segment overlays. The layer takes the clicks of its buttons
-                   * only, so uncovered track stays a seek surface; over a
-                   * segment, the ruler track above and the playhead hit area are the seek surfaces.
-                   * The `z-10` puts this layer under the pending region and the playhead.
-                   */}
-                  <div
-                    role="group"
-                    aria-label={segmentListLabel}
-                    className="pointer-events-none absolute inset-x-0 inset-y-2 z-10"
-                  >
-                    {segmentLayouts.map(({ segment: seg, number, label, layout }) => {
-                      // A string comparison at render time, so selection never rebuilds
-                      // the memoized layouts.
-                      const isCurrent = seg.id === currentSegmentId;
-                      return (
-                        <button
-                          key={seg.id}
-                          type="button"
-                          aria-pressed={isCurrent}
-                          aria-label={label}
-                          // Selecting does not seek: the playhead is the operand of Mark
-                          // In, Mark Out and Split, so a selection click must not move it.
-                          onClick={() => selectSegment(seg.id)}
-                          // The overlay layer holding the segments is z-10, the pending-In
-                          // overlays are z-20, and the playhead is z-30. Applying z-20 to
-                          // the selected segment raises it above sibling segments so
-                          // overlapping segments do not obscure it, without covering the playhead.
-                          className={`pointer-events-auto absolute inset-y-1 flex items-center overflow-hidden rounded-md px-2 shadow-xs ${
-                            isCurrent
-                              ? "z-20 border-2 border-primary-active bg-primary text-primary-foreground ring-2 ring-primary-active ring-offset-2 ring-offset-clip-video"
-                              : "border-2 border-primary/45 bg-primary/20 text-foreground backdrop-blur-xs hover:border-primary/70 hover:bg-primary/30"
-                          }`}
-                          style={{
-                            left: layout.left,
-                            width: layout.width,
-                          }}
-                        >
-                          <span
-                            className={`truncate font-mono text-[10px] font-semibold ${
-                              isCurrent ? "text-primary-foreground" : "text-foreground"
-                            }`}
-                          >
-                            #{number}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/*
-                   * Track playhead layer. Positioned after the segment group at z-30
-                   * so the 9px hit area is grabbable above segments.
-                   *
-                   * The layer spans the full track height, and `-top-px` pulls it up over
-                   * the 1px divider, so it meets the ruler playhead and the two read as one
-                   * line from the top of the ruler to the bottom of the track.
-                   *
-                   * The line has the same outline as the ruler playhead: a drop-shadow
-                   * ring in the timeline background colour on the left, the right and the
-                   * lower edge. It has no upper edge on purpose. That edge would paint over
-                   * the lowest pixel of the ruler line, and the one line would show a gap.
-                   */}
+                  {/* Track playhead, after the segment group (see TrackPlayhead) */}
                   {!isIndeterminate && (
-                    <div className="pointer-events-none absolute inset-x-0 -top-px bottom-0 z-30">
-                      <div
-                        className="pointer-events-none absolute inset-y-0 flex -translate-x-1/2 flex-col items-center"
-                        style={{ left: playhead.left }}
-                        data-approximate={isPositionApproximate}
-                      >
-                        <div
-                          onPointerDown={canSeek ? handlePointerDown : undefined}
-                          onPointerMove={handlePointerMove}
-                          onPointerUp={handlePointerUp}
-                          onPointerCancel={handlePointerCancel}
-                          onLostPointerCapture={handlePointerCancel}
-                          className={`flex h-full w-[9px] touch-none items-center justify-center ${canSeek ? "pointer-events-auto cursor-ew-resize" : "pointer-events-none"}`}
-                        >
-                          <div className="h-full w-0.5 bg-timeline-playhead drop-shadow-[1px_0_0,-1px_0_0,0_1px_0] drop-shadow-timeline-background" />
-                        </div>
-                      </div>
-                    </div>
+                    <TrackPlayhead
+                      videoStartPts={videoStartPts}
+                      videoTimeBase={videoTimeBase}
+                      totalDurationSeconds={totalDurationSeconds}
+                      canSeek={canSeek}
+                      scrubHandlers={scrubHandlers}
+                    />
                   )}
                 </div>
               ) : mediaStatus === "loading" ? (
@@ -1028,6 +640,22 @@ export function TimelinePanel({
           </div>
         </div>
       </div>
+
+      {/* The follow of the playhead. It renders nothing (see PlayheadFollow). */}
+      <PlayheadFollow
+        media={media}
+        sourceId={sourceId}
+        totalDurationSeconds={totalDurationSeconds}
+        isIndeterminate={isIndeterminate}
+        canSeek={canSeek}
+        laneWidthPx={laneWidthPx}
+        viewportWidthPx={viewportWidthPx}
+        scrollRef={scrollRef}
+        scrollLeftRef={scrollLeftRef}
+        userScrolledRef={userScrolledRef}
+        gestureRef={gestureRef}
+        gestureSeekTargetRef={gestureSeekTargetRef}
+      />
     </section>
   );
 }
