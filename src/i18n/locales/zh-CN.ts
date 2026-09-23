@@ -68,13 +68,34 @@ export const zhCN: TranslationCatalog = {
       deleteSegment: "删除",
       deleteSegmentAria: "删除当前片段",
       play: "播放",
-      playHint: "播放（空格键）",
       pause: "暂停",
-      pauseHint: "暂停（空格键）",
       previousStep: "后退一帧",
-      previousStepHint: "后退一帧（左方向键）",
       nextStep: "前进一帧",
-      nextStepHint: "前进一帧（右方向键）",
+    },
+    disabledReason: {
+      preciseMarkingUnavailable: "此视频无法精确标记。",
+      markInFirst: "请先标记入点。",
+      selectSegment: "请先选择一个片段。",
+      playheadInsideSegment: "请将播放头移到入点与出点之间。",
+      playheadBeforeOut: "请将播放头移到出点之前。",
+      playheadAfterIn: "请将播放头移到入点之后。",
+      atInPoint: "播放头已位于入点。",
+      atOutPoint: "播放头已位于出点。",
+      noFrameRate: "源未报告帧率。",
+    },
+  },
+  // A key keeps the label that is printed on its key cap. The space bar has no printed
+  // label, so it takes the Chinese name.
+  shortcut: {
+    key: {
+      space: "空格",
+      home: "Home",
+      end: "End",
+      delete: "Delete",
+      backspace: "Backspace",
+      escape: "Esc",
+      ctrl: "Ctrl",
+      shift: "Shift",
     },
   },
   timeline: {

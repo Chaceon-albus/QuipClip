@@ -65,13 +65,35 @@ export const en = {
       deleteSegment: "Delete",
       deleteSegmentAria: "Delete Current Segment",
       play: "Play",
-      playHint: "Play (Space)",
       pause: "Pause",
-      pauseHint: "Pause (Space)",
       previousStep: "Step Back One Frame",
-      previousStepHint: "Step Back One Frame (Left Arrow)",
       nextStep: "Step Forward One Frame",
-      nextStepHint: "Step Forward One Frame (Right Arrow)",
+    },
+    disabledReason: {
+      preciseMarkingUnavailable: "Precise marking is unavailable for this video.",
+      markInFirst: "Mark an In point first.",
+      selectSegment: "Select a segment first.",
+      playheadInsideSegment: "Move the playhead between the In and Out points.",
+      playheadBeforeOut: "Move the playhead before the Out point.",
+      playheadAfterIn: "Move the playhead after the In point.",
+      atInPoint: "The playhead is already at the In point.",
+      atOutPoint: "The playhead is already at the Out point.",
+      noFrameRate: "The source reports no frame rate.",
+    },
+  },
+  // The names of the keys that are words, for the key chips of the tooltips and menus. Each
+  // chip is a separate element, never part of a sentence. Keep the label that is printed on
+  // the key cap. The space bar has no printed label, so its name is a word of the language.
+  shortcut: {
+    key: {
+      space: "Space",
+      home: "Home",
+      end: "End",
+      delete: "Delete",
+      backspace: "Backspace",
+      escape: "Esc",
+      ctrl: "Ctrl",
+      shift: "Shift",
     },
   },
   timeline: {

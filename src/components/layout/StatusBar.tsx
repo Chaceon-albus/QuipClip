@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { Settings, TriangleAlert } from "lucide-react";
+import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
+import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -29,6 +31,9 @@ export function StatusBar() {
   const media = useMediaStore((state) => state.media);
   const settingsOpen = useSettingsPanelStore((state) => state.open);
   const showSettings = useSettingsPanelStore((state) => state.show);
+  // The key name comes from the binding table (ADR 026).
+  const shortcutOf = useShortcutLabels();
+  const settingsShortcut = shortcutOf("openSettings");
 
   const probeStartedRef = useRef(false);
   const ffmpeg = useFfmpegStore(useShallow(selectFfmpegState));
@@ -266,6 +271,7 @@ export function StatusBar() {
               aria-label={t("statusBar.settings")}
               aria-haspopup="dialog"
               aria-expanded={settingsOpen}
+              aria-keyshortcuts={settingsShortcut?.aria}
               onClick={() => {
                 showSettings();
               }}
@@ -273,7 +279,10 @@ export function StatusBar() {
               <Settings className="size-4" strokeWidth={1.75} />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>{t("statusBar.settings")}</TooltipContent>
+          <ShortcutTooltipContent
+            label={t("statusBar.settings")}
+            keys={settingsShortcut?.keys}
+          />
         </Tooltip>
       </div>
     </footer>

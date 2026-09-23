@@ -10,6 +10,7 @@ import { useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { AlertCircle, Film, Loader2 } from "lucide-react";
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
+import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
 import {
   getSourceRevisionKey,
@@ -122,6 +123,9 @@ export function PreviewPane() {
   const media = useMediaStore((s) => s.media);
   const error = useMediaStore((s) => s.error);
   const openMedia = useOpenMediaAction();
+  // The Open button performs the Open Media action, so it declares the same key (ADR 026).
+  const shortcutOf = useShortcutLabels();
+  const openMediaShortcut = shortcutOf("openMedia");
 
   const playbackError = usePlaybackStore((s) => s.error);
   const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
@@ -526,7 +530,12 @@ export function PreviewPane() {
                   <h2 className="text-sm font-medium text-preview-foreground">
                     {t("preview.empty.title")}
                   </h2>
-                  <Button onClick={openMedia}>{t("preview.empty.openVideo")}</Button>
+                  <Button
+                    onClick={openMedia}
+                    aria-keyshortcuts={openMediaShortcut?.aria}
+                  >
+                    {t("preview.empty.openVideo")}
+                  </Button>
                   <div className="flex flex-col items-center gap-1 text-xs text-preview-muted">
                     <p>{t("preview.empty.dropHint")}</p>
                     <p>{SUPPORTED_VIDEO_FORMATS}</p>

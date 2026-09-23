@@ -2,9 +2,10 @@
  * The key table of the window keyboard layer (ADR 026).
  *
  * `SHORTCUT_BINDINGS` is the only source of the key bindings. The keyboard layer matches each
- * key press against it. A later unit renders the key names in the tooltips from this table,
- * so no tooltip spells a key on its own. Each binding names a key, an exact set of modifiers,
- * an action, and what a repeated key press does.
+ * key press against it. `shortcutLabels.ts` formats the key names of the tooltips, the menu
+ * items and the `aria-keyshortcuts` attributes from this table, so no control spells a key on
+ * its own. Each binding names a key, an exact set of modifiers, an action, and what a repeated
+ * key press does.
  *
  * The module has no React, DOM or store dependency, so the tests need no document.
  */

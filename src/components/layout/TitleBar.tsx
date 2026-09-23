@@ -8,10 +8,14 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipTrigger } from "@/components/ui/tooltip";
+import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
+import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { ExportDialog } from "@/components/export/ExportDialog";
 import { useExportPanelStore } from "@/features/export";
 import { useMediaStore } from "@/features/media";
@@ -28,6 +32,10 @@ export function TitleBar() {
   const media = useMediaStore((state) => state.media);
   const exportDialogOpen = useExportPanelStore((state) => state.open);
   const setExportDialogOpen = useExportPanelStore((state) => state.setOpen);
+  // The key names come from the binding table (ADR 026).
+  const shortcutOf = useShortcutLabels();
+  const openMediaShortcut = shortcutOf("openMedia");
+  const exportShortcut = shortcutOf("export");
 
   // The empty preview offers the same action through its Open button.
   const handleOpenMedia = useOpenMediaAction();
@@ -88,9 +96,20 @@ export function TitleBar() {
               <ChevronDown className="size-3" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            <DropdownMenuItem onClick={handleOpenMedia}>
+          {/* The menu is wider than its trigger, so a label and its key fit on one row. The
+              key text is hidden from assistive technology, because each item declares the
+              same key in aria-keyshortcuts. */}
+          <DropdownMenuContent align="start" className="w-auto min-w-48">
+            <DropdownMenuItem
+              onClick={handleOpenMedia}
+              aria-keyshortcuts={openMediaShortcut?.aria}
+            >
               {t("titleBar.menu.openMedia")}
+              {openMediaShortcut && (
+                <DropdownMenuShortcut aria-hidden="true">
+                  {openMediaShortcut.keys}
+                </DropdownMenuShortcut>
+              )}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem disabled>
@@ -101,8 +120,16 @@ export function TitleBar() {
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem disabled>{t("titleBar.menu.save")}</DropdownMenuItem>
-            <DropdownMenuItem onClick={handleExport}>
+            <DropdownMenuItem
+              onClick={handleExport}
+              aria-keyshortcuts={exportShortcut?.aria}
+            >
               {t("titleBar.menu.export")}
+              {exportShortcut && (
+                <DropdownMenuShortcut aria-hidden="true">
+                  {exportShortcut.keys}
+                </DropdownMenuShortcut>
+              )}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -121,15 +148,24 @@ export function TitleBar() {
 
       {/* Right: Export button (constant), plus window controls on non-macOS platforms */}
       <div className="flex items-center gap-1">
-        <Button
-          size="sm"
-          variant="default"
-          disabled={!canExportMedia(media !== null)}
-          onClick={handleExport}
-        >
-          <FileOutput />
-          {t("titleBar.action.export")}
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="sm"
+              variant="default"
+              disabled={!canExportMedia(media !== null)}
+              onClick={handleExport}
+              aria-keyshortcuts={exportShortcut?.aria}
+            >
+              <FileOutput />
+              {t("titleBar.action.export")}
+            </Button>
+          </TooltipTrigger>
+          <ShortcutTooltipContent
+            label={t("titleBar.action.export")}
+            keys={exportShortcut?.keys}
+          />
+        </Tooltip>
         {!isMac && (
           <div className="flex h-10 items-center">
             <button

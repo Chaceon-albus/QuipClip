@@ -1371,16 +1371,17 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.split")).toBe("Split");
     expect(instance.t("transport.action.splitAria")).toBe("Split Segment at Playhead");
     expect(instance.t("transport.action.play")).toBe("Play");
-    expect(instance.t("transport.action.playHint")).toBe("Play (Space)");
-    expect(instance.t("transport.action.pauseHint")).toBe("Pause (Space)");
+    expect(instance.t("transport.action.pause")).toBe("Pause");
     expect(instance.t("transport.action.previousStep")).toBe("Step Back One Frame");
-    expect(instance.t("transport.action.previousStepHint")).toBe(
-      "Step Back One Frame (Left Arrow)",
-    );
     expect(instance.t("transport.action.nextStep")).toBe("Step Forward One Frame");
-    expect(instance.t("transport.action.nextStepHint")).toBe(
-      "Step Forward One Frame (Right Arrow)",
+    expect(instance.t("transport.disabledReason.markInFirst")).toBe(
+      "Mark an In point first.",
     );
+    expect(instance.t("transport.disabledReason.noFrameRate")).toBe(
+      "The source reports no frame rate.",
+    );
+    expect(instance.t("shortcut.key.space")).toBe("Space");
+    expect(instance.t("shortcut.key.escape")).toBe("Esc");
     expect(instance.t("preview.approximate")).toBe("Approx.");
 
     // Dialog
@@ -1511,14 +1512,13 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.split")).toBe("分割");
     expect(instance.t("transport.action.splitAria")).toBe("在播放头处分割片段");
     expect(instance.t("transport.action.play")).toBe("播放");
-    expect(instance.t("transport.action.playHint")).toBe("播放（空格键）");
-    expect(instance.t("transport.action.pauseHint")).toBe("暂停（空格键）");
+    expect(instance.t("transport.action.pause")).toBe("暂停");
     expect(instance.t("transport.action.previousStep")).toBe("后退一帧");
-    expect(instance.t("transport.action.previousStepHint")).toBe(
-      "后退一帧（左方向键）",
-    );
     expect(instance.t("transport.action.nextStep")).toBe("前进一帧");
-    expect(instance.t("transport.action.nextStepHint")).toBe("前进一帧（右方向键）");
+    expect(instance.t("transport.disabledReason.markInFirst")).toBe("请先标记入点。");
+    expect(instance.t("transport.disabledReason.noFrameRate")).toBe("源未报告帧率。");
+    expect(instance.t("shortcut.key.space")).toBe("空格");
+    expect(instance.t("shortcut.key.escape")).toBe("Esc");
     expect(instance.t("preview.approximate")).toBe("（近似）");
 
     // Dialog
