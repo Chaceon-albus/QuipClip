@@ -28,10 +28,9 @@ export const zhCN: TranslationCatalog = {
     action: {
       export: "导出",
     },
-    project: {
-      untitled: "未命名项目",
-      saved: "已保存",
-      edited: "已编辑",
+    source: {
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      segmentCount_other: "{{count}} 个片段",
     },
   },
   dialog: {

@@ -4,6 +4,7 @@ import { StatusBar } from "@/components/layout/StatusBar";
 import { TitleBar } from "@/components/layout/TitleBar";
 import { startTaskbarProgressSync } from "@/components/layout/taskbarProgressSync";
 import { useKeyboardShortcuts } from "@/components/layout/useKeyboardShortcuts";
+import { startWindowTitleSync } from "@/components/layout/windowTitleSync";
 import { PreviewPane } from "@/components/preview/PreviewPane";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { TimelinePanel } from "@/components/timeline/TimelinePanel";
@@ -16,6 +17,8 @@ export function AppShell() {
 
   // Mirror the export progress on the Dock and the task bar (ADR 025).
   useEffect(() => startTaskbarProgressSync(), []);
+  // Name the open file in the native window title, which the system shows outside the window.
+  useEffect(() => startWindowTitleSync(), []);
 
   const runtimeBrowserDurationSeconds = usePlaybackStore(
     (state) => state.runtimeBrowserDurationSeconds,

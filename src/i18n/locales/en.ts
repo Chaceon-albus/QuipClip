@@ -25,10 +25,9 @@ export const en = {
     action: {
       export: "Export",
     },
-    project: {
-      untitled: "Untitled Project",
-      saved: "Saved",
-      edited: "Edited",
+    source: {
+      segmentCount_one: "{{count}} segment",
+      segmentCount_other: "{{count}} segments",
     },
   },
   dialog: {

@@ -1347,8 +1347,8 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("titleBar.menu.save")).toBe("Save");
     expect(instance.t("titleBar.menu.export")).toBe("Export...");
     expect(instance.t("titleBar.action.export")).toBe("Export");
-    expect(instance.t("titleBar.project.untitled")).toBe("Untitled Project");
-    expect(instance.t("titleBar.project.saved")).toBe("Saved");
+    expect(instance.t("titleBar.source.segmentCount", { count: 1 })).toBe("1 segment");
+    expect(instance.t("titleBar.source.segmentCount", { count: 3 })).toBe("3 segments");
     expect(instance.t("window.minimize")).toBe("Minimize");
     expect(instance.t("window.toggleMaximize")).toBe("Toggle maximize/restore");
     expect(instance.t("window.close")).toBe("Close");
@@ -1492,8 +1492,8 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("titleBar.menu.save")).toBe("保存");
     expect(instance.t("titleBar.menu.export")).toBe("导出...");
     expect(instance.t("titleBar.action.export")).toBe("导出");
-    expect(instance.t("titleBar.project.untitled")).toBe("未命名项目");
-    expect(instance.t("titleBar.project.saved")).toBe("已保存");
+    expect(instance.t("titleBar.source.segmentCount", { count: 1 })).toBe("1 个片段");
+    expect(instance.t("titleBar.source.segmentCount", { count: 3 })).toBe("3 个片段");
     expect(instance.t("window.minimize")).toBe("最小化");
     expect(instance.t("window.toggleMaximize")).toBe("切换最大化/还原");
     expect(instance.t("window.close")).toBe("关闭");
