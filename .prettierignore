@@ -5,6 +5,9 @@ pnpm-lock.yaml
 # Agent workspace: skill submodules must not be reformatted, and `private` is off limits.
 .agents
 
+# Agent workspace and worktrees: each worktree is a full copy of the repository.
+.claude
+
 # Generated or binary
 src-tauri/target
 src-tauri/gen

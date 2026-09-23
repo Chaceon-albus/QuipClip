@@ -6,8 +6,9 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    // Build output, dependencies, and the Rust side are not linted here.
-    ignores: ["dist", "src-tauri/target", "src-tauri/gen", "node_modules"],
+    // Build output, dependencies, the Rust side, and the agent worktrees under
+    // `.claude` are not linted here.
+    ignores: ["dist", "src-tauri/target", "src-tauri/gen", "node_modules", ".claude"],
   },
   js.configs.recommended,
   tseslint.configs.recommendedTypeChecked,
