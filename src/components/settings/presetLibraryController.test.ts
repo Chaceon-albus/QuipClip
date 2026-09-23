@@ -4,6 +4,7 @@ import {
   DEFAULT_CUSTOM_FRAME_RATE,
   DEFAULT_CUSTOM_RESOLUTION,
 } from "@/features/settings/presetDocument";
+import { DEFAULT_AUDIO_BITRATE_KBPS } from "@/features/settings/audioCodecs";
 import { defaultQualityValue, isValidEncoderName } from "@/features/settings/limits";
 import type { Preset, Settings } from "@/features/settings/types";
 import {
@@ -23,6 +24,9 @@ function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
     container: "mp4",
     videoEncoder: "libx264",
     audioEncoder: "aac",
+    audioBitrate: 320,
+    audioSampleRate: "source",
+    audioChannels: "source",
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -435,6 +439,36 @@ describe("PresetLibraryController", () => {
       expect(saveSettings).not.toHaveBeenCalled();
       expect(controller.getView().dirty).toBe(true);
     });
+
+    it.each([
+      { container: "mov" as const, audioEncoder: "flac" },
+      { container: "mov" as const, audioEncoder: "libopus" },
+    ])(
+      "gives view.canSave === false and saveDraft makes no save call for $container + $audioEncoder draft",
+      async ({ container, audioEncoder }) => {
+        const settings = createSettings({ presets: [createPreset("p1")] });
+        const saveSettings = vi.fn();
+        const controller = createPresetLibraryController({
+          getSettings: () => settings,
+          saveSettings,
+        });
+
+        controller.select("p1");
+        controller.updateDraft({ container, audioEncoder });
+
+        const view = controller.getView();
+        expect(view.canSave).toBe(false);
+        expect(view.issues).toContainEqual({
+          field: "audioEncoder",
+          code: "containerMismatch",
+          values: { container, encoder: audioEncoder },
+        });
+
+        const result = await controller.saveDraft();
+        expect(result).toBe(false);
+        expect(saveSettings).not.toHaveBeenCalled();
+      },
+    );
 
     it("returns false and performs no IPC when the draft is not dirty", async () => {
       const settings = createSettings({ presets: [createPreset("p1")] });
@@ -967,6 +1001,57 @@ describe("PresetLibraryController", () => {
       expect(view.dirty).toBe(true);
     });
 
+    it("raises a containerMismatch issue when setContainer('mov') is called on a libopus draft", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { container: "mkv", audioEncoder: "libopus" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      expect(controller.getView().issues).toEqual([]);
+
+      controller.setContainer("mov");
+
+      const view = controller.getView();
+      expect(view.draft?.container).toBe("mov");
+      expect(view.issues).toEqual([
+        {
+          field: "audioEncoder",
+          code: "containerMismatch",
+          values: { container: "mov", encoder: "libopus" },
+        },
+      ]);
+      expect(view.canSave).toBe(false);
+    });
+
+    it("clears the containerMismatch issue when setContainer('mkv') is called on a mov + libopus draft", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { container: "mov", audioEncoder: "libopus" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      expect(controller.getView().issues).toContainEqual({
+        field: "audioEncoder",
+        code: "containerMismatch",
+        values: { container: "mov", encoder: "libopus" },
+      });
+
+      controller.setContainer("mkv");
+
+      const view = controller.getView();
+      expect(view.draft?.container).toBe("mkv");
+      expect(view.issues).toEqual([]);
+      expect(view.dirty).toBe(true);
+      expect(view.canSave).toBe(true);
+    });
+
     it("is a no-op when there is no draft", () => {
       const controller = createPresetLibraryController({
         getSettings: () => null,
@@ -1065,6 +1150,65 @@ describe("PresetLibraryController", () => {
       expect(view.audioEncoderIsCustom).toBe(false);
     });
 
+    it("removes audioBitrate when choosing a lossless audio encoder", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { audioEncoder: "aac", audioBitrate: 256 })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      expect(controller.getView().draft?.audioBitrate).toBe(256);
+
+      controller.chooseEncoder("audio", "flac");
+
+      const view = controller.getView();
+      expect(view.draft?.audioEncoder).toBe("flac");
+      expect("audioBitrate" in (view.draft ?? {})).toBe(false);
+      expect(view.draft?.audioBitrate).toBeUndefined();
+      expect(view.dirty).toBe(true);
+    });
+
+    it("sets DEFAULT_AUDIO_BITRATE_KBPS when switching from a lossless encoder to a non-lossless encoder with no bitrate stored", () => {
+      const presetWithoutBitrate = createPreset("p1", { audioEncoder: "flac" });
+      delete presetWithoutBitrate.audioBitrate;
+      const settings = createSettings({ presets: [presetWithoutBitrate] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      expect(controller.getView().draft?.audioBitrate).toBeUndefined();
+
+      controller.chooseEncoder("audio", "aac");
+
+      const view = controller.getView();
+      expect(view.draft?.audioEncoder).toBe("aac");
+      expect(view.draft?.audioBitrate).toBe(DEFAULT_AUDIO_BITRATE_KBPS);
+      expect(view.dirty).toBe(true);
+    });
+
+    it("preserves existing audioBitrate when switching between non-lossless encoders", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { audioEncoder: "aac", audioBitrate: 192 })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseEncoder("audio", "libopus");
+
+      const view = controller.getView();
+      expect(view.draft?.audioEncoder).toBe("libopus");
+      expect(view.draft?.audioBitrate).toBe(192);
+      expect(view.dirty).toBe(true);
+    });
+
     it("is a no-op when there is no draft", () => {
       const controller = createPresetLibraryController({
         getSettings: () => null,
@@ -1111,6 +1255,42 @@ describe("PresetLibraryController", () => {
       expect(view.issues).toContainEqual({ field: "audioEncoder", code: "charset" });
     });
 
+    it("does not clear audioBitrate when typing a lossless encoder name in the free-text field", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { audioEncoder: "aac", audioBitrate: 320 })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setEncoderName("audio", "alac");
+
+      const view = controller.getView();
+      expect(view.draft?.audioEncoder).toBe("alac");
+      expect(view.draft?.audioBitrate).toBe(320);
+      expect(view.dirty).toBe(true);
+    });
+
+    it("does not reset audioBitrate when typing a non-lossless encoder name in the free-text field", () => {
+      const presetWithoutBitrate = createPreset("p1", { audioEncoder: "alac" });
+      delete presetWithoutBitrate.audioBitrate;
+      const settings = createSettings({ presets: [presetWithoutBitrate] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setEncoderName("audio", "libmp3lame");
+
+      const view = controller.getView();
+      expect(view.draft?.audioEncoder).toBe("libmp3lame");
+      expect("audioBitrate" in (view.draft ?? {})).toBe(false);
+      expect(view.dirty).toBe(true);
+    });
+
     it("is a no-op when there is no draft", () => {
       const controller = createPresetLibraryController({
         getSettings: () => null,
@@ -1121,6 +1301,119 @@ describe("PresetLibraryController", () => {
 
       expect(controller.getView().draft).toBeNull();
       expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("setAudioBitrate", () => {
+    it("sets the draft audio bitrate, recomputes issues, and marks dirty", () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setAudioBitrate(192);
+
+      const view = controller.getView();
+      expect(view.draft?.audioBitrate).toBe(192);
+      expect(view.dirty).toBe(true);
+      expect(view.issues).toEqual([]);
+    });
+
+    it("removes the audioBitrate key completely when null is passed", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { audioBitrate: 320 })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setAudioBitrate(null);
+
+      const view = controller.getView();
+      expect("audioBitrate" in (view.draft ?? {})).toBe(false);
+      expect(view.draft?.audioBitrate).toBeUndefined();
+      expect(view.dirty).toBe(true);
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.setAudioBitrate(192);
+      expect(controller.getView().draft).toBeNull();
+    });
+  });
+
+  describe("setAudioSampleRate", () => {
+    it("sets the draft audio sample rate, recomputes issues, and marks dirty", () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setAudioSampleRate(44100);
+
+      let view = controller.getView();
+      expect(view.draft?.audioSampleRate).toBe(44100);
+      expect(view.dirty).toBe(true);
+
+      controller.setAudioSampleRate("source");
+      view = controller.getView();
+      expect(view.draft?.audioSampleRate).toBe("source");
+      expect(view.dirty).toBe(true);
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.setAudioSampleRate(48000);
+      expect(controller.getView().draft).toBeNull();
+    });
+  });
+
+  describe("setAudioChannels", () => {
+    it("sets the draft audio channels, recomputes issues, and marks dirty", () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setAudioChannels("stereo");
+
+      let view = controller.getView();
+      expect(view.draft?.audioChannels).toBe("stereo");
+      expect(view.dirty).toBe(true);
+
+      controller.setAudioChannels("mono");
+      view = controller.getView();
+      expect(view.draft?.audioChannels).toBe("mono");
+
+      controller.setAudioChannels("source");
+      view = controller.getView();
+      expect(view.draft?.audioChannels).toBe("source");
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.setAudioChannels("stereo");
+      expect(controller.getView().draft).toBeNull();
     });
   });
 

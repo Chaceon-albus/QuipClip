@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AUDIO_CHANNEL_SETTINGS,
   BACKEND_SETTINGS_ERROR_CODES,
   PRESET_CONTAINERS,
   QUALITY_KINDS,
@@ -14,6 +15,8 @@ import {
   isPositiveRational,
   isPositiveU32,
   isPreset,
+  isPresetAudioChannels,
+  isPresetAudioSampleRate,
   isPresetContainer,
   isPresetFrameRate,
   isPresetQuality,
@@ -35,6 +38,9 @@ function createValidPreset(overrides: Partial<Preset> = {}): Preset {
     container: "mp4",
     videoEncoder: "libx264",
     audioEncoder: "aac",
+    audioBitrate: 320,
+    audioSampleRate: "source",
+    audioChannels: "source",
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -204,6 +210,47 @@ describe("Settings Validation & Normalization", () => {
     });
   });
 
+  describe("isPresetAudioChannels", () => {
+    it("accepts exactly the literal wire strings from AUDIO_CHANNEL_SETTINGS", () => {
+      for (const channels of AUDIO_CHANNEL_SETTINGS) {
+        expect(isPresetAudioChannels(channels)).toBe(true);
+      }
+      expect(isPresetAudioChannels("source")).toBe(true);
+      expect(isPresetAudioChannels("stereo")).toBe(true);
+      expect(isPresetAudioChannels("mono")).toBe(true);
+    });
+
+    it("rejects unknown channel settings", () => {
+      expect(isPresetAudioChannels("surround")).toBe(false);
+      expect(isPresetAudioChannels("5.1")).toBe(false);
+      expect(isPresetAudioChannels("")).toBe(false);
+      expect(isPresetAudioChannels(null)).toBe(false);
+      expect(isPresetAudioChannels(2)).toBe(false);
+    });
+  });
+
+  describe("isPresetAudioSampleRate", () => {
+    it("accepts 'source' or a safe integer frequency in hertz", () => {
+      expect(isPresetAudioSampleRate("source")).toBe(true);
+      expect(isPresetAudioSampleRate(44100)).toBe(true);
+      expect(isPresetAudioSampleRate(48000)).toBe(true);
+      expect(isPresetAudioSampleRate(96000)).toBe(true);
+      expect(isPresetAudioSampleRate(8000)).toBe(true);
+    });
+
+    it("rejects floats, non-numbers, negative values, and null", () => {
+      expect(isPresetAudioSampleRate(44100.5)).toBe(false);
+      expect(isPresetAudioSampleRate(-1)).toBe(false);
+      expect(isPresetAudioSampleRate(-48000)).toBe(false);
+      expect(isPresetAudioSampleRate(U32_MAX + 1)).toBe(false);
+      expect(isPresetAudioSampleRate("48000")).toBe(false);
+      expect(isPresetAudioSampleRate(Number.NaN)).toBe(false);
+      expect(isPresetAudioSampleRate(Number.POSITIVE_INFINITY)).toBe(false);
+      expect(isPresetAudioSampleRate(null)).toBe(false);
+      expect(isPresetAudioSampleRate(undefined)).toBe(false);
+    });
+  });
+
   describe("isPreset", () => {
     it("accepts a fully valid preset", () => {
       const preset = createValidPreset();
@@ -289,6 +336,120 @@ describe("Settings Validation & Normalization", () => {
       expect(isPreset(createValidPreset({ videoEncoder: "   " }))).toBe(false);
       expect(isPreset(createValidPreset({ audioEncoder: "" }))).toBe(false);
       expect(isPreset(createValidPreset({ audioEncoder: "   " }))).toBe(false);
+    });
+
+    it("accepts a preset with audioBitrate omitted (encoder default)", () => {
+      const preset = createValidPreset();
+      delete preset.audioBitrate;
+      expect(isPreset(preset)).toBe(true);
+    });
+
+    it("accepts a preset with a safe integer audioBitrate", () => {
+      expect(isPreset(createValidPreset({ audioBitrate: 128 }))).toBe(true);
+      expect(isPreset(createValidPreset({ audioBitrate: 320 }))).toBe(true);
+    });
+
+    it("rejects invalid audioBitrate types", () => {
+      expect(isPreset(createValidPreset({ audioBitrate: 128.5 }))).toBe(false);
+      expect(isPreset(createValidPreset({ audioBitrate: -1 }))).toBe(false);
+      expect(isPreset(createValidPreset({ audioBitrate: U32_MAX + 1 }))).toBe(false);
+      expect(
+        isPreset(
+          createValidPreset({
+            audioBitrate: "320" as unknown as number,
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isPreset(
+          createValidPreset({
+            audioBitrate: null as unknown as number,
+          }),
+        ),
+      ).toBe(false);
+      expect(isPreset(createValidPreset({ audioBitrate: Number.NaN }))).toBe(false);
+    });
+
+    it("accepts audioSampleRate: 'source' or safe integer", () => {
+      expect(isPreset(createValidPreset({ audioSampleRate: "source" }))).toBe(true);
+      expect(isPreset(createValidPreset({ audioSampleRate: 48000 }))).toBe(true);
+      expect(isPreset(createValidPreset({ audioSampleRate: 44100 }))).toBe(true);
+    });
+
+    it("rejects invalid audioSampleRate values", () => {
+      expect(isPreset(createValidPreset({ audioSampleRate: 48000.5 }))).toBe(false);
+      expect(
+        isPreset(
+          createValidPreset({
+            audioSampleRate: -1 as unknown as Preset["audioSampleRate"],
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isPreset(
+          createValidPreset({
+            audioSampleRate: (U32_MAX + 1) as unknown as Preset["audioSampleRate"],
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isPreset(
+          createValidPreset({
+            audioSampleRate: "48000" as unknown as Preset["audioSampleRate"],
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isPreset(
+          createValidPreset({
+            audioSampleRate: null as unknown as Preset["audioSampleRate"],
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isPreset(
+          createValidPreset({
+            audioSampleRate: undefined as unknown as Preset["audioSampleRate"],
+          }),
+        ),
+      ).toBe(false);
+    });
+
+    it("accepts audioChannels in AUDIO_CHANNEL_SETTINGS", () => {
+      expect(isPreset(createValidPreset({ audioChannels: "source" }))).toBe(true);
+      expect(isPreset(createValidPreset({ audioChannels: "stereo" }))).toBe(true);
+      expect(isPreset(createValidPreset({ audioChannels: "mono" }))).toBe(true);
+    });
+
+    it("rejects invalid audioChannels values", () => {
+      expect(
+        isPreset(
+          createValidPreset({
+            audioChannels: "5.1" as unknown as Preset["audioChannels"],
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isPreset(
+          createValidPreset({
+            audioChannels: "" as unknown as Preset["audioChannels"],
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isPreset(
+          createValidPreset({
+            audioChannels: null as unknown as Preset["audioChannels"],
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isPreset(
+          createValidPreset({
+            audioChannels: undefined as unknown as Preset["audioChannels"],
+          }),
+        ),
+      ).toBe(false);
     });
 
     it("rejects null, non-objects, and primitives", () => {

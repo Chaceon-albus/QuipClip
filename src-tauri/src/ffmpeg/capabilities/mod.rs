@@ -140,13 +140,19 @@ pub struct Candidate {
 /// The set is fixed by decision, not discovered from a listing: a probe of every listed
 /// encoder would run for a long time and would test encoders that no export preset offers.
 ///
+/// ADR 023 added four audio encoders: `aac_at`, the AAC encoder of macOS AudioToolbox, which
+/// only a macOS build lists and every other build reports as not listed; `libmp3lame`; and the
+/// two lossless encoders `flac` and `alac`. ADR 006's audio smoke command passes for all four.
+/// The order inside each kind is not incidental: the preset editor lists the encoders in this
+/// order, so the audio entries run from the AAC encoders, best first, to the lossless ones.
+///
 /// **Editing this list requires bumping [`cache::CACHE_SCHEMA_VERSION`].** The on-disk capability
 /// cache is keyed by the ffmpeg binary and by that version, and **not** by the contents of this
 /// list, so a release that adds a candidate here without bumping it serves a `ready` report
 /// written before the new name existed, with that name missing. The interface then tells the user
 /// that QuipClip tests a fixed set of encoders and this name is not in it -- for an encoder
 /// QuipClip does test.
-pub const TESTED_ENCODERS: [Candidate; 12] = [
+pub const TESTED_ENCODERS: [Candidate; 16] = [
     Candidate {
         name: "h264_nvenc",
         kind: CodecKind::Video,
@@ -188,11 +194,27 @@ pub const TESTED_ENCODERS: [Candidate; 12] = [
         kind: CodecKind::Audio,
     },
     Candidate {
+        name: "aac_at",
+        kind: CodecKind::Audio,
+    },
+    Candidate {
         name: "aac",
         kind: CodecKind::Audio,
     },
     Candidate {
         name: "libopus",
+        kind: CodecKind::Audio,
+    },
+    Candidate {
+        name: "libmp3lame",
+        kind: CodecKind::Audio,
+    },
+    Candidate {
+        name: "flac",
+        kind: CodecKind::Audio,
+    },
+    Candidate {
+        name: "alac",
         kind: CodecKind::Audio,
     },
 ];
@@ -431,7 +453,15 @@ mod tests {
     /// the name list is asserted in full, a rename cannot pass silently either.
     #[test]
     fn tested_encoders_have_the_expected_names_and_kinds() {
-        const AUDIO: [&str; 3] = ["libfdk_aac", "aac", "libopus"];
+        const AUDIO: [&str; 7] = [
+            "libfdk_aac",
+            "aac_at",
+            "aac",
+            "libopus",
+            "libmp3lame",
+            "flac",
+            "alac",
+        ];
         const VIDEO: [&str; 9] = [
             "h264_nvenc",
             "hevc_nvenc",
@@ -474,8 +504,8 @@ mod tests {
     /// [`write_dummy_ffmpeg`]'s caller to build a matching [`cache::CacheKey`].
     const VERSION_STDOUT: &str = "ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers\nbuilt with Apple clang\nconfiguration: --enable-gpl --enable-version3\n";
 
-    /// An `-encoders` fixture that lists exactly four of the twelve [`TESTED_ENCODERS`]:
-    /// two video (`libx264`, `libx265`) and two audio (`aac`, `libopus`). The other eight
+    /// An `-encoders` fixture that lists exactly four of the sixteen [`TESTED_ENCODERS`]:
+    /// two video (`libx264`, `libx265`) and two audio (`aac`, `libopus`). The other twelve
     /// must come back [`EncoderStatus::NotListed`] without ever reaching `run_smoke`.
     const ENCODERS_STDOUT: &str = " ------\n V....D libx264              libx264 H.264\n V....D libx265              libx265 H.265\n A....D aac                  AAC\n A....D libopus              libopus Opus\n";
 

@@ -52,7 +52,13 @@ pub const MAX_ENTRIES: usize = 8;
 ///
 /// [`load_cache_file`] treats any other value as an unreadable file, the same as corrupt
 /// JSON, so a future schema change can freely change the file shape without a migration.
-pub const CACHE_SCHEMA_VERSION: u32 = 1;
+///
+/// The value also changes with every edit to [`super::TESTED_ENCODERS`], because the cache key
+/// does not cover that list; see its doc comment. Version 2 is ADR 023's: it added `aac_at`,
+/// `libmp3lame`, `flac`, and `alac` to the tested set, and a version 1 report holds no result
+/// for any of them. The first start after the upgrade therefore reads a version 1 file as a
+/// miss and probes again.
+pub const CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// The largest `probedAt` value [`read`] accepts.
 ///
@@ -586,6 +592,26 @@ mod tests {
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         value["schemaVersion"] = serde_json::json!(CACHE_SCHEMA_VERSION + 1);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        assert_eq!(read(&directory.path, &key), None);
+    }
+
+    #[test]
+    fn a_cache_written_before_adr_023_misses_so_the_new_encoders_get_probed() {
+        // ADR 023 added four audio encoders to `TESTED_ENCODERS`, and the cache key does not
+        // cover that list. A version 1 file is otherwise valid, and serving it would report the
+        // new encoders as outside the tested set on a binary that has them.
+        assert_eq!(CACHE_SCHEMA_VERSION, 2);
+        let directory = TestDirectory::new();
+        let key = sample_key("pre-adr-023");
+        write(&directory.path, &key, &sample_report(1_700_000_700)).unwrap();
+        assert!(read(&directory.path, &key).is_some());
+
+        let path = directory.path.join(CACHE_FILE_NAME);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["schemaVersion"] = serde_json::json!(1);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
 
         assert_eq!(read(&directory.path, &key), None);

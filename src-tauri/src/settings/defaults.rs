@@ -13,8 +13,8 @@
 //! does on request.
 
 use super::{
-    Container, FrameRateSetting, Preset, Quality, QualityKind, ResolutionSetting, Settings,
-    CURRENT_SCHEMA_VERSION,
+    AudioChannels, AudioSampleRateSetting, Container, FrameRateSetting, Preset, Quality,
+    QualityKind, ResolutionSetting, Settings, CURRENT_SCHEMA_VERSION,
 };
 
 /// The id of the default H.264-in-MP4 seed. [`seeded_settings`] selects this as the initial
@@ -42,6 +42,16 @@ const HARDWARE_PRESET_NAME: &str = "H.264 MP4 (hardware)";
 /// everywhere.
 const HARDWARE_PRESET_BITRATE_KBPS: u32 = 12_000;
 
+/// The audio bitrate, in kilobits per second, every seed uses.
+///
+/// ADR 023 exists because a seed that named `aac` and no bitrate ran the native encoder at its
+/// own default of 128 kbps, which the user reported as too low for an export. Every seed pairs
+/// this with the source sample rate and the source channel layout, so the filter graph of a
+/// seed resamples nothing and mixes nothing down. ffmpeg still converts, in front of the
+/// encoder, only what the encoder cannot accept (ADR 023 measurement 3): native `aac` accepts
+/// at most 96000 Hz, for example, so a 192000 Hz source is still resampled.
+const SEED_AUDIO_BITRATE_KBPS: u32 = 320;
+
 /// Build a plain software preset with a CRF quality control. Both software seeds share this
 /// shape and differ only in id, name, and encoder.
 fn crf_preset(id: &str, name: &str, video_encoder: &str, crf: u32) -> Preset {
@@ -51,6 +61,9 @@ fn crf_preset(id: &str, name: &str, video_encoder: &str, crf: u32) -> Preset {
         container: Container::Mp4,
         video_encoder: video_encoder.to_owned(),
         audio_encoder: "aac".to_owned(),
+        audio_bitrate: Some(SEED_AUDIO_BITRATE_KBPS),
+        audio_sample_rate: AudioSampleRateSetting::Source,
+        audio_channels: AudioChannels::Source,
         quality: Quality {
             kind: QualityKind::Crf,
             value: crf,
@@ -75,6 +88,9 @@ fn hardware_preset() -> Option<Preset> {
         container: Container::Mp4,
         video_encoder: video_encoder.to_owned(),
         audio_encoder: "aac".to_owned(),
+        audio_bitrate: Some(SEED_AUDIO_BITRATE_KBPS),
+        audio_sample_rate: AudioSampleRateSetting::Source,
+        audio_channels: AudioChannels::Source,
         quality: Quality {
             kind: QualityKind::Bitrate,
             value: HARDWARE_PRESET_BITRATE_KBPS,
@@ -154,6 +170,28 @@ mod tests {
         assert_eq!(presets[0].quality.kind, QualityKind::Crf);
         assert_eq!(presets[1].video_encoder, "libx265");
         assert_eq!(presets[1].quality.kind, QualityKind::Crf);
+    }
+
+    #[test]
+    fn every_seed_writes_320_kbps_audio_at_the_source_rate_and_layout() {
+        // ADR 023's seed values. `restore_default_presets` writes these over an older seed with
+        // the same id, so pinning them here pins what a restore gives a user too.
+        for preset in default_presets() {
+            assert_eq!(preset.audio_encoder, "aac", "{}", preset.id);
+            assert_eq!(preset.audio_bitrate, Some(320), "{}", preset.id);
+            assert_eq!(
+                preset.audio_sample_rate,
+                AudioSampleRateSetting::Source,
+                "{}",
+                preset.id
+            );
+            assert_eq!(
+                preset.audio_channels,
+                AudioChannels::Source,
+                "{}",
+                preset.id
+            );
+        }
     }
 
     #[test]

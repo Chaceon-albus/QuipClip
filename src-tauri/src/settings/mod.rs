@@ -36,6 +36,29 @@ pub const MAX_RESOLUTION_DIMENSION: u32 = 16_384;
 /// The largest encoder name length, counted in `chars()`, [`validate_settings`] accepts.
 pub const MAX_ENCODER_NAME_CHARS: usize = 64;
 
+/// The smallest [`Preset::audio_bitrate`], in kilobits per second, [`validate_settings`]
+/// accepts; see ADR 023.
+pub const MIN_AUDIO_BITRATE_KBPS: u32 = 8;
+
+/// The largest [`Preset::audio_bitrate`], in kilobits per second, [`validate_settings`]
+/// accepts; see ADR 023.
+pub const MAX_AUDIO_BITRATE_KBPS: u32 = 1536;
+
+/// The smallest [`AudioSampleRateSetting::Fixed`] rate, in hertz, [`validate_settings`]
+/// accepts; see ADR 023.
+pub const MIN_AUDIO_SAMPLE_RATE: u32 = 8_000;
+
+/// The largest [`AudioSampleRateSetting::Fixed`] rate, in hertz, [`validate_settings`]
+/// accepts; see ADR 023.
+pub const MAX_AUDIO_SAMPLE_RATE: u32 = 192_000;
+
+/// The output sample rate a preset takes when its document holds no `audioSampleRate` key.
+///
+/// This is the rate ADR 014 wrote into every audio chain as a constant before ADR 023 made it a
+/// preset field. A document from before that change must render the same command line as it did
+/// then, byte for byte, so the absent key reads as this value and not as `source`.
+const LEGACY_AUDIO_SAMPLE_RATE: u32 = 48_000;
+
 // A fourth private copy of the JavaScript `Number.MAX_SAFE_INTEGER` bound. `project/mod.rs`,
 // `commands/project.rs`, and `commands/media.rs` each already hold their own; ADR 009 caps a
 // commit to one refactor, and hoisting this constant to a shared location is not this
@@ -93,8 +116,13 @@ pub struct Settings {
     pub active_preset_id: Option<String>,
 }
 
-/// One export preset: an identity, a container, two encoder names, a quality control, and
-/// two output settings.
+/// One export preset: an identity, a container, two encoder names, three audio output
+/// settings, a quality control, and two video output settings.
+///
+/// The three audio fields arrived with ADR 023, after documents without them already existed.
+/// Each one therefore reads an absent key as the behaviour from before ADR 023 -- no `-b:a`,
+/// 48000 Hz, stereo -- so an older document renders the same command line as before, byte for
+/// byte, and the schema version stays 1.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Preset {
@@ -108,6 +136,27 @@ pub struct Preset {
     pub video_encoder: String,
     /// The ffmpeg audio encoder name, validated to reach `-c:a` as a codec name only.
     pub audio_encoder: String,
+    /// The audio bitrate, in **kilobits per second**, or `None` to leave the audio encoder at
+    /// its own default. Valid range [`MIN_AUDIO_BITRATE_KBPS`]`..=`[`MAX_AUDIO_BITRATE_KBPS`].
+    ///
+    /// The key is absent from the JSON, never `null`, when this holds no value, as for
+    /// [`Settings::ffmpeg_path`]. Rust does not know which encoders are lossless (ADR 023): the
+    /// renderer writes `-b:a` whenever this holds a value, and the editor clears it for `flac`
+    /// and `alac`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_bitrate: Option<u32>,
+    /// The output sample rate: the source audio stream's own rate, or an explicit rate.
+    ///
+    /// Always serialized. An absent key reads as 48000 Hz, the rate ADR 014 fixed before this
+    /// field existed; see [`AudioSampleRateSetting`]'s `Default`.
+    #[serde(default)]
+    pub audio_sample_rate: AudioSampleRateSetting,
+    /// The output channel layout: the source audio stream's own layout, stereo, or mono.
+    ///
+    /// Always serialized. An absent key reads as stereo, the layout ADR 014 fixed before this
+    /// field existed; see [`AudioChannels`]'s `Default`.
+    #[serde(default)]
+    pub audio_channels: AudioChannels,
     /// The quality control and its value.
     pub quality: Quality,
     /// The output resolution: the source resolution, or an explicit width and height.
@@ -276,6 +325,110 @@ impl<'de> Deserialize<'de> for FrameRateSetting {
     }
 }
 
+/// The output sample rate: the source audio stream's own rate, or an explicit rate in hertz.
+///
+/// The wire shape is the string `"source"` or a JSON integer, matching
+/// [`ResolutionSetting`]'s hand-written `Visitor` approach and for the same reason. The range
+/// of [`Self::Fixed`] is not checked here: [`validate_settings`] reports it with the preset
+/// index, as it does for every other range in this module.
+///
+/// `Default` is `Fixed(48000)`, not `Source`. It is what an absent `audioSampleRate` key reads
+/// as, and 48000 is the rate every export used before ADR 023 made it a setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioSampleRateSetting {
+    /// Keep the source audio stream's sample rate; the string `"source"` on the wire.
+    Source,
+    /// Resample to this explicit rate, in hertz. Valid range
+    /// [`MIN_AUDIO_SAMPLE_RATE`]`..=`[`MAX_AUDIO_SAMPLE_RATE`].
+    Fixed(u32),
+}
+
+impl Default for AudioSampleRateSetting {
+    fn default() -> Self {
+        Self::Fixed(LEGACY_AUDIO_SAMPLE_RATE)
+    }
+}
+
+impl Serialize for AudioSampleRateSetting {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Source => serializer.serialize_str("source"),
+            Self::Fixed(rate) => serializer.serialize_u32(*rate),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AudioSampleRateSetting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct AudioSampleRateVisitor;
+
+        impl<'de> de::Visitor<'de> for AudioSampleRateVisitor {
+            type Value = AudioSampleRateSetting;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("the string \"source\" or an integer sample rate in hertz")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value == "source" {
+                    Ok(AudioSampleRateSetting::Source)
+                } else {
+                    Err(de::Error::invalid_value(de::Unexpected::Str(value), &self))
+                }
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                u32::try_from(value)
+                    .map(AudioSampleRateSetting::Fixed)
+                    .map_err(|_| de::Error::invalid_value(de::Unexpected::Unsigned(value), &self))
+            }
+
+            // serde_json reports a negative integer here and a non-negative one through
+            // `visit_u64`, but another deserializer may report either sign here.
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                u32::try_from(value)
+                    .map(AudioSampleRateSetting::Fixed)
+                    .map_err(|_| de::Error::invalid_value(de::Unexpected::Signed(value), &self))
+            }
+        }
+
+        deserializer.deserialize_any(AudioSampleRateVisitor)
+    }
+}
+
+/// The output channel layout: the source audio stream's own layout, stereo, or mono.
+///
+/// `Source` keeps the source layout, so a 5.1 source stays 5.1 through an encoder that accepts
+/// it; ADR 023 measurement 3 found that ffmpeg itself mixes down in front of an encoder that
+/// does not. `Default` is `Stereo`, not `Source`, for the reason [`AudioSampleRateSetting`]
+/// gives: it is what an absent `audioChannels` key reads as.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AudioChannels {
+    /// Keep the source audio stream's channel layout.
+    Source,
+    /// Mix to two channels.
+    #[default]
+    Stereo,
+    /// Mix to one channel.
+    Mono,
+}
+
 /// Which of a [`Preset`]'s two encoder-name fields failed validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresetField {
@@ -336,6 +489,14 @@ pub enum SettingsValidationError {
         index: usize,
         field: PresetField,
     },
+    AudioBitrateOutOfRange {
+        index: usize,
+        value: u32,
+    },
+    AudioSampleRateOutOfRange {
+        index: usize,
+        value: u32,
+    },
     QualityOutOfRange {
         index: usize,
         kind: QualityKind,
@@ -383,6 +544,14 @@ impl fmt::Display for SettingsValidationError {
                 formatter,
                 "presets[{index}].{field} is not a valid encoder name"
             ),
+            Self::AudioBitrateOutOfRange { index, value } => write!(
+                formatter,
+                "presets[{index}].audioBitrate {value} is out of range {MIN_AUDIO_BITRATE_KBPS}..={MAX_AUDIO_BITRATE_KBPS}"
+            ),
+            Self::AudioSampleRateOutOfRange { index, value } => write!(
+                formatter,
+                "presets[{index}].audioSampleRate {value} is out of range {MIN_AUDIO_SAMPLE_RATE}..={MAX_AUDIO_SAMPLE_RATE}"
+            ),
             Self::QualityOutOfRange { index, kind, value } => write!(
                 formatter,
                 "presets[{index}].quality.value {value} is out of range for {kind}"
@@ -415,8 +584,9 @@ impl Error for SettingsValidationError {}
 /// and a positive rational denominator -- is already guaranteed by the time a `Settings`
 /// value exists, because deserialization rejects a structurally invalid document before this
 /// function ever runs. This function checks what remains: the schema version, preset id and
-/// name shape, the encoder-name security rule, the quality and resolution ranges, the
-/// safe-integer bounds on a custom frame rate, and the two cross-references
+/// name shape, the encoder-name security rule, the audio bitrate and sample rate ranges, the
+/// quality and resolution ranges, the safe-integer bounds on a custom frame rate, and the two
+/// cross-references
 /// (`active_preset_id` naming a preset, and every preset id being unique).
 ///
 /// [`Settings::revision`] is deliberately not checked. It is a compare-and-swap counter, not a
@@ -466,6 +636,27 @@ pub fn validate_settings(settings: &Settings) -> Result<(), SettingsValidationEr
                 index,
                 field: PresetField::AudioEncoder,
             });
+        }
+
+        // ADR 023 bounds both audio values for the reason ADR 013 gives about quality ranges:
+        // the bounds stop a fault in the interface from storing a value no encoder can use.
+        // They are not narrowed for each encoder, because a preset can name an encoder this
+        // machine does not have.
+        if let Some(bitrate) = preset.audio_bitrate {
+            if !(MIN_AUDIO_BITRATE_KBPS..=MAX_AUDIO_BITRATE_KBPS).contains(&bitrate) {
+                return Err(SettingsValidationError::AudioBitrateOutOfRange {
+                    index,
+                    value: bitrate,
+                });
+            }
+        }
+        if let AudioSampleRateSetting::Fixed(rate) = preset.audio_sample_rate {
+            if !(MIN_AUDIO_SAMPLE_RATE..=MAX_AUDIO_SAMPLE_RATE).contains(&rate) {
+                return Err(SettingsValidationError::AudioSampleRateOutOfRange {
+                    index,
+                    value: rate,
+                });
+            }
         }
 
         if !is_valid_quality(preset.quality) {
@@ -1013,6 +1204,9 @@ mod tests {
             container: Container::Mp4,
             video_encoder: "libx264".to_owned(),
             audio_encoder: "aac".to_owned(),
+            audio_bitrate: None,
+            audio_sample_rate: AudioSampleRateSetting::Fixed(48_000),
+            audio_channels: AudioChannels::Stereo,
             quality: Quality {
                 kind: QualityKind::Crf,
                 value: 20,
@@ -1020,6 +1214,20 @@ mod tests {
             resolution: ResolutionSetting::Source,
             frame_rate: FrameRateSetting::Source,
         }
+    }
+
+    /// A preset as a document written before ADR 023 holds it: none of the three audio keys.
+    fn pre_adr_023_preset_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "preset-1",
+            "name": "Sample",
+            "container": "mp4",
+            "videoEncoder": "libx264",
+            "audioEncoder": "aac",
+            "quality": {"kind": "crf", "value": 20},
+            "resolution": "source",
+            "frameRate": "source",
+        })
     }
 
     /// A document at revision 0, the value a first save compares against and the value
@@ -1230,7 +1438,11 @@ mod tests {
             "h264_videotoolbox",
             "libsvtav1",
             "aac",
+            "aac_at",
             "libopus",
+            "libmp3lame",
+            "flac",
+            "alac",
         ] {
             let mut preset = sample_preset("preset-1");
             preset.video_encoder = name.to_owned();
@@ -1270,6 +1482,287 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<FrameRateSetting>(&json).unwrap(),
             frame_rate_custom
+        );
+    }
+
+    // -- The three ADR 023 audio fields. --
+
+    #[test]
+    fn a_preset_without_the_audio_keys_reads_as_the_behaviour_from_before_adr_023() {
+        // ADR 023: an older document must render the same command line as before, byte for
+        // byte, so each absent key reads as the value the renderer used to hard-code -- no
+        // `-b:a`, 48000 Hz, stereo -- and never as `source`.
+        let preset: Preset = serde_json::from_value(pre_adr_023_preset_json()).unwrap();
+        assert_eq!(preset.audio_bitrate, None);
+        assert_eq!(
+            preset.audio_sample_rate,
+            AudioSampleRateSetting::Fixed(48_000)
+        );
+        assert_eq!(preset.audio_channels, AudioChannels::Stereo);
+        assert_eq!(
+            AudioSampleRateSetting::default(),
+            AudioSampleRateSetting::Fixed(48_000)
+        );
+        assert_eq!(AudioChannels::default(), AudioChannels::Stereo);
+        assert!(validate_settings(&sample_settings(vec![preset])).is_ok());
+    }
+
+    #[test]
+    fn a_saved_preset_always_writes_the_rate_and_channels_and_omits_an_unset_bitrate() {
+        let mut preset = sample_preset("preset-1");
+        let value = serde_json::to_value(&preset).unwrap();
+        let object = value.as_object().unwrap();
+        assert!(!object.contains_key("audioBitrate"), "{value}");
+        assert_eq!(value["audioSampleRate"], serde_json::json!(48_000));
+        assert_eq!(value["audioChannels"], serde_json::json!("stereo"));
+
+        preset.audio_bitrate = Some(320);
+        preset.audio_sample_rate = AudioSampleRateSetting::Source;
+        preset.audio_channels = AudioChannels::Source;
+        let value = serde_json::to_value(&preset).unwrap();
+        assert_eq!(value["audioBitrate"], serde_json::json!(320));
+        assert_eq!(value["audioSampleRate"], serde_json::json!("source"));
+        assert_eq!(value["audioChannels"], serde_json::json!("source"));
+    }
+
+    #[test]
+    fn a_null_audio_bitrate_still_deserializes_as_unset() {
+        // The same tolerance `ffmpegPath` has: `#[serde(default)]` on an `Option` also accepts
+        // an explicit `null`, so the interface can clear the value either way.
+        let mut value = pre_adr_023_preset_json();
+        value["audioBitrate"] = serde_json::Value::Null;
+        let preset: Preset = serde_json::from_value(value).unwrap();
+        assert_eq!(preset.audio_bitrate, None);
+    }
+
+    #[test]
+    fn every_audio_value_round_trips_through_a_preset() {
+        for bitrate in [None, Some(MIN_AUDIO_BITRATE_KBPS), Some(320), Some(1536)] {
+            for sample_rate in [
+                AudioSampleRateSetting::Source,
+                AudioSampleRateSetting::Fixed(44_100),
+                AudioSampleRateSetting::Fixed(MAX_AUDIO_SAMPLE_RATE),
+            ] {
+                for channels in [
+                    AudioChannels::Source,
+                    AudioChannels::Stereo,
+                    AudioChannels::Mono,
+                ] {
+                    let mut preset = sample_preset("preset-1");
+                    preset.audio_bitrate = bitrate;
+                    preset.audio_sample_rate = sample_rate;
+                    preset.audio_channels = channels;
+                    let json = serde_json::to_string(&preset).unwrap();
+                    assert_eq!(
+                        serde_json::from_str::<Preset>(&json).unwrap(),
+                        preset,
+                        "{json}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn audio_sample_rate_reads_the_word_source_or_an_integer() {
+        assert_eq!(
+            serde_json::from_str::<AudioSampleRateSetting>(r#""source""#).unwrap(),
+            AudioSampleRateSetting::Source
+        );
+        assert_eq!(
+            serde_json::from_str::<AudioSampleRateSetting>("44100").unwrap(),
+            AudioSampleRateSetting::Fixed(44_100)
+        );
+        assert_eq!(
+            serde_json::to_string(&AudioSampleRateSetting::Source).unwrap(),
+            r#""source""#
+        );
+        assert_eq!(
+            serde_json::to_string(&AudioSampleRateSetting::Fixed(96_000)).unwrap(),
+            "96000"
+        );
+    }
+
+    #[test]
+    fn a_wrong_audio_sample_rate_shape_names_the_expectation() {
+        // The reason for the hand-written `Visitor`: an untagged enum would report "data did not
+        // match any variant" and name neither the field nor the expected shape.
+        for json in [
+            r#""src""#,
+            r#""48000""#,
+            "48000.5",
+            "-1",
+            "4294967296",
+            r#"{"hz": 48000}"#,
+            "[48000]",
+            "true",
+        ] {
+            let error = serde_json::from_str::<AudioSampleRateSetting>(json).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("\"source\"") && message.contains("integer sample rate"),
+                "{json}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_null_audio_sample_rate_is_rejected_with_the_expected_shape() {
+        // `audioBitrate` accepts an explicit `null` as unset, but `audioSampleRate` has no unset
+        // value: only an absent key reads as the default. A `null` is a wrong shape.
+        let error = serde_json::from_str::<AudioSampleRateSetting>("null").unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("\"source\"") && message.contains("integer sample rate"),
+            "message was: {message}"
+        );
+
+        let mut value = pre_adr_023_preset_json();
+        value["audioSampleRate"] = serde_json::Value::Null;
+        let error = serde_json::from_value::<Preset>(value).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("\"source\"") && message.contains("integer sample rate"),
+            "message was: {message}"
+        );
+    }
+
+    #[test]
+    fn a_capitalized_source_sample_rate_is_rejected_with_the_expected_shape() {
+        // The word is matched exactly, as `audioChannels` matches its words.
+        let error = serde_json::from_str::<AudioSampleRateSetting>(r#""Source""#).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("\"source\"") && message.contains("integer sample rate"),
+            "message was: {message}"
+        );
+
+        let mut value = pre_adr_023_preset_json();
+        value["audioSampleRate"] = serde_json::json!("Source");
+        let error = serde_json::from_value::<Preset>(value).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("\"source\"") && message.contains("integer sample rate"),
+            "message was: {message}"
+        );
+    }
+
+    #[test]
+    fn audio_channels_round_trip_and_an_unknown_word_is_rejected() {
+        for (channels, wire) in [
+            (AudioChannels::Source, "source"),
+            (AudioChannels::Stereo, "stereo"),
+            (AudioChannels::Mono, "mono"),
+        ] {
+            let json = serde_json::to_string(&channels).unwrap();
+            assert_eq!(json, format!("\"{wire}\""), "channels were: {channels:?}");
+            assert_eq!(
+                serde_json::from_str::<AudioChannels>(&json).unwrap(),
+                channels
+            );
+        }
+
+        for json in [r#""surround""#, r#""Stereo""#, r#""5.1""#, "2"] {
+            assert!(
+                serde_json::from_str::<AudioChannels>(json).is_err(),
+                "accepted {json}"
+            );
+        }
+        let mut value = pre_adr_023_preset_json();
+        value["audioChannels"] = serde_json::json!("surround");
+        let error = serde_json::from_value::<Preset>(value).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown variant"),
+            "message was: {error}"
+        );
+    }
+
+    #[test]
+    fn enforces_the_audio_bitrate_bounds() {
+        for bitrate in [
+            None,
+            Some(MIN_AUDIO_BITRATE_KBPS),
+            Some(MAX_AUDIO_BITRATE_KBPS),
+        ] {
+            let mut preset = sample_preset("preset-1");
+            preset.audio_bitrate = bitrate;
+            assert!(
+                validate_settings(&sample_settings(vec![preset])).is_ok(),
+                "rejected {bitrate:?}"
+            );
+        }
+
+        for bitrate in [0, MIN_AUDIO_BITRATE_KBPS - 1, MAX_AUDIO_BITRATE_KBPS + 1] {
+            let mut preset = sample_preset("preset-1");
+            preset.audio_bitrate = Some(bitrate);
+            let other = sample_preset("preset-0");
+            assert_eq!(
+                validate_settings(&sample_settings(vec![other, preset])),
+                Err(SettingsValidationError::AudioBitrateOutOfRange {
+                    index: 1,
+                    value: bitrate
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn enforces_the_audio_sample_rate_bounds_and_accepts_source() {
+        for sample_rate in [
+            AudioSampleRateSetting::Source,
+            AudioSampleRateSetting::Fixed(MIN_AUDIO_SAMPLE_RATE),
+            AudioSampleRateSetting::Fixed(MAX_AUDIO_SAMPLE_RATE),
+        ] {
+            let mut preset = sample_preset("preset-1");
+            preset.audio_sample_rate = sample_rate;
+            assert!(
+                validate_settings(&sample_settings(vec![preset])).is_ok(),
+                "rejected {sample_rate:?}"
+            );
+        }
+
+        for rate in [0, MIN_AUDIO_SAMPLE_RATE - 1, MAX_AUDIO_SAMPLE_RATE + 1] {
+            let mut preset = sample_preset("preset-1");
+            preset.audio_sample_rate = AudioSampleRateSetting::Fixed(rate);
+            let other = sample_preset("preset-0");
+            assert_eq!(
+                validate_settings(&sample_settings(vec![other, preset])),
+                Err(SettingsValidationError::AudioSampleRateOutOfRange {
+                    index: 1,
+                    value: rate
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn the_audio_ranges_are_the_ones_adr_023_states() {
+        // The frontend holds its own copy of these bounds (ADR 023), so both sides pin them.
+        assert_eq!(MIN_AUDIO_BITRATE_KBPS, 8);
+        assert_eq!(MAX_AUDIO_BITRATE_KBPS, 1536);
+        assert_eq!(MIN_AUDIO_SAMPLE_RATE, 8_000);
+        assert_eq!(MAX_AUDIO_SAMPLE_RATE, 192_000);
+    }
+
+    #[test]
+    fn the_audio_range_errors_name_the_field_and_the_value() {
+        let bitrate = SettingsValidationError::AudioBitrateOutOfRange {
+            index: 3,
+            value: 2000,
+        }
+        .to_string();
+        assert!(
+            bitrate.contains("presets[3].audioBitrate") && bitrate.contains("2000"),
+            "message was: {bitrate}"
+        );
+        let sample_rate = SettingsValidationError::AudioSampleRateOutOfRange {
+            index: 4,
+            value: 7_999,
+        }
+        .to_string();
+        assert!(
+            sample_rate.contains("presets[4].audioSampleRate") && sample_rate.contains("7999"),
+            "message was: {sample_rate}"
         );
     }
 

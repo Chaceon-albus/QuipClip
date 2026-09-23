@@ -4,12 +4,20 @@ import {
   validatePresetFields,
   type PresetFieldIssue,
 } from "@/features/settings/limits";
-import type { Preset } from "@/features/settings/types";
+import type { Preset, PresetAudioSampleRate } from "@/features/settings/types";
 import type { EncoderProbeState } from "./encoderAvailability";
 import { CUSTOM_ENCODER_VALUE as CONTROLLER_CUSTOM_ENCODER_VALUE } from "./presetLibraryController";
 import {
+  AUDIO_BITRATE_DEFAULT_VALUE,
   CUSTOM_ENCODER_VALUE,
   isActivationKey,
+  parseAudioBitrateValue,
+  parseAudioSampleRateValue,
+  presentAudioBitrateSelect,
+  presentAudioBitrateValue,
+  presentAudioChannelsSelect,
+  presentAudioSampleRateSelect,
+  presentAudioSampleRateValue,
   presentContainer,
   presentEncoderOption,
   presentEncoderSelect,
@@ -55,6 +63,9 @@ describe("presetPresenter", () => {
       container: "mp4",
       videoEncoder: "libx264",
       audioEncoder: "aac",
+      audioBitrate: 320,
+      audioSampleRate: "source",
+      audioChannels: "source",
       quality: { kind: "crf", value: 20 },
       resolution: "source",
       frameRate: "source",
@@ -119,6 +130,30 @@ describe("presetPresenter", () => {
       expect(issues[0].code).toBe("positive");
       expect(presentPresetIssue(issues[0])).toStrictEqual({
         key: "settings.field.positive",
+      });
+    });
+
+    it("maps a containerMismatch issue to settings.field.containerMismatch carrying container and encoder", () => {
+      const preset: Preset = { ...basePreset, container: "mov", audioEncoder: "flac" };
+      const issues = validatePresetFields(preset);
+      expect(issues).toHaveLength(1);
+      expect(issues[0].code).toBe("containerMismatch");
+      expect(issues[0].values?.container).toBe("mov");
+      expect(presentPresetIssue(issues[0])).toStrictEqual({
+        key: "settings.field.containerMismatch",
+        values: { container: "MOV", encoder: "flac" },
+      });
+    });
+
+    it("maps raw container value through presentContainer for containerMismatch issue", () => {
+      const issue: PresetFieldIssue = {
+        field: "audioEncoder",
+        code: "containerMismatch",
+        values: { container: "mov", encoder: "libopus" },
+      };
+      expect(presentPresetIssue(issue)).toStrictEqual({
+        key: "settings.field.containerMismatch",
+        values: { container: "MOV", encoder: "libopus" },
       });
     });
   });
@@ -555,18 +590,267 @@ describe("presetPresenter", () => {
     });
   });
 
+  describe("presentAudioBitrateSelect", () => {
+    const formatter = new Intl.NumberFormat("en-US");
+
+    it("builds standard options for a lossy audio encoder with default", () => {
+      const result = presentAudioBitrateSelect("aac", undefined, formatter);
+      expect(result.disabled).toBe(false);
+      expect(result.hintKey).toBeUndefined();
+      expect(result.options[0]).toEqual({
+        value: "default",
+        labelKey: "settings.preset.audioBitrateDefault",
+      });
+      expect(result.options.slice(1).map((opt) => opt.value)).toEqual([
+        "96",
+        "128",
+        "160",
+        "192",
+        "256",
+        "320",
+      ]);
+      expect(result.options[1]).toEqual({
+        value: "96",
+        labelKey: "settings.preset.audioBitrateValue",
+        labelValues: { value: "96" },
+      });
+    });
+
+    it("builds libopus options up to 510 kbps", () => {
+      const result = presentAudioBitrateSelect("libopus", 128, formatter);
+      expect(result.disabled).toBe(false);
+      expect(result.options.map((opt) => opt.value)).toEqual([
+        "default",
+        "64",
+        "96",
+        "128",
+        "160",
+        "192",
+        "256",
+        "320",
+        "510",
+      ]);
+    });
+
+    it("appends current stored value when not in the choices list", () => {
+      const result = presentAudioBitrateSelect("aac", 112, formatter);
+      expect(result.options.map((opt) => opt.value)).toEqual([
+        "default",
+        "96",
+        "128",
+        "160",
+        "192",
+        "256",
+        "320",
+        "112",
+      ]);
+      expect(result.options[7]).toEqual({
+        value: "112",
+        labelKey: "settings.preset.audioBitrateValue",
+        labelValues: { value: "112" },
+      });
+    });
+
+    it("disables the select with a hint for lossless encoders", () => {
+      const resultFlac = presentAudioBitrateSelect("flac", undefined, formatter);
+      expect(resultFlac.disabled).toBe(true);
+      expect(resultFlac.hintKey).toBe("settings.preset.audioBitrateLossless");
+      expect(resultFlac.options).toEqual([
+        {
+          value: "default",
+          labelKey: "settings.preset.audioBitrateDefault",
+        },
+      ]);
+
+      const resultAlac = presentAudioBitrateSelect("alac", undefined, formatter);
+      expect(resultAlac.disabled).toBe(true);
+      expect(resultAlac.hintKey).toBe("settings.preset.audioBitrateLossless");
+    });
+
+    it("keeps select enabled with a hint when a lossless encoder has a stored bitrate", () => {
+      const result = presentAudioBitrateSelect("flac", 320, formatter);
+      expect(result.disabled).toBe(false);
+      expect(result.hintKey).toBe("settings.preset.audioBitrateLossless");
+      expect(result.options.map((opt) => opt.value)).toEqual([
+        AUDIO_BITRATE_DEFAULT_VALUE,
+        "320",
+      ]);
+    });
+  });
+
+  describe("presentAudioSampleRateSelect", () => {
+    const formatter = new Intl.NumberFormat("en-US");
+
+    it("builds options with source and standard sample rates in kHz", () => {
+      const result = presentAudioSampleRateSelect("source", formatter);
+      expect(result.options).toEqual([
+        {
+          value: "source",
+          labelKey: "settings.preset.sourceOption",
+        },
+        {
+          value: "44100",
+          labelKey: "settings.preset.audioSampleRateValue",
+          labelValues: { value: "44.1" },
+        },
+        {
+          value: "48000",
+          labelKey: "settings.preset.audioSampleRateValue",
+          labelValues: { value: "48" },
+        },
+        {
+          value: "96000",
+          labelKey: "settings.preset.audioSampleRateValue",
+          labelValues: { value: "96" },
+        },
+      ]);
+    });
+
+    it("appends current stored sample rate when not in the choices list", () => {
+      const result = presentAudioSampleRateSelect(88200, formatter);
+      expect(result.options.map((opt) => opt.value)).toEqual([
+        "source",
+        "44100",
+        "48000",
+        "96000",
+        "88200",
+      ]);
+      expect(result.options[4]).toEqual({
+        value: "88200",
+        labelKey: "settings.preset.audioSampleRateValue",
+        labelValues: { value: "88.2" },
+      });
+    });
+  });
+
+  describe("presentAudioChannelsSelect", () => {
+    it("returns source, stereo, and mono options", () => {
+      const result = presentAudioChannelsSelect();
+      expect(result.options).toEqual([
+        { value: "source", labelKey: "settings.preset.sourceOption" },
+        { value: "stereo", labelKey: "settings.preset.audioChannelsStereo" },
+        { value: "mono", labelKey: "settings.preset.audioChannelsMono" },
+      ]);
+    });
+  });
+
+  describe("presentAudioBitrateValue and parseAudioBitrateValue", () => {
+    it("maps undefined to AUDIO_BITRATE_DEFAULT_VALUE and numbers to strings", () => {
+      expect(presentAudioBitrateValue(undefined)).toBe(AUDIO_BITRATE_DEFAULT_VALUE);
+      expect(presentAudioBitrateValue(128)).toBe("128");
+      expect(presentAudioBitrateValue(320)).toBe("320");
+    });
+
+    it("parses AUDIO_BITRATE_DEFAULT_VALUE to null and number strings to numbers", () => {
+      expect(parseAudioBitrateValue(AUDIO_BITRATE_DEFAULT_VALUE)).toBeNull();
+      expect(parseAudioBitrateValue("128")).toBe(128);
+      expect(parseAudioBitrateValue("320")).toBe(320);
+    });
+  });
+
+  describe("presentAudioSampleRateValue and parseAudioSampleRateValue", () => {
+    it("maps 'source' and numeric sample rates to string select values", () => {
+      expect(presentAudioSampleRateValue("source")).toBe("source");
+      expect(presentAudioSampleRateValue(48000)).toBe("48000");
+      expect(presentAudioSampleRateValue(44100)).toBe("44100");
+    });
+
+    it("parses 'source' to 'source' and numeric strings to numbers", () => {
+      expect(parseAudioSampleRateValue("source")).toBe("source");
+      expect(parseAudioSampleRateValue("48000")).toBe(48000);
+      expect(parseAudioSampleRateValue("44100")).toBe(44100);
+    });
+  });
+
+  describe("selected value option matching", () => {
+    const formatter = new Intl.NumberFormat("en-US");
+
+    it("always matches one of the options in presentAudioBitrateSelect", () => {
+      const cases: Array<{ encoder: string; bitrate: number | undefined }> = [
+        { encoder: "aac", bitrate: undefined },
+        { encoder: "aac", bitrate: 128 },
+        { encoder: "aac", bitrate: 112 },
+        { encoder: "libopus", bitrate: undefined },
+        { encoder: "libopus", bitrate: 510 },
+        { encoder: "flac", bitrate: undefined },
+        { encoder: "flac", bitrate: 320 },
+      ];
+
+      for (const { encoder, bitrate } of cases) {
+        const selectView = presentAudioBitrateSelect(encoder, bitrate, formatter);
+        const selectedValue = presentAudioBitrateValue(bitrate);
+        expect(selectView.options.some((opt) => opt.value === selectedValue)).toBe(
+          true,
+        );
+      }
+    });
+
+    it("always matches one of the options in presentAudioSampleRateSelect", () => {
+      const cases: Array<PresetAudioSampleRate> = [
+        "source",
+        44100,
+        48000,
+        96000,
+        22050,
+      ];
+
+      for (const rate of cases) {
+        const selectView = presentAudioSampleRateSelect(rate, formatter);
+        const selectedValue = presentAudioSampleRateValue(rate);
+        expect(selectView.options.some((opt) => opt.value === selectedValue)).toBe(
+          true,
+        );
+      }
+    });
+
+    it("always matches one of the options in presentAudioChannelsSelect", () => {
+      const channelsView = presentAudioChannelsSelect();
+      for (const channels of ["source", "stereo", "mono"] as const) {
+        expect(channelsView.options.some((opt) => opt.value === channels)).toBe(true);
+      }
+    });
+
+    it("always matches one of the options in presentEncoderSelect", () => {
+      const probeState = createProbeState({
+        results: [
+          { name: "libx264", kind: "video", listed: true, status: "works" },
+          { name: "aac", kind: "audio", listed: true, status: "works" },
+        ],
+      });
+
+      for (const current of ["libx264", "nonexistent", CUSTOM_ENCODER_VALUE]) {
+        const selectView = presentEncoderSelect(probeState, "video", current);
+        expect(selectView.options.some((opt) => opt.value === current)).toBe(true);
+      }
+
+      for (const current of ["aac", "alac", CUSTOM_ENCODER_VALUE]) {
+        const selectView = presentEncoderSelect(probeState, "audio", current);
+        expect(selectView.options.some((opt) => opt.value === current)).toBe(true);
+      }
+    });
+  });
+
   // Every key this presenter can emit must resolve to a non-empty string in the English
   // catalog, so a renamed or deleted message fails here instead of rendering a raw key on
   // screen. Follows the same convention as `settingsErrorPresenter.test.ts`.
   describe("catalog coverage", () => {
     const emittedKeys = [
-      // all six field issue codes
+      // all seven field issue codes
       "settings.field.required",
       "settings.field.tooLong",
       "settings.field.charset",
       "settings.field.outOfRange",
       "settings.field.notInteger",
       "settings.field.positive",
+      "settings.field.containerMismatch",
+      // audio preset controls
+      "settings.preset.audioBitrateDefault",
+      "settings.preset.audioBitrateValue",
+      "settings.preset.audioBitrateLossless",
+      "settings.preset.sourceOption",
+      "settings.preset.audioSampleRateValue",
+      "settings.preset.audioChannelsStereo",
+      "settings.preset.audioChannelsMono",
       // all three availability keys
       "settings.encoder.available",
       "settings.encoder.unavailable",

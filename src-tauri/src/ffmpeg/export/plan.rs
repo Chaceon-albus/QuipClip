@@ -14,7 +14,7 @@ use super::{
     SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::probe::MediaProbe;
-use crate::settings::{FrameRateSetting, Preset, ResolutionSetting};
+use crate::settings::{AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting};
 use crate::time::{pts_seconds, Pts, Rational};
 use std::path::Path;
 
@@ -315,14 +315,30 @@ pub fn build_plan(
     // and emit neither `-map "[a]"` nor `-c:a`, and the export would then exit zero with a
     // video-only file for a source whose audio the preview played -- the same silent failure
     // ADR 014 rules out for the short stream specifier one paragraph earlier.
+    //
+    // The output format is resolved here too, so the graph renders numbers and never reads the
+    // preset. `source` for the rate becomes the source stream's own rate. `source` for the
+    // channels stays as it is, because the probe reports a channel count and not a layout; see
+    // `PlannedAudio::output_channels`. The rate range and the bitrate range are not re-checked
+    // here: `settings::validate_settings` bounds both, and `commands::export` plans only from a
+    // preset it read out of the settings document through the validating `settings::load`.
     let audio = match probe.audio.as_ref() {
         None => None,
-        Some(audio) => Some(PlannedAudio {
-            stream_index: audio.index,
-            sample_rate: audio
+        Some(audio) => {
+            let sample_rate = audio
                 .sample_rate
-                .ok_or(ExportErrorCode::SourceAudioRateUnknown)?,
-        }),
+                .ok_or(ExportErrorCode::SourceAudioRateUnknown)?;
+            let output_sample_rate = match preset.audio_sample_rate {
+                AudioSampleRateSetting::Source => sample_rate,
+                AudioSampleRateSetting::Fixed(rate) => rate,
+            };
+            Some(PlannedAudio {
+                stream_index: audio.index,
+                sample_rate,
+                output_sample_rate,
+                output_channels: preset.audio_channels,
+            })
+        }
     };
 
     let mut planned_segments = Vec::with_capacity(segments.len());
@@ -413,6 +429,7 @@ pub fn build_plan(
         resolution,
         video_encoder: preset.video_encoder.clone(),
         audio_encoder: preset.audio_encoder.clone(),
+        audio_bitrate: preset.audio_bitrate,
         quality: preset.quality,
         container: preset.container,
         total_duration,
@@ -516,7 +533,7 @@ mod tests {
     use super::*;
     use crate::ffmpeg::probe::AudioProbe;
     use crate::project::Resolution;
-    use crate::settings::{Container, Quality, QualityKind};
+    use crate::settings::{AudioChannels, Container, Quality, QualityKind};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -644,6 +661,9 @@ mod tests {
             container: Container::Mp4,
             video_encoder: "libx264".to_owned(),
             audio_encoder: "aac".to_owned(),
+            audio_bitrate: None,
+            audio_sample_rate: AudioSampleRateSetting::Fixed(48_000),
+            audio_channels: AudioChannels::Stereo,
             quality: Quality {
                 kind: QualityKind::Crf,
                 value: 20,
@@ -1284,7 +1304,9 @@ mod tests {
             plan.audio,
             Some(PlannedAudio {
                 stream_index: 1,
-                sample_rate: 44_100
+                sample_rate: 44_100,
+                output_sample_rate: 48_000,
+                output_channels: AudioChannels::Stereo,
             })
         );
         assert_eq!(plan.segments[0].audio_in_tick, Some(0));
@@ -1314,7 +1336,9 @@ mod tests {
             plan.audio,
             Some(PlannedAudio {
                 stream_index: 2,
-                sample_rate: 48_000
+                sample_rate: 48_000,
+                output_sample_rate: 48_000,
+                output_channels: AudioChannels::Stereo,
             })
         );
         assert_eq!(plan.segments[0].audio_in_tick, Some(0));
@@ -1389,6 +1413,119 @@ mod tests {
         // instead would export a video-only file for a source the preview played with
         // sound, and report nothing, so the preflight refuses the export here.
         assert_eq!(error, ExportErrorCode::SourceAudioRateUnknown);
+    }
+
+    // -- computation: the ADR 023 audio output format -------------------------------------
+
+    /// A probe with a 44100 Hz, six-channel audio stream at index 1: a rate that is not 48000
+    /// and a layout that is not stereo, so neither legacy value can pass for the source's own.
+    fn probe_with_44100_hz_surround_audio() -> MediaProbe {
+        let mut probe = sample_probe();
+        probe.video_time_base = Rational::new(1, 30_000).unwrap();
+        probe.audio = Some(AudioProbe {
+            index: 1,
+            codec: Some("ac3".to_owned()),
+            sample_rate: Some(44_100),
+            channels: Some(6),
+        });
+        probe
+    }
+
+    #[test]
+    fn a_source_sample_rate_resolves_to_the_source_streams_own_rate() {
+        // The graph must render a number, so `source` is resolved here rather than there. The
+        // tick unit is untouched: it is the source rate whatever the preset asks for.
+        let mut preset = sample_preset();
+        preset.audio_sample_rate = AudioSampleRateSetting::Source;
+        preset.audio_channels = AudioChannels::Source;
+        let plan = plan_with(
+            &[boundary(0, 1001)],
+            &probe_with_44100_hz_surround_audio(),
+            &preset,
+            valid_path_facts(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.audio,
+            Some(PlannedAudio {
+                stream_index: 1,
+                sample_rate: 44_100,
+                output_sample_rate: 44_100,
+                output_channels: AudioChannels::Source,
+            })
+        );
+        assert_eq!(plan.segments[0].audio_out_tick, Some(1471));
+    }
+
+    #[test]
+    fn a_fixed_sample_rate_and_channel_choice_reach_the_plan_and_leave_the_ticks_alone() {
+        for (sample_rate, channels) in [
+            (96_000, AudioChannels::Mono),
+            (48_000, AudioChannels::Stereo),
+            (8_000, AudioChannels::Source),
+        ] {
+            let mut preset = sample_preset();
+            preset.audio_sample_rate = AudioSampleRateSetting::Fixed(sample_rate);
+            preset.audio_channels = channels;
+            let plan = plan_with(
+                &[boundary(0, 1001)],
+                &probe_with_44100_hz_surround_audio(),
+                &preset,
+                valid_path_facts(),
+            )
+            .unwrap();
+            let audio = plan.audio.expect("the probe reports audio");
+            assert_eq!(audio.sample_rate, 44_100);
+            assert_eq!(audio.output_sample_rate, sample_rate);
+            assert_eq!(audio.output_channels, channels);
+            // Still 1471 at the source's 44100 Hz, not 1602 at 48000 or any other output rate.
+            assert_eq!(plan.segments[0].audio_out_tick, Some(1471));
+        }
+    }
+
+    #[test]
+    fn the_preset_audio_bitrate_is_copied_verbatim() {
+        for bitrate in [None, Some(8), Some(320), Some(1536)] {
+            let mut preset = sample_preset();
+            preset.audio_bitrate = bitrate;
+            let plan = plan_with(
+                &[boundary(0, 1001)],
+                &probe_with_44100_hz_surround_audio(),
+                &preset,
+                valid_path_facts(),
+            )
+            .unwrap();
+            assert_eq!(plan.audio_bitrate, bitrate);
+        }
+    }
+
+    #[test]
+    fn a_preset_without_the_adr_023_keys_plans_the_legacy_48000_hz_stereo_output() {
+        // What an older settings document deserializes to, planned against a source that is
+        // neither 48000 Hz nor stereo: the output must still be 48000 Hz stereo with no bitrate,
+        // which is what every export wrote before ADR 023.
+        let legacy: Preset = serde_json::from_value(serde_json::json!({
+            "id": "preset-1",
+            "name": "Test preset",
+            "container": "mp4",
+            "videoEncoder": "libx264",
+            "audioEncoder": "aac",
+            "quality": {"kind": "crf", "value": 20},
+            "resolution": "source",
+            "frameRate": "source",
+        }))
+        .unwrap();
+        let plan = plan_with(
+            &[boundary(0, 1001)],
+            &probe_with_44100_hz_surround_audio(),
+            &legacy,
+            valid_path_facts(),
+        )
+        .unwrap();
+        let audio = plan.audio.expect("the probe reports audio");
+        assert_eq!(audio.output_sample_rate, 48_000);
+        assert_eq!(audio.output_channels, AudioChannels::Stereo);
+        assert_eq!(plan.audio_bitrate, None);
     }
 
     #[test]

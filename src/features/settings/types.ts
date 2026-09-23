@@ -63,6 +63,21 @@ export type PresetResolution = "source" | Resolution;
 export type PresetFrameRate = "source" | Rational;
 
 /**
+ * Output audio channel layout options supported by export presets.
+ * Closed set matching the Rust `AudioChannels` enum.
+ */
+export const AUDIO_CHANNEL_SETTINGS = ["source", "stereo", "mono"] as const;
+
+export type PresetAudioChannels = (typeof AUDIO_CHANNEL_SETTINGS)[number];
+
+/**
+ * Output audio sample rate setting for an export preset.
+ * Either the literal "source" string to preserve source sample rate,
+ * or an explicit integer frequency in hertz (8000..=192000).
+ */
+export type PresetAudioSampleRate = "source" | number;
+
+/**
  * Single export preset definition matching the Rust `Preset` wire schema.
  */
 export type Preset = {
@@ -71,6 +86,19 @@ export type Preset = {
   container: PresetContainer;
   videoEncoder: string;
   audioEncoder: string;
+  /**
+   * Target audio bitrate in kilobits per second (kbps), an integer from 8 to 1536.
+   * Absent when using the audio encoder's default bitrate (ADR 023).
+   */
+  audioBitrate?: number;
+  /**
+   * Target audio sample rate in hertz, or "source" to preserve source sample rate.
+   */
+  audioSampleRate: PresetAudioSampleRate;
+  /**
+   * Target audio channel layout setting: "source", "stereo", or "mono".
+   */
+  audioChannels: PresetAudioChannels;
   quality: PresetQuality;
   resolution: PresetResolution;
   frameRate: PresetFrameRate;

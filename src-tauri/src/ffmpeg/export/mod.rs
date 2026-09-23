@@ -6,8 +6,9 @@
 //! ffmpeg, and this module holds the types that every later stage of the renderer shares.
 //!
 //! [`plan`] builds the pure [`ExportPlan`] from a source probe, a preset, and the requested
-//! segment boundaries: it resolves the output frame rate, computes each segment's exact
-//! duration and seek position, and converts video PTS into audio ticks. [`ExportPlan`] also
+//! segment boundaries: it resolves the output frame rate and the audio output format,
+//! computes each segment's exact duration and seek position, and converts video PTS into
+//! audio ticks. [`ExportPlan`] also
 //! exposes [`ExportPlan::single_input_seek_seconds`], the one extra value ADR 014's second
 //! graph shape (one input for the whole source) needs beyond the per-segment plan.
 //!
@@ -74,7 +75,7 @@ pub use progress::{ProgressReader, ProgressSnapshot};
 pub use registry::{ExportRegistry, ExportSlot};
 
 use crate::project::Resolution;
-use crate::settings::{Container, Quality};
+use crate::settings::{AudioChannels, Container, Quality};
 use crate::time::{Pts, Rational};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -176,10 +177,12 @@ pub struct PlannedSegment {
     pub audio_out_tick: Option<i64>,
 }
 
-/// The audio stream a plan addresses, and the sample rate its ticks are measured in.
+/// The audio stream a plan addresses, the sample rate its ticks are measured in, and the
+/// format every audio chain ends in.
 ///
-/// These two facts always travel together; see [`ExportPlan::audio`] for why bundling them
-/// into one type, rather than two independent optional fields, is the point.
+/// The first two facts always travel together; see [`ExportPlan::audio`] for why bundling them
+/// into one type, rather than two independent optional fields, is the point. The output format
+/// belongs here too, because it only means something when there is audio to format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlannedAudio {
     /// The absolute index of the audio stream the filter graph must address.
@@ -190,7 +193,26 @@ pub struct PlannedAudio {
     pub stream_index: u32,
     /// The sample rate every `audio_in_tick`/`audio_out_tick` in this plan's segments is
     /// measured in: the tick unit is `1 / sample_rate` seconds.
+    ///
+    /// This is always the source stream's own rate, whatever the preset asks for, because the
+    /// graph pins each input link to it before `atrim` reads the ticks (ADR 014 measurement 17).
     pub sample_rate: u32,
+    /// The sample rate every audio chain resamples to before `concat`, in hertz.
+    ///
+    /// [`plan::build_plan`] resolves the preset's [`AudioSampleRateSetting::Source`] to
+    /// [`Self::sample_rate`] here, so the graph renders a number and never reads the preset.
+    /// Every chain reads the same audio stream and ends at this one rate, so `concat` still
+    /// receives inputs that agree (ADR 023).
+    ///
+    /// [`AudioSampleRateSetting::Source`]: crate::settings::AudioSampleRateSetting::Source
+    pub output_sample_rate: u32,
+    /// The channel layout every audio chain ends in.
+    ///
+    /// [`AudioChannels::Source`] is the one value the plan cannot resolve to a concrete layout:
+    /// the probe reports a channel count, not a layout, so the graph instead names no layout at
+    /// all and the chain keeps the source stream's own (ADR 023). As with the rate, every chain
+    /// reads the same stream, so every chain ends with the same layout.
+    pub output_channels: AudioChannels,
 }
 
 /// A fully resolved, ready-to-render export: one source, its segments in concat order, and
@@ -239,6 +261,12 @@ pub struct ExportPlan {
     pub video_encoder: String,
     /// The ffmpeg audio encoder name, verbatim from the preset.
     pub audio_encoder: String,
+    /// The audio bitrate in kilobits per second, verbatim from the preset, or `None` to leave
+    /// the audio encoder at its own default.
+    ///
+    /// The argument builder writes it as `-b:a <n>k` only when [`Self::audio`] is `Some`, for
+    /// the same reason it writes `-c:a` only then.
+    pub audio_bitrate: Option<u32>,
     /// The quality control and its value, verbatim from the preset.
     pub quality: Quality,
     /// The output container, which selects the muxer (ADR 004).

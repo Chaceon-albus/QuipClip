@@ -343,6 +343,14 @@ fn map_validation_error(error: SettingsValidationError) -> SettingsCommandError 
             field: Some(format!("presets[{index}].{field}")),
             ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
         },
+        SettingsValidationError::AudioBitrateOutOfRange { index, .. } => SettingsCommandError {
+            field: Some(format!("presets[{index}].audioBitrate")),
+            ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
+        },
+        SettingsValidationError::AudioSampleRateOutOfRange { index, .. } => SettingsCommandError {
+            field: Some(format!("presets[{index}].audioSampleRate")),
+            ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
+        },
         SettingsValidationError::QualityOutOfRange { index, .. } => SettingsCommandError {
             field: Some(format!("presets[{index}].quality.value")),
             ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
@@ -390,6 +398,9 @@ mod tests {
             container: settings::Container::Mp4,
             video_encoder: "libx264".to_owned(),
             audio_encoder: "aac".to_owned(),
+            audio_bitrate: None,
+            audio_sample_rate: settings::AudioSampleRateSetting::Fixed(48_000),
+            audio_channels: settings::AudioChannels::Stereo,
             quality: settings::Quality {
                 kind: settings::QualityKind::Crf,
                 value: 20,
@@ -492,6 +503,35 @@ mod tests {
         assert_eq!(quality.code, SettingsCommandErrorCode::InvalidSettings);
         assert_eq!(quality.field.as_deref(), Some("presets[2].quality.value"));
 
+        let audio_bitrate = map_validation_error(SettingsValidationError::AudioBitrateOutOfRange {
+            index: 1,
+            value: 4_000,
+        });
+        assert_eq!(
+            audio_bitrate.code,
+            SettingsCommandErrorCode::InvalidSettings
+        );
+        assert_eq!(
+            audio_bitrate.field.as_deref(),
+            Some("presets[1].audioBitrate")
+        );
+        assert_eq!(audio_bitrate.value, None);
+
+        let audio_sample_rate =
+            map_validation_error(SettingsValidationError::AudioSampleRateOutOfRange {
+                index: 3,
+                value: 7_999,
+            });
+        assert_eq!(
+            audio_sample_rate.code,
+            SettingsCommandErrorCode::InvalidSettings
+        );
+        assert_eq!(
+            audio_sample_rate.field.as_deref(),
+            Some("presets[3].audioSampleRate")
+        );
+        assert_eq!(audio_sample_rate.value, None);
+
         let encoder = map_validation_error(SettingsValidationError::InvalidEncoderName {
             index: 0,
             field: settings::PresetField::VideoEncoder,
@@ -593,6 +633,36 @@ mod tests {
 
         assert_eq!(error.code, SettingsCommandErrorCode::InvalidSettings);
         assert_eq!(error.field.as_deref(), Some("activePresetId"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn save_refuses_an_out_of_range_audio_value_with_its_field_path_on_the_wire() {
+        // The ADR 023 audio ranges, end to end: the frontend matches `code` and `field` in this
+        // exact serialized form, and the file on disk stays as it was.
+        let directory = TestDirectory::new();
+        let valid = sample_settings(vec![sample_preset("preset-0"), sample_preset("preset-1")]);
+        settings::save(&directory.path, &valid).unwrap();
+        let path = directory.path.join(settings::SETTINGS_FILE_NAME);
+        let before = fs::read(&path).unwrap();
+
+        let mut bad_bitrate = valid.clone();
+        bad_bitrate.presets[1].audio_bitrate = Some(settings::MAX_AUDIO_BITRATE_KBPS + 1);
+        let error = save_settings_with(&directory.path, bad_bitrate).unwrap_err();
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            serde_json::json!({"code": "invalidSettings", "field": "presets[1].audioBitrate"})
+        );
+
+        let mut bad_rate = valid;
+        bad_rate.presets[1].audio_sample_rate =
+            settings::AudioSampleRateSetting::Fixed(settings::MIN_AUDIO_SAMPLE_RATE - 1);
+        let error = save_settings_with(&directory.path, bad_rate).unwrap_err();
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            serde_json::json!({"code": "invalidSettings", "field": "presets[1].audioSampleRate"})
+        );
+
         assert_eq!(fs::read(&path).unwrap(), before);
     }
 

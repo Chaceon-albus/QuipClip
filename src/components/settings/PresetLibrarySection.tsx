@@ -18,9 +18,11 @@ import {
   PRESET_CONTAINERS,
   QUALITY_KINDS,
   type Preset,
+  type PresetAudioChannels,
   type PresetContainer,
   type QualityKind,
 } from "@/features/settings/types";
+import { getResolvedLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
 import {
   createPresetLibraryController,
@@ -31,6 +33,13 @@ import {
   CUSTOM_ENCODER_VALUE,
   MAX_PRESETS,
   isActivationKey,
+  parseAudioBitrateValue,
+  parseAudioSampleRateValue,
+  presentAudioBitrateSelect,
+  presentAudioBitrateValue,
+  presentAudioChannelsSelect,
+  presentAudioSampleRateSelect,
+  presentAudioSampleRateValue,
   presentContainer,
   presentEncoderSelect,
   presentNumericField,
@@ -50,14 +59,30 @@ function PresetEditor({
   controller: PresetLibraryController;
   ffmpegState: Pick<FfmpegState, "status" | "results">;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const translate = t as (
     key: string,
     options?: Record<string, string | number>,
   ) => string;
 
+  const resolvedLanguage = getResolvedLanguage(i18n);
+  const numberFormatter = useMemo(
+    () => new Intl.NumberFormat(resolvedLanguage),
+    [resolvedLanguage],
+  );
+
   const videoSelect = presentEncoderSelect(ffmpegState, "video", draft.videoEncoder);
   const audioSelect = presentEncoderSelect(ffmpegState, "audio", draft.audioEncoder);
+  const bitrateSelect = presentAudioBitrateSelect(
+    draft.audioEncoder,
+    draft.audioBitrate,
+    numberFormatter,
+  );
+  const sampleRateSelect = presentAudioSampleRateSelect(
+    draft.audioSampleRate,
+    numberFormatter,
+  );
+  const channelsSelect = presentAudioChannelsSelect();
   const issues = presentPresetIssues(view.issues);
 
   return (
@@ -188,6 +213,89 @@ function PresetEditor({
               {t("settings.encoder.customHint")}
             </p>
           </div>
+        ) : null}
+      </div>
+
+      {/* Audio Bitrate, Sample Rate, Channels */}
+      <div className="space-y-1">
+        <div className="grid grid-cols-3 gap-2">
+          {/* Audio Bitrate */}
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">
+              {t("settings.preset.audioBitrateLabel")}
+            </label>
+            <Select
+              disabled={bitrateSelect.disabled}
+              value={presentAudioBitrateValue(draft.audioBitrate)}
+              onValueChange={(val) =>
+                controller.setAudioBitrate(parseAudioBitrateValue(val))
+              }
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {bitrateSelect.options.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {translate(option.labelKey, option.labelValues)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Audio Sample Rate */}
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">
+              {t("settings.preset.audioSampleRateLabel")}
+            </label>
+            <Select
+              value={presentAudioSampleRateValue(draft.audioSampleRate)}
+              onValueChange={(val) =>
+                controller.setAudioSampleRate(parseAudioSampleRateValue(val))
+              }
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {sampleRateSelect.options.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {translate(option.labelKey, option.labelValues)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Audio Channels */}
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">
+              {t("settings.preset.audioChannelsLabel")}
+            </label>
+            <Select
+              value={draft.audioChannels}
+              onValueChange={(val) =>
+                controller.setAudioChannels(val as PresetAudioChannels)
+              }
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {channelsSelect.options.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {translate(option.labelKey)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        {bitrateSelect.hintKey ? (
+          <p className="text-xs text-muted-foreground">
+            {translate(bitrateSelect.hintKey)}
+          </p>
         ) : null}
       </div>
 

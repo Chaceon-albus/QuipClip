@@ -566,7 +566,7 @@ mod tests {
             run_id: "1-0".to_owned(),
             result: sample_encoder_result(),
             done: 1,
-            total: 12,
+            total: 16,
         };
 
         let value = serde_json::to_value(&event).unwrap();
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(value["runId"], "1-0");
         assert_eq!(value["result"]["kind"], "video");
         assert_eq!(value["done"], 1);
-        assert_eq!(value["total"], 12);
+        assert_eq!(value["total"], 16);
         // The outer tag stays "event"; it is never lifted to "kind", which would collide
         // with EncoderResult's own "kind" field one level down. See the module doc comment.
         assert!(value.get("kind").is_none());

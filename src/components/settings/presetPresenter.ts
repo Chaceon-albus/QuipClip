@@ -6,8 +6,20 @@
  */
 
 import type { CodecKind, FfmpegState } from "@/features/ffmpeg/types";
+import {
+  AUDIO_SAMPLE_RATE_CHOICES,
+  audioBitrateChoices,
+  isLosslessAudioEncoder,
+} from "@/features/settings/audioCodecs";
 import type { PresetFieldIssue } from "@/features/settings/limits";
-import type { Preset, PresetContainer, QualityKind } from "@/features/settings/types";
+import type {
+  Preset,
+  PresetAudioChannels,
+  PresetAudioSampleRate,
+  PresetContainer,
+  QualityKind,
+} from "@/features/settings/types";
+import { isPresetContainer } from "@/features/settings/validation";
 import {
   buildEncoderOptions,
   getEncoderAvailability,
@@ -21,6 +33,9 @@ import { CUSTOM_ENCODER_VALUE } from "./presetLibraryController";
 
 export { MAX_PRESETS } from "@/features/settings/limits";
 export { CUSTOM_ENCODER_VALUE };
+
+/** Sentinel value for the "encoder default" choice in an audio bitrate `<Select>`. */
+export const AUDIO_BITRATE_DEFAULT_VALUE = "default";
 
 export type MessageView = {
   key: string;
@@ -50,9 +65,28 @@ export function presentPresetIssue(issue: PresetFieldIssue): MessageView {
     case "positive":
       key = "settings.field.positive";
       break;
+    case "containerMismatch":
+      key = "settings.field.containerMismatch";
+      break;
   }
 
   if (issue.values) {
+    if (
+      issue.code === "containerMismatch" &&
+      typeof issue.values.container === "string"
+    ) {
+      const rawContainer = issue.values.container;
+      const formattedContainer = isPresetContainer(rawContainer)
+        ? presentContainer(rawContainer)
+        : rawContainer;
+      return {
+        key,
+        values: {
+          ...issue.values,
+          container: formattedContainer,
+        },
+      };
+    }
     return { key, values: issue.values };
   }
   return { key };
@@ -317,4 +351,165 @@ export function presentNumericField(value: number): string {
  */
 export function isActivationKey(key: string): boolean {
   return key === "Enter" || key === " ";
+}
+
+/** View model for one entry in an audio bitrate `<Select>`. */
+export type AudioBitrateOptionView = {
+  value: string;
+  labelKey: string;
+  labelValues?: { value: string };
+};
+
+/** View model for the audio bitrate `<Select>`. */
+export type AudioBitrateSelectView = {
+  options: AudioBitrateOptionView[];
+  disabled: boolean;
+  hintKey?: string;
+};
+
+/**
+ * Maps an audio bitrate (in kbps, or undefined for encoder default) to its `<Select>` value string.
+ */
+export function presentAudioBitrateValue(bitrate: number | undefined): string {
+  return bitrate === undefined ? AUDIO_BITRATE_DEFAULT_VALUE : String(bitrate);
+}
+
+/**
+ * Parses an audio bitrate `<Select>` value string back into a numeric kbps value, or null for encoder default.
+ */
+export function parseAudioBitrateValue(value: string): number | null {
+  return value === AUDIO_BITRATE_DEFAULT_VALUE ? null : Number(value);
+}
+
+/**
+ * Builds the options and disabled state for the audio bitrate `<Select>`.
+ *
+ * For lossless encoders (e.g. FLAC, ALAC), the select is disabled only when no bitrate is
+ * stored. If a lossless preset already stores a bitrate (e.g. from hand-editing), the select
+ * remains enabled so the user can choose "Encoder Default" to clear it. In both cases, a
+ * localized hint explains that lossless encoders do not use a bitrate setting.
+ */
+export function presentAudioBitrateSelect(
+  encoder: string,
+  currentBitrate: number | undefined,
+  formatter: Intl.NumberFormat,
+): AudioBitrateSelectView {
+  const lossless = isLosslessAudioEncoder(encoder);
+  const choices = audioBitrateChoices(encoder);
+
+  const options: AudioBitrateOptionView[] = [
+    {
+      value: AUDIO_BITRATE_DEFAULT_VALUE,
+      labelKey: "settings.preset.audioBitrateDefault",
+    },
+  ];
+
+  const choiceList = [...choices];
+  if (currentBitrate !== undefined && !choiceList.includes(currentBitrate)) {
+    choiceList.push(currentBitrate);
+  }
+
+  for (const choice of choiceList) {
+    options.push({
+      value: String(choice),
+      labelKey: "settings.preset.audioBitrateValue",
+      labelValues: { value: formatter.format(choice) },
+    });
+  }
+
+  if (lossless) {
+    return {
+      options,
+      disabled: currentBitrate === undefined,
+      hintKey: "settings.preset.audioBitrateLossless",
+    };
+  }
+
+  return {
+    options,
+    disabled: false,
+  };
+}
+
+/**
+ * Maps a preset audio sample rate ("source" or frequency in Hz) to its `<Select>` value string.
+ */
+export function presentAudioSampleRateValue(sampleRate: PresetAudioSampleRate): string {
+  return String(sampleRate);
+}
+
+/**
+ * Parses an audio sample rate `<Select>` value string back into a `PresetAudioSampleRate` ("source" or numeric Hz).
+ */
+export function parseAudioSampleRateValue(value: string): PresetAudioSampleRate {
+  return value === "source" ? "source" : Number(value);
+}
+
+/** View model for one entry in an audio sample rate `<Select>`. */
+export type AudioSampleRateOptionView = {
+  value: string;
+  labelKey: string;
+  labelValues?: { value: string };
+};
+
+/** View model for the audio sample rate `<Select>`. */
+export type AudioSampleRateSelectView = {
+  options: AudioSampleRateOptionView[];
+};
+
+/**
+ * Builds the options for the audio sample rate `<Select>`.
+ *
+ * Displays "Same as Source" followed by standard sample rates in kHz (e.g. 44.1 kHz, 48 kHz).
+ * If the current stored value is not in the standard list, it is preserved as an additional option.
+ */
+export function presentAudioSampleRateSelect(
+  currentSampleRate: PresetAudioSampleRate,
+  formatter: Intl.NumberFormat,
+): AudioSampleRateSelectView {
+  const options: AudioSampleRateOptionView[] = [
+    {
+      value: "source",
+      labelKey: "settings.preset.sourceOption",
+    },
+  ];
+
+  const choices: number[] = [...AUDIO_SAMPLE_RATE_CHOICES];
+  if (typeof currentSampleRate === "number" && !choices.includes(currentSampleRate)) {
+    choices.push(currentSampleRate);
+  }
+
+  for (const rate of choices) {
+    options.push({
+      value: String(rate),
+      labelKey: "settings.preset.audioSampleRateValue",
+      labelValues: { value: formatter.format(rate / 1000) },
+    });
+  }
+
+  return { options };
+}
+
+/** View model for one entry in an audio channels `<Select>`. */
+export type AudioChannelsOptionView = {
+  value: PresetAudioChannels;
+  labelKey: string;
+};
+
+/** View model for the audio channels `<Select>`. */
+export type AudioChannelsSelectView = {
+  options: AudioChannelsOptionView[];
+};
+
+/**
+ * Builds the options for the audio channels `<Select>` ("source", "stereo", "mono").
+ */
+export function presentAudioChannelsSelect(): AudioChannelsSelectView {
+  return {
+    options: [
+      { value: "source", labelKey: "settings.preset.sourceOption" },
+      { value: "stereo", labelKey: "settings.preset.audioChannelsStereo" },
+      { value: "mono", labelKey: "settings.preset.audioChannelsMono" },
+    ],
+  };
 }

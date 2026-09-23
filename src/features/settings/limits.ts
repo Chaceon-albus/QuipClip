@@ -5,6 +5,7 @@
  * Authoritative backend source: src-tauri/src/settings/mod.rs.
  */
 
+import { isAudioEncoderAllowedIn } from "./audioCodecs";
 import type { Preset, QualityKind } from "./types";
 
 /**
@@ -44,6 +45,30 @@ export const MAX_ENCODER_NAME_CHARS = 64;
 export const MIN_ENCODER_NAME_CHARS = 1;
 
 /**
+ * Minimum audio bitrate in kilobits per second (kbps).
+ * Authoritative source: src-tauri/src/settings/mod.rs (MIN_AUDIO_BITRATE_KBPS).
+ */
+export const MIN_AUDIO_BITRATE_KBPS = 8;
+
+/**
+ * Maximum audio bitrate in kilobits per second (kbps).
+ * Authoritative source: src-tauri/src/settings/mod.rs (MAX_AUDIO_BITRATE_KBPS).
+ */
+export const MAX_AUDIO_BITRATE_KBPS = 1536;
+
+/**
+ * Minimum audio sample rate in hertz.
+ * Authoritative source: src-tauri/src/settings/mod.rs (MIN_AUDIO_SAMPLE_RATE).
+ */
+export const MIN_AUDIO_SAMPLE_RATE = 8000;
+
+/**
+ * Maximum audio sample rate in hertz.
+ * Authoritative source: src-tauri/src/settings/mod.rs (MAX_AUDIO_SAMPLE_RATE).
+ */
+export const MAX_AUDIO_SAMPLE_RATE = 192000;
+
+/**
  * Regular expression validating encoder name character set and start pattern.
  * Encoder names must start with an alphanumeric character and contain only [0-9A-Za-z_.-].
  * Authoritative source: src-tauri/src/settings/mod.rs (is_valid_encoder_name).
@@ -81,10 +106,23 @@ export function defaultQualityValue(kind: QualityKind): number {
 }
 
 export type PresetFieldName =
-  "name" | "videoEncoder" | "audioEncoder" | "quality" | "resolution" | "frameRate";
+  | "name"
+  | "videoEncoder"
+  | "audioEncoder"
+  | "audioBitrate"
+  | "audioSampleRate"
+  | "quality"
+  | "resolution"
+  | "frameRate";
 
 export type PresetFieldIssueCode =
-  "required" | "tooLong" | "charset" | "outOfRange" | "notInteger" | "positive";
+  | "required"
+  | "tooLong"
+  | "charset"
+  | "outOfRange"
+  | "notInteger"
+  | "positive"
+  | "containerMismatch";
 
 export type PresetFieldIssue = {
   field: PresetFieldName;
@@ -121,9 +159,11 @@ export function canAddPreset(presetCount: number): boolean {
 /**
  * Validates the fields of an individual export preset, returning issues in fixed field order.
  *
- * Order: name, videoEncoder, audioEncoder, quality, resolution, frameRate.
+ * Order: name, videoEncoder, audioEncoder, audioBitrate, audioSampleRate, quality, resolution, frameRate.
  * Reports at most one issue per field. Returns [] when all fields are valid.
- * Authoritative source: src-tauri/src/settings/mod.rs (validate_settings).
+ * Authoritative source: src-tauri/src/settings/mod.rs (validate_settings). Note that the
+ * container-audio encoder compatibility rule exists only here (ADR 023); Rust does not repeat
+ * the container rule.
  */
 export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
   const issues: PresetFieldIssue[] = [];
@@ -147,14 +187,61 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
     issues.push({ field: "videoEncoder", code: "charset" });
   }
 
-  // 3. audioEncoder: blank after trim -> required; !isValidEncoderName(untrimmed) -> charset
+  // 3. audioEncoder: blank after trim -> required; !isValidEncoderName(untrimmed) -> charset; container mismatch -> containerMismatch
   if (preset.audioEncoder.trim().length === 0) {
     issues.push({ field: "audioEncoder", code: "required" });
   } else if (!isValidEncoderName(preset.audioEncoder)) {
     issues.push({ field: "audioEncoder", code: "charset" });
+  } else if (!isAudioEncoderAllowedIn(preset.container, preset.audioEncoder)) {
+    issues.push({
+      field: "audioEncoder",
+      code: "containerMismatch",
+      values: {
+        container: preset.container,
+        encoder: preset.audioEncoder,
+      },
+    });
   }
 
-  // 4. quality: not safe integer -> notInteger; outside range -> outOfRange
+  // 4. audioBitrate: when present, not safe integer -> notInteger; outside bounds -> outOfRange
+  if (preset.audioBitrate !== undefined) {
+    if (!Number.isSafeInteger(preset.audioBitrate)) {
+      issues.push({ field: "audioBitrate", code: "notInteger" });
+    } else if (
+      preset.audioBitrate < MIN_AUDIO_BITRATE_KBPS ||
+      preset.audioBitrate > MAX_AUDIO_BITRATE_KBPS
+    ) {
+      issues.push({
+        field: "audioBitrate",
+        code: "outOfRange",
+        values: {
+          min: MIN_AUDIO_BITRATE_KBPS,
+          max: MAX_AUDIO_BITRATE_KBPS,
+        },
+      });
+    }
+  }
+
+  // 5. audioSampleRate: when a number, not safe integer -> notInteger; outside bounds -> outOfRange
+  if (typeof preset.audioSampleRate === "number") {
+    if (!Number.isSafeInteger(preset.audioSampleRate)) {
+      issues.push({ field: "audioSampleRate", code: "notInteger" });
+    } else if (
+      preset.audioSampleRate < MIN_AUDIO_SAMPLE_RATE ||
+      preset.audioSampleRate > MAX_AUDIO_SAMPLE_RATE
+    ) {
+      issues.push({
+        field: "audioSampleRate",
+        code: "outOfRange",
+        values: {
+          min: MIN_AUDIO_SAMPLE_RATE,
+          max: MAX_AUDIO_SAMPLE_RATE,
+        },
+      });
+    }
+  }
+
+  // 6. quality: not safe integer -> notInteger; outside range -> outOfRange
   if (!Number.isSafeInteger(preset.quality.value)) {
     issues.push({ field: "quality", code: "notInteger" });
   } else {

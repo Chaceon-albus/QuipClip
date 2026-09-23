@@ -40,6 +40,7 @@
 
 use super::{ExportPlan, OutputTiming, PlannedAudio, PlannedSegment};
 use crate::project::Resolution;
+use crate::settings::AudioChannels;
 
 /// The pixel format every video chain ends in, from ADR 014's chain template.
 ///
@@ -47,23 +48,43 @@ use crate::project::Resolution;
 /// normalizes to one before the join rather than relying on the source's own.
 const VIDEO_PIXEL_FORMAT: &str = "format=yuv420p";
 
-/// The sample format, sample rate, and channel layout every audio chain ends in, from ADR
-/// 014's chain template.
+/// Render the `aformat` every audio chain ends in: the sample format, the plan's output rate,
+/// and the plan's channel layout, from ADR 014's chain template as ADR 023 amends it.
 ///
-/// The `48000` here is the *output* rate `concat` receives, and it is deliberately a
-/// constant rather than [`PlannedAudio::sample_rate`]: that field is the unit the plan's
-/// audio ticks are measured in (the source stream's own rate, which ADR 014 measurement 4
-/// found at 44100, 48000, and 32000 Hz), not a target. `concat` requires its audio inputs to
-/// agree, so each chain resamples to this one rate; the ticks stay in the source's rate
-/// because that is the unit `atrim` reads them in. The test fixtures deliberately use a
-/// 44100 Hz source so the two numbers can never be confused for each other.
+/// The rate here is [`PlannedAudio::output_sample_rate`], the *output* rate `concat`
+/// receives, and never [`PlannedAudio::sample_rate`]: that field is the unit the plan's audio
+/// ticks are measured in (the source stream's own rate, which ADR 014 measurement 4 found at
+/// 44100, 48000, and 32000 Hz), not a target. The two are equal whenever the output rate
+/// matches the source rate: always for a preset that asks for the source rate, which
+/// [`super::plan::build_plan`] has already resolved to a number, and also for a fixed rate
+/// that happens to match, such as the legacy 48000 Hz on a 48000 Hz source. The test fixtures deliberately use a 44100 Hz source with a 48000 Hz output, so the
+/// two numbers can never be confused for each other.
+///
+/// Every chain reads the same audio stream and renders this same filter, so every chain ends
+/// at one rate and with one layout, and `concat` still receives inputs that agree. For
+/// [`AudioChannels::Source`] the filter names no `channel_layouts` at all, so each chain keeps
+/// the source stream's layout; ADR 023 measurement 3 found that ffmpeg then converts in front
+/// of an encoder that cannot take that layout, so no filter here depends on the encoder.
+///
+/// A preset from before ADR 023 plans 48000 Hz and [`AudioChannels::Stereo`], and this renders
+/// exactly the constant ADR 014 used to fix:
+/// `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo`.
 ///
 /// This is not the same `aformat` as [`audio_input_pin`], which carries the *source* rate and
 /// stands at the head of the chain. Both are needed, for opposite reasons: this one converts
-/// the cut audio to the one rate `concat` joins at; that one stops ffmpeg from converting
+/// the cut audio to the one format `concat` joins at; that one stops ffmpeg from converting
 /// the audio *before* the cut, which would read the boundary ticks in the wrong unit.
-const AUDIO_SAMPLE_FORMAT: &str =
-    "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
+fn audio_output_format(audio: PlannedAudio) -> String {
+    let layout = match audio.output_channels {
+        AudioChannels::Source => "",
+        AudioChannels::Stereo => ":channel_layouts=stereo",
+        AudioChannels::Mono => ":channel_layouts=mono",
+    };
+    format!(
+        "aformat=sample_fmts=fltp:sample_rates={}{layout}",
+        audio.output_sample_rate
+    )
+}
 
 /// Which of ADR 014's two graph shapes to render.
 ///
@@ -225,16 +246,18 @@ fn splitter_chain(stream_index: u32, pin: &str, filter: &str, label: &str, count
 /// with the trailing comma that joins it to the filter behind it.
 ///
 /// This is the one filter in the graph that exists to defeat an ffmpeg behaviour rather than
-/// to express a decision, so it reads as redundant beside [`AUDIO_SAMPLE_FORMAT`] at the end
-/// of the same chain. It is not. **Deleting it silently desynchronizes every export that
-/// seeks.**
+/// to express a decision, so it reads as redundant beside [`audio_output_format`] at the end
+/// of the same chain. When the preset keeps the source rate, the two filters even render the
+/// same number. It is still not redundant, and it stays on every chain whatever the preset
+/// asks for. **Deleting it silently desynchronizes every export that seeks and resamples.**
 ///
 /// ADR 014 measurement 17 has the behaviour. FFmpeg negotiates one sample rate over a filter
 /// link, and it configures an input's audio buffer source at whatever the link settles on.
 /// With no `-ss`, that is the source stream's own rate. With `-ss` -- which ADR 014's "The
 /// seek" puts on almost every export -- the negotiation instead pulls the *output* rate
-/// backwards through the graph, out of [`AUDIO_SAMPLE_FORMAT`]'s `48000`, and the input
-/// arrives already resampled. The `atrim` boundaries do not follow: the plan computes them as
+/// backwards through the graph, out of the rate [`audio_output_format`] closes the chain at
+/// (48000 in the measurement), and the input arrives already resampled. The `atrim` boundaries
+/// do not follow: the plan computes them as
 /// `round(pts * videoTimeBase * sampleRate)` in the source's rate, and `atrim` reads them in
 /// whatever unit its input link happens to use. On the measured 44100 Hz source,
 /// `start_pts=441000` therefore means 10 s without the seek and 9.1875 s with it -- the cut
@@ -243,8 +266,9 @@ fn splitter_chain(stream_index: u32, pin: &str, filter: &str, label: &str, count
 ///
 /// Nothing downstream can catch that. The video frame count is untouched, so ADR 014's
 /// `frameCountMismatch` guard passes, ffmpeg exits zero, and the export ships with the audio
-/// seconds out of step with the picture. A 48000 Hz source hides the fault completely,
-/// because the two rates agree.
+/// seconds out of step with the picture. A source already at the output rate hides the fault
+/// completely, because the two rates agree -- which is also why a preset that keeps the source
+/// rate never shows it, and why that is no reason to drop the pin for such a preset.
 ///
 /// Pinning the link to [`PlannedAudio::sample_rate`] restores the boundary: the constraint
 /// applies to this filter's *input* link as well as its output, so it reaches back to the
@@ -320,7 +344,8 @@ fn audio_chain(audio: PlannedAudio, shape: GraphShape, index: usize, ticks: (i64
     };
     let (in_tick, out_tick) = ticks;
     let head = format!("{source}atrim=start_pts={in_tick}:end_pts={out_tick}");
-    format!("{head},asetpts=PTS-STARTPTS,{AUDIO_SAMPLE_FORMAT}[a{index}]")
+    let format = audio_output_format(audio);
+    format!("{head},asetpts=PTS-STARTPTS,{format}[a{index}]")
 }
 
 /// Render the closing `concat` filter and the graph's output labels.
@@ -356,13 +381,17 @@ mod tests {
     ///
     /// Two properties of this fixture are load-bearing, not decoration:
     ///
-    /// - The source rate is 44100, while `AUDIO_SAMPLE_FORMAT` pins the output rate at
-    ///   48000. Replacing that constant with [`PlannedAudio::sample_rate`] therefore changes
-    ///   every pinned string below, instead of passing unnoticed as it would if the fixture
-    ///   also ran at 48000. The same gap is what makes [`audio_input_pin`] visible at all:
-    ///   its `44100` and the chain's closing `48000` are two different rates in one chain,
-    ///   and a 48000 Hz fixture would render them identically -- which is exactly why the
-    ///   fault ADR 014 measurement 17 records reached a shipped graph unseen.
+    /// - The source rate is 44100, while the plan's output rate is 48000 -- the value a preset
+    ///   from before ADR 023 plans. Rendering [`PlannedAudio::sample_rate`] where
+    ///   [`PlannedAudio::output_sample_rate`] belongs therefore changes every pinned string
+    ///   below, instead of passing unnoticed as it would if the fixture also ran at 48000. The
+    ///   same gap is what makes [`audio_input_pin`] visible at all: its `44100` and the chain's
+    ///   closing `48000` are two different rates in one chain, and a 48000 Hz fixture would
+    ///   render them identically -- which is exactly why the fault ADR 014 measurement 17
+    ///   records reached a shipped graph unseen.
+    /// - The output is 48000 Hz stereo, the pre-ADR 023 default, so every pinned string below is
+    ///   byte-identical to the graph ADR 014 shipped before the output format became a preset
+    ///   setting. That is ADR 023's compatibility promise, stated as a fixture.
     /// - Element 1 starts *earlier* in the source than element 0. ADR 007 makes array order
     ///   authoritative and forbids sorting; a builder that sorted by `in_pts` would reorder
     ///   this fixture and change every pinned string of two or more segments.
@@ -393,7 +422,7 @@ mod tests {
     }
 
     /// A plan over the first `count` fixture segments: video stream 1, audio stream 2 at
-    /// 44100 Hz, 25 fps, and the source's own resolution.
+    /// 44100 Hz written out as 48000 Hz stereo, 25 fps, and the source's own resolution.
     ///
     /// Neither stream index is the one a short specifier would bind. `[0:v]` and `[0:a]`
     /// would both resolve to stream 0 on a file laid out this way, so a chain that used a
@@ -404,15 +433,13 @@ mod tests {
             source: PathBuf::from("/media/source.mp4"),
             destination: PathBuf::from("/export/out.mp4"),
             video_stream_index: 1,
-            audio: Some(PlannedAudio {
-                stream_index: 2,
-                sample_rate: 44_100,
-            }),
+            audio: Some(fixture_audio(2, 44_100)),
             segments: fixture_segments(count),
             timing: OutputTiming::ConstantFrameRate(Rational::new(25, 1).unwrap()),
             resolution: None,
             video_encoder: "libx264".to_owned(),
             audio_encoder: "aac".to_owned(),
+            audio_bitrate: None,
             quality: Quality {
                 kind: QualityKind::Crf,
                 value: 20,
@@ -420,6 +447,17 @@ mod tests {
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
             expected_frames: Some(u64::try_from(frames).unwrap()),
+        }
+    }
+
+    /// An audio stream at `stream_index`, with ticks at `sample_rate`, written out in the
+    /// pre-ADR 023 format of 48000 Hz stereo.
+    fn fixture_audio(stream_index: u32, sample_rate: u32) -> PlannedAudio {
+        PlannedAudio {
+            stream_index,
+            sample_rate,
+            output_sample_rate: 48_000,
+            output_channels: AudioChannels::Stereo,
         }
     }
 
@@ -567,13 +605,14 @@ mod tests {
     }
 
     #[test]
-    fn the_audio_output_rate_is_a_constant_not_the_sources_tick_rate() {
+    fn the_audio_output_rate_is_the_plans_output_rate_not_the_sources_tick_rate() {
         // The fixture's audio stream runs at 44100 Hz, so its ticks are in 1/44100 units,
-        // while ADR 014's chain template resamples every chain to 48000 Hz for `concat`.
-        // Swapping `AUDIO_SAMPLE_FORMAT`'s constant for `PlannedAudio::sample_rate` would keep
-        // the ticks correct and still produce the wrong output rate. The chain now carries the
-        // source rate too, in `audio_input_pin` at its head, so this asserts the two rates by
-        // position rather than by presence: 44100 in front of the cut, 48000 behind it.
+        // while its plan resamples every chain to 48000 Hz for `concat`. Rendering
+        // `PlannedAudio::sample_rate` in the closing `aformat` instead of `output_sample_rate`
+        // would keep the ticks correct and still produce the wrong output rate. The chain
+        // carries the source rate too, in `audio_input_pin` at its head, so this asserts the
+        // two rates by position rather than by presence: 44100 in front of the cut, 48000
+        // behind it.
         let graph = build_filter_graph(&fixture_plan(1), GraphShape::InputPerSegment);
         assert!(
             graph.contains("aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144"),
@@ -594,7 +633,7 @@ mod tests {
         // The test class ADR 014's consequences ask for: a fixture that is not 48000 Hz.
         //
         // Measurement 17. An input seek makes ffmpeg configure that input's audio at the rate
-        // the graph negotiates for its *output*, pulled backwards out of `AUDIO_SAMPLE_FORMAT`.
+        // the graph negotiates for its *output*, pulled backwards out of the closing `aformat`.
         // `atrim` then reads the plan's source-rate ticks as 48000ths: on this 44100 Hz
         // fixture `start_pts=441000` means 9.1875 s instead of 10 s, and a 1.000000 s segment
         // exports 0.918750 s of audio, starting in the wrong place, with the error growing
@@ -640,10 +679,7 @@ mod tests {
         // stop. The ticks here are that source's own: 148480 and 151552 at time base 1/12800
         // are 11.6 s and 11.84 s, which are 371200 and 378880 ticks at 32000 Hz.
         let mut plan = fixture_plan(1);
-        plan.audio = Some(PlannedAudio {
-            stream_index: 2,
-            sample_rate: 32_000,
-        });
+        plan.audio = Some(fixture_audio(2, 32_000));
         plan.segments[0].audio_in_tick = Some(371_200);
         plan.segments[0].audio_out_tick = Some(378_880);
         assert_eq!(
@@ -669,6 +705,164 @@ mod tests {
                 "[v0][a0]concat=n=1:v=1:a=1[v][a]",
             )
         );
+    }
+
+    // -- The ADR 023 output format --------------------------------------------------------
+
+    /// The fixture plan with its output format replaced, and nothing else touched.
+    fn plan_with_output(count: usize, rate: u32, channels: AudioChannels) -> ExportPlan {
+        let mut plan = fixture_plan(count);
+        plan.audio = Some(PlannedAudio {
+            output_sample_rate: rate,
+            output_channels: channels,
+            ..fixture_audio(2, 44_100)
+        });
+        plan
+    }
+
+    #[test]
+    fn a_source_rate_ends_every_chain_at_44100_and_keeps_the_input_pin_in_both_shapes() {
+        // `build_plan` resolves the preset's `source` rate to the stream's own 44100, so the
+        // closing `aformat` now renders the same number as the pin at the head of the chain.
+        // The pin must stay anyway: see `audio_input_pin`.
+        let plan = plan_with_output(2, 44_100, AudioChannels::Stereo);
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::InputPerSegment),
+            concat!(
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v0];",
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a0];",
+                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v1];",
+                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
+                "asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a1];",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+            )
+        );
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::SingleInput),
+            concat!(
+                "[0:1]split=2[sv0][sv1];",
+                "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a0];",
+                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v1];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a1];",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+            )
+        );
+        assert!(!build_filter_graph(&plan, GraphShape::InputPerSegment).contains("48000"));
+    }
+
+    #[test]
+    fn source_channels_name_no_channel_layout_in_both_shapes() {
+        // The seeds' own format: the source rate and the source layout. With no
+        // `channel_layouts` option each chain keeps the stream's layout, so a 5.1 source stays
+        // 5.1 through an encoder that takes it (ADR 023 measurement 3).
+        let plan = plan_with_output(2, 44_100, AudioChannels::Source);
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::InputPerSegment),
+            concat!(
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v0];",
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=44100[a0];",
+                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v1];",
+                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
+                "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=44100[a1];",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+            )
+        );
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::SingleInput),
+            concat!(
+                "[0:1]split=2[sv0][sv1];",
+                "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=44100[a0];",
+                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v1];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=44100[a1];",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+            )
+        );
+
+        // Source channels with a fixed rate: the option is still absent, and the rate is the
+        // plan's own.
+        let fixed_rate = plan_with_output(1, 96_000, AudioChannels::Source);
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            let graph = build_filter_graph(&fixed_rate, shape);
+            assert!(!graph.contains("channel_layouts"), "{graph}");
+            assert!(
+                graph.contains(",aformat=sample_fmts=fltp:sample_rates=96000[a0];"),
+                "{graph}"
+            );
+        }
+    }
+
+    #[test]
+    fn mono_channels_render_the_mono_layout_in_both_shapes() {
+        let plan = plan_with_output(1, 48_000, AudioChannels::Mono);
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::InputPerSegment),
+            concat!(
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v0];",
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono[a0];",
+                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+            )
+        );
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::SingleInput),
+            concat!(
+                "[0:1]split=1[sv0];",
+                "[0:2]aformat=sample_rates=44100,asplit=1[sa0];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
+                "format=yuv420p[v0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono[a0];",
+                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+            )
+        );
+    }
+
+    #[test]
+    fn every_chain_of_one_graph_ends_in_the_same_audio_format() {
+        // `concat` needs inputs that agree. Every chain reads the same stream and renders the
+        // same closing filter, so one graph must hold exactly one spelling of it, once for each
+        // segment, whatever the format.
+        for channels in [
+            AudioChannels::Source,
+            AudioChannels::Stereo,
+            AudioChannels::Mono,
+        ] {
+            for rate in [8_000, 44_100, 192_000] {
+                let plan = plan_with_output(3, rate, channels);
+                let expected = audio_output_format(plan.audio.expect("fixture audio"));
+                for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+                    let graph = build_filter_graph(&plan, shape);
+                    assert_eq!(graph.matches("aformat=sample_fmts=").count(), 3, "{graph}");
+                    assert_eq!(
+                        graph.matches(&format!("{expected}[a")).count(),
+                        3,
+                        "{graph}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -811,10 +1005,7 @@ mod tests {
         // and export audio the preview never played, with no error reported anywhere.
         let mut plan = fixture_plan(1);
         plan.video_stream_index = 2;
-        plan.audio = Some(PlannedAudio {
-            stream_index: 5,
-            sample_rate: 44_100,
-        });
+        plan.audio = Some(fixture_audio(5, 44_100));
         assert_eq!(
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(

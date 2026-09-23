@@ -6,6 +6,7 @@
 
 import type { Rational } from "@/types/project";
 import {
+  AUDIO_CHANNEL_SETTINGS,
   BACKEND_SETTINGS_ERROR_CODES,
   PRESET_CONTAINERS,
   QUALITY_KINDS,
@@ -15,6 +16,8 @@ import {
   type BackendSettingsErrorCode,
   type LoadSettingsResult,
   type Preset,
+  type PresetAudioChannels,
+  type PresetAudioSampleRate,
   type PresetContainer,
   type PresetFrameRate,
   type PresetQuality,
@@ -132,6 +135,25 @@ export function isPresetFrameRate(value: unknown): value is PresetFrameRate {
 }
 
 /**
+ * Checks whether an unknown value is a valid PresetAudioChannels setting.
+ */
+export function isPresetAudioChannels(value: unknown): value is PresetAudioChannels {
+  return (
+    typeof value === "string" &&
+    (AUDIO_CHANNEL_SETTINGS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Checks whether an unknown value is a valid PresetAudioSampleRate setting.
+ */
+export function isPresetAudioSampleRate(
+  value: unknown,
+): value is PresetAudioSampleRate {
+  return value === "source" || isNonNegativeU32(value);
+}
+
+/**
  * Validates whether an unknown value is a valid Preset structure.
  */
 export function isPreset(value: unknown): value is Preset {
@@ -149,6 +171,9 @@ export function isPreset(value: unknown): value is Preset {
     p.videoEncoder.trim().length > 0 &&
     typeof p.audioEncoder === "string" &&
     p.audioEncoder.trim().length > 0 &&
+    (p.audioBitrate === undefined || isNonNegativeU32(p.audioBitrate)) &&
+    isPresetAudioSampleRate(p.audioSampleRate) &&
+    isPresetAudioChannels(p.audioChannels) &&
     isPresetQuality(p.quality) &&
     isPresetResolution(p.resolution) &&
     isPresetFrameRate(p.frameRate)

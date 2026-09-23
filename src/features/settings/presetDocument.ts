@@ -10,6 +10,7 @@
 
 import type { Rational, Resolution } from "@/types/project";
 
+import { DEFAULT_AUDIO_BITRATE_KBPS } from "./audioCodecs";
 import type { Preset, Settings } from "./types";
 
 /**
@@ -30,7 +31,8 @@ export const DEFAULT_CUSTOM_FRAME_RATE: Rational = { n: 30, d: 1 };
  * Builds a new export preset draft with sensible defaults for immediate creation.
  *
  * The defaults match the H.264 seed in `src-tauri/src/settings/defaults.rs`: mp4 container,
- * libx264 video encoder, aac audio encoder, CRF 20, source resolution, and source frame rate.
+ * libx264 video encoder, aac audio encoder, 320 kbps audio bitrate, source sample rate,
+ * source audio channels, CRF 20, source resolution, and source frame rate (ADR 023).
  *
  * The caller supplies `id` and `name`. This function never generates an id itself, so callers
  * that need deterministic tests inject one.
@@ -42,6 +44,9 @@ export function createPresetDraft(id: string, name: string): Preset {
     container: "mp4",
     videoEncoder: "libx264",
     audioEncoder: "aac",
+    audioBitrate: DEFAULT_AUDIO_BITRATE_KBPS,
+    audioSampleRate: "source",
+    audioChannels: "source",
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",

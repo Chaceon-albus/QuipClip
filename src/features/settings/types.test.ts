@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AUDIO_CHANNEL_SETTINGS,
   BACKEND_SETTINGS_ERROR_CODES,
   FRONTEND_SETTINGS_ERROR_CODES,
   PRESET_CONTAINERS,
@@ -37,6 +38,15 @@ describe("Settings Types & Wire Constants", () => {
       expect(QUALITY_KINDS).toContain("crf");
       expect(QUALITY_KINDS).toContain("bitrate");
       expect(QUALITY_KINDS).toContain("qualityScale");
+    });
+  });
+
+  describe("Audio Channel Settings", () => {
+    it("contains exactly the literal wire strings for audio channels matching Rust", () => {
+      expect(AUDIO_CHANNEL_SETTINGS).toEqual(["source", "stereo", "mono"]);
+      expect(AUDIO_CHANNEL_SETTINGS).toContain("source");
+      expect(AUDIO_CHANNEL_SETTINGS).toContain("stereo");
+      expect(AUDIO_CHANNEL_SETTINGS).toContain("mono");
     });
   });
 

@@ -90,7 +90,7 @@ pub const WINDOWS_COMMAND_LINE_LIMIT: usize = 32_767;
 /// budget would therefore fail with `E2BIG` on macOS.
 ///
 /// Nothing reaches it. [`super::MAX_EXPORT_SEGMENTS`] holds the widest command the settings
-/// permit near 31500 bytes, 33 times smaller, so this constant is a real platform number for
+/// permit near 31600 bytes, 33 times smaller, so this constant is a real platform number for
 /// the platform rather than a bound the renderer ever tests -- and one consequence is worth
 /// stating plainly: because [`COMMAND_LINE_BUDGET`] is the host's own, [`GraphShape::SingleInput`]
 /// is unreachable on macOS in production. Only a Windows user's export can select the fallback;
@@ -238,8 +238,14 @@ fn command_line_length(arguments: &[String]) -> usize {
 /// writes an `[a]` output label. (The two can only disagree for a hand-built plan that carries
 /// an audio stream but leaves a segment without ticks; `build_filter_graph` documents that
 /// case, and a debug assertion there is what reports it.) Neither the audio encoder name nor an
-/// audio bitrate reaches the command line otherwise. ADR 013 gives no audio bitrate control at
-/// all: [`Quality`] describes the video stream, and the audio encoder runs at its own default.
+/// audio bitrate reaches the command line otherwise.
+///
+/// `-b:a <n>k` follows `-c:a` directly when the plan also carries an
+/// [`ExportPlan::audio_bitrate`] (ADR 023). [`Quality`] still describes the video stream only.
+/// With no bitrate the audio encoder runs at its own default, which is what every export did
+/// before ADR 023, so an older preset renders the same vector as before. This writes the flag
+/// for any encoder, lossless ones included: ADR 023 leaves the knowledge of which encoders take
+/// no bitrate to the editor, which clears the value for them.
 #[must_use]
 pub fn build_arguments(
     plan: &ExportPlan,
@@ -293,6 +299,11 @@ pub fn build_arguments(
     push_pair(&mut arguments, quality_flag, &quality_value);
     if plan.audio.is_some() {
         push_pair(&mut arguments, "-c:a", &plan.audio_encoder);
+        // Kilobits per second on the wire, with the `k` suffix, as for `-b:v`: the bare number
+        // would mean bits per second, which is a thousand times too small.
+        if let Some(bitrate) = plan.audio_bitrate {
+            push_pair(&mut arguments, "-b:a", &format!("{bitrate}k"));
+        }
     }
 
     let (muxer, faststart) = muxer_of(plan.container);
@@ -434,7 +445,10 @@ mod tests {
     use super::*;
     use crate::ffmpeg::export::{OutputTiming, PlannedAudio, PlannedSegment, MAX_EXPORT_SEGMENTS};
     use crate::project::Resolution;
-    use crate::settings::{MAX_ENCODER_NAME_CHARS, MAX_RESOLUTION_DIMENSION};
+    use crate::settings::{
+        AudioChannels, MAX_AUDIO_BITRATE_KBPS, MAX_AUDIO_SAMPLE_RATE, MAX_ENCODER_NAME_CHARS,
+        MAX_RESOLUTION_DIMENSION, MIN_AUDIO_BITRATE_KBPS, MIN_AUDIO_SAMPLE_RATE,
+    };
     use crate::time::Pts;
     use std::path::PathBuf;
 
@@ -494,22 +508,35 @@ mod tests {
         }
     }
 
-    /// A plan over the first `count` fixture segments: H.264 video at CRF 20, AAC audio, MP4.
+    /// An audio stream at `stream_index`, with ticks at `sample_rate`, written out in the
+    /// pre-ADR 023 format of 48000 Hz stereo.
+    fn legacy_audio(stream_index: u32, sample_rate: u32) -> PlannedAudio {
+        PlannedAudio {
+            stream_index,
+            sample_rate,
+            output_sample_rate: 48_000,
+            output_channels: AudioChannels::Stereo,
+        }
+    }
+
+    /// A plan over the first `count` fixture segments: H.264 video at CRF 20, AAC audio at the
+    /// encoder's own default bitrate, MP4.
+    ///
+    /// No audio bitrate, as a preset from before ADR 023 plans, so every pinned vector below
+    /// that does not set one is the vector ADR 014 shipped.
     fn fixture_plan(count: usize) -> ExportPlan {
         let frames = 6 + 12 * (count - 1);
         ExportPlan {
             source: PathBuf::from(SOURCE),
             destination: PathBuf::from("/export/out.mp4"),
             video_stream_index: 1,
-            audio: Some(PlannedAudio {
-                stream_index: 2,
-                sample_rate: 44_100,
-            }),
+            audio: Some(legacy_audio(2, 44_100)),
             segments: fixture_segments(count),
             timing: OutputTiming::ConstantFrameRate(Rational::new(25, 1).unwrap()),
             resolution: None,
             video_encoder: "libx264".to_owned(),
             audio_encoder: "aac".to_owned(),
+            audio_bitrate: None,
             quality: Quality {
                 kind: QualityKind::Crf,
                 value: 20,
@@ -881,9 +908,11 @@ mod tests {
     }
 
     #[test]
-    fn a_quality_scale_preset_uses_q_v_and_still_leaves_the_audio_bitrate_alone() {
-        // ADR 013 defines no audio bitrate control at all: `Quality` describes the video
-        // stream, and the audio encoder runs at its own default. `-b:a` appears nowhere.
+    fn a_quality_scale_preset_uses_q_v_and_leaves_an_unset_audio_bitrate_off_the_line() {
+        // `Quality` describes the video stream only, so `-q:v` never turns into an audio flag.
+        // The fixture holds no audio bitrate, so the audio encoder runs at its own default and
+        // no `-b:a` appears; `the_audio_bitrate_flag_appears_exactly_when_set_and_there_is_audio`
+        // below covers the other half.
         let mut plan = fixture_plan(1);
         plan.quality = Quality {
             kind: QualityKind::QualityScale,
@@ -924,6 +953,150 @@ mod tests {
                 "/export/.out.mp4.tmp-4242-0",
             ]
         );
+    }
+
+    #[test]
+    fn an_audio_bitrate_reaches_ffmpeg_in_kilobits_directly_after_the_audio_encoder() {
+        // ADR 023's seed value. `-b:a` sits between `-c:a aac` and the muxer flags, and it
+        // carries the `k` suffix for the reason `a_bitrate_preset_reaches_ffmpeg_in_kilobits`
+        // gives for `-b:v`.
+        let mut plan = fixture_plan(1);
+        plan.audio_bitrate = Some(320);
+        assert_eq!(
+            arguments(&plan, GraphShape::InputPerSegment),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-ss",
+                "6.6",
+                "-i",
+                "/media/source.mp4",
+                "-filter_complex",
+                "<graph>",
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "20",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "320k",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "/export/.out.mp4.tmp-4242-0",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_input_mkv_plan_with_a_bitrate_carries_b_a_after_c_a_and_no_faststart() {
+        // The other shape and the container without `+faststart`, so the flag's position is
+        // pinned against the end of the vector as well as against the `-c:a` in front of it.
+        let mut plan = fixture_plan(3);
+        plan.container = Container::Mkv;
+        plan.destination = PathBuf::from("/export/out.mkv");
+        // 510 kbps, not the settings maximum: libopus refuses more than 256 kbps for each
+        // channel, and 510 kbps is valid for stereo.
+        plan.audio_encoder = "libopus".to_owned();
+        plan.audio_bitrate = Some(510);
+        assert_eq!(
+            arguments(&plan, GraphShape::SingleInput),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-ss",
+                "5",
+                "-i",
+                "/media/source.mp4",
+                "-filter_complex",
+                "<graph>",
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "20",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "510k",
+                "-f",
+                "matroska",
+                "/export/.out.mp4.tmp-4242-0",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_audio_bitrate_flag_appears_exactly_when_set_and_there_is_audio() {
+        // Four cases, both shapes. With no bitrate the vector is the pre-ADR 023 one, byte for
+        // byte. With no audio, a bitrate must not reach the line either: `-b:a` would name a
+        // bitrate for a stream the graph never writes, exactly as a stray `-c:a` would.
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            for bitrate in [None, Some(MIN_AUDIO_BITRATE_KBPS), Some(320)] {
+                for has_audio in [true, false] {
+                    let mut plan = fixture_plan(2);
+                    plan.audio_bitrate = bitrate;
+                    if !has_audio {
+                        plan.audio = None;
+                        for segment in &mut plan.segments {
+                            segment.audio_in_tick = None;
+                            segment.audio_out_tick = None;
+                        }
+                    }
+                    let emitted = arguments(&plan, shape);
+                    let flags = emitted
+                        .iter()
+                        .filter(|argument| argument.as_str() == "-b:a")
+                        .count();
+                    let expected = match bitrate {
+                        Some(_) if has_audio => 1,
+                        _ => 0,
+                    };
+                    assert_eq!(
+                        flags, expected,
+                        "{bitrate:?}, audio {has_audio}: {emitted:?}"
+                    );
+
+                    if let (Some(bitrate), true) = (bitrate, has_audio) {
+                        let encoder = emitted
+                            .iter()
+                            .position(|argument| argument == "-c:a")
+                            .expect("a plan with audio names an audio encoder");
+                        assert_eq!(emitted[encoder + 2], "-b:a", "{emitted:?}");
+                        assert_eq!(emitted[encoder + 3], format!("{bitrate}k"), "{emitted:?}");
+                    } else {
+                        // Removing the setting changes nothing else: the vector equals the one
+                        // a plan with no bitrate at all produces.
+                        let mut unset = plan.clone();
+                        unset.audio_bitrate = None;
+                        assert_eq!(emitted, arguments(&unset, shape));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1024,10 +1197,7 @@ mod tests {
         plan.timing = OutputTiming::ConstantFrameRate(
             Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
         );
-        plan.audio = Some(PlannedAudio {
-            stream_index: 2,
-            sample_rate: 48_000,
-        });
+        plan.audio = Some(legacy_audio(2, 48_000));
         plan.segments[0] = segment(160_000, 190_030, 256_000, 304_048, Rational::new(1, 3));
         plan.expected_frames = Some(30);
         plan.total_duration = Rational::new(1_001, 1_000).expect("1.001 is a valid duration");
@@ -1083,7 +1253,8 @@ mod tests {
     }
 
     /// Every plan and shape the guard tests below sweep: both shapes, every container, with
-    /// and without audio, every quality kind, a clamped seek, and a sub-microsecond seek.
+    /// and without audio, every quality kind, an audio bitrate, a clamped seek, and a
+    /// sub-microsecond seek.
     fn guard_matrix() -> Vec<(ExportPlan, GraphShape)> {
         let mut cases: Vec<(ExportPlan, GraphShape)> = Vec::new();
         for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
@@ -1104,6 +1275,10 @@ mod tests {
                 plan.quality = Quality { kind, value: 7 };
                 cases.push((plan, shape));
             }
+            let mut with_audio_bitrate = fixture_plan(2);
+            with_audio_bitrate.audio_bitrate = Some(320);
+            cases.push((with_audio_bitrate, shape));
+
             let mut silent = fixture_plan(2);
             silent.audio = None;
             for segment in &mut silent.segments {
@@ -1338,10 +1513,7 @@ mod tests {
                 r"C:\Users\alexandra.whitfield\Videos\Exports\grand-final-highlights.mp4",
             ),
             video_stream_index: 1,
-            audio: Some(PlannedAudio {
-                stream_index: 2,
-                sample_rate: 48_000,
-            }),
+            audio: Some(legacy_audio(2, 48_000)),
             segments,
             timing: OutputTiming::ConstantFrameRate(
                 Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
@@ -1349,6 +1521,7 @@ mod tests {
             resolution: Some(Resolution { w: 3840, h: 2160 }),
             video_encoder: "hevc_videotoolbox".to_owned(),
             audio_encoder: "aac".to_owned(),
+            audio_bitrate: None,
             quality: Quality {
                 kind: QualityKind::Crf,
                 value: 20,
@@ -1383,7 +1556,7 @@ mod tests {
         //
         // This plan measures 30253 of the 31743 available bytes. Do not read that gap as the
         // margin the cap has: this fixture uses a 106-character path and ordinary encoder
-        // names, and the widest plan the settings actually permit needs 31498 at the same
+        // names, and the widest plan the settings actually permit needs 31613 at the same
         // count. `the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap` measures
         // that one, and it is the test that justifies the cap. This one is about the realistic
         // case, and about the fallback being reached at all.
@@ -1419,6 +1592,31 @@ mod tests {
         format!("{head}{}{suffix}", "a".repeat(fill))
     }
 
+    /// The audio stream and output format that spell the longest audio chains: a two-digit
+    /// stream index, and 192000 Hz both in the input pin and in the closing `aformat`, with the
+    /// `stereo` layout.
+    ///
+    /// 192000 is the top of ADR 023's fixed range, and it is one digit longer than 48000.
+    /// `stereo` is the longest of the three layout choices: `mono` is two bytes shorter, and
+    /// `source` drops the whole `:channel_layouts=` option.
+    /// `the_widest_audio_format_is_the_one_the_widest_plan_carries_and_it_fits_at_the_cap`
+    /// checks the choice.
+    ///
+    /// This bound assumes a probed rate of at most six digits, and no code enforces it: the
+    /// probe accepts any rate above 0. A `source` rate renders the stream's own rate in every
+    /// closing `aformat`, not only in the one input pin, so each digit past six adds one byte
+    /// for each segment and one for the pin. A probed rate longer than six digits is therefore outside the measured
+    /// budget. The consequence is not a wrong output: at the segment cap on Windows, the command
+    /// line can exceed the limit, and the spawn then fails and reports `ffmpegSpawnFailed`.
+    fn widest_audio() -> PlannedAudio {
+        PlannedAudio {
+            stream_index: 11,
+            sample_rate: MAX_AUDIO_SAMPLE_RATE,
+            output_sample_rate: MAX_AUDIO_SAMPLE_RATE,
+            output_channels: AudioChannels::Stereo,
+        }
+    }
+
     /// The widest plan the settings schema permits, over `count` segments.
     ///
     /// Every dimension is at the maximum `settings::validate_settings` accepts, or at the
@@ -1426,8 +1624,9 @@ mod tests {
     /// `MAX_PATH` for the source *and* the reservation, [`MAX_ENCODER_NAME_CHARS`] for both
     /// encoder names, `MAX_RESOLUTION_DIMENSION` on both axes, the longest quality argument
     /// (`-b:v 200000k`, the top of the bitrate range), MP4 for its extra `-movflags
-    /// +faststart`, an NTSC rate, two-digit stream indices, a 192000 Hz audio rate in the input
-    /// pin, eleven-digit PTS values, twelve-digit audio ticks, and a seek that fills every
+    /// +faststart`, an NTSC rate, two-digit stream indices, the widest audio format
+    /// [`widest_audio`] names, the longest audio bitrate (`-b:a 1536k`, the top of ADR 023's
+    /// range), eleven-digit PTS values, twelve-digit audio ticks, and a seek that fills every
     /// decimal place [`SEEK_DECIMALS`] allows.
     fn widest_plan(count: usize) -> ExportPlan {
         let segments = (0..count)
@@ -1448,10 +1647,7 @@ mod tests {
             source: PathBuf::from(longest_windows_path(".mkv")),
             destination: PathBuf::from(longest_windows_path(".mp4")),
             video_stream_index: 10,
-            audio: Some(PlannedAudio {
-                stream_index: 11,
-                sample_rate: 192_000,
-            }),
+            audio: Some(widest_audio()),
             segments,
             timing: OutputTiming::ConstantFrameRate(
                 Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
@@ -1462,6 +1658,7 @@ mod tests {
             }),
             video_encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
             audio_encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
+            audio_bitrate: Some(MAX_AUDIO_BITRATE_KBPS),
             quality: Quality {
                 kind: QualityKind::Bitrate,
                 value: 200_000,
@@ -1483,11 +1680,14 @@ mod tests {
         // for the largest segment count that still fits, on the fixture above, choosing the
         // shape the way production does.
         //
-        // Measured at the time of writing: the widest permitted plan needs 31498 of the 31743
+        // Measured at the time of writing: the widest permitted plan needs 31613 of the 31743
         // available bytes at the cap, and 101 segments do not fit. The cap of 100 is therefore
-        // exactly the largest value that is safe -- there are 245 bytes of slack, not the
-        // thousand a plausible-looking fixture suggests. (A realistic plan on a 106-character
-        // path measures 30253 at the same count.) The assertion is one-sided on purpose:
+        // exactly the largest value that is safe -- there are 130 bytes of slack, not the
+        // thousand a plausible-looking fixture suggests. ADR 023's audio settings cost 115 of
+        // the 245 bytes that were there before them; see
+        // `the_widest_audio_format_is_the_one_the_widest_plan_carries_and_it_fits_at_the_cap`.
+        // (A realistic plan on a 106-character path measures 30253 at the same count.) The
+        // assertion is one-sided on purpose:
         // shortening the command is welcome and must not fail a test, but a filter added to the
         // graph or a settings maximum raised has to bring the cap down with it, and that is the
         // drift this catches.
@@ -1506,6 +1706,75 @@ mod tests {
             largest >= MAX_EXPORT_SEGMENTS,
             "the widest permitted plan fits {largest} segments, under the cap of \
              {MAX_EXPORT_SEGMENTS}; lower the cap or shorten the command"
+        );
+    }
+
+    #[test]
+    fn the_widest_audio_format_is_the_one_the_widest_plan_carries_and_it_fits_at_the_cap() {
+        // ADR 023 made the closing `aformat` and `-b:a` preset settings, so the widest command
+        // now depends on them, and the test above is only as good as `widest_audio` is wide.
+        // This sweeps every other audio choice at the cap to prove none spells a longer command
+        // in either shape, and then asks the budget question for the widest one directly.
+        let reservation = longest_windows_path(".mp4.tmp-13724-0");
+        let widest = widest_plan(MAX_EXPORT_SEGMENTS);
+        let widest_length =
+            |shape: GraphShape| -> usize { measured_length(&widest, shape, &reservation) };
+
+        for output_sample_rate in [MIN_AUDIO_SAMPLE_RATE, 44_100, 48_000, MAX_AUDIO_SAMPLE_RATE] {
+            for output_channels in [
+                AudioChannels::Source,
+                AudioChannels::Stereo,
+                AudioChannels::Mono,
+            ] {
+                for audio_bitrate in [
+                    None,
+                    Some(MIN_AUDIO_BITRATE_KBPS),
+                    Some(320),
+                    Some(MAX_AUDIO_BITRATE_KBPS),
+                ] {
+                    let mut plan = widest_plan(MAX_EXPORT_SEGMENTS);
+                    plan.audio = Some(PlannedAudio {
+                        output_sample_rate,
+                        output_channels,
+                        ..widest_audio()
+                    });
+                    plan.audio_bitrate = audio_bitrate;
+                    for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+                        assert!(
+                            measured_length(&plan, shape, &reservation) <= widest_length(shape),
+                            "{output_sample_rate} Hz, {output_channels:?}, {audio_bitrate:?} \
+                             as {shape:?} is wider than the widest plan"
+                        );
+                    }
+                }
+            }
+        }
+
+        // What ADR 023 costs at the cap, byte for byte. Against the 48000 Hz stereo format ADR
+        // 014 fixed, with no bitrate: one more digit in each of the 100 closing `aformat`
+        // filters, and `-b:a 1536k`, which is two arguments of 4 and 5 bytes plus the
+        // per-argument overhead of each. The input pin carries the source rate in both plans,
+        // so it contributes nothing to the difference.
+        let output = Path::new(&reservation);
+        let shape = choose_graph_shape_within(&widest, output, WINDOWS_COMMAND_LINE_BUDGET);
+        assert_eq!(shape, GraphShape::SingleInput);
+        let mut legacy = widest_plan(MAX_EXPORT_SEGMENTS);
+        legacy.audio = Some(PlannedAudio {
+            output_sample_rate: 48_000,
+            output_channels: AudioChannels::Stereo,
+            ..widest_audio()
+        });
+        legacy.audio_bitrate = None;
+        assert_eq!(
+            widest_length(shape) - measured_length(&legacy, shape, &reservation),
+            MAX_EXPORT_SEGMENTS + (4 + ARGUMENT_OVERHEAD_BYTES) + (5 + ARGUMENT_OVERHEAD_BYTES)
+        );
+
+        let length = widest_length(shape);
+        assert!(
+            length <= WINDOWS_COMMAND_LINE_BUDGET,
+            "the widest audio format at {MAX_EXPORT_SEGMENTS} segments as {shape:?} needs \
+             {length} bytes, over the {WINDOWS_COMMAND_LINE_BUDGET}-byte budget"
         );
     }
 

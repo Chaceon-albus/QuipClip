@@ -29,6 +29,10 @@ import {
   validatePresetFields,
   type PresetFieldIssue,
 } from "@/features/settings/limits";
+import {
+  DEFAULT_AUDIO_BITRATE_KBPS,
+  isLosslessAudioEncoder,
+} from "@/features/settings/audioCodecs";
 // Import the store MODULE directly, never the "@/features/settings" barrel. The barrel also
 // re-exports "./client", whose `saveSettings` is the raw IPC call that bypasses the store's
 // serialized write queue (ADR 013). Taking that export by mistake would let this controller's
@@ -36,6 +40,8 @@ import {
 import { settingsStore } from "@/features/settings/store";
 import type {
   Preset,
+  PresetAudioChannels,
+  PresetAudioSampleRate,
   PresetContainer,
   QualityKind,
   Settings,
@@ -313,7 +319,7 @@ export class PresetLibraryController {
       this.updateDraft({ videoEncoder: value });
     } else {
       this.audioEncoderIsCustom = false;
-      this.updateDraft({ audioEncoder: value });
+      this.applyAudioEncoder(value);
     }
   }
 
@@ -323,10 +329,87 @@ export class PresetLibraryController {
    * Does NOT trim `raw`. `validatePresetFields` rejects a padded name as a `charset` failure,
    * and trimming here would hide that from the user while Rust would still reject it.
    *
+   * Does NOT apply the lossless encoder rule: typing free-text names must not clear or set
+   * `audioBitrate` on intermediate keystrokes. Only `chooseEncoder` applies that rule.
+   *
    * No-op when there is no draft.
    */
   setEncoderName(kind: "video" | "audio", raw: string): void {
-    this.updateDraft(kind === "video" ? { videoEncoder: raw } : { audioEncoder: raw });
+    if (kind === "video") {
+      this.updateDraft({ videoEncoder: raw });
+    } else {
+      this.updateDraft({ audioEncoder: raw });
+    }
+  }
+
+  /**
+   * Applies an audio encoder change to the draft, enforcing lossless vs. lossy bitrate rules (ADR 023):
+   * - A new encoder that is lossless removes `audioBitrate`.
+   * - A change from a lossless encoder to a non-lossless encoder, with no bitrate stored, sets `DEFAULT_AUDIO_BITRATE_KBPS`.
+   */
+  private applyAudioEncoder(newEncoder: string): void {
+    if (!this.draft) {
+      return;
+    }
+    const wasLossless = isLosslessAudioEncoder(this.draft.audioEncoder);
+    const isLossless = isLosslessAudioEncoder(newEncoder);
+    const nextDraft: Preset = {
+      ...this.draft,
+      audioEncoder: newEncoder,
+    };
+
+    if (isLossless) {
+      delete nextDraft.audioBitrate;
+    } else if (wasLossless && nextDraft.audioBitrate === undefined) {
+      nextDraft.audioBitrate = DEFAULT_AUDIO_BITRATE_KBPS;
+    }
+
+    this.draft = nextDraft;
+    this.issues = validatePresetFields(this.draft);
+    this.dirty = true;
+    this.notify();
+  }
+
+  /**
+   * Sets the draft's audio bitrate in kbps, or null for encoder default.
+   *
+   * Setting null removes the `audioBitrate` key completely rather than storing `undefined`
+   * or `null`, matching the wire contract where an absent key means encoder default (ADR 023).
+   *
+   * No-op when there is no draft.
+   */
+  setAudioBitrate(value: number | null): void {
+    if (!this.draft) {
+      return;
+    }
+    const nextDraft: Preset = { ...this.draft };
+    if (value === null) {
+      delete nextDraft.audioBitrate;
+    } else {
+      nextDraft.audioBitrate = value;
+    }
+    this.draft = nextDraft;
+    this.issues = validatePresetFields(this.draft);
+    this.dirty = true;
+    this.notify();
+  }
+
+  /**
+   * Sets the draft's audio sample rate ("source" or numeric frequency in Hz).
+   *
+   * No-op when there is no draft.
+   */
+  setAudioSampleRate(value: PresetAudioSampleRate): void {
+    this.updateDraft({ audioSampleRate: value });
+  }
+
+  /**
+   * Sets the draft's audio channel layout ("source", "stereo", or "mono").
+   *
+   * No-op when there is no draft.
+   */
+  setAudioChannels(value: PresetAudioChannels): void {
+    this.updateDraft({ audioChannels: value });
   }
 
   /**

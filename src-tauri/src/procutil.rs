@@ -9,8 +9,8 @@
 //! The capability probe (ADR 006) was the loudest of the three call sites, and its true shape is
 //! worth stating, because the ceiling and the common case are far apart. A full probe runs three
 //! listing commands -- `-version`, `-encoders` and `-hwaccels`; `-decoders` and `-filters` are
-//! recorded non-goals -- and then one smoke test per *listed* candidate out of the twelve in
-//! `capabilities::TESTED_ENCODERS`, one process each. Fifteen windows is therefore the ceiling,
+//! recorded non-goals -- and then one smoke test per *listed* candidate out of the sixteen in
+//! `capabilities::TESTED_ENCODERS`, one process each. Nineteen windows is therefore the ceiling,
 //! and a run reaches it only on the first probe of a binary, on a cache miss after an ffmpeg
 //! upgrade, and on a forced re-probe. Every start after that hits the on-disk cache, which answers
 //! after `-version` and before `-encoders`: one child, and so one window. A media import

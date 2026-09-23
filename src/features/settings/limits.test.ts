@@ -5,10 +5,14 @@ import {
   defaultQualityValue,
   ENCODER_NAME_PATTERN,
   isValidEncoderName,
+  MAX_AUDIO_BITRATE_KBPS,
+  MAX_AUDIO_SAMPLE_RATE,
   MAX_ENCODER_NAME_CHARS,
   MAX_PRESET_NAME_CHARS,
   MAX_PRESETS,
   MAX_RESOLUTION_DIMENSION,
+  MIN_AUDIO_BITRATE_KBPS,
+  MIN_AUDIO_SAMPLE_RATE,
   MIN_ENCODER_NAME_CHARS,
   MIN_RESOLUTION_DIMENSION,
   QUALITY_RANGES,
@@ -22,6 +26,9 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
     container: "mp4",
     videoEncoder: "libx264",
     audioEncoder: "aac",
+    audioBitrate: 320,
+    audioSampleRate: "source",
+    audioChannels: "source",
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -38,6 +45,10 @@ describe("limits", () => {
       expect(MAX_RESOLUTION_DIMENSION).toBe(16_384);
       expect(MAX_ENCODER_NAME_CHARS).toBe(64);
       expect(MIN_ENCODER_NAME_CHARS).toBe(1);
+      expect(MIN_AUDIO_BITRATE_KBPS).toBe(8);
+      expect(MAX_AUDIO_BITRATE_KBPS).toBe(1536);
+      expect(MIN_AUDIO_SAMPLE_RATE).toBe(8000);
+      expect(MAX_AUDIO_SAMPLE_RATE).toBe(192000);
       expect(ENCODER_NAME_PATTERN.source).toBe("^[0-9A-Za-z][0-9A-Za-z_.-]*$");
       expect(QUALITY_RANGES).toEqual({
         crf: { min: 0, max: 63 },
@@ -196,6 +207,144 @@ describe("limits", () => {
 
     it("returns false directly for an empty encoder name", () => {
       expect(isValidEncoderName("")).toBe(false);
+    });
+
+    it("reports containerMismatch when mov contains flac or libopus", () => {
+      expect(
+        validatePresetFields(createPreset({ container: "mov", audioEncoder: "flac" })),
+      ).toEqual([
+        {
+          field: "audioEncoder",
+          code: "containerMismatch",
+          values: { container: "mov", encoder: "flac" },
+        },
+      ]);
+
+      expect(
+        validatePresetFields(
+          createPreset({ container: "mov", audioEncoder: "libopus" }),
+        ),
+      ).toEqual([
+        {
+          field: "audioEncoder",
+          code: "containerMismatch",
+          values: { container: "mov", encoder: "libopus" },
+        },
+      ]);
+    });
+
+    it("allows valid container and audio encoder combinations", () => {
+      expect(
+        validatePresetFields(createPreset({ container: "mov", audioEncoder: "aac" })),
+      ).toEqual([]);
+      expect(
+        validatePresetFields(createPreset({ container: "mp4", audioEncoder: "flac" })),
+      ).toEqual([]);
+      expect(
+        validatePresetFields(
+          createPreset({ container: "mkv", audioEncoder: "libopus" }),
+        ),
+      ).toEqual([]);
+    });
+
+    it("prioritizes required and charset issues over containerMismatch for audioEncoder", () => {
+      expect(
+        validatePresetFields(createPreset({ container: "mov", audioEncoder: "   " })),
+      ).toEqual([{ field: "audioEncoder", code: "required" }]);
+
+      expect(
+        validatePresetFields(createPreset({ container: "mov", audioEncoder: "-flac" })),
+      ).toEqual([{ field: "audioEncoder", code: "charset" }]);
+    });
+  });
+
+  describe("audioBitrate validation", () => {
+    it("passes when audioBitrate is absent (encoder default)", () => {
+      const preset = createPreset();
+      delete preset.audioBitrate;
+      expect(validatePresetFields(preset)).toEqual([]);
+    });
+
+    it("validates audioBitrate bounds: 8 passes, 1536 passes, 7 fails, 1537 fails", () => {
+      expect(validatePresetFields(createPreset({ audioBitrate: 8 }))).toEqual([]);
+      expect(validatePresetFields(createPreset({ audioBitrate: 320 }))).toEqual([]);
+      expect(validatePresetFields(createPreset({ audioBitrate: 1536 }))).toEqual([]);
+
+      expect(validatePresetFields(createPreset({ audioBitrate: 7 }))).toEqual([
+        {
+          field: "audioBitrate",
+          code: "outOfRange",
+          values: { min: 8, max: 1536 },
+        },
+      ]);
+
+      expect(validatePresetFields(createPreset({ audioBitrate: 1537 }))).toEqual([
+        {
+          field: "audioBitrate",
+          code: "outOfRange",
+          values: { min: 8, max: 1536 },
+        },
+      ]);
+    });
+
+    it("fails non-integer audioBitrate with notInteger", () => {
+      expect(validatePresetFields(createPreset({ audioBitrate: 128.5 }))).toEqual([
+        { field: "audioBitrate", code: "notInteger" },
+      ]);
+      expect(validatePresetFields(createPreset({ audioBitrate: Number.NaN }))).toEqual([
+        { field: "audioBitrate", code: "notInteger" },
+      ]);
+      expect(
+        validatePresetFields(createPreset({ audioBitrate: Number.POSITIVE_INFINITY })),
+      ).toEqual([{ field: "audioBitrate", code: "notInteger" }]);
+    });
+  });
+
+  describe("audioSampleRate validation", () => {
+    it("passes when audioSampleRate is 'source'", () => {
+      expect(validatePresetFields(createPreset({ audioSampleRate: "source" }))).toEqual(
+        [],
+      );
+    });
+
+    it("validates audioSampleRate bounds: 8000 passes, 192000 passes, 7999 fails, 192001 fails", () => {
+      expect(validatePresetFields(createPreset({ audioSampleRate: 8000 }))).toEqual([]);
+      expect(validatePresetFields(createPreset({ audioSampleRate: 48000 }))).toEqual(
+        [],
+      );
+      expect(validatePresetFields(createPreset({ audioSampleRate: 192000 }))).toEqual(
+        [],
+      );
+
+      expect(validatePresetFields(createPreset({ audioSampleRate: 7999 }))).toEqual([
+        {
+          field: "audioSampleRate",
+          code: "outOfRange",
+          values: { min: 8000, max: 192000 },
+        },
+      ]);
+
+      expect(validatePresetFields(createPreset({ audioSampleRate: 192001 }))).toEqual([
+        {
+          field: "audioSampleRate",
+          code: "outOfRange",
+          values: { min: 8000, max: 192000 },
+        },
+      ]);
+    });
+
+    it("fails non-integer audioSampleRate with notInteger", () => {
+      expect(validatePresetFields(createPreset({ audioSampleRate: 44100.5 }))).toEqual([
+        { field: "audioSampleRate", code: "notInteger" },
+      ]);
+      expect(
+        validatePresetFields(createPreset({ audioSampleRate: Number.NaN })),
+      ).toEqual([{ field: "audioSampleRate", code: "notInteger" }]);
+      expect(
+        validatePresetFields(
+          createPreset({ audioSampleRate: Number.POSITIVE_INFINITY }),
+        ),
+      ).toEqual([{ field: "audioSampleRate", code: "notInteger" }]);
     });
   });
 
@@ -401,6 +550,9 @@ describe("limits", () => {
         name: "   ",
         videoEncoder: "-f",
         audioEncoder: "   ",
+        audioBitrate: 0,
+        audioSampleRate: 5000,
+        audioChannels: "source",
         quality: { kind: "crf", value: 99 },
         resolution: { w: 0, h: 0 },
         frameRate: { n: 0, d: 1 },
@@ -411,6 +563,16 @@ describe("limits", () => {
         { field: "name", code: "required" },
         { field: "videoEncoder", code: "charset" },
         { field: "audioEncoder", code: "required" },
+        {
+          field: "audioBitrate",
+          code: "outOfRange",
+          values: { min: 8, max: 1536 },
+        },
+        {
+          field: "audioSampleRate",
+          code: "outOfRange",
+          values: { min: 8000, max: 192000 },
+        },
         {
           field: "quality",
           code: "outOfRange",
@@ -433,6 +595,9 @@ describe("limits", () => {
         name: "   ",
         videoEncoder: "-f",
         audioEncoder: "   ",
+        audioBitrate: 0,
+        audioSampleRate: 5000,
+        audioChannels: "source",
         quality: { kind: "crf", value: 20.5 },
         resolution: { w: 0, h: 1080 },
         frameRate: { n: 0, d: 1 },

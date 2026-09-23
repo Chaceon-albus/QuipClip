@@ -935,7 +935,10 @@ mod tests {
     use super::*;
     use crate::ffmpeg::export::{OutputTiming, PlannedSegment};
     use crate::ffmpeg::ExecutableOrigin;
-    use crate::settings::{Container, FrameRateSetting, Quality, QualityKind, ResolutionSetting};
+    use crate::settings::{
+        AudioChannels, AudioSampleRateSetting, Container, FrameRateSetting, Quality, QualityKind,
+        ResolutionSetting,
+    };
     use crate::time::{FrameCount, TickCount};
     use std::cell::RefCell;
     use std::fs;
@@ -957,6 +960,9 @@ mod tests {
             container: Container::Mp4,
             video_encoder: "libx264".to_owned(),
             audio_encoder: "aac".to_owned(),
+            audio_bitrate: None,
+            audio_sample_rate: AudioSampleRateSetting::Fixed(48_000),
+            audio_channels: AudioChannels::Stereo,
             quality: Quality {
                 kind: QualityKind::Crf,
                 value: 20,
@@ -1016,6 +1022,7 @@ mod tests {
             resolution: None,
             video_encoder: "libx264".to_owned(),
             audio_encoder: "aac".to_owned(),
+            audio_bitrate: None,
             quality: Quality {
                 kind: QualityKind::Crf,
                 value: 20,
