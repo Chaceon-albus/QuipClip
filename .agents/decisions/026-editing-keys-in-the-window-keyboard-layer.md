@@ -113,7 +113,7 @@ The actions behave as follows:
 ### The tooltips
 
 The table is the only source of the key names in the interface. A tooltip that names a key
-reads it from the table, and formats it for the platform: `⌘⇧Z` on macOS, `Ctrl+Shift+Z` on
+reads it from the table, and formats it for the platform: `⇧⌘Z` on macOS (the Apple order: ⌃ ⌥ ⇧ ⌘, then the key), `Ctrl+Shift+Z` on
 Windows.
 
 ## Consequences
