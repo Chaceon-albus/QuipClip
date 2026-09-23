@@ -1,5 +1,7 @@
+import { useEffect } from "react";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { TitleBar } from "@/components/layout/TitleBar";
+import { startTaskbarProgressSync } from "@/components/layout/taskbarProgressSync";
 import { useKeyboardShortcuts } from "@/components/layout/useKeyboardShortcuts";
 import { PreviewPane } from "@/components/preview/PreviewPane";
 import { TimelinePanel } from "@/components/timeline/TimelinePanel";
@@ -9,6 +11,9 @@ import { usePlaybackStore } from "@/features/playback";
 
 export function AppShell() {
   useKeyboardShortcuts();
+
+  // Mirror the export progress on the Dock and the task bar (ADR 025).
+  useEffect(() => startTaskbarProgressSync(), []);
 
   const runtimeBrowserDurationSeconds = usePlaybackStore(
     (state) => state.runtimeBrowserDurationSeconds,
