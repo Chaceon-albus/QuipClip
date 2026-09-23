@@ -42,7 +42,6 @@ export const en = {
     loading: "Loading media...",
     videoPlayerLabel: "Video preview for {{fileName}}",
     decodeError: "Native playback failed. A proxy is required to preview this format.",
-    approximate: "Approx.",
   },
   fileDrop: {
     release: "Release to open the video",
@@ -176,6 +175,12 @@ export const en = {
       system: "System Default",
       en: "English",
       zhCN: "简体中文",
+    },
+    timecode: {
+      label: "Timecode",
+      frames: "Frames (HH:MM:SS:FF)",
+      milliseconds: "Milliseconds (HH:MM:SS.mmm)",
+      hint: "A source with a variable or unknown frame rate always shows milliseconds.",
     },
     ffmpeg: {
       section: "FFmpeg Location",

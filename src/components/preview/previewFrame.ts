@@ -2,106 +2,138 @@
  * Pure helper functions for video preview timecode formatting, calibration state,
  * and source lifecycle concurrency guards.
  *
- * Implements ADR 002 and ADR 003 source-relative HH:MM:SS.mmm timecode formatting
- * for calibrated source PTS presentation and approximate browser time fallback.
+ * Implements the ADR 002 and ADR 003 source-relative timecode for calibrated source PTS
+ * presentation and for the approximate browser time fallback. The format is `HH:MM:SS:FF`
+ * or `HH:MM:SS.mmm`, as the display of the source selects (ADR 028).
  */
 
-import { ptsElapsedSeconds, ticksToSeconds } from "@/lib/time";
+import { isPositiveRational } from "@/features/media/validation";
+import { isPtsString, isTickCountString, ticksToSeconds } from "@/lib/time";
+import {
+  formatElapsedTimecode,
+  formatFrameTimecodeFromTicks,
+  formatMillisecondsTimecode,
+  MILLISECONDS_TIMECODE_DISPLAY,
+  timecodePlaceholder,
+  type TimecodeDisplay,
+} from "@/lib/timecode";
 import type { Pts, Rational, TickCount } from "@/types/project";
 import type { CalibrationStatus, PresentedFrame } from "@/features/playback";
 
 /**
- * Formats a non-negative floating-point seconds value as `HH:MM:SS.mmm`.
- *
- * @param seconds Non-negative finite duration in seconds.
+ * Formats a signed tick count in a time base. A negative count formats as its magnitude
+ * with a leading minus sign. The frame format uses exact rational arithmetic, with the
+ * frame boundary margin of the display. The millisecond format converts the magnitude to
+ * seconds with the checked helper, and returns null when that conversion is not safe.
  */
-export function formatMillisecondsTimecode(seconds: number): string {
-  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
-    return "00:00:00.000";
+function formatSignedTicks(
+  deltaTicks: bigint,
+  timeBase: Rational,
+  display: TimecodeDisplay,
+): string | null {
+  const isNegative = deltaTicks < 0n;
+  const magnitude = isNegative ? -deltaTicks : deltaTicks;
+  let formatted: string;
+  if (display.format === "frames") {
+    formatted = formatFrameTimecodeFromTicks(
+      magnitude,
+      timeBase,
+      display.rate,
+      display.videoTimeBase,
+    );
+  } else {
+    const seconds = ticksToSeconds(magnitude.toString() as TickCount, timeBase);
+    if (seconds === null) {
+      return null;
+    }
+    formatted = formatMillisecondsTimecode(seconds);
   }
-
-  const milliseconds = seconds * 1000;
-  if (!Number.isFinite(milliseconds)) {
-    return "00:00:00.000";
-  }
-  const totalMs = Math.round(milliseconds);
-  if (!Number.isSafeInteger(totalMs)) {
-    return "00:00:00.000";
-  }
-  const ms = totalMs % 1000;
-  const totalSec = Math.floor(totalMs / 1000);
-  const ss = totalSec % 60;
-  const totalMin = Math.floor(totalSec / 60);
-  const mm = totalMin % 60;
-  const hh = Math.floor(totalMin / 60);
-
-  const pad2 = (n: number) => String(n).padStart(2, "0");
-  const pad3 = (n: number) => String(n).padStart(3, "0");
-
-  return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}.${pad3(ms)}`;
+  return isNegative ? `-${formatted}` : formatted;
 }
 
 /**
- * Formats an inferred source PTS as source-relative `HH:MM:SS.mmm` elapsed time
- * relative to the source stream's `videoStartPts` (ADR 003).
+ * Formats an inferred source PTS as source-relative elapsed time relative to the source
+ * stream's `videoStartPts` (ADR 003).
  *
  * Formula:
  * `elapsedSeconds = (inferredPts - videoStartPts) * videoTimeBase`
  *
+ * The frame format computes `FF` from the exact tick delta, so an exact frame start never
+ * shows the frame before it. A negative elapsed time takes a leading minus sign. Invalid
+ * input formats as zero.
+ *
  * @param inferredPts Inferred presentation timestamp from calibrated RVFC.
  * @param videoStartPts Presentation timestamp origin of the source video stream.
  * @param videoTimeBase Rational timebase of the video stream.
+ * @param display The timecode format of the source. Defaults to milliseconds.
  */
 export function formatSourceRelativeTime(
   inferredPts: Pts,
   videoStartPts: Pts,
   videoTimeBase: Rational,
+  display: TimecodeDisplay = MILLISECONDS_TIMECODE_DISPLAY,
 ): string {
-  const deltaSeconds = ptsElapsedSeconds(inferredPts, videoStartPts, videoTimeBase);
-  if (deltaSeconds === null) {
-    return "00:00:00.000";
+  const zero = formatElapsedTimecode(0, display);
+  if (
+    !isPtsString(inferredPts) ||
+    !isPtsString(videoStartPts) ||
+    !isPositiveRational(videoTimeBase)
+  ) {
+    return zero;
   }
-
-  const isNegative = deltaSeconds < 0;
-  const absSeconds = Math.abs(deltaSeconds);
-  const formatted = formatMillisecondsTimecode(absSeconds);
-  return isNegative ? `-${formatted}` : formatted;
+  const deltaTicks = BigInt(inferredPts) - BigInt(videoStartPts);
+  return formatSignedTicks(deltaTicks, videoTimeBase, display) ?? zero;
 }
 
 /**
- * Formats approximate browser `currentTime` in seconds as `HH:MM:SS.mmm` (ADR 003).
+ * Formats approximate browser `currentTime` in seconds (ADR 003).
  * Used when PTS calibration is calibrating or unavailable.
  *
  * @param seconds Raw browser `currentTime` in seconds.
+ * @param display The timecode format of the source. Defaults to milliseconds.
  */
-export function formatApproximateTime(seconds: number): string {
+export function formatApproximateTime(
+  seconds: number,
+  display: TimecodeDisplay = MILLISECONDS_TIMECODE_DISPLAY,
+): string {
   if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
-    return "00:00:00.000";
+    return formatElapsedTimecode(0, display);
   }
 
   const isNegative = seconds < 0;
-  const absSeconds = Math.abs(seconds);
-  const formatted = formatMillisecondsTimecode(absSeconds);
+  const formatted = formatElapsedTimecode(Math.abs(seconds), display);
   return isNegative ? `-${formatted}` : formatted;
 }
 
 /**
  * Formats total source extent for preview display, prioritizing reported `videoDurationTicks`
  * when available and falling back to `approximateDurationSeconds` (ADR 002, ADR 003).
+ * Returns the placeholder of the display when neither is valid: the extent is then unknown,
+ * not zero.
  *
  * @param approximateDurationSeconds Reported approximate duration in seconds.
  * @param videoDurationTicks Optional stream duration in video time base ticks.
  * @param videoTimeBase Optional rational time base of the video stream.
+ * @param display The timecode format of the source. Defaults to milliseconds.
  */
 export function formatPreviewTotalDuration(
   approximateDurationSeconds: number | null | undefined,
   videoDurationTicks?: TickCount | null,
   videoTimeBase?: Rational | null,
+  display: TimecodeDisplay = MILLISECONDS_TIMECODE_DISPLAY,
 ): string {
-  if (videoDurationTicks && videoTimeBase) {
-    const sec = ticksToSeconds(videoDurationTicks, videoTimeBase);
-    if (sec !== null) {
-      return formatMillisecondsTimecode(sec);
+  if (
+    videoDurationTicks &&
+    isTickCountString(videoDurationTicks) &&
+    isPositiveRational(videoTimeBase)
+  ) {
+    const formatted = formatSignedTicks(
+      BigInt(videoDurationTicks),
+      videoTimeBase,
+      display,
+    );
+    if (formatted !== null) {
+      return formatted;
     }
   }
 
@@ -110,15 +142,16 @@ export function formatPreviewTotalDuration(
     Number.isFinite(approximateDurationSeconds) &&
     approximateDurationSeconds >= 0
   ) {
-    return formatMillisecondsTimecode(approximateDurationSeconds);
+    return formatElapsedTimecode(approximateDurationSeconds, display);
   }
 
-  return "00:00:00.000";
+  return timecodePlaceholder(display);
 }
 
 /**
- * Formats the current preview timecode, displaying source-relative `HH:MM:SS.mmm`
- * when calibrated and ready, and approximate browser time otherwise (ADR 003).
+ * Formats the current preview timecode: the pending seek target first, then the
+ * source-relative time of the presented frame when calibration is ready, and the approximate
+ * browser time otherwise (ADR 003, ADR 022).
  *
  * @param presentedFrame Last confirmed presented frame from RVFC, or null.
  * @param calibrationStatus Calibration status of the active source.
@@ -126,6 +159,7 @@ export function formatPreviewTotalDuration(
  * @param videoTimeBase Source video time base.
  * @param approximateBrowserTime Fallback browser currentTime in seconds.
  * @param seekTargetSeconds Pending seek target in seconds from the start of the source, or null (ADR 022).
+ * @param display The timecode format of the source. Defaults to milliseconds.
  */
 export function formatPreviewCurrentTime(
   presentedFrame: PresentedFrame | null,
@@ -134,13 +168,14 @@ export function formatPreviewCurrentTime(
   videoTimeBase: Rational | null | undefined,
   approximateBrowserTime: number,
   seekTargetSeconds: number | null = null,
+  display: TimecodeDisplay = MILLISECONDS_TIMECODE_DISPLAY,
 ): string {
   if (
     typeof seekTargetSeconds === "number" &&
     Number.isFinite(seekTargetSeconds) &&
     seekTargetSeconds >= 0
   ) {
-    return formatMillisecondsTimecode(seekTargetSeconds);
+    return formatElapsedTimecode(seekTargetSeconds, display);
   }
 
   if (
@@ -153,10 +188,11 @@ export function formatPreviewCurrentTime(
       presentedFrame.inferredSourcePts,
       videoStartPts,
       videoTimeBase,
+      display,
     );
   }
 
-  return formatApproximateTime(approximateBrowserTime);
+  return formatApproximateTime(approximateBrowserTime, display);
 }
 
 /**

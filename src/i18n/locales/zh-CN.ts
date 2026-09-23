@@ -45,7 +45,6 @@ export const zhCN: TranslationCatalog = {
     loading: "正在加载媒体...",
     videoPlayerLabel: "视频预览：{{fileName}}",
     decodeError: "原生播放失败，预览此格式需要生成代理文件。",
-    approximate: "（近似）",
   },
   fileDrop: {
     release: "松开以打开视频",
@@ -177,6 +176,12 @@ export const zhCN: TranslationCatalog = {
       system: "系统默认",
       en: "English",
       zhCN: "简体中文",
+    },
+    timecode: {
+      label: "时间码",
+      frames: "帧（HH:MM:SS:FF）",
+      milliseconds: "毫秒（HH:MM:SS.mmm）",
+      hint: "帧率可变或未知的源始终显示毫秒。",
     },
     ffmpeg: {
       section: "FFmpeg 位置",

@@ -130,6 +130,15 @@ describe("ADR 011 key normalization and plural parity validator", () => {
     expect(zhCN.app.name).toBe("QuipClip");
   });
 
+  it("names both ADR 028 timecode formats with their literal patterns in both catalogs", () => {
+    expect(en.settings.timecode.label).toBe("Timecode");
+    expect(zhCN.settings.timecode.label).toBe("时间码");
+    expect(en.settings.timecode.frames).toBe("Frames (HH:MM:SS:FF)");
+    expect(zhCN.settings.timecode.frames).toBe("帧（HH:MM:SS:FF）");
+    expect(en.settings.timecode.milliseconds).toBe("Milliseconds (HH:MM:SS.mmm)");
+    expect(zhCN.settings.timecode.milliseconds).toBe("毫秒（HH:MM:SS.mmm）");
+  });
+
   describe("evidence-based plural family detection and false-positive prevention", () => {
     it("does not classify ordinary exact semantic keys such as tone_one, status_other, or phase_ordinal_one as plural solely from suffix", () => {
       const ordinarySemanticKeys = {
@@ -1382,7 +1391,7 @@ describe("application shell localization and status bar formatting", () => {
     );
     expect(instance.t("shortcut.key.space")).toBe("Space");
     expect(instance.t("shortcut.key.escape")).toBe("Esc");
-    expect(instance.t("preview.approximate")).toBe("Approx.");
+    expect(instance.t("settings.timecode.label")).toBe("Timecode");
 
     // Dialog
     expect(instance.t("dialog.videoFilter")).toBe("Video Files");
@@ -1519,7 +1528,7 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.disabledReason.noFrameRate")).toBe("源未报告帧率。");
     expect(instance.t("shortcut.key.space")).toBe("空格");
     expect(instance.t("shortcut.key.escape")).toBe("Esc");
-    expect(instance.t("preview.approximate")).toBe("（近似）");
+    expect(instance.t("settings.timecode.label")).toBe("时间码");
 
     // Dialog
     expect(instance.t("dialog.videoFilter")).toBe("视频文件");

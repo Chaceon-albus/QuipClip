@@ -12,6 +12,7 @@ import { AlertCircle, Film, Loader2 } from "lucide-react";
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   getSourceRevisionKey,
   mediaStore,
@@ -22,10 +23,17 @@ import {
 import {
   createVideoRefCallback,
   playbackStore,
+  resolveTimecodeDisplay,
   scrubAudioController,
   usePlaybackStore,
   type PlaybackSource,
 } from "@/features/playback";
+import { useTimecodePreference } from "@/features/settings/timecodePreference";
+import {
+  FRAME_TIMECODE_PLACEHOLDER,
+  MILLISECONDS_TIMECODE_PLACEHOLDER,
+  type TimecodeDisplay,
+} from "@/lib/timecode";
 import { cn } from "@/lib/utils";
 import type { Pts, Rational } from "@/types/project";
 import { formatSupportedVideoFormats } from "./previewEmptyState";
@@ -78,6 +86,36 @@ function toPlaybackSource(media: ImportMediaResult | null): PlaybackSource | nul
 }
 
 /**
+ * Marks the current timecode as approximate. It is a small `≈` badge before the value, and
+ * its tooltip gives the same explanation as the status bar's approximate-position chip. The
+ * badge can take the focus, so a keyboard user can open the tooltip, and its accessible
+ * name is the chip's label, because a screen reader would read the symbol alone as a
+ * relation.
+ *
+ * The preview section is always dark, so the `-text` token resolves to its dark value here.
+ */
+function ApproximateBadge() {
+  const { t } = useTranslation();
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          tabIndex={0}
+          className="mr-1.5 rounded-sm bg-warning/15 px-1 text-2xs text-warning-text focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        >
+          <span aria-hidden="true">≈</span>
+          <span className="sr-only">{t("statusBar.approximatePosition")}</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-md flex-col items-start gap-1 text-xs">
+        <p>{t("statusBar.approximatePositionDetail")}</p>
+        <p>{t("statusBar.approximatePositionMarks")}</p>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
  * Current preview timecode. It subscribes to `presentedFrame` and to the approximate clock on
  * its own, so the surrounding pane, and with it the `<video>` element, does not re-render once
  * for every presented video frame or every `timeupdate`.
@@ -85,11 +123,12 @@ function toPlaybackSource(media: ImportMediaResult | null): PlaybackSource | nul
 function PreviewTimecode({
   videoStartPts,
   videoTimeBase,
+  display,
 }: {
   videoStartPts: Pts | null;
   videoTimeBase: Rational;
+  display: TimecodeDisplay;
 }) {
-  const { t } = useTranslation();
   const presentedFrame = usePlaybackStore((s) => s.presentedFrame);
   const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
   const approximateBrowserTimeSeconds = usePlaybackStore(
@@ -97,7 +136,8 @@ function PreviewTimecode({
   );
   const seekTargetSeconds = usePlaybackStore((s) => s.seekTargetSeconds);
 
-  // Source-relative HH:MM:SS.mmm for a ready inferred PTS, approximate browser time otherwise
+  // The seek target first, then the source-relative time of a ready inferred PTS, then the
+  // approximate browser time (ADR 022), in the format of the source (ADR 028).
   const currentTimeDisplay = formatPreviewCurrentTime(
     presentedFrame,
     calibrationStatus,
@@ -105,14 +145,13 @@ function PreviewTimecode({
     videoTimeBase,
     approximateBrowserTimeSeconds ?? 0,
     seekTargetSeconds,
+    display,
   );
 
   return (
     <>
-      <span className="font-medium text-primary">{currentTimeDisplay}</span>
-      {isPreviewTimeApproximate(calibrationStatus) && (
-        <span className="text-preview-muted">{t("preview.approximate")}</span>
-      )}
+      {isPreviewTimeApproximate(calibrationStatus) && <ApproximateBadge />}
+      <span className="text-primary">{currentTimeDisplay}</span>
     </>
   );
 }
@@ -324,13 +363,28 @@ export function PreviewPane() {
     setVideoError(true);
   };
 
+  // The format of the open source: the user's preference, with milliseconds for a source
+  // without a single nominal rate (ADR 028). With no source, the placeholder follows the
+  // preference alone.
+  const timecodePreference = useTimecodePreference((s) => s.format);
+  const probe = media?.probe;
+  const timecodeDisplay = useMemo(
+    () => resolveTimecodeDisplay(timecodePreference, probe),
+    [timecodePreference, probe],
+  );
+  const noMediaPlaceholder =
+    timecodePreference === "frames"
+      ? FRAME_TIMECODE_PLACEHOLDER
+      : MILLISECONDS_TIMECODE_PLACEHOLDER;
+
   const totalTimeDisplay = media
     ? formatPreviewTotalDuration(
         media.probe.approximateDurationSeconds,
         media.probe.videoDurationTicks,
         media.probe.videoTimeBase,
+        timecodeDisplay,
       )
-    : "00:00:00.000";
+    : noMediaPlaceholder;
 
   // The preview stays dark in both themes. The `dark` class makes every theme token and
   // every `dark:` variant inside the section use the dark value, so text, controls and the
@@ -548,18 +602,21 @@ export function PreviewPane() {
       </div>
 
       {/* Preview Bottom Row: Timecode. `h-6` holds the row at a fixed height, so the video
-          frame above keeps its size. */}
+          frame above keeps its size. Tabular figures keep every digit the same width, so
+          the value does not shift while it counts. With no media, both values are
+          placeholders in the muted colour, because no time is known. */}
       <div className="flex shrink-0 items-center justify-between px-1 pt-2">
-        <div className="flex h-6 items-center gap-1.5 font-mono text-xs">
+        <div className="flex h-6 items-center font-mono text-[15px] leading-none font-medium tracking-tight tabular-nums">
           {media ? (
             <PreviewTimecode
               videoStartPts={media.probe.videoStartPts}
               videoTimeBase={media.probe.videoTimeBase}
+              display={timecodeDisplay}
             />
           ) : (
-            <span className="font-medium text-primary">00:00:00.000</span>
+            <span className="text-preview-muted">{noMediaPlaceholder}</span>
           )}
-          <span className="text-preview-muted">/</span>
+          <span className="mx-1 text-preview-muted/60">/</span>
           <span className="text-preview-muted">{totalTimeDisplay}</span>
         </div>
       </div>

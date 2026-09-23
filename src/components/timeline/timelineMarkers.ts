@@ -5,7 +5,7 @@
  * Spans source time [0, totalDurationSeconds] (ADR 002, ADR 003, ADR 007).
  */
 
-import { formatMillisecondsTimecode } from "@/components/preview/previewFrame";
+import { formatMillisecondsTimecode } from "@/lib/timecode";
 
 export interface RulerMarker {
   /** Formatted source-relative timecode (HH:MM:SS.mmm). */

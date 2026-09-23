@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational, TickCount } from "@/types/project";
 import {
   createSourceLifecycleGuard,
   formatApproximateTime,
-  formatMillisecondsTimecode,
   formatPreviewCurrentTime,
   formatPreviewTotalDuration,
   formatSourceRelativeTime,
@@ -17,34 +17,182 @@ describe("Preview Frame Helpers & ADR 003 Math", () => {
   const tbNtsc: Rational = { n: 1001, d: 30000 };
   const tb90k: Rational = { n: 1, d: 90000 };
 
-  describe("formatMillisecondsTimecode", () => {
-    it("formats 0 seconds as 00:00:00.000", () => {
-      expect(formatMillisecondsTimecode(0)).toBe("00:00:00.000");
-    });
+  // These displays use the smallest frame boundary margin, so the tests below check the
+  // routing of each position to the formatter. The half-tick margin has its own test.
+  const frames25: TimecodeDisplay = {
+    format: "frames",
+    rate: { n: 25, d: 1 },
+    videoTimeBase: null,
+  };
+  const frames2997: TimecodeDisplay = {
+    format: "frames",
+    rate: { n: 30000, d: 1001 },
+    videoTimeBase: null,
+  };
+  const milliseconds: TimecodeDisplay = { format: "milliseconds" };
 
-    it("formats whole seconds and sub-second milliseconds accurately", () => {
-      expect(formatMillisecondsTimecode(1)).toBe("00:00:01.000");
-      expect(formatMillisecondsTimecode(1.234)).toBe("00:00:01.234");
-      expect(formatMillisecondsTimecode(1.005)).toBe("00:00:01.005");
-      expect(formatMillisecondsTimecode(59.999)).toBe("00:00:59.999");
-    });
-
-    it("formats minutes and hours rollover correctly", () => {
-      expect(formatMillisecondsTimecode(60)).toBe("00:01:00.000");
-      expect(formatMillisecondsTimecode(3600)).toBe("01:00:00.000");
-      expect(formatMillisecondsTimecode(3661.5)).toBe("01:01:01.500");
-      expect(formatMillisecondsTimecode(3723.456)).toBe("01:02:03.456");
-    });
-
-    it("handles invalid or non-finite inputs by returning 00:00:00.000", () => {
-      expect(formatMillisecondsTimecode(-1)).toBe("00:00:00.000");
-      expect(formatMillisecondsTimecode(NaN)).toBe("00:00:00.000");
-      expect(formatMillisecondsTimecode(Infinity)).toBe("00:00:00.000");
-      expect(formatMillisecondsTimecode(-Infinity)).toBe("00:00:00.000");
-      expect(formatMillisecondsTimecode(null as unknown as number)).toBe(
-        "00:00:00.000",
+  describe("frame format (ADR 028)", () => {
+    it("formats an inferred PTS with exact frame arithmetic", () => {
+      expect(formatSourceRelativeTime("1" as Pts, "0" as Pts, tb25, frames25)).toBe(
+        "00:00:00:01",
       );
-      expect(formatMillisecondsTimecode(Number.MAX_VALUE)).toBe("00:00:00.000");
+      expect(
+        formatSourceRelativeTime("5025" as Pts, "5000" as Pts, tb25, frames25),
+      ).toBe("00:00:01:00");
+      expect(formatSourceRelativeTime("-25" as Pts, "-50" as Pts, tb25, frames25)).toBe(
+        "00:00:01:00",
+      );
+      // Frame 15 at 29.97 fps with a 1/90000 time base.
+      expect(
+        formatSourceRelativeTime("135045" as Pts, "90000" as Pts, tb90k, frames2997),
+      ).toBe("00:00:00:15");
+    });
+
+    it("formats an inferred PTS before the start with a leading minus sign", () => {
+      expect(formatSourceRelativeTime("0" as Pts, "25" as Pts, tb25, frames25)).toBe(
+        "-00:00:01:00",
+      );
+    });
+
+    it("formats an invalid PTS as zero frames", () => {
+      expect(
+        formatSourceRelativeTime("invalid" as Pts, "0" as Pts, tb25, frames25),
+      ).toBe("00:00:00:00");
+      expect(
+        formatSourceRelativeTime("0" as Pts, "0" as Pts, { n: 0, d: 1 }, frames25),
+      ).toBe("00:00:00:00");
+    });
+
+    it("formats a PTS delta above the safe-integer range in frames", () => {
+      // The millisecond format cannot convert this delta; the exact frame format can.
+      expect(
+        formatSourceRelativeTime(
+          "9007199254740993" as Pts,
+          "0" as Pts,
+          tb90k,
+          frames25,
+        ),
+      ).toMatch(/^\d+:\d{2}:\d{2}:\d{2}$/);
+      expect(
+        formatSourceRelativeTime(
+          "9007199254740993" as Pts,
+          "0" as Pts,
+          tb90k,
+          milliseconds,
+        ),
+      ).toBe("00:00:00.000");
+    });
+
+    it("formats the approximate clock in frames", () => {
+      expect(formatApproximateTime(1.16, frames25)).toBe("00:00:01:04");
+      expect(formatApproximateTime(-1.5, frames25)).toBe("-00:00:01:12");
+      expect(formatApproximateTime(Number.NaN, frames25)).toBe("00:00:00:00");
+    });
+
+    it("formats the total extent in frames", () => {
+      expect(formatPreviewTotalDuration(null, "250" as TickCount, tb25, frames25)).toBe(
+        "00:00:10:00",
+      );
+      expect(formatPreviewTotalDuration(12.345, null, null, frames25)).toBe(
+        "00:00:12:08",
+      );
+    });
+
+    it("formats the pending seek target in frames", () => {
+      const presented = { mediaTime: 1.0, inferredSourcePts: "25" as Pts };
+      expect(
+        formatPreviewCurrentTime(
+          presented,
+          "ready",
+          "0" as Pts,
+          tb25,
+          1.0,
+          1.16,
+          frames25,
+        ),
+      ).toBe("00:00:01:04");
+      expect(
+        formatPreviewCurrentTime(null, "unavailable", null, tb25, 3.75, null, frames25),
+      ).toBe("00:00:03:18");
+    });
+
+    it("formats the presented frame in frames when no seek is pending", () => {
+      const presented = { mediaTime: 1.0, inferredSourcePts: "29" as Pts };
+      expect(
+        formatPreviewCurrentTime(
+          presented,
+          "ready",
+          "0" as Pts,
+          tb25,
+          1.0,
+          null,
+          frames25,
+        ),
+      ).toBe("00:00:01:04");
+    });
+
+    it("shows the same frame for a seek target and the frame that answers it (ADR 022)", () => {
+      // Frame 15 at 29.97 fps, one tick per frame. The seek target is the floating-point
+      // value of its exact start.
+      const presented = { mediaTime: 0.5005, inferredSourcePts: "15" as Pts };
+      const target = (15 * 1001) / 30000;
+      const whilePending = formatPreviewCurrentTime(
+        presented,
+        "ready",
+        "0" as Pts,
+        tbNtsc,
+        0.5005,
+        target,
+        frames2997,
+      );
+      const settled = formatPreviewCurrentTime(
+        presented,
+        "ready",
+        "0" as Pts,
+        tbNtsc,
+        0.5005,
+        null,
+        frames2997,
+      );
+      expect(whilePending).toBe("00:00:00:15");
+      expect(settled).toBe(whilePending);
+    });
+
+    it("applies the half-tick margin of the display's time base to a PTS and a seek target", () => {
+      // Matroska stores PTS in milliseconds. Frame 3 at 29.97 fps starts at 100.1 ms, and
+      // its PTS is 100. Without the margin it would show frame 02.
+      const tbMilli: Rational = { n: 1, d: 1000 };
+      const matroska2997: TimecodeDisplay = {
+        format: "frames",
+        rate: { n: 30000, d: 1001 },
+        videoTimeBase: tbMilli,
+      };
+      const presented = { mediaTime: 0.1, inferredSourcePts: "100" as Pts };
+      const settled = formatPreviewCurrentTime(
+        presented,
+        "ready",
+        "0" as Pts,
+        tbMilli,
+        0.1,
+        null,
+        matroska2997,
+      );
+      // A seek target 0.9 frame into frame 3.
+      const target = (3.9 * 1001) / 30000;
+      const whilePending = formatPreviewCurrentTime(
+        presented,
+        "ready",
+        "0" as Pts,
+        tbMilli,
+        0.1,
+        target,
+        matroska2997,
+      );
+      expect(settled).toBe("00:00:00:03");
+      expect(whilePending).toBe(settled);
+      expect(
+        formatSourceRelativeTime("100" as Pts, "0" as Pts, tbMilli, frames2997),
+      ).toBe("00:00:00:02");
     });
   });
 
@@ -166,9 +314,19 @@ describe("Preview Frame Helpers & ADR 003 Math", () => {
       expect(formatPreviewTotalDuration(12.345, null, null)).toBe("00:00:12.345");
     });
 
-    it("returns 00:00:00.000 when both are unavailable or invalid", () => {
-      expect(formatPreviewTotalDuration(null, null, null)).toBe("00:00:00.000");
-      expect(formatPreviewTotalDuration(undefined, null, null)).toBe("00:00:00.000");
+    it("returns the placeholder when both are unavailable or invalid, because the extent is unknown", () => {
+      expect(formatPreviewTotalDuration(null, null, null)).toBe("--:--:--.---");
+      expect(formatPreviewTotalDuration(undefined, null, null)).toBe("--:--:--.---");
+      expect(formatPreviewTotalDuration(-1, null, null)).toBe("--:--:--.---");
+      expect(formatPreviewTotalDuration(null, null, null, frames25)).toBe(
+        "--:--:--:--",
+      );
+    });
+
+    it("falls back to the approximate duration when the tick count cannot be converted", () => {
+      expect(
+        formatPreviewTotalDuration(12.345, "9007199254740993" as TickCount, tb25),
+      ).toBe("00:00:12.345");
     });
   });
 
