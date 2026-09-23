@@ -254,9 +254,8 @@ export function StatusBar() {
         {/*
          * Status bar sizing rule: a standalone icon button is a 24px box with a 16px glyph,
          * and an icon inline with text is 14px. The 24px controls fit the 28px bar without
-         * making it taller. The dark: and aria-expanded: overrides replace the ghost
-         * variant's neutral colours, so hover and the open dialog use the sidebar accent in
-         * both themes, like the export indicator next to this button.
+         * making it taller. The chrome variant gives hover and the open dialog the sidebar
+         * accent in both themes, like the export indicator next to this button.
          *
          * The button opens the settings dialog directly. The dialog is mounted in AppShell,
          * so this button is not a Radix DialogTrigger and sets the two attributes that a
@@ -265,9 +264,8 @@ export function StatusBar() {
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
-              variant="ghost"
+              variant="chrome"
               size="icon-xs"
-              className="text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent aria-expanded:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent"
               aria-label={t("statusBar.settings")}
               aria-haspopup="dialog"
               aria-expanded={settingsOpen}

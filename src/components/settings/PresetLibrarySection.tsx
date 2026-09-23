@@ -804,10 +804,13 @@ function PresetEditor({
           >
             {t("settings.preset.setActive")}
           </Button>
+          {/* The red label keeps 4.5:1 only up to the /10 fill: in the dark theme a /12 fill
+              already gives 4.46:1. Thus the press keeps the hover fill, which also replaces
+              the teal press fill of the outline variant, and turns the border red. */}
           <Button
             variant="outline"
             size="sm"
-            className="text-destructive-text hover:bg-destructive/10 hover:text-destructive-text"
+            className="text-destructive-text hover:bg-destructive/10 hover:text-destructive-text active:border-destructive/50 active:bg-destructive/10"
             disabled={view.pending}
             onClick={() => {
               onRequestDelete(draft.id);

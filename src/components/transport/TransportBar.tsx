@@ -226,11 +226,11 @@ export function TransportBar() {
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                variant="ghost"
+                variant="tool-ghost"
+                size="tool"
                 disabled={isUndoDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={undo}
-                className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label={t("transport.action.undo")}
                 aria-keyshortcuts={undoShortcut?.aria}
               >
@@ -248,11 +248,11 @@ export function TransportBar() {
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                variant="ghost"
+                variant="tool-ghost"
+                size="tool"
                 disabled={isRedoDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={redo}
-                className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label={t("transport.action.redo")}
                 aria-keyshortcuts={redoShortcut?.aria}
               >
@@ -291,7 +291,8 @@ export function TransportBar() {
             <TooltipTrigger asChild>
               <span className="inline-flex">
                 <Button
-                  variant="outline"
+                  variant="tool"
+                  size="tool-row"
                   disabled={isMarkInDisabled}
                   onMouseDown={preventFocusOnMouseDown}
                   onClick={() => {
@@ -302,7 +303,7 @@ export function TransportBar() {
                       markIn(frame.inferredSourcePts);
                     }
                   }}
-                  className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted disabled:delay-150 motion-reduce:duration-0"
+                  className="disabled:delay-150 motion-reduce:duration-0"
                   aria-label={t("transport.action.markInAria")}
                   aria-describedby={markInReasonId}
                   aria-keyshortcuts={markInShortcut?.aria}
@@ -328,7 +329,8 @@ export function TransportBar() {
             <TooltipTrigger asChild>
               <span className="inline-flex">
                 <Button
-                  variant="outline"
+                  variant="tool"
+                  size="tool-row"
                   disabled={isMarkOutDisabled}
                   onMouseDown={preventFocusOnMouseDown}
                   onClick={() => {
@@ -337,7 +339,7 @@ export function TransportBar() {
                       markOut(frame.inferredSourcePts);
                     }
                   }}
-                  className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted disabled:delay-150 motion-reduce:duration-0"
+                  className="disabled:delay-150 motion-reduce:duration-0"
                   aria-label={t("transport.action.markOutAria")}
                   aria-describedby={markOutReasonId}
                   aria-keyshortcuts={markOutShortcut?.aria}
@@ -363,7 +365,8 @@ export function TransportBar() {
             <TooltipTrigger asChild>
               <span className="inline-flex">
                 <Button
-                  variant="outline"
+                  variant="tool"
+                  size="tool-row"
                   disabled={isSplitDisabled}
                   onMouseDown={preventFocusOnMouseDown}
                   onClick={() => {
@@ -372,7 +375,7 @@ export function TransportBar() {
                       split(frame.inferredSourcePts);
                     }
                   }}
-                  className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted disabled:delay-150 motion-reduce:duration-0"
+                  className="disabled:delay-150 motion-reduce:duration-0"
                   aria-label={t("transport.action.splitAria")}
                   aria-describedby={splitReasonId}
                 >
@@ -401,11 +404,11 @@ export function TransportBar() {
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                variant="ghost"
+                variant="tool-ghost"
+                size="tool"
                 disabled={isNewSegmentDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={newSegment}
-                className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label={t("transport.action.newSegmentAria")}
                 aria-keyshortcuts={newSegmentShortcut?.aria}
               >
@@ -424,11 +427,11 @@ export function TransportBar() {
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                variant="ghost"
+                variant="tool-ghost"
+                size="tool"
                 disabled={isDeleteSegmentDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={deleteSegment}
-                className="flex h-12 w-12 flex-col items-center justify-center gap-0.5 rounded-lg p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
                 aria-label={t("transport.action.deleteSegmentAria")}
                 aria-keyshortcuts={deleteSegmentShortcut?.aria}
               >
@@ -455,12 +458,11 @@ export function TransportBar() {
             <TooltipTrigger asChild>
               <span className="inline-flex">
                 <Button
-                  variant="ghost"
-                  size="icon"
+                  variant="tool-ghost"
+                  size="tool-icon"
                   disabled={isStepDisabled}
                   onMouseDown={preventFocusOnMouseDown}
                   onClick={() => seekNominal(-1)}
-                  className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
                   aria-label={t("transport.action.previousStep")}
                   aria-describedby={previousStepReasonId}
                   aria-keyshortcuts={previousStepShortcut?.aria}
@@ -482,11 +484,11 @@ export function TransportBar() {
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                size="icon"
+                size="tool-icon-lg"
                 disabled={isPlayDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={togglePlayback}
-                className="size-11 rounded-lg bg-primary text-primary-foreground shadow-xs hover:bg-primary-hover active:bg-primary-active"
+                className="shadow-xs"
                 aria-label={
                   isPlaying ? t("transport.action.pause") : t("transport.action.play")
                 }
@@ -511,12 +513,11 @@ export function TransportBar() {
             <TooltipTrigger asChild>
               <span className="inline-flex">
                 <Button
-                  variant="ghost"
-                  size="icon"
+                  variant="tool-ghost"
+                  size="tool-icon"
                   disabled={isStepDisabled}
                   onMouseDown={preventFocusOnMouseDown}
                   onClick={() => seekNominal(1)}
-                  className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
                   aria-label={t("transport.action.nextStep")}
                   aria-describedby={nextStepReasonId}
                   aria-keyshortcuts={nextStepShortcut?.aria}

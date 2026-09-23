@@ -87,11 +87,7 @@ export function TitleBar() {
         )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="xs"
-              className="h-6 gap-1 px-1.5 text-xs text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-            >
+            <Button variant="chrome" size="xs" className="px-1.5">
               {t("titleBar.menu.file")}
               <ChevronDown className="size-3" />
             </Button>

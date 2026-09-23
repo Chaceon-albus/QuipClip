@@ -111,8 +111,9 @@ describe("createConfirmFocusReturn", () => {
 
 describe("DESTRUCTIVE_CONFIRM_CLASS", () => {
   // The contrast figures in confirmDialogModel.ts hold only when these classes replace the
-  // fill, the text, and the hover fill of the default button. If tailwind-merge kept a class
-  // of the default variant beside them, the stylesheet order would decide the color instead.
+  // fill, the text, the hover fill, and the press fill of the default button. If
+  // tailwind-merge kept a class of the default variant beside them, the stylesheet order
+  // would decide the color instead.
   it("replaces every color class of the default button", () => {
     const merged = cn(buttonVariants({ variant: "default" }), DESTRUCTIVE_CONFIRM_CLASS)
       .split(" ")
@@ -120,7 +121,8 @@ describe("DESTRUCTIVE_CONFIRM_CLASS", () => {
 
     expect(merged).not.toContain("bg-primary");
     expect(merged).not.toContain("text-primary-foreground");
-    expect(merged).not.toContain("hover:bg-primary/80");
+    expect(merged).not.toContain("hover:bg-primary-hover");
+    expect(merged).not.toContain("active:bg-primary-active");
     for (const token of DESTRUCTIVE_CONFIRM_CLASS.split(" ")) {
       expect(merged).toContain(token);
     }

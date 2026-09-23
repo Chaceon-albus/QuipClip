@@ -196,9 +196,8 @@ export function ExportStatusIndicator() {
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
-              variant="ghost"
+              variant="chrome"
               size="icon-xs"
-              className="text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent"
               aria-label={t("statusBar.export.dismiss")}
               onClick={reset}
             >

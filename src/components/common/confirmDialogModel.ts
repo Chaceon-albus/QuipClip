@@ -15,21 +15,28 @@
  * | ----- | ----- | ---------- | ----------------------------- | ----------------------------- |
  * | Light | Rest  | 4.67:1     | 4.46:1                        | 4.88:1                        |
  * | Light | Hover | 5.34:1     | 3.97:1 (`/90`)                | 4.21:1 (`/20`)                |
+ * | Light | Press | 6.12:1     | —                             | —                             |
  * | Dark  | Rest  | 5.02:1     | 3.28:1                        | 3.94:1 (`/20`)                |
  * | Dark  | Hover | 5.69:1     | 3.87:1 (`/90`)                | 3.39:1 (`/30`)                |
+ * | Dark  | Press | 6.41:1     | —                             | —                             |
  *
  * The button text is 14 px at weight 500, so it needs 4.5:1. Only this style reaches it in
- * both themes and in both states. The light theme gets light text on a dark red fill, and the
- * dark theme gets dark text on a light red fill, which is how the primary button of each
- * theme already works.
+ * both themes and in every state. The two other styles fail at rest or on hover, so the
+ * table gives no press figure for them. The light theme gets light text on a dark red fill,
+ * and the dark theme gets dark text on a light red fill, which is how the primary button of
+ * each theme already works.
  *
- * The hover color mixes the fill toward `foreground`, which moves it away from the text in
- * both themes: darker in the light theme and lighter in the dark theme. The mix is in OKLab so
- * that the hue does not turn toward orange on the way. The fill keeps at least 4.38:1 against
- * the dialog footer, above the 3:1 that WCAG 1.4.11 asks of a control boundary.
+ * The hover color mixes the fill 10% toward `foreground`, which moves it away from the text
+ * in both themes: darker in the light theme and lighter in the dark theme. The press color
+ * mixes 20%, so it moves further in the same direction. The mix is in OKLab so that the hue
+ * does not turn toward orange on the way. The fill keeps at least 4.38:1 against the dialog
+ * footer, above the 3:1 that WCAG 1.4.11 asks of a control boundary.
+ *
+ * The press class must be in this list, because the default button has its own press fill
+ * (`active:bg-primary-active`), and this class replaces it.
  */
 export const DESTRUCTIVE_CONFIRM_CLASS =
-  "bg-destructive text-popover hover:bg-[color-mix(in_oklab,var(--destructive),var(--foreground)_10%)]";
+  "bg-destructive text-popover hover:bg-[color-mix(in_oklab,var(--destructive),var(--foreground)_10%)] active:bg-[color-mix(in_oklab,var(--destructive),var(--foreground)_20%)]";
 
 /** The narrow view of an element that the focus rule reads, so a test can pass a fake. */
 export interface FocusCandidate {
