@@ -72,6 +72,9 @@ pub fn run() {
         // the registry and outlives the command that claimed it, so the managed value is the
         // `Arc` itself rather than the registry.
         .manage(Arc::new(ffmpeg::export::ExportRegistry::default()))
+        // The destination of the last published export. The show and open commands read the
+        // path from here, so the web view names a run and never a path.
+        .manage(commands::export_output::PublishedExports::default())
         // Whether the user confirmed the quit (ADR 027). The exit handler below reads it.
         .manage(commands::quit::QuitGate::default());
 
@@ -88,6 +91,8 @@ pub fn run() {
             commands::export::start_export,
             commands::export::cancel_export,
             commands::export::cancel_active_export,
+            commands::export_output::reveal_export_output,
+            commands::export_output::open_export_output,
             commands::media::import_media,
             commands::media::read_source_revision,
             commands::project::load_project,

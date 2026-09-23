@@ -68,6 +68,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
 
+use super::export_output::PublishedExports;
 use super::media::{map_probe_error, ImportMediaErrorCode};
 use super::next_run_id;
 
@@ -263,6 +264,7 @@ struct PreparedExport {
 pub async fn start_export(
     app: tauri::AppHandle,
     registry: tauri::State<'_, Arc<ExportRegistry>>,
+    published: tauri::State<'_, PublishedExports>,
     request: ExportRequestWire,
 ) -> Result<ExportStart, ExportCommandError> {
     let app_data_directory = app
@@ -277,6 +279,10 @@ pub async fn start_export(
     let slot = registry
         .begin(&run_id)
         .ok_or_else(|| ExportCommandError::new(ExportErrorCode::ExportAlreadyRunning))?;
+    // The earlier run is over, and the interface stops showing its result when this run
+    // starts. Forget its output, so Show and Open cannot act on a file that this run can
+    // replace.
+    published.clear();
 
     // Preparation spawns ffprobe and touches the filesystem, so it does not belong on the
     // async executor. It is bounded work -- one short-lived child process -- which is what
@@ -635,6 +641,9 @@ fn run_export_worker(
     );
 
     let output_path = start.output_path.clone();
+    // The published path, as a path. `output_path` is its lossy string form for the event, and
+    // the show and open commands must name the file that the rename wrote.
+    let destination = prepared.plan.destination.clone();
     // A panic inside the run has to be turned back into a report. [`spawn_export_worker`]
     // gives the reason a lost report cannot be tolerated -- the interface sits on "exporting"
     // forever, with no timeout, and `cancel_export` answers `false` because the slot is
@@ -651,14 +660,22 @@ fn run_export_worker(
         run_export(app, &slot, prepared, &run_id)
     }));
     match outcome {
-        Ok(Ok(frames)) => emit_event(
-            app,
-            ExportEvent::Finished {
-                run_id,
-                output_path,
-                frames,
-            },
-        ),
+        Ok(Ok(frames)) => {
+            // Recorded before the event, so a show or open request that follows the event
+            // finds the file. The commands take the path from this record and never from the
+            // web view (`commands::export_output`).
+            if let Some(published) = app.try_state::<PublishedExports>() {
+                published.record(&run_id, destination);
+            }
+            emit_event(
+                app,
+                ExportEvent::Finished {
+                    run_id,
+                    output_path,
+                    frames,
+                },
+            );
+        }
         Ok(Err(error)) => emit_failed(app, &run_id, error),
         Err(_) => emit_failed(
             app,
