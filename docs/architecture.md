@@ -497,6 +497,12 @@ Assets live in fixed places. The icon master is `src/assets/brand/app-icon.svg`.
 `pnpm icons` command regenerates the desktop icon files in `src-tauri/icons/` from that
 SVG. The palette is `src/styles/globals.css`.
 
+The theme preference (System Default, Light, Dark) lives in the web view store beside the
+language. `public/theme-init.js` is a plain script in the `<head>` that applies it before the
+first paint, so a dark theme never flashes light. It must stay a same-origin file loaded
+before the stylesheet: the CSP allows no inline script. It repeats the resolve rule of
+`src/lib/theme.ts`, and a test runs both and compares them.
+
 The shadcn output in `src/components/ui/` is generated code, but some of its files carry
 hand edits. Each edit has a `QuipClip: hand-edited` comment that gives the reason. A
 regeneration overwrites these edits, so merge them back by hand after one. The shadcn
