@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
 import { Film } from "lucide-react";
@@ -18,6 +19,7 @@ import {
 import {
   getDisplayedElapsedSeconds,
   isPlaybackPositionApproximate,
+  playbackStore,
   usePlaybackStore,
   type PlaybackStoreState,
   type SeekOptions,
@@ -28,7 +30,9 @@ import {
   calculateContentWidthPx,
   calculateFollowScrollLeft,
   calculateMaxZoom,
+  calculatePausedFollow,
   calculatePendingInRegionLayoutFromSeconds,
+  calculatePendingNavigation,
   calculatePercentFromPts,
   calculatePlayheadLayout,
   calculatePtsFromClientX,
@@ -93,6 +97,24 @@ const selectSelectSegment = (state: TimelineStoreState) => state.selectSegment;
 const PENDING_IN_FLAG_PLACEMENT_STYLE: CSSProperties = {
   transform: "translateX(max(-100%, min(0px, calc((100cqw - 100%) * 100000))))",
 };
+
+/**
+ * Scrolls the timeline to a follow target, clamped to the scroll range, and keeps the mirror
+ * of the scroll position truthful. The clamp reads the layout, but only when the view pages.
+ */
+function applyFollowScrollLeft(
+  scrollEl: HTMLDivElement,
+  scrollLeftRef: RefObject<number>,
+  targetScrollLeft: number,
+): void {
+  const maxScrollLeftPx = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
+  const nextScrollLeft = Math.min(targetScrollLeft, maxScrollLeftPx);
+
+  if (scrollLeftRef.current !== nextScrollLeft) {
+    scrollEl.scrollLeft = nextScrollLeft;
+    scrollLeftRef.current = nextScrollLeft;
+  }
+}
 
 export function TimelinePanel({
   activeSourceId,
@@ -174,6 +196,11 @@ export function TimelinePanel({
   // The per-frame path must cause zero forced layouts.
   const scrollLeftRef = useRef<number>(0);
   const userScrolledRef = useRef<boolean>(false);
+
+  // The seek target that the last request of the pointer gesture left in the store, or null.
+  // seekFromClientX records it, and the paused follow compares and clears it through
+  // calculatePendingNavigation.
+  const gestureSeekTargetRef = useRef<number | null>(null);
 
   const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
     const nextScrollLeft = event.currentTarget.scrollLeft;
@@ -377,6 +404,11 @@ export function TimelinePanel({
    *
    * Passes `{ scrub: phase === "scrub" }` so playhead drag moves use fastSeek and audio bursts,
    * while pointer down, pointer release, and a cancelled drag perform exact seeks.
+   *
+   * Records the seek target that each request leaves in the store, so the paused follow does
+   * not treat a position that the gesture requested as a navigation. The render of the exact
+   * seek at release runs after the gesture ends, so isActive() cannot filter that seek. The
+   * recorded target filters it (calculatePendingNavigation).
    */
   const seekFromClientX = (clientX: number, phase: "scrub" | "final") => {
     const laneEl = laneRef.current;
@@ -396,6 +428,7 @@ export function TimelinePanel({
       );
       if (targetPts !== null) {
         seekToPts(targetPts, options);
+        gestureSeekTargetRef.current = playbackStore.getState().seekTargetSeconds;
       }
       return;
     }
@@ -405,8 +438,9 @@ export function TimelinePanel({
       rect.width,
       totalDurationSeconds,
     );
-    if (targetSeconds !== null) {
-      onApproximateSeek?.(targetSeconds, options);
+    if (targetSeconds !== null && onApproximateSeek) {
+      onApproximateSeek(targetSeconds, options);
+      gestureSeekTargetRef.current = playbackStore.getState().seekTargetSeconds;
     }
   };
 
@@ -511,14 +545,68 @@ export function TimelinePanel({
       return;
     }
 
-    const maxScrollLeftPx = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
-    const nextScrollLeft = Math.min(targetScrollLeft, maxScrollLeftPx);
-
-    if (scrollLeftRef.current !== nextScrollLeft) {
-      scrollEl.scrollLeft = nextScrollLeft;
-      scrollLeftRef.current = nextScrollLeft;
-    }
+    applyFollowScrollLeft(scrollEl, scrollLeftRef, targetScrollLeft);
   }, [isPlaying, laneWidthPx, playhead.percent, viewportWidthPx]);
+
+  // The displayed playhead position, in seconds, at the last run of the paused follow below.
+  // That follow acts only when this position changes. A zoom, a resize or a change of the
+  // source extent changes the geometry or the percent, and not this value, so none of them
+  // moves the view.
+  const lastElapsedSecondsRef = useRef<number>(currentElapsedSeconds);
+
+  // Follow the playhead while paused, when a navigation such as a frame step moves it out of
+  // the visible window. calculatePausedFollow states the conditions. A navigation is a
+  // deliberate move of the playhead, so it also ends a suspension from an earlier pan. A pan
+  // with no navigation changes no position, so this effect never undoes it.
+  useEffect(() => {
+    const previousElapsedSeconds = lastElapsedSecondsRef.current;
+    lastElapsedSecondsRef.current = currentElapsedSeconds;
+
+    const pending = calculatePendingNavigation(
+      seekTargetSeconds,
+      gestureSeekTargetRef.current,
+    );
+    gestureSeekTargetRef.current = pending.nextRecordedTarget;
+
+    if (isPlaying) {
+      // The playback follow above owns the view.
+      return;
+    }
+
+    const scrollEl = scrollRef.current;
+    if (!scrollEl || viewportWidthPx <= 0) {
+      return;
+    }
+
+    const decision = calculatePausedFollow({
+      playheadPercent: playhead.percent,
+      elapsedSeconds: currentElapsedSeconds,
+      previousElapsedSeconds,
+      isNavigationPending: pending.isNavigationPending,
+      isGestureActive: gestureRef.current?.isActive() === true,
+      laneWidthPx,
+      laneLeftOffsetPx: TIMELINE_GUTTER_WIDTH_PX,
+      scrollLeftPx: scrollLeftRef.current,
+      viewportWidthPx,
+      leadFraction: PLAYHEAD_FOLLOW_LEAD_FRACTION,
+    });
+
+    if (!decision.isNavigation) {
+      return;
+    }
+
+    userScrolledRef.current = false;
+    if (decision.scrollLeftPx !== null) {
+      applyFollowScrollLeft(scrollEl, scrollLeftRef, decision.scrollLeftPx);
+    }
+  }, [
+    currentElapsedSeconds,
+    isPlaying,
+    laneWidthPx,
+    playhead.percent,
+    seekTargetSeconds,
+    viewportWidthPx,
+  ]);
 
   const activeSourceSegments = useMemo(
     () => getActiveSourceSegmentEntries(segments, sourceId),

@@ -217,3 +217,117 @@ export function calculateFollowScrollLeft(
     playheadContentX - Math.max(laneLeftOffsetPx, leadFraction * viewportWidthPx),
   );
 }
+
+/** The result of `calculatePendingNavigation`. */
+export interface PendingNavigation {
+  /**
+   * True while a seek request is pending that the pointer gesture of the timeline did not
+   * send. Each seek action sets the seek target when it accepts a request (ADR 022), so a
+   * frame step sets it. A seek that settles, a pause and the last frames of playback do not.
+   */
+  isNavigationPending: boolean;
+  /**
+   * The gesture target to keep recorded. It stays while the pending target is the target
+   * of the gesture, and it becomes null when that target settles or a later request
+   * replaces it.
+   */
+  nextRecordedTarget: number | null;
+}
+
+/**
+ * Decides whether the pending seek target is a navigation or a position that the pointer
+ * gesture of the timeline requested.
+ *
+ * `recordedGestureTargetSeconds` is the seek target that the last request of the gesture
+ * left in the store. A pending target equal to it belongs to the gesture, so it is not a
+ * navigation. The render of the exact seek at release runs after the gesture ends, so a
+ * test of the active gesture cannot filter that seek, and the recorded target filters it.
+ *
+ * The record is cleared as soon as the pending target differs from it. A later request
+ * that lands on the same value is therefore a navigation.
+ */
+export function calculatePendingNavigation(
+  seekTargetSeconds: number | null,
+  recordedGestureTargetSeconds: number | null,
+): PendingNavigation {
+  const isGestureTarget =
+    seekTargetSeconds !== null && seekTargetSeconds === recordedGestureTargetSeconds;
+  return {
+    isNavigationPending: seekTargetSeconds !== null && !isGestureTarget,
+    nextRecordedTarget: isGestureTarget ? recordedGestureTargetSeconds : null,
+  };
+}
+
+/** Inputs of `calculatePausedFollow`. */
+export interface PausedFollowInput {
+  /** The displayed playhead position, in percent of the source extent. */
+  playheadPercent: number;
+  /** The displayed playhead position, in seconds from the start of the source. */
+  elapsedSeconds: number;
+  /** The displayed playhead position at the previous decision, in seconds. */
+  previousElapsedSeconds: number;
+  /** `isNavigationPending` of `calculatePendingNavigation`. */
+  isNavigationPending: boolean;
+  /** True while a pointer gesture on the timeline is active. */
+  isGestureActive: boolean;
+  laneWidthPx: number;
+  laneLeftOffsetPx: number;
+  scrollLeftPx: number;
+  viewportWidthPx: number;
+  /** The lead fraction of a forward move. A backward move uses `1 - leadFraction`. */
+  leadFraction: number;
+}
+
+/** The result of `calculatePausedFollow`. */
+export interface PausedFollowDecision {
+  /**
+   * True when a navigation moved the playhead. A navigation ends the suspension of the
+   * follow that a pan by the user started.
+   */
+  isNavigation: boolean;
+  /** The scrollLeft that brings the playhead into view, or null to keep the view. */
+  scrollLeftPx: number | null;
+}
+
+/**
+ * Decides the follow of the playhead while the source is paused.
+ *
+ * The view moves only when all of these are true:
+ * - The displayed position changed, in seconds. A zoom or a resize changes the geometry and
+ *   not the position, so the view stays where the zoom put it. A change of the source extent
+ *   changes the percent of the playhead and not its position in seconds, so it is not a move
+ *   either.
+ * - A seek request that the pointer gesture did not send is pending. A drag must not move
+ *   the view under the pointer, and a position that changes with no request, such as the
+ *   settle of a seek or the last frame after a pause, is not a navigation.
+ * - No pointer gesture is active.
+ * - `calculateFollowScrollLeft` reports that the playhead is outside the visible window.
+ *
+ * The paging is the paging of playback, with one difference: a backward move puts the
+ * playhead the lead fraction from the right edge, so the frames before it are in view. With
+ * the forward lead, each backward step past the gutter would page again, and the whole
+ * timeline would slide under the eye.
+ */
+export function calculatePausedFollow(input: PausedFollowInput): PausedFollowDecision {
+  const hasMoved =
+    Number.isFinite(input.elapsedSeconds) &&
+    Number.isFinite(input.previousElapsedSeconds) &&
+    input.elapsedSeconds !== input.previousElapsedSeconds;
+  const isNavigation = !input.isGestureActive && input.isNavigationPending && hasMoved;
+  if (!isNavigation) {
+    return { isNavigation: false, scrollLeftPx: null };
+  }
+
+  const isBackward = input.elapsedSeconds < input.previousElapsedSeconds;
+  return {
+    isNavigation: true,
+    scrollLeftPx: calculateFollowScrollLeft(
+      input.playheadPercent,
+      input.laneWidthPx,
+      input.laneLeftOffsetPx,
+      input.scrollLeftPx,
+      input.viewportWidthPx,
+      isBackward ? 1 - input.leadFraction : input.leadFraction,
+    ),
+  };
+}

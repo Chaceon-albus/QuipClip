@@ -5,6 +5,8 @@ import {
   calculateContentWidthPx,
   calculateFollowScrollLeft,
   calculateMaxZoom,
+  calculatePausedFollow,
+  calculatePendingNavigation,
   calculateWheelZoomFactor,
   clampTimelineZoom,
   MAX_TIMELINE_CONTENT_WIDTH_PX,
@@ -15,6 +17,7 @@ import {
   TIMELINE_GUTTER_WIDTH_PX,
   TIMELINE_MIN_CONTENT_WIDTH_PX,
   TIMELINE_WHEEL_ZOOM_BASE,
+  type PausedFollowInput,
 } from "./viewport";
 
 describe("timeline viewport module", () => {
@@ -797,6 +800,293 @@ describe("timeline viewport module", () => {
         const actualLeadPx = playheadContentX - scrollLeft;
         expect(Math.abs(actualLeadPx - expectedLeadPx)).toBeLessThan(1e-9);
       }
+    });
+  });
+
+  describe("calculatePendingNavigation", () => {
+    it("reports no navigation and clears the record when no seek is pending", () => {
+      expect(calculatePendingNavigation(null, null)).toEqual({
+        isNavigationPending: false,
+        nextRecordedTarget: null,
+      });
+      expect(calculatePendingNavigation(null, 12.5)).toEqual({
+        isNavigationPending: false,
+        nextRecordedTarget: null,
+      });
+    });
+
+    it("reports no navigation and keeps the record while the pending target is the gesture's", () => {
+      expect(calculatePendingNavigation(12.5, 12.5)).toEqual({
+        isNavigationPending: false,
+        nextRecordedTarget: 12.5,
+      });
+    });
+
+    it("reports a navigation and clears the record when another request replaced the target", () => {
+      expect(calculatePendingNavigation(12.6, 12.5)).toEqual({
+        isNavigationPending: true,
+        nextRecordedTarget: null,
+      });
+      expect(calculatePendingNavigation(12.6, null)).toEqual({
+        isNavigationPending: true,
+        nextRecordedTarget: null,
+      });
+    });
+  });
+
+  describe("calculatePausedFollow", () => {
+    // A zoomed lane: 10,000 px of lane for a 100 s source, behind a 1,000 px viewport and the
+    // 96 px gutter. At 100 px/s the position in seconds equals the percent. At scrollLeft 0
+    // the visible content range is [96, 1000].
+    const base: PausedFollowInput = {
+      playheadPercent: 9,
+      elapsedSeconds: 9,
+      previousElapsedSeconds: 9,
+      isNavigationPending: true,
+      isGestureActive: false,
+      laneWidthPx: 10_000,
+      laneLeftOffsetPx: 96,
+      scrollLeftPx: 0,
+      viewportWidthPx: 1000,
+      leadFraction: 0.1,
+    };
+
+    /** A move from `from` to `to` seconds on the 100 s source of `base`. */
+    const move = (from: number, to: number) => ({
+      playheadPercent: to,
+      elapsedSeconds: to,
+      previousElapsedSeconds: from,
+    });
+
+    it("pages when a navigation moves the playhead out of view while paused", () => {
+      // previous: 96 + 900 = 996 (visible). Now: 96 + 910 = 1006 > 1000 (past the right edge).
+      const decision = calculatePausedFollow({ ...base, ...move(9, 9.1) });
+
+      expect(decision.isNavigation).toBe(true);
+      // The paging of playback: the playhead lands max(96, 0.1 * 1000) = 100 px from the left.
+      expect(decision.scrollLeftPx).not.toBeNull();
+      expect(decision.scrollLeftPx!).toBeCloseTo(906, 9);
+      expect(decision.scrollLeftPx).toBe(
+        calculateFollowScrollLeft(9.1, 10_000, 96, 0, 1000, 0.1),
+      );
+    });
+
+    it("reports a navigation that stays in view, and leaves the view where it is", () => {
+      const decision = calculatePausedFollow({ ...base, ...move(5, 5.1) });
+      expect(decision).toEqual({ isNavigation: true, scrollLeftPx: null });
+    });
+
+    it("does not page after a zoom that changed only the geometry", () => {
+      // The playhead at 50% is at 96 + 5000 = 5096 after the zoom, far past the right edge,
+      // and a seek is still pending. The position did not change, so the view stays.
+      expect(calculateFollowScrollLeft(50, 10_000, 96, 0, 1000, 0.1)).not.toBeNull();
+      expect(calculatePausedFollow({ ...base, ...move(50, 50) })).toEqual({
+        isNavigation: false,
+        scrollLeftPx: null,
+      });
+    });
+
+    it("does not page when only the source extent changed while a seek is pending", () => {
+      // The runtime duration arrives and the percent of the playhead changes from 9 to 45,
+      // which is out of view. The position in seconds is still 9, so it is not a move.
+      expect(calculateFollowScrollLeft(45, 10_000, 96, 0, 1000, 0.1)).not.toBeNull();
+      const decision = calculatePausedFollow({
+        ...base,
+        playheadPercent: 45,
+        elapsedSeconds: 9,
+        previousElapsedSeconds: 9,
+      });
+      expect(decision).toEqual({ isNavigation: false, scrollLeftPx: null });
+    });
+
+    it("does not page while a pointer gesture is active", () => {
+      const decision = calculatePausedFollow({
+        ...base,
+        ...move(9, 20),
+        isGestureActive: true,
+      });
+      expect(decision).toEqual({ isNavigation: false, scrollLeftPx: null });
+    });
+
+    it("does not undo a manual scroll when the position did not change", () => {
+      // The user scrolled to 3000, so the visible range is [3096, 4000], and the playhead at
+      // 96 + 500 = 596 is out of view. No position change, so the view stays where it is,
+      // with or without a pending seek.
+      for (const isNavigationPending of [false, true]) {
+        const decision = calculatePausedFollow({
+          ...base,
+          ...move(5, 5),
+          scrollLeftPx: 3000,
+          isNavigationPending,
+        });
+        expect(decision).toEqual({ isNavigation: false, scrollLeftPx: null });
+      }
+    });
+
+    it("does not page for a position change with no pending navigation", () => {
+      // A seek that settles, or the last frame after a pause, moves the displayed position with
+      // no pending seek target. That is not a navigation, so a pan by the user survives it.
+      const decision = calculatePausedFollow({
+        ...base,
+        ...move(9, 9.1),
+        isNavigationPending: false,
+      });
+      expect(decision).toEqual({ isNavigation: false, scrollLeftPx: null });
+    });
+
+    it("does not page for a non-finite position", () => {
+      const cases: Array<[number, number]> = [
+        [Number.NaN, 9.1],
+        [9, Number.NaN],
+        [9, Infinity],
+      ];
+      for (const [from, to] of cases) {
+        const decision = calculatePausedFollow({
+          ...base,
+          playheadPercent: 9.1,
+          elapsedSeconds: to,
+          previousElapsedSeconds: from,
+        });
+        expect(decision).toEqual({ isNavigation: false, scrollLeftPx: null });
+      }
+    });
+
+    it("brings the playhead back after a manual scroll when a navigation moves it", () => {
+      // The user scrolled to 3000 (visible range [3096, 4000]). A step moves the playhead from
+      // 596 to 606, still out of view, so the view pages to it.
+      const decision = calculatePausedFollow({
+        ...base,
+        ...move(5, 5.1),
+        scrollLeftPx: 3000,
+      });
+      expect(decision.isNavigation).toBe(true);
+      expect(decision.scrollLeftPx!).toBeCloseTo(606 - 100, 9);
+    });
+
+    it("mirrors the lead for a backward move, so the frames before the playhead are in view", () => {
+      // Visible range at scrollLeft 2000: [2096, 3000]. A step back moves the playhead from
+      // 96 + 2005 = 2101 to 96 + 1995 = 2091, behind the gutter. The playhead lands
+      // max(96, 0.9 * 1000) = 900 px from the left edge of the viewport.
+      const decision = calculatePausedFollow({
+        ...base,
+        ...move(20.05, 19.95),
+        scrollLeftPx: 2000,
+      });
+      expect(decision.isNavigation).toBe(true);
+      expect(decision.scrollLeftPx!).toBeCloseTo(2091 - 900, 9);
+      expect(decision.scrollLeftPx).toBe(
+        calculateFollowScrollLeft(19.95, 10_000, 96, 2000, 1000, 0.9),
+      );
+    });
+
+    describe("with the gesture filter of calculatePendingNavigation", () => {
+      // One render of the timeline: the pending-navigation filter, then the paused follow.
+      // `recorded` is the gesture target that the component holds. Each render returns the
+      // record for the next render, as the component writes it back.
+      const render = (
+        recorded: number | null,
+        seekTargetSeconds: number | null,
+        from: number,
+        to: number,
+        isGestureActive: boolean,
+      ) => {
+        const pending = calculatePendingNavigation(seekTargetSeconds, recorded);
+        const decision = calculatePausedFollow({
+          ...base,
+          ...move(from, to),
+          isNavigationPending: pending.isNavigationPending,
+          isGestureActive,
+        });
+        return { recorded: pending.nextRecordedTarget, decision };
+      };
+      const noPage = { isNavigation: false, scrollLeftPx: null };
+
+      it("does not page for a drag released past the edge or for the settle of its seek", () => {
+        // The drag moves to 9.5 s, past the edge: the playhead is at 1046 and the visible
+        // range is [96, 1000].
+        let step = render(9.5, 9.5, 5, 9.5, true);
+        expect(step.decision).toEqual(noPage);
+        // Release: the exact seek goes to 9.6 s. The gesture has ended, and the recorded
+        // target (9.6) is the one that seekFromClientX wrote for that seek.
+        step = render(9.6, 9.6, 9.5, 9.6, false);
+        expect(step.decision).toEqual(noPage);
+        expect(step.recorded).toBe(9.6);
+        // The seek settles: the target clears, and the playhead moves to the presented frame.
+        step = render(step.recorded, null, 9.6, 9.58, false);
+        expect(step.decision).toEqual(noPage);
+        expect(step.recorded).toBeNull();
+      });
+
+      it("pages for a frame step while the seek of the drag is still pending", () => {
+        // The release left 9.6 s recorded, and the step replaces the pending target.
+        const step = render(9.6, 9.65, 9.6, 9.65, false);
+        expect(step.decision.isNavigation).toBe(true);
+        expect(step.decision.scrollLeftPx).not.toBeNull();
+        expect(step.recorded).toBeNull();
+      });
+
+      it("pages for a later request that lands on the value of a cleared gesture target", () => {
+        // The drag released at 9.6 s, and its seek settled on 9.58 s, which cleared the record.
+        const settled = render(9.6, null, 9.6, 9.58, false);
+        expect(settled.recorded).toBeNull();
+        // A later request lands exactly on 9.6 s again. It is a navigation.
+        const step = render(settled.recorded, 9.6, 9.58, 9.6, false);
+        expect(step.decision.isNavigation).toBe(true);
+        expect(step.decision.scrollLeftPx).not.toBeNull();
+      });
+    });
+
+    it("pages once per window, and not once per step, for held frame steps in both directions", () => {
+      // 200 px/s at 24 fps: a frame is 200 / 24 px wide. The lane holds 60 s of source.
+      const fps = 24;
+      const durationSeconds = 60;
+      const laneWidthPx = 200 * durationSeconds;
+      const viewportWidthPx = 1000;
+      const laneLeftOffsetPx = 96;
+      const maxScrollLeftPx = laneLeftOffsetPx + laneWidthPx - viewportWidthPx;
+      const frameCount = fps * durationSeconds;
+      const secondsOf = (frame: number) => frame / fps;
+      const percentOf = (frame: number) => (frame / frameCount) * 100;
+
+      const run = (frames: number[], initialScrollLeftPx: number) => {
+        let scrollLeftPx = initialScrollLeftPx;
+        let pages = 0;
+        for (let i = 1; i < frames.length; i++) {
+          const decision = calculatePausedFollow({
+            playheadPercent: percentOf(frames[i]),
+            elapsedSeconds: secondsOf(frames[i]),
+            previousElapsedSeconds: secondsOf(frames[i - 1]),
+            isNavigationPending: true,
+            isGestureActive: false,
+            laneWidthPx,
+            laneLeftOffsetPx,
+            scrollLeftPx,
+            viewportWidthPx,
+            leadFraction: 0.1,
+          });
+          if (decision.scrollLeftPx !== null) {
+            pages++;
+            scrollLeftPx = Math.min(decision.scrollLeftPx, maxScrollLeftPx);
+          }
+          // The playhead is in view after every step.
+          const x = laneLeftOffsetPx + (percentOf(frames[i]) / 100) * laneWidthPx;
+          expect(x).toBeGreaterThanOrEqual(scrollLeftPx + laneLeftOffsetPx);
+          expect(x).toBeLessThanOrEqual(scrollLeftPx + viewportWidthPx);
+        }
+        return pages;
+      };
+
+      const forward = Array.from({ length: frameCount + 1 }, (_, i) => i);
+      const backward = [...forward].reverse();
+
+      // One window shows roughly (1000 - 96) / (200 / 24) = 108 frames, and a page puts the
+      // playhead 10% from the leading edge, so a page covers roughly 96 frames or more.
+      const forwardPages = run(forward, 0);
+      const backwardPages = run(backward, maxScrollLeftPx);
+      expect(forwardPages).toBeGreaterThan(0);
+      expect(backwardPages).toBeGreaterThan(0);
+      expect(forwardPages).toBeLessThanOrEqual(Math.ceil(frameCount / 90));
+      expect(backwardPages).toBeLessThanOrEqual(Math.ceil(frameCount / 90));
     });
   });
 });
