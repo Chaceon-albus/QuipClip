@@ -200,6 +200,8 @@ export const en = {
       empty: "No presets yet.",
       limitReached: "Limit of {{max}} presets reached.",
       unsaved: "Unsaved changes",
+      saveBlocked_one: "Fix {{count}} problem to save.",
+      saveBlocked_other: "Fix {{count}} problems to save.",
       unsavedPrompt: "“{{name}}” has unsaved changes.",
       discardConfirm: "Discard Changes",
       discardCancel: "Keep Editing",

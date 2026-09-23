@@ -201,6 +201,8 @@ export const zhCN: TranslationCatalog = {
       empty: "暂无预设。",
       limitReached: "已达到 {{max}} 个预设的上限。",
       unsaved: "有未保存的更改",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      saveBlocked_other: "修正 {{count}} 个问题后即可保存。",
       unsavedPrompt: "“{{name}}”有未保存的更改。",
       discardConfirm: "放弃更改",
       discardCancel: "继续编辑",

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createI18nInstance } from "@/i18n";
 import { en } from "@/i18n/locales/en";
 import {
   validatePresetFields,
@@ -19,13 +20,17 @@ import {
   presentAudioSampleRateSelect,
   presentAudioSampleRateValue,
   presentContainer,
+  groupIssuesByField,
+  joinDescribedBy,
   presentEncoderOption,
   presentEncoderSelect,
+  presentFrameRateInvalid,
   presentNumericField,
   presentPresetEncoderMark,
   presentPresetIssue,
-  presentPresetIssues,
   presentQualityKind,
+  presentResolutionInvalid,
+  presentSaveBlockedSummary,
 } from "./presetPresenter";
 
 /**
@@ -158,8 +163,39 @@ describe("presetPresenter", () => {
     });
   });
 
-  describe("presentPresetIssues", () => {
-    it("derives a stable unique id per entry and passes through key and values", () => {
+  describe("groupIssuesByField", () => {
+    const basePreset: Preset = {
+      id: "preset-1",
+      name: "Default Preset",
+      container: "mp4",
+      videoEncoder: "libx264",
+      audioEncoder: "aac",
+      audioBitrate: 320,
+      audioSampleRate: "source",
+      audioChannels: "source",
+      quality: { kind: "crf", value: 20 },
+      resolution: "source",
+      frameRate: "source",
+    };
+
+    const EMPTY_GROUPS = {
+      name: [],
+      container: [],
+      videoEncoder: [],
+      audioEncoder: [],
+      audioBitrate: [],
+      audioSampleRate: [],
+      quality: [],
+      resolution: [],
+      frameRate: [],
+      other: [],
+    };
+
+    it("returns an empty list for every field, and for other, when there are no issues", () => {
+      expect(groupIssuesByField([])).toStrictEqual(EMPTY_GROUPS);
+    });
+
+    it("puts each issue under the field it names, with the presented message", () => {
       const issues: PresetFieldIssue[] = [
         { field: "name", code: "required" },
         {
@@ -169,28 +205,250 @@ describe("presetPresenter", () => {
         },
       ];
 
-      expect(presentPresetIssues(issues)).toStrictEqual([
-        { id: "name-required-0", key: "settings.field.required" },
-        {
-          id: "quality-outOfRange-1",
-          key: "settings.field.outOfRange",
-          values: { kind: "crf", min: 0, max: 63 },
-        },
+      expect(groupIssuesByField(issues)).toStrictEqual({
+        ...EMPTY_GROUPS,
+        name: [{ key: "settings.field.required" }],
+        quality: [
+          {
+            key: "settings.field.outOfRange",
+            values: { kind: "crf", min: 0, max: 63 },
+          },
+        ],
+      });
+    });
+
+    it("tells the five numeric fields apart: each notInteger message is under its own field", () => {
+      const preset: Preset = {
+        ...basePreset,
+        quality: { kind: "crf", value: Number.NaN },
+        resolution: { w: Number.NaN, h: 1080 },
+        frameRate: { n: 30, d: Number.NaN },
+      };
+      const groups = groupIssuesByField(validatePresetFields(preset));
+
+      const notInteger = [{ key: "settings.field.notInteger" }];
+      expect(groups.quality).toStrictEqual(notInteger);
+      expect(groups.resolution).toStrictEqual(notInteger);
+      expect(groups.frameRate).toStrictEqual(notInteger);
+      expect(groups.other).toStrictEqual([]);
+    });
+
+    it("shows a containerMismatch issue under both the audio encoder and the container", () => {
+      const preset: Preset = { ...basePreset, container: "mov", audioEncoder: "flac" };
+      const groups = groupIssuesByField(validatePresetFields(preset));
+
+      const message = {
+        key: "settings.field.containerMismatch",
+        values: { container: "MOV", encoder: "flac" },
+      };
+      expect(groups.audioEncoder).toStrictEqual([message]);
+      expect(groups.container).toStrictEqual([message]);
+      expect(groups.other).toStrictEqual([]);
+    });
+
+    it("keeps every other audio encoder issue under the audio encoder only", () => {
+      const groups = groupIssuesByField([{ field: "audioEncoder", code: "charset" }]);
+      expect(groups.audioEncoder).toStrictEqual([{ key: "settings.field.charset" }]);
+      expect(groups.container).toStrictEqual([]);
+    });
+
+    it("puts an issue that names no field of the editor under other", () => {
+      // The type allows only known fields. A cast stands for a field that reaches the issues
+      // before the editor has a place for it.
+      const unknown = {
+        field: "subtitleTrack",
+        code: "required",
+      } as unknown as PresetFieldIssue;
+
+      expect(groupIssuesByField([unknown])).toStrictEqual({
+        ...EMPTY_GROUPS,
+        other: [{ key: "settings.field.required" }],
+      });
+    });
+
+    it("does not treat an inherited object property as a field", () => {
+      const inherited = {
+        field: "toString",
+        code: "required",
+      } as unknown as PresetFieldIssue;
+
+      expect(groupIssuesByField([inherited]).other).toStrictEqual([
+        { key: "settings.field.required" },
       ]);
     });
 
-    it("gives two issues sharing field and code distinct ids", () => {
-      const issues: PresetFieldIssue[] = [
+    it("keeps the order of the issues inside one group", () => {
+      const groups = groupIssuesByField([
         { field: "quality", code: "notInteger" },
-        { field: "quality", code: "notInteger" },
-      ];
+        {
+          field: "quality",
+          code: "outOfRange",
+          values: { kind: "crf", min: 0, max: 63 },
+        },
+      ]);
+      expect(groups.quality.map((message) => message.key)).toStrictEqual([
+        "settings.field.notInteger",
+        "settings.field.outOfRange",
+      ]);
+    });
+  });
 
-      const result = presentPresetIssues(issues);
-      expect(result[0].id).not.toBe(result[1].id);
+  describe("presentSaveBlockedSummary", () => {
+    it("returns null when there are no issues", () => {
+      expect(presentSaveBlockedSummary([])).toBeNull();
     });
 
-    it("returns an empty array for no issues", () => {
-      expect(presentPresetIssues([])).toStrictEqual([]);
+    it("counts issues, not messages: a containerMismatch that shows at two fields counts once", () => {
+      const issues: PresetFieldIssue[] = [
+        { field: "name", code: "required" },
+        {
+          field: "audioEncoder",
+          code: "containerMismatch",
+          values: { container: "mov", encoder: "flac" },
+        },
+      ];
+      expect(presentSaveBlockedSummary(issues)).toStrictEqual({
+        key: "settings.preset.saveBlocked",
+        values: { count: 2 },
+      });
+    });
+
+    it.each([
+      ["en", 1, "Fix 1 problem to save."],
+      ["en", 3, "Fix 3 problems to save."],
+      ["zh-CN", 1, "修正 1 个问题后即可保存。"],
+      ["zh-CN", 3, "修正 3 个问题后即可保存。"],
+    ] as const)(
+      "renders the plural form in %s for a count of %i",
+      async (language, count, expected) => {
+        const instance = await createI18nInstance({
+          initialPreference: language,
+          storage: null,
+          systemLanguages: [],
+        });
+        const issues: PresetFieldIssue[] = Array.from({ length: count }, () => ({
+          field: "name",
+          code: "required",
+        }));
+        const summary = presentSaveBlockedSummary(issues);
+        expect(summary).not.toBeNull();
+        const translate = instance.t as unknown as (
+          key: string,
+          options?: Record<string, string | number>,
+        ) => string;
+        expect(translate(summary!.key, summary!.values)).toBe(expected);
+      },
+    );
+  });
+
+  describe("presentResolutionInvalid", () => {
+    const basePreset: Preset = {
+      id: "preset-1",
+      name: "Default Preset",
+      container: "mp4",
+      videoEncoder: "libx264",
+      audioEncoder: "aac",
+      audioSampleRate: "source",
+      audioChannels: "source",
+      quality: { kind: "crf", value: 20 },
+      resolution: { w: 1280, h: 720 },
+      frameRate: "source",
+    };
+
+    function invalidFor(resolution: Preset["resolution"]) {
+      const draft: Preset = { ...basePreset, resolution };
+      return presentResolutionInvalid(draft, validatePresetFields(draft));
+    }
+
+    it("marks neither input when the resolution is valid", () => {
+      expect(invalidFor({ w: 1280, h: 720 })).toStrictEqual({ w: false, h: false });
+    });
+
+    it("marks neither input when the resolution is the source", () => {
+      expect(invalidFor("source")).toStrictEqual({ w: false, h: false });
+    });
+
+    it("marks only the width when the width is blank", () => {
+      expect(invalidFor({ w: Number.NaN, h: 720 })).toStrictEqual({
+        w: true,
+        h: false,
+      });
+    });
+
+    it("marks only the height when the height is out of range", () => {
+      expect(invalidFor({ w: 1280, h: 20_000 })).toStrictEqual({ w: false, h: true });
+    });
+
+    it("marks both inputs when both hold a bad value", () => {
+      expect(invalidFor({ w: 0, h: Number.NaN })).toStrictEqual({ w: true, h: true });
+    });
+
+    it("marks neither input when the issue list holds no resolution issue", () => {
+      const draft: Preset = { ...basePreset, resolution: { w: Number.NaN, h: 720 } };
+      expect(presentResolutionInvalid(draft, [])).toStrictEqual({ w: false, h: false });
+    });
+
+    it("marks both inputs when the issue list names the resolution but neither input fails alone", () => {
+      // Stands for a future rule on the pair as a whole, such as an aspect ratio.
+      const draft: Preset = { ...basePreset, resolution: { w: 1280, h: 720 } };
+      expect(
+        presentResolutionInvalid(draft, [{ field: "resolution", code: "outOfRange" }]),
+      ).toStrictEqual({ w: true, h: true });
+    });
+  });
+
+  describe("presentFrameRateInvalid", () => {
+    const basePreset: Preset = {
+      id: "preset-1",
+      name: "Default Preset",
+      container: "mp4",
+      videoEncoder: "libx264",
+      audioEncoder: "aac",
+      audioSampleRate: "source",
+      audioChannels: "source",
+      quality: { kind: "crf", value: 20 },
+      resolution: "source",
+      frameRate: { n: 30000, d: 1001 },
+    };
+
+    function invalidFor(frameRate: Preset["frameRate"]) {
+      const draft: Preset = { ...basePreset, frameRate };
+      return presentFrameRateInvalid(draft, validatePresetFields(draft));
+    }
+
+    it("marks neither input when the frame rate is valid", () => {
+      expect(invalidFor({ n: 30000, d: 1001 })).toStrictEqual({ n: false, d: false });
+    });
+
+    it("marks neither input when the frame rate is the source", () => {
+      expect(invalidFor("source")).toStrictEqual({ n: false, d: false });
+    });
+
+    it("marks only the denominator when the denominator is blank", () => {
+      expect(invalidFor({ n: 30, d: Number.NaN })).toStrictEqual({ n: false, d: true });
+    });
+
+    it("marks only the numerator when the numerator is zero", () => {
+      expect(invalidFor({ n: 0, d: 1 })).toStrictEqual({ n: true, d: false });
+    });
+
+    it("marks both inputs when both hold a bad value", () => {
+      expect(invalidFor({ n: -1, d: 0 })).toStrictEqual({ n: true, d: true });
+    });
+  });
+
+  describe("joinDescribedBy", () => {
+    it("joins the present ids with one space", () => {
+      expect(joinDescribedBy("a-error", "a-hint")).toBe("a-error a-hint");
+    });
+
+    it("skips false, null, undefined, and the empty string", () => {
+      expect(joinDescribedBy(false, "a-hint", null, undefined, "")).toBe("a-hint");
+    });
+
+    it("returns undefined when no id is present, so the attribute does not render", () => {
+      expect(joinDescribedBy(false, undefined)).toBeUndefined();
+      expect(joinDescribedBy()).toBeUndefined();
     });
   });
 

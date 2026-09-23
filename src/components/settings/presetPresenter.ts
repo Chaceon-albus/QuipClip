@@ -11,7 +11,15 @@ import {
   audioBitrateChoices,
   isLosslessAudioEncoder,
 } from "@/features/settings/audioCodecs";
-import type { PresetFieldIssue } from "@/features/settings/limits";
+import {
+  validatePresetFields,
+  type PresetFieldIssue,
+  type PresetFieldName,
+} from "@/features/settings/limits";
+import {
+  DEFAULT_CUSTOM_FRAME_RATE,
+  DEFAULT_CUSTOM_RESOLUTION,
+} from "@/features/settings/presetDocument";
 import type {
   Preset,
   PresetAudioChannels,
@@ -20,6 +28,7 @@ import type {
   QualityKind,
 } from "@/features/settings/types";
 import { isPresetContainer } from "@/features/settings/validation";
+import type { Rational, Resolution } from "@/types/project";
 import {
   buildEncoderOptions,
   getEncoderAvailability,
@@ -93,25 +102,187 @@ export function presentPresetIssue(issue: PresetFieldIssue): MessageView {
 }
 
 /**
- * Maps a whole `validatePresetFields` result to view models ready for the issues list,
- * attaching a stable, unique React key to each entry the same way `pushDetail` does for
- * `ffmpegStatusPresenter`'s detail entries.
- *
- * `validatePresetFields` reports at most one issue per field, so `field` and `code` alone would
- * already be unique in practice; the index is still folded in so this function has no hidden
- * assumption about that upstream invariant.
+ * A field of the preset editor that can show a validation message: each field that
+ * `validatePresetFields` names, plus `container`. No issue names `container` as its field, but
+ * a `containerMismatch` issue concerns it (see `issueTargets`).
  */
-export function presentPresetIssues(
-  issues: PresetFieldIssue[],
-): Array<{ id: string; key: string; values?: Record<string, string | number> }> {
-  return issues.map((issue, index) => {
-    const presented = presentPresetIssue(issue);
-    const id = `${issue.field}-${issue.code}-${index}`;
-    if (presented.values) {
-      return { id, key: presented.key, values: presented.values };
+export type PresetIssueTarget = PresetFieldName | "container";
+
+/**
+ * The validation messages of a draft, grouped by the field that shows each one.
+ *
+ * `other` holds an issue that names no field of the editor, so that the editor still shows it
+ * in one box below the fields. `validatePresetFields` names a known field in every issue it
+ * makes, so `other` is empty unless a new field reaches the issues before the editor shows it.
+ */
+export type PresetIssueGroups = Record<PresetIssueTarget | "other", MessageView[]>;
+
+/**
+ * Every issue target, once. The `Record` type makes the compiler reject this object when a new
+ * `PresetFieldName` is added and the editor has no place for its messages.
+ */
+const ISSUE_TARGETS: Record<PresetIssueTarget, true> = {
+  name: true,
+  container: true,
+  videoEncoder: true,
+  audioEncoder: true,
+  audioBitrate: true,
+  audioSampleRate: true,
+  quality: true,
+  resolution: true,
+  frameRate: true,
+};
+
+function isIssueTarget(value: string): value is PresetIssueTarget {
+  return Object.prototype.hasOwnProperty.call(ISSUE_TARGETS, value);
+}
+
+/**
+ * The fields that show one issue.
+ *
+ * An issue shows under the field it names. A `containerMismatch` issue names the audio
+ * encoder, but the conflict is between two fields: the container cannot hold that encoder. A
+ * change to either field fixes it, so the issue also shows under `container`.
+ */
+function issueTargets(issue: PresetFieldIssue): PresetIssueTarget[] {
+  const targets: PresetIssueTarget[] = [];
+  if (isIssueTarget(issue.field)) {
+    targets.push(issue.field);
+  }
+  if (issue.code === "containerMismatch" && !targets.includes("container")) {
+    targets.push("container");
+  }
+  return targets;
+}
+
+/**
+ * Groups a `validatePresetFields` result by the editor field that shows each message, so every
+ * message appears at the control it is about (see `issueTargets`). An issue that names no known
+ * field goes to `other`. The order of the issues stays the same inside each group.
+ */
+export function groupIssuesByField(
+  issues: readonly PresetFieldIssue[],
+): PresetIssueGroups {
+  const groups: PresetIssueGroups = {
+    name: [],
+    container: [],
+    videoEncoder: [],
+    audioEncoder: [],
+    audioBitrate: [],
+    audioSampleRate: [],
+    quality: [],
+    resolution: [],
+    frameRate: [],
+    other: [],
+  };
+  for (const issue of issues) {
+    const message = presentPresetIssue(issue);
+    const targets = issueTargets(issue);
+    if (targets.length === 0) {
+      groups.other.push(message);
     }
-    return { id, key: presented.key };
-  });
+    for (const target of targets) {
+      groups[target].push(message);
+    }
+  }
+  return groups;
+}
+
+/**
+ * Presents the short line beside Save that says why Save is off, or `null` when the draft has
+ * no issues.
+ *
+ * `count` is the number of issues, not the number of messages in `groupIssuesByField`: a
+ * `containerMismatch` issue shows under two fields, but it is one problem to fix. The key is a
+ * plural family, so i18next selects the form for the count in each language (ADR 011).
+ */
+export function presentSaveBlockedSummary(
+  issues: readonly PresetFieldIssue[],
+): MessageView | null {
+  if (issues.length === 0) {
+    return null;
+  }
+  return { key: "settings.preset.saveBlocked", values: { count: issues.length } };
+}
+
+/**
+ * Marks the two inputs of a pair field. When neither input fails alone, the pair fails only as
+ * a whole, so both inputs are marked.
+ */
+function markPair(firstFails: boolean, secondFails: boolean): [boolean, boolean] {
+  if (!firstFails && !secondFails) {
+    return [true, true];
+  }
+  return [firstFails, secondFails];
+}
+
+/**
+ * Answers which of the two custom resolution inputs a `resolution` issue is about, so that
+ * only the input with the bad value is marked invalid.
+ *
+ * `validatePresetFields` reports one issue for the width and the height together. This function
+ * validates each input again alone, with the other input set to its value in
+ * `DEFAULT_CUSTOM_RESOLUTION`. The answer thus follows the validation rules and does not
+ * repeat them. Returns `false` for both when there is no `resolution` issue.
+ */
+export function presentResolutionInvalid(
+  draft: Preset,
+  issues: readonly PresetFieldIssue[],
+): { w: boolean; h: boolean } {
+  if (
+    draft.resolution === "source" ||
+    !issues.some((issue) => issue.field === "resolution")
+  ) {
+    return { w: false, h: false };
+  }
+  const { w, h } = draft.resolution;
+  const fails = (resolution: Resolution) =>
+    validatePresetFields({ ...draft, resolution }).some(
+      (issue) => issue.field === "resolution",
+    );
+  const [wFails, hFails] = markPair(
+    fails({ w, h: DEFAULT_CUSTOM_RESOLUTION.h }),
+    fails({ w: DEFAULT_CUSTOM_RESOLUTION.w, h }),
+  );
+  return { w: wFails, h: hFails };
+}
+
+/**
+ * Answers which of the two custom frame rate inputs a `frameRate` issue is about. It works as
+ * `presentResolutionInvalid` does, with `DEFAULT_CUSTOM_FRAME_RATE` for the other input.
+ */
+export function presentFrameRateInvalid(
+  draft: Preset,
+  issues: readonly PresetFieldIssue[],
+): { n: boolean; d: boolean } {
+  if (
+    draft.frameRate === "source" ||
+    !issues.some((issue) => issue.field === "frameRate")
+  ) {
+    return { n: false, d: false };
+  }
+  const { n, d } = draft.frameRate;
+  const fails = (frameRate: Rational) =>
+    validatePresetFields({ ...draft, frameRate }).some(
+      (issue) => issue.field === "frameRate",
+    );
+  const [nFails, dFails] = markPair(
+    fails({ n, d: DEFAULT_CUSTOM_FRAME_RATE.d }),
+    fails({ n: DEFAULT_CUSTOM_FRAME_RATE.n, d }),
+  );
+  return { n: nFails, d: dFails };
+}
+
+/**
+ * Joins the ids of the elements that describe a control into one `aria-describedby` value.
+ * Skips each id that is absent, and returns `undefined` when none is left, so the attribute
+ * does not render at all.
+ */
+export function joinDescribedBy(
+  ...ids: ReadonlyArray<string | false | null | undefined>
+): string | undefined {
+  const present = ids.filter((id): id is string => typeof id === "string" && id !== "");
+  return present.length > 0 ? present.join(" ") : undefined;
 }
 
 /** An encoder option that carries a reason: every availability except "available". */
