@@ -481,6 +481,12 @@ Assets live in fixed places. The icon master is `src/assets/brand/app-icon.svg`.
 `pnpm icons` command regenerates the desktop icon files in `src-tauri/icons/` from that
 SVG. The palette is `src/styles/globals.css`.
 
+The shadcn output in `src/components/ui/` is generated code, but some of its files carry
+hand edits. Each edit has a `QuipClip: hand-edited` comment that gives the reason. A
+regeneration overwrites these edits, so merge them back by hand after one. The shadcn
+registry now emits an import of an extra npm package, so a new primitive is built on the
+`radix-ui` package in `src/components/common/` and is not generated.
+
 ## Build and check
 
 ```bash

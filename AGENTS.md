@@ -23,7 +23,7 @@ Hold TypeScript at 5.9. `typescript-eslint` caps its peer range below 6.1.
 
 ```
 src/            React frontend
-  components/ui/    shadcn output. Generated code.
+  components/ui/    shadcn output. Generated code, with marked hand edits.
   components/       common, export, layout, preview, settings, timeline, transport
   features/         export, ffmpeg, media, playback, settings, timeline
   i18n/             the catalogs and the language resolver
