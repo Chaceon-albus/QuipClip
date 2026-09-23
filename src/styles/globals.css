@@ -159,7 +159,13 @@
 :root {
   /* ---------------------------------------------------------
    * Base
+   *
+   * `color-scheme` tells the web view which native controls and scroll bars to draw.
+   * `src/lib/theme.ts` also writes it on <html>, and that inline value wins over this
+   * rule. The rule is the fallback when no script ran.
    * --------------------------------------------------------- */
+
+  color-scheme: light;
 
   --background: oklch(0.975 0.006 200);
   --foreground: oklch(0.235 0.018 205);
@@ -462,7 +468,11 @@
 .dark {
   /* ---------------------------------------------------------
    * Base
+   *
+   * Each `.dark` scope, such as the always-dark preview, gets dark native controls.
    * --------------------------------------------------------- */
+
+  color-scheme: dark;
 
   --background: oklch(0.145 0.01 210);
   --foreground: oklch(0.925 0.01 200);

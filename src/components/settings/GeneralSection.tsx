@@ -9,11 +9,16 @@ import {
 } from "@/components/ui/select";
 import { createLanguageMenuController } from "@/components/layout/languageMenuController";
 import {
+  themePreferenceStore,
+  useThemePreference,
+} from "@/features/settings/themePreference";
+import {
   isTimecodeFormat,
   timecodePreferenceStore,
   useTimecodePreference,
 } from "@/features/settings/timecodePreference";
 import { getLanguagePreference, type LanguagePreference } from "@/i18n";
+import { isThemePreference } from "@/lib/theme";
 
 /**
  * The General tab of the settings dialog. It holds the settings that belong to the
@@ -24,6 +29,7 @@ export function GeneralSection() {
   return (
     <section className="space-y-4">
       <LanguageField />
+      <AppearanceField />
       <TimecodeField />
     </section>
   );
@@ -81,6 +87,42 @@ function LanguageField() {
           <SelectItem value="system">{t("settings.language.system")}</SelectItem>
           <SelectItem value="en">{t("settings.language.en")}</SelectItem>
           <SelectItem value="zh-CN">{t("settings.language.zhCN")}</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+const { setPreference: setThemePreference } = themePreferenceStore.getState();
+
+/**
+ * The colour theme. Like the language, it lives in web view storage and not in the settings
+ * file. A change applies at once: `main.tsx` connects the store to the document root.
+ */
+function AppearanceField() {
+  const { t } = useTranslation();
+  const triggerId = useId();
+  const preference = useThemePreference((state) => state.preference);
+
+  const handlePreferenceChange = (value: string) => {
+    if (isThemePreference(value)) {
+      setThemePreference(value);
+    }
+  };
+
+  return (
+    <div className="space-y-1">
+      <label htmlFor={triggerId} className="text-xs font-medium text-muted-foreground">
+        {t("settings.appearance.label")}
+      </label>
+      <Select value={preference} onValueChange={handlePreferenceChange}>
+        <SelectTrigger id={triggerId} className="w-64 max-w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="system">{t("settings.appearance.system")}</SelectItem>
+          <SelectItem value="light">{t("settings.appearance.light")}</SelectItem>
+          <SelectItem value="dark">{t("settings.appearance.dark")}</SelectItem>
         </SelectContent>
       </Select>
     </div>

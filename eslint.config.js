@@ -49,6 +49,21 @@ export default tseslint.config(
     },
   },
   {
+    // `public/theme-init.js` runs as a plain script before the application module. It has
+    // no module scope and no type information. An ES5 `catch` must name its error, and
+    // the script ignores that error on purpose.
+    files: ["public/**/*.js"],
+    languageOptions: {
+      sourceType: "script",
+      globals: globals.browser,
+    },
+    extends: [tseslint.configs.disableTypeChecked],
+    rules: {
+      "no-unused-vars": ["error", { caughtErrors: "none" }],
+      "@typescript-eslint/no-unused-vars": ["error", { caughtErrors: "none" }],
+    },
+  },
+  {
     files: ["*.config.{js,ts}", "scripts/**"],
     languageOptions: { globals: globals.node },
     extends: [tseslint.configs.disableTypeChecked],

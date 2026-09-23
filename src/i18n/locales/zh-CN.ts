@@ -225,6 +225,12 @@ export const zhCN: TranslationCatalog = {
       en: "English",
       zhCN: "简体中文",
     },
+    appearance: {
+      label: "外观",
+      system: "系统默认",
+      light: "浅色",
+      dark: "深色",
+    },
     timecode: {
       label: "时间码",
       frames: "帧（HH:MM:SS:FF）",

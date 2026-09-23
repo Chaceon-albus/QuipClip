@@ -240,6 +240,12 @@ export const en = {
       en: "English",
       zhCN: "简体中文",
     },
+    appearance: {
+      label: "Appearance",
+      system: "System Default",
+      light: "Light",
+      dark: "Dark",
+    },
     timecode: {
       label: "Timecode",
       frames: "Frames (HH:MM:SS:FF)",
