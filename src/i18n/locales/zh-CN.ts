@@ -101,10 +101,17 @@ export const zhCN: TranslationCatalog = {
     seekFailed: "跳转到指定位置失败。",
   },
   statusBar: {
-    projectResolution: "项目分辨率：{{width}} × {{height}}",
-    projectResolutionDefault: "项目分辨率：1920 × 1080",
-    sourceNominalRate: "源标称帧率：{{fps}} fps",
-    sourceNominalRateUnavailable: "源标称帧率：—",
+    source: {
+      summary: "{{width}} × {{height}} · {{fps}} fps",
+      summaryNoRate: "{{width}} × {{height}}",
+      resolution: "源分辨率：{{width}} × {{height}}",
+      rateAverage: "标称帧率：{{fps}} fps（avg_frame_rate）",
+      rateReal: "标称帧率：{{fps}} fps（r_frame_rate）",
+      rateUnavailable: "标称帧率：源未报告",
+    },
+    ffmpeg: {
+      settingsHint: "点击打开 FFmpeg 设置。",
+    },
     approximatePosition: "近似位置",
     approximatePositionDetail: "播放头跟随浏览器时钟，而不是精确的帧时间戳。",
     approximatePositionMarks:
@@ -250,11 +257,11 @@ export const zhCN: TranslationCatalog = {
       locating: "正在查找 FFmpeg...",
       probing: "正在探测 FFmpeg（{{done}}/{{total}}）...",
       ready: "FFmpeg {{version}}（{{tested}} 个编码器中 {{working}} 个可用）",
+      readyShort: "FFmpeg {{version}}",
       missing: "未找到 FFmpeg",
       failed: "FFmpeg 探测失败",
     },
     detail: {
-      title: "FFmpeg 详情",
       program: "程序：{{path}}",
       version: "版本：{{version}}",
       searched: "已搜索：{{path}}",

@@ -962,11 +962,11 @@ describe("i18next runtime initialization and fallback behavior", () => {
     expect(instance.t("settings.language.label")).toBe("Language");
     expect(instance.t("transport.action.markOut")).toBe("Out");
     expect(
-      instance.t("statusBar.projectResolution", {
+      instance.t("statusBar.source.resolution", {
         width: 1920,
         height: 1080,
       }),
-    ).toBe("Project Resolution: 1920 × 1080");
+    ).toBe("Source resolution: 1920 × 1080");
   });
 
   it("asynchronously initializes instance and verifies isInitialized state in Simplified Chinese", async () => {
@@ -981,11 +981,11 @@ describe("i18next runtime initialization and fallback behavior", () => {
     expect(instance.t("settings.language.label")).toBe("语言");
     expect(instance.t("transport.action.markOut")).toBe("出点");
     expect(
-      instance.t("statusBar.projectResolution", {
+      instance.t("statusBar.source.resolution", {
         width: 1920,
         height: 1080,
       }),
-    ).toBe("项目分辨率：1920 × 1080");
+    ).toBe("源分辨率：1920 × 1080");
   });
 
   it("actually exercises i18next fallbackLng by switching to an unsupported language and proves failure if fallbackLng is missing", async () => {
@@ -1603,45 +1603,66 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.field.notInteger")).toBe("请输入一个整数。");
   });
 
-  it("formats resolution and frame rate numbers with Intl under resolved locale", async () => {
+  // The frame size is a technical identifier and keeps its plain digits. The frame rate is a
+  // measured quantity and goes through Intl under the resolved locale.
+  it("formats the source summary and its tooltip lines under the resolved locale", async () => {
     const instance = await createI18nInstance({
       initialPreference: "en",
       systemLanguages: [],
     });
 
-    const enFormatter = new Intl.NumberFormat("en");
+    const enFormatter = new Intl.NumberFormat("en", { maximumFractionDigits: 3 });
+    const enRate = enFormatter.format(30000 / 1001);
     expect(
-      instance.t("statusBar.projectResolution", {
-        width: enFormatter.format(1920),
-        height: enFormatter.format(1080),
+      instance.t("statusBar.source.summary", {
+        width: String(1920),
+        height: String(1080),
+        fps: enRate,
       }),
-    ).toBe("Project Resolution: 1,920 × 1,080");
-
+    ).toBe("1920 × 1080 · 29.97 fps");
     expect(
-      instance.t("statusBar.sourceNominalRate", {
-        fps: enFormatter.format(25),
+      instance.t("statusBar.source.summaryNoRate", {
+        width: String(1920),
+        height: String(1080),
       }),
-    ).toBe("Source Nominal Rate: 25 fps");
-    expect(instance.t("statusBar.sourceNominalRateUnavailable")).toBe(
-      "Source Nominal Rate: —",
+    ).toBe("1920 × 1080");
+    expect(
+      instance.t("statusBar.source.resolution", {
+        width: String(1920),
+        height: String(1080),
+      }),
+    ).toBe("Source resolution: 1920 × 1080");
+    expect(instance.t("statusBar.source.rateAverage", { fps: enRate })).toBe(
+      "Nominal frame rate: 29.97 fps (avg_frame_rate)",
+    );
+    expect(instance.t("statusBar.source.rateReal", { fps: enRate })).toBe(
+      "Nominal frame rate: 29.97 fps (r_frame_rate)",
+    );
+    expect(instance.t("statusBar.source.rateUnavailable")).toBe(
+      "Nominal frame rate: not reported by the source",
     );
 
     await instance.changeLanguage("zh-CN");
-    const zhFormatter = new Intl.NumberFormat("zh-CN");
+    const zhFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 3 });
+    const zhRate = zhFormatter.format(30000 / 1001);
 
     expect(
-      instance.t("statusBar.projectResolution", {
-        width: zhFormatter.format(1920),
-        height: zhFormatter.format(1080),
+      instance.t("statusBar.source.summary", {
+        width: String(1920),
+        height: String(1080),
+        fps: zhRate,
       }),
-    ).toBe("项目分辨率：1,920 × 1,080");
-
+    ).toBe("1920 × 1080 · 29.97 fps");
     expect(
-      instance.t("statusBar.sourceNominalRate", {
-        fps: zhFormatter.format(25),
+      instance.t("statusBar.source.resolution", {
+        width: String(1920),
+        height: String(1080),
       }),
-    ).toBe("源标称帧率：25 fps");
-    expect(instance.t("statusBar.sourceNominalRateUnavailable")).toBe("源标称帧率：—");
+    ).toBe("源分辨率：1920 × 1080");
+    expect(instance.t("statusBar.source.rateAverage", { fps: zhRate })).toBe(
+      "标称帧率：29.97 fps（avg_frame_rate）",
+    );
+    expect(instance.t("statusBar.source.rateUnavailable")).toBe("标称帧率：源未报告");
   });
 });
 

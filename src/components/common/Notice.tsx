@@ -30,14 +30,17 @@ const noticeVariants = cva("flex gap-2 rounded-md border p-2.5 text-xs", {
   },
 });
 
-// An icon is not text, so it keeps the base token.
+// An icon is not text, so it needs 3:1, not 4.5:1, against the tinted box. The info,
+// success, and destructive base tokens reach 3:1 in both themes, so those icons keep the
+// base token. The light warning base token reaches only about 2.4:1, so the warning icon
+// takes the `-text` token, which is the same colour as the base token in the dark theme.
 const iconVariants = cva("mt-px size-3.5 shrink-0", {
   variants: {
     tone: {
       neutral: "",
       info: "text-info",
       success: "text-success",
-      warning: "text-warning",
+      warning: "text-warning-text",
       destructive: "text-destructive",
     },
   },

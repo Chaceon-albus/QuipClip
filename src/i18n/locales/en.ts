@@ -98,10 +98,17 @@ export const en = {
     seekFailed: "Failed to seek to the requested position.",
   },
   statusBar: {
-    projectResolution: "Project Resolution: {{width}} × {{height}}",
-    projectResolutionDefault: "Project Resolution: 1920 × 1080",
-    sourceNominalRate: "Source Nominal Rate: {{fps}} fps",
-    sourceNominalRateUnavailable: "Source Nominal Rate: —",
+    source: {
+      summary: "{{width}} × {{height}} · {{fps}} fps",
+      summaryNoRate: "{{width}} × {{height}}",
+      resolution: "Source resolution: {{width}} × {{height}}",
+      rateAverage: "Nominal frame rate: {{fps}} fps (avg_frame_rate)",
+      rateReal: "Nominal frame rate: {{fps}} fps (r_frame_rate)",
+      rateUnavailable: "Nominal frame rate: not reported by the source",
+    },
+    ffmpeg: {
+      settingsHint: "Click to open FFmpeg settings.",
+    },
     approximatePosition: "Approximate position",
     approximatePositionDetail:
       "The playhead follows the browser clock, not the exact frame timestamp.",
@@ -249,11 +256,11 @@ export const en = {
       locating: "Locating FFmpeg...",
       probing: "Probing FFmpeg ({{done}}/{{total}})...",
       ready: "FFmpeg {{version}} ({{working}} of {{tested}} encoders work)",
+      readyShort: "FFmpeg {{version}}",
       missing: "FFmpeg missing",
       failed: "FFmpeg probe failed",
     },
     detail: {
-      title: "FFmpeg Details",
       program: "Program: {{path}}",
       version: "Version: {{version}}",
       searched: "Searched: {{path}}",

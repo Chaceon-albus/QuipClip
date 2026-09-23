@@ -6,7 +6,12 @@ import {
   type FfmpegState,
   type InspectedCandidate,
 } from "@/features/ffmpeg/types";
-import { presentFfmpegStatus } from "./ffmpegStatusPresenter";
+import { en } from "@/i18n/locales/en";
+import {
+  presentFfmpegStatus,
+  SHORT_VERSION_MAX_LENGTH,
+  shortVersion,
+} from "./ffmpegStatusPresenter";
 
 function createFormatters(locale = "en") {
   return {
@@ -44,6 +49,15 @@ describe("presentFfmpegStatus", () => {
       expect(view).toEqual({
         lineKey: "ffmpeg.status.locating",
         lineValues: {},
+        labelKey: "ffmpeg.status.locating",
+        labelValues: {},
+        summary: [
+          {
+            key: "ffmpeg.status.locating",
+            id: "ffmpeg.status.locating#0",
+            mono: false,
+          },
+        ],
         detail: [],
         tone: "neutral",
       });
@@ -56,6 +70,15 @@ describe("presentFfmpegStatus", () => {
       expect(view).toEqual({
         lineKey: "ffmpeg.status.locating",
         lineValues: {},
+        labelKey: "ffmpeg.status.locating",
+        labelValues: {},
+        summary: [
+          {
+            key: "ffmpeg.status.locating",
+            id: "ffmpeg.status.locating#0",
+            mono: false,
+          },
+        ],
         detail: [],
         tone: "neutral",
       });
@@ -78,6 +101,19 @@ describe("presentFfmpegStatus", () => {
           done: "4",
           total: "12",
         },
+        labelKey: "ffmpeg.status.probing",
+        labelValues: {
+          done: "4",
+          total: "12",
+        },
+        summary: [
+          {
+            key: "ffmpeg.status.probing",
+            values: { done: "4", total: "12" },
+            id: "ffmpeg.status.probing#0",
+            mono: false,
+          },
+        ],
         detail: [],
         tone: "neutral",
       });
@@ -152,6 +188,25 @@ describe("presentFfmpegStatus", () => {
         tested: "12",
       });
       expect(view.tone).toBe("ready");
+
+      // The status bar label holds the short version only. The tooltip summary holds the
+      // complete line with the encoder count, and the program path.
+      expect(view.labelKey).toBe("ffmpeg.status.readyShort");
+      expect(view.labelValues).toEqual({ version: "7.1.1" });
+      expect(view.summary).toEqual([
+        {
+          key: "ffmpeg.status.ready",
+          values: { version: "7.1.1", working: "5", tested: "12" },
+          id: "ffmpeg.status.ready#0",
+          mono: false,
+        },
+        {
+          key: "ffmpeg.detail.program",
+          values: { path: "/opt/homebrew/bin/ffmpeg" },
+          id: "ffmpeg.detail.program#1",
+          mono: false,
+        },
+      ]);
 
       expect(view.detail).toEqual([
         {
@@ -425,6 +480,16 @@ describe("presentFfmpegStatus", () => {
         tested: "0",
       });
       expect(view.tone).toBe("warning");
+      expect(view.labelValues).toEqual({ version: "" });
+      // With no program path, the summary holds the status line only.
+      expect(view.summary).toEqual([
+        {
+          key: "ffmpeg.status.ready",
+          values: { version: "", working: "0", tested: "0" },
+          id: "ffmpeg.status.ready#0",
+          mono: false,
+        },
+      ]);
       expect(view.detail).toEqual([
         {
           key: "ffmpeg.detail.license.none",
@@ -442,6 +507,87 @@ describe("presentFfmpegStatus", () => {
           mono: false,
         },
       ]);
+    });
+
+    it("labels a master-branch build with its short version and keeps the complete one elsewhere", () => {
+      const version = "N-121234-g1a2b3c4d5e-20250923";
+      const state: FfmpegState = {
+        ...createBaseState(),
+        status: "ready",
+        version,
+        results: [{ name: "libx264", kind: "video", listed: true, status: "works" }],
+        done: 1,
+        total: 1,
+      };
+
+      const view = presentFfmpegStatus(state, format);
+
+      expect(view.labelValues).toEqual({ version: "N-121234" });
+      expect(view.lineValues.version).toBe(version);
+      expect(view.summary[0]?.values?.version).toBe(version);
+      expect(view.detail).toContainEqual({
+        key: "ffmpeg.detail.version",
+        values: { version },
+        id: "ffmpeg.detail.version#0",
+        mono: false,
+      });
+    });
+  });
+
+  describe("shortVersion", () => {
+    it.each([
+      // A release version has no `-`, so it stays as it is.
+      ["7.1.1", "7.1.1"],
+      ["9.0", "9.0"],
+      // A release-branch build keeps the text before the first `-`.
+      ["n7.1.1-20-g1234567890-20250901", "n7.1.1"],
+      // A distribution package drops its package revision.
+      ["6.1.1-3ubuntu5", "6.1.1"],
+      ["7.1.1-full_build-www.gyan.dev", "7.1.1"],
+      // A master-branch build keeps the marker and its revision number.
+      ["N-121234-g1a2b3c4d5e-20250923", "N-121234"],
+      // A gyan.dev git build starts with a date, and keeps the whole 10-character date.
+      ["2025-09-01-git-5e5a2a7a0c-full_build-www.gyan.dev", "2025-09-01"],
+      ["2025-09-01", "2025-09-01"],
+      // A text that only starts like a date keeps the text before its first `-`.
+      ["2025-9-1-git", "2025"],
+      // A text with no `-` stops at 12 characters.
+      ["abcdefghijklmnopqrstuvwxyz", "abcdefghijkl"],
+      // The text before the first `-` also stops at 12 characters.
+      ["1234567890123456-rc1", "123456789012"],
+      // `N` with no numeric revision after it is kept as it is.
+      ["N-gabcdef", "N"],
+      // An empty text before the first `-` falls back to the start of the whole string.
+      ["-custom", "-custom"],
+      ["  7.1.1  ", "7.1.1"],
+      ["", ""],
+    ])("shortens %j to %j", (version, expected) => {
+      expect(shortVersion(version)).toBe(expected);
+    });
+
+    it("never returns more than SHORT_VERSION_MAX_LENGTH characters", () => {
+      for (const version of [
+        "N-1234567890123-gabc",
+        "x".repeat(40),
+        "-".repeat(40),
+        "2025-09-01-git-5e5a2a7a0c-full_build-www.gyan.dev",
+      ]) {
+        expect(Array.from(shortVersion(version)).length).toBeLessThanOrEqual(
+          SHORT_VERSION_MAX_LENGTH,
+        );
+      }
+    });
+
+    it("returns a prefix of the trimmed version, so the label never shows other text", () => {
+      for (const version of [
+        "7.1.1",
+        "n7.1.1-20-g1234567890-20250901",
+        "N-121234-g1a2b3c4d5e-20250923",
+        "2025-09-01-git-5e5a2a7a0c-full_build-www.gyan.dev",
+        "abcdefghijklmnopqrstuvwxyz",
+      ]) {
+        expect(version.trim().startsWith(shortVersion(version))).toBe(true);
+      }
     });
   });
 
@@ -481,6 +627,20 @@ describe("presentFfmpegStatus", () => {
       expect(view).toEqual({
         lineKey: "ffmpeg.status.missing",
         lineValues: {},
+        labelKey: "ffmpeg.status.missing",
+        labelValues: {},
+        summary: [
+          {
+            key: "ffmpeg.status.missing",
+            id: "ffmpeg.status.missing#0",
+            mono: false,
+          },
+          {
+            key: "ffmpegError.ffmpegPairMissing",
+            id: "ffmpegError.ffmpegPairMissing#1",
+            mono: false,
+          },
+        ],
         detail: [
           {
             key: "ffmpegError.ffmpegPairMissing",
@@ -540,6 +700,20 @@ describe("presentFfmpegStatus", () => {
       expect(view).toEqual({
         lineKey: "ffmpeg.status.missing",
         lineValues: {},
+        labelKey: "ffmpeg.status.missing",
+        labelValues: {},
+        summary: [
+          {
+            key: "ffmpeg.status.missing",
+            id: "ffmpeg.status.missing#0",
+            mono: false,
+          },
+          {
+            key: "ffmpegError.ffmpegPairMissing",
+            id: "ffmpegError.ffmpegPairMissing#1",
+            mono: false,
+          },
+        ],
         detail: [
           {
             key: "ffmpegError.ffmpegPairMissing",
@@ -564,6 +738,20 @@ describe("presentFfmpegStatus", () => {
       expect(view).toEqual({
         lineKey: "ffmpeg.status.missing",
         lineValues: {},
+        labelKey: "ffmpeg.status.missing",
+        labelValues: {},
+        summary: [
+          {
+            key: "ffmpeg.status.missing",
+            id: "ffmpeg.status.missing#0",
+            mono: false,
+          },
+          {
+            key: "ffmpegError.ffmpegPairMissing",
+            id: "ffmpegError.ffmpegPairMissing#1",
+            mono: false,
+          },
+        ],
         detail: [
           {
             key: "ffmpegError.ffmpegPairMissing",
@@ -594,6 +782,20 @@ describe("presentFfmpegStatus", () => {
       expect(view).toEqual({
         lineKey: "ffmpeg.status.missing",
         lineValues: {},
+        labelKey: "ffmpeg.status.missing",
+        labelValues: {},
+        summary: [
+          {
+            key: "ffmpeg.status.missing",
+            id: "ffmpeg.status.missing#0",
+            mono: false,
+          },
+          {
+            key: "ffmpegError.ffmpegPairMissing",
+            id: "ffmpegError.ffmpegPairMissing#1",
+            mono: false,
+          },
+        ],
         detail: [
           {
             key: "ffmpegError.ffmpegPairMissing",
@@ -632,6 +834,20 @@ describe("presentFfmpegStatus", () => {
       expect(view).toEqual({
         lineKey: "ffmpeg.status.failed",
         lineValues: {},
+        labelKey: "ffmpeg.status.failed",
+        labelValues: {},
+        summary: [
+          {
+            key: "ffmpeg.status.failed",
+            id: "ffmpeg.status.failed#0",
+            mono: false,
+          },
+          {
+            key: "ffmpegError.ffmpegSpawnFailed",
+            id: "ffmpegError.ffmpegSpawnFailed#1",
+            mono: false,
+          },
+        ],
         detail: [
           {
             key: "ffmpegError.ffmpegSpawnFailed",
@@ -665,6 +881,20 @@ describe("presentFfmpegStatus", () => {
       expect(view).toEqual({
         lineKey: "ffmpeg.status.failed",
         lineValues: {},
+        labelKey: "ffmpeg.status.failed",
+        labelValues: {},
+        summary: [
+          {
+            key: "ffmpeg.status.failed",
+            id: "ffmpeg.status.failed#0",
+            mono: false,
+          },
+          {
+            key: "ffmpegError.cacheUnavailable",
+            id: "ffmpegError.cacheUnavailable#1",
+            mono: false,
+          },
+        ],
         detail: [
           {
             key: "ffmpegError.cacheUnavailable",
@@ -686,6 +916,12 @@ describe("presentFfmpegStatus", () => {
       expect(presentFfmpegStatus(stateNullError, format)).toEqual({
         lineKey: "ffmpeg.status.failed",
         lineValues: {},
+        labelKey: "ffmpeg.status.failed",
+        labelValues: {},
+        summary: [
+          { key: "ffmpeg.status.failed", id: "ffmpeg.status.failed#0", mono: false },
+          { key: "ffmpegError.unknown", id: "ffmpegError.unknown#1", mono: false },
+        ],
         detail: [
           {
             key: "ffmpegError.unknown",
@@ -709,6 +945,12 @@ describe("presentFfmpegStatus", () => {
       expect(presentFfmpegStatus(stateUnrecognized, format)).toEqual({
         lineKey: "ffmpeg.status.failed",
         lineValues: {},
+        labelKey: "ffmpeg.status.failed",
+        labelValues: {},
+        summary: [
+          { key: "ffmpeg.status.failed", id: "ffmpeg.status.failed#0", mono: false },
+          { key: "ffmpegError.unknown", id: "ffmpegError.unknown#1", mono: false },
+        ],
         detail: [
           {
             key: "ffmpegError.unknown",
@@ -819,5 +1061,38 @@ describe("presentFfmpegStatus", () => {
       // pairwise distinct, so the set of ids is exactly as large as the detail array.
       expect(new Set(ids).size).toBe(view.detail.length);
     });
+  });
+
+  // Every label key must resolve to a non-empty string in the English catalog, so a renamed
+  // or deleted message fails here instead of rendering a raw key in the status bar.
+  describe("label catalog coverage", () => {
+    const statuses: FfmpegState["status"][] = [
+      "idle",
+      "locating",
+      "probing",
+      "ready",
+      "missing",
+      "failed",
+    ];
+
+    it.each(statuses)("resolves the label key of status '%s'", (status) => {
+      const view = presentFfmpegStatus({ ...createBaseState(), status }, format);
+      const [group, subgroup, leaf] = view.labelKey.split(".");
+      expect(group).toBe("ffmpeg");
+      expect(subgroup).toBe("status");
+      const resolved = (en.ffmpeg.status as Record<string, string>)[leaf];
+      expect(typeof resolved).toBe("string");
+      expect(resolved.trim().length).toBeGreaterThan(0);
+    });
+
+    // The tooltip opens with the state in every status, and holds at most two lines.
+    it.each(statuses)(
+      "starts the summary of status '%s' with its status line",
+      (status) => {
+        const view = presentFfmpegStatus({ ...createBaseState(), status }, format);
+        expect(view.summary[0]?.key).toBe(view.lineKey);
+        expect(view.summary.length).toBeLessThanOrEqual(2);
+      },
+    );
   });
 });
