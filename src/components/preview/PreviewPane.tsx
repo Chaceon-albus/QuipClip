@@ -326,8 +326,13 @@ export function PreviewPane() {
       )
     : "00:00:00.000";
 
+  // The preview stays dark in both themes. The `dark` class makes every theme token and
+  // every `dark:` variant inside the section use the dark value, so text, controls and the
+  // styled scrollbars keep their contrast on the dark surface in the light theme.
+  // `scheme-dark` gives native widgets, such as a future `<video controls>`, the dark color
+  // scheme. Tooltips and menus render in a portal under <body>, so they keep the app theme.
   return (
-    <section className="flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground select-none">
+    <section className="dark flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground scheme-dark select-none">
       {/* 16:9 Video Canvas Surface */}
       <div className="relative flex min-h-0 flex-1 items-center justify-center">
         <div className="relative flex aspect-video h-full max-h-full w-auto max-w-full items-center justify-center overflow-hidden rounded-lg border border-preview-border bg-preview-surface shadow-xs">
@@ -340,7 +345,7 @@ export function PreviewPane() {
                   aria-live="polite"
                 >
                   <AlertCircle className="size-6 shrink-0 text-warning" />
-                  <p className="text-xs font-medium text-warning">
+                  <p className="text-xs font-medium text-warning-text">
                     {t("preview.decodeError")}
                   </p>
                 </div>
