@@ -94,6 +94,7 @@
 
   --color-clip-video: var(--clip-video);
   --color-clip-video-hover: var(--clip-video-hover);
+  --color-clip-video-border: var(--clip-video-border);
   --color-clip-video-selected: var(--clip-video-selected);
   --color-clip-video-selected-border: var(--clip-video-selected-border);
   --color-clip-foreground: var(--clip-foreground);
@@ -318,13 +319,24 @@
 
   /* ---------------------------------------------------------
    * Video clips
+   *
+   * A timeline segment is a clip. The track is the part that the export cuts away.
+   *
+   * - The border keeps 3.5:1 against the track, and 3:1 against a hatch line, the
+   *   unselected fill and the hover fill. A segment that lies inside a later one shows
+   *   its outline over that fill.
+   * - The selected fill is the brand colour. It keeps 2.5:1 against the unselected
+   *   fill, and the brand foreground keeps 4.5:1 on it for the label.
+   * - The selected border is the clip colour with the most contrast against the track:
+   *   the darkest in the light theme and the lightest in the dark theme.
    * --------------------------------------------------------- */
 
-  --clip-video: oklch(0.86 0.03 195);
-  --clip-video-hover: oklch(0.82 0.04 193);
+  --clip-video: oklch(0.84 0.035 195);
+  --clip-video-hover: oklch(0.8 0.045 193);
+  --clip-video-border: oklch(0.48 0.06 192);
 
-  --clip-video-selected: oklch(0.78 0.05 191);
-  --clip-video-selected-border: oklch(0.53 0.075 190);
+  --clip-video-selected: var(--primary);
+  --clip-video-selected-border: oklch(0.36 0.06 190);
 
   --clip-foreground: oklch(0.3 0.02 205);
 
@@ -604,9 +616,10 @@
 
   --clip-video: oklch(0.4 0.045 195);
   --clip-video-hover: oklch(0.46 0.06 192);
+  --clip-video-border: oklch(0.74 0.065 192);
 
-  --clip-video-selected: oklch(0.5 0.07 190);
-  --clip-video-selected-border: oklch(0.72 0.085 190);
+  --clip-video-selected: var(--primary);
+  --clip-video-selected-border: oklch(0.88 0.055 190);
 
   --clip-foreground: oklch(0.92 0.01 200);
 

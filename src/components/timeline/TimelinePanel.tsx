@@ -7,7 +7,6 @@ import {
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { Film } from "lucide-react";
 import {
   getGeneratedSourceId,
   getSourceRevisionKey,
@@ -576,15 +575,26 @@ export function TimelinePanel({
                     canSeek={canSeek}
                     scrubHandlers={scrubHandlers}
                   >
-                    {/* Full-source background layer */}
-                    <div className="pointer-events-none absolute inset-0 flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-clip-video p-2 text-clip-foreground shadow-xs">
-                      <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-preview-surface text-preview-muted">
-                        <Film className="size-3.5" />
-                      </div>
-                      <span className="truncate text-xs font-medium">
-                        {media.fileName}
-                      </span>
-                    </div>
+                    {/*
+                     * Full-source background layer. The export cuts away each part of the
+                     * source that no segment covers, so this bar is drawn as excluded: a
+                     * quiet diagonal hatch on the track colour, inside a thin outline. The
+                     * segments above it are solid, so the kept parts read as footage and
+                     * the cut parts do not. The file name is in the title bar.
+                     *
+                     * At a high zoom the bar can be more than a million pixels wide, and
+                     * the playhead above it moves on every frame, so the engine repaints
+                     * parts of the bar often. Two rules keep that repaint cheap:
+                     *
+                     * - The hatch is an 8px tile that repeats, and not one gradient across
+                     *   the bar. 8px is a whole number of device pixels at 125%, 150% and
+                     *   175% scaling. The tile gives 1px lines at a 5.66px period, and its
+                     *   two stripes meet the stripes of the next tiles, so the hatch has no
+                     *   seam.
+                     * - The outline is solid. A dashed border on a bar of that length costs
+                     *   more to paint, and the hatch already marks the bar as cut.
+                     */}
+                    <div className="pointer-events-none absolute inset-0 rounded-lg border border-timeline-divider bg-timeline-track bg-[linear-gradient(135deg,var(--timeline-divider)_0_9%,transparent_9%_50%,var(--timeline-divider)_50%_59%,transparent_59%)] bg-size-[8px_8px]" />
 
                     {/* Pending In region and bracket (see PendingInTrackMarks) */}
                     <PendingInTrackMarks

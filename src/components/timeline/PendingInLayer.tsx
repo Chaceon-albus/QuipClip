@@ -171,6 +171,12 @@ interface PendingInRegionProps extends PendingInLayerProps {
  * `presentedFrame` until the next RVFC callback, so a region drawn from it would disappear
  * on every click, frame step and scrub sample (ADR 022). This is display only: Mark Out and
  * the edit predicates still read `presentedFrame`.
+ *
+ * The region can lie over an existing segment, because a new segment can overlap an old one
+ * (ADR 007). The dashed border is the opaque brand colour, so it keeps 3:1 against the fill
+ * of an unselected segment in the light theme. At 80% opacity it did not. It does not keep
+ * 3:1 against the selected fill, which is also the brand colour. But the region never lies
+ * over the selected segment: while a segment is current, no In mark is pending (ADR 007).
  */
 function PendingInRegion({
   pendingInPts,
@@ -192,7 +198,7 @@ function PendingInRegion({
 
   return (
     <div
-      className="pointer-events-none absolute inset-y-1 z-20 rounded-md border-2 border-dashed border-primary/80 bg-primary/15"
+      className="pointer-events-none absolute inset-y-1 z-20 rounded-md border-2 border-dashed border-primary bg-primary/15"
       style={{
         left: pendingRegion.left,
         width: pendingRegion.width,
