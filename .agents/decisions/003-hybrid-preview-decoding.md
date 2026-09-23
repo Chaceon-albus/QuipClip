@@ -53,6 +53,15 @@ The ffprobe result supplies the container, video codec, profile, pixel format, a
 depth for a native-decode preflight. `canPlayType()` and the `video.error` event check the
 decision at runtime.
 
+(Added on 2026-09-23.) A third runtime signal covers a web view that plays the sound of a file
+but decodes no picture and fires no error, as WebView2 does for HEVC without the codec
+extension. When the element reports a width of 0 at `loadedmetadata` while the probe reports
+a picture, the pane waits before it marks the source ready. A `resize` with a width, or a
+presented frame, proves a picture. After 1.5 seconds, frame data with a width of 0 fails the
+source. With no frame data, the pane waits again, and at 6 seconds it takes the ready path, as
+it did before this check. The failure panel names what failed: the codec, a container that
+the platform does not open, or a file that could not be read.
+
 ### PTS calibration
 
 QuipClip calibrates each preview source when it loads:
