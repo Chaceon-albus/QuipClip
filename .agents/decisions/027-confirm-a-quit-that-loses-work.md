@@ -66,6 +66,12 @@ Opening another video while the open one has segments also asks first: File > Op
 back when the user opens that file again, so the dialog says that. It does not say that
 they are lost.
 
+The dialog does not appear when the chosen file is the file that is already open, compared
+by its path. A pending In point is lost on a replace, so the dialog names it when segments
+also exist. A pending In point alone does not ask, because one key sets it again. If the
+file changed on disk and the user opens it again by the same path, the import makes it a
+new source with no dialog. The old segments do not fit the changed file.
+
 ### What this changes in ADR 017
 
 ADR 017 still cancels a running export on exit and waits at most 5 seconds. The sentence
