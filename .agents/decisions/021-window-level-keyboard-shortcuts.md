@@ -190,12 +190,13 @@ is the fault this record removes.
   `Space` after a click on an edit action starts playback and does not repeat that
   action. A button still takes the focus from the Tab key.
 - The menu of the title bar and the language menu of the status bar no longer open
-  with `Space`. (Later change: the status bar no longer has a language menu. Its gear
-  opens the Settings dialog, and the language choice is in that dialog.) They open with `Enter` and with `ArrowDown`. A trigger that holds
+  with `Space`. They open with `Enter` and with `ArrowDown`. A trigger that holds
   the focus while its menu is closed does not own the keyboard, so `Space` there
   starts playback. Radix returns the focus to the trigger when a menu closes, and
   the earlier rule left the arrow keys dead on that trigger until the user clicked
   somewhere else. That was the same fault this record removes.
+  Later change: the status bar no longer has a language menu. Its gear opens the
+  Settings dialog, and the language choice is in that dialog.
 - `ArrowUp` and `ArrowDown` no longer step a frame. They stepped one only while the
   slider held the focus, and that state is the fault this record removes. Those two
   keys stay with the containers that scroll and with the menus that move a
