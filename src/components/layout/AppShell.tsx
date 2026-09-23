@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { DropOverlay } from "@/components/layout/DropOverlay";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { TitleBar } from "@/components/layout/TitleBar";
 import { startTaskbarProgressSync } from "@/components/layout/taskbarProgressSync";
@@ -38,6 +39,11 @@ export function AppShell() {
          * because the status bar only holds one of its openers.
          */}
         <SettingsDialog />
+        {/*
+         * The one subscription to file drops on the window. The overlay holds the drag state
+         * itself, so a drag renders the overlay and not the whole shell.
+         */}
+        <DropOverlay />
       </div>
     </TooltipProvider>
   );

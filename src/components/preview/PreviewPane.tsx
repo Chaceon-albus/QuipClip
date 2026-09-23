@@ -516,7 +516,8 @@ export function PreviewPane() {
                 </div>
               )}
 
-              {/* Empty state: it says what to do and offers the File menu's Open Media action. */}
+              {/* Empty state: it says what to do, offers the File menu's Open Media action,
+                  and names the drop on the window as the other way to open a video. */}
               {status === "idle" && (
                 <div className="flex flex-col items-center gap-3 p-4 text-center">
                   <div className="grid size-12 place-items-center rounded-xl border border-preview-border bg-preview-background text-preview-muted">
@@ -526,9 +527,10 @@ export function PreviewPane() {
                     {t("preview.empty.title")}
                   </h2>
                   <Button onClick={openMedia}>{t("preview.empty.openVideo")}</Button>
-                  <p className="text-xs text-preview-muted">
-                    {SUPPORTED_VIDEO_FORMATS}
-                  </p>
+                  <div className="flex flex-col items-center gap-1 text-xs text-preview-muted">
+                    <p>{t("preview.empty.dropHint")}</p>
+                    <p>{SUPPORTED_VIDEO_FORMATS}</p>
+                  </div>
                 </div>
               )}
             </>

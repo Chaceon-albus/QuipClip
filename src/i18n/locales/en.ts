@@ -38,11 +38,17 @@ export const en = {
     empty: {
       title: "Open a video to start marking segments",
       openVideo: "Open Video...",
+      dropHint: "or drop a video file here",
     },
     loading: "Loading media...",
     videoPlayerLabel: "Video preview for {{fileName}}",
     decodeError: "Native playback failed. A proxy is required to preview this format.",
     approximate: "Approx.",
+  },
+  fileDrop: {
+    release: "Release to open the video",
+    unsupported: "No supported video file",
+    othersIgnored: "QuipClip opens one file and ignores the others.",
   },
   transport: {
     action: {

@@ -41,11 +41,17 @@ export const zhCN: TranslationCatalog = {
     empty: {
       title: "打开视频，开始标记片段",
       openVideo: "打开视频...",
+      dropHint: "或将视频文件拖到这里",
     },
     loading: "正在加载媒体...",
     videoPlayerLabel: "视频预览：{{fileName}}",
     decodeError: "原生播放失败，预览此格式需要生成代理文件。",
     approximate: "（近似）",
+  },
+  fileDrop: {
+    release: "松开以打开视频",
+    unsupported: "没有可打开的视频文件",
+    othersIgnored: "只打开一个文件，其他文件将被忽略。",
   },
   transport: {
     action: {

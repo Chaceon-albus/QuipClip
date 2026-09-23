@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { openMediaFileDialog, VIDEO_FILE_EXTENSIONS } from "./dialog";
+import {
+  hasVideoFileExtension,
+  openMediaFileDialog,
+  VIDEO_FILE_EXTENSIONS,
+} from "./dialog";
 import { ImportMediaError, type ImportMediaResult } from "./types";
 import type { FrameCount, Pts, TickCount } from "@/types/project";
 
@@ -41,6 +45,44 @@ describe("Media Dialog Orchestration", () => {
       expect(VIDEO_FILE_EXTENSIONS).toContain("mov");
       expect(VIDEO_FILE_EXTENSIONS).toContain("mkv");
       expect(VIDEO_FILE_EXTENSIONS).toContain("webm");
+    });
+  });
+
+  describe("hasVideoFileExtension", () => {
+    it("accepts every extension of the dialog filter", () => {
+      for (const extension of VIDEO_FILE_EXTENSIONS) {
+        expect(hasVideoFileExtension(`/media/clip.${extension}`)).toBe(true);
+      }
+    });
+
+    it("ignores the letter case of the extension", () => {
+      expect(hasVideoFileExtension("/media/CLIP.MP4")).toBe(true);
+      expect(hasVideoFileExtension("/media/clip.WebM")).toBe(true);
+    });
+
+    it("reads the last extension of the name", () => {
+      expect(hasVideoFileExtension("/media/clip.mp4.txt")).toBe(false);
+      expect(hasVideoFileExtension("/media/clip.backup.mov")).toBe(true);
+    });
+
+    it("accepts a Windows path", () => {
+      expect(hasVideoFileExtension("C:\\Users\\me\\Videos\\clip.mkv")).toBe(true);
+      expect(hasVideoFileExtension("C:\\Users\\me\\clip.mp4\\notes")).toBe(false);
+    });
+
+    it("refuses a name with no extension or an unsupported one", () => {
+      expect(hasVideoFileExtension("/media/clip")).toBe(false);
+      expect(hasVideoFileExtension("/media/clip.")).toBe(false);
+      expect(hasVideoFileExtension("/media/clip.txt")).toBe(false);
+      expect(hasVideoFileExtension("")).toBe(false);
+    });
+
+    it("does not read a dot in a directory name as the extension", () => {
+      expect(hasVideoFileExtension("/media/set.mp4/clip")).toBe(false);
+    });
+
+    it("does not read a leading dot as the extension", () => {
+      expect(hasVideoFileExtension("/media/.mp4")).toBe(false);
     });
   });
 

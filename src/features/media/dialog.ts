@@ -25,6 +25,28 @@ export const VIDEO_FILE_EXTENSIONS = [
 ] as const;
 
 /**
+ * Reports whether a file path ends in one of `VIDEO_FILE_EXTENSIONS`, in any letter case.
+ *
+ * This is the same test the file dialog filter applies, so a path that other entry points
+ * accept, such as a file dropped on the window, is one the dialog would also show.
+ *
+ * The test reads the name after the last `/` or `\`, so it accepts a POSIX path and a
+ * Windows path. A name whose only dot is its first character, such as `.mp4`, has no
+ * extension.
+ *
+ * @param path An absolute or relative file path.
+ */
+export function hasVideoFileExtension(path: string): boolean {
+  const name = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) {
+    return false;
+  }
+  const extension = name.slice(dot + 1).toLowerCase();
+  return (VIDEO_FILE_EXTENSIONS as readonly string[]).includes(extension);
+}
+
+/**
  * Options for configuring `openMediaFileDialog`.
  */
 export interface OpenMediaFileDialogOptions {
