@@ -75,6 +75,7 @@ export const zhCN: TranslationCatalog = {
     seekSlider: "时间轴定位",
     segmentList: "时间轴片段",
     segment: "片段 {{index}}",
+    pendingInFlag: "入点",
   },
   mediaError: {
     invalidPath: "所选文件路径无效。",

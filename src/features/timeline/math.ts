@@ -592,11 +592,27 @@ export interface PendingInRegionLayout {
 }
 
 /**
- * Calculates CSS percentage layout properties for a pending In region / preview span.
+ * Calculates CSS percentage layout properties for the pending In region: the span from the
+ * pending In boundary to the displayed playback position.
+ *
+ * `displayedElapsedSeconds` must be the value the playhead is drawn at, which
+ * `getDisplayedElapsedSeconds` gives: the seek target first, then the presented frame, then the
+ * approximate clock (ADR 022). The right edge is clamped and scaled with the same formula as
+ * `calculatePlayheadLayout`, so it meets the playhead. Each seek clears `presentedFrame` until
+ * the next RVFC callback, so a right edge taken from the presented frame would hide the region
+ * on every click, frame step and scrub sample.
+ *
+ * This layout is display only. Mark Out and the edit predicates keep reading `presentedFrame`
+ * (ADR 003), so this function never creates or checks an edit position.
+ *
+ * Returns null when there is no pending In or no usable time axis. Otherwise the region is
+ * visible only when the clamped displayed position lies strictly after the clamped In
+ * boundary. A displayed position at or before the In boundary, or one that is not finite,
+ * gives a hidden region of zero width at the In boundary.
  */
-export function calculatePendingInRegionLayout(
+export function calculatePendingInRegionLayoutFromSeconds(
   pendingInPts: Pts | null | undefined,
-  currentPts: Pts | null | undefined,
+  displayedElapsedSeconds: number | null | undefined,
   videoStartPts: Pts | null | undefined,
   videoTimeBase: Rational | null | undefined,
   totalDurationSeconds: number | null | undefined,
@@ -627,44 +643,33 @@ export function calculatePendingInRegionLayout(
 
   const clampedIn = Math.max(0, Math.min(totalDurationSeconds, inElapsed));
   const leftPercent = (clampedIn / totalDurationSeconds) * 100;
+  const hidden: PendingInRegionLayout = {
+    isVisible: false,
+    leftPercent,
+    widthPercent: 0,
+    left: `${leftPercent}%`,
+    width: "0%",
+  };
 
   if (
-    !currentPts ||
-    !isPtsString(currentPts) ||
-    !isValidSegmentRange(pendingInPts, currentPts)
+    typeof displayedElapsedSeconds !== "number" ||
+    !Number.isFinite(displayedElapsedSeconds)
   ) {
-    return {
-      isVisible: false,
-      leftPercent,
-      widthPercent: 0,
-      left: `${leftPercent}%`,
-      width: "0%",
-    };
+    return hidden;
   }
 
-  const outElapsed = ptsElapsedSeconds(currentPts, videoStartPts, videoTimeBase);
-  if (outElapsed === null) {
-    return {
-      isVisible: false,
-      leftPercent,
-      widthPercent: 0,
-      left: `${leftPercent}%`,
-      width: "0%",
-    };
+  // The same clamp and the same expression as the playhead percent, so the right edge lands
+  // on the playhead. The comparison uses the percentages, so a visible region never has a
+  // width that rounds to zero.
+  const clampedOut = Math.max(
+    0,
+    Math.min(totalDurationSeconds, displayedElapsedSeconds),
+  );
+  const rightPercent = (clampedOut / totalDurationSeconds) * 100;
+  if (rightPercent <= leftPercent) {
+    return hidden;
   }
-
-  const clampedOut = Math.max(0, Math.min(totalDurationSeconds, outElapsed));
-  if (clampedOut <= clampedIn) {
-    return {
-      isVisible: false,
-      leftPercent,
-      widthPercent: 0,
-      left: `${leftPercent}%`,
-      width: "0%",
-    };
-  }
-
-  const widthPercent = ((clampedOut - clampedIn) / totalDurationSeconds) * 100;
+  const widthPercent = rightPercent - leftPercent;
 
   return {
     isVisible: true,

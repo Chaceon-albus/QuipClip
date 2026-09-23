@@ -72,6 +72,7 @@ export const en = {
     seekSlider: "Timeline seek",
     segmentList: "Timeline segments",
     segment: "Segment {{index}}",
+    pendingInFlag: "In",
   },
   mediaError: {
     invalidPath: "The selected file path is invalid.",

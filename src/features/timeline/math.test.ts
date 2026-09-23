@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Pts, Segment, TickCount } from "@/types/project";
+import { getDisplayedElapsedSeconds } from "@/features/playback/presentation";
 import {
-  calculatePendingInRegionLayout,
+  calculatePendingInRegionLayoutFromSeconds,
   calculatePercentFromPts,
   calculatePlayheadLayout,
   calculatePtsFromClientX,
@@ -311,27 +312,6 @@ describe("single-source ruler layout", () => {
     expect(calculatePercentFromPts(pts("0"), pts("-1000"), timeBase, 2)).toBe(50);
   });
 
-  it("shows a pending region only after a distinct later PTS", () => {
-    expect(
-      calculatePendingInRegionLayout(
-        pts("-500"),
-        pts("500"),
-        pts("-1000"),
-        timeBase,
-        2,
-      ),
-    ).toMatchObject({ isVisible: true, leftPercent: 25, widthPercent: 50 });
-    expect(
-      calculatePendingInRegionLayout(
-        pts("-500"),
-        pts("-500"),
-        pts("-1000"),
-        timeBase,
-        2,
-      ),
-    ).toMatchObject({ isVisible: false, widthPercent: 0 });
-  });
-
   it("maps finite clicks to seek-request PTS and rejects unsafe conversions", () => {
     expect(calculatePtsFromClientX(50, 0, 100, 2, pts("-1000"), timeBase)).toBe("0");
     expect(
@@ -346,5 +326,221 @@ describe("single-source ruler layout", () => {
     expect(calculatePlayheadLayout(1, 2)).toEqual({ percent: 50, left: "50%" });
     expect(calculatePlayheadLayout(3, 2)).toEqual({ percent: 100, left: "100%" });
     expect(calculatePlayheadLayout(Number.NaN, 2)).toEqual({ percent: 0, left: "0%" });
+  });
+});
+
+describe("pending In region from the displayed position", () => {
+  const timeBase = { n: 1, d: 1000 };
+  const start = pts("-1000");
+  // The In boundary at PTS -500 is 0.5 s into a 2 s source, so the region starts at 25%.
+  const inPts = pts("-500");
+  const layout = (
+    pendingInPts: Pts | null | undefined,
+    displayedSeconds: number | null | undefined,
+  ) =>
+    calculatePendingInRegionLayoutFromSeconds(
+      pendingInPts,
+      displayedSeconds,
+      start,
+      timeBase,
+      2,
+    );
+  const hiddenAtIn = {
+    isVisible: false,
+    leftPercent: 25,
+    widthPercent: 0,
+    left: "25%",
+    width: "0%",
+  };
+
+  it("spans from the In boundary to a later displayed position", () => {
+    expect(layout(inPts, 1.5)).toEqual({
+      isVisible: true,
+      leftPercent: 25,
+      widthPercent: 50,
+      left: "25%",
+      width: "50%",
+    });
+  });
+
+  it.each([0.6, 1, 1.2345, 1.999, 2, 5])(
+    "ends on the playhead for a displayed position of %s",
+    (displayedSeconds) => {
+      const region = layout(inPts, displayedSeconds);
+      const playhead = calculatePlayheadLayout(displayedSeconds, 2);
+      expect(region).toMatchObject({ isVisible: true });
+      expect(
+        (region?.leftPercent ?? Number.NaN) + (region?.widthPercent ?? Number.NaN),
+      ).toBeCloseTo(playhead.percent, 10);
+    },
+  );
+
+  it("hides the region when the displayed position is exactly at the In boundary", () => {
+    expect(layout(inPts, 0.5)).toEqual(hiddenAtIn);
+  });
+
+  it("shows the region one tick after the In boundary", () => {
+    const region = layout(inPts, 0.501);
+    expect(region).toMatchObject({ isVisible: true, leftPercent: 25, left: "25%" });
+    expect(region?.widthPercent).toBeCloseTo(0.05, 10);
+  });
+
+  it.each([0.499, 0.25, 0, -1])(
+    "hides the region when the displayed position %s is before the In boundary",
+    (displayedSeconds) => {
+      expect(layout(inPts, displayedSeconds)).toEqual(hiddenAtIn);
+    },
+  );
+
+  it.each([
+    null,
+    undefined,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+  ])("hides the region for a displayed position of %s", (displayedSeconds) => {
+    expect(layout(inPts, displayedSeconds)).toEqual(hiddenAtIn);
+  });
+
+  it("clamps the right edge to the ruler extent", () => {
+    expect(layout(inPts, 3)).toEqual({
+      isVisible: true,
+      leftPercent: 25,
+      widthPercent: 75,
+      left: "25%",
+      width: "75%",
+    });
+  });
+
+  it("starts at the left edge for an In boundary at the start of the source", () => {
+    expect(layout(start, 0)).toEqual({
+      isVisible: false,
+      leftPercent: 0,
+      widthPercent: 0,
+      left: "0%",
+      width: "0%",
+    });
+    expect(layout(start, 0.5)).toEqual({
+      isVisible: true,
+      leftPercent: 0,
+      widthPercent: 25,
+      left: "0%",
+      width: "25%",
+    });
+  });
+
+  it("clamps an In boundary outside the ruler extent", () => {
+    // Before the start of the source, the region starts at the left edge.
+    expect(layout(pts("-2000"), 0)).toMatchObject({ isVisible: false, leftPercent: 0 });
+    expect(layout(pts("-2000"), 1)).toEqual({
+      isVisible: true,
+      leftPercent: 0,
+      widthPercent: 50,
+      left: "0%",
+      width: "50%",
+    });
+    // After the end of the source, no clamped displayed position lies after it.
+    expect(layout(pts("1500"), 5)).toEqual({
+      isVisible: false,
+      leftPercent: 100,
+      widthPercent: 0,
+      left: "100%",
+      width: "0%",
+    });
+  });
+
+  it("returns null with no pending In", () => {
+    expect(layout(null, 1.5)).toBeNull();
+    expect(layout(undefined, 1.5)).toBeNull();
+    expect(layout(pts("1.5"), 1.5)).toBeNull();
+  });
+
+  it("returns null with no media timing", () => {
+    expect(
+      calculatePendingInRegionLayoutFromSeconds(inPts, 1.5, null, timeBase, 2),
+    ).toBeNull();
+    expect(
+      calculatePendingInRegionLayoutFromSeconds(inPts, 1.5, undefined, timeBase, 2),
+    ).toBeNull();
+    expect(
+      calculatePendingInRegionLayoutFromSeconds(inPts, 1.5, start, null, 2),
+    ).toBeNull();
+    expect(
+      calculatePendingInRegionLayoutFromSeconds(
+        inPts,
+        1.5,
+        start,
+        { n: 0, d: 1000 },
+        2,
+      ),
+    ).toBeNull();
+  });
+
+  it.each([null, undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "returns null for a ruler extent of %s",
+    (totalDurationSeconds) => {
+      expect(
+        calculatePendingInRegionLayoutFromSeconds(
+          inPts,
+          1.5,
+          start,
+          timeBase,
+          totalDurationSeconds,
+        ),
+      ).toBeNull();
+    },
+  );
+
+  it("stays visible while a seek waits for its RVFC callback", () => {
+    // Each seek clears presentedFrame and sets the seek target (ADR 022). The region follows
+    // the target, as the playhead does, so it does not disappear until the next frame.
+    const displayedSeconds = getDisplayedElapsedSeconds(
+      {
+        seekTargetSeconds: 1.25,
+        presentedFrame: null,
+        calibrationStatus: "ready",
+        approximateBrowserTimeSeconds: 0.25,
+      },
+      start,
+      timeBase,
+    );
+    expect(layout(inPts, displayedSeconds)).toEqual({
+      isVisible: true,
+      leftPercent: 25,
+      widthPercent: 37.5,
+      left: "25%",
+      width: "37.5%",
+    });
+  });
+
+  it("follows the presented frame when no seek is pending", () => {
+    const displayedSeconds = getDisplayedElapsedSeconds(
+      {
+        seekTargetSeconds: null,
+        presentedFrame: frame("500"),
+        calibrationStatus: "ready",
+        approximateBrowserTimeSeconds: 0.25,
+      },
+      start,
+      timeBase,
+    );
+    expect(layout(inPts, displayedSeconds)).toMatchObject({
+      isVisible: true,
+      leftPercent: 25,
+      widthPercent: 50,
+    });
+
+    // Mark In writes the PTS of the presented frame, so the region is hidden directly after it.
+    const atIn = getDisplayedElapsedSeconds(
+      {
+        seekTargetSeconds: null,
+        presentedFrame: frame("-500"),
+        calibrationStatus: "ready",
+        approximateBrowserTimeSeconds: 0.25,
+      },
+      start,
+      timeBase,
+    );
+    expect(layout(inPts, atIn)).toEqual(hiddenAtIn);
   });
 });
