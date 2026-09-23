@@ -152,4 +152,9 @@ one exact seek at the last pointer position. A drag therefore never ends on a ke
 - A drag during playback pauses it. The playback stays paused after the release.
 - The timeline does not scroll when a drag goes past the visible edge. That is a possible
   later step.
-- The pending In region still follows `presentedFrame`, not the target.
+- The pending In region follows the same displayed position as the playhead: the seek
+  target first, then the presented frame. This is a display only. Mark Out and every
+  other edit action still read `presentedFrame`. (Changed on 2026-09-23. Before that,
+  the region followed `presentedFrame`. Each seek sets `presentedFrame` to null until
+  the next frame callback, so the region disappeared on every click and frame step, and
+  it flickered while an arrow key was held.)
