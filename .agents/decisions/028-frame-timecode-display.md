@@ -25,23 +25,39 @@ to the language preference (ADR 011).
 `FF` comes from the nominal frame rate of the source: the average frame rate, else the real
 frame rate, as the status bar uses them.
 
-- `HH:MM:SS` is the whole elapsed seconds, the same as in the millisecond format.
-- `FF` is the frame index inside that second: the fractional part of the elapsed seconds,
-  multiplied by the nominal rate, rounded down. Before the rounding, the display adds half a
-  tick of the source video time base, and at least 1 µs. Containers such as Matroska store
-  each PTS rounded to the millisecond, so at 29.97 fps a frame start can lie up to 0.5 ms
-  before its nominal position. Without the margin, that frame shows the number of the frame
-  before it, and a frame step repeats one number and skips the next. The display still names
-  the frame that contains the time, not the nearest frame, so a seek target in the middle of
-  a frame shows the same number as the frame that answers it.
+The display names the frame that contains the time, by that frame's nominal start:
+
+1. It adds a small margin to the elapsed time (see below).
+2. It finds the frame index `J`: the elapsed time multiplied by the nominal rate, rounded
+   down.
+3. `HH:MM:SS` is the whole seconds of the nominal start of frame `J`, that is `J` divided by
+   the rate, rounded down.
+4. `FF` is `J` minus the index of the first frame that starts in that second.
+
+The margin is at least 1 µs. When the nominal frame interval is not a whole number of ticks
+of the source video time base, the margin is half a tick. Containers such as Matroska store
+each PTS rounded to the millisecond, so at 29.97 fps a frame start can lie up to 0.5 ms
+before its nominal position. Without the margin, that frame shows the number of the frame
+before it, and a frame step repeats one number and skips the next. When the interval is a
+whole number of ticks, as with a time base of 1/25 at 25 fps, the frame starts lie exactly
+on the tick grid, and half a tick could be half a frame. The margin is then only 1 µs.
+
+The display rounds down and never to the nearest frame, so a seek target in the middle of a
+frame shows the same number as the frame that answers it (ADR 022).
+
+At 23.976, 29.97 and 59.94 fps, a frame can start just before a whole second. Inside that
+frame, the frame format still shows the earlier second, while the millisecond format shows
+the new one, for less than one frame interval. A simpler rule that split the elapsed time
+into whole seconds and a fraction first was tested and refused: its frame bins drift
+against the real frames, so it repeats and skips numbers at those rates.
 
 This is a display rule only. No edit, seek or export reads `FF`. A mark still stores the
 PTS of the frame on screen.
 
 For an integer rate such as 24, 25, 30 or 60, `FF` is the same as the non-drop-frame SMPTE
 count. For 23.976, 29.97 and 59.94, `FF` counts frames inside each real second, so the
-display never drifts from the millisecond format. It is not SMPTE drop-frame or
-non-drop-frame timecode.
+display never drifts from the millisecond format by more than one frame. It is not SMPTE
+drop-frame or non-drop-frame timecode.
 
 The millisecond format is used when the source has no nominal frame rate. It is also used
 when the average frame rate and the real frame rate differ, because the source then has a
