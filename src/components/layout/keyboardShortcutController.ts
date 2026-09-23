@@ -2,11 +2,16 @@
  * Pure keyboard shortcut resolver for QuipClip.
  *
  * Implements window-level keyboard shortcut rules without React, DOM, or store dependencies,
- * allowing full deterministic testing in a node environment.
+ * allowing full deterministic testing in a node environment. ADR 021 gives the rules of the
+ * layer. ADR 026 gives the key table, in `shortcutBindings.ts`, and the rule for modifiers.
  */
 
-export type ShortcutAction =
-  "togglePlayback" | "stepBackOneFrame" | "stepForwardOneFrame";
+import {
+  findShortcutBinding,
+  type ShortcutAction,
+  type ShortcutKeyPress,
+  type ShortcutPlatform,
+} from "./shortcutBindings";
 
 /** Tag names whose elements own every key press. Uppercase: Element.tagName is uppercase. */
 export const EDITABLE_TAG_NAMES: readonly string[] = ["INPUT", "TEXTAREA", "SELECT"];
@@ -24,6 +29,17 @@ export const MODAL_LAYER_SELECTOR: string =
   '[role="menu"]:not([data-state="closed"]),' +
   '[role="listbox"]:not([data-state="closed"])';
 
+/**
+ * Selector for a tooltip that is open.
+ *
+ * The shadcn wrapper sets `data-slot="tooltip-content"` on the Radix content element, and
+ * Radix sets `data-state` on that element to `delayed-open`, `instant-open` or `closed`. Radix
+ * keeps a closing tooltip mounted while its exit animation runs, and a tooltip in that state
+ * is already dismissed, so `closed` does not count.
+ */
+export const OPEN_TOOLTIP_SELECTOR: string =
+  '[data-slot="tooltip-content"]:not([data-state="closed"])';
+
 /** Selector naming every container that owns the keyboard while focus is inside it. */
 export const KEYBOARD_OWNER_SELECTOR: string =
   '[role="dialog"],[role="alertdialog"],[role="menu"],[role="menubar"],' +
@@ -38,25 +54,27 @@ export interface ShortcutEventTarget {
   readonly hasAncestorMatching: (selector: string) => boolean;
 }
 
-export interface ShortcutKeyEvent {
-  readonly key: string;
+export interface ShortcutKeyEvent extends ShortcutKeyPress {
   readonly repeat: boolean;
   readonly isComposing: boolean;
   /** Legacy code. 229 marks a key an input method took, which isComposing misses on the first key. */
   readonly keyCode?: number;
-  readonly ctrlKey: boolean;
-  readonly metaKey: boolean;
-  readonly altKey: boolean;
-  readonly shiftKey: boolean;
   readonly defaultPrevented: boolean;
   readonly target: ShortcutEventTarget | null;
   /** True while a modal layer is mounted anywhere in the document. */
   readonly isOverlayOpen: boolean;
+  /** True while a tooltip is open anywhere in the document (`OPEN_TOOLTIP_SELECTOR`). */
+  readonly isTooltipOpen: boolean;
 }
 
-export interface ShortcutCapabilities {
-  readonly hasActiveSource: boolean;
-  readonly hasNominalRate: boolean;
+export interface ShortcutContext {
+  /** The platform that decides what `primary` means. */
+  readonly platform: ShortcutPlatform;
+  /**
+   * Answers whether the action can run now. It must apply the same condition as the control
+   * that performs the action (ADR 026). The resolver asks only for the action it matched.
+   */
+  readonly isActionAvailable: (action: ShortcutAction) => boolean;
 }
 
 export interface ShortcutResolution {
@@ -66,8 +84,15 @@ export interface ShortcutResolution {
   readonly action: ShortcutAction | null;
 }
 
+const NOT_CLAIMED: ShortcutResolution = { claimed: false, action: null };
+const CLAIMED_WITHOUT_ACTION: ShortcutResolution = { claimed: true, action: null };
+
 /**
- * Determines whether a keyboard event is suppressed from triggering window-level shortcuts.
+ * Determines whether the context of a keyboard event keeps it from every window-level
+ * shortcut, whatever the key.
+ *
+ * The modifier rule is not here. ADR 026 replaced the refusal of every modifier with an exact
+ * match against each binding, so the key table decides it (`matchesShortcutModifiers`).
  */
 export function isShortcutSuppressed(event: ShortcutKeyEvent): boolean {
   // 1. This guards only against another listener registered earlier on the window in the
@@ -77,32 +102,26 @@ export function isShortcutSuppressed(event: ShortcutKeyEvent): boolean {
     return true;
   }
 
-  // 2. Modifiers: Ctrl, Meta (Cmd), and Alt represent system, browser, or app-level shortcuts.
-  // Shift is refused ON PURPOSE, to reserve Shift+Arrow for a later multi-frame step and to
-  // keep the modifier test one expression.
-  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) {
-    return true;
-  }
-
-  // 3. IME input methods: Both input-method tests are needed. `isComposing` is false on the
+  // 2. IME input methods: Both input-method tests are needed. `isComposing` is false on the
   // very first keydown that opens a composition in several browser engines, and `keyCode === 229`
   // marks every key the input method consumed.
   if (event.isComposing || event.keyCode === 229) {
     return true;
   }
 
-  // 4. Modal/overlay open: `isOverlayOpen` is deliberately redundant with the ancestor test.
+  // 3. Modal/overlay open: `isOverlayOpen` is deliberately redundant with the ancestor test.
   // It covers the case where a modal is open but focus sits on <body>, which the ancestor test
   // cannot see.
   if (event.isOverlayOpen) {
     return true;
   }
 
-  // 5. Form inputs and focused keyboard owners:
-  // - EDITABLE_TAG_NAMES: Standard text input and select form controls own every key press.
+  // 4. Form inputs and focused keyboard owners:
+  // - EDITABLE_TAG_NAMES: Standard text input and select form controls own every key press,
+  //   including primary+Z, so a text field keeps its own undo.
   // - isContentEditable: Rich-text editable regions own text entry.
   // - KEYBOARD_OWNER_SELECTOR: Containers such as dialogs, menus, and listboxes own
-  //   arrow keys and space for navigation and item selection.
+  //   arrow keys, Home, End, Escape and Space for navigation and item selection.
   if (event.target !== null) {
     if (
       EDITABLE_TAG_NAMES.includes(event.target.tagName) ||
@@ -124,56 +143,46 @@ export function isShortcutSuppressed(event: ShortcutKeyEvent): boolean {
  * thing in the main window regardless of application state — exactly like a disabled button.
  * Merging them into one nullable field would make Space activate whatever button happens to hold
  * focus when no media is open, and not when media is open, which is the state-dependent key
- * meaning this unit removes.
+ * meaning this unit removes. ADR 026 applies the same rule to every binding: when the condition
+ * of the action is false, the layer owns the key press and performs nothing, so the key cannot
+ * go to another handler that the user cannot see.
  *
- * We do NOT claim ArrowUp, ArrowDown, or Home:
- * - Up and down belong to scroll containers and to Radix roving focus (ArrowDown opens a focused dropdown).
- * - Home currently calls seekToPts, which hard-requires a ready calibration and otherwise
- *   PAUSES the element and sets error: "seekFailed" — a global Home under the looser gate would
- *   raise a visible error on every uncalibrated source.
+ * A key press that matches no binding of the table is not claimed. ArrowUp and ArrowDown are
+ * in no binding: they belong to scroll containers and to Radix roving focus (ArrowDown opens a
+ * focused dropdown).
  */
 export function resolveShortcut(
   event: ShortcutKeyEvent,
-  capabilities: ShortcutCapabilities,
+  context: ShortcutContext,
 ): ShortcutResolution {
   if (isShortcutSuppressed(event)) {
-    return { claimed: false, action: null };
+    return NOT_CLAIMED;
   }
 
-  if (event.key === " ") {
-    // Space is claimed to prevent page scroll and prevent accidental button triggers.
-    // A held Space must not toggle thirty times a second, and must still not scroll the page.
-    if (event.repeat) {
-      return { claimed: true, action: null };
-    }
-    return {
-      claimed: true,
-      action: capabilities.hasActiveSource ? "togglePlayback" : null,
-    };
+  const binding = findShortcutBinding(event, context.platform);
+  if (binding === null) {
+    // Every other key, and every modifier combination the table does not name, belongs to
+    // other handlers, to the web view, or to the system.
+    return NOT_CLAIMED;
   }
 
-  if (event.key === "ArrowLeft") {
-    // Repeats pass through unchanged so holding an arrow key steps continuously.
-    return {
-      claimed: true,
-      action:
-        capabilities.hasActiveSource && capabilities.hasNominalRate
-          ? "stepBackOneFrame"
-          : null,
-    };
+  // Radix closes an open tooltip from a keydown listener on the document in the capture phase.
+  // The window listener runs before it, so a claimed Escape would never reach it and no tooltip
+  // could be dismissed from the keyboard (WCAG 1.4.13). The layer lets the key pass, the
+  // tooltip closes, and the next Escape finishes the segment (ADR 026).
+  if (binding.yieldsToOpenTooltip === true && event.isTooltipOpen) {
+    return NOT_CLAIMED;
   }
 
-  if (event.key === "ArrowRight") {
-    // Repeats pass through unchanged so holding an arrow key steps continuously.
-    return {
-      claimed: true,
-      action:
-        capabilities.hasActiveSource && capabilities.hasNominalRate
-          ? "stepForwardOneFrame"
-          : null,
-    };
+  // A "taken" key must not act thirty times a second while it is held, and must still not
+  // reach the page: a held Space would otherwise scroll it. An "acts" key, such as an arrow,
+  // steps on every repeat so that holding it steps continuously.
+  if (event.repeat && binding.repeat === "taken") {
+    return CLAIMED_WITHOUT_ACTION;
   }
 
-  // Every other key belongs to other handlers or default browser behavior.
-  return { claimed: false, action: null };
+  return {
+    claimed: true,
+    action: context.isActionAvailable(binding.action) ? binding.action : null,
+  };
 }

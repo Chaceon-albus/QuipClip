@@ -16,6 +16,15 @@ import {
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  canDeleteSegment,
+  canFinishSegment,
+  canRedoEdit,
+  canStepFrames,
+  canTogglePlayback,
+  canUndoEdit,
+  isSourceActive,
+} from "@/components/layout/actionConditions";
 import { useMediaStore, type MediaStoreState } from "@/features/media";
 import {
   hasNominalFrameRate,
@@ -85,8 +94,9 @@ export function TransportBar() {
   const hasMedia = media !== null;
   // The playback store replaces presentedFrame on every presented frame. Selecting the
   // derived booleans instead of the object keeps this tree off the frame-rate render path.
-  const hasActiveSource = usePlaybackStore(
-    (s) => hasMedia && s.isAttached && s.isReady,
+  // Every condition below is shared with the window keyboard layer (ADR 026).
+  const hasActiveSource = usePlaybackStore((s) =>
+    isSourceActive(hasMedia, s.isAttached, s.isReady),
   );
   const isPlaying = usePlaybackStore((s) => s.isPlaying);
   const togglePlayback = playbackStore.getState().togglePlayback;
@@ -126,15 +136,19 @@ export function TransportBar() {
     ),
   );
 
-  const isUndoDisabled = !hasActiveSource || !canUndo;
-  const isRedoDisabled = !hasActiveSource || !canRedo;
+  const isUndoDisabled = !canUndoEdit(hasActiveSource, canUndo);
+  const isRedoDisabled = !canRedoEdit(hasActiveSource, canRedo);
   const isMarkInDisabled = !isMarkInEnabled;
   const isMarkOutDisabled = !isMarkOutEnabled;
   const isSplitDisabled = !isSplitEnabled;
-  // Nothing is in progress when no segment is current and no In mark is pending.
-  const isNewSegmentDisabled =
-    !hasActiveSource || (currentSegment === null && pendingInPts === null);
-  const isDeleteSegmentDisabled = !hasActiveSource || currentSegment === null;
+  const isNewSegmentDisabled = !canFinishSegment(
+    hasActiveSource,
+    currentSegment,
+    pendingInPts,
+  );
+  const isDeleteSegmentDisabled = !canDeleteSegment(hasActiveSource, currentSegment);
+  const isStepDisabled = !canStepFrames(hasActiveSource, hasNominalRate);
+  const isPlayDisabled = !canTogglePlayback(hasActiveSource);
 
   return (
     <section className="flex h-[72px] shrink-0 items-center justify-center border-y border-border bg-card px-4 select-none">
@@ -306,7 +320,7 @@ export function TransportBar() {
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={!hasActiveSource || !hasNominalRate}
+                disabled={isStepDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={() => seekNominal(-1)}
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -322,7 +336,7 @@ export function TransportBar() {
             <TooltipTrigger asChild>
               <Button
                 size="icon"
-                disabled={!hasActiveSource}
+                disabled={isPlayDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={togglePlayback}
                 className="size-11 rounded-lg bg-primary text-primary-foreground shadow-xs hover:bg-primary-hover active:bg-primary-active"
@@ -349,7 +363,7 @@ export function TransportBar() {
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={!hasActiveSource || !hasNominalRate}
+                disabled={isStepDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={() => seekNominal(1)}
                 className="size-10 text-muted-foreground hover:bg-muted hover:text-foreground"

@@ -17,6 +17,7 @@ import { useExportPanelStore } from "@/features/export";
 import { useMediaStore } from "@/features/media";
 import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
+import { canExportMedia } from "./actionConditions";
 import { runExportFlow } from "./exportFlowController";
 
 export function TitleBar() {
@@ -123,7 +124,7 @@ export function TitleBar() {
         <Button
           size="sm"
           variant="default"
-          disabled={media === null}
+          disabled={!canExportMedia(media !== null)}
           onClick={handleExport}
         >
           <FileOutput />
