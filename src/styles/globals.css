@@ -28,6 +28,9 @@
   --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
+  --color-tooltip: var(--tooltip);
+  --color-tooltip-foreground: var(--tooltip-foreground);
+  --color-tooltip-border: var(--tooltip-border);
 
   --color-primary: var(--primary);
   --color-primary-hover: var(--primary-hover);
@@ -112,6 +115,17 @@
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
 
+  /*
+   * Elevation. These are theme shadows, so `shadow-raised`, `shadow-floating` and
+   * `shadow-dialog` exist. They are inline, so each element reads the `--elevation-*`
+   * value of its own theme scope. The dark theme needs a stronger alpha, because the
+   * default Tailwind shadows are not visible on a dark background. The name is not
+   * `popover`, because `shadow-popover` is also the shadow colour from `--color-popover`.
+   */
+  --shadow-raised: var(--elevation-raised);
+  --shadow-floating: var(--elevation-floating);
+  --shadow-dialog: var(--elevation-dialog);
+
   --animate-progress-flow: progress-flow 1.8s linear infinite;
   --animate-progress-bounce: progress-bounce 1.2s ease-in-out infinite;
   --animate-progress-bounce-flow:
@@ -150,6 +164,28 @@
 
   --popover: oklch(0.995 0.003 195);
   --popover-foreground: oklch(0.235 0.018 205);
+
+  /* ---------------------------------------------------------
+   * Tooltip
+   *
+   * The light theme keeps a dark tooltip. It needs no border.
+   * --------------------------------------------------------- */
+
+  --tooltip: var(--foreground);
+  --tooltip-foreground: var(--background);
+  --tooltip-border: transparent;
+
+  /* ---------------------------------------------------------
+   * Elevation
+   *
+   * raised: a control just above its surface.
+   * floating: menus, select lists and tooltips.
+   * dialog: a modal dialog above its scrim.
+   * --------------------------------------------------------- */
+
+  --elevation-raised: 0 1px 2px rgb(0 0 0 / 0.06);
+  --elevation-floating: 0 4px 12px rgb(0 0 0 / 0.1), 0 1px 3px rgb(0 0 0 / 0.08);
+  --elevation-dialog: 0 16px 48px rgb(0 0 0 / 0.18), 0 4px 12px rgb(0 0 0 / 0.1);
 
   /* ---------------------------------------------------------
    * Brand / Primary
@@ -344,6 +380,27 @@
 
   --popover: oklch(0.185 0.014 205);
   --popover-foreground: oklch(0.925 0.01 200);
+
+  /* ---------------------------------------------------------
+   * Tooltip
+   *
+   * A raised grey with light text, not the inverted near-white block. The border
+   * keeps the tooltip apart from grey controls and from the dark preview.
+   * --------------------------------------------------------- */
+
+  --tooltip: oklch(0.27 0.014 205);
+  --tooltip-foreground: var(--foreground);
+  --tooltip-border: oklch(0.36 0.015 204);
+
+  /* ---------------------------------------------------------
+   * Elevation
+   *
+   * The same geometry as the light theme, with a stronger alpha.
+   * --------------------------------------------------------- */
+
+  --elevation-raised: 0 1px 2px rgb(0 0 0 / 0.5);
+  --elevation-floating: 0 4px 12px rgb(0 0 0 / 0.5), 0 1px 3px rgb(0 0 0 / 0.5);
+  --elevation-dialog: 0 16px 48px rgb(0 0 0 / 0.6), 0 4px 12px rgb(0 0 0 / 0.5);
 
   /* ---------------------------------------------------------
    * Brand / Primary
