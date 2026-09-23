@@ -38,6 +38,15 @@ Rust extends the scope for each file the user opens, with
 `asset_protocol_scope().allow_file(path)`, and for that file only. The application never
 opens the scope to a directory.
 
+(Found on 2026-09-23.) One exception exists, and the application does not cause it. The
+window config sets `dragDropEnabled`, so Tauri takes native file drops. On each drop,
+Tauri 2.11 itself adds every dropped file to the asset scope, and every dropped folder
+recursively, before it sends the drop event to the page (`manager/window.rs`). The scope
+API can add and forbid paths, but it cannot remove an added path. A forbid rule would also
+block a file that the user opens from that folder later. The application therefore
+accepts this grant. The asset protocol serves files only to this web view, and the CSP
+loads no remote script. The grant lasts until the application exits.
+
 ### Decode check
 
 The ffprobe result supplies the container, video codec, profile, pixel format, and bit

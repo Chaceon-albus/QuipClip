@@ -149,7 +149,8 @@ supplies audio and keeps sound and picture together.
 
 The asset protocol is off by default. It needs an entry in `tauri.conf.json`, a `media-src`
 entry in the CSP, and a scope that Rust extends for each file the user opens, and for that
-file only.
+file only. A file drop is the exception: Tauri itself adds every dropped file and
+folder to the scope. ADR 003 records why the application accepts that.
 
 The two target web views decode different codec sets. The planned proxy fallback will use
 probe metadata, `canPlayType()`, and the media error event to detect unsupported native
