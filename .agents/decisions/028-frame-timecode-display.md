@@ -27,7 +27,13 @@ frame rate, as the status bar uses them.
 
 - `HH:MM:SS` is the whole elapsed seconds, the same as in the millisecond format.
 - `FF` is the frame index inside that second: the fractional part of the elapsed seconds,
-  multiplied by the nominal rate, rounded down.
+  multiplied by the nominal rate, rounded down. Before the rounding, the display adds half a
+  tick of the source video time base, and at least 1 µs. Containers such as Matroska store
+  each PTS rounded to the millisecond, so at 29.97 fps a frame start can lie up to 0.5 ms
+  before its nominal position. Without the margin, that frame shows the number of the frame
+  before it, and a frame step repeats one number and skips the next. The display still names
+  the frame that contains the time, not the nearest frame, so a seek target in the middle of
+  a frame shows the same number as the frame that answers it.
 
 This is a display rule only. No edit, seek or export reads `FF`. A mark still stores the
 PTS of the frame on screen.
