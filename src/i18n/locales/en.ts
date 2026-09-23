@@ -117,6 +117,20 @@ export const en = {
     approximatePositionMarks:
       "Mark In, Mark Out, and Split stay unavailable until the exact frame timestamp is known.",
     settings: "Settings",
+    export: {
+      preparing: "Preparing export",
+      running: "Exporting {{percent}}",
+      runningUnknown: "Exporting",
+      remaining: "{{time}} left",
+      publishing: "Finishing",
+      canceling: "Canceling",
+      finished: "Export finished",
+      failed: "Export failed",
+      canceled: "Export canceled",
+      output: "Output: {{name}}",
+      showHint: "Click to show the export window.",
+      dismiss: "Dismiss",
+    },
   },
   settings: {
     title: "Settings",
@@ -305,7 +319,10 @@ export const en = {
     status: {
       preparing: "Preparing export...",
       running: "Exporting...",
-      progress: "Exporting frame {{frame}} of {{expectedFrames}}...",
+      runningPercent: "Exporting... {{percent}}",
+      remaining: "About {{time}} left",
+      frames: "Frame {{frame}} of {{expectedFrames}}",
+      speed: "{{speed}}×",
       publishing: "Finishing...",
       finished: "Export completed successfully.",
       canceled: "Export was canceled.",

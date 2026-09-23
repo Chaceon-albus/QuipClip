@@ -119,6 +119,20 @@ export const zhCN: TranslationCatalog = {
     approximatePositionMarks:
       "在获知精确的帧时间戳之前，标记入点、标记出点和分割保持不可用。",
     settings: "设置",
+    export: {
+      preparing: "正在准备导出",
+      running: "正在导出 {{percent}}",
+      runningUnknown: "正在导出",
+      remaining: "剩余 {{time}}",
+      publishing: "正在完成",
+      canceling: "正在取消",
+      finished: "导出完成",
+      failed: "导出失败",
+      canceled: "导出已取消",
+      output: "输出：{{name}}",
+      showHint: "点击显示导出窗口。",
+      dismiss: "关闭提示",
+    },
   },
   settings: {
     title: "设置",
@@ -305,7 +319,10 @@ export const zhCN: TranslationCatalog = {
     status: {
       preparing: "正在准备导出...",
       running: "正在导出...",
-      progress: "正在导出第 {{frame}} 帧，共 {{expectedFrames}} 帧...",
+      runningPercent: "正在导出... {{percent}}",
+      remaining: "剩余约 {{time}}",
+      frames: "{{frame}} / {{expectedFrames}} 帧",
+      speed: "{{speed}}×",
       publishing: "正在完成...",
       finished: "导出已成功完成。",
       canceled: "导出已取消。",

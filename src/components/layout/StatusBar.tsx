@@ -30,6 +30,7 @@ import {
   type FfmpegStatusView,
 } from "./ffmpegStatusPresenter";
 import { createLanguageMenuController } from "./languageMenuController";
+import { ExportStatusIndicator } from "./ExportStatusIndicator";
 import {
   presentPlaybackHint,
   selectCalibrationStatus,
@@ -238,6 +239,7 @@ export function StatusBar() {
 
       {/* Right: Settings button and Language dropdown menu */}
       <div className="flex items-center">
+        <ExportStatusIndicator />
         <DropdownMenu>
           <Tooltip>
             <TooltipTrigger asChild>

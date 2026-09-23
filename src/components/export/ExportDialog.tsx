@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useShallow } from "zustand/react/shallow";
 import { XIcon } from "lucide-react";
+import { ProgressBar } from "@/components/common/ProgressBar";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -24,6 +26,7 @@ import {
   resolveExportDismissal,
 } from "./exportCancelState";
 import { presentExportError } from "./exportErrorPresenter";
+import { formatRemaining, presentExportProgress } from "./exportProgressPresenter";
 import { presentSetupBlocker, resolveSetupPresetId } from "./exportSetupPresenter";
 
 export interface ExportDialogProps {
@@ -48,38 +51,135 @@ export interface ExportDialogProps {
 }
 
 /**
- * Progress readout for a running export.
+ * Progress readout for an active export.
  *
- * `frame` is written once per drained ffmpeg `-progress` block, so it changes many times
- * per second for the whole encode. It is subscribed HERE, in a leaf, rather than in
+ * `frame`, `fps`, and `speed` are written once per drained ffmpeg `-progress` block, so they change
+ * many times per second for the whole encode. They are subscribed HERE, in a leaf, rather than in
  * `ExportDialog`, so a progress write re-renders this element alone instead of the whole
  * Radix dialog subtree. The observable output is identical.
  */
-function ExportProgress({ formatter }: { formatter: Intl.NumberFormat }) {
-  const { t } = useTranslation();
-  const frame = useExportStore((state) => state.frame);
-  const expectedFrames = useExportStore((state) => state.expectedFrames);
+function ExportProgress() {
+  const { t, i18n } = useTranslation();
+  const exportData = useExportStore(
+    useShallow((state) => ({
+      status: state.status,
+      frame: state.frame,
+      expectedFrames: state.expectedFrames,
+      fps: state.fps,
+      speed: state.speed,
+      cancelRequested: state.cancelRequested,
+    })),
+  );
+
+  const view = presentExportProgress(exportData);
+  const resolvedLanguage = getResolvedLanguage(i18n);
+
+  const percentFormatter = useMemo(
+    () =>
+      new Intl.NumberFormat(resolvedLanguage, {
+        style: "percent",
+        maximumFractionDigits: 0,
+      }),
+    [resolvedLanguage],
+  );
+
+  const frameFormatter = useMemo(
+    () => new Intl.NumberFormat(resolvedLanguage),
+    [resolvedLanguage],
+  );
+
+  const speedFormatter = useMemo(
+    () =>
+      new Intl.NumberFormat(resolvedLanguage, {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }),
+    [resolvedLanguage],
+  );
+
+  if (!view) {
+    return null;
+  }
+
+  let title = "";
+  switch (view.phase) {
+    case "canceling":
+      title = t("export.status.canceling");
+      break;
+    case "preparing":
+      title = t("export.status.preparing");
+      break;
+    case "publishing":
+      title = t("export.status.publishing");
+      break;
+    case "running":
+      title =
+        view.percentFraction !== null
+          ? t("export.status.runningPercent", {
+              percent: percentFormatter.format(view.percentFraction),
+            })
+          : t("export.status.running");
+      break;
+  }
+
+  const remaining =
+    view.remainingSeconds !== null
+      ? t("export.status.remaining", {
+          time: formatRemaining(view.remainingSeconds),
+        })
+      : null;
+
+  let detail: string | null = null;
+  if (view.basePhase === "running") {
+    const parts: string[] = [];
+    if (view.frame !== null && view.expectedFrames !== null) {
+      parts.push(
+        t("export.status.frames", {
+          frame: frameFormatter.format(view.frame),
+          expectedFrames: frameFormatter.format(view.expectedFrames),
+        }),
+      );
+    }
+    if (view.speed !== null) {
+      parts.push(
+        t("export.status.speed", {
+          speed: speedFormatter.format(view.speed),
+        }),
+      );
+    }
+    if (parts.length > 0) {
+      detail = parts.join(" · ");
+    }
+  }
+
+  let cancelNote: string | null = null;
+  if (view.phase === "canceling") {
+    if (view.basePhase === "running") {
+      cancelNote = t("export.status.cancelingNote");
+    } else if (view.basePhase === "publishing") {
+      cancelNote = t("export.status.cancelingNotePublishing");
+    }
+  }
 
   return (
-    <div className="space-y-3 py-2">
-      <div className="text-sm text-muted-foreground">
-        {frame !== null && expectedFrames !== null
-          ? t("export.status.progress", {
-              frame: formatter.format(frame),
-              expectedFrames: formatter.format(expectedFrames),
-            })
-          : t("export.status.running")}
+    <div className="space-y-2 py-2">
+      <div className="flex items-baseline justify-between gap-4 text-sm">
+        <span>{title}</span>
+        {remaining && (
+          <span className="text-muted-foreground tabular-nums">{remaining}</span>
+        )}
       </div>
-      {frame !== null && expectedFrames !== null && expectedFrames > 0 && (
-        <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
-          <div
-            className="h-full bg-primary transition-all duration-150"
-            style={{
-              width: `${Math.min(100, Math.max(0, (frame / expectedFrames) * 100))}%`,
-            }}
-          />
-        </div>
+      <ProgressBar
+        size="md"
+        value={view.barValue}
+        flowing={view.phase !== "canceling"}
+        aria-label={t("export.title")}
+        aria-valuetext={title}
+      />
+      {detail && (
+        <div className="text-xs text-muted-foreground tabular-nums">{detail}</div>
       )}
+      {cancelNote && <p className="text-xs text-muted-foreground/80">{cancelNote}</p>}
     </div>
   );
 }
@@ -90,7 +190,7 @@ export function ExportDialog({
   onExportAnyway,
   onReimport,
 }: ExportDialogProps) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   // Holds the preset id requested by the user during the setup step. When null, the dialog
   // falls back to the settings activePresetId or first preset (ADR 024).
   const [requestedPresetId, setRequestedPresetId] = useState<string | null>(null);
@@ -118,12 +218,6 @@ export function ExportDialog({
   const isActive = dismissal === "hide";
   const canceling = isCancelOutstanding({ status, cancelRequested });
   const cancelEnabled = isCancelEnabled({ status, runId, cancelRequested });
-
-  const resolvedLanguage = getResolvedLanguage(i18n);
-  const numberFormatter = useMemo(
-    () => new Intl.NumberFormat(resolvedLanguage),
-    [resolvedLanguage],
-  );
 
   const errorView = presentExportError(error);
 
@@ -226,48 +320,16 @@ export function ExportDialog({
         ) : null;
 
       case "preparing":
-        return (
-          <div className="py-2 text-sm text-muted-foreground">
-            {canceling ? t("export.status.canceling") : t("export.status.preparing")}
-          </div>
-        );
-
       case "running":
-        if (canceling) {
-          return (
-            <div className="space-y-2 py-2 text-sm text-muted-foreground">
-              <div>{t("export.status.canceling")}</div>
-              <p className="text-xs text-muted-foreground/80">
-                {t("export.status.cancelingNote")}
-              </p>
-            </div>
-          );
-        }
-        return <ExportProgress formatter={numberFormatter} />;
-
       case "publishing":
-        if (canceling) {
-          return (
-            <div className="space-y-2 py-2 text-sm text-muted-foreground">
-              <div>{t("export.status.canceling")}</div>
-              <p className="text-xs text-muted-foreground/80">
-                {t("export.status.cancelingNotePublishing")}
-              </p>
-            </div>
-          );
-        }
-        return (
-          <div className="py-2 text-sm text-muted-foreground">
-            {t("export.status.publishing")}
-          </div>
-        );
+        return <ExportProgress />;
 
       case "finished":
         return (
           <div className="py-2">
             <div
               role="status"
-              className="rounded-md border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-400"
+              className="rounded-md border border-success/20 bg-success/10 p-3 text-sm text-success"
             >
               {t("export.status.finished")}
             </div>
