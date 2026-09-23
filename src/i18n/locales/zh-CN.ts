@@ -126,6 +126,11 @@ export const zhCN: TranslationCatalog = {
   },
   settings: {
     title: "设置",
+    tab: {
+      general: "常规",
+      ffmpeg: "FFmpeg",
+      presets: "导出预设",
+    },
     resetDamaged: "重置设置",
     resetDamagedHint:
       "无法读取设置文件。重置会将其重命名为 settings.invalid.json，然后写入全新的默认设置。",

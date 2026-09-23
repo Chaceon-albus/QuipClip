@@ -1,35 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { useFfmpegStore } from "@/features/ffmpeg";
 import { useMediaStore } from "@/features/media";
 import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
-import {
-  getLanguagePreference,
-  getResolvedLanguage,
-  type LanguagePreference,
-} from "@/i18n";
+import { useSettingsPanelStore } from "@/features/settings/panelStore";
+import { getResolvedLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
 import {
   presentFfmpegStatus,
   selectFfmpegState,
   type FfmpegStatusView,
 } from "./ffmpegStatusPresenter";
-import { createLanguageMenuController } from "./languageMenuController";
 import { ExportStatusIndicator } from "./ExportStatusIndicator";
 import {
   presentPlaybackHint,
@@ -54,33 +39,8 @@ const toneClasses: Record<StatusBarTone, string> = {
 export function StatusBar() {
   const { t, i18n } = useTranslation();
   const media = useMediaStore((state) => state.media);
-  const [preference, setPreference] = useState<LanguagePreference>(() =>
-    getLanguagePreference(),
-  );
-  const [settingsOpen, setSettingsOpen] = useState(false);
-
-  const controller = useMemo(
-    () =>
-      createLanguageMenuController({
-        instance: i18n,
-        initialPreference: getLanguagePreference(),
-        onPreferenceChange: setPreference,
-      }),
-    [i18n],
-  );
-
-  // Sync preference state when i18n language changes externally
-  useEffect(() => {
-    controller.activate();
-    const handleLanguageChanged = () => {
-      controller.handleLanguageChanged();
-    };
-    i18n.on("languageChanged", handleLanguageChanged);
-    return () => {
-      i18n.off("languageChanged", handleLanguageChanged);
-      controller.deactivate();
-    };
-  }, [i18n, controller]);
+  const settingsOpen = useSettingsPanelStore((state) => state.open);
+  const showSettings = useSettingsPanelStore((state) => state.show);
 
   const probeStartedRef = useRef(false);
   const ffmpeg = useFfmpegStore(useShallow(selectFfmpegState));
@@ -94,10 +54,6 @@ export function StatusBar() {
     probeStartedRef.current = true;
     void startProbe();
   }, [startProbe]);
-
-  const handleLanguageChange = (value: string) => {
-    void controller.requestPreference(value);
-  };
 
   const resolvedLanguage = getResolvedLanguage(i18n);
 
@@ -239,62 +195,38 @@ export function StatusBar() {
         )}
       </div>
 
-      {/* Right: Settings button and Language dropdown menu */}
+      {/* Right: Export indicator and the Settings button */}
       <div className="flex items-center">
         <ExportStatusIndicator />
         {/*
          * Status bar sizing rule: a standalone icon button is a 24px box with a 16px glyph,
          * and an icon inline with text is 14px. The 24px controls fit the 28px bar without
          * making it taller. The dark: and aria-expanded: overrides replace the ghost
-         * variant's neutral colours, so hover and the open menu use the sidebar accent in
+         * variant's neutral colours, so hover and the open dialog use the sidebar accent in
          * both themes, like the export indicator next to this button.
+         *
+         * The button opens the settings dialog directly. The dialog is mounted in AppShell,
+         * so this button is not a Radix DialogTrigger and sets the two attributes that a
+         * DialogTrigger would set.
          */}
-        <DropdownMenu>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  className="text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent aria-expanded:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent"
-                  aria-label={t("statusBar.settings")}
-                >
-                  <Settings className="size-4" strokeWidth={1.75} />
-                </Button>
-              </DropdownMenuTrigger>
-            </TooltipTrigger>
-            <TooltipContent>{t("statusBar.settings")}</TooltipContent>
-          </Tooltip>
-
-          <DropdownMenuContent
-            align="end"
-            side="top"
-            sideOffset={6}
-            className="min-w-44"
-          >
-            <DropdownMenuLabel>{t("settings.language.label")}</DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuRadioGroup
-              value={preference}
-              onValueChange={handleLanguageChange}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent aria-expanded:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent"
+              aria-label={t("statusBar.settings")}
+              aria-haspopup="dialog"
+              aria-expanded={settingsOpen}
+              onClick={() => {
+                showSettings();
+              }}
             >
-              <DropdownMenuRadioItem value="system">
-                {t("settings.language.system")}
-              </DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="en">
-                {t("settings.language.en")}
-              </DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="zh-CN">
-                {t("settings.language.zhCN")}
-              </DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
-              {t("settings.title")}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+              <Settings className="size-4" strokeWidth={1.75} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{t("statusBar.settings")}</TooltipContent>
+        </Tooltip>
       </div>
     </footer>
   );

@@ -124,6 +124,11 @@ export const en = {
   },
   settings: {
     title: "Settings",
+    tab: {
+      general: "General",
+      ffmpeg: "FFmpeg",
+      presets: "Export Presets",
+    },
     resetDamaged: "Reset Settings",
     resetDamagedHint:
       "The settings file cannot be read. A reset renames it to settings.invalid.json and writes fresh defaults.",

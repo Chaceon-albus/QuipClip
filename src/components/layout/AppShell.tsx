@@ -4,6 +4,7 @@ import { TitleBar } from "@/components/layout/TitleBar";
 import { startTaskbarProgressSync } from "@/components/layout/taskbarProgressSync";
 import { useKeyboardShortcuts } from "@/components/layout/useKeyboardShortcuts";
 import { PreviewPane } from "@/components/preview/PreviewPane";
+import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { TimelinePanel } from "@/components/timeline/TimelinePanel";
 import { TransportBar } from "@/components/transport/TransportBar";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -31,6 +32,12 @@ export function AppShell() {
           onApproximateSeek={seekApproximate}
         />
         <StatusBar />
+        {/*
+         * The one mount of the settings dialog. The settings panel store opens it, so any
+         * component can open it on a given tab. It is mounted here and not in the status bar,
+         * because the status bar only holds one of its openers.
+         */}
+        <SettingsDialog />
       </div>
     </TooltipProvider>
   );
