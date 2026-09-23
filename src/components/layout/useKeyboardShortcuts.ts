@@ -13,6 +13,7 @@ import {
   type ShortcutEventTarget,
   type ShortcutKeyEvent,
 } from "./keyboardShortcutController";
+import { quitGuard } from "./quitGuardController";
 import { getShortcutPlatform } from "./shortcutBindings";
 import {
   planShortcutCommand,
@@ -58,8 +59,11 @@ function runShortcutCommand(command: ShortcutCommand): void {
       timeline.redo();
       return;
     case "openMedia":
-      // The call of the Open Media item of the title bar menu.
-      void openMediaFileDialog({ filterName: i18n.t("dialog.videoFilter") });
+      // The call of the Open Media item of the title bar menu (`useOpenMediaAction`).
+      void openMediaFileDialog({
+        filterName: i18n.t("dialog.videoFilter"),
+        importPath: quitGuard.requestOpen,
+      });
       return;
     case "export":
       // The call of the Export button of the title bar.

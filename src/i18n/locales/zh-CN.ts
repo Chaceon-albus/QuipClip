@@ -51,6 +51,27 @@ export const zhCN: TranslationCatalog = {
     unsupported: "没有可打开的视频文件",
     othersIgnored: "只打开一个文件，其他文件将被忽略。",
   },
+  quitGuard: {
+    quit: {
+      title: "退出 QuipClip？",
+      confirm: "退出",
+    },
+    replace: {
+      title: "替换已打开的视频？",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      segments_other:
+        "已标记的 {{count}} 个片段会保留在当前视频中，重新打开该视频即可看到。",
+      confirm: "替换",
+    },
+    loss: {
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      segments_other: "已标记的 {{count}} 个片段将丢失。",
+      pendingIn: "待定的入点将丢失。",
+      export: "导出将停止。",
+      preset: "对“{{name}}”的未保存更改将丢失。",
+      presetUnnamed: "预设的未保存更改将丢失。",
+    },
+  },
   transport: {
     action: {
       undo: "撤销",

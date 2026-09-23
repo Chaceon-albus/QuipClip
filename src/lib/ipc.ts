@@ -22,6 +22,7 @@ export const BACKEND_COMMANDS = {
   START_EXPORT: "start_export",
   CANCEL_EXPORT: "cancel_export",
   CANCEL_ACTIVE_EXPORT: "cancel_active_export",
+  CONFIRM_QUIT: "confirm_quit",
 } as const;
 
 export type BackendCommand = (typeof BACKEND_COMMANDS)[keyof typeof BACKEND_COMMANDS];
@@ -32,6 +33,8 @@ export type BackendCommand = (typeof BACKEND_COMMANDS)[keyof typeof BACKEND_COMM
 export const BACKEND_EVENTS = {
   CAPABILITY_PROBE: "ffmpeg:capability-probe",
   EXPORT_PROGRESS: "export:progress",
+  /** An application exit that Rust held back until the frontend decides (ADR 027). */
+  QUIT_REQUESTED: "app:quit-requested",
 } as const;
 
 export type BackendEvent = (typeof BACKEND_EVENTS)[keyof typeof BACKEND_EVENTS];

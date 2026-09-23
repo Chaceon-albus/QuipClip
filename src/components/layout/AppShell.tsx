@@ -1,9 +1,11 @@
 import { useEffect } from "react";
 import { DropOverlay } from "@/components/layout/DropOverlay";
+import { QuitGuardDialog } from "@/components/layout/QuitGuardDialog";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { TitleBar } from "@/components/layout/TitleBar";
 import { startTaskbarProgressSync } from "@/components/layout/taskbarProgressSync";
 import { useKeyboardShortcuts } from "@/components/layout/useKeyboardShortcuts";
+import { useQuitGuard } from "@/components/layout/useQuitGuard";
 import { startWindowTitleSync } from "@/components/layout/windowTitleSync";
 import { PreviewPane } from "@/components/preview/PreviewPane";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
@@ -14,6 +16,8 @@ import { usePlaybackStore } from "@/features/playback";
 
 export function AppShell() {
   useKeyboardShortcuts();
+  // Every close request and every held-back exit request runs the quit decision (ADR 027).
+  useQuitGuard();
 
   // Mirror the export progress on the Dock and the task bar (ADR 025).
   useEffect(() => startTaskbarProgressSync(), []);
@@ -47,6 +51,11 @@ export function AppShell() {
          * itself, so a drag renders the overlay and not the whole shell.
          */}
         <DropOverlay />
+        {/*
+         * The one mount of the quit guard dialog. Its portal opens after any dialog that is
+         * already open, so it draws above a settings dialog that holds an unsaved draft.
+         */}
+        <QuitGuardDialog />
       </div>
     </TooltipProvider>
   );

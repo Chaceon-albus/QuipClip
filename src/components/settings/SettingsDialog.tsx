@@ -133,6 +133,15 @@ export function SettingsDialog() {
   // Set by Cancel and read by the effect below, after the footer shows the Close button again.
   const cancelledPromptRef = useRef<ClosePrompt | null>(null);
 
+  // A quit drops the draft, so the quit guard reads it from the panel store (ADR 027).
+  const unsavedPresetName = presetDraft.dirty ? (presetDraft.presetName ?? "") : null;
+  useEffect(() => {
+    settingsPanelStore.getState().setUnsavedPresetName(unsavedPresetName);
+    return () => {
+      settingsPanelStore.getState().setUnsavedPresetName(null);
+    };
+  }, [unsavedPresetName]);
+
   const unsavedPrompt =
     closePrompt === null ? null : presentUnsavedDraftPrompt(presetDraft);
 

@@ -7,6 +7,7 @@ import {
   type DroppedPathsClassification,
 } from "./fileDropPresenter";
 import { MODAL_LAYER_SELECTOR } from "./keyboardShortcutController";
+import { quitGuard } from "./quitGuardController";
 
 /**
  * True when a drop must not open a file: a modal layer is open, or an import is loading.
@@ -25,9 +26,10 @@ function isFileDropBlocked(): boolean {
  * Opens a video that the user drops on the window, and returns what the drop overlay shows.
  *
  * The hook subscribes once to the drag-drop events of the Tauri web view. A drop opens the
- * file through `importPath` of the media store, which is the call the Open Media dialog makes
+ * file through `requestOpen` of the quit guard, which is the call the Open Media dialog makes
  * after the user picks a file. The drop therefore replaces an open source exactly as the
- * dialog does, and the import validates the file in the same way.
+ * dialog does: it asks first when the open source has segments (ADR 027), and the import
+ * validates the file in the same way.
  *
  * @returns The classification the overlay shows, or null when the overlay is hidden.
  */
@@ -49,7 +51,7 @@ export function useFileDropOpen(): DroppedPathsClassification | null {
         dragged = step.dragged;
         setOverlay(step.overlay);
         if (step.openPath !== null) {
-          void mediaStore.getState().importPath(step.openPath);
+          void quitGuard.requestOpen(step.openPath);
         }
       });
     } catch {

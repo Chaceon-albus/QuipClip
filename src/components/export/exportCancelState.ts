@@ -10,6 +10,16 @@ import type { ExportStatus } from "@/features/export";
 export type ExportDismissal = "hide" | "close";
 
 /**
+ * True while a run is active: preparing, running, or publishing, with or without a run id.
+ *
+ * A dismissal of the export dialog hides it in these statuses (ADR 025), and a quit in
+ * these statuses asks first, because it stops the run (ADR 027).
+ */
+export function isExportRunActive(status: ExportStatus): boolean {
+  return status === "preparing" || status === "running" || status === "publishing";
+}
+
+/**
  * Resolves whether dismissing the dialog hides it while the export continues,
  * or closes it and resets the store.
  *
@@ -17,10 +27,7 @@ export type ExportDismissal = "hide" | "close";
  * See ADR 025.
  */
 export function resolveExportDismissal(status: ExportStatus): ExportDismissal {
-  if (status === "preparing" || status === "running" || status === "publishing") {
-    return "hide";
-  }
-  return "close";
+  return isExportRunActive(status) ? "hide" : "close";
 }
 
 /**

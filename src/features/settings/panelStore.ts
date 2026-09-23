@@ -1,9 +1,12 @@
 /**
  * Settings panel store managing the open state and the visible section of the settings dialog.
  *
- * The store holds only whether the settings dialog is open and which tab it shows, so any
+ * The store holds whether the settings dialog is open and which tab it shows, so any
  * component can open it: the status bar gear today, and later a message that tells the user
  * to open Settings or the ffmpeg status line. The dialog keeps one mount, in `AppShell`.
+ *
+ * It also holds the name of a preset draft with unsaved edits. The dialog writes it, and the
+ * quit guard reads it, because a quit drops the draft (ADR 027).
  */
 
 import { useStore } from "zustand";
@@ -28,7 +31,15 @@ export function isSettingsSection(value: unknown): value is SettingsSection {
   );
 }
 
-export type SettingsPanelState = { open: boolean; section: SettingsSection };
+export type SettingsPanelState = {
+  open: boolean;
+  section: SettingsSection;
+  /**
+   * The name that the prompts show for a preset draft with unsaved edits, or null when no
+   * draft holds an unsaved edit. The name can be empty, for a new preset with no name yet.
+   */
+  unsavedPresetName: string | null;
+};
 
 export type SettingsPanelActions = {
   /**
@@ -39,6 +50,8 @@ export type SettingsPanelActions = {
   hide: () => void;
   /** Changes the visible section and does not change the open state. */
   setSection: (section: SettingsSection) => void;
+  /** Records the unsaved preset draft. Only the settings dialog calls it. */
+  setUnsavedPresetName: (name: string | null) => void;
 };
 
 export type SettingsPanelStoreState = SettingsPanelState & SettingsPanelActions;
@@ -49,10 +62,12 @@ export function createSettingsPanelStore(
   return createStore<SettingsPanelStoreState>()((set) => ({
     open: initialState?.open ?? false,
     section: initialState?.section ?? DEFAULT_SETTINGS_SECTION,
+    unsavedPresetName: initialState?.unsavedPresetName ?? null,
     show: (section?: SettingsSection) =>
       set(section === undefined ? { open: true } : { open: true, section }),
     hide: () => set({ open: false }),
     setSection: (section: SettingsSection) => set({ section }),
+    setUnsavedPresetName: (name: string | null) => set({ unsavedPresetName: name }),
   }));
 }
 

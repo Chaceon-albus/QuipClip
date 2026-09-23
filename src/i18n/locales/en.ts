@@ -48,6 +48,32 @@ export const en = {
     unsupported: "No supported video file",
     othersIgnored: "QuipClip opens one file and ignores the others.",
   },
+  // The confirmations before a quit or before another video replaces the open one (ADR 027).
+  // Each message below `loss` and `replace.segments` is one line of a list in the dialog,
+  // which shows only the lines that apply. A replacement keeps the segments with the old
+  // video, and it loses the pending In point, so its dialog reuses `loss.pendingIn`.
+  quitGuard: {
+    quit: {
+      title: "Quit QuipClip?",
+      confirm: "Quit",
+    },
+    replace: {
+      title: "Replace the open video?",
+      segments_one:
+        "The marked segment stays with the open video. Open that video again to see it.",
+      segments_other:
+        "The {{count}} marked segments stay with the open video. Open that video again to see them.",
+      confirm: "Replace",
+    },
+    loss: {
+      segments_one: "{{count}} marked segment will be lost.",
+      segments_other: "{{count}} marked segments will be lost.",
+      pendingIn: "The pending In point will be lost.",
+      export: "The export will stop.",
+      preset: "The unsaved changes to “{{name}}” will be lost.",
+      presetUnnamed: "The unsaved changes to the preset will be lost.",
+    },
+  },
   transport: {
     action: {
       undo: "Undo",

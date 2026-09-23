@@ -7,6 +7,7 @@ pub mod capabilities;
 pub mod export;
 pub mod media;
 pub mod project;
+pub mod quit;
 pub mod settings;
 
 /// A per-process counter that, combined with the current time, makes each run id unique

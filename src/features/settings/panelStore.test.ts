@@ -78,6 +78,23 @@ describe("Settings Panel Store", () => {
     expect(opened.getState().open).toBe(true);
   });
 
+  it("records the unsaved preset draft without changing the open state", () => {
+    const store = createSettingsPanelStore({ open: true, section: "presets" });
+    expect(store.getState().unsavedPresetName).toBeNull();
+
+    store.getState().setUnsavedPresetName("Web 1080p");
+    expect(store.getState().unsavedPresetName).toBe("Web 1080p");
+    expect(store.getState().open).toBe(true);
+    expect(store.getState().section).toBe("presets");
+
+    // A new preset can have no name yet. It still holds an unsaved edit.
+    store.getState().setUnsavedPresetName("");
+    expect(store.getState().unsavedPresetName).toBe("");
+
+    store.getState().setUnsavedPresetName(null);
+    expect(store.getState().unsavedPresetName).toBeNull();
+  });
+
   it("keeps separate store instances independent", () => {
     const first = createSettingsPanelStore();
     const second = createSettingsPanelStore();

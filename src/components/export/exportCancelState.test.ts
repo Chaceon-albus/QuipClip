@@ -3,10 +3,21 @@ import { EXPORT_STATUSES, type ExportStatus } from "@/features/export";
 import {
   isCancelEnabled,
   isCancelOutstanding,
+  isExportRunActive,
   resolveExportDismissal,
 } from "./exportCancelState";
 
 const RUN_ID = "run-abc-123";
+
+describe("isExportRunActive", () => {
+  it("is true exactly in preparing, running, and publishing", () => {
+    for (const status of EXPORT_STATUSES) {
+      const isProgress =
+        status === "preparing" || status === "running" || status === "publishing";
+      expect(isExportRunActive(status)).toBe(isProgress);
+    }
+  });
+});
 
 describe("resolveExportDismissal", () => {
   it("answers 'hide' for preparing, running, and publishing", () => {

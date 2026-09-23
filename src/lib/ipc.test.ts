@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { BACKEND_COMMANDS } from "./ipc";
+import { BACKEND_COMMANDS, BACKEND_EVENTS } from "./ipc";
 
 /**
  * Reads the leaf names registered with `tauri::generate_handler!` out of the Rust source.
@@ -48,5 +48,20 @@ describe("Backend command parity", () => {
       (command) => !registered.includes(command),
     );
     expect(missing).toEqual([]);
+  });
+});
+
+describe("Backend event parity", () => {
+  it("names the quit request event exactly as the Rust constant does", () => {
+    // A rename on one side only leaves every quit held back by Rust with no dialog to answer
+    // it (ADR 027), so the two copies of the name are compared here.
+    const source = readFileSync(
+      fileURLToPath(new URL("../../src-tauri/src/commands/quit.rs", import.meta.url)),
+      "utf8",
+    );
+    const match = /pub const QUIT_REQUESTED_EVENT: &str = "([^"]+)";/.exec(source);
+
+    expect(match).not.toBeNull();
+    expect(match![1]).toBe(BACKEND_EVENTS.QUIT_REQUESTED);
   });
 });
