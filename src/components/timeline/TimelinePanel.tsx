@@ -578,24 +578,44 @@ export function TimelinePanel({
   return (
     <section className="flex h-[180px] shrink-0 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
       {/*
-       * scrollbar-gutter: stable reserves space for the horizontal scrollbar so the track row
-       * does not change height when the horizontal scrollbar appears at the first zoom and disappears at
-       * zoom 1. This costs a few pixels of height permanently on a platform with classic scrollbars.
+       * overflow-x: scroll shows the horizontal scrollbar at every zoom factor, also when
+       * nothing overflows. The `::-webkit-scrollbar` rules in globals.css make it a classic
+       * scrollbar that takes layout height in WebView2 and in WKWebView. With `auto`, the
+       * scrollbar appeared at the first zoom and the track row became shorter by its height.
+       * With `scroll`, the panel always gives that height to the scrollbar, so the rows keep
+       * one height at every zoom factor.
+       *
+       * When nothing overflows, the scrollbar has no thumb. Its track is transparent, so the
+       * strip shows the timeline background of the section.
+       *
+       * scrollbar-gutter cannot do this: it reserves space only at the inline-start and
+       * inline-end edges, which hold the vertical scrollbar in a horizontal writing mode.
+       *
        * overscroll-behavior-x: contain stops a horizontal flick at the content edge from
        * engaging the web view's rubber-band or back gesture.
        */}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex min-h-0 flex-1 [scrollbar-gutter:stable] flex-col overflow-x-auto overflow-y-hidden overscroll-x-contain"
+        className="flex min-h-0 flex-1 flex-col overflow-x-scroll overflow-y-hidden overscroll-x-contain"
       >
         {/*
          * Shared width ancestor for both the ruler row and track row.
          * Putting the zoomed width on this shared ancestor ensures the ruler lane and
          * the track lane span one rectangle by construction, which seekFromClientX depends on.
+         *
+         * overflow-x: clip cuts off content that goes past the end of the lane, such as a
+         * centred tick label at 100% or the playhead at the end of the source. Without it,
+         * that content adds to the scroll range, and the panel scrolls at zoom 1. `clip`
+         * does not make a scroll container, but `hidden` does. So the sticky gutters keep
+         * the outer scroll container as their scrollport.
+         *
+         * At 100%, the clip cuts off the right half of the playhead head. The tip and the
+         * visible half of the line stay on the end of the lane. This is the mirror of 0%,
+         * where the sticky gutter covers the left half.
          */}
         <div
-          className="flex min-w-[900px] flex-1 flex-col"
+          className="flex min-w-[900px] flex-1 flex-col overflow-x-clip"
           style={{
             width: `calc(${TIMELINE_GUTTER_WIDTH_PX}px + (100% - ${TIMELINE_GUTTER_WIDTH_PX}px) * ${zoom})`,
           }}
