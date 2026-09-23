@@ -83,13 +83,18 @@ export const ANCHOR_TOLERANCE_SECONDS = 1.0;
  * Largest distance in seconds between the clamped target of a nominal step and the position the
  * step starts from, at which the step counts as a step that cannot move the source.
  *
- * At an edge the clamp returns the bound itself (0, or the smaller of the approximate duration
- * and the duration the element reports), and the start position is that same bound read back
- * from the element or from the pending seek. The two can
- * differ only by the rounding of one instant, and the rounding error of a double at the length of
- * any real source is below one nanosecond. The value is one microsecond, which is far above that
- * error. It is also far below one frame interval (about 1 ms at 1000 fps, 33 ms at 30 fps), so a
- * step that moves one real frame never falls inside it.
+ * The bounds are positions on the browser media timeline. The lower bound is its origin, or the
+ * calibrated first frame when that lies later. The upper bound is the lower bound plus the
+ * approximate duration, or the duration the element reports when that is smaller. At an edge
+ * the clamp returns the bound itself, and the start position is that same bound read back from
+ * the element or from the pending seek. The two values can differ only by the rounding of one
+ * instant, and the rounding error of a double at the length of any real source is below one
+ * nanosecond. The value is one microsecond, which is far above that error. It is also far below
+ * one frame interval (about 1 ms at 1000 fps, 33 ms at 30 fps), so a step that moves one real
+ * frame never falls inside it.
+ *
+ * A start position outside the bounds needs no tolerance for a step further outward: a step
+ * never moves against its direction, so its target is then the start position itself.
  */
 export const NOMINAL_STEP_EDGE_TOLERANCE_SECONDS = 1e-6;
 
@@ -714,39 +719,80 @@ export function createPlaybackStore(
           return;
         }
 
-        let targetTime = currentBrowserTime + deltaSeconds;
-        if (targetTime < 0) {
-          targetTime = 0;
+        // The bounds are positions on the browser media timeline, the axis of currentTime, which
+        // ADR 003 does not require to start at 0. The lower bound is the start of that timeline,
+        // or the calibrated first frame when it lies later, because no frame precedes the one
+        // videoStartPts names. A target below the start would never equal the position the next
+        // press reads back, because the browser moves it to the start, so each press would seek
+        // again.
+        let lowerBound = browserTimelineOriginSeconds;
+        if (state.calibrationStatus === "ready" && calibratedMediaTime !== null) {
+          lowerBound = Math.max(lowerBound, calibratedMediaTime);
         }
+        // The probe prefers the duration of the video stream, which counts from the first video
+        // frame, so the approximate duration goes on the lower bound. The element stops a seek at
+        // its own duration, an end position that caps any overshoot of that sum and that can be
+        // rounded to the clock of the web view. Clamp to it as seekApproximate does, so that the
+        // element reports back exactly the clamp value and the edge check below fires on the
+        // next step. When the stream duration is invalid, the probe falls back to the container
+        // duration, which counts from the container start, so the sum can overshoot by the
+        // distance from the origin to the first frame; the element duration caps that overshoot
+        // when the element reports one. Without either duration there is no upper bound.
+        const approximateDuration = attachedSource.approximateDurationSeconds;
+        const approximateEnd =
+          typeof approximateDuration === "number" &&
+          Number.isFinite(approximateDuration) &&
+          approximateDuration > 0
+            ? lowerBound + approximateDuration
+            : Number.POSITIVE_INFINITY;
+        const upperBound =
+          state.runtimeBrowserDurationSeconds === null
+            ? approximateEnd
+            : Math.min(approximateEnd, state.runtimeBrowserDurationSeconds);
+
+        // The step starts from the start position moved into the bounds. A step forward from a
+        // position before the calibrated first frame therefore reaches the frame after it, and
+        // not the frame already on screen, which can produce no RVFC callback (ADR 022). Each
+        // clamp applies the lower bound last, so a step never seeks before the start of the
+        // media when bad metadata puts the upper bound below it.
+        const stepStart = Math.max(
+          Math.min(currentBrowserTime, upperBound),
+          lowerBound,
+        );
+        let targetTime = Math.max(
+          Math.min(stepStart + deltaSeconds, upperBound),
+          lowerBound,
+        );
+        // A step never moves against its direction. The rule compares against the real start
+        // position, currentBrowserTime (the pending target when one exists, and currentTime when
+        // none exists), not against stepStart. The element can stand outside the bounds: the
+        // probe reports the duration of the video stream, and the element plays to the end of
+        // the container, which can lie later. A forward step from there would otherwise seek
+        // back, and a backward step from a position before the calibrated first frame would
+        // seek forward.
         if (
-          typeof attachedSource.approximateDurationSeconds === "number" &&
-          Number.isFinite(attachedSource.approximateDurationSeconds) &&
-          attachedSource.approximateDurationSeconds > 0
+          (deltaFrames > 0 && targetTime < currentBrowserTime) ||
+          (deltaFrames < 0 && targetTime > currentBrowserTime)
         ) {
-          targetTime = Math.min(targetTime, attachedSource.approximateDurationSeconds);
-        }
-        // The element stops a seek at its own duration, which can be shorter than the probe
-        // duration or rounded to the clock of the web view. Clamp to it as seekApproximate does,
-        // so that the element reports back exactly the clamp value and the edge check below
-        // fires on the next step.
-        if (state.runtimeBrowserDurationSeconds !== null) {
-          targetTime = Math.min(targetTime, state.runtimeBrowserDurationSeconds);
+          targetTime = currentBrowserTime;
         }
 
-        // A step at the first or the last position of the source cannot move it: the clamp above
-        // returns the position the step starts from. Such a step does nothing to the position. It
+        // A step at the first or the last position of the source cannot move it: the rules above
+        // return the position the step starts from. Such a step does nothing to the position. It
         // dispatches no seek, keeps presentedFrame and seekTargetSeconds, and requests no cue. A
         // seek that lands on the frame already on screen can produce no RVFC callback (ADR 022),
         // so dispatching it would leave presentedFrame null and the edit actions disabled, and
-        // each press would play the ADR 019 cue again at the same position. ADR 021 makes each
-        // key press one step; at an edge there is no frame to step to, so a press that does not
-        // move keeps that rule.
+        // each press would play the ADR 019 cue again at the same position. Before the anchor is
+        // taken, it would also refuse the calibration (ADR 003). ADR 021 makes each key press
+        // one step; at an edge there is no frame to step to, so a press that does not move keeps
+        // that rule.
         //
-        // The comparison uses the value the step was computed from: the pending target when one
-        // exists, and currentTime when none exists. A pending exact seek to the edge therefore
-        // absorbs each later press toward that edge, and the element still receives that one
-        // seek. A pending scrub target does not count: fastSeek lands on a keyframe and not on
-        // its target, so an exact seek to the same time is still required (ADR 022).
+        // The comparison uses the real start position, currentBrowserTime, and not stepStart: the
+        // pending target when one exists, and currentTime when none exists. A pending exact seek
+        // to the edge therefore absorbs each later press toward that edge, and the element still
+        // receives that one seek. A pending scrub target does not count: fastSeek lands on a
+        // keyframe and not on its target, so an exact seek to the same time is still required
+        // (ADR 022).
         if (
           pending?.scrub !== true &&
           Math.abs(targetTime - currentBrowserTime) <

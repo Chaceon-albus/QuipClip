@@ -845,11 +845,14 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
     it("clamps nominal seek to lower bound 0 and does not update presentedFrame optimistically", () => {
       const store = createPlaybackStore();
-      const video = createFakeVideo({ initialCurrentTime: 0.02 });
+      const video = createFakeVideo();
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
       store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      // The element moves on after metadata loaded, so the timeline origin stays 0.
+      video.currentTime = 0.02;
+      video.seeking = false;
 
       // Seek -10 frames from 0.02s -> clamps to 0
       store.getState().seekNominal(-10);
@@ -1355,11 +1358,14 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
     it("clamps nominal seek to approximateDurationSeconds when specified", () => {
       const store = createPlaybackStore();
-      const video = createFakeVideo({ initialCurrentTime: 9.98 });
+      const video = createFakeVideo();
 
       // sourceA has approximateDurationSeconds: 10.0
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // The element moves on after metadata loaded, so the timeline origin stays 0.
+      video.currentTime = 9.98;
+      video.seeking = false;
 
       // Seek +10 frames (0.40s) from 9.98s -> 10.38s, clamped to 10.0s
       store.getState().seekNominal(10);
@@ -1743,10 +1749,13 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
     it("calls request with the same target seconds assigned to the element and direction -1 on backward seekNominal", () => {
       const store = createPlaybackStore();
-      const video = createFakeVideo({ initialCurrentTime: 2.0 });
+      const video = createFakeVideo();
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // The element moves on after metadata loaded, so the timeline origin stays 0.
+      video.currentTime = 2.0;
+      video.seeking = false;
 
       // sourceA has fps25 ({ n: 25, d: 1 }), so -1 frame = -0.04s.
       // Target time = 2.0 - 0.04 = 1.96s.
@@ -1759,10 +1768,13 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
     it("calls request with 0 and direction -1 when stepping backward clamps to 0", () => {
       const store = createPlaybackStore();
-      const video = createFakeVideo({ initialCurrentTime: 0.01 });
+      const video = createFakeVideo();
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // The element moves on after metadata loaded, so the timeline origin stays 0.
+      video.currentTime = 0.01;
+      video.seeking = false;
 
       // sourceA has fps25 (0.04s per frame). Stepping backward from 0.01 clamps to 0.
       store.getState().seekNominal(-1);
@@ -1774,10 +1786,13 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
     it("calls request with approximateDurationSeconds and direction 1 when stepping forward clamps to upper bound", () => {
       const store = createPlaybackStore();
-      const video = createFakeVideo({ initialCurrentTime: 9.99 });
+      const video = createFakeVideo();
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // The element moves on after metadata loaded, so the timeline origin stays 0.
+      video.currentTime = 9.99;
+      video.seeking = false;
 
       // sourceA has approximateDurationSeconds 10.0 and fps25 (0.04s per frame).
       // Stepping forward from 9.99 clamps to 10.0.
@@ -3135,13 +3150,36 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
     it("treats a position less than the tolerance from the edge as the edge", () => {
       const store = createPlaybackStore();
-      const video = createFakeVideo({ initialCurrentTime: 1e-7 });
+      const video = createFakeVideo();
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // The element moves on after metadata loaded, so the timeline origin stays 0.
+      video.currentTime = 1e-7;
+      video.seeking = false;
+      const setsBefore = video.currentTimeSets;
 
       store.getState().seekNominal(-1);
 
-      expect(video.currentTimeSets).toBe(0);
+      expect(video.currentTimeSets).toBe(setsBefore);
+      expect(video.currentTime).toBe(1e-7);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(requestSpy).not.toHaveBeenCalled();
+    });
+
+    it("treats a position less than the tolerance from the last position as the edge", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      // The upper bound is the approximate duration, 10 s, on a timeline that starts at 0.
+      video.currentTime = 10 - 1e-7;
+      video.seeking = false;
+      const setsBefore = video.currentTimeSets;
+
+      store.getState().seekNominal(1);
+
+      expect(video.currentTimeSets).toBe(setsBefore);
+      expect(video.currentTime).toBe(10 - 1e-7);
       expect(store.getState().seekTargetSeconds).toBeNull();
       expect(requestSpy).not.toHaveBeenCalled();
     });
@@ -3433,6 +3471,430 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().seekNominal(1);
       expect(video.currentTimeSets).toBe(setsBefore + 1);
       expect(store.getState().presentedFrame).toBeNull();
+    });
+
+    it("an element past the upper bound does not step forward, and a step back seeks inside the bounds", () => {
+      const store = createPlaybackStore();
+      // The probe reports the 10 s video stream, and the element plays the 10.3 s container.
+      const video = createFakeVideo({ duration: 10.3 });
+      attachCalibrated(store, video);
+      store.getState().syncBrowserDuration(identityA, video);
+
+      // Playback ran to the end of the container and shows the last frame.
+      video.currentTime = 10.3;
+      video.seeking = false;
+      store.getState().syncPresentedFrame(identityA, 9.96, 2, video);
+      const presented = store.getState().presentedFrame;
+      expect(presented?.inferredSourcePts).toBe("249");
+      const setsBefore = video.currentTimeSets;
+
+      store.getState().seekNominal(1);
+      expect(video.currentTimeSets).toBe(setsBefore);
+      expect(video.currentTime).toBe(10.3);
+      expect(store.getState().presentedFrame).toBe(presented);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(requestSpy).not.toHaveBeenCalled();
+
+      // The step back starts from the upper bound (10 s), not from 10.3 s, and lands one frame
+      // interval before it. That is the start of the last frame, which is already on screen,
+      // so the picture does not change: the same final-frame gap as the known-gap test above.
+      store.getState().seekNominal(-1);
+      expect(video.currentTimeSets).toBe(setsBefore + 1);
+      expect(video.currentTime).toBeCloseTo(9.96, 9);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(9.96, 9);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenLastCalledWith(video.currentTime, -1);
+    });
+
+    it("a calibrated first frame after the origin bounds a step back, and a step back before it does not move forward", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      // The first frame lies 0.02 s after the start of the timeline, inside the anchor
+      // tolerance, so it calibrates.
+      store.getState().syncPresentedFrame(identityA, 0.02, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      const firstPresented = store.getState().presentedFrame;
+
+      // The element still stands at the origin, before the first frame. A step back must not
+      // seek forward to that frame.
+      store.getState().seekNominal(-1);
+      store.getState().seekNominal(-3);
+      expect(video.currentTimeSets).toBe(0);
+      expect(video.currentTime).toBe(0);
+      expect(store.getState().presentedFrame).toBe(firstPresented);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(requestSpy).not.toHaveBeenCalled();
+
+      // From a later frame, a long step back stops on the first frame.
+      store.getState().seekToPts("5" as Pts);
+      settle(store, video, 0.22, 2);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("5");
+      const setsBefore = video.currentTimeSets;
+
+      store.getState().seekNominal(-10);
+      expect(video.currentTimeSets).toBe(setsBefore + 1);
+      expect(video.currentTime).toBe(0.02);
+      expect(store.getState().seekTargetSeconds).toBe(0.02);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenLastCalledWith(0.02, -1);
+
+      // The seek settles on the first frame, and the next step back is at the edge.
+      settle(store, video, 0.02, 3);
+      const presented = store.getState().presentedFrame;
+      expect(presented?.inferredSourcePts).toBe("0");
+      requestSpy.mockClear();
+
+      store.getState().seekNominal(-1);
+      expect(video.currentTimeSets).toBe(setsBefore + 1);
+      expect(video.currentTime).toBe(0.02);
+      expect(store.getState().presentedFrame).toBe(presented);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(requestSpy).not.toHaveBeenCalled();
+    });
+
+    it("a step forward from a position before the calibrated first frame lands on the frame after it", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      // The first frame lies 0.08 s after the start of the timeline, and the element still
+      // stands at the origin.
+      store.getState().syncPresentedFrame(identityA, 0.08, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+
+      // The step starts from the first frame, so it reaches frame 1 and not the frame that is
+      // already on screen.
+      store.getState().seekNominal(1);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBeCloseTo(0.12, 9);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.12, 9);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenLastCalledWith(video.currentTime, 1);
+
+      settle(store, video, 0.12, 2);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1");
+    });
+
+    // The probe prefers the duration of the video stream, which counts from its first frame.
+    // The element duration, when the element reports one, is the same end position.
+    it.each([10.08, undefined])(
+      "counts the approximate duration from the calibrated first frame (element duration %s)",
+      (duration) => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration });
+        store.getState().attach(sourceA, video);
+        video.readyState = 1;
+        store.getState().syncReady(identityA, video);
+        store.getState().syncBrowserDuration(identityA, video);
+        expect(store.getState().runtimeBrowserDurationSeconds).toBe(duration ?? null);
+        // The first frame lies 0.08 s after the start of the timeline.
+        store.getState().syncPresentedFrame(identityA, 0.08, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+
+        store.getState().seekToPts("240" as Pts);
+        settle(store, video, 9.68, 2);
+        requestSpy.mockClear();
+        const setsBefore = video.currentTimeSets;
+
+        // Twenty frames from PTS 240 pass the end of the stream, which is 0.08 s + 10 s.
+        store.getState().seekNominal(20);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(10.08);
+        expect(store.getState().seekTargetSeconds).toBe(10.08);
+        expect(requestSpy).toHaveBeenLastCalledWith(10.08, 1);
+
+        // The element presents the last frame, PTS 249, and the next press is at the edge.
+        settle(store, video, 10.04, 3);
+        const presented = store.getState().presentedFrame;
+        expect(presented?.inferredSourcePts).toBe("249");
+        requestSpy.mockClear();
+
+        store.getState().seekNominal(1);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(store.getState().presentedFrame).toBe(presented);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(requestSpy).not.toHaveBeenCalled();
+      },
+    );
+
+    // ADR 003 does not require the browser media timeline to start at 0. The bounds of a step
+    // are positions on that timeline, which is the axis of currentTime.
+    describe("On a Browser Timeline That Starts Away from 0", () => {
+      /**
+       * Attaches a source to an element whose browser media timeline starts at `origin`.
+       *
+       * React creates the node, so the element reports 0 at attach time; the browser moves
+       * currentTime to the start of the timeline when metadata loads, which is the reading
+       * syncReady takes. That move counts in currentTimeSets, so a test reads the count after
+       * this helper returns.
+       */
+      function attachAtOrigin(
+        store: PlaybackStore,
+        origin: number,
+        options?: { duration?: number; fastSeek?: boolean; source?: PlaybackSource },
+      ): ReturnType<typeof createFakeVideo> {
+        const source = options?.source ?? sourceA;
+        const video = createFakeVideo({
+          duration: options?.duration,
+          fastSeek: options?.fastSeek,
+        });
+        store.getState().attach(source, video);
+        video.readyState = 1;
+        video.currentTime = origin;
+        video.seeking = false;
+        store.getState().syncReady(getSourceRevisionKey(source), video);
+        return video;
+      }
+
+      it("a step back at the origin before the anchor seeks nowhere, and the first frame still calibrates", () => {
+        const store = createPlaybackStore();
+        const video = attachAtOrigin(store, 5);
+        expect(store.getState().calibrationStatus).toBe("calibrating");
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekNominal(-1);
+        expect(video.currentTimeSets).toBe(setsBefore);
+        store.getState().seekNominal(-1);
+        store.getState().seekNominal(-5);
+
+        expect(video.currentTimeSets).toBe(setsBefore);
+        expect(video.currentTime).toBe(5);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(requestSpy).not.toHaveBeenCalled();
+
+        // The element never left the start, so the first callback still anchors videoStartPts.
+        store.getState().syncPresentedFrame(identityA, 5, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+      });
+
+      it("a long step back clamps to the origin, and the next step back does nothing", () => {
+        const store = createPlaybackStore();
+        const video = attachAtOrigin(store, 5);
+        store.getState().syncPresentedFrame(identityA, 5, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+
+        store.getState().seekNominal(1);
+        settle(store, video, 5.04, 2);
+        store.getState().seekNominal(1);
+        settle(store, video, 5.08, 3);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("2");
+        requestSpy.mockClear();
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekNominal(-10);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(5);
+        expect(store.getState().seekTargetSeconds).toBe(0);
+        expect(requestSpy).toHaveBeenCalledTimes(1);
+        expect(requestSpy).toHaveBeenLastCalledWith(5, -1);
+
+        // The seek settles on the first frame, and the next step back is at the edge.
+        settle(store, video, 5, 4);
+        const presented = store.getState().presentedFrame;
+        expect(presented?.inferredSourcePts).toBe("0");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        requestSpy.mockClear();
+
+        store.getState().seekNominal(-1);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(5);
+        expect(store.getState().presentedFrame).toBe(presented);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(requestSpy).not.toHaveBeenCalled();
+      });
+
+      it("a long step forward clamps to the origin plus the approximate duration, and the next step forward does nothing", () => {
+        const store = createPlaybackStore();
+        const video = attachAtOrigin(store, 5);
+        store.getState().syncPresentedFrame(identityA, 5, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+
+        store.getState().seekToPts("240" as Pts);
+        expect(video.currentTime).toBeCloseTo(14.6, 9);
+        settle(store, video, 14.6, 2);
+        requestSpy.mockClear();
+        const setsBefore = video.currentTimeSets;
+
+        // Twenty frames from elapsed second 9.6 pass the 10 s duration. The bound is browser
+        // position 15, not 10.
+        store.getState().seekNominal(20);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(15);
+        expect(store.getState().seekTargetSeconds).toBe(10);
+        expect(requestSpy).toHaveBeenCalledTimes(1);
+        expect(requestSpy).toHaveBeenLastCalledWith(15, 1);
+
+        // The element presents the last frame, PTS 249, and the next press is at the edge.
+        settle(store, video, 14.96, 3);
+        const presented = store.getState().presentedFrame;
+        expect(presented?.inferredSourcePts).toBe("249");
+        requestSpy.mockClear();
+
+        store.getState().seekNominal(1);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(15);
+        expect(store.getState().presentedFrame).toBe(presented);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(requestSpy).not.toHaveBeenCalled();
+      });
+
+      it("a step forward after playback ran to the end does not move back", () => {
+        const store = createPlaybackStore();
+        const video = attachAtOrigin(store, 5);
+        store.getState().syncPresentedFrame(identityA, 5, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+
+        // Playback runs to the end of the source and shows the last frame.
+        store.getState().play();
+        video.currentTime = 15;
+        video.seeking = false;
+        store.getState().syncPresentedFrame(identityA, 14.96, 2, video);
+        store.getState().syncEnded(identityA, video);
+        expect(store.getState().isPlaying).toBe(false);
+        const presented = store.getState().presentedFrame;
+        expect(presented?.inferredSourcePts).toBe("249");
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekNominal(1);
+        store.getState().seekNominal(5);
+
+        expect(video.currentTimeSets).toBe(setsBefore);
+        expect(video.currentTime).toBe(15);
+        expect(store.getState().presentedFrame).toBe(presented);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(requestSpy).not.toHaveBeenCalled();
+      });
+
+      it("a step forward clamps to a shorter element duration, and the next step forward does nothing", () => {
+        const store = createPlaybackStore();
+        // The origin plus the probe duration is 15 s, and the element ends at 14.8 s.
+        const video = attachAtOrigin(store, 5, { duration: 14.8 });
+        store.getState().syncBrowserDuration(identityA, video);
+        expect(store.getState().runtimeBrowserDurationSeconds).toBe(14.8);
+        store.getState().syncPresentedFrame(identityA, 5, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+
+        store.getState().seekToPts("240" as Pts);
+        settle(store, video, 14.6, 2);
+        requestSpy.mockClear();
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekNominal(10);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(14.8);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(9.8, 9);
+        expect(requestSpy).toHaveBeenCalledTimes(1);
+        expect(requestSpy).toHaveBeenLastCalledWith(14.8, 1);
+
+        // The element presents its last frame, and the next press is at the edge.
+        settle(store, video, 14.76, 3);
+        const presented = store.getState().presentedFrame;
+        expect(presented?.inferredSourcePts).toBe("244");
+        requestSpy.mockClear();
+
+        store.getState().seekNominal(1);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(14.8);
+        expect(store.getState().presentedFrame).toBe(presented);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(requestSpy).not.toHaveBeenCalled();
+      });
+
+      it("without a start PTS the origin is the lower bound", () => {
+        const store = createPlaybackStore();
+        const noStartSource: PlaybackSource = { ...sourceA, videoStartPts: null };
+        const video = attachAtOrigin(store, 5, { source: noStartSource });
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        // A first frame after the origin does not bound the step, because nothing calibrated it.
+        store.getState().syncPresentedFrame(identityA, 5.02, 1, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+
+        store.getState().seekNominal(5);
+        expect(video.currentTime).toBeCloseTo(5.2, 9);
+        fireSeeked(store, identityA, video);
+        requestSpy.mockClear();
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekNominal(-10);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(5);
+        expect(store.getState().seekTargetSeconds).toBe(0);
+        expect(requestSpy).toHaveBeenCalledTimes(1);
+        expect(requestSpy).toHaveBeenLastCalledWith(5, -1);
+
+        // The seek settles at the origin, and the next step back is at the edge.
+        fireSeeked(store, identityA, video);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        requestSpy.mockClear();
+
+        store.getState().seekNominal(-1);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(5);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(requestSpy).not.toHaveBeenCalled();
+      });
+
+      it("a calibration that became unavailable no longer bounds the step with its first frame", () => {
+        const store = createPlaybackStore();
+        const video = attachAtOrigin(store, 5);
+        // The first frame lies 0.02 s after the origin.
+        store.getState().syncPresentedFrame(identityA, 5.02, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        // A distinct frame that infers the same PTS makes the calibration unavailable (ADR 003).
+        store.getState().syncPresentedFrame(identityA, 5.03, 2, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+
+        store.getState().seekNominal(5);
+        expect(video.currentTime).toBeCloseTo(5.2, 9);
+        fireSeeked(store, identityA, video);
+        requestSpy.mockClear();
+        const setsBefore = video.currentTimeSets;
+
+        // The bound is the origin, not the first frame of the refused calibration.
+        store.getState().seekNominal(-10);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(5);
+        expect(store.getState().seekTargetSeconds).toBe(0);
+        expect(requestSpy).toHaveBeenLastCalledWith(5, -1);
+      });
+
+      it("a pending scrub at the origin before the first frame gets one exact seek to the scrub target (ADR 022)", () => {
+        const store = createPlaybackStore();
+        const video = attachAtOrigin(store, 5, { fastSeek: true });
+        // The first frame lies 0.02 s after the origin.
+        store.getState().syncPresentedFrame(identityA, 5.02, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        store.getState().seekToPts("5" as Pts);
+        settle(store, video, 5.22, 2);
+        const setsBefore = video.currentTimeSets;
+
+        // A scrub to elapsed second 0 is issued through fastSeek at the origin.
+        store.getState().seekApproximate(0, { scrub: true });
+        expect(video.fastSeek).toHaveBeenCalledWith(5);
+        requestSpy.mockClear();
+
+        // The step starts from the scrub target, which lies before the first frame. It does not
+        // move forward to that frame, and it still sends one exact seek to the scrub target.
+        store.getState().seekNominal(-1);
+        expect(requestSpy).toHaveBeenCalledTimes(1);
+        expect(requestSpy).toHaveBeenLastCalledWith(5, -1);
+        expect(store.getState().seekTargetSeconds).toBe(0);
+        expect(video.currentTimeSets).toBe(setsBefore);
+        fireSeeked(store, identityA, video);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(5);
+
+        // The exact seek is now the last request, so a further press at the edge does nothing.
+        requestSpy.mockClear();
+        store.getState().seekNominal(-1);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(requestSpy).not.toHaveBeenCalled();
+      });
     });
   });
 });
