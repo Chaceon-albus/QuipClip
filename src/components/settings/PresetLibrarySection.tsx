@@ -687,7 +687,7 @@ export function PresetLibrarySection() {
                         <span
                           tabIndex={-1}
                           className={cn(
-                            "rounded px-1.5 py-0.5 text-[10px] font-semibold",
+                            "rounded px-1.5 py-0.5 text-2xs leading-none font-semibold",
                             encoderMark.tone === "warning"
                               ? "bg-warning/10 text-warning-text"
                               : "bg-muted text-muted-foreground",
@@ -708,7 +708,7 @@ export function PresetLibrarySection() {
                     </Tooltip>
                   ) : null}
                   {preset.id === view.activePresetId ? (
-                    <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                    <span className="rounded bg-primary/10 px-1.5 py-0.5 text-2xs leading-none font-semibold text-primary">
                       {t("settings.preset.activeBadge")}
                     </span>
                   ) : null}

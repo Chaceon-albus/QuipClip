@@ -6,6 +6,8 @@ import {
   LANGUAGE_PREFERENCES,
   LANGUAGE_STORAGE_KEY,
   SUPPORTED_LANGUAGES,
+  applyDocumentLanguage,
+  bindDocumentLanguage,
   createI18nInstance,
   en,
   getLanguagePreference,
@@ -20,6 +22,7 @@ import {
   validateCatalogParity,
   validatePlaceholderSyntax,
   zhCN,
+  type DocumentLanguageTarget,
   type PreferenceStorage,
 } from "./index";
 import { EXPORT_ERROR_CODES } from "@/features/export/types";
@@ -1209,6 +1212,122 @@ describe("global singleton runtime initI18n concurrency and retry safety", () =>
       vi.restoreAllMocks();
       // Reset back to English
       await setLanguagePreference("en", { storage });
+    }
+  });
+});
+
+describe("document language follows the resolved language", () => {
+  it("writes the language tag to an injected target and ignores an explicit null target", () => {
+    const target: DocumentLanguageTarget = { lang: "en" };
+
+    applyDocumentLanguage("zh-CN", target);
+    expect(target.lang).toBe("zh-CN");
+
+    applyDocumentLanguage("en", target);
+    expect(target.lang).toBe("en");
+
+    expect(() => applyDocumentLanguage("zh-CN", null)).not.toThrow();
+  });
+
+  it("does not throw when no document exists", () => {
+    vi.stubGlobal("document", undefined);
+
+    try {
+      expect(() => applyDocumentLanguage("zh-CN")).not.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("writes the language at once for an initialized instance and on each languageChanged event", async () => {
+    const instance = await createI18nInstance({
+      initialPreference: "zh-CN",
+      systemLanguages: [],
+    });
+    const target: DocumentLanguageTarget = { lang: "en" };
+
+    const unbind = bindDocumentLanguage(instance, target);
+    expect(target.lang).toBe("zh-CN");
+
+    await instance.changeLanguage("en");
+    expect(target.lang).toBe("en");
+
+    await instance.changeLanguage("zh-CN");
+    expect(target.lang).toBe("zh-CN");
+
+    // A language without a catalog resolves to the fallback, never to the raw tag.
+    await instance.changeLanguage("fr");
+    expect(target.lang).toBe(FALLBACK_LANGUAGE);
+
+    unbind();
+    await instance.changeLanguage("zh-CN");
+    expect(target.lang).toBe(FALLBACK_LANGUAGE);
+  });
+
+  it("sets the first language from the event that init emits when bound before init", async () => {
+    const instance = i18next.createInstance();
+    const target: DocumentLanguageTarget = { lang: "en" };
+
+    const unbind = bindDocumentLanguage(instance, target);
+    // Not initialized yet: the binding must not write a guess.
+    expect(target.lang).toBe("en");
+
+    await instance.init({
+      lng: "zh-CN",
+      fallbackLng: FALLBACK_LANGUAGE,
+      resources: { en: { translation: en }, "zh-CN": { translation: zhCN } },
+    });
+    expect(target.lang).toBe("zh-CN");
+
+    unbind();
+  });
+
+  it("drives document.documentElement.lang from the default instance at init and on every change", async () => {
+    const storage = createMockStorage();
+    const documentElement: DocumentLanguageTarget = { lang: "en" };
+    vi.stubGlobal("document", { documentElement });
+
+    try {
+      // At init.
+      await initI18n({
+        storage,
+        systemLanguages: ["en-US"],
+        initialPreference: "zh-CN",
+      });
+      expect(documentElement.lang).toBe("zh-CN");
+
+      // At init, when the requested language is already active and no event fires.
+      documentElement.lang = "en";
+      await initI18n({
+        storage,
+        systemLanguages: ["en-US"],
+        initialPreference: "zh-CN",
+      });
+      expect(documentElement.lang).toBe("zh-CN");
+
+      // On a settings change.
+      await setLanguagePreference("en", { storage });
+      expect(documentElement.lang).toBe("en");
+
+      // On a return to the system setting.
+      await setLanguagePreference("system", { storage, systemLanguages: ["zh-TW"] });
+      expect(documentElement.lang).toBe("zh-CN");
+
+      // On a direct change of the default instance.
+      await i18next.changeLanguage("en");
+      expect(documentElement.lang).toBe("en");
+
+      // An isolated instance leaves the document alone.
+      const isolated = await createI18nInstance({
+        initialPreference: "en",
+        systemLanguages: [],
+      });
+      await setLanguagePreference("zh-CN", { storage, instance: isolated });
+      expect(getResolvedLanguage(isolated)).toBe("zh-CN");
+      expect(documentElement.lang).toBe("en");
+    } finally {
+      await setLanguagePreference("en", { storage });
+      vi.unstubAllGlobals();
     }
   });
 });

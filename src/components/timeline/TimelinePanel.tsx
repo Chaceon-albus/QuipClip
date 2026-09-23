@@ -821,7 +821,7 @@ export function TimelinePanel({
               ) : (
                 /* Localized empty prompt */
                 <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
-                  <span className="italic">{t("timeline.emptyPrompt")}</span>
+                  {t("timeline.emptyPrompt")}
                 </div>
               )}
             </div>

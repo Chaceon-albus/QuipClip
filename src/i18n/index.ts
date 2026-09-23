@@ -16,6 +16,7 @@ import {
   FALLBACK_LANGUAGE,
   LANGUAGE_PREFERENCES,
   LANGUAGE_STORAGE_KEY,
+  type DocumentLanguageTarget,
   type LanguagePreference,
   type PreferenceStorage,
   type SetPreferenceOptions,
@@ -207,20 +208,91 @@ export async function createI18nInstance(
 }
 
 /**
+ * Safely accesses the document root element without throwing outside a browser.
+ */
+function getDefaultDocumentLanguageTarget(): DocumentLanguageTarget | null {
+  if (typeof document !== "undefined" && document.documentElement) {
+    return document.documentElement;
+  }
+  return null;
+}
+
+/**
+ * Writes a resolved language tag to the `lang` attribute of the document root.
+ *
+ * Screen readers choose their voice from this attribute (WCAG 3.1.1), and the web view
+ * chooses the Han glyph forms from it. `index.html` ships `lang="en"`, and this call
+ * replaces it with the language that the interface shows. The `:lang(zh)` rules in
+ * `globals.css` read the same attribute.
+ *
+ * An explicit null target does nothing; only undefined reads the global document.
+ */
+export function applyDocumentLanguage(
+  language: SupportedLanguage,
+  target?: DocumentLanguageTarget | null,
+): void {
+  const root = target !== undefined ? target : getDefaultDocumentLanguageTarget();
+  if (root && root.lang !== language) {
+    root.lang = language;
+  }
+}
+
+/**
+ * Keeps the document language equal to the resolved language of an i18next instance.
+ *
+ * It writes the language at once if the instance is already initialized, and again on each
+ * `languageChanged` event. i18next also emits that event from `init`, so a binding made
+ * before `init` covers the first language. The written tag is always a supported language:
+ * a change to a language without a catalog writes the fallback language.
+ *
+ * Returns a function that removes the binding.
+ */
+export function bindDocumentLanguage(
+  instance: I18nInstance,
+  target?: DocumentLanguageTarget | null,
+): () => void {
+  const sync = (): void => {
+    applyDocumentLanguage(getResolvedLanguage(instance), target);
+  };
+  instance.on("languageChanged", sync);
+  if (instance.isInitialized) {
+    sync();
+  }
+  return () => {
+    instance.off("languageChanged", sync);
+  };
+}
+
+/**
  * Global singleton i18n instance.
  */
 const defaultI18n: I18nInstance = i18next;
 let initQueue: Promise<unknown> = Promise.resolve();
 
 /**
+ * Only the default instance drives the document language. An instance from
+ * `createI18nInstance` is isolated and leaves the document alone.
+ */
+let isDocumentLanguageBound = false;
+
+/**
  * Initializes the default i18next runtime instance with react-i18next.
  * Guarantees that concurrent calls are serialized strictly in invocation order so the latest call wins.
  * Guarantees that a failed initialization does not permanently poison future retry attempts.
+ *
+ * It also sets the document language at init, and binds the document language to every later
+ * `languageChanged` event of the default instance.
  */
 export function initI18n(options?: I18nRuntimeOptions): Promise<I18nInstance> {
   const preference =
     options?.initialPreference ?? getStoredPreference(options?.storage);
   const resolvedLanguage = resolveLanguage(preference, options?.systemLanguages);
+
+  // Bind once, before the first `init`, so that the event `init` emits is not missed.
+  if (!isDocumentLanguageBound) {
+    bindDocumentLanguage(defaultI18n);
+    isDocumentLanguageBound = true;
+  }
 
   const execute = async (): Promise<I18nInstance> => {
     if (!defaultI18n.isInitialized) {
@@ -238,6 +310,8 @@ export function initI18n(options?: I18nRuntimeOptions): Promise<I18nInstance> {
         await defaultI18n.changeLanguage(resolvedLanguage);
       }
     }
+    // No event fires when the requested language is already active, so write it here too.
+    applyDocumentLanguage(getResolvedLanguage(defaultI18n));
     return defaultI18n;
   };
 

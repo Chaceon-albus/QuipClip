@@ -150,7 +150,7 @@ export function TransportBar() {
             aria-label={t("transport.action.undo")}
           >
             <Undo2 className="size-4" />
-            <span className="text-[10px] leading-none font-medium">
+            <span className="text-2xs leading-none font-medium">
               {t("transport.action.undo")}
             </span>
           </Button>
@@ -163,7 +163,7 @@ export function TransportBar() {
             aria-label={t("transport.action.redo")}
           >
             <Redo2 className="size-4" />
-            <span className="text-[10px] leading-none font-medium">
+            <span className="text-2xs leading-none font-medium">
               {t("transport.action.redo")}
             </span>
           </Button>
@@ -269,7 +269,7 @@ export function TransportBar() {
                 aria-label={t("transport.action.newSegmentAria")}
               >
                 <SquarePlus className="size-4" />
-                <span className="text-[10px] leading-none font-medium">
+                <span className="text-2xs leading-none font-medium">
                   {t("transport.action.newSegment")}
                 </span>
               </Button>
@@ -288,7 +288,7 @@ export function TransportBar() {
                 aria-label={t("transport.action.deleteSegmentAria")}
               >
                 <Trash2 className="size-4" />
-                <span className="text-[10px] leading-none font-medium">
+                <span className="text-2xs leading-none font-medium">
                   {t("transport.action.deleteSegment")}
                 </span>
               </Button>

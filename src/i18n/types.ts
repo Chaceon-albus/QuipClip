@@ -62,6 +62,14 @@ export interface PreferenceStorage {
 }
 
 /**
+ * The element that carries the document language in its `lang` attribute.
+ * `document.documentElement` satisfies it. Tests inject a plain object instead of a DOM.
+ */
+export interface DocumentLanguageTarget {
+  lang: string;
+}
+
+/**
  * Recursive schema type for translation catalogs ensuring complete key parity.
  */
 export type DeepStringSchema<T> = {

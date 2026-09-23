@@ -142,7 +142,7 @@ export function ExportSetup({
         <div className="flex items-start gap-2 text-xs">
           <span
             className={cn(
-              "mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold",
+              "mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-2xs leading-none font-semibold",
               encoderMark.tone === "warning"
                 ? "bg-warning/10 text-warning-text"
                 : "bg-muted text-muted-foreground",
