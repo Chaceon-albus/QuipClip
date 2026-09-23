@@ -11,7 +11,12 @@
  */
 
 import type { MediaProbe } from "@/features/media";
-import { hasNominalFrameRate, type PlaybackState } from "@/features/playback";
+import {
+  getNominalFrameRate,
+  hasNominalFrameRate,
+  NOMINAL_STEP_EDGE_TOLERANCE_SECONDS,
+  type PlaybackState,
+} from "@/features/playback";
 import {
   canMarkIn,
   canMarkOut,
@@ -61,6 +66,8 @@ export interface ShortcutSnapshot {
     | "presentedFrame"
     | "seekTargetSeconds"
     | "runtimeBrowserDurationSeconds"
+    | "approximateBrowserTimeSeconds"
+    | "isPlaying"
   >;
   readonly timeline: Pick<
     TimelineState,
@@ -125,6 +132,52 @@ function isTargetOnScreen(
     return false;
   }
   return BigInt(frame.inferredSourcePts) === BigInt(target);
+}
+
+/**
+ * True when the element already stands at the End target on a calibrated source, with a
+ * frame on screen, no seek pending and no playback.
+ *
+ * This is the rule of `isTargetOnScreen` for End. End seeks on the approximate clock, so no
+ * PTS names its target. The presented frame is also not the value to compare: the last frame
+ * starts one frame interval before the end, so its time never equals the target. The plan
+ * therefore compares the position of the element, `approximateBrowserTimeSeconds`. It is on
+ * the axis of the target, seconds from the start of the source, and the `seeked` handler of
+ * the preview updates it when a seek completes. `seekApproximate` can clamp the target to the
+ * duration of the element, and the plan does not repeat that clamp. When the clamp moves the
+ * target by the tolerance or more, End seeks again, as it did before this rule.
+ *
+ * The tolerance is half a nominal frame interval. A position nearer than that to the target
+ * is nearer to it than to any other nominal frame position, so the seek would show the frame
+ * already on screen. A position one frame before the end is outside it, and End still moves
+ * there. Without a nominal frame rate no interval is known, and the tolerance is
+ * `NOMINAL_STEP_EDGE_TOLERANCE_SECONDS`. The nominal step uses the same value to compare a
+ * clamp target with the position that the element reads back after a seek to it. After End,
+ * the two values differ only by the rounding of one instant, and the value is far below the
+ * frame interval of any real source.
+ *
+ * During playback the rule never applies. The approximate clock is then a `timeupdate` sample
+ * that lags the element, and the seek of End also stops the playback.
+ */
+function isElementAtEnd(
+  playback: ShortcutSnapshot["playback"],
+  probe: ShortcutProbe,
+  endSeconds: number,
+): boolean {
+  const position = playback.approximateBrowserTimeSeconds;
+  if (
+    playback.calibrationStatus !== "ready" ||
+    playback.presentedFrame === null ||
+    playback.seekTargetSeconds !== null ||
+    playback.isPlaying ||
+    position === null
+  ) {
+    return false;
+  }
+  const rate = getNominalFrameRate(probe);
+  const tolerance =
+    rate === null ? NOMINAL_STEP_EDGE_TOLERANCE_SECONDS : rate.d / (2 * rate.n);
+  return Math.abs(position - endSeconds) < tolerance;
 }
 
 /**
@@ -247,6 +300,10 @@ export function planShortcutCommand(
         runtimeBrowserDuration: playback.runtimeBrowserDurationSeconds,
       });
       if (endSeconds === null) {
+        return null;
+      }
+      // Already there: End, End moves nothing and keeps the frame for Mark Out.
+      if (isElementAtEnd(playback, probe, endSeconds)) {
         return null;
       }
       return { kind: "seekApproximate", seconds: endSeconds };

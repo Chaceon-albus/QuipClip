@@ -49,8 +49,8 @@ interface SnapshotOverrides {
 }
 
 /**
- * A calibrated, attached and ready source at 1 s (PTS 90000), with no segment, no pending In
- * mark and an empty edit history.
+ * A calibrated, attached, ready and paused source at 1 s (PTS 90000), with no segment, no
+ * pending In mark and an empty edit history.
  */
 function createSnapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
   return {
@@ -58,10 +58,12 @@ function createSnapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
     playback: {
       isAttached: true,
       isReady: true,
+      isPlaying: false,
       calibrationStatus: "ready",
       presentedFrame: { mediaTime: 1, inferredSourcePts: pts("90000") },
       seekTargetSeconds: null,
       runtimeBrowserDurationSeconds: 10.02,
+      approximateBrowserTimeSeconds: 1,
       ...overrides.playback,
     },
     timeline: {
@@ -193,13 +195,17 @@ function createStoreHarness() {
     return command;
   };
 
-  /** The element finishes the running seek, and the browser presents the frame there. */
-  const presentSeekedFrame = (): void => {
+  /**
+   * The element finishes the running seek, and the browser presents a frame. The calls follow
+   * the `seeked` handler of the preview: the approximate clock first, then the seek state. The
+   * frame is at the position of the element, unless `mediaTime` names another one, as at the
+   * end of the source, where the last frame starts one interval before the end.
+   */
+  const presentSeekedFrame = (mediaTime: number = element.currentTime): void => {
     element.seeking = false;
+    playback.getState().syncBrowserTime(key, element);
     playback.getState().syncSeeked(key, element);
-    playback
-      .getState()
-      .syncPresentedFrame(key, element.currentTime, ++presentedFrames, element);
+    playback.getState().syncPresentedFrame(key, mediaTime, ++presentedFrames, element);
   };
 
   /** A click on the ruler at a frame: one exact seek, then the frame it presents. */
@@ -427,6 +433,82 @@ describe("planShortcutCommand", () => {
         playback: { runtimeBrowserDurationSeconds: null },
       });
       expect(planShortcutCommand("goToEnd", indeterminate)).toBeNull();
+    });
+
+    // The end of the ruler is 10 s at 30 fps. The last frame (PTS 897000) starts one interval
+    // before it, so End compares the position of the element, not the presented frame.
+    const LAST_FRAME = { mediaTime: 299 / 30, inferredSourcePts: pts("897000") };
+    const END_SEEK: ShortcutCommand = { kind: "seekApproximate", seconds: 10 };
+    const atEndSnapshot = (
+      playback: Partial<ShortcutSnapshot["playback"]> = {},
+      probe: ShortcutProbe = createProbe(),
+    ): ShortcutSnapshot =>
+      createSnapshot({
+        probe,
+        playback: {
+          presentedFrame: LAST_FRAME,
+          approximateBrowserTimeSeconds: 10,
+          ...playback,
+        },
+      });
+
+    it("does nothing on End when the element already stands at the end", () => {
+      expect(planShortcutCommand("goToEnd", atEndSnapshot())).toBeNull();
+      // Less than half a frame interval from the end, on either side of it.
+      for (const position of [10 - 0.4 / 30, 10 + 0.4 / 30]) {
+        expect(
+          planShortcutCommand(
+            "goToEnd",
+            atEndSnapshot({ approximateBrowserTimeSeconds: position }),
+          ),
+        ).toBeNull();
+      }
+    });
+
+    it("goes to the end from one frame before it", () => {
+      const oneFrameBefore = atEndSnapshot({
+        approximateBrowserTimeSeconds: 10 - 1 / 30,
+      });
+      expect(planShortcutCommand("goToEnd", oneFrameBefore)).toEqual(END_SEEK);
+    });
+
+    it("goes to the end when a seek is pending, even from the end", () => {
+      // The element is moving away from the end, so the seek must still run.
+      const leaving = atEndSnapshot({ seekTargetSeconds: 3 });
+      expect(planShortcutCommand("goToEnd", leaving)).toEqual(END_SEEK);
+    });
+
+    it("goes to the end from the end without a frame, a clock, a calibration or a pause", () => {
+      const cases: Partial<ShortcutSnapshot["playback"]>[] = [
+        { presentedFrame: null },
+        { approximateBrowserTimeSeconds: null },
+        { calibrationStatus: "unavailable", presentedFrame: null },
+        // The clock is a timeupdate sample during playback, and the seek stops the playback.
+        { isPlaying: true },
+      ];
+      for (const playback of cases) {
+        expect(planShortcutCommand("goToEnd", atEndSnapshot(playback))).toEqual(
+          END_SEEK,
+        );
+      }
+    });
+
+    it("does nothing on End at the end without a nominal rate, within one microsecond", () => {
+      const noRate = createProbe({ avgFrameRate: null, rFrameRate: null });
+      expect(planShortcutCommand("goToEnd", atEndSnapshot({}, noRate))).toBeNull();
+      expect(
+        planShortcutCommand(
+          "goToEnd",
+          atEndSnapshot({ approximateBrowserTimeSeconds: 10 + 1e-7 }, noRate),
+        ),
+      ).toBeNull();
+      // No frame interval is known, so a position one millisecond away still seeks.
+      expect(
+        planShortcutCommand(
+          "goToEnd",
+          atEndSnapshot({ approximateBrowserTimeSeconds: 10 - 1e-3 }, noRate),
+        ),
+      ).toEqual(END_SEEK);
     });
   });
 
@@ -756,6 +838,30 @@ describe("planShortcutCommand", () => {
 
       expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "0" });
       expect(h.timeline.getState().pendingInPts).toBe("0");
+    });
+
+    it("End, End, O: the second End does nothing and O marks an Out at the last frame", () => {
+      const h = createStoreHarness();
+      h.clickRulerAt("25");
+      expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "25" });
+
+      // The end of the ruler is 250 frames at 25 fps. The element stands at 10 s, and the
+      // browser presents the last frame, which starts one interval earlier.
+      expect(h.press("goToEnd")).toEqual({ kind: "seekApproximate", seconds: 10 });
+      h.presentSeekedFrame(249 / 25);
+      expect(h.shownPts()).toBe("249");
+      expect(h.playback.getState().approximateBrowserTimeSeconds).toBe(10);
+      expect(h.playback.getState().seekTargetSeconds).toBeNull();
+
+      const seeks = h.element.currentTimeSets;
+      expect(h.press("goToEnd")).toBeNull();
+      expect(h.element.currentTimeSets).toBe(seeks);
+      expect(h.shownPts()).toBe("249");
+
+      expect(h.press("markOut")).toEqual({ kind: "markOut", pts: "249" });
+      expect(h.timeline.getState().segments).toEqual([
+        { id: "segment-1", sourceId: SOURCE_ID, inPts: "25", outPts: "249" },
+      ]);
     });
 
     it("O then Shift+O: the return does nothing, and Escape then I marks a new In there", () => {
