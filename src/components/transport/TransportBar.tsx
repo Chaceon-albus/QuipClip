@@ -172,6 +172,12 @@ export function TransportBar() {
         <Separator orientation="vertical" className="h-8 bg-border" />
 
         {/* Group 2: Mark points and cut tools (In, Out, Split) */}
+        {/*
+          Every seek clears presentedFrame until RVFC reports a frame (ADR 022), which
+          disables these three for a few frames on each step. Only the dimming waits 150 ms:
+          a delay set in the disabled state applies on the way in, and a return inside it
+          cancels the fade. Reduced motion drops the fade and keeps the delay.
+        */}
         <div className="flex items-center gap-2">
           <Tooltip>
             <TooltipTrigger asChild>
@@ -187,7 +193,7 @@ export function TransportBar() {
                     markIn(frame.inferredSourcePts);
                   }
                 }}
-                className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
+                className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted disabled:delay-150 motion-reduce:duration-0"
                 aria-label={t("transport.action.markInAria")}
               >
                 <ArrowRightToLine className="size-4 text-muted-foreground" />
@@ -211,7 +217,7 @@ export function TransportBar() {
                     markOut(frame.inferredSourcePts);
                   }
                 }}
-                className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
+                className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted disabled:delay-150 motion-reduce:duration-0"
                 aria-label={t("transport.action.markOutAria")}
               >
                 <ArrowLeftToLine className="size-4 text-muted-foreground" />
@@ -235,7 +241,7 @@ export function TransportBar() {
                     split(frame.inferredSourcePts);
                   }
                 }}
-                className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted"
+                className="flex h-10 items-center gap-2 rounded-lg border-border bg-card px-3 hover:bg-muted disabled:delay-150 motion-reduce:duration-0"
                 aria-label={t("transport.action.splitAria")}
               >
                 <Scissors className="size-4 text-muted-foreground" />
