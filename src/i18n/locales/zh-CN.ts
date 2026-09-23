@@ -166,6 +166,19 @@ export const zhCN: TranslationCatalog = {
       discardPrompt: "放弃未保存的更改并切换到其他预设？",
       discardConfirm: "放弃更改",
       discardCancel: "继续编辑",
+      deleteDialog: {
+        title: "删除预设“{{name}}”？",
+        description: "此操作无法撤销。",
+        descriptionActive:
+          "此操作无法撤销。此预设是当前预设，删除后“{{next}}”将成为当前预设。",
+        descriptionLast: "此操作无法撤销。这是唯一的预设，删除后将没有当前预设。",
+        confirm: "删除",
+      },
+      restoreDialog: {
+        title: "恢复默认预设？",
+        description:
+          "此操作会将内置预设恢复为原始设置，并重新添加已删除的内置预设。您对内置预设所做的更改将被覆盖。您自己的预设和 FFmpeg 位置保持不变。",
+      },
       nameLabel: "名称",
       containerLabel: "容器",
       videoEncoderLabel: "视频编码器",

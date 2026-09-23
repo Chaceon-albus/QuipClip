@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  activePresetIdAfterDelete,
   addPreset,
   createPresetDraft,
   DEFAULT_CUSTOM_FRAME_RATE,
@@ -570,5 +571,51 @@ describe("referential freshness", () => {
 
     expect(result).not.toBe(settings);
     expect(result.presets).not.toBe(settings.presets);
+  });
+});
+
+describe("activePresetIdAfterDelete", () => {
+  const a = createPreset("a");
+  const b = createPreset("b");
+  const c = createPreset("c");
+
+  it("returns the preset that slides into the removed index when the active preset is deleted", () => {
+    expect(activePresetIdAfterDelete([a, b, c], "b", "b")).toBe("c");
+    expect(activePresetIdAfterDelete([a, b, c], "a", "a")).toBe("b");
+  });
+
+  it("returns the new last preset when the deleted active preset was last", () => {
+    expect(activePresetIdAfterDelete([a, b, c], "c", "c")).toBe("b");
+  });
+
+  it("returns undefined when the deleted active preset was the only one", () => {
+    expect(activePresetIdAfterDelete([a], "a", "a")).toBeUndefined();
+  });
+
+  it("keeps the active id when the deleted preset is not active", () => {
+    expect(activePresetIdAfterDelete([a, b, c], "a", "c")).toBe("a");
+    expect(activePresetIdAfterDelete([a, b, c], undefined, "c")).toBeUndefined();
+  });
+
+  it("keeps the active id when the id names no preset", () => {
+    expect(activePresetIdAfterDelete([a, b], "a", "does-not-exist")).toBe("a");
+  });
+
+  // The delete confirmation names the preset this function returns. It must be the preset
+  // that `deletePreset` really makes active, for every id and every active preset.
+  it("agrees with deletePreset for every id and every active preset", () => {
+    const presets = [a, b, c];
+    const activeIds = [undefined, "a", "b", "c"];
+    const ids = ["a", "b", "c", "does-not-exist"];
+    for (const activePresetId of activeIds) {
+      for (const id of ids) {
+        const settings = createSettings(
+          activePresetId === undefined ? { presets } : { presets, activePresetId },
+        );
+        expect(activePresetIdAfterDelete(presets, activePresetId, id)).toBe(
+          deletePreset(settings, id).activePresetId,
+        );
+      }
+    }
   });
 });

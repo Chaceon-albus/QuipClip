@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { Notice } from "@/components/common/Notice";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,6 +26,11 @@ import {
 } from "@/features/settings/types";
 import { getResolvedLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
+import {
+  presentDeletePresetConfirm,
+  presentRestoreDefaultsConfirm,
+  type DeletePresetConfirmView,
+} from "./presetConfirmPresenter";
 import {
   createPresetLibraryController,
   type PresetLibraryController,
@@ -54,11 +60,14 @@ function PresetEditor({
   view,
   controller,
   ffmpegState,
+  onRequestDelete,
 }: {
   draft: Preset;
   view: PresetLibraryView;
   controller: PresetLibraryController;
   ffmpegState: Pick<FfmpegState, "status" | "results">;
+  /** Asks the user to confirm the delete. The section owns the confirmation. */
+  onRequestDelete: (id: string) => void;
 }) {
   const { t, i18n } = useTranslation();
   const translate = t as (
@@ -496,7 +505,7 @@ function PresetEditor({
             className="text-destructive-text hover:bg-destructive/10 hover:text-destructive-text"
             disabled={view.pending}
             onClick={() => {
-              void controller.deletePreset(draft.id);
+              onRequestDelete(draft.id);
             }}
           >
             {t("settings.preset.delete")}
@@ -526,6 +535,20 @@ export function PresetLibrarySection() {
   // `select` discards a dirty draft without warning and leaves the confirmation to the
   // view; this holds the pending target until the user answers.
   const [pendingSelectId, setPendingSelectId] = useState<string | null>(null);
+
+  // The delete confirmation. `prompt` is presented when the dialog opens and is kept after it
+  // closes, so the title and the description stay on screen while the dialog animates out,
+  // even after the delete has removed the preset they name. The dialog is modal, so this
+  // window cannot change the preset library while it is open. Another window or another copy
+  // of QuipClip can still save, so the text can be out of date. The delete stays safe: it
+  // removes the preset by id, not by position, and the revision check of ADR 013 refuses a save
+  // that is based on a library another process has changed.
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    open: boolean;
+    prompt: DeletePresetConfirmView | null;
+  }>({ open: false, prompt: null });
+  const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
+  const restorePrompt = presentRestoreDefaultsConfirm();
 
   const controller = useMemo(
     () =>
@@ -577,6 +600,13 @@ export function PresetLibrarySection() {
     controller.select(id);
   };
 
+  const handleRequestDelete = (id: string) => {
+    const prompt = presentDeletePresetConfirm(view.presets, view.activePresetId, id);
+    if (prompt !== null) {
+      setDeleteConfirm({ open: true, prompt });
+    }
+  };
+
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between">
@@ -602,7 +632,7 @@ export function PresetLibrarySection() {
             // be the one enabled control in a state where it cannot work.
             disabled={view.ready ? view.pending : true}
             onClick={() => {
-              void controller.restoreDefaults();
+              setRestoreConfirmOpen(true);
             }}
           >
             {t("settings.preset.restoreDefaults")}
@@ -726,8 +756,54 @@ export function PresetLibrarySection() {
           view={view}
           controller={controller}
           ffmpegState={ffmpegState}
+          onRequestDelete={handleRequestDelete}
         />
       ) : null}
+
+      {/* Each confirm button keeps the gate of the button that opened its dialog: the
+          controller requires every write to wait while `view.pending` is true. */}
+      <ConfirmDialog
+        open={deleteConfirm.open}
+        onOpenChange={(open) => setDeleteConfirm((previous) => ({ ...previous, open }))}
+        title={
+          deleteConfirm.prompt
+            ? translate(
+                deleteConfirm.prompt.title.key,
+                deleteConfirm.prompt.title.values,
+              )
+            : null
+        }
+        description={
+          deleteConfirm.prompt
+            ? translate(
+                deleteConfirm.prompt.description.key,
+                deleteConfirm.prompt.description.values,
+              )
+            : null
+        }
+        confirmLabel={t("settings.preset.deleteDialog.confirm")}
+        cancelLabel={t("common.cancel")}
+        destructive
+        confirmDisabled={view.pending}
+        onConfirm={() => {
+          if (deleteConfirm.prompt) {
+            void controller.deletePreset(deleteConfirm.prompt.presetId);
+          }
+        }}
+      />
+      <ConfirmDialog
+        open={restoreConfirmOpen}
+        onOpenChange={setRestoreConfirmOpen}
+        title={translate(restorePrompt.title.key)}
+        description={translate(restorePrompt.description.key)}
+        confirmLabel={t("settings.preset.restoreDefaults")}
+        cancelLabel={t("common.cancel")}
+        destructive
+        confirmDisabled={view.ready ? view.pending : true}
+        onConfirm={() => {
+          void controller.restoreDefaults();
+        }}
+      />
     </section>
   );
 }

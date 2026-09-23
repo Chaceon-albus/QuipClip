@@ -164,6 +164,20 @@ export const en = {
       discardPrompt: "Discard the unsaved changes and switch to another preset?",
       discardConfirm: "Discard",
       discardCancel: "Keep Editing",
+      deleteDialog: {
+        title: "Delete preset “{{name}}”?",
+        description: "You cannot undo this action.",
+        descriptionActive:
+          "You cannot undo this action. This preset is the active preset, so “{{next}}” will become the active preset.",
+        descriptionLast:
+          "You cannot undo this action. This is the only preset, so no preset will be active.",
+        confirm: "Delete",
+      },
+      restoreDialog: {
+        title: "Restore the default presets?",
+        description:
+          "This restores the built-in presets to their original settings and adds back any you deleted. It replaces the changes you made to them. Your own presets and the FFmpeg location stay as they are.",
+      },
       nameLabel: "Name",
       containerLabel: "Container",
       videoEncoderLabel: "Video Encoder",

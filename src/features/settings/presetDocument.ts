@@ -121,6 +121,29 @@ export function updatePreset(settings: Settings, preset: Preset): Settings {
 }
 
 /**
+ * Returns the `activePresetId` that a delete of `id` leaves behind.
+ *
+ * `deletePreset` builds its document from this answer, and the delete confirmation names the
+ * preset it returns. One function serves both, so the confirmation can never name a preset
+ * other than the one the delete makes active. See `deletePreset` for the rule itself.
+ */
+export function activePresetIdAfterDelete(
+  presets: readonly Preset[],
+  activePresetId: string | undefined,
+  id: string,
+): string | undefined {
+  const index = presets.findIndex((preset) => preset.id === id);
+  if (index === -1 || activePresetId !== id) {
+    return activePresetId;
+  }
+  const remaining = presets.filter((preset) => preset.id !== id);
+  if (remaining.length === 0) {
+    return undefined;
+  }
+  return remaining[Math.min(index, remaining.length - 1)].id;
+}
+
+/**
  * Removes the preset with the given id and repairs `activePresetId` so it never dangles.
  *
  * This module is the only place in the system that can create a dangling `activePresetId`:
@@ -147,17 +170,11 @@ export function deletePreset(settings: Settings, id: string): Settings {
   }
 
   const presets = settings.presets.filter((preset) => preset.id !== id);
-
-  if (settings.activePresetId !== id) {
-    return buildSettings(settings, presets, settings.activePresetId);
-  }
-
-  if (presets.length === 0) {
-    return buildSettings(settings, presets, undefined);
-  }
-
-  const nextActiveIndex = Math.min(index, presets.length - 1);
-  return buildSettings(settings, presets, presets[nextActiveIndex].id);
+  return buildSettings(
+    settings,
+    presets,
+    activePresetIdAfterDelete(settings.presets, settings.activePresetId, id),
+  );
 }
 
 /**
