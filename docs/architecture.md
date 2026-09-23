@@ -49,6 +49,7 @@ document summarizes them and shows how the parts fit together.
 | [`026-editing-keys-in-the-window-keyboard-layer.md`](../.agents/decisions/026-editing-keys-in-the-window-keyboard-layer.md)                 | The window keyboard layer takes the editing keys                |
 | [`027-confirm-a-quit-that-loses-work.md`](../.agents/decisions/027-confirm-a-quit-that-loses-work.md)                                       | A close or a quit that would lose work asks first               |
 | [`028-frame-timecode-display.md`](../.agents/decisions/028-frame-timecode-display.md)                                                       | Elapsed time shows as HH:MM:SS:FF by default                    |
+| [`029-show-and-open-the-export-output.md`](../.agents/decisions/029-show-and-open-the-export-output.md)                                     | Show and open the export output through its run                 |
 
 ## Shape
 
@@ -234,7 +235,9 @@ See ADR 004 and ADR 014.
 
 ADR 004 gives the semantic steps. ADR 014 selects the command shape from measurements on
 ffmpeg 9.0.1. ADR 016 adds the orchestration. The renderer is written, and `start_export`,
-`cancel_export`, and `cancel_active_export` are registered commands.
+`cancel_export`, and `cancel_active_export` are registered commands. After a run finishes,
+`reveal_export_output` and `open_export_output` show or open the file that the run wrote.
+They take the run identifier, never a path (ADR 029).
 
 One `ffmpeg` process writes one output. One `-copyts`, placed once before the first input,
 keeps the raw source PTS visible to the filter graph on every input. The renderer seeks each
