@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
-import { XIcon } from "lucide-react";
+import { CircleSlash, XIcon } from "lucide-react";
+import { DESTRUCTIVE_CONFIRM_CLASS } from "@/components/common/confirmDialogModel";
 import { Notice } from "@/components/common/Notice";
 import { ProgressBar } from "@/components/common/ProgressBar";
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   confirmExportFlow,
   runExportFlow,
@@ -21,14 +23,17 @@ import { openMediaFileDialog } from "@/features/media";
 import { useSettingsStore } from "@/features/settings";
 import { getResolvedLanguage } from "@/i18n";
 import { ExportSetup } from "./ExportSetup";
-import {
-  isCancelEnabled,
-  isCancelOutstanding,
-  resolveExportDismissal,
-} from "./exportCancelState";
-import { presentExportError } from "./exportErrorPresenter";
+import { resolveExportDismissal } from "./exportCancelState";
+import { presentExportOutcome } from "./exportErrorPresenter";
 import { formatRemaining, presentExportProgress } from "./exportProgressPresenter";
 import { presentSetupBlocker, resolveSetupPresetId } from "./exportSetupPresenter";
+import {
+  decideStopClick,
+  presentStopButton,
+  refreshStopArmedAt,
+  stopArmRemainingMs,
+  trackExportStart,
+} from "./exportStopPresenter";
 
 export interface ExportDialogProps {
   open: boolean;
@@ -197,6 +202,15 @@ export function ExportDialog({
   const [requestedPresetId, setRequestedPresetId] = useState<string | null>(null);
   // Guard against double clicks triggering multiple concurrent native save dialogs.
   const [choosingDestination, setChoosingDestination] = useState(false);
+  // The time of the click that armed Stop Export, or null when it is not armed. The time is
+  // from `performance.now()`, which is monotonic, so a change of the system clock cannot
+  // shorten or lengthen the window.
+  const [stopArmedAt, setStopArmedAt] = useState<number | null>(null);
+  // The time the current export started, on the same clock. Only the click handler reads it,
+  // so it is a ref and a change does not render the dialog again. This component stays
+  // mounted while the dialog is hidden (ADR 025), so it sees every status change.
+  const exportStartedAtRef = useRef<number | null>(null);
+  const stopNoteId = useId();
 
   const status = useExportStore((state) => state.status);
   const runId = useExportStore((state) => state.runId);
@@ -204,6 +218,46 @@ export function ExportDialog({
   const error = useExportStore((state) => state.error);
   const cancelExport = useExportStore((state) => state.cancelExport);
   const reset = useExportStore((state) => state.reset);
+
+  useEffect(() => {
+    const startedAt = trackExportStart(
+      exportStartedAtRef.current,
+      status,
+      performance.now(),
+    );
+    exportStartedAtRef.current = startedAt;
+    // An armed state belongs to one run. When the run is no longer active, clear it, so a
+    // later run can never start with the confirmation label from this one.
+    if (startedAt === null) {
+      setStopArmedAt(null);
+    }
+  }, [status]);
+
+  // Reverts an armed Stop Export button when its window ends. A hidden or occluded window can
+  // delay the timer, so the armed time is also checked against the clock when the window
+  // becomes visible or takes the focus again. The label then never stays armed after its
+  // window.
+  useEffect(() => {
+    if (stopArmedAt === null) {
+      return;
+    }
+    const timer = window.setTimeout(
+      () => {
+        setStopArmedAt(null);
+      },
+      stopArmRemainingMs(stopArmedAt, performance.now()),
+    );
+    const refresh = () => {
+      setStopArmedAt((current) => refreshStopArmedAt(current, performance.now()));
+    };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [stopArmedAt]);
 
   const settings = useSettingsStore((state) => state.settings);
   const effectivePresetId = resolveSetupPresetId(settings, requestedPresetId);
@@ -217,12 +271,23 @@ export function ExportDialog({
   // and resets the store when in an idle or terminal status (ADR 025).
   const dismissal = resolveExportDismissal(status);
   const isActive = dismissal === "hide";
-  const canceling = isCancelOutstanding({ status, cancelRequested });
-  const cancelEnabled = isCancelEnabled({ status, runId, cancelRequested });
-
-  const errorView = presentExportError(error);
+  // "publishing" always disables the button: the backend already ran its last cancel test
+  // before it emitted the event that puts the interface into that phase (ADR 016), so a stop
+  // there cannot stop the rename. "running" with no run id disables it, and an outstanding
+  // cancel disables it in any active status. `isCancelEnabled` holds these rules keyed to
+  // `cancelRequested` in the store (ADR 025), and `presentStopButton` applies them.
+  const stopView = presentStopButton({
+    status,
+    runId,
+    cancelRequested,
+    armed: stopArmedAt !== null,
+  });
+  // The close control hides the dialog while an export is active, and the export continues.
+  // The label says so, because an X usually reads as "close".
+  const closeLabel = isActive ? t("export.action.hide") : t("common.close");
 
   const hideDialog = () => {
+    setStopArmedAt(null);
     onOpenChange(false);
   };
 
@@ -230,6 +295,7 @@ export function ExportDialog({
     onOpenChange(false);
     setRequestedPresetId(null);
     setChoosingDestination(false);
+    setStopArmedAt(null);
     reset();
   };
 
@@ -304,8 +370,29 @@ export function ExportDialog({
     }
   };
 
-  const handleCancel = async () => {
-    await cancelExport();
+  // The first click on a long export only arms the button, and the second half of a
+  // double-click is ignored. See `decideStopClick`. The rule reads the clock, and the label
+  // reads `stopArmedAt`, which the timer and the refresh above clear. A timer that fires late
+  // can show the confirmation label for a few milliseconds after the window. A click in that
+  // gap arms the button again and does not stop, which is the safe direction.
+  const handleStopClick = () => {
+    if (!stopView.enabled) {
+      return;
+    }
+    const decision = decideStopClick({
+      now: performance.now(),
+      startedAt: exportStartedAtRef.current,
+      armedAt: stopArmedAt,
+    });
+    if (decision.kind === "ignore") {
+      return;
+    }
+    if (decision.kind === "arm") {
+      setStopArmedAt(decision.armedAt);
+      return;
+    }
+    setStopArmedAt(null);
+    void cancelExport();
   };
 
   const renderContent = () => {
@@ -346,23 +433,31 @@ export function ExportDialog({
           );
         }
 
-        const fallbackKey =
-          status === "canceled" ? "exportError.canceled" : "exportError.unknown";
-        const key = errorView?.key ?? fallbackKey;
-        const values = errorView?.values;
+        const outcome = presentExportOutcome({ status, error });
+
+        // A stop that the user asked for is a result, not an error, so it is neutral.
+        if (outcome.kind === "canceled") {
+          return (
+            <div className="py-2">
+              <Notice tone={outcome.tone} role={outcome.role} icon={CircleSlash}>
+                {t(outcome.message.key)}
+              </Notice>
+            </div>
+          );
+        }
 
         return (
           <div className="py-2">
-            <Notice tone="destructive" role="alert">
+            <Notice tone={outcome.tone} role={outcome.role}>
               <p>
                 {(t as (k: string, opts?: Record<string, string | number>) => string)(
-                  key,
-                  values,
+                  outcome.message.key,
+                  outcome.message.values,
                 )}
               </p>
-              {error?.detail && (
+              {outcome.detail && (
                 <pre className="mt-2 max-h-32 overflow-y-auto font-mono text-xs whitespace-pre-wrap opacity-80 select-text">
-                  {error.detail}
+                  {outcome.detail}
                 </pre>
               )}
             </Notice>
@@ -378,20 +473,36 @@ export function ExportDialog({
         showCloseButton={false}
         aria-describedby={undefined}
         className="sm:max-w-md"
+        onOpenAutoFocus={(event) => {
+          // Radix would focus the first tabbable element, which is the close button. A Radix
+          // tooltip opens on every focus that no pointer press on its trigger started, so the
+          // tooltip would show on each open, and the first Escape would close the tooltip and
+          // not the dialog. The dialog takes the focus instead, and Tab reaches the close
+          // button first.
+          event.preventDefault();
+          if (event.currentTarget instanceof HTMLElement) {
+            event.currentTarget.focus();
+          }
+        }}
       >
         <DialogHeader>
           <DialogTitle>{t("export.title")}</DialogTitle>
         </DialogHeader>
 
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="absolute top-2 right-2"
-          onClick={dismiss}
-        >
-          <XIcon />
-          <span className="sr-only">{t("common.close")}</span>
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="absolute top-2 right-2"
+              onClick={dismiss}
+            >
+              <XIcon />
+              <span className="sr-only">{closeLabel}</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{closeLabel}</TooltipContent>
+        </Tooltip>
 
         {renderContent()}
 
@@ -424,19 +535,42 @@ export function ExportDialog({
             </>
           ) : isActive ? (
             <>
+              {stopView.noteKey && (
+                <p
+                  id={stopNoteId}
+                  className="self-center text-xs text-muted-foreground sm:mr-auto"
+                >
+                  {t(stopView.noteKey)}
+                </p>
+              )}
+              {/* Announces the armed state. A screen reader does not reliably read a name
+                  change of the focused button, and a live region must exist before its
+                  content changes. */}
+              <span className="sr-only" aria-live="polite" aria-atomic="true">
+                {stopView.armed ? t("export.action.stopConfirm") : ""}
+              </span>
+              {/* One element in every state, so the focus stays on it after the first click
+                  and a second Enter confirms. */}
               <Button
-                variant="outline"
-                onClick={() => void handleCancel()}
-                // Among active statuses, "publishing" always disables it: the backend already
-                // ran its last cancel test before it emitted the event that puts the interface
-                // into that phase (ADR 016), so a cancel there cannot stop the rename, and the
-                // button would report a cancel that never happened while the export still
-                // writes the file. "running" with no run id disables it, and an outstanding
-                // cancel disables it in any active status. `isCancelEnabled` holds these rules
-                // keyed to `cancelRequested` in the store (ADR 025).
-                disabled={!cancelEnabled}
+                variant={stopView.appearance === "outline" ? "outline" : "default"}
+                className={
+                  stopView.appearance === "destructive"
+                    ? DESTRUCTIVE_CONFIRM_CLASS
+                    : undefined
+                }
+                onClick={handleStopClick}
+                onKeyDown={(event) => {
+                  // A held Enter repeats its keydown, and each keydown clicks the button. The
+                  // repeat would confirm the stop that the first keydown armed, so only a
+                  // second, separate press confirms.
+                  if (event.key === "Enter" && event.repeat) {
+                    event.preventDefault();
+                  }
+                }}
+                disabled={!stopView.enabled}
+                aria-describedby={stopView.noteKey ? stopNoteId : undefined}
               >
-                {canceling ? t("export.status.canceling") : t("common.cancel")}
+                {t(stopView.labelKey)}
               </Button>
               <Button onClick={hideDialog}>{t("export.action.runInBackground")}</Button>
             </>

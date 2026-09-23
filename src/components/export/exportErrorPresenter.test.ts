@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { presentExportError } from "./exportErrorPresenter";
+import { presentExportError, presentExportOutcome } from "./exportErrorPresenter";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n";
 import {
@@ -91,5 +91,115 @@ describe("presentExportError", () => {
 
     expect(view).toStrictEqual({ key: "exportError.ffmpegProcessFailed" });
     expect(view).not.toHaveProperty("values");
+  });
+});
+
+describe("presentExportOutcome", () => {
+  it("presents a canceled export as a neutral status with the canceled status text", () => {
+    const outcome = presentExportOutcome({
+      status: "canceled",
+      error: new ExportError({ code: "canceled" }),
+    });
+
+    expect(outcome).toStrictEqual({
+      kind: "canceled",
+      tone: "neutral",
+      role: "status",
+      message: { key: "export.status.canceled" },
+      detail: null,
+    });
+  });
+
+  it("drops a diagnostic that a canceled export carries", () => {
+    const outcome = presentExportOutcome({
+      status: "canceled",
+      error: new ExportError({ code: "canceled", detail: "process killed" }),
+    });
+
+    expect(outcome.kind).toBe("canceled");
+    expect(outcome.detail).toBeNull();
+  });
+
+  it("presents a canceled status with no error as canceled", () => {
+    expect(presentExportOutcome({ status: "canceled", error: null }).kind).toBe(
+      "canceled",
+    );
+  });
+
+  it("presents a canceled code as canceled even in the failed status", () => {
+    const outcome = presentExportOutcome({
+      status: "failed",
+      error: new ExportError({ code: "canceled" }),
+    });
+
+    expect(outcome.kind).toBe("canceled");
+    expect(outcome.tone).toBe("neutral");
+  });
+
+  it("presents a failed export as a destructive alert with its error key and diagnostic", () => {
+    const outcome = presentExportOutcome({
+      status: "failed",
+      error: new ExportError({
+        code: "ffmpegProcessFailed",
+        detail: "Conversion failed!",
+      }),
+    });
+
+    expect(outcome).toStrictEqual({
+      kind: "failed",
+      tone: "destructive",
+      role: "alert",
+      message: { key: "exportError.ffmpegProcessFailed" },
+      detail: "Conversion failed!",
+    });
+  });
+
+  it("gives a failed export with no diagnostic a null detail", () => {
+    const withoutDetail = presentExportOutcome({
+      status: "failed",
+      error: new ExportError({ code: "outputRenameFailed" }),
+    });
+    const emptyDetail = presentExportOutcome({
+      status: "failed",
+      error: new ExportError({ code: "outputRenameFailed", detail: "" }),
+    });
+
+    expect(withoutDetail.detail).toBeNull();
+    expect(emptyDetail.detail).toBeNull();
+  });
+
+  it("falls back to exportError.unknown for a failed status with no error", () => {
+    expect(presentExportOutcome({ status: "failed", error: null })).toStrictEqual({
+      kind: "failed",
+      tone: "destructive",
+      role: "alert",
+      message: { key: "exportError.unknown" },
+      detail: null,
+    });
+  });
+
+  it("presents every code but canceled as a failure", () => {
+    for (const code of EXPORT_ERROR_CODES) {
+      if (code === "canceled") {
+        continue;
+      }
+      const outcome = presentExportOutcome({
+        status: "failed",
+        error: new ExportError({ code }),
+      });
+      expect(outcome.kind).toBe("failed");
+      expect(outcome.tone).toBe("destructive");
+      expect(outcome.message.key).toBe(`exportError.${code}`);
+    }
+  });
+
+  it("uses a canceled status text that exists in both catalogs", () => {
+    const outcome = presentExportOutcome({ status: "canceled", error: null });
+
+    for (const catalog of [en, zhCN]) {
+      const resolved = resolveCatalogKey(catalog, outcome.message.key);
+      expect(typeof resolved).toBe("string");
+      expect((resolved as string).trim().length).toBeGreaterThan(0);
+    }
   });
 });

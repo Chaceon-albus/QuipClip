@@ -1,5 +1,6 @@
 /**
- * Pure presenter for translating an export error into an i18next key for the export dialog.
+ * Pure presenter for translating an export error into an i18next key for the export dialog,
+ * and for the notice that shows a failed or canceled export.
  *
  * Follows the presenter pattern from `src/components/settings/settingsErrorPresenter.ts`.
  */
@@ -36,4 +37,67 @@ export function presentExportError(error: ExportError | null): ExportErrorView |
   const code = isKnownCode ? rawCode : "unknown";
 
   return { key: `exportError.${code}` };
+}
+
+/**
+ * The notice that shows how an export that did not finish ended.
+ *
+ * - `canceled`: the user stopped the export. This is not an error, so the notice is neutral,
+ *   it is a `status`, and it carries no diagnostic.
+ * - `failed`: the export stopped on an error. The notice is destructive, it is an `alert`, and
+ *   it carries the diagnostic text when the backend sent one.
+ */
+export type ExportOutcomeView =
+  | {
+      kind: "canceled";
+      tone: "neutral";
+      role: "status";
+      message: { key: "export.status.canceled" };
+      detail: null;
+    }
+  | {
+      kind: "failed";
+      tone: "destructive";
+      role: "alert";
+      message: ExportErrorView;
+      detail: string | null;
+    };
+
+export interface ExportOutcomeInput {
+  status: "failed" | "canceled";
+  error: ExportError | null;
+}
+
+/**
+ * Presents the notice for an export that ended in `failed` or `canceled`.
+ *
+ * The store sets `canceled` exactly when the error code is `canceled`. The presenter accepts
+ * either signal, so a canceled export never shows in the error style.
+ *
+ * The replacement confirmation for `sourceRevisionChanged` is not an outcome. The dialog
+ * shows it with its own actions before it calls this presenter.
+ */
+export function presentExportOutcome({
+  status,
+  error,
+}: ExportOutcomeInput): ExportOutcomeView {
+  if (status === "canceled" || error?.code === "canceled") {
+    return {
+      kind: "canceled",
+      tone: "neutral",
+      role: "status",
+      message: { key: "export.status.canceled" },
+      detail: null,
+    };
+  }
+
+  // An empty diagnostic carries nothing to show.
+  const detail = error?.detail;
+  return {
+    kind: "failed",
+    tone: "destructive",
+    role: "alert",
+    message: presentExportError(error) ?? { key: "exportError.unknown" },
+    detail: detail ? detail : null,
+  };
 }
