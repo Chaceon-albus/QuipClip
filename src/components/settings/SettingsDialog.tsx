@@ -45,7 +45,7 @@ export function SettingsDialog({
       <DialogContent
         showCloseButton={false}
         aria-describedby={undefined}
-        className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
+        className="flex max-h-[85vh] flex-col overflow-hidden sm:max-w-2xl"
       >
         <DialogHeader>
           <DialogTitle>{t("settings.title")}</DialogTitle>
@@ -58,35 +58,37 @@ export function SettingsDialog({
           </Button>
         </DialogClose>
 
-        {errorView ? (
-          <div
-            role="alert"
-            className="rounded-md border border-destructive/20 bg-destructive/10 p-3 text-xs text-destructive"
-          >
-            {(t as (key: string, options?: Record<string, string | number>) => string)(
-              errorView.key,
-              errorView.values,
-            )}
-          </div>
-        ) : null}
-
-        {canRecover ? (
-          <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3 text-xs">
-            <p className="text-muted-foreground">{t("settings.resetDamagedHint")}</p>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                void settingsStore.getState().resetSettings();
-              }}
+        {/* Scrollable body keeps header, close button, and footer pinned */}
+        <div className="-mx-4 min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-1">
+          {errorView ? (
+            <div
+              role="alert"
+              className="rounded-md border border-destructive/20 bg-destructive/10 p-3 text-xs text-destructive"
             >
-              {t("settings.resetDamaged")}
-            </Button>
-          </div>
-        ) : null}
+              {(
+                t as (key: string, options?: Record<string, string | number>) => string
+              )(errorView.key, errorView.values)}
+            </div>
+          ) : null}
 
-        <FfmpegPathSection />
-        <PresetLibrarySection />
+          {canRecover ? (
+            <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3 text-xs">
+              <p className="text-muted-foreground">{t("settings.resetDamagedHint")}</p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  void settingsStore.getState().resetSettings();
+                }}
+              >
+                {t("settings.resetDamaged")}
+              </Button>
+            </div>
+          ) : null}
+
+          <FfmpegPathSection />
+          <PresetLibrarySection />
+        </div>
 
         <DialogFooter>
           <DialogClose asChild>
