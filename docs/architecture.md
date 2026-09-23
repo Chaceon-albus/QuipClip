@@ -46,6 +46,7 @@ document summarizes them and shows how the parts fit together.
 | [`023-audio-output-controls-in-presets.md`](../.agents/decisions/023-audio-output-controls-in-presets.md)                                   | Audio bitrate, sample rate, and channels in each preset         |
 | [`024-export-setup-step.md`](../.agents/decisions/024-export-setup-step.md)                                                                 | The export dialog selects the preset before the save dialog     |
 | [`025-background-export-and-progress-display.md`](../.agents/decisions/025-background-export-and-progress-display.md)                       | A hidden export continues, and three places show its progress   |
+| [`026-editing-keys-in-the-window-keyboard-layer.md`](../.agents/decisions/026-editing-keys-in-the-window-keyboard-layer.md)                 | The window keyboard layer takes the editing keys                |
 
 ## Shape
 
