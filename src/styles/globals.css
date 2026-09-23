@@ -22,6 +22,9 @@
   --color-primary-hover: var(--primary-hover);
   --color-primary-active: var(--primary-active);
   --color-primary-foreground: var(--primary-foreground);
+  --color-progress-track: var(--progress-track);
+  --color-progress-track-success: var(--progress-track-success);
+  --color-progress-track-destructive: var(--progress-track-destructive);
 
   --color-secondary: var(--secondary);
   --color-secondary-hover: var(--secondary-hover);
@@ -93,6 +96,30 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
+
+  --animate-progress-flow: progress-flow 1.8s linear infinite;
+  --animate-progress-bounce: progress-bounce 1.2s ease-in-out infinite;
+  --animate-progress-bounce-flow:
+    progress-bounce 1.2s ease-in-out infinite, progress-flow 1.8s linear infinite;
+
+  @keyframes progress-flow {
+    from {
+      background-position-x: 0;
+    }
+    to {
+      background-position-x: var(--progress-flow-period, 12rem);
+    }
+  }
+
+  @keyframes progress-bounce {
+    0%,
+    100% {
+      transform: translateX(-100%);
+    }
+    50% {
+      transform: translateX(300%);
+    }
+  }
 }
 
 :root {
@@ -117,6 +144,19 @@
   --primary-hover: oklch(0.49 0.078 190);
   --primary-active: oklch(0.45 0.075 190);
   --primary-foreground: oklch(0.98 0.006 195);
+
+  /* ---------------------------------------------------------
+   * Progress bar
+   * --------------------------------------------------------- */
+
+  --progress-track: oklch(0.53 0.075 190 / 0.16);
+  --progress-track-success: oklch(0.58 0.13 145 / 0.16);
+  --progress-track-destructive: oklch(0.58 0.2 25 / 0.16);
+  --progress-from: var(--primary);
+  --progress-to: oklch(0.66 0.12 172);
+  --progress-to-success: oklch(0.68 0.13 145);
+  --progress-to-destructive: oklch(0.68 0.2 25);
+  --progress-flow-period: 12rem;
 
   /* ---------------------------------------------------------
    * Secondary
@@ -276,6 +316,18 @@
   --primary-foreground: oklch(0.17 0.018 195);
 
   /* ---------------------------------------------------------
+   * Progress bar
+   * --------------------------------------------------------- */
+
+  --progress-track: oklch(0.72 0.085 190 / 0.24);
+  --progress-track-success: oklch(0.7 0.13 145 / 0.24);
+  --progress-track-destructive: oklch(0.64 0.2 25 / 0.24);
+  --progress-from: var(--primary);
+  --progress-to: oklch(0.86 0.11 172);
+  --progress-to-success: oklch(0.82 0.13 145);
+  --progress-to-destructive: oklch(0.82 0.2 25);
+
+  /* ---------------------------------------------------------
    * Secondary
    * --------------------------------------------------------- */
 
@@ -425,4 +477,15 @@
   ::-webkit-scrollbar-corner {
     background: transparent;
   }
+}
+
+@utility progress-fill {
+  background-image: linear-gradient(
+    90deg,
+    var(--progress-from),
+    var(--progress-to),
+    var(--progress-from)
+  );
+  background-size: var(--progress-flow-period, 12rem) 100%;
+  background-repeat: repeat-x;
 }
