@@ -364,6 +364,73 @@
 }
 
 /* =========================================================
+   Motion
+   ========================================================= */
+
+/* Durations. Both themes use the same values, so these are root variables and not theme
+ * variables. A utility reads one with the `duration-(--motion-fast)` syntax. */
+:root {
+  /* No animation. Timeline objects, the playhead and the selection follow the pointer
+   * and the media clock directly. */
+  --motion-instant: 0ms;
+  /* A hover or press colour change, a focus ring, and the exit of an overlay. */
+  --motion-fast: 100ms;
+  /* The entry of a tooltip, a menu or a select list. */
+  --motion-base: 150ms;
+  /* The entry of a dialog. */
+  --motion-moderate: 200ms;
+  /* The width of the progress bar and other size changes. */
+  --motion-slow: 300ms;
+}
+
+/* Easing curves. They are in the `--ease-*` theme namespace, so the `ease-standard`,
+ * `ease-enter` and `ease-exit` utilities exist. The two `--default-transition-*`
+ * variables are the Tailwind defaults for each `transition` and `transition-*` utility
+ * when the element has no `duration-*` or `ease-*` utility. They do not change the
+ * tw-animate-css `animate-in` and `animate-out` keyframes. */
+@theme {
+  /* A state change on an element that stays on screen. */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  /* An element that comes onto the screen. It starts fast and then settles. */
+  --ease-enter: cubic-bezier(0, 0, 0, 1);
+  /* An element that goes off the screen. It starts slowly and then accelerates. */
+  --ease-exit: cubic-bezier(0.3, 0, 1, 1);
+
+  /* The default duration of a transition utility. */
+  --default-transition-duration: var(--motion-fast);
+  /* The default curve of a transition utility. */
+  --default-transition-timing-function: var(--ease-standard);
+}
+
+/* Reduced motion for overlays. The tw-animate-css `enter` and `exit` keyframes read the
+ * `--tw-enter-*` and `--tw-exit-*` variables, and the `zoom-*`, `slide-*` and `spin-*`
+ * utilities set them. This rule sets the scale to 1 and the translation and rotation to
+ * 0, so a tooltip, a menu, a select list or a dialog only fades. The fade and its
+ * duration do not change.
+ *
+ * The selector matches the class attribute text, not `[data-slot]`, because the alert
+ * dialog content in `ConfirmDialog` has no `data-slot`. It matches each element that
+ * uses `animate-in` or `animate-out` through any variant. Only those two keyframes read
+ * these variables, so a match on another element has no effect. `animate-spin` and
+ * `animate-pulse` do not match and keep their motion.
+ *
+ * The rule is outside all cascade layers. Tailwind puts its utilities in the `utilities`
+ * layer, and a declaration outside a layer wins over a declaration in a layer. Thus the
+ * rule needs no `!important`. */
+@media (prefers-reduced-motion: reduce) {
+  :is([class*="animate-in"], [class*="animate-out"]) {
+    --tw-enter-scale: 1;
+    --tw-enter-translate-x: 0;
+    --tw-enter-translate-y: 0;
+    --tw-enter-rotate: 0;
+    --tw-exit-scale: 1;
+    --tw-exit-translate-x: 0;
+    --tw-exit-translate-y: 0;
+    --tw-exit-rotate: 0;
+  }
+}
+
+/* =========================================================
    Dark Theme
    ========================================================= */
 
