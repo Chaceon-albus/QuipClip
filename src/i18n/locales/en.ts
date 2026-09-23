@@ -172,9 +172,11 @@ export const en = {
       empty: "No presets yet.",
       limitReached: "Limit of {{max}} presets reached.",
       unsaved: "Unsaved changes",
-      discardPrompt: "Discard the unsaved changes and switch to another preset?",
-      discardConfirm: "Discard",
+      unsavedPrompt: "“{{name}}” has unsaved changes.",
+      discardConfirm: "Discard Changes",
       discardCancel: "Keep Editing",
+      saveAndSwitch: "Save and Switch",
+      dontSave: "Don’t Save",
       deleteDialog: {
         title: "Delete preset “{{name}}”?",
         description: "You cannot undo this action.",

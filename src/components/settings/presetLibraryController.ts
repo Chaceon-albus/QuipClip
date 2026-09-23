@@ -565,6 +565,20 @@ export class PresetLibraryController {
   }
 
   /**
+   * Saves the draft before the user leaves it: for a switch to another preset, or for a close
+   * of the settings dialog.
+   *
+   * Resolves true only when the write succeeded AND no unsaved edit remains, so the caller can
+   * leave without losing work. An edit made while the write was in flight is not in the write,
+   * so `saveDraft` keeps `dirty` true for it. This method then resolves false, and the caller
+   * stays on the draft. When `saveDraft` refuses or fails, this method resolves false too.
+   */
+  async saveDraftBeforeLeaving(): Promise<boolean> {
+    const saved = await this.saveDraft();
+    return saved && !this.dirty;
+  }
+
+  /**
    * Reloads the draft from the stored document, discarding unsaved edits, and clears `dirty`.
    */
   cancelDraft(): void {

@@ -32,6 +32,13 @@ import {
   type DeletePresetConfirmView,
 } from "./presetConfirmPresenter";
 import {
+  CLEAN_PRESET_DRAFT_GUARD,
+  isUnsavedPresetRow,
+  presentPresetDraftStatus,
+  presentUnsavedDraftPrompt,
+  type PresetDraftGuard,
+} from "./presetDraftGuard";
+import {
   createPresetLibraryController,
   type PresetLibraryController,
   type PresetLibraryView,
@@ -516,7 +523,17 @@ function PresetEditor({
   );
 }
 
-export function PresetLibrarySection() {
+export interface PresetLibrarySectionProps {
+  /**
+   * Receives the state of the draft and the actions that settle it, each time the state
+   * changes, and `CLEAN_PRESET_DRAFT_GUARD` when the section unmounts. The settings dialog
+   * reads it to keep a close request from dropping an unsaved draft. Pass a stable function,
+   * such as a state setter.
+   */
+  onDraftChange?: (guard: PresetDraftGuard) => void;
+}
+
+export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProps) {
   const { t } = useTranslation();
   const translate = t as (
     key: string,
@@ -576,6 +593,38 @@ export function PresetLibrarySection() {
     };
   }, [controller]);
 
+  // Report the draft upward. The guard is rebuilt only when one of its values changes, so the
+  // dialog renders again only then. The actions call the controller, which owns the draft.
+  const { dirty, presetName, canSave, pending } = presentPresetDraftStatus(view);
+  const draftGuard = useMemo<PresetDraftGuard>(
+    () => ({
+      dirty,
+      presetName,
+      canSave,
+      pending,
+      save: () => controller.saveDraftBeforeLeaving(),
+      discard: () => {
+        controller.cancelDraft();
+      },
+    }),
+    [controller, dirty, presetName, canSave, pending],
+  );
+  const unsavedPrompt = presentUnsavedDraftPrompt(draftGuard);
+
+  useEffect(() => {
+    onDraftChange?.(draftGuard);
+  }, [onDraftChange, draftGuard]);
+
+  // The draft ends with this section, because the dialog unmounts its content when it closes.
+  useEffect(() => {
+    if (onDraftChange === undefined) {
+      return undefined;
+    }
+    return () => {
+      onDraftChange(CLEAN_PRESET_DRAFT_GUARD);
+    };
+  }, [onDraftChange]);
+
   useEffect(() => {
     // Compare the settings slice rather than resubscribing to every store write. The store
     // publishes pure lifecycle transitions ("loading", "saving", "ready") that leave
@@ -593,11 +642,25 @@ export function PresetLibrarySection() {
   }, [controller]);
 
   const handleActivateRow = (id: string) => {
+    // No selection change while a write is in flight. A Save and Switch that is running holds
+    // its target, and a row pressed now would either move the prompt to a target that the
+    // running save then ignores, or select a row under that save.
+    if (view.pending) {
+      return;
+    }
     if (view.dirty && id !== view.selectedPresetId) {
       setPendingSelectId(id);
       return;
     }
     controller.select(id);
+  };
+
+  // The target is a parameter and is not read from state after the save: a save that leaves
+  // the draft clean also clears `pendingSelectId`, as described above.
+  const handleSaveAndSwitch = async (id: string) => {
+    if (await controller.saveDraftBeforeLeaving()) {
+      controller.select(id);
+    }
   };
 
   const handleRequestDelete = (id: string) => {
@@ -648,16 +711,20 @@ export function PresetLibrarySection() {
 
       {/* The target above is cleared once the draft is clean, so a Save or a Cancel elsewhere
           in the editor leaves no stale prompt behind. */}
-      {pendingSelectId !== null ? (
+      {pendingSelectId !== null && unsavedPrompt !== null ? (
         <Notice tone="warning" role="alert">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span>{t("settings.preset.discardPrompt")}</span>
+            <span className="min-w-0 wrap-break-word">
+              {translate(unsavedPrompt.message.key, unsavedPrompt.message.values)}
+            </span>
             {/* Outline and ghost buttons inherit the text color. Reset it here so the
-                buttons do not take the warning color of the box. */}
+                buttons do not take the warning color of the box. The order and the styles
+                match the unsaved-changes prompt in the settings dialog footer. */}
             <div className="flex items-center gap-2 text-foreground">
               <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
+                disabled={unsavedPrompt.choicesDisabled}
                 onClick={() => {
                   controller.select(pendingSelectId);
                   setPendingSelectId(null);
@@ -666,11 +733,22 @@ export function PresetLibrarySection() {
                 {t("settings.preset.discardConfirm")}
               </Button>
               <Button
-                variant="ghost"
+                variant="outline"
                 size="sm"
+                disabled={unsavedPrompt.choicesDisabled}
                 onClick={() => setPendingSelectId(null)}
               >
                 {t("settings.preset.discardCancel")}
+              </Button>
+              <Button
+                variant="default"
+                size="sm"
+                disabled={unsavedPrompt.saveDisabled}
+                onClick={() => {
+                  void handleSaveAndSwitch(pendingSelectId);
+                }}
+              >
+                {t("settings.preset.saveAndSwitch")}
               </Button>
             </div>
           </div>
@@ -703,7 +781,20 @@ export function PresetLibrarySection() {
                     : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
                 )}
               >
-                <span className="truncate">{preset.name}</span>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate">{preset.name}</span>
+                  {isUnsavedPresetRow(view, preset.id) ? (
+                    <>
+                      {/* The dot is decorative. The `sr-only` span carries its meaning into
+                          the row's accessible name, as the encoder badge does. */}
+                      <span
+                        aria-hidden="true"
+                        className="size-1.5 shrink-0 rounded-full bg-primary"
+                      />
+                      <span className="sr-only">{` ${t("settings.preset.unsaved")}`}</span>
+                    </>
+                  ) : null}
+                </span>
                 <div className="flex shrink-0 items-center gap-1.5">
                   {encoderMark ? (
                     <Tooltip>

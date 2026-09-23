@@ -1552,7 +1552,7 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.preset.limitReached", { max: 100 })).toBe(
       "已达到 100 个预设的上限。",
     );
-    expect(instance.t("settings.preset.unsaved")).toBe("未保存的更改");
+    expect(instance.t("settings.preset.unsaved")).toBe("有未保存的更改");
     expect(instance.t("settings.preset.nameLabel")).toBe("名称");
     expect(instance.t("settings.preset.containerLabel")).toBe("容器");
     expect(instance.t("settings.preset.videoEncoderLabel")).toBe("视频编码器");

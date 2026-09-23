@@ -43,9 +43,10 @@ export interface DialogFocusReturn {
 
 export function createDialogFocusReturn(): DialogFocusReturn {
   let opener: FocusReturnTarget | null = null;
-  // Every close comes after an interaction that sets this value: Escape, a press on a close
-  // button, or a press outside the dialog. The keyboard default applies only to a close that
-  // no interaction caused, and for that close the WAI-ARIA default is the safe one.
+  // Every close comes after an interaction that sets this value: Escape, or a press on a
+  // close button or on a choice of the unsaved-changes prompt. A press outside the dialog
+  // does not close it. The keyboard default applies only to a close that no interaction
+  // caused, and for that close the WAI-ARIA default is the safe one.
   let interaction: DialogInteraction = "keyboard";
 
   return {

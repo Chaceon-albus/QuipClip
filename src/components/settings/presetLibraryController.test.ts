@@ -597,6 +597,84 @@ describe("PresetLibraryController", () => {
     });
   });
 
+  // The settings dialog closes, and the preset library switches presets, only when this
+  // resolves true. A true result must therefore mean that no edit is left unsaved.
+  describe("saveDraftBeforeLeaving", () => {
+    it("resolves true and clears dirty when the save succeeds", async () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const saveSettings = vi
+        .fn()
+        .mockImplementation((next: Settings) => Promise.resolve(next));
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+      });
+
+      controller.select("p1");
+      controller.setName("Renamed");
+
+      await expect(controller.saveDraftBeforeLeaving()).resolves.toBe(true);
+      expect(saveSettings).toHaveBeenCalledTimes(1);
+      expect(controller.getView().dirty).toBe(false);
+    });
+
+    it("resolves false and keeps the edit when the save fails", async () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const saveSettings = vi.fn().mockResolvedValue(null);
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+      });
+
+      controller.select("p1");
+      controller.setName("Renamed");
+
+      await expect(controller.saveDraftBeforeLeaving()).resolves.toBe(false);
+      expect(controller.getView().dirty).toBe(true);
+      expect(controller.getView().draft?.name).toBe("Renamed");
+    });
+
+    it("resolves false with no IPC when the draft cannot be saved", async () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const saveSettings = vi.fn();
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+      });
+
+      controller.select("p1");
+      controller.updateQualityValue("");
+      expect(controller.getView().canSave).toBe(false);
+
+      await expect(controller.saveDraftBeforeLeaving()).resolves.toBe(false);
+      expect(saveSettings).not.toHaveBeenCalled();
+      expect(controller.getView().dirty).toBe(true);
+    });
+
+    // The write carries the draft as it was when the save started. A keystroke that lands
+    // while the write is in flight is not in it, so leaving would lose that keystroke.
+    it("resolves false when an edit lands while the write is in flight", async () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const deferred = createDeferred<Settings | null>();
+      const saveSettings = vi.fn().mockReturnValue(deferred.promise);
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+      });
+
+      controller.select("p1");
+      controller.setName("Renamed");
+      const leaving = controller.saveDraftBeforeLeaving();
+      controller.setName("Renamed again");
+
+      deferred.resolve(settings);
+
+      await expect(leaving).resolves.toBe(false);
+      expect(controller.getView().dirty).toBe(true);
+      expect(controller.getView().draft?.name).toBe("Renamed again");
+    });
+  });
+
   describe("addPreset", () => {
     it("refuses to add and performs no IPC once the library holds MAX_PRESETS", async () => {
       const presets = Array.from({ length: 100 }, (_, index) =>

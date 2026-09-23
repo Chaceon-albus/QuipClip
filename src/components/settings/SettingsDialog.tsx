@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { XIcon } from "lucide-react";
 import { Tabs as TabsPrimitive } from "radix-ui";
@@ -20,17 +27,24 @@ import {
 } from "@/features/settings/panelStore";
 import { settingsStore, useSettingsStore } from "@/features/settings/store";
 import { createDialogFocusReturn } from "./dialogFocusReturn";
+import {
+  CLEAN_PRESET_DRAFT_GUARD,
+  decideCloseRequest,
+  decidePromptSaveOutcome,
+  isElementRendered,
+  pickPromptCancelFocus,
+  pickPromptOpenFocus,
+  presentUnsavedDraftPrompt,
+  type PresetDraftGuard,
+  type PromptFocusTarget,
+} from "./presetDraftGuard";
 import { presentSettingsError } from "./settingsErrorPresenter";
 import { FfmpegPathSection } from "./FfmpegPathSection";
 import { GeneralSection } from "./GeneralSection";
 import { PresetLibrarySection } from "./PresetLibrarySection";
 
-const handleOpenChange = (open: boolean) => {
-  if (open) {
-    settingsPanelStore.getState().show();
-  } else {
-    settingsPanelStore.getState().hide();
-  }
+const hideSettings = () => {
+  settingsPanelStore.getState().hide();
 };
 
 const handleSectionChange = (value: string) => {
@@ -39,12 +53,66 @@ const handleSectionChange = (value: string) => {
   }
 };
 
+/** The unsaved-changes prompt that a close request raised. */
+type ClosePrompt = {
+  /** The element that held the focus when the prompt opened. Cancel gives it back. */
+  returnFocus: HTMLElement | null;
+};
+
+/** The section that holds the preset editor, which the unsaved-changes prompt is about. */
+const PRESETS_SECTION: SettingsSection = "presets";
+
+function toPromptFocusTarget(element: HTMLElement | null): PromptFocusTarget | null {
+  if (element === null) {
+    return null;
+  }
+  // Getters, because the rules read the element when the focus moves, not when it is wrapped.
+  return {
+    get isConnected() {
+      return element.isConnected;
+    },
+    get isRendered() {
+      return isElementRendered(element);
+    },
+    get isDisabled() {
+      return element.matches(":disabled");
+    },
+    focus: () => {
+      element.focus();
+    },
+  };
+}
+
+/** Gives the focus to Cancel, or to the prompt message while Cancel is disabled. */
+function focusPrompt(cancel: HTMLElement | null, message: HTMLElement | null): void {
+  pickPromptOpenFocus(
+    toPromptFocusTarget(cancel),
+    toPromptFocusTarget(message),
+  )?.focus();
+}
+
 /**
  * The settings dialog. `AppShell` mounts it once, and the settings panel store opens it and
- * selects its tab, so any component can open it on a given section.
+ * selects its tab, so any component can open it on a given section. A `show` while the
+ * dialog is open only changes the tab.
+ *
+ * A close request cannot drop an unsaved preset draft. Escape, the close button in the
+ * header, and the Close button in the footer all reach `onOpenChange(false)`. The dialog is
+ * controlled by the panel store, so it stays open when `requestClose` does not call `hide`.
+ * With a dirty draft, the footer shows the unsaved-changes prompt instead of the Close
+ * button, and the dialog switches to the preset tab. A second close request dismisses the
+ * prompt. See `decideCloseRequest`. A press outside the dialog never closes it, because the
+ * dialog is a form.
+ *
+ * The panel store's `hide` stays an unconditional close. The dialog calls it only after the
+ * guard allows the close or the user answered the prompt.
  */
 export function SettingsDialog() {
   const { t } = useTranslation();
+  const translate = t as (
+    key: string,
+    options?: Record<string, string | number>,
+  ) => string;
   const open = useSettingsPanelStore((state) => state.open);
   const section = useSettingsPanelStore((state) => state.section);
   const error = useSettingsStore((state) => state.error);
@@ -53,6 +121,111 @@ export function SettingsDialog() {
   const errorView = presentSettingsError(error);
   const focusReturn = useMemo(() => createDialogFocusReturn(), []);
   const bodyRef = useRef<HTMLDivElement>(null);
+
+  // The preset library reports its draft here. Its unmount reports the clean guard.
+  const [presetDraft, setPresetDraft] = useState<PresetDraftGuard>(
+    CLEAN_PRESET_DRAFT_GUARD,
+  );
+  const [closePrompt, setClosePrompt] = useState<ClosePrompt | null>(null);
+  const promptCancelRef = useRef<HTMLButtonElement>(null);
+  const promptMessageRef = useRef<HTMLParagraphElement>(null);
+  const footerCloseRef = useRef<HTMLButtonElement>(null);
+  // Set by Cancel and read by the effect below, after the footer shows the Close button again.
+  const cancelledPromptRef = useRef<ClosePrompt | null>(null);
+
+  const unsavedPrompt =
+    closePrompt === null ? null : presentUnsavedDraftPrompt(presetDraft);
+
+  // Drop the prompt as soon as the draft is clean, derived during render the way the preset
+  // library drops its switch prompt. A Save or a Cancel in the preset editor clears the draft
+  // while the prompt is open, and the prompt then has nothing left to ask about.
+  if (closePrompt !== null && unsavedPrompt === null) {
+    setClosePrompt(null);
+  }
+
+  useEffect(() => {
+    if (closePrompt !== null) {
+      // This also takes a keyboard user from the field that raised the prompt to the prompt.
+      focusPrompt(promptCancelRef.current, promptMessageRef.current);
+      return;
+    }
+    const cancelled = cancelledPromptRef.current;
+    cancelledPromptRef.current = null;
+    if (cancelled !== null) {
+      pickPromptCancelFocus(
+        toPromptFocusTarget(cancelled.returnFocus),
+        toPromptFocusTarget(footerCloseRef.current),
+      )?.focus();
+    }
+  }, [closePrompt]);
+
+  const cancelPrompt = () => {
+    cancelledPromptRef.current = closePrompt;
+    setClosePrompt(null);
+  };
+
+  const requestClose = () => {
+    switch (decideCloseRequest(presetDraft, closePrompt !== null)) {
+      case "close":
+        hideSettings();
+        return;
+      case "raise": {
+        const active = document.activeElement;
+        setClosePrompt({
+          returnFocus:
+            active instanceof HTMLElement && active !== document.body ? active : null,
+        });
+        // Show the draft the prompt is about. The tab switch also scrolls the body to the
+        // top, where the preset list marks the unsaved preset.
+        if (section !== PRESETS_SECTION) {
+          settingsPanelStore.getState().setSection(PRESETS_SECTION);
+        }
+        return;
+      }
+      case "cancel":
+        cancelPrompt();
+        return;
+      case "hold":
+        focusPrompt(promptCancelRef.current, promptMessageRef.current);
+        return;
+    }
+  };
+
+  const handleOpenChange = (next: boolean) => {
+    if (next) {
+      settingsPanelStore.getState().show();
+    } else {
+      requestClose();
+    }
+  };
+
+  const handleDontSave = () => {
+    presetDraft.discard();
+    hideSettings();
+  };
+
+  // Closes only when the save succeeded and left nothing unsaved. A failed save keeps the
+  // dialog and the prompt open, and the error notice at the top of the scrolling body reports
+  // the failure. See `decidePromptSaveOutcome`.
+  const handleSaveAndClose = async () => {
+    // The save disables every choice while it runs, and a disabled button drops the focus to
+    // the document body. The message keeps the focus inside the prompt.
+    promptMessageRef.current?.focus();
+    const saved = await presetDraft.save();
+    // The store clears its error when a save starts, so an error here belongs to this save.
+    switch (decidePromptSaveOutcome(saved, settingsStore.getState().error !== null)) {
+      case "close":
+        hideSettings();
+        return;
+      case "revealError":
+        if (bodyRef.current !== null) {
+          bodyRef.current.scrollTop = 0;
+        }
+        return;
+      case "stay":
+        return;
+    }
+  };
 
   // The load failed and no document survived it. Every control below then disables itself,
   // so without this the dialog has no way out and the user must delete the file by hand.
@@ -100,8 +273,11 @@ export function SettingsDialog() {
         onPointerDownCapture={() => {
           focusReturn.noteInteraction("pointer");
         }}
-        onPointerDownOutside={() => {
-          focusReturn.noteInteraction("pointer");
+        onInteractOutside={(event) => {
+          // The dialog is a form. A stray press outside it must not close it, with or
+          // without an unsaved draft. The dialog closes from Escape, the close button in
+          // the header, and the footer.
+          event.preventDefault();
         }}
         onCloseAutoFocus={(event) => {
           // Radix would focus its trigger, and this dialog has none. See dialogFocusReturn.ts
@@ -142,12 +318,7 @@ export function SettingsDialog() {
           >
             {errorView ? (
               <Notice tone="destructive" role="alert">
-                {(
-                  t as (
-                    key: string,
-                    options?: Record<string, string | number>,
-                  ) => string
-                )(errorView.key, errorView.values)}
+                {translate(errorView.key, errorView.values)}
               </Notice>
             ) : null}
 
@@ -175,15 +346,55 @@ export function SettingsDialog() {
               <FfmpegPathSection />
             </SettingsPanel>
             <SettingsPanel value="presets">
-              <PresetLibrarySection />
+              <PresetLibrarySection onDraftChange={setPresetDraft} />
             </SettingsPanel>
           </div>
         </TabsPrimitive.Root>
 
         <DialogFooter>
-          <DialogClose asChild>
-            <Button variant="outline">{t("common.close")}</Button>
-          </DialogClose>
+          {unsavedPrompt !== null ? (
+            <div className="flex w-full flex-wrap items-center justify-end gap-2">
+              {/* `tabIndex={-1}` lets the message take the focus while a save disables
+                  every button, without adding a stop to the Tab order. */}
+              <p
+                ref={promptMessageRef}
+                role="alert"
+                tabIndex={-1}
+                className="mr-auto min-w-0 font-medium wrap-break-word outline-none"
+              >
+                {translate(unsavedPrompt.message.key, unsavedPrompt.message.values)}
+              </p>
+              <Button
+                variant="ghost"
+                disabled={unsavedPrompt.choicesDisabled}
+                onClick={handleDontSave}
+              >
+                {t("settings.preset.dontSave")}
+              </Button>
+              <Button
+                ref={promptCancelRef}
+                variant="outline"
+                disabled={unsavedPrompt.choicesDisabled}
+                onClick={cancelPrompt}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button
+                disabled={unsavedPrompt.saveDisabled}
+                onClick={() => {
+                  void handleSaveAndClose();
+                }}
+              >
+                {t("common.save")}
+              </Button>
+            </div>
+          ) : (
+            <DialogClose asChild>
+              <Button ref={footerCloseRef} variant="outline">
+                {t("common.close")}
+              </Button>
+            </DialogClose>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
