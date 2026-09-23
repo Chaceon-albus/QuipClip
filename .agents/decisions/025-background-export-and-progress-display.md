@@ -37,10 +37,25 @@ The user asked for these changes:
   before this decision.
 
 The close control, Escape, and the outside click all use that rule. The footer of an active
-run shows two buttons: Cancel and "Run in Background". Cancel keeps its rules from ADR 016.
-"Run in Background" hides the dialog.
+run shows two buttons: Stop Export and "Run in Background". Stop Export keeps the cancel
+rules from ADR 016. "Run in Background" hides the dialog.
 
-A dismissal never cancels. Only the Cancel button cancels.
+A dismissal never cancels. Only the Stop Export button cancels.
+
+(Changed on 2026-09-23. The button was named Cancel. The setup step shows a Cancel button
+in the same place, and that button only closes the dialog. The same word in the same place
+had two results, and one of them discards the work of the encode. The button is now Stop
+Export, in the destructive style. The close control of an active run says "Hide (export
+continues)". A stop that the user asked for shows in a neutral style, not as an error.)
+
+### A long run needs a second click to stop
+
+A run that started 30 seconds ago or more needs two clicks on Stop Export. The first click
+changes the button to Confirm Stop for 3 seconds. A second click in that time stops the run.
+A second click that comes less than 500 ms after the first does nothing, so a double-click
+cannot arm and stop in one gesture. 500 ms is the default double-click time on macOS and on
+Windows. A run shorter than 30 seconds stops on one click, because it costs little to start
+again. `src/components/export/exportStopPresenter.ts` holds the rule and its constants.
 
 **This replaces the last section of ADR 016, "Dismissing the dialog during preparation now
 cancels".** That section cancelled by slot on a dismissal because the dismissal reset the

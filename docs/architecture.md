@@ -265,7 +265,8 @@ An application exit cancels a running export and waits a bounded time for it to 
 does not leave `ffmpeg` encoding into a temporary file that nothing will remove. See ADR 017.
 
 A dismissal of the export dialog during an active run hides the dialog. It does not cancel
-the run (ADR 025). Only the Cancel button cancels. While the dialog is hidden, the status bar
+the run (ADR 025). Only the Stop Export button cancels, and a run of 30 seconds or more
+needs a second click to confirm. While the dialog is hidden, the status bar
 shows the progress of the run, and then its result until the user dismisses it. The Dock on
 macOS and the task bar on Windows also show the progress. The percent and the time estimate
 come from the frame count and the `fps` value of `-progress`, and one presenter computes them
