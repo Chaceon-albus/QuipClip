@@ -171,6 +171,10 @@ export interface PlaybackActions {
   /**
    * Seeks by a nominal frame delta hint using valid avgFrameRate then rFrameRate.
    * Disabled when neither frame rate is valid.
+   * Does nothing when the clamped target equals the position the step starts from, which is
+   * the case at the first and the last position of the source. Such a step still pauses
+   * playback. A pending scrub target at the edge still gets one exact seek, because fastSeek
+   * lands on a keyframe and not on its target (ADR 022).
    */
   seekNominal: (deltaFrames: number) => void;
 

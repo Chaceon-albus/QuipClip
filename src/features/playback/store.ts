@@ -80,6 +80,20 @@ export function hasNominalFrameRate(
 export const ANCHOR_TOLERANCE_SECONDS = 1.0;
 
 /**
+ * Largest distance in seconds between the clamped target of a nominal step and the position the
+ * step starts from, at which the step counts as a step that cannot move the source.
+ *
+ * At an edge the clamp returns the bound itself (0, or the smaller of the approximate duration
+ * and the duration the element reports), and the start position is that same bound read back
+ * from the element or from the pending seek. The two can
+ * differ only by the rounding of one instant, and the rounding error of a double at the length of
+ * any real source is below one nanosecond. The value is one microsecond, which is far above that
+ * error. It is also far below one frame interval (about 1 ms at 1000 fps, 33 ms at 30 fps), so a
+ * step that moves one real frame never falls inside it.
+ */
+export const NOMINAL_STEP_EDGE_TOLERANCE_SECONDS = 1e-6;
+
+/**
  * Factory function creating a vanilla Zustand store instance for playback state.
  *
  * The attached HTMLVideoElement/PlaybackMediaElement, active PlaybackSource, and calibration
@@ -710,6 +724,41 @@ export function createPlaybackStore(
           attachedSource.approximateDurationSeconds > 0
         ) {
           targetTime = Math.min(targetTime, attachedSource.approximateDurationSeconds);
+        }
+        // The element stops a seek at its own duration, which can be shorter than the probe
+        // duration or rounded to the clock of the web view. Clamp to it as seekApproximate does,
+        // so that the element reports back exactly the clamp value and the edge check below
+        // fires on the next step.
+        if (state.runtimeBrowserDurationSeconds !== null) {
+          targetTime = Math.min(targetTime, state.runtimeBrowserDurationSeconds);
+        }
+
+        // A step at the first or the last position of the source cannot move it: the clamp above
+        // returns the position the step starts from. Such a step does nothing to the position. It
+        // dispatches no seek, keeps presentedFrame and seekTargetSeconds, and requests no cue. A
+        // seek that lands on the frame already on screen can produce no RVFC callback (ADR 022),
+        // so dispatching it would leave presentedFrame null and the edit actions disabled, and
+        // each press would play the ADR 019 cue again at the same position. ADR 021 makes each
+        // key press one step; at an edge there is no frame to step to, so a press that does not
+        // move keeps that rule.
+        //
+        // The comparison uses the value the step was computed from: the pending target when one
+        // exists, and currentTime when none exists. A pending exact seek to the edge therefore
+        // absorbs each later press toward that edge, and the element still receives that one
+        // seek. A pending scrub target does not count: fastSeek lands on a keyframe and not on
+        // its target, so an exact seek to the same time is still required (ADR 022).
+        if (
+          pending?.scrub !== true &&
+          Math.abs(targetTime - currentBrowserTime) <
+            NOMINAL_STEP_EDGE_TOLERANCE_SECONDS
+        ) {
+          // A frame step means that the user stops to look at frames (ADR 019, ADR 022), so an
+          // edge press during playback still pauses, as the seek path does. pause stops the cue
+          // and invalidates a pending play promise, and it does not touch presentedFrame.
+          if (state.isPlaying) {
+            get().pause();
+          }
+          return;
         }
 
         // seekNominal stays exact (it assigns currentTime through the helper with scrub false).
