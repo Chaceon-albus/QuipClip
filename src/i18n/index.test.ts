@@ -1359,7 +1359,8 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("titleBar.source.segmentCount", { count: 1 })).toBe("1 segment");
     expect(instance.t("titleBar.source.segmentCount", { count: 3 })).toBe("3 segments");
     expect(instance.t("window.minimize")).toBe("Minimize");
-    expect(instance.t("window.toggleMaximize")).toBe("Toggle maximize/restore");
+    expect(instance.t("window.maximize")).toBe("Maximize");
+    expect(instance.t("window.restore")).toBe("Restore Down");
     expect(instance.t("window.close")).toBe("Close");
 
     // PreviewPane
@@ -1504,7 +1505,8 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("titleBar.source.segmentCount", { count: 1 })).toBe("1 个片段");
     expect(instance.t("titleBar.source.segmentCount", { count: 3 })).toBe("3 个片段");
     expect(instance.t("window.minimize")).toBe("最小化");
-    expect(instance.t("window.toggleMaximize")).toBe("切换最大化/还原");
+    expect(instance.t("window.maximize")).toBe("最大化");
+    expect(instance.t("window.restore")).toBe("向下还原");
     expect(instance.t("window.close")).toBe("关闭");
 
     // PreviewPane

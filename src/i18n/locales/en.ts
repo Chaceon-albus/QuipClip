@@ -10,7 +10,8 @@ export const en = {
   },
   window: {
     minimize: "Minimize",
-    toggleMaximize: "Toggle maximize/restore",
+    maximize: "Maximize",
+    restore: "Restore Down",
     close: "Close",
   },
   titleBar: {

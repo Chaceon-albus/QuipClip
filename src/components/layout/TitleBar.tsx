@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronDown, FileOutput, Minus, Square, X } from "lucide-react";
+import { ChevronDown, FileOutput } from "lucide-react";
 import appIcon from "@/assets/brand/app-icon.svg";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,6 +30,9 @@ import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { canExportMedia } from "./actionConditions";
 import { runExportFlow } from "./exportFlowController";
+import { useWindowState } from "./useWindowState";
+import { CloseGlyph, MaximizeGlyph, MinimizeGlyph, RestoreGlyph } from "./WindowGlyphs";
+import { resolveMaximizeControl } from "./windowStateSync";
 
 /**
  * The hover delay of the full path. It is longer than the default of the shell, because the
@@ -39,6 +42,50 @@ const PATH_TOOLTIP_DELAY_MS = 600;
 
 /** The gap between the title and its path tooltip, in pixels. */
 const PATH_TOOLTIP_OFFSET = 6;
+
+/**
+ * The title text while the window does not have the focus. The system dims the title of an
+ * inactive window, on Windows and on macOS, and this class mirrors that. The dim is 75 %,
+ * because at 60 % the muted title text is too faint on the light chrome (about 2.4:1).
+ */
+const INACTIVE_TITLE_CLASS = "group-data-inactive/title-bar:opacity-75";
+
+/**
+ * A Windows window button. The size is the Windows 11 caption button: 46 pixels wide, and the
+ * full height of the title bar above its bottom border.
+ *
+ * That height is 39 pixels, and a centred 10 pixel glyph would start 14.5 pixels down. The
+ * anti-aliased close glyph would then straddle two pixel rows. The 1 pixel bottom padding
+ * makes the content box 38 pixels, so the glyph starts on a whole pixel, 14 pixels down.
+ *
+ * The focus ring is inset, so the edge of the window does not clip it. `outline-hidden`
+ * keeps a transparent outline, which forced-colors mode draws as a visible focus mark.
+ */
+const WINDOW_BUTTON_CLASS =
+  "group/window-button inline-flex w-[46px] items-center justify-center pb-px text-sidebar-foreground transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden focus-visible:ring-inset";
+
+/** The hover and press fills of the minimize and maximize buttons. */
+const WINDOW_BUTTON_FILL_CLASS =
+  "hover:bg-foreground/[0.06] active:bg-foreground/[0.12]";
+
+/**
+ * The hover and press fills of the close button. The red is the fixed Windows 11 close colour.
+ * The system uses it in the light theme and in the dark theme, so no palette token replaces it.
+ */
+const CLOSE_BUTTON_FILL_CLASS =
+  "hover:bg-[#c42b1c] hover:text-white active:bg-[#c42b1c]/90 active:text-white";
+
+/**
+ * The glyph of a window button. While the window does not have the focus, the glyph dims, as
+ * the system glyphs do. Hover and press show it at full strength again, so the white glyph on
+ * the close colour does not dim. The dim is on the glyph only, so the fills keep their colour.
+ *
+ * The full-strength rules repeat the inactive variant. A plain `group-hover` rule has the same
+ * specificity as the dim rule, and Tailwind writes the dim rule later, so the dim would win.
+ * The stacked variant adds one selector, so its rule wins in any order.
+ */
+const WINDOW_GLYPH_CLASS =
+  "group-data-inactive/title-bar:opacity-60 group-data-inactive/title-bar:group-hover/window-button:opacity-100 group-data-inactive/title-bar:group-active/window-button:opacity-100";
 
 // A number, so the title bar renders again only when the count changes.
 const selectActiveSourceSegmentCount = (state: TimelineStoreState) =>
@@ -60,6 +107,10 @@ export function TitleBar() {
 
   // The empty preview offers the same action through its Open button.
   const handleOpenMedia = useOpenMediaAction();
+
+  // macOS draws its own window buttons, so only the other platforms read the maximized state.
+  const { maximized, focused } = useWindowState(!isMac);
+  const maximizeControl = resolveMaximizeControl(maximized);
 
   const handleExport = () => {
     void runExportFlow({
@@ -85,8 +136,10 @@ export function TitleBar() {
   return (
     <header
       data-tauri-drag-region="deep"
+      // The window buttons and the title text dim while the window does not have the focus.
+      data-inactive={focused ? undefined : ""}
       className={cn(
-        "relative flex h-10 shrink-0 items-center justify-between border-b border-border bg-sidebar text-xs select-none",
+        "group/title-bar relative flex h-10 shrink-0 items-center justify-between border-b border-border bg-sidebar text-xs select-none",
         // The reserved width for the native macOS traffic-light buttons, which
         // titleBarStyle: "Overlay" draws over the top left of the web view.
         isMac ? "pr-3 pl-[78px]" : "pr-0 pl-3",
@@ -100,7 +153,12 @@ export function TitleBar() {
         {!isMac && (
           <>
             <img src={appIcon} alt="" className="size-[22px] shrink-0" />
-            <span className="text-sm font-medium text-sidebar-foreground">
+            <span
+              className={cn(
+                "text-sm font-medium text-sidebar-foreground",
+                INACTIVE_TITLE_CLASS,
+              )}
+            >
               {t("app.name")}
             </span>
             <Separator orientation="vertical" className="h-4 bg-sidebar-border" />
@@ -155,7 +213,12 @@ export function TitleBar() {
       {/* Centre: the open file and its segment count. With no media, macOS shows the
           application name here, because its left zone does not (ADR 020). Every other
           platform shows the name in the left zone, so the centre stays empty. */}
-      <div className="absolute left-1/2 flex max-w-[min(42vw,560px)] -translate-x-1/2 items-center text-xs text-muted-foreground">
+      <div
+        className={cn(
+          "absolute left-1/2 flex max-w-[min(42vw,560px)] -translate-x-1/2 items-center text-xs text-muted-foreground",
+          INACTIVE_TITLE_CLASS,
+        )}
+      >
         {media ? (
           <TitleBarFile
             fileName={media.fileName}
@@ -167,8 +230,9 @@ export function TitleBar() {
         )}
       </div>
 
-      {/* Right: Export button (constant), plus window controls on non-macOS platforms */}
-      <div className="flex items-center gap-1">
+      {/* Right: Export button (constant), plus window controls on non-macOS platforms. The
+          zone takes the full bar height, so the window buttons can fill it. */}
+      <div className="flex items-center gap-1 self-stretch">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -188,30 +252,36 @@ export function TitleBar() {
           />
         </Tooltip>
         {!isMac && (
-          <div className="flex h-10 items-center">
+          // The margin keeps the filled Export button apart from the hover fill of the
+          // minimize button. The group and its buttons stretch to the bar height.
+          <div className="ml-2 flex self-stretch">
             <button
               type="button"
               onClick={handleMinimize}
               aria-label={t("window.minimize")}
-              className="inline-flex h-10 w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className={cn(WINDOW_BUTTON_CLASS, WINDOW_BUTTON_FILL_CLASS)}
             >
-              <Minus className="size-3.5" />
+              <MinimizeGlyph className={WINDOW_GLYPH_CLASS} />
             </button>
             <button
               type="button"
               onClick={handleMaximize}
-              aria-label={t("window.toggleMaximize")}
-              className="inline-flex h-10 w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              aria-label={t(maximizeControl.labelKey)}
+              className={cn(WINDOW_BUTTON_CLASS, WINDOW_BUTTON_FILL_CLASS)}
             >
-              <Square className="size-3" />
+              {maximizeControl.glyph === "restore" ? (
+                <RestoreGlyph className={WINDOW_GLYPH_CLASS} />
+              ) : (
+                <MaximizeGlyph className={WINDOW_GLYPH_CLASS} />
+              )}
             </button>
             <button
               type="button"
               onClick={handleClose}
               aria-label={t("window.close")}
-              className="inline-flex h-10 w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-destructive hover:text-destructive-foreground"
+              className={cn(WINDOW_BUTTON_CLASS, CLOSE_BUTTON_FILL_CLASS)}
             >
-              <X className="size-4" />
+              <CloseGlyph className={WINDOW_GLYPH_CLASS} />
             </button>
           </div>
         )}

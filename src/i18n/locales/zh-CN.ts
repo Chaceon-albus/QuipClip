@@ -13,7 +13,8 @@ export const zhCN: TranslationCatalog = {
   },
   window: {
     minimize: "最小化",
-    toggleMaximize: "切换最大化/还原",
+    maximize: "最大化",
+    restore: "向下还原",
     close: "关闭",
   },
   titleBar: {
