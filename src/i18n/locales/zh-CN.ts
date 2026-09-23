@@ -317,6 +317,7 @@ export const zhCN: TranslationCatalog = {
       chooseDestination: "导出…",
       exportAnyway: "仍然导出",
       reimport: "重新导入",
+      runInBackground: "后台运行",
     },
   },
   exportError: {

@@ -319,6 +319,7 @@ export const en = {
       chooseDestination: "Export…",
       exportAnyway: "Export Anyway",
       reimport: "Re-import",
+      runInBackground: "Run in Background",
     },
   },
   exportError: {

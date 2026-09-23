@@ -21,7 +21,7 @@ import { ExportSetup } from "./ExportSetup";
 import {
   isCancelEnabled,
   isCancelOutstanding,
-  isExportDismissalRefused,
+  resolveExportDismissal,
 } from "./exportCancelState";
 import { presentExportError } from "./exportErrorPresenter";
 import { presentSetupBlocker, resolveSetupPresetId } from "./exportSetupPresenter";
@@ -91,14 +91,6 @@ export function ExportDialog({
   onReimport,
 }: ExportDialogProps) {
   const { t, i18n } = useTranslation();
-  // Holds the run the user asked to cancel. Keying the flag to a run id, instead of
-  // holding a plain boolean, makes the canceling state derived: a new export carries a
-  // new run id, so the flag stops applying the moment the flow restarts.
-  const [cancelingRunId, setCancelingRunId] = useState<string | null>(null);
-  // Holds the cancel the user asked for in the one phase that has no run id to key it to.
-  // `isCancelOutstanding` is keyed to a run id and cannot see this one, so the dialog holds it
-  // itself and scopes it below to the phase it can apply in.
-  const [unnamedCancelPending, setUnnamedCancelPending] = useState(false);
   // Holds the preset id requested by the user during the setup step. When null, the dialog
   // falls back to the settings activePresetId or first preset (ADR 024).
   const [requestedPresetId, setRequestedPresetId] = useState<string | null>(null);
@@ -107,6 +99,7 @@ export function ExportDialog({
 
   const status = useExportStore((state) => state.status);
   const runId = useExportStore((state) => state.runId);
+  const cancelRequested = useExportStore((state) => state.cancelRequested);
   const error = useExportStore((state) => state.error);
   const cancelExport = useExportStore((state) => state.cancelExport);
   const reset = useExportStore((state) => state.reset);
@@ -119,22 +112,12 @@ export function ExportDialog({
   const exportDisabled =
     effectivePresetId === null || blocker !== null || choosingDestination;
 
-  // All three derived values live in a pure module, so their rules carry their own tests.
-  const isRunning = isExportDismissalRefused({ status, runId });
-  // The by-slot cancel names no run, so the flag above stands in for the run id. Scope it to
-  // the phase it applies in, the way `isCancelOutstanding` is scoped by the run id: it stops
-  // applying as soon as the store learns an id or leaves "preparing".
-  const unnamedCanceling =
-    unnamedCancelPending && status === "preparing" && runId === null;
-  const canceling =
-    isCancelOutstanding({ status, runId, cancelingRunId }) || unnamedCanceling;
-  const cancelEnabled =
-    isCancelEnabled({ status, runId, cancelingRunId }) && !unnamedCanceling;
-  // The footer offers Cancel in every phase where a run is in progress. "preparing" with no
-  // run id is one of them: it stays dismissable, but Cancel now reaches the backend there, so
-  // offering Close alone would hide the control that phase most needs. An outstanding unnamed
-  // cancel keeps the button in place while it is disabled, instead of swapping it for Close.
-  const showCancel = isRunning || cancelEnabled || unnamedCanceling;
+  // Dismissal hides the dialog while an export is active (preparing, running, publishing)
+  // and resets the store when in an idle or terminal status (ADR 025).
+  const dismissal = resolveExportDismissal(status);
+  const isActive = dismissal === "hide";
+  const canceling = isCancelOutstanding({ status, cancelRequested });
+  const cancelEnabled = isCancelEnabled({ status, runId, cancelRequested });
 
   const resolvedLanguage = getResolvedLanguage(i18n);
   const numberFormatter = useMemo(
@@ -144,40 +127,31 @@ export function ExportDialog({
 
   const errorView = presentExportError(error);
 
-  // Walking away during "preparing" before the backend answered used to orphan the run: the
-  // store never learned the run id, so it could never name one to cancel. It no longer has to
-  // name one -- the store cancels by slot in that phase -- so every dismissal path asks the
-  // backend to stop before it resets. Fired and not awaited, because the dialog closes at once
-  // and the store owns whatever the backend answers.
-  const cancelUnnamedRun = () => {
-    if (status === "preparing" && runId === null) {
-      void cancelExport();
-    }
+  const hideDialog = () => {
+    onOpenChange(false);
   };
 
-  const handleClose = () => {
-    cancelUnnamedRun();
+  const closeAndReset = () => {
     onOpenChange(false);
-    setCancelingRunId(null);
-    setUnnamedCancelPending(false);
     setRequestedPresetId(null);
     setChoosingDestination(false);
     reset();
   };
 
+  const dismiss = () => {
+    if (isActive) {
+      hideDialog();
+    } else {
+      closeAndReset();
+    }
+  };
+
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
-      if (isRunning) {
-        return;
-      }
-      cancelUnnamedRun();
-      setCancelingRunId(null);
-      setUnnamedCancelPending(false);
-      setRequestedPresetId(null);
-      setChoosingDestination(false);
-      reset();
+      dismiss();
+      return;
     }
-    onOpenChange(nextOpen);
+    onOpenChange(true);
   };
 
   // The replacement confirmation is not a failure the user can only close: it carries its own
@@ -189,7 +163,7 @@ export function ExportDialog({
   // flow proceeds past the source revision check to the setup step with no stale confirmation behind it;
   // the flow re-opens the modal itself at the setup step.
   const handleExportAnyway = () => {
-    handleClose();
+    closeAndReset();
     if (onExportAnyway) {
       onExportAnyway();
       return;
@@ -202,7 +176,7 @@ export function ExportDialog({
   };
 
   const handleReimport = () => {
-    handleClose();
+    closeAndReset();
     if (onReimport) {
       onReimport();
       return;
@@ -216,26 +190,26 @@ export function ExportDialog({
     }
     setChoosingDestination(true);
     try {
-      await confirmExportFlow(
+      const started = await confirmExportFlow(
         {
           setModalOpen: onOpenChange,
           filterName: t("dialog.videoFilter"),
         },
         effectivePresetId,
       );
+      if (started) {
+        // Clear the user's manual selection once the export has started so that a subsequent
+        // export setup step defaults to the project's active preset (ADR 024) even if this
+        // run completes while the dialog is hidden (ADR 025). The started request already
+        // carries the preset id.
+        setRequestedPresetId(null);
+      }
     } finally {
       setChoosingDestination(false);
     }
   };
 
   const handleCancel = async () => {
-    setCancelingRunId(runId);
-    if (runId === null) {
-      // The store cancels by slot here and writes no state on success, so the acknowledgement
-      // has to come from the dialog. Without it the user waits out the rest of preparation --
-      // up to 30 seconds for a re-probe -- with the button still reading "Cancel".
-      setUnnamedCancelPending(true);
-    }
     await cancelExport();
   };
 
@@ -350,32 +324,20 @@ export function ExportDialog({
         showCloseButton={false}
         aria-describedby={undefined}
         className="sm:max-w-md"
-        onEscapeKeyDown={(e) => {
-          if (isRunning) {
-            e.preventDefault();
-          }
-        }}
-        onPointerDownOutside={(e) => {
-          if (isRunning) {
-            e.preventDefault();
-          }
-        }}
       >
         <DialogHeader>
           <DialogTitle>{t("export.title")}</DialogTitle>
         </DialogHeader>
 
-        {!isRunning && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="absolute top-2 right-2"
-            onClick={handleClose}
-          >
-            <XIcon />
-            <span className="sr-only">{t("common.close")}</span>
-          </Button>
-        )}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="absolute top-2 right-2"
+          onClick={dismiss}
+        >
+          <XIcon />
+          <span className="sr-only">{t("common.close")}</span>
+        </Button>
 
         {renderContent()}
 
@@ -383,7 +345,7 @@ export function ExportDialog({
           {status === "idle" ? (
             open ? (
               <>
-                <Button variant="outline" onClick={handleClose}>
+                <Button variant="outline" onClick={closeAndReset}>
                   {t("common.cancel")}
                 </Button>
                 <Button
@@ -396,7 +358,7 @@ export function ExportDialog({
             ) : null
           ) : isSourceRevisionConfirmation ? (
             <>
-              <Button variant="outline" onClick={handleClose}>
+              <Button variant="outline" onClick={closeAndReset}>
                 {t("common.cancel")}
               </Button>
               <Button variant="outline" onClick={handleReimport}>
@@ -406,22 +368,26 @@ export function ExportDialog({
                 {t("export.action.exportAnyway")}
               </Button>
             </>
-          ) : showCancel ? (
-            <Button
-              variant="outline"
-              onClick={() => void handleCancel()}
-              // Only "publishing" disables it now. The backend already ran its last cancel
-              // test before it emitted the event that puts the interface into that phase
-              // (ADR 016), so a cancel there cannot stop the rename, and the button would
-              // report a cancel that never happened while the export still writes the file.
-              // "preparing" with no run id is enabled: the store cancels by export slot when
-              // it holds no id. `isCancelEnabled` holds both rules.
-              disabled={!cancelEnabled}
-            >
-              {canceling ? t("export.status.canceling") : t("common.cancel")}
-            </Button>
+          ) : isActive ? (
+            <>
+              <Button
+                variant="outline"
+                onClick={() => void handleCancel()}
+                // Among active statuses, "publishing" always disables it: the backend already
+                // ran its last cancel test before it emitted the event that puts the interface
+                // into that phase (ADR 016), so a cancel there cannot stop the rename, and the
+                // button would report a cancel that never happened while the export still
+                // writes the file. "running" with no run id disables it, and an outstanding
+                // cancel disables it in any active status. `isCancelEnabled` holds these rules
+                // keyed to `cancelRequested` in the store (ADR 025).
+                disabled={!cancelEnabled}
+              >
+                {canceling ? t("export.status.canceling") : t("common.cancel")}
+              </Button>
+              <Button onClick={hideDialog}>{t("export.action.runInBackground")}</Button>
+            </>
           ) : (
-            <Button variant="outline" onClick={handleClose}>
+            <Button variant="outline" onClick={closeAndReset}>
               {t("common.close")}
             </Button>
           )}

@@ -258,16 +258,25 @@ export type ExportState = {
   segmentCount: number;
   /**
    * Latest reported frame count from ffmpeg progress.
-   * Recorded during export but not rendered in UI yet:
-   * the percentage bar becomes a view-only change later.
    */
   frame: number | null;
   /**
    * Expected total frame count computed during planning.
-   * Recorded during export but not rendered in UI yet:
-   * the percentage bar becomes a view-only change later.
    */
   expectedFrames: number | null;
+  /**
+   * Latest encode rate that ffmpeg reported, or null if not reported yet.
+   * ffmpeg reports the mean since the start of the encode.
+   */
+  fps: Rational | null;
+  /**
+   * Latest speed factor that ffmpeg reported, or null if not reported yet.
+   */
+  speed: Rational | null;
+  /**
+   * True while a cancel that this store asked for is outstanding.
+   */
+  cancelRequested: boolean;
   /** Last error encountered during export, or null if idle or succeeded. */
   error: ExportError | null;
 };

@@ -1,131 +1,109 @@
 import { describe, expect, it } from "vitest";
-import { EXPORT_STATUSES } from "@/features/export";
+import { EXPORT_STATUSES, type ExportStatus } from "@/features/export";
 import {
   isCancelEnabled,
   isCancelOutstanding,
-  isExportDismissalRefused,
+  resolveExportDismissal,
 } from "./exportCancelState";
 
 const RUN_ID = "run-abc-123";
-const OTHER_RUN_ID = "run-xyz-789";
 
-describe("isExportDismissalRefused", () => {
-  // BLOCKING 08-F1: "preparing" before the backend answers is the one progress phase with
-  // no run to protect. Dismissal now cancels the run by its export slot rather than orphaning
-  // it, so this allowance is a real exit and the Cancel button is offered beside it.
-  it("permits dismissal during preparing while no run id exists", () => {
-    expect(isExportDismissalRefused({ status: "preparing", runId: null })).toBe(false);
-    expect(
-      isCancelEnabled({ status: "preparing", runId: null, cancelingRunId: null }),
-    ).toBe(true);
+describe("resolveExportDismissal", () => {
+  it("answers 'hide' for preparing, running, and publishing", () => {
+    const hideStatuses: ExportStatus[] = ["preparing", "running", "publishing"];
+    for (const status of hideStatuses) {
+      expect(resolveExportDismissal(status)).toBe("hide");
+    }
   });
 
-  it("refuses dismissal once a run exists, and for running and publishing", () => {
-    expect(isExportDismissalRefused({ status: "preparing", runId: RUN_ID })).toBe(true);
-    expect(isExportDismissalRefused({ status: "running", runId: RUN_ID })).toBe(true);
-    expect(isExportDismissalRefused({ status: "publishing", runId: RUN_ID })).toBe(
-      true,
-    );
+  it("answers 'close' for all terminal and idle statuses", () => {
+    const closeStatuses: ExportStatus[] = ["idle", "finished", "failed", "canceled"];
+    for (const status of closeStatuses) {
+      expect(resolveExportDismissal(status)).toBe("close");
+    }
   });
 
-  it("permits dismissal in every status that is not a progress phase", () => {
+  it("covers every status in EXPORT_STATUSES", () => {
     for (const status of EXPORT_STATUSES) {
-      const progress =
+      const dismissal = resolveExportDismissal(status);
+      const isProgress =
         status === "preparing" || status === "running" || status === "publishing";
-      if (progress) {
-        continue;
-      }
-      expect(isExportDismissalRefused({ status, runId: RUN_ID })).toBe(false);
-      expect(isExportDismissalRefused({ status, runId: null })).toBe(false);
+      expect(dismissal).toBe(isProgress ? "hide" : "close");
     }
   });
 });
 
 describe("isCancelOutstanding", () => {
-  it("reports no outstanding cancel while no run id is known, in every status", () => {
+  it("reports true in progress statuses when cancelRequested is true", () => {
     for (const status of EXPORT_STATUSES) {
-      expect(isCancelOutstanding({ status, runId: null, cancelingRunId: null })).toBe(
-        false,
-      );
-    }
-  });
-
-  it("reports an outstanding cancel only in the phases where a run is active", () => {
-    for (const status of EXPORT_STATUSES) {
-      const active =
+      const isProgress =
         status === "preparing" || status === "running" || status === "publishing";
-      expect(
-        isCancelOutstanding({ status, runId: RUN_ID, cancelingRunId: RUN_ID }),
-      ).toBe(active);
+      expect(isCancelOutstanding({ status, cancelRequested: true })).toBe(isProgress);
     }
   });
 
-  it("ignores a cancel that names a different run, so a new export starts clean", () => {
+  it("reports false in every status when cancelRequested is false", () => {
     for (const status of EXPORT_STATUSES) {
-      expect(
-        isCancelOutstanding({ status, runId: RUN_ID, cancelingRunId: OTHER_RUN_ID }),
-      ).toBe(false);
+      expect(isCancelOutstanding({ status, cancelRequested: false })).toBe(false);
     }
   });
 });
 
 describe("isCancelEnabled", () => {
-  it("keeps the button disabled while no run id is known, except while preparing", () => {
-    // "preparing" is the exception, and the reason the store no longer needs an id there:
-    // `cancel_active_export` stops whichever run holds the single export slot, which in that
-    // window is the run this store just started.
-    for (const status of EXPORT_STATUSES) {
-      const expected = status === "preparing";
-      expect(isCancelEnabled({ status, runId: null, cancelingRunId: null })).toBe(
-        expected,
-      );
-      expect(isCancelEnabled({ status, runId: null, cancelingRunId: RUN_ID })).toBe(
-        expected,
-      );
-    }
+  it("enables cancel in preparing with or without a run id when no cancel is requested", () => {
+    expect(
+      isCancelEnabled({ status: "preparing", runId: null, cancelRequested: false }),
+    ).toBe(true);
+    expect(
+      isCancelEnabled({ status: "preparing", runId: RUN_ID, cancelRequested: false }),
+    ).toBe(true);
   });
 
-  it("keeps the button disabled during publishing, with a run id and without one", () => {
-    // Unchanged by the cancel-by-slot work: the backend runs its last cancel test before it
-    // emits the event that puts the interface into this phase (ADR 016).
+  it("disables cancel in preparing when a cancel is requested", () => {
     expect(
-      isCancelEnabled({ status: "publishing", runId: RUN_ID, cancelingRunId: null }),
+      isCancelEnabled({ status: "preparing", runId: null, cancelRequested: true }),
     ).toBe(false);
     expect(
-      isCancelEnabled({ status: "publishing", runId: null, cancelingRunId: null }),
+      isCancelEnabled({ status: "preparing", runId: RUN_ID, cancelRequested: true }),
     ).toBe(false);
   });
 
-  it("enables the button in preparing and running with a run id and no outstanding cancel", () => {
-    for (const status of ["preparing", "running"] as const) {
-      expect(isCancelEnabled({ status, runId: RUN_ID, cancelingRunId: null })).toBe(
-        true,
-      );
-    }
+  it("enables cancel in running only when runId is known and no cancel is requested", () => {
+    expect(
+      isCancelEnabled({ status: "running", runId: RUN_ID, cancelRequested: false }),
+    ).toBe(true);
+    expect(
+      isCancelEnabled({ status: "running", runId: null, cancelRequested: false }),
+    ).toBe(false);
+    expect(
+      isCancelEnabled({ status: "running", runId: RUN_ID, cancelRequested: true }),
+    ).toBe(false);
   });
 
-  it("disables the button while a cancel for the active run is outstanding", () => {
-    for (const status of ["preparing", "running"] as const) {
-      expect(isCancelEnabled({ status, runId: RUN_ID, cancelingRunId: RUN_ID })).toBe(
-        false,
-      );
-    }
+  it("disables cancel in publishing regardless of runId or cancelRequested", () => {
+    expect(
+      isCancelEnabled({ status: "publishing", runId: RUN_ID, cancelRequested: false }),
+    ).toBe(false);
+    expect(
+      isCancelEnabled({ status: "publishing", runId: null, cancelRequested: false }),
+    ).toBe(false);
+    expect(
+      isCancelEnabled({ status: "publishing", runId: RUN_ID, cancelRequested: true }),
+    ).toBe(false);
   });
 
-  it("keeps the button enabled when the outstanding cancel names a different run", () => {
-    for (const status of ["preparing", "running"] as const) {
-      expect(
-        isCancelEnabled({ status, runId: RUN_ID, cancelingRunId: OTHER_RUN_ID }),
-      ).toBe(true);
-    }
-  });
-
-  it("keeps the button disabled in every status that carries no active run", () => {
+  it("disables cancel in all non-progress statuses", () => {
     for (const status of EXPORT_STATUSES) {
-      if (status === "preparing" || status === "running") {
+      if (status === "preparing" || status === "running" || status === "publishing") {
         continue;
       }
-      expect(isCancelEnabled({ status, runId: RUN_ID, cancelingRunId: null })).toBe(
+      expect(isCancelEnabled({ status, runId: RUN_ID, cancelRequested: false })).toBe(
+        false,
+      );
+      expect(isCancelEnabled({ status, runId: null, cancelRequested: false })).toBe(
+        false,
+      );
+      expect(isCancelEnabled({ status, runId: RUN_ID, cancelRequested: true })).toBe(
         false,
       );
     }

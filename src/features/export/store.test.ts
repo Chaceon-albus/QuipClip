@@ -57,6 +57,9 @@ describe("Media Export Store", () => {
       expect(state.segmentCount).toBe(0);
       expect(state.frame).toBeNull();
       expect(state.expectedFrames).toBeNull();
+      expect(state.fps).toBeNull();
+      expect(state.speed).toBeNull();
+      expect(state.cancelRequested).toBe(false);
       expect(state.error).toBeNull();
     });
 
@@ -70,6 +73,9 @@ describe("Media Export Store", () => {
           segmentCount: 3,
           frame: 50,
           expectedFrames: 100,
+          fps: { n: 30, d: 1 },
+          speed: { n: 1, d: 1 },
+          cancelRequested: true,
         },
       );
       const state = store.getState();
@@ -80,6 +86,9 @@ describe("Media Export Store", () => {
       expect(state.segmentCount).toBe(3);
       expect(state.frame).toBe(50);
       expect(state.expectedFrames).toBe(100);
+      expect(state.fps).toEqual({ n: 30, d: 1 });
+      expect(state.speed).toEqual({ n: 1, d: 1 });
+      expect(state.cancelRequested).toBe(true);
     });
   });
 
@@ -852,8 +861,9 @@ describe("Media Export Store", () => {
     });
 
     it("does not report a slot cancel that rejects after the store was reset", async () => {
-      // The dismissal path: the dialog fires the cancel and resets without awaiting it. A
-      // failure that landed afterward would put an error back on a dialog the user closed.
+      // The start fails on its own while a by-slot cancel is pending, and the user closes the
+      // result, which resets the store. A failure that landed afterward would put an error
+      // back on a dialog the user closed.
       const cancelDeferred = createDeferred<boolean>();
       const startDeferred = createDeferred<ExportStart>();
 
@@ -1156,6 +1166,9 @@ describe("Media Export Store", () => {
       expect(state.segmentCount).toBe(0);
       expect(state.frame).toBeNull();
       expect(state.expectedFrames).toBeNull();
+      expect(state.fps).toBeNull();
+      expect(state.speed).toBeNull();
+      expect(state.cancelRequested).toBe(false);
       expect(state.error).toBeNull();
       expect(typeof state.startExport).toBe("function");
       expect(typeof state.cancelExport).toBe("function");
@@ -1167,6 +1180,418 @@ describe("Media Export Store", () => {
 
     it("exports useExportStore hook function", () => {
       expect(typeof useExportStore).toBe("function");
+    });
+  });
+
+  describe("Progress Event fps and speed", () => {
+    it("records fps and speed, and a later event that omits them keeps the old values", async () => {
+      let eventHandler!: (event: ExportProgressEvent) => void;
+
+      const store = createExportStore({
+        subscribeExportProgress: (handler) => {
+          eventHandler = handler;
+          return Promise.resolve(() => {});
+        },
+        startExport: () =>
+          Promise.resolve(
+            createValidStartResult({
+              runId: "run-progress-metrics",
+            }),
+          ),
+      });
+
+      await store.getState().startExport(createValidRequest());
+
+      eventHandler({
+        event: "progress",
+        runId: "run-progress-metrics",
+        frame: 50,
+        fps: { n: 60, d: 1 },
+        speed: { n: 3, d: 2 },
+      });
+
+      expect(store.getState().fps).toEqual({ n: 60, d: 1 });
+      expect(store.getState().speed).toEqual({ n: 3, d: 2 });
+
+      // Later progress event omits fps and speed
+      eventHandler({
+        event: "progress",
+        runId: "run-progress-metrics",
+        frame: 100,
+      });
+
+      expect(store.getState().frame).toBe(100);
+      expect(store.getState().fps).toEqual({ n: 60, d: 1 });
+      expect(store.getState().speed).toEqual({ n: 3, d: 2 });
+    });
+  });
+
+  describe("Clearing fps, speed, and cancelRequested", () => {
+    it("startExport and reset clear fps, speed, and cancelRequested", async () => {
+      let eventHandler!: (event: ExportProgressEvent) => void;
+
+      const store = createExportStore({
+        subscribeExportProgress: (handler) => {
+          eventHandler = handler;
+          return Promise.resolve(() => {});
+        },
+        startExport: () =>
+          Promise.resolve(
+            createValidStartResult({
+              runId: "run-clear-metrics",
+            }),
+          ),
+        cancelExport: () => Promise.resolve(true),
+      });
+
+      await store.getState().startExport(createValidRequest());
+
+      eventHandler({
+        event: "progress",
+        runId: "run-clear-metrics",
+        frame: 30,
+        fps: { n: 30, d: 1 },
+        speed: { n: 1, d: 1 },
+      });
+
+      await store.getState().cancelExport();
+      expect(store.getState().fps).toEqual({ n: 30, d: 1 });
+      expect(store.getState().speed).toEqual({ n: 1, d: 1 });
+      expect(store.getState().cancelRequested).toBe(true);
+
+      // reset clears all three
+      store.getState().reset();
+      expect(store.getState().fps).toBeNull();
+      expect(store.getState().speed).toBeNull();
+      expect(store.getState().cancelRequested).toBe(false);
+
+      // Initialize a store with non-null values
+      const storeWithState = createExportStore(
+        {
+          subscribeExportProgress: () => Promise.resolve(() => {}),
+          startExport: () =>
+            Promise.resolve(
+              createValidStartResult({
+                runId: "run-second",
+              }),
+            ),
+        },
+        {
+          status: "running",
+          runId: "run-initial",
+          fps: { n: 24, d: 1 },
+          speed: { n: 2, d: 1 },
+          cancelRequested: true,
+        },
+      );
+
+      expect(storeWithState.getState().fps).toEqual({ n: 24, d: 1 });
+      expect(storeWithState.getState().speed).toEqual({ n: 2, d: 1 });
+      expect(storeWithState.getState().cancelRequested).toBe(true);
+
+      // startExport clears all three in its initial set
+      const p = storeWithState.getState().startExport(createValidRequest());
+      expect(storeWithState.getState().fps).toBeNull();
+      expect(storeWithState.getState().speed).toBeNull();
+      expect(storeWithState.getState().cancelRequested).toBe(false);
+      await p;
+      expect(storeWithState.getState().fps).toBeNull();
+      expect(storeWithState.getState().speed).toBeNull();
+      expect(storeWithState.getState().cancelRequested).toBe(false);
+    });
+  });
+
+  describe("by-id cancel cancelRequested tracking", () => {
+    it("is true while pending, equals answer when true, and equals answer when false", async () => {
+      // True case
+      const trueDeferred = createDeferred<boolean>();
+      const storeTrue = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () =>
+          Promise.resolve(createValidStartResult({ runId: "run-by-id-true" })),
+        cancelExport: () => trueDeferred.promise,
+      });
+
+      await storeTrue.getState().startExport(createValidRequest());
+      expect(storeTrue.getState().cancelRequested).toBe(false);
+
+      const cancelPromiseTrue = storeTrue.getState().cancelExport();
+      expect(storeTrue.getState().cancelRequested).toBe(true);
+
+      trueDeferred.resolve(true);
+      expect(await cancelPromiseTrue).toBe(true);
+      expect(storeTrue.getState().cancelRequested).toBe(true);
+
+      // False case
+      const falseDeferred = createDeferred<boolean>();
+      const storeFalse = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () =>
+          Promise.resolve(createValidStartResult({ runId: "run-by-id-false" })),
+        cancelExport: () => falseDeferred.promise,
+      });
+
+      await storeFalse.getState().startExport(createValidRequest());
+      expect(storeFalse.getState().cancelRequested).toBe(false);
+
+      const cancelPromiseFalse = storeFalse.getState().cancelExport();
+      expect(storeFalse.getState().cancelRequested).toBe(true);
+
+      falseDeferred.resolve(false);
+      expect(await cancelPromiseFalse).toBe(false);
+      expect(storeFalse.getState().cancelRequested).toBe(false);
+    });
+
+    it("is true while pending and false after a rejection", async () => {
+      const rejectDeferred = createDeferred<boolean>();
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () =>
+          Promise.resolve(createValidStartResult({ runId: "run-by-id-reject" })),
+        cancelExport: () => rejectDeferred.promise,
+      });
+
+      await store.getState().startExport(createValidRequest());
+      expect(store.getState().cancelRequested).toBe(false);
+
+      const cancelPromise = store.getState().cancelExport();
+      expect(store.getState().cancelRequested).toBe(true);
+
+      rejectDeferred.reject(new Error("IPC failed"));
+      expect(await cancelPromise).toBe(false);
+      expect(store.getState().cancelRequested).toBe(false);
+      expect(store.getState().status).toBe("failed");
+    });
+    it("does not write cancelRequested when by-id cancel resolves after reset and start learns run-2", async () => {
+      const cancelDef = createDeferred<boolean>();
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: (req) =>
+          Promise.resolve(
+            createValidStartResult({
+              runId: req.outputPath === "/media/output-2.mp4" ? "run-2" : "run-1",
+            }),
+          ),
+        cancelExport: () => cancelDef.promise,
+      });
+
+      await store.getState().startExport(createValidRequest());
+      expect(store.getState().runId).toBe("run-1");
+
+      const cancelPromise = store.getState().cancelExport();
+      expect(store.getState().cancelRequested).toBe(true);
+
+      store.getState().reset();
+      await store
+        .getState()
+        .startExport(createValidRequest({ outputPath: "/media/output-2.mp4" }));
+      expect(store.getState().runId).toBe("run-2");
+      expect(store.getState().cancelRequested).toBe(false);
+
+      cancelDef.resolve(true);
+      expect(await cancelPromise).toBe(true);
+      expect(store.getState().cancelRequested).toBe(false);
+    });
+  });
+
+  describe("by-slot cancel cancelRequested tracking", () => {
+    it("is true while pending, true after true, and false after false", async () => {
+      // True case
+      const cancelDefTrue = createDeferred<boolean>();
+      const startDefTrue = createDeferred<ExportStart>();
+      const storeTrue = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () => startDefTrue.promise,
+        cancelActiveExport: () => cancelDefTrue.promise,
+      });
+
+      void storeTrue.getState().startExport(createValidRequest());
+      await Promise.resolve();
+      expect(storeTrue.getState().status).toBe("preparing");
+      expect(storeTrue.getState().cancelRequested).toBe(false);
+
+      const pTrue = storeTrue.getState().cancelExport();
+      expect(storeTrue.getState().cancelRequested).toBe(true);
+
+      cancelDefTrue.resolve(true);
+      expect(await pTrue).toBe(true);
+      expect(storeTrue.getState().cancelRequested).toBe(true);
+
+      // False case
+      const cancelDefFalse = createDeferred<boolean>();
+      const startDefFalse = createDeferred<ExportStart>();
+      const storeFalse = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () => startDefFalse.promise,
+        cancelActiveExport: () => cancelDefFalse.promise,
+      });
+
+      void storeFalse.getState().startExport(createValidRequest());
+      await Promise.resolve();
+      expect(storeFalse.getState().cancelRequested).toBe(false);
+
+      const pFalse = storeFalse.getState().cancelExport();
+      expect(storeFalse.getState().cancelRequested).toBe(true);
+
+      cancelDefFalse.resolve(false);
+      expect(await pFalse).toBe(false);
+      expect(storeFalse.getState().cancelRequested).toBe(false);
+    });
+
+    it("does not write cancelRequested when by-slot cancel resolves after reset", async () => {
+      const cancelDef = createDeferred<boolean>();
+      const startDef = createDeferred<ExportStart>();
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () => startDef.promise,
+        cancelActiveExport: () => cancelDef.promise,
+      });
+
+      void store.getState().startExport(createValidRequest());
+      await Promise.resolve();
+
+      const cancelPromise = store.getState().cancelExport();
+      expect(store.getState().cancelRequested).toBe(true);
+
+      store.getState().reset();
+      expect(store.getState().cancelRequested).toBe(false);
+
+      cancelDef.resolve(true);
+      expect(await cancelPromise).toBe(true);
+      expect(store.getState().cancelRequested).toBe(false);
+    });
+
+    it("does not write cancelRequested when by-slot cancel resolves after a new startExport", async () => {
+      const cancelDef = createDeferred<boolean>();
+      const secondStart = createDeferred<ExportStart>();
+      const secondReq = createValidRequest({ outputPath: "/out2.mp4" });
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: (req) => {
+          if (req.outputPath === "/out2.mp4") {
+            return secondStart.promise;
+          }
+          return new Promise(() => {});
+        },
+        cancelActiveExport: () => cancelDef.promise,
+      });
+
+      void store
+        .getState()
+        .startExport(createValidRequest({ outputPath: "/out1.mp4" }));
+      await Promise.resolve();
+
+      const cancelPromise = store.getState().cancelExport();
+      expect(store.getState().cancelRequested).toBe(true);
+
+      void store.getState().startExport(secondReq);
+      await Promise.resolve();
+      expect(store.getState().cancelRequested).toBe(false);
+
+      cancelDef.resolve(true);
+      expect(await cancelPromise).toBe(true);
+      expect(store.getState().cancelRequested).toBe(false);
+    });
+
+    it("resolves after the store learned the run id and still writes the answer", async () => {
+      const cancelDef = createDeferred<boolean>();
+      const startDef = createDeferred<ExportStart>();
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () => startDef.promise,
+        cancelActiveExport: () => cancelDef.promise,
+      });
+
+      const startPromise = store.getState().startExport(createValidRequest());
+      await Promise.resolve();
+      expect(store.getState().status).toBe("preparing");
+      expect(store.getState().runId).toBeNull();
+
+      const cancelPromise = store.getState().cancelExport();
+      expect(store.getState().cancelRequested).toBe(true);
+
+      startDef.resolve(createValidStartResult({ runId: "run-learned" }));
+      await startPromise;
+      expect(store.getState().runId).toBe("run-learned");
+      expect(store.getState().cancelRequested).toBe(true);
+
+      cancelDef.resolve(true);
+      const accepted = await cancelPromise;
+
+      expect(accepted).toBe(true);
+      expect(store.getState().cancelRequested).toBe(true);
+    });
+
+    it("resolves false after the store learned the run id and clears cancelRequested", async () => {
+      const cancelDef = createDeferred<boolean>();
+      const startDef = createDeferred<ExportStart>();
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () => startDef.promise,
+        cancelActiveExport: () => cancelDef.promise,
+      });
+
+      const startPromise = store.getState().startExport(createValidRequest());
+      await Promise.resolve();
+      expect(store.getState().status).toBe("preparing");
+      expect(store.getState().runId).toBeNull();
+
+      const cancelPromise = store.getState().cancelExport();
+      expect(store.getState().cancelRequested).toBe(true);
+
+      startDef.resolve(createValidStartResult({ runId: "run-learned" }));
+      await startPromise;
+      expect(store.getState().runId).toBe("run-learned");
+      expect(store.getState().cancelRequested).toBe(true);
+
+      cancelDef.resolve(false);
+      const accepted = await cancelPromise;
+
+      expect(accepted).toBe(false);
+      expect(store.getState().cancelRequested).toBe(false);
+    });
+
+    it("clears cancelRequested and preserves running status without reporting error when slot cancel rejects after run id is learned", async () => {
+      let progressCallback!: (event: ExportProgressEvent) => void;
+      const cancelDef = createDeferred<boolean>();
+      const startDef = createDeferred<ExportStart>();
+      const store = createExportStore({
+        subscribeExportProgress: (cb) => {
+          progressCallback = cb;
+          return Promise.resolve(() => {});
+        },
+        startExport: () => startDef.promise,
+        cancelActiveExport: () => cancelDef.promise,
+      });
+
+      const startPromise = store.getState().startExport(createValidRequest());
+      await Promise.resolve();
+      expect(store.getState().status).toBe("preparing");
+      expect(store.getState().runId).toBeNull();
+
+      const cancelPromise = store.getState().cancelExport();
+      expect(store.getState().cancelRequested).toBe(true);
+
+      startDef.resolve(createValidStartResult({ runId: "run-learned" }));
+      await startPromise;
+      progressCallback({
+        event: "started",
+        runId: "run-learned",
+        outputPath: "/media/output.mp4",
+        segmentCount: 1,
+        totalDurationUs: 1000,
+      });
+      expect(store.getState().runId).toBe("run-learned");
+      expect(store.getState().status).toBe("running");
+      expect(store.getState().cancelRequested).toBe(true);
+
+      cancelDef.reject(new Error("IPC failed"));
+      const accepted = await cancelPromise;
+
+      expect(accepted).toBe(false);
+      expect(store.getState().cancelRequested).toBe(false);
+      expect(store.getState().status).toBe("running");
+      expect(store.getState().error).toBeNull();
     });
   });
 });

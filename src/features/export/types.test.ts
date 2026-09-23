@@ -300,6 +300,9 @@ describe("Export Types & Wire Constants", () => {
         segmentCount: 0,
         frame: null,
         expectedFrames: null,
+        fps: null,
+        speed: null,
+        cancelRequested: false,
         error: null,
         startExport: () => Promise.resolve(null),
         cancelExport: () => Promise.resolve(true),
@@ -315,6 +318,9 @@ describe("Export Types & Wire Constants", () => {
       expect(storeState.segmentCount).toBe(0);
       expect(storeState.frame).toBeNull();
       expect(storeState.expectedFrames).toBeNull();
+      expect(storeState.fps).toBeNull();
+      expect(storeState.speed).toBeNull();
+      expect(storeState.cancelRequested).toBe(false);
       expect(storeState.error).toBeNull();
       expect(typeof storeState.reportError).toBe("function");
     });

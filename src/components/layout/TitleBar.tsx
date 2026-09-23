@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ChevronDown, FileOutput, Minus, Square, X } from "lucide-react";
@@ -13,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 import { ExportDialog } from "@/components/export/ExportDialog";
+import { useExportPanelStore } from "@/features/export";
 import { openMediaFileDialog, useMediaStore } from "@/features/media";
 import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
@@ -24,7 +24,8 @@ export function TitleBar() {
   // Windows title bar.
   const isMac = isMacOS();
   const media = useMediaStore((state) => state.media);
-  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const exportDialogOpen = useExportPanelStore((state) => state.open);
+  const setExportDialogOpen = useExportPanelStore((state) => state.setOpen);
 
   const handleOpenMedia = () => {
     void openMediaFileDialog({

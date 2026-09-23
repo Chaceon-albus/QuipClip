@@ -104,6 +104,8 @@ export function createExportStore(
               event.expectedFrames !== undefined
                 ? event.expectedFrames
                 : state.expectedFrames,
+            fps: event.fps !== undefined ? event.fps : state.fps,
+            speed: event.speed !== undefined ? event.speed : state.speed,
           }));
           break;
         }
@@ -199,6 +201,9 @@ export function createExportStore(
       segmentCount: initialState?.segmentCount ?? 0,
       frame: initialState?.frame ?? null,
       expectedFrames: initialState?.expectedFrames ?? null,
+      fps: initialState?.fps ?? null,
+      speed: initialState?.speed ?? null,
+      cancelRequested: initialState?.cancelRequested ?? false,
       error: initialState?.error ?? null,
 
       ensureSubscribed,
@@ -217,6 +222,9 @@ export function createExportStore(
           segmentCount: 0,
           frame: null,
           expectedFrames: null,
+          fps: null,
+          speed: null,
+          cancelRequested: false,
           error: null,
         });
       },
@@ -240,9 +248,26 @@ export function createExportStore(
           // every start passes through it, so a store that was reset AND started again would
           // take a stale rejection into a run this call knows nothing about.
           const requestId = latestRequestId;
+          const isSameActiveStart = (): boolean => {
+            const currentStatus = get().status;
+            return (
+              requestId === latestRequestId &&
+              (currentStatus === "preparing" ||
+                currentStatus === "running" ||
+                currentStatus === "publishing")
+            );
+          };
+          set({ cancelRequested: true });
           try {
-            return await cancelActiveExportFn();
+            const accepted = await cancelActiveExportFn();
+            if (isSameActiveStart()) {
+              set({ cancelRequested: accepted });
+            }
+            return accepted;
           } catch (err) {
+            if (isSameActiveStart()) {
+              set({ cancelRequested: false });
+            }
             // Report only while the store is still waiting on the same start. A run that
             // reported its id in the meantime is tracked and can be cancelled again, a store
             // that was reset or started again has moved on, and a start that failed on its
@@ -257,11 +282,17 @@ export function createExportStore(
             return false;
           }
         }
+        set({ cancelRequested: true });
         try {
-          return await cancelExportFn(runId);
+          const accepted = await cancelExportFn(runId);
+          if (activeRunId === runId) {
+            set({ cancelRequested: accepted });
+          }
+          return accepted;
         } catch (err) {
           // A rejection that lands after the run changed belongs to nobody.
           if (activeRunId === runId) {
+            set({ cancelRequested: false });
             reportError(err);
           }
           return false;
@@ -281,6 +312,9 @@ export function createExportStore(
           segmentCount: request.segments.length,
           frame: null,
           expectedFrames: null,
+          fps: null,
+          speed: null,
+          cancelRequested: false,
           error: null,
         });
 
