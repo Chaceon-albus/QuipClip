@@ -118,11 +118,20 @@ The frontend calls `setProgressBar` on the main window. The capability file gran
 | `publishing`                                 | Normal, 100 percent   |
 | `failed`                                     | Error, 100 percent    |
 
-The error state stays until the store resets, the same as the status bar result. The
-frontend sends a state only when the state or the whole percent changes.
+The error state stays until the store resets, the same as the status bar result.
 
-On macOS, Tauri draws the bar on the Dock icon. The Dock bar does not move in the
-indeterminate state.
+The frontend sends the state once at start, and then only when the state or the whole percent
+changes. The start call clears a bar that a reloaded web view left behind. One call is in flight
+at a time. When a call settles, the frontend sends the latest state if it differs from the state
+of that call. `set_progress_bar` is an asynchronous command, so two calls that are sent together
+can arrive in the wrong order. A `publishing` state and a `finished` state arrive about one
+millisecond apart, and the wrong order leaves a full bar after the export.
+
+On macOS, Tauri draws the bar on the Dock icon. The Dock bar does not move in the indeterminate
+state. It also keeps its last value when a state arrives with no value. On macOS the
+indeterminate state therefore carries the value 0, so a new export does not show the full bar of
+the previous export. On Windows the indeterminate state carries no value, because a value changes
+the task bar state to normal.
 
 ### One progress bar component serves every display
 
