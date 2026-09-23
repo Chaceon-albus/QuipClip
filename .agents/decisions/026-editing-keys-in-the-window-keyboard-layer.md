@@ -80,16 +80,19 @@ and Mark In from the button use one predicate. When the condition is false, the 
 the key press and performs nothing, as ADR 021 does for `Space` without media. The key then
 cannot go to another handler that the user cannot see.
 
-Three cases own the key press and perform nothing, because the action would harm the
-state or change nothing:
+Two cases own the key press and perform nothing, because the action would harm the state
+or change nothing:
 
 - A seek to the frame that is already on screen, when no seek is pending. ADR 022 says
   that such a seek may bring no frame callback. Mark In and Mark Out would then stay
   disabled. Go to the start, and go to the In or Out point, do nothing in this case.
 - Home and End while the calibration is open. A seek in that window refuses precise
   editing for the attachment (ADR 021).
-- `Escape` while a tooltip is open. The layer does not own that key press, so Radix closes
-  the tooltip first. A second `Escape` finishes the segment.
+
+One case does not own the key press: `Escape` while a tooltip is open. Radix then closes
+the tooltip. A second `Escape` finishes the segment.
+
+The actions behave as follows:
 
 - Mark In and Mark Out write the PTS of the frame the browser confirmed, as ADR 003 and
   ADR 022 require. A key press during a pending seek does nothing.
