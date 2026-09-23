@@ -47,6 +47,8 @@ document summarizes them and shows how the parts fit together.
 | [`024-export-setup-step.md`](../.agents/decisions/024-export-setup-step.md)                                                                 | The export dialog selects the preset before the save dialog     |
 | [`025-background-export-and-progress-display.md`](../.agents/decisions/025-background-export-and-progress-display.md)                       | A hidden export continues, and three places show its progress   |
 | [`026-editing-keys-in-the-window-keyboard-layer.md`](../.agents/decisions/026-editing-keys-in-the-window-keyboard-layer.md)                 | The window keyboard layer takes the editing keys                |
+| [`027-confirm-a-quit-that-loses-work.md`](../.agents/decisions/027-confirm-a-quit-that-loses-work.md)                                       | A close or a quit that would lose work asks first               |
+| [`028-frame-timecode-display.md`](../.agents/decisions/028-frame-timecode-display.md)                                                       | Elapsed time shows as HH:MM:SS:FF by default                    |
 
 ## Shape
 
@@ -138,7 +140,8 @@ QuipClip does not persist a project timeline time base or segment timeline start
 
 The output frame rate is `renderSettings.frameRate`. It is a future render setting. It
 does not define edit positions. The UI shows source-relative elapsed time as
-`HH:MM:SS.mmm`.
+`HH:MM:SS:FF` by default, with frames from the nominal rate for display only, and as
+`HH:MM:SS.mmm` when the user chooses it or the source has no single nominal rate (ADR 028).
 
 ## Preview
 

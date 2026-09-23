@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
+- Amended by: ADR 028
 
 ## Context
 
