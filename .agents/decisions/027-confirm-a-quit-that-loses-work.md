@@ -38,10 +38,12 @@ Every way to close goes through the same frontend decision.
 1. **The window close.** The close button, `Alt+F4` and the red window button raise the
    close request of the window. The frontend listens with `onCloseRequested`. It always
    cancels the request, and then runs the decision.
-2. **The application quit.** `Cmd+Q` and the Quit item of the macOS application menu raise
-   `RunEvent::ExitRequested` in Rust. While a window is open and the quit is not confirmed,
-   Rust calls `prevent_exit` and sends an event to the frontend. The frontend then runs the
-   decision.
+2. **The application quit.** On macOS the default Quit item sends `terminate:`. With tauri
+   2.11 and tao 0.35 that raises only `RunEvent::Exit`, which cannot be prevented, and not
+   `ExitRequested`. The application therefore supplies its own macOS menu: the default
+   menu, with the Quit item replaced by an item on `Cmd+Q` that calls `exit(0)`. That call
+   raises `ExitRequested`. While a window is open and the quit is not confirmed, Rust calls
+   `prevent_exit` and sends an event to the frontend. The frontend then runs the decision.
 3. **The decision.** If nothing would be lost, the frontend calls the `confirm_quit`
    command at once. Otherwise it shows a confirmation dialog that names what would be lost.
    Cancel is the default button. Quit calls `confirm_quit`.
@@ -50,6 +52,17 @@ Every way to close goes through the same frontend decision.
    ADR 017 handler cancels the export and waits its bounded time.
 
 When no window is open, Rust never prevents the exit. The frontend could not answer.
+
+The Dock Quit, a logout and the Windows end of session still raise only `RunEvent::Exit`.
+No dialog can run there. The handler of `RunEvent::Exit` therefore also cancels the export
+and waits its bounded time, as ADR 017 does. The cancel is safe to run twice.
+
+### Replacing the open video
+
+Opening another video while the open one has segments also asks first: File > Open Media,
+`Cmd+O` or `Ctrl+O`, and a file drop. The segments stay with the old source, and they come
+back when the user opens that file again, so the dialog says that. It does not say that
+they are lost.
 
 ### What this changes in ADR 017
 
@@ -62,9 +75,12 @@ not.
 
 - A close with segments, an active export or an unsaved preset draft shows one dialog. A
   close with nothing to lose closes at once.
-- `Cmd+Q` on macOS reaches the same dialog. This closes the open question in ADR 017 about
-  the Quit menu item, provided that `Cmd+Q` raises `ExitRequested`. A manual check in the
-  built `.app` must confirm this.
+- `Cmd+Q` and the menu Quit on macOS reach the same dialog through the custom Quit item.
+  This closes the open question in ADR 017: the default Quit item did not raise
+  `ExitRequested`, so it skipped the export cancel. A manual check in the built `.app` must
+  confirm the new path, first with an export running.
+- The window hides before the bounded wait of ADR 017, so it does not stay on screen,
+  frozen, for up to 5 seconds.
 - If the web view stops answering, the window close does nothing, because the frontend
   owns the decision. The user can still force the application to quit through the
   operating system.

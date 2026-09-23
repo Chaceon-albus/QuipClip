@@ -268,6 +268,13 @@ rename. See ADR 016.
 An application exit cancels a running export and waits a bounded time for it to end, so a quit
 does not leave `ffmpeg` encoding into a temporary file that nothing will remove. See ADR 017.
 
+A close or a quit that would lose work asks first (ADR 027). The window close and the
+custom macOS Quit item both reach one frontend decision. It asks when segments, a pending In
+point, an active export or an unsaved preset draft would be lost, and otherwise it quits at
+once through the `confirm_quit` command. Opening another video over one with segments also
+asks. Exits that cannot be prevented, such as the Dock Quit or a logout, still cancel the
+export and wait.
+
 A dismissal of the export dialog during an active run hides the dialog. It does not cancel
 the run (ADR 025). Only the Stop Export button cancels, and a run of 30 seconds or more
 needs a second click to confirm. While the dialog is hidden, the status bar
