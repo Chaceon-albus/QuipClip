@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { AlertCircle, Film, Loader2 } from "lucide-react";
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
@@ -34,14 +34,25 @@ import {
   MILLISECONDS_TIMECODE_PLACEHOLDER,
   type TimecodeDisplay,
 } from "@/lib/timecode";
+import { isMacOS, isWindows } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import type { Pts, Rational } from "@/types/project";
+import {
+  PICTURE_CHECK_INTERVAL_MS,
+  presentDecodeFailure,
+  resolvePictureCheck,
+  type DecodeFailureReason,
+  type DecodeFailureTrigger,
+  type PictureCheckEvent,
+  type PictureCheckState,
+  type PreviewPlatform,
+} from "./decodeFailure";
 import { formatSupportedVideoFormats } from "./previewEmptyState";
 import {
   createSourceLifecycleGuard,
   formatPreviewCurrentTime,
   formatPreviewTotalDuration,
-  isPreviewTimeApproximate,
+  showsApproximateBadge,
 } from "./previewFrame";
 
 // The playback store actions never change, so they are read once instead of through a
@@ -63,6 +74,34 @@ const {
 // The format names in the empty state come from the list the file dialog filters on, so the
 // two cannot disagree.
 const SUPPORTED_VIDEO_FORMATS = formatSupportedVideoFormats(VIDEO_FILE_EXTENSIONS);
+
+/** The platform of the web view, for the hint of the decode-failure panel. */
+function currentPlatform(): PreviewPlatform {
+  if (isWindows()) {
+    return "windows";
+  }
+  if (isMacOS()) {
+    return "macos";
+  }
+  return "other";
+}
+
+/** The picture check of one mounted video element (see `resolvePictureCheck`). */
+interface PictureCheck {
+  readonly element: HTMLVideoElement;
+  readonly state: PictureCheckState;
+  /** The current wait for a picture, while the check is pending. */
+  readonly timer: number | null;
+  /** `performance.now()` when the check started to wait, or null before the first wait. */
+  readonly waitStartedAt: number | null;
+}
+
+/** Stops the wait of a picture check, so that its timer can no longer act. */
+function stopPictureCheckTimer(check: PictureCheck | null): void {
+  if (check !== null && check.timer !== null) {
+    window.clearTimeout(check.timer);
+  }
+}
 
 /**
  * Builds the timing descriptor the playback store attaches, or null when no media is open.
@@ -124,10 +163,12 @@ function PreviewTimecode({
   videoStartPts,
   videoTimeBase,
   display,
+  decodeFailed,
 }: {
   videoStartPts: Pts | null;
   videoTimeBase: Rational;
   display: TimecodeDisplay;
+  decodeFailed: boolean;
 }) {
   const presentedFrame = usePlaybackStore((s) => s.presentedFrame);
   const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
@@ -150,10 +191,74 @@ function PreviewTimecode({
 
   return (
     <>
-      {isPreviewTimeApproximate(calibrationStatus) && <ApproximateBadge />}
+      {showsApproximateBadge(calibrationStatus, decodeFailed) && <ApproximateBadge />}
       <span className="text-primary">{currentTimeDisplay}</span>
     </>
   );
+}
+
+/** The tags of the decode-failure reason messages. `<mono>` wraps a technical value. */
+const REASON_COMPONENTS = {
+  mono: <span className="font-mono text-preview-foreground" />,
+};
+
+/**
+ * The reason line of the decode-failure panel.
+ *
+ * `Trans` types its values from the key. For a union of keys it requires the placeholders of
+ * every member, so each case narrows the reason to one placeholder shape and its values.
+ */
+function DecodeFailureReasonText({ reason }: { reason: DecodeFailureReason }) {
+  const { t } = useTranslation();
+  switch (reason.shape) {
+    case "full":
+      return (
+        <Trans
+          t={t}
+          i18nKey={reason.key}
+          values={reason.values}
+          components={REASON_COMPONENTS}
+        />
+      );
+    case "noProfile":
+      return (
+        <Trans
+          t={t}
+          i18nKey={reason.key}
+          values={reason.values}
+          components={REASON_COMPONENTS}
+        />
+      );
+    case "noPixelFormat":
+      return (
+        <Trans
+          t={t}
+          i18nKey={reason.key}
+          values={reason.values}
+          components={REASON_COMPONENTS}
+        />
+      );
+    case "codecOnly":
+      return (
+        <Trans
+          t={t}
+          i18nKey={reason.key}
+          values={reason.values}
+          components={REASON_COMPONENTS}
+        />
+      );
+    case "container":
+      return (
+        <Trans
+          t={t}
+          i18nKey={reason.key}
+          values={reason.values}
+          components={REASON_COMPONENTS}
+        />
+      );
+    case "plain":
+      return t(reason.key);
+  }
 }
 
 export function PreviewPane() {
@@ -174,7 +279,13 @@ export function PreviewPane() {
 
   const sourceRevisionKey = getSourceRevisionKey(media);
   const [previousMedia, setPreviousMedia] = useState(media);
-  const [videoError, setVideoError] = useState(false);
+  // What made the web view fail to play the source, or null while it plays: the element
+  // fired `error`, or the picture check found no picture. The pane then shows the
+  // decode-failure panel in place of the element.
+  const [failureTrigger, setFailureTrigger] = useState<DecodeFailureTrigger | null>(
+    null,
+  );
+  const decodeFailed = failureTrigger !== null;
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [sourceGuard] = useState(() => createSourceLifecycleGuard());
@@ -182,12 +293,12 @@ export function PreviewPane() {
   // The approximate clock needs no render-phase reset here. `attach` and `detach` null the
   // store field, which also covers an element replaced without a media change.
 
-  // Clear a decode error for every new media object, including a re-import of the same file,
-  // which keeps its revision key. Otherwise the import reports success and the pane keeps the
-  // decode-error panel.
+  // Clear a decode failure for every new media object, including a re-import of the same
+  // file, which keeps its revision key. Otherwise the import reports success and the pane keeps
+  // the decode-failure panel.
   if (previousMedia !== media) {
     setPreviousMedia(media);
-    setVideoError(false);
+    setFailureTrigger(null);
   }
 
   // Reset playback store if media disappears
@@ -206,6 +317,31 @@ export function PreviewPane() {
   }, [sourceRevisionKey, sourceGuard]);
 
   const mediaPath = media?.path;
+  const mediaProbe = media?.probe;
+  const mediaFileName = media?.fileName;
+
+  // What the decode-failure panel says about this source and its trigger.
+  const decodeFailure = useMemo(
+    () =>
+      failureTrigger === null || mediaProbe === undefined || mediaFileName === undefined
+        ? null
+        : presentDecodeFailure({
+            probe: mediaProbe,
+            fileName: mediaFileName,
+            trigger: failureTrigger,
+            platform: currentPlatform(),
+          }),
+    [failureTrigger, mediaProbe, mediaFileName],
+  );
+
+  // The picture check of the mounted video element. The ref callback clears it when the
+  // element leaves the tree: on a source change, on the decode-failure panel, and on unmount.
+  const pictureCheckRef = useRef<PictureCheck | null>(null);
+  // The picture check runner of the latest render. The frame callback loop and the wait
+  // timer outlive the render that started them, so they call the runner through this ref.
+  const runPictureCheckRef = useRef<
+    ((element: HTMLVideoElement, event: PictureCheckEvent) => void) | null
+  >(null);
 
   const videoSrc = useMemo(
     () => (mediaPath === undefined ? undefined : convertFileSrc(mediaPath)),
@@ -240,6 +376,11 @@ export function PreviewPane() {
         playbackStore.getState().detach(sourceRevisionKey, node),
     });
     ownerRef.current(element);
+    if (element === null) {
+      // A removed element ends its picture check, so a pending wait cannot act on it.
+      stopPictureCheckTimer(pictureCheckRef.current);
+      pictureCheckRef.current = null;
+    }
   }, []);
 
   // Registers and unregisters the hidden scrub audio element with exact ownership (ADR 019).
@@ -272,7 +413,7 @@ export function PreviewPane() {
   // Register requestVideoFrameCallback lifecycle loop (ADR 003)
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !media || videoError) {
+    if (!video || !media || decodeFailed) {
       return;
     }
 
@@ -302,6 +443,13 @@ export function PreviewPane() {
         // Guard against late callbacks from unmounted or replaced sources
         if (cancelled || !sourceGuard.isActive(expectedRevisionKey)) {
           return;
+        }
+
+        // A presented frame proves a picture. A pending picture check takes the ready path
+        // before the store sees the frame, so the calibration anchor is checked against the
+        // position that `syncReady` reads, not the one saved at attach (ADR 003).
+        if (pictureCheckRef.current?.state === "pending") {
+          runPictureCheckRef.current?.(video, { type: "frame" });
         }
 
         syncPresentedFrame(
@@ -347,7 +495,7 @@ export function PreviewPane() {
         }
       }
     };
-  }, [sourceRevisionKey, media, videoError, sourceGuard]);
+  }, [sourceRevisionKey, media, decodeFailed, sourceGuard]);
 
   const handleTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>) => {
     if (!sourceGuard.isActive(sourceRevisionKey) || !media) {
@@ -356,12 +504,106 @@ export function PreviewPane() {
     syncBrowserTime(sourceRevisionKey, e.currentTarget);
   };
 
-  const handleVideoError = () => {
+  // An `error` event and a failed picture check take the same path. The element leaves the
+  // tree on the next render, and its ref callback detaches it from the playback store.
+  const handleDecodeFailure = (
+    element: HTMLVideoElement,
+    trigger: DecodeFailureTrigger,
+  ) => {
     if (!sourceGuard.isActive(sourceRevisionKey)) {
       return;
     }
-    setVideoError(true);
+    const check = pictureCheckRef.current;
+    if (check !== null) {
+      stopPictureCheckTimer(check);
+      pictureCheckRef.current = { ...check, state: "failed", timer: null };
+    }
+    syncUnready(sourceRevisionKey, element);
+    setFailureTrigger(trigger);
   };
+
+  // The ready path of a loaded element. `loadedmetadata` takes it at once when the element
+  // reports a picture size. Otherwise the picture check takes it when a size arrives.
+  const takeReadyPath = (element: HTMLVideoElement) => {
+    if (!sourceGuard.isActive(sourceRevisionKey)) {
+      return;
+    }
+    syncReady(sourceRevisionKey, element);
+    syncBrowserDuration(sourceRevisionKey, element);
+    syncBrowserTime(sourceRevisionKey, element);
+  };
+
+  // Feeds an element event, or the end of a wait, to the picture check, and performs the
+  // action that `resolvePictureCheck` returns.
+  const runPictureCheck = (element: HTMLVideoElement, event: PictureCheckEvent) => {
+    if (!sourceGuard.isActive(sourceRevisionKey)) {
+      return;
+    }
+    let check = pictureCheckRef.current;
+    if (check === null || check.element !== element) {
+      // Only `loadedmetadata` starts the check of an element. A later event of an element
+      // without a check, such as a late event of a replaced element, does nothing.
+      if (event.type !== "loadedMetadata") {
+        return;
+      }
+      stopPictureCheckTimer(check);
+      check = { element, state: "idle", timer: null, waitStartedAt: null };
+    }
+
+    const result = resolvePictureCheck(check.state, event);
+    if (result.action === "none") {
+      if (result.state !== check.state || pictureCheckRef.current !== check) {
+        pictureCheckRef.current = { ...check, state: result.state };
+      }
+      return;
+    }
+    stopPictureCheckTimer(check);
+
+    if (result.action === "wait") {
+      // A new `loadedmetadata` starts the total wait again. A repeated wait keeps its start.
+      const waitStartedAt =
+        event.type === "loadedMetadata" || check.waitStartedAt === null
+          ? performance.now()
+          : check.waitStartedAt;
+      const timer = window.setTimeout(() => {
+        const current = pictureCheckRef.current;
+        // A replaced or removed element, or a newer wait, owns the record now.
+        if (
+          current === null ||
+          current.element !== element ||
+          current.timer !== timer
+        ) {
+          return;
+        }
+        pictureCheckRef.current = { ...current, timer: null };
+        runPictureCheckRef.current?.(element, {
+          type: "timeout",
+          videoWidth: element.videoWidth,
+          readyState: element.readyState,
+          elapsedMs: performance.now() - waitStartedAt,
+        });
+      }, PICTURE_CHECK_INTERVAL_MS);
+      pictureCheckRef.current = { element, state: result.state, timer, waitStartedAt };
+      return;
+    }
+
+    pictureCheckRef.current = {
+      element,
+      state: result.state,
+      timer: null,
+      waitStartedAt: check.waitStartedAt,
+    };
+    if (result.action === "ready") {
+      takeReadyPath(element);
+    } else {
+      handleDecodeFailure(element, { kind: "pictureMissing" });
+    }
+  };
+
+  // Publish the runner of this render for the frame callback loop and the wait timer.
+  useLayoutEffect(() => {
+    runPictureCheckRef.current = runPictureCheck;
+  });
 
   // The format of the open source: the user's preference, with milliseconds for a source
   // without a single nominal rate (ADR 028). With no source, the placeholder follows the
@@ -405,15 +647,39 @@ export function PreviewPane() {
           {media ? (
             <>
               {/* Loaded Video Surface: Preserved during replacements or error states */}
-              {videoError ? (
+              {decodeFailed ? (
+                /* Decode-failure panel: what the system player cannot decode, the step
+                   that can make the file play, and the Open Media action for another file.
+                   The panel scrolls when the preview is too small to hold it. */
                 <div
-                  className="flex max-w-md flex-col items-center justify-center gap-2 p-4 text-center"
+                  className="flex max-h-full max-w-md flex-col items-center gap-2 overflow-y-auto p-4 text-center"
                   aria-live="polite"
                 >
-                  <AlertCircle className="size-6 shrink-0 text-warning" />
-                  <p className="text-xs font-medium text-warning-text">
-                    {t("preview.decodeError")}
-                  </p>
+                  <AlertCircle
+                    aria-hidden="true"
+                    className="size-6 shrink-0 text-warning"
+                  />
+                  <h2 className="text-sm font-medium text-preview-foreground">
+                    {t("preview.decodeFailure.title")}
+                  </h2>
+                  {decodeFailure && (
+                    <div className="flex flex-col gap-1 text-xs text-preview-muted">
+                      {/* The values are identifiers a user can copy into a search. */}
+                      <p className="select-text">
+                        <DecodeFailureReasonText reason={decodeFailure.reason} />
+                      </p>
+                      {decodeFailure.hintKey !== null && (
+                        <p>{t(decodeFailure.hintKey)}</p>
+                      )}
+                    </div>
+                  )}
+                  <Button
+                    className="mt-1"
+                    onClick={openMedia}
+                    aria-keyshortcuts={openMediaShortcut?.aria}
+                  >
+                    {t("preview.decodeFailure.openAnother")}
+                  </Button>
                 </div>
               ) : (
                 <video
@@ -454,17 +720,25 @@ export function PreviewPane() {
                     }
                   }}
                   onLoadedMetadata={(e) => {
-                    if (sourceGuard.isActive(sourceRevisionKey)) {
-                      syncReady(sourceRevisionKey, e.currentTarget);
-                      syncBrowserDuration(sourceRevisionKey, e.currentTarget);
-                      handleTimeUpdate(e);
-                    }
+                    // A zero picture width here is only a suspicion. The picture check
+                    // holds the ready path until a size arrives, or it reports a failure.
+                    runPictureCheck(e.currentTarget, {
+                      type: "loadedMetadata",
+                      videoWidth: e.currentTarget.videoWidth,
+                      probeWidth: media.probe.width,
+                    });
+                  }}
+                  onResize={(e) => {
+                    runPictureCheck(e.currentTarget, {
+                      type: "resize",
+                      videoWidth: e.currentTarget.videoWidth,
+                    });
                   }}
                   onError={(e) => {
-                    if (sourceGuard.isActive(sourceRevisionKey)) {
-                      syncUnready(sourceRevisionKey, e.currentTarget);
-                      handleVideoError();
-                    }
+                    handleDecodeFailure(e.currentTarget, {
+                      kind: "mediaError",
+                      code: e.currentTarget.error?.code ?? null,
+                    });
                   }}
                 />
               )}
@@ -472,7 +746,7 @@ export function PreviewPane() {
               {/* Hidden audio element for scrub bursts on frame step (ADR 019).
                   Gated on:
                   1. media.probe.audio: null when the source has no audio stream. Mount nothing then.
-                  2. !videoError: web view could not decode the source. Mount nothing then.
+                  2. !decodeFailed: web view could not decode the source. Mount nothing then.
                   3. attachedSourceRevisionKey === sourceRevisionKey: the identity comparison keeps
                      React from constructing the node at all, React assigns `src` at construction
                      so a fetch would start before insertion, and a boolean such as isAttached
@@ -484,7 +758,7 @@ export function PreviewPane() {
                      straight to "unavailable" mounts at attach time, which is correct because such a
                      source has no anchor to protect. */}
               {media.probe.audio &&
-                !videoError &&
+                !decodeFailed &&
                 attachedSourceRevisionKey === sourceRevisionKey &&
                 calibrationStatus !== "calibrating" && (
                   <audio
@@ -526,7 +800,7 @@ export function PreviewPane() {
               )}
 
               {/* Restrained Overlay when local playback start fails */}
-              {playbackError && !videoError && (
+              {playbackError && !decodeFailed && (
                 <div
                   className="absolute top-3 right-3 left-3 z-10 flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/90 px-3 py-1.5 text-xs text-destructive-foreground shadow-md backdrop-blur-xs"
                   aria-live="polite"
@@ -612,6 +886,7 @@ export function PreviewPane() {
               videoStartPts={media.probe.videoStartPts}
               videoTimeBase={media.probe.videoTimeBase}
               display={timecodeDisplay}
+              decodeFailed={decodeFailed}
             />
           ) : (
             <span className="text-preview-muted">{noMediaPlaceholder}</span>

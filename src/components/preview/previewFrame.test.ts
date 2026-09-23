@@ -8,6 +8,7 @@ import {
   formatPreviewTotalDuration,
   formatSourceRelativeTime,
   isPreviewTimeApproximate,
+  showsApproximateBadge,
   SourceLifecycleController,
 } from "./previewFrame";
 
@@ -441,6 +442,20 @@ describe("Preview Frame Helpers & ADR 003 Math", () => {
     it("keeps a ready source non-approximate even when presentedFrame is null between a seek and its frame callback", () => {
       // Locking down the frame step flicker regression: the badge depends on calibration status alone
       expect(isPreviewTimeApproximate("ready")).toBe(false);
+    });
+  });
+
+  describe("showsApproximateBadge", () => {
+    it("follows the calibration status while the picture plays", () => {
+      expect(showsApproximateBadge("calibrating", false)).toBe(true);
+      expect(showsApproximateBadge("unavailable", false)).toBe(true);
+      expect(showsApproximateBadge("ready", false)).toBe(false);
+    });
+
+    it("hides the badge while the decode-failure panel replaces the picture", () => {
+      expect(showsApproximateBadge("calibrating", true)).toBe(false);
+      expect(showsApproximateBadge("unavailable", true)).toBe(false);
+      expect(showsApproximateBadge("ready", true)).toBe(false);
     });
   });
 

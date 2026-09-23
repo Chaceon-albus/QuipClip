@@ -44,7 +44,33 @@ export const zhCN: TranslationCatalog = {
     },
     loading: "正在加载媒体...",
     videoPlayerLabel: "视频预览：{{fileName}}",
-    decodeError: "原生播放失败，预览此格式需要生成代理文件。",
+    decodeFailure: {
+      title: "无法预览此视频",
+      unsupportedCodec: {
+        full: "系统播放器不支持 <mono>{{codec}} {{profile}}</mono>（<mono>{{pixelFormat}}</mono>）。",
+        noProfile:
+          "系统播放器不支持 <mono>{{codec}}</mono>（<mono>{{pixelFormat}}</mono>）。",
+        noPixelFormat: "系统播放器不支持 <mono>{{codec}} {{profile}}</mono>。",
+        codecOnly: "系统播放器不支持 <mono>{{codec}}</mono>。",
+      },
+      cannotPlay: {
+        full: "QuipClip 无法播放此文件（视频：<mono>{{codec}} {{profile}}</mono>，<mono>{{pixelFormat}}</mono>）。",
+        noProfile:
+          "QuipClip 无法播放此文件（视频：<mono>{{codec}}</mono>，<mono>{{pixelFormat}}</mono>）。",
+        noPixelFormat:
+          "QuipClip 无法播放此文件（视频：<mono>{{codec}} {{profile}}</mono>）。",
+        codecOnly: "QuipClip 无法播放此文件（视频：<mono>{{codec}}</mono>）。",
+      },
+      unsupportedContainer: "系统播放器无法打开 <mono>{{container}}</mono> 文件。",
+      readFailed: "QuipClip 无法读取此文件。",
+      hint: {
+        installHevc:
+          "从 Microsoft Store 安装“HEVC 视频扩展”，然后重新启动 QuipClip 并再次打开此文件。",
+        convertH264: "将视频转换为 H.264（8 位、4:2:0）MP4 后即可预览。",
+        convertMp4: "将视频转换为 MP4 格式后再预览。",
+      },
+      openAnother: "打开其他文件...",
+    },
   },
   fileDrop: {
     release: "松开以打开视频",

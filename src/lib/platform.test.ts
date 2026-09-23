@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isMacOS, isMacOSUserAgent } from "@/lib/platform";
+import {
+  isMacOS,
+  isMacOSUserAgent,
+  isWindows,
+  isWindowsUserAgent,
+} from "@/lib/platform";
 
 describe("platform detection", () => {
   describe("isMacOSUserAgent", () => {
@@ -54,6 +59,48 @@ describe("platform detection", () => {
         userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
       });
       expect(isMacOS()).toBe(true);
+    });
+  });
+
+  describe("isWindowsUserAgent", () => {
+    it("returns true for a real WebView2 user agent", () => {
+      const webView2 =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
+      expect(isWindowsUserAgent(webView2)).toBe(true);
+    });
+
+    it("returns false for a real macOS WKWebView user agent", () => {
+      const macOSWKWebView =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
+      expect(isWindowsUserAgent(macOSWKWebView)).toBe(false);
+    });
+
+    it("returns false for a Linux user agent", () => {
+      const linuxUA =
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+      expect(isWindowsUserAgent(linuxUA)).toBe(false);
+    });
+
+    it("returns false for an empty string", () => {
+      expect(isWindowsUserAgent("")).toBe(false);
+    });
+  });
+
+  describe("isWindows", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("returns false when there is no navigator", () => {
+      vi.stubGlobal("navigator", undefined);
+      expect(isWindows()).toBe(false);
+    });
+
+    it("reads the user agent of the current environment", () => {
+      vi.stubGlobal("navigator", {
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      });
+      expect(isWindows()).toBe(true);
     });
   });
 });

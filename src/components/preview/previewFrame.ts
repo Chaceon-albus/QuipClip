@@ -212,6 +212,23 @@ export function isPreviewTimeApproximate(
 }
 
 /**
+ * Reports whether the preview shows the approximate badge beside the timecode.
+ *
+ * While the decode-failure panel replaces the picture, the source plays nothing, so there is
+ * no position for the badge to qualify. The calibration status is `unavailable` then, and
+ * the badge would otherwise show.
+ *
+ * @param calibrationStatus Calibration status of the active source.
+ * @param decodeFailed True while the decode-failure panel replaces the picture.
+ */
+export function showsApproximateBadge(
+  calibrationStatus: CalibrationStatus,
+  decodeFailed: boolean,
+): boolean {
+  return !decodeFailed && isPreviewTimeApproximate(calibrationStatus);
+}
+
+/**
  * Interface for tracking and guarding active media source identity across React commit
  * and layout-effect boundaries.
  */

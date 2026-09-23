@@ -41,7 +41,44 @@ export const en = {
     },
     loading: "Loading media...",
     videoPlayerLabel: "Video preview for {{fileName}}",
-    decodeError: "Native playback failed. A proxy is required to preview this format.",
+    // The panel that replaces the picture when the web view cannot play the source. The
+    // `<mono>` tags wrap the technical values, which the panel shows in a monospace font.
+    // {{codec}} is a codec display name such as "HEVC" or "H.264". {{profile}} is the codec
+    // profile as ffprobe reports it, such as "Main 10". {{pixelFormat}} is the ffprobe pixel
+    // format, such as "yuv420p10le". {{container}} is a container name such as "AVI" or
+    // "MKV". The noProfile, noPixelFormat, and codecOnly variants omit a value that ffprobe
+    // did not state.
+    decodeFailure: {
+      title: "QuipClip cannot preview this video",
+      // The element plays no picture: the system player does not decode the video stream.
+      unsupportedCodec: {
+        full: "The system player does not support <mono>{{codec}} {{profile}}</mono> (<mono>{{pixelFormat}}</mono>).",
+        noProfile:
+          "The system player does not support <mono>{{codec}}</mono> (<mono>{{pixelFormat}}</mono>).",
+        noPixelFormat:
+          "The system player does not support <mono>{{codec}} {{profile}}</mono>.",
+        codecOnly: "The system player does not support <mono>{{codec}}</mono>.",
+      },
+      // The element reported an error whose cause QuipClip cannot name.
+      cannotPlay: {
+        full: "QuipClip cannot play this file (video: <mono>{{codec}} {{profile}}</mono>, <mono>{{pixelFormat}}</mono>).",
+        noProfile:
+          "QuipClip cannot play this file (video: <mono>{{codec}}</mono>, <mono>{{pixelFormat}}</mono>).",
+        noPixelFormat:
+          "QuipClip cannot play this file (video: <mono>{{codec}} {{profile}}</mono>).",
+        codecOnly: "QuipClip cannot play this file (video: <mono>{{codec}}</mono>).",
+      },
+      unsupportedContainer:
+        "The system player cannot open <mono>{{container}}</mono> files.",
+      readFailed: "QuipClip could not read the file.",
+      hint: {
+        installHevc:
+          "Install the HEVC Video Extensions from the Microsoft Store, then restart QuipClip and open the file again.",
+        convertH264: "Convert the video to H.264 (8-bit, 4:2:0) MP4 to preview it.",
+        convertMp4: "Convert the video to MP4 to preview it.",
+      },
+      openAnother: "Open Another File...",
+    },
   },
   fileDrop: {
     release: "Release to open the video",
