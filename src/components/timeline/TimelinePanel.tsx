@@ -577,10 +577,15 @@ export function TimelinePanel({
             width: `calc(${TIMELINE_GUTTER_WIDTH_PX}px + (100% - ${TIMELINE_GUTTER_WIDTH_PX}px) * ${zoom})`,
           }}
         >
-          {/* Ruler Row (~28px tall) */}
-          <div className="flex h-7 shrink-0 border-b border-timeline-divider">
+          {/*
+           * Ruler Row (~28px tall). The divider under the ruler is drawn by the gutter and the
+           * lane, not by the row. The track playhead extends 1px up over that divider, and
+           * the gutter's own border keeps that pixel under the sticky gutter when the
+           * playhead scrolls behind it.
+           */}
+          <div className="flex h-7 shrink-0">
             {/* Gutter header pinned sticky on the left */}
-            <div className="sticky left-0 z-40 w-[96px] shrink-0 border-r border-timeline-divider bg-sidebar" />
+            <div className="sticky left-0 z-40 w-[96px] shrink-0 border-r border-b border-timeline-divider bg-sidebar" />
 
             {/*
              * Ruler track with time markers and tick marks, and the pointer scrub
@@ -610,23 +615,37 @@ export function TimelinePanel({
               onPointerUp={handlePointerUp}
               onPointerCancel={handlePointerCancel}
               onLostPointerCapture={handlePointerCancel}
-              className={`relative flex-1 touch-none bg-timeline-ruler ${canSeek ? "cursor-pointer" : ""}`}
+              className={`relative flex-1 touch-none border-b border-timeline-divider bg-timeline-ruler ${canSeek ? "cursor-pointer" : ""}`}
             >
               {/* Timecode labels and ticks */}
               <div className="relative h-full w-full font-mono text-[10px]">
                 <TimelineRuler markers={markers} />
               </div>
 
-              {/* Playhead marker in ruler */}
+              {/*
+               * Playhead in the ruler: the upper part of one line that the track playhead
+               * continues below the divider. The line spans the full ruler height and the
+               * head lies over its top, both centred on the playhead position. The head is
+               * 12px wide, an even width like the 2px line, so its edges and its tip fall on
+               * the same pixel boundaries as the line. It is 12px tall, so it leaves most of
+               * a timecode label under the playhead visible.
+               *
+               * The outline is a 1px ring in the timeline background colour, so the line
+               * stays visible over a fill of a similar colour, such as the selected segment.
+               * It is a drop-shadow filter on this wrapper, and not a box-shadow, for two
+               * reasons: clip-path removes the head's own shadow, and one filter outlines the
+               * head and the line as one shape, with no gap below the tip. The ring has a
+               * left, a right and a lower edge only, the same ring as the track playhead.
+               */}
               {media && !isIndeterminate && (
                 <div
-                  className="pointer-events-none absolute top-0 bottom-0 z-30 flex -translate-x-1/2 flex-col items-center"
+                  className="pointer-events-none absolute inset-y-0 z-30 -translate-x-1/2 drop-shadow-[1px_0_0,-1px_0_0,0_1px_0] drop-shadow-timeline-background"
                   style={{ left: playhead.left }}
                   aria-label={t("timeline.playhead")}
                   data-approximate={isPositionApproximate}
                 >
-                  <div className="h-2 w-3 rounded-b-xs bg-timeline-playhead shadow-xs" />
                   <div className="h-full w-0.5 bg-timeline-playhead" />
+                  <div className="absolute top-0 left-1/2 h-3 w-3 -translate-x-1/2 bg-timeline-playhead [clip-path:polygon(0_0,100%_0,100%_50%,50%_100%,0_50%)]" />
                 </div>
               )}
             </div>
@@ -641,18 +660,26 @@ export function TimelinePanel({
               </span>
             </div>
 
-            {/* Track lane container */}
-            <div className="relative flex flex-1 items-center bg-timeline-track py-2">
+            {/*
+             * Track lane container. It has no vertical padding, so the geometry box and the
+             * track playhead span the full track height. The seek slider and the segment
+             * layer carry the 8px vertical inset instead.
+             */}
+            <div className="relative flex flex-1 items-center bg-timeline-track">
               {media ? (
                 /*
                  * Shared geometry box. The seek slider and the segment layer are siblings
-                 * inside it, each spanning the same rectangle, so `inset-y-1` and the
-                 * left/width percentages resolve exactly as they did when the overlays
-                 * were children of the slider. Segments are interactive, and interactive
-                 * content cannot be nested inside a `role="slider"` element.
+                 * inside it, each spanning the same rectangle (`inset-x-0 inset-y-2`), so
+                 * `inset-y-1` and the left/width percentages resolve exactly as they did
+                 * when the overlays were children of the slider. Segments are interactive,
+                 * and interactive content cannot be nested inside a `role="slider"` element.
                  */
                 <div className="relative h-full w-full">
-                  {/* Canonical accessible seek surface */}
+                  {/*
+                   * Canonical accessible seek surface. Its 8px vertical inset holds the
+                   * source bar, the pending In overlays, the hit area and the focus ring
+                   * clear of the ruler divider and of the lower panel edge.
+                   */}
                   <div
                     role="slider"
                     aria-label={t("timeline.seekSlider")}
@@ -673,7 +700,7 @@ export function TimelinePanel({
                     onPointerUp={handlePointerUp}
                     onPointerCancel={handlePointerCancel}
                     onLostPointerCapture={handlePointerCancel}
-                    className={`absolute inset-0 touch-none ${canSeek ? "cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
+                    className={`absolute inset-x-0 inset-y-2 touch-none ${canSeek ? "cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
                   >
                     {/* Full-source background layer */}
                     <div className="pointer-events-none absolute inset-0 flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-clip-video p-2 text-clip-foreground shadow-xs">
@@ -716,7 +743,7 @@ export function TimelinePanel({
                   <div
                     role="group"
                     aria-label={segmentListLabel}
-                    className="pointer-events-none absolute inset-0 z-10"
+                    className="pointer-events-none absolute inset-x-0 inset-y-2 z-10"
                   >
                     {segmentLayouts.map(({ segment: seg, number, label, layout }) => {
                       // A string comparison at render time, so selection never rebuilds
@@ -760,9 +787,18 @@ export function TimelinePanel({
                   {/*
                    * Track playhead layer. Positioned after the segment group at z-30
                    * so the 9px hit area is grabbable above segments.
+                   *
+                   * The layer spans the full track height, and `-top-px` pulls it up over
+                   * the 1px divider, so it meets the ruler playhead and the two read as one
+                   * line from the top of the ruler to the bottom of the track.
+                   *
+                   * The line has the same outline as the ruler playhead: a drop-shadow
+                   * ring in the timeline background colour on the left, the right and the
+                   * lower edge. It has no upper edge on purpose. That edge would paint over
+                   * the lowest pixel of the ruler line, and the one line would show a gap.
                    */}
                   {!isIndeterminate && (
-                    <div className="pointer-events-none absolute inset-0 z-30">
+                    <div className="pointer-events-none absolute inset-x-0 -top-px bottom-0 z-30">
                       <div
                         className="pointer-events-none absolute inset-y-0 flex -translate-x-1/2 flex-col items-center"
                         style={{ left: playhead.left }}
@@ -776,7 +812,7 @@ export function TimelinePanel({
                           onLostPointerCapture={handlePointerCancel}
                           className={`flex h-full w-[9px] touch-none items-center justify-center ${canSeek ? "pointer-events-auto cursor-ew-resize" : "pointer-events-none"}`}
                         >
-                          <div className="h-full w-0.5 bg-timeline-playhead shadow-xs" />
+                          <div className="h-full w-0.5 bg-timeline-playhead drop-shadow-[1px_0_0,-1px_0_0,0_1px_0] drop-shadow-timeline-background" />
                         </div>
                       </div>
                     </div>
