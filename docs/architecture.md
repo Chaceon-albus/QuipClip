@@ -45,6 +45,7 @@ document summarizes them and shows how the parts fit together.
 | [`022-playhead-scrub-display-target-and-coalesced-seeks.md`](../.agents/decisions/022-playhead-scrub-display-target-and-coalesced-seeks.md) | The playhead draws the seek target, and one seek runs at a time |
 | [`023-audio-output-controls-in-presets.md`](../.agents/decisions/023-audio-output-controls-in-presets.md)                                   | Audio bitrate, sample rate, and channels in each preset         |
 | [`024-export-setup-step.md`](../.agents/decisions/024-export-setup-step.md)                                                                 | The export dialog selects the preset before the save dialog     |
+| [`025-background-export-and-progress-display.md`](../.agents/decisions/025-background-export-and-progress-display.md)                       | A hidden export continues, and three places show its progress   |
 
 ## Shape
 
@@ -226,8 +227,8 @@ only the segments, so the user can watch what the export will contain.
 See ADR 004 and ADR 014.
 
 ADR 004 gives the semantic steps. ADR 014 selects the command shape from measurements on
-ffmpeg 9.0.1. ADR 016 adds the orchestration. The renderer is written, and `start_export`
-and `cancel_export` are registered commands.
+ffmpeg 9.0.1. ADR 016 adds the orchestration. The renderer is written, and `start_export`,
+`cancel_export`, and `cancel_active_export` are registered commands.
 
 One `ffmpeg` process writes one output. One `-copyts`, placed once before the first input,
 keeps the raw source PTS visible to the filter graph on every input. The renderer seeks each
@@ -261,6 +262,13 @@ rename. See ADR 016.
 
 An application exit cancels a running export and waits a bounded time for it to end, so a quit
 does not leave `ffmpeg` encoding into a temporary file that nothing will remove. See ADR 017.
+
+A dismissal of the export dialog during an active run hides the dialog. It does not cancel
+the run (ADR 025). Only the Cancel button cancels. While the dialog is hidden, the status bar
+shows the progress of the run, and then its result until the user dismisses it. The Dock on
+macOS and the task bar on Windows also show the progress. The percent and the time estimate
+come from the frame count and the `fps` value of `-progress`, and one presenter computes them
+for every display. One `ProgressBar` component in `src/components/common/` draws every bar.
 
 The seek supplies the speed. The trim supplies the exactness. An input seek alone is not
 frame-exact: on MPEG-TS a seek lands only on key frames, and it can land after the target.
