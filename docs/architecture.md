@@ -175,8 +175,9 @@ editing for that source.
 Media without `start_pts` can still play. Missing `start_pts`, missing RVFC support, or an
 invalid conversion disables precise edit actions. Browser `currentTime` then supplies an
 explicitly approximate display and seek fallback, for the preview timecode and for the timeline
-playhead alike. The status bar names the position as approximate, and it is the only place that
-explains why the mark actions are unavailable.
+playhead alike. The status bar and a badge beside the preview timecode name the position as
+approximate. Their tooltips, and the tooltips of the disabled mark buttons, explain why the
+mark actions are unavailable.
 
 Two questions look like one, and one predicate must not answer both. Which clock supplies
 the number is answered by `isPlaybackPositionApproximate`, which is also true for the one
