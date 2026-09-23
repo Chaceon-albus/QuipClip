@@ -43,6 +43,8 @@ document summarizes them and shows how the parts fit together.
 | [`020-platform-title-bar-and-export-action.md`](../.agents/decisions/020-platform-title-bar-and-export-action.md)                           | One title bar per platform, with the export action inside it    |
 | [`021-window-level-keyboard-shortcuts.md`](../.agents/decisions/021-window-level-keyboard-shortcuts.md)                                     | One window keyboard layer for play and the frame step           |
 | [`022-playhead-scrub-display-target-and-coalesced-seeks.md`](../.agents/decisions/022-playhead-scrub-display-target-and-coalesced-seeks.md) | The playhead draws the seek target, and one seek runs at a time |
+| [`023-audio-output-controls-in-presets.md`](../.agents/decisions/023-audio-output-controls-in-presets.md)                                   | Audio bitrate, sample rate, and channels in each preset         |
+| [`024-export-setup-step.md`](../.agents/decisions/024-export-setup-step.md)                                                                 | The export dialog selects the preset before the save dialog     |
 
 ## Shape
 
@@ -240,6 +242,18 @@ The renderer has two graph shapes. It opens one input for each segment while the
 command line stays inside the platform budget. It otherwise opens one input, seeks once, and
 divides that input with `split` and `asplit`.
 
+The final `aformat` of each audio chain takes its sample rate and its channel layout from the
+preset (ADR 023). The value `source` selects the rate of the source stream, or omits the
+layout option. The leading `aformat` still pins the input link at the source rate. When an
+encoder cannot accept the requested format, ffmpeg converts the samples in front of it.
+
+The export action opens the export dialog at a setup step (ADR 024). The flow controller
+first examines the running export, the media, the segments, and the source revision. The
+setup step then shows the presets, with the active preset selected, and a summary of the
+selected preset. "Export…" opens the native save dialog with the extension of that preset's
+container. A cancel there returns to the setup step. An export with a preset that is not
+active saves that preset as the active preset, and a failed save does not stop the export.
+
 One export runs at a time, and a second request is refused. A cancel that arrives during the
 encode kills the child at the next poll. A cancel is also tested twice where it decides
 publication: once before `ffmpeg` starts, and once after the process exits and before the
@@ -320,6 +334,14 @@ output resolution and frame rate. Each output setting is the word `source` or an
 value. The container set is closed. The encoder names are free text, because the capability
 probe discovers what the installed build offers, but each name must read as a name and not
 as an ffmpeg flag.
+
+ADR 023 adds three audio settings to a preset: a bitrate in kilobits per second, a sample
+rate, and a channel setting. The bitrate is optional, and without it the encoder uses its own
+default. The sample rate is `source` or a value in hertz. The channel setting is `source`,
+`stereo`, or `mono`. A file from before ADR 023 reads as 48000 Hz stereo with no bitrate,
+which is the output that export wrote before. The editor disables the bitrate for the
+lossless encoders `flac` and `alac`. It refuses a preset that pairs `mov` with `flac` or
+`libopus`, because the `mov` muxer refuses both.
 
 A missing file seeds presets in memory and writes them on the first save. The seeded
 identifiers are constants. The restore action replaces a seeded preset by identifier and
