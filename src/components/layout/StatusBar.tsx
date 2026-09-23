@@ -158,8 +158,10 @@ export function StatusBar() {
     t as (key: string, options?: Record<string, string>) => string
   )(statusView.lineKey, statusView.lineValues);
 
+  // The right padding is 8px, not 12px: a 16px glyph centred in the 24px settings button
+  // adds a 4px inset, so the glyph sits 12px from the edge, the same inset as the left text.
   return (
-    <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-sidebar px-3 text-xs text-muted-foreground select-none">
+    <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-sidebar pr-2 pl-3 text-xs text-muted-foreground select-none">
       {/* Left: Project resolution and reported source-rate metadata */}
       <div className="flex items-center gap-4">
         <span>
@@ -240,6 +242,13 @@ export function StatusBar() {
       {/* Right: Settings button and Language dropdown menu */}
       <div className="flex items-center">
         <ExportStatusIndicator />
+        {/*
+         * Status bar sizing rule: a standalone icon button is a 24px box with a 16px glyph,
+         * and an icon inline with text is 14px. The 24px controls fit the 28px bar without
+         * making it taller. The dark: and aria-expanded: overrides replace the ghost
+         * variant's neutral colours, so hover and the open menu use the sidebar accent in
+         * both themes, like the export indicator next to this button.
+         */}
         <DropdownMenu>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -247,10 +256,10 @@ export function StatusBar() {
                 <Button
                   variant="ghost"
                   size="icon-xs"
-                  className="size-5 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  className="text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent aria-expanded:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent"
                   aria-label={t("statusBar.settings")}
                 >
-                  <Settings className="size-3.5" />
+                  <Settings className="size-4" strokeWidth={1.75} />
                 </Button>
               </DropdownMenuTrigger>
             </TooltipTrigger>

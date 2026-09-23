@@ -17,6 +17,13 @@ import { presentExportIndicator } from "./exportIndicatorPresenter";
  * Subscribes to the export store and panel store directly as a leaf component
  * so high-frequency progress updates do not re-render the status bar.
  * Renders nothing when the export dialog is open or when status is idle (ADR 025).
+ *
+ * Sizing follows the status bar rule: every control is 24px tall, a standalone icon button
+ * is a 24px box with a 16px glyph, and an icon inline with text is 14px. The dismiss X gets
+ * the full 24px box but keeps the 14px glyph, because it sits next to the result text it
+ * dismisses. Each vertical separator is 16px tall, the height of a 16px glyph.
+ * `data-vertical:self-center` replaces the Separator's own `self-stretch`, which puts an
+ * item with a fixed height at the top of the row instead of at its centre.
  */
 export function ExportStatusIndicator() {
   const { t, i18n } = useTranslation();
@@ -102,7 +109,7 @@ export function ExportStatusIndicator() {
               type="button"
               onClick={show}
               aria-label={line}
-              className="flex h-5 items-center gap-2 rounded-sm px-1.5 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+              className="flex h-6 items-center gap-2 rounded-sm px-1.5 text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
             >
               <ProgressBar
                 size="xs"
@@ -138,7 +145,10 @@ export function ExportStatusIndicator() {
             <p>{t("statusBar.export.showHint")}</p>
           </TooltipContent>
         </Tooltip>
-        <Separator orientation="vertical" className="mx-2 h-3.5 bg-border" />
+        <Separator
+          orientation="vertical"
+          className="mx-1.5 h-4 bg-border data-vertical:self-center"
+        />
       </>
     );
   }
@@ -162,13 +172,13 @@ export function ExportStatusIndicator() {
 
   return (
     <>
-      <div className="flex items-center gap-0.5">
+      <div className="flex items-center gap-1">
         <Tooltip>
           <TooltipTrigger asChild>
             <button
               type="button"
               onClick={show}
-              className="flex h-5 items-center gap-1.5 rounded-sm px-1.5 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+              className="flex h-6 items-center gap-1.5 rounded-sm px-1.5 text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
             >
               {config.icon}
               <span className="whitespace-nowrap">{t(config.labelKey)}</span>
@@ -188,7 +198,7 @@ export function ExportStatusIndicator() {
             <Button
               variant="ghost"
               size="icon-xs"
-              className="size-5 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              className="text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:hover:bg-sidebar-accent"
               aria-label={t("statusBar.export.dismiss")}
               onClick={reset}
             >
@@ -198,7 +208,10 @@ export function ExportStatusIndicator() {
           <TooltipContent>{t("statusBar.export.dismiss")}</TooltipContent>
         </Tooltip>
       </div>
-      <Separator orientation="vertical" className="mx-2 h-3.5 bg-border" />
+      <Separator
+        orientation="vertical"
+        className="mx-1.5 h-4 bg-border data-vertical:self-center"
+      />
     </>
   );
 }
