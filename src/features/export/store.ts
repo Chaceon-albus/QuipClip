@@ -55,11 +55,12 @@ export interface ExportStoreDependencies {
  * lives strictly in the factory closure to ensure public store state remains serializable.
  *
  * @param dependencies Injected dependencies for testability.
- * @param initialState Optional initial state overrides.
+ * @param initialState Optional initial state overrides. `tracking` is not one of them: it
+ *   follows from `runId`, because a store created with a run id tracks that run.
  */
 export function createExportStore(
   dependencies: ExportStoreDependencies = {},
-  initialState?: Partial<ExportState>,
+  initialState?: Partial<Omit<ExportState, "tracking">>,
 ): StoreApi<ExportStoreState> {
   const startExportFn = dependencies.startExport ?? startExport;
   const cancelExportFn = dependencies.cancelExport ?? cancelExport;
@@ -75,6 +76,17 @@ export function createExportStore(
   let awaitingRunId = false;
 
   return createStore<ExportStoreState>()((set, get) => {
+    /**
+     * Changes the tracked run and the public `tracking` field together, with the other fields
+     * of `patch`. Every write of `activeRunId` after creation goes through here, and the
+     * initial `tracking` comes from the initial `activeRunId`, so `tracking` always equals
+     * `activeRunId !== null`.
+     */
+    function setTrackedRun(runId: string | null, patch: Partial<ExportState>): void {
+      activeRunId = runId;
+      set({ ...patch, tracking: runId !== null });
+    }
+
     function handleEvent(event: ExportProgressEvent): void {
       if (awaitingRunId && !activeRunId) {
         pendingEvents.push(event);
@@ -116,8 +128,7 @@ export function createExportStore(
           break;
         }
         case "finished": {
-          activeRunId = null;
-          set({
+          setTrackedRun(null, {
             status: "finished",
             outputPath: event.outputPath,
             frame: event.frames,
@@ -126,14 +137,13 @@ export function createExportStore(
           break;
         }
         case "failed": {
-          activeRunId = null;
           const normalizedError = new ExportError({
             code: event.code,
             detail: event.detail,
             exitCode: event.exitCode,
             encoder: event.encoder,
           });
-          set({
+          setTrackedRun(null, {
             status: event.code === "canceled" ? "canceled" : "failed",
             error: normalizedError,
           });
@@ -204,6 +214,9 @@ export function createExportStore(
       fps: initialState?.fps ?? null,
       speed: initialState?.speed ?? null,
       cancelRequested: initialState?.cancelRequested ?? false,
+      // The initial value of `activeRunId`, which comes from the initial run id. Every later
+      // change goes through `setTrackedRun`.
+      tracking: activeRunId !== null,
       error: initialState?.error ?? null,
 
       ensureSubscribed,
@@ -212,10 +225,9 @@ export function createExportStore(
 
       reset: () => {
         latestRequestId++;
-        activeRunId = null;
         awaitingRunId = false;
         pendingEvents = [];
-        set({
+        setTrackedRun(null, {
           status: "idle",
           runId: null,
           outputPath: null,
@@ -301,11 +313,10 @@ export function createExportStore(
 
       startExport: async (request: ExportRequest): Promise<ExportStart | null> => {
         const requestId = ++latestRequestId;
-        activeRunId = null;
         awaitingRunId = true;
         pendingEvents = [];
 
-        set({
+        setTrackedRun(null, {
           status: "preparing",
           runId: null,
           outputPath: request.outputPath,
@@ -336,10 +347,9 @@ export function createExportStore(
             return null;
           }
 
-          activeRunId = start.runId;
           awaitingRunId = false;
 
-          set({
+          setTrackedRun(start.runId, {
             runId: start.runId,
             outputPath: start.outputPath,
             segmentCount: start.segmentCount,
@@ -362,11 +372,10 @@ export function createExportStore(
             return null;
           }
 
-          activeRunId = null;
           awaitingRunId = false;
           pendingEvents = [];
 
-          set({
+          setTrackedRun(null, {
             status: normalized.code === "canceled" ? "canceled" : "failed",
             runId: null,
             error: normalized,

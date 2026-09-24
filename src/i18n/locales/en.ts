@@ -384,6 +384,12 @@ export const en = {
     save: "Save",
     error: "Error",
     loading: "Loading...",
+    diagnostic: {
+      copy: "Copy",
+      copied: "Copied",
+      selectedMac: "The text is selected. Press ⌘C to copy it.",
+      selectedWindows: "The text is selected. Press Ctrl+C to copy it.",
+    },
   },
   ffmpeg: {
     status: {
@@ -500,6 +506,12 @@ export const en = {
       revealWindows: "Show in File Explorer",
       open: "Open",
       done: "Done",
+      openSettings: "Open Settings...",
+      back: "Back",
+    },
+    details: {
+      show: "Show Details",
+      hide: "Hide Details",
     },
   },
   exportOutputError: {

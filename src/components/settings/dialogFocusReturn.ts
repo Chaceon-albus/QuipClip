@@ -29,8 +29,15 @@ export interface DialogFocusReturn {
   /**
    * Records the element that held the focus when the dialog opened. Call it from
    * `onOpenAutoFocus`: Radix dispatches that event before it moves the focus into the dialog.
+   *
+   * `returnFocus` is an element that the caller named in place of the opener, because the
+   * opener leaves the document as the dialog opens. When it is present, it is the only
+   * candidate, and the opener is ignored.
    */
-  noteOpened: (opener: FocusReturnTarget | null) => void;
+  noteOpened: (
+    opener: FocusReturnTarget | null,
+    returnFocus?: FocusReturnTarget | null,
+  ) => void;
   /** Records the kind of the latest interaction with the open dialog. */
   noteInteraction: (interaction: DialogInteraction) => void;
   /**
@@ -50,8 +57,8 @@ export function createDialogFocusReturn(): DialogFocusReturn {
   let interaction: DialogInteraction = "keyboard";
 
   return {
-    noteOpened: (next) => {
-      opener = next;
+    noteOpened: (next, returnFocus) => {
+      opener = returnFocus ?? next;
       interaction = "keyboard";
     },
     noteInteraction: (next) => {

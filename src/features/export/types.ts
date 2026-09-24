@@ -277,6 +277,18 @@ export type ExportState = {
    * True while a cancel that this store asked for is outstanding.
    */
   cancelRequested: boolean;
+  /**
+   * True while the store tracks a run by its identifier: from the answer of `start_export`
+   * until the `finished` or `failed` event of that run, until a reset, or until a new
+   * `startExport`. A new start clears it at once, and sets it again when its own
+   * `start_export` answers with a run id.
+   *
+   * A `failed` status does not end the tracking by itself. The store also reports `failed`
+   * when a call from the interface rejects while the run continues, such as `cancel_export`
+   * at the IPC layer, and it keeps the run: the backend still encodes it, and its events
+   * still arrive. A reset in that state drops the only record of a live run.
+   */
+  tracking: boolean;
   /** Last error encountered during export, or null if idle or succeeded. */
   error: ExportError | null;
 };

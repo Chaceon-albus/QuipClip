@@ -364,6 +364,12 @@ export const zhCN: TranslationCatalog = {
     save: "保存",
     error: "错误",
     loading: "加载中...",
+    diagnostic: {
+      copy: "复制",
+      copied: "已复制",
+      selectedMac: "文本已选中，请按 ⌘C 复制。",
+      selectedWindows: "文本已选中，请按 Ctrl+C 复制。",
+    },
   },
   ffmpeg: {
     status: {
@@ -476,6 +482,12 @@ export const zhCN: TranslationCatalog = {
       revealWindows: "在文件资源管理器中显示",
       open: "打开",
       done: "完成",
+      openSettings: "打开设置...",
+      back: "返回",
+    },
+    details: {
+      show: "显示详细信息",
+      hide: "隐藏详细信息",
     },
   },
   exportOutputError: {

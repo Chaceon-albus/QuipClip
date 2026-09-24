@@ -19,15 +19,26 @@ import {
   runExportFlow,
 } from "@/components/layout/exportFlowController";
 import {
+  exportStore,
   useExportOutputActionStore,
   useExportStore,
   type ExportOutputAction,
 } from "@/features/export";
 import { openMediaFileDialog } from "@/features/media";
-import { useSettingsStore } from "@/features/settings";
+import {
+  settingsPanelStore,
+  useSettingsStore,
+  type SettingsSection,
+} from "@/features/settings";
 import { getResolvedLanguage } from "@/i18n";
 import { isMacOS } from "@/lib/platform";
+import { ExportErrorDetails } from "./ExportErrorDetails";
 import { ExportSetup } from "./ExportSetup";
+import {
+  canGoBackToSetup,
+  createOpenStepGeneration,
+  guardOpenStepEffects,
+} from "./exportBackToSetup";
 import { resolveExportDismissal } from "./exportCancelState";
 import { presentExportOutcome } from "./exportErrorPresenter";
 import {
@@ -213,6 +224,19 @@ export function ExportDialog({
   const [requestedPresetId, setRequestedPresetId] = useState<string | null>(null);
   // Guard against double clicks triggering multiple concurrent native save dialogs.
   const [choosingDestination, setChoosingDestination] = useState(false);
+  // True while the open step that Back runs again has not answered. The setup step shows
+  // meanwhile, and Export stays disabled, so no export starts before the checks end.
+  const [backCheckPending, setBackCheckPending] = useState(false);
+  // One generation for each open step that Back starts. A close invalidates it, so a step
+  // that answers after the close changes nothing (`exportBackToSetup.ts`).
+  const [backStep] = useState(createOpenStepGeneration);
+  // Counts the clicks on Back. The Back button leaves the document with the failed panel, so
+  // the effect below gives the focus to the first control of the setup step once per click.
+  const [backClicks, setBackClicks] = useState(0);
+  const setupFirstControlRef = useRef<HTMLButtonElement>(null);
+  // The element that held the focus when the dialog opened, or null. The settings dialog
+  // gives the focus back to it, because the "Open Settings..." button is gone by then.
+  const openerRef = useRef<HTMLElement | null>(null);
   // The time of the click that armed Stop Export, or null when it is not armed. The time is
   // from `performance.now()`, which is monotonic, so a change of the system clock cannot
   // shorten or lengthen the window.
@@ -235,6 +259,7 @@ export function ExportDialog({
   const runId = useExportStore((state) => state.runId);
   const outputPath = useExportStore((state) => state.outputPath);
   const cancelRequested = useExportStore((state) => state.cancelRequested);
+  const tracking = useExportStore((state) => state.tracking);
   const error = useExportStore((state) => state.error);
   const cancelExport = useExportStore((state) => state.cancelExport);
   const reset = useExportStore((state) => state.reset);
@@ -292,13 +317,32 @@ export function ExportDialog({
     }
   }, [open, status]);
 
+  // Runs once for each click on Back, after the commit that the click made. That commit holds
+  // the reset and any failure that the open step reported before its first await, such as
+  // `sourceNotFound`, so the status read here is the one on the screen. When it is idle, the
+  // setup step rendered in the same commit, and its first control exists. When the open
+  // step failed, the failed panel shows and the focus stays on the dialog. No flag outlives
+  // the click, so a later close or reset never moves the focus. While the settings load,
+  // the step has no control, and the focus stays on the dialog too.
+  useEffect(() => {
+    if (backClicks === 0) {
+      return;
+    }
+    if (exportStore.getState().status === "idle") {
+      setupFirstControlRef.current?.focus();
+    }
+  }, [backClicks]);
+
   const settings = useSettingsStore((state) => state.settings);
   const effectivePresetId = resolveSetupPresetId(settings, requestedPresetId);
   const selectedPreset =
     settings?.presets.find((preset) => preset.id === effectivePresetId) ?? null;
   const blocker = presentSetupBlocker(selectedPreset);
   const exportDisabled =
-    effectivePresetId === null || blocker !== null || choosingDestination;
+    effectivePresetId === null ||
+    blocker !== null ||
+    choosingDestination ||
+    backCheckPending;
 
   // Dismissal hides the dialog while an export is active (preparing, running, publishing)
   // and resets the store when in an idle or terminal status (ADR 025).
@@ -325,9 +369,11 @@ export function ExportDialog({
   };
 
   const closeAndReset = () => {
+    backStep.invalidate();
     onOpenChange(false);
     setRequestedPresetId(null);
     setChoosingDestination(false);
+    setBackCheckPending(false);
     setStopArmedAt(null);
     // The reset changes the run id, and that change clears the Show and Open state
     // (`bindOutputActionsToExportRun`).
@@ -375,6 +421,16 @@ export function ExportDialog({
   const isSourceRevisionConfirmation =
     status === "failed" && error?.code === "sourceRevisionChanged";
 
+  // The notice of a run that ended without an output, and the recovery that its footer
+  // offers beside Close. Null in every other status, and for the confirmation.
+  const outcome =
+    (status === "failed" || status === "canceled") && !isSourceRevisionConfirmation
+      ? presentExportOutcome({ status, error })
+      : null;
+  const recovery = outcome?.recovery ?? null;
+  const recoverySettingsSection =
+    recovery?.kind === "openSettings" ? recovery.section : null;
+
   // Resumes the export the check refused. The store is reset and the modal closed first, so the
   // flow proceeds past the source revision check to the setup step with no stale confirmation behind it;
   // the flow re-opens the modal itself at the setup step.
@@ -398,6 +454,59 @@ export function ExportDialog({
       return;
     }
     void openMediaFileDialog({ filterName: t("dialog.videoFilter") });
+  };
+
+  // Closes this dialog before the settings dialog opens, so two modal dialogs never show
+  // together. The failed panel and the setup step offer this, and neither holds an active
+  // run. The status is read at the click and not at the render, so a run that became active
+  // since the render is hidden and not reset, the same as a dismissal (ADR 025).
+  const handleOpenSettings = (section: SettingsSection) => {
+    if (resolveExportDismissal(exportStore.getState().status) === "hide") {
+      hideDialog();
+    } else {
+      closeAndReset();
+    }
+    // The settings dialog gives the focus back to the element that opened this dialog. It
+    // skips an opener that left the document, such as the status bar indicator, which
+    // hides while this dialog shows.
+    settingsPanelStore.getState().show(section, openerRef.current);
+  };
+
+  // Goes back to the setup step after a failure. The store is reset to idle, and the open
+  // step of ADR 024 runs again, the same step the Export button runs. Its checks therefore
+  // see the media, the segments, and the source file as they are now, and a check that
+  // fails shows its own panel. The dialog stays open, so it does not close and open again,
+  // and the preset that the user chose stays selected.
+  //
+  // Back is offered only while the store no longer tracks the run: `failed`, and not the
+  // failed stop request that leaves the backend encoding (`canGoBackToSetup`). A `failed`
+  // status alone does not prove that the backend has no run. The store is read at the click
+  // and not at the render. Until the step answers, Export is disabled: the source check
+  // reads the file, which on a share that stopped answering can take seconds, and an export
+  // must not start before it ends. A close in that time makes the step stale.
+  const handleBackToSetup = () => {
+    if (!canGoBackToSetup(exportStore.getState())) {
+      return;
+    }
+    const isCurrent = backStep.begin();
+    setBackClicks((count) => count + 1);
+    setChoosingDestination(false);
+    setStopArmedAt(null);
+    setBackCheckPending(true);
+    reset();
+    void runExportFlow({
+      ...guardOpenStepEffects(isCurrent, {
+        setModalOpen: onOpenChange,
+        reportError: (err) => {
+          exportStore.getState().reportError(err);
+        },
+      }),
+      filterName: t("dialog.videoFilter"),
+    }).finally(() => {
+      if (isCurrent()) {
+        setBackCheckPending(false);
+      }
+    });
   };
 
   const handleConfirmExport = async () => {
@@ -459,6 +568,8 @@ export function ExportDialog({
             selectedPreset={selectedPreset}
             blocker={blocker}
             onSelect={setRequestedPresetId}
+            onOpenSettings={handleOpenSettings}
+            firstControlRef={setupFirstControlRef}
           />
         ) : null;
 
@@ -526,7 +637,8 @@ export function ExportDialog({
 
       case "failed":
       case "canceled": {
-        if (isSourceRevisionConfirmation) {
+        // `outcome` is null here only for the confirmation.
+        if (isSourceRevisionConfirmation || outcome === null) {
           return (
             <div className="py-2">
               <Notice tone="warning" role="alert">
@@ -535,8 +647,6 @@ export function ExportDialog({
             </div>
           );
         }
-
-        const outcome = presentExportOutcome({ status, error });
 
         // A stop that the user asked for is a result, not an error, so it is neutral.
         if (outcome.kind === "canceled") {
@@ -549,8 +659,9 @@ export function ExportDialog({
           );
         }
 
+        // `min-w-0` lets this grid item shrink below the width of a long diagnostic line.
         return (
-          <div className="py-2">
+          <div className="min-w-0 space-y-2 py-2">
             <Notice tone={outcome.tone} role={outcome.role}>
               <p>
                 {(t as (k: string, opts?: Record<string, string | number>) => string)(
@@ -558,12 +669,11 @@ export function ExportDialog({
                   outcome.message.values,
                 )}
               </p>
-              {outcome.detail && (
-                <pre className="mt-2 max-h-32 overflow-y-auto font-mono text-xs whitespace-pre-wrap select-text">
-                  {outcome.detail}
-                </pre>
-              )}
             </Notice>
+            {outcome.detail && (
+              // The key starts a new diagnostic closed, with no "Copied" left from the last.
+              <ExportErrorDetails key={outcome.detail} detail={outcome.detail} />
+            )}
           </div>
         );
       }
@@ -582,6 +692,11 @@ export function ExportDialog({
           // tooltip would show on each open, and the first Escape would close the tooltip and
           // not the dialog. The dialog takes the focus instead, and Tab reaches the close
           // button first. A finished run gives the focus to Done, its default button.
+          // Radix dispatches this before it moves the focus, so the active element is still
+          // the element that opened the dialog.
+          const opener = document.activeElement;
+          openerRef.current =
+            opener instanceof HTMLElement && opener !== document.body ? opener : null;
           event.preventDefault();
           const target =
             status === "finished" && doneButtonRef.current
@@ -622,8 +737,15 @@ export function ExportDialog({
                 </Button>
                 <Button
                   disabled={exportDisabled}
+                  aria-busy={backCheckPending || undefined}
                   onClick={() => void handleConfirmExport()}
                 >
+                  {backCheckPending && (
+                    <Loader2
+                      aria-hidden="true"
+                      className="animate-spin motion-reduce:animate-none"
+                    />
+                  )}
                   {t("export.action.chooseDestination")}
                 </Button>
               </>
@@ -726,9 +848,21 @@ export function ExportDialog({
               </Button>
             </>
           ) : (
-            <Button variant="outline" onClick={closeAndReset}>
-              {t("common.close")}
-            </Button>
+            <>
+              <Button variant="outline" onClick={closeAndReset}>
+                {t("common.close")}
+              </Button>
+              {/* The recovery is the primary action, so it is the rightmost button. */}
+              {recoverySettingsSection !== null && (
+                <Button onClick={() => handleOpenSettings(recoverySettingsSection)}>
+                  {t("export.action.openSettings")}
+                </Button>
+              )}
+              {recovery?.kind === "backToSetup" &&
+                canGoBackToSetup({ status, tracking }) && (
+                  <Button onClick={handleBackToSetup}>{t("export.action.back")}</Button>
+                )}
+            </>
           )}
         </DialogFooter>
       </DialogContent>

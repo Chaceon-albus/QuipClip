@@ -687,6 +687,134 @@ describe("Media Export Store", () => {
       expect(result).toBe(false);
       expect(store.getState().status).toBe("failed");
       expect(store.getState().error?.code).toBe("unknown");
+      // The backend still encodes the run, so the store keeps it.
+      expect(store.getState().tracking).toBe(true);
+    });
+
+    it("tracks a run from the start answer until its final event or a reset", async () => {
+      let eventHandler!: (event: ExportProgressEvent) => void;
+      const store = createExportStore({
+        subscribeExportProgress: (handler) => {
+          eventHandler = handler;
+          return Promise.resolve(() => {});
+        },
+        startExport: () =>
+          Promise.resolve(createValidStartResult({ runId: "run-tracked" })),
+      });
+      expect(store.getState().tracking).toBe(false);
+
+      await store.getState().startExport(createValidRequest());
+      expect(store.getState().tracking).toBe(true);
+
+      eventHandler({
+        event: "failed",
+        runId: "run-tracked",
+        code: "ffmpegProcessFailed",
+      });
+      expect(store.getState().status).toBe("failed");
+      expect(store.getState().tracking).toBe(false);
+
+      await store.getState().startExport(createValidRequest());
+      expect(store.getState().tracking).toBe(true);
+      eventHandler({
+        event: "finished",
+        runId: "run-tracked",
+        outputPath: "/media/output.mp4",
+        frames: 150,
+      });
+      expect(store.getState().tracking).toBe(false);
+
+      await store.getState().startExport(createValidRequest());
+      store.getState().reset();
+      expect(store.getState().tracking).toBe(false);
+    });
+
+    it("leaves the tracking alone when a late event names an older run", async () => {
+      let eventHandler!: (event: ExportProgressEvent) => void;
+      const store = createExportStore({
+        subscribeExportProgress: (handler) => {
+          eventHandler = handler;
+          return Promise.resolve(() => {});
+        },
+        startExport: (req) =>
+          Promise.resolve(
+            createValidStartResult({
+              runId: req.presetId === "second" ? "run-new" : "run-old",
+            }),
+          ),
+      });
+
+      await store.getState().startExport(createValidRequest({ presetId: "first" }));
+      await store.getState().startExport(createValidRequest({ presetId: "second" }));
+      expect(store.getState().runId).toBe("run-new");
+      expect(store.getState().tracking).toBe(true);
+
+      eventHandler({ event: "failed", runId: "run-old", code: "ffmpegProcessFailed" });
+      eventHandler({
+        event: "finished",
+        runId: "run-old",
+        outputPath: "/media/old.mp4",
+        frames: 10,
+      });
+
+      expect(store.getState().tracking).toBe(true);
+      expect(store.getState().runId).toBe("run-new");
+      expect(store.getState().status).toBe("preparing");
+
+      store.getState().reset();
+      eventHandler({ event: "failed", runId: "run-new", code: "ffmpegProcessFailed" });
+
+      expect(store.getState().tracking).toBe(false);
+      expect(store.getState().status).toBe("idle");
+    });
+
+    it("clears the tracking at once when a new start begins", async () => {
+      let answerSecond: (start: ExportStart) => void = () => {};
+      let calls = 0;
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () => {
+          calls++;
+          if (calls === 1) {
+            return Promise.resolve(createValidStartResult({ runId: "run-first" }));
+          }
+          return new Promise<ExportStart>((resolve) => {
+            answerSecond = resolve;
+          });
+        },
+      });
+
+      await store.getState().startExport(createValidRequest());
+      expect(store.getState().tracking).toBe(true);
+
+      const second = store.getState().startExport(createValidRequest());
+      expect(store.getState().tracking).toBe(false);
+
+      await vi.waitFor(() => {
+        expect(calls).toBe(2);
+      });
+      answerSecond(createValidStartResult({ runId: "run-second" }));
+      await second;
+      expect(store.getState().tracking).toBe(true);
+    });
+
+    it("does not track a run whose start rejected", async () => {
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: () => Promise.reject(new ExportError({ code: "outputReadOnly" })),
+      });
+
+      await store.getState().startExport(createValidRequest());
+
+      expect(store.getState().status).toBe("failed");
+      expect(store.getState().tracking).toBe(false);
+    });
+
+    it("derives the initial tracking from the initial run id", () => {
+      expect(createExportStore({}, { runId: "run-1" }).getState().tracking).toBe(true);
+      expect(createExportStore({}, { status: "failed" }).getState().tracking).toBe(
+        false,
+      );
     });
 
     it("keeps tracking an active run when cancelExport rejects, allowing subsequent events and retried cancel", async () => {

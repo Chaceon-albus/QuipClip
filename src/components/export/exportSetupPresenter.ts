@@ -13,6 +13,7 @@ import {
   isAudioEncoderAllowedIn,
   isLosslessAudioEncoder,
 } from "@/features/settings/audioCodecs";
+import type { SettingsSection } from "@/features/settings/panelStore";
 import type {
   Preset,
   Settings,
@@ -318,4 +319,26 @@ export function resolveExportSetupStepState(state: {
   }
 
   return "ready";
+}
+
+/**
+ * Returns the settings section that the setup step opens when it cannot list a preset, or
+ * null when it can.
+ *
+ * - "empty": the library holds no preset, and the Presets tab adds one.
+ * - "error": the settings file did not load. The settings dialog shows the read error and
+ *   its reset control above every tab, and the Presets tab holds what the export needs.
+ * - "loading" and "ready" need no way out.
+ */
+export function presentSetupSettingsSection(
+  state: ExportSetupStepState,
+): SettingsSection | null {
+  switch (state) {
+    case "empty":
+    case "error":
+      return "presets";
+    case "loading":
+    case "ready":
+      return null;
+  }
 }

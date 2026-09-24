@@ -95,6 +95,37 @@ describe("Settings Panel Store", () => {
     expect(store.getState().unsavedPresetName).toBeNull();
   });
 
+  it("starts with no return target", () => {
+    expect(createSettingsPanelStore().getState().returnFocus).toBeNull();
+  });
+
+  it("records the return target that show names, with or without a section", () => {
+    const target = { isConnected: true, focus: () => {} };
+    const store = createSettingsPanelStore();
+
+    store.getState().show("presets", target);
+    expect(store.getState().returnFocus).toBe(target);
+    expect(store.getState().section).toBe("presets");
+
+    store.getState().hide();
+    store.getState().show(undefined, target);
+    expect(store.getState().returnFocus).toBe(target);
+    expect(store.getState().section).toBe("presets");
+  });
+
+  it("clears the return target on hide and on a show that names none", () => {
+    const target = { isConnected: true, focus: () => {} };
+    const store = createSettingsPanelStore();
+
+    store.getState().show("ffmpeg", target);
+    store.getState().hide();
+    expect(store.getState().returnFocus).toBeNull();
+
+    store.getState().show("ffmpeg", target);
+    store.getState().show();
+    expect(store.getState().returnFocus).toBeNull();
+  });
+
   it("keeps separate store instances independent", () => {
     const first = createSettingsPanelStore();
     const second = createSettingsPanelStore();

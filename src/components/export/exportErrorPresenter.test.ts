@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { presentExportError, presentExportOutcome } from "./exportErrorPresenter";
+import {
+  presentExportError,
+  presentExportErrorRecovery,
+  presentExportOutcome,
+  type ExportErrorRecovery,
+} from "./exportErrorPresenter";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n";
 import {
@@ -10,6 +15,7 @@ import {
   ExportError,
   type ExportErrorCode,
 } from "@/features/export/types";
+import { SETTINGS_SECTIONS } from "@/features/settings/panelStore";
 
 /**
  * Resolves a dotted translation key path (e.g. "exportError.outputNotWritable") against a nested
@@ -107,6 +113,7 @@ describe("presentExportOutcome", () => {
       role: "status",
       message: { key: "export.status.canceled" },
       detail: null,
+      recovery: null,
     });
   });
 
@@ -151,6 +158,7 @@ describe("presentExportOutcome", () => {
       role: "alert",
       message: { key: "exportError.ffmpegProcessFailed" },
       detail: "Conversion failed!",
+      recovery: { kind: "backToSetup" },
     });
   });
 
@@ -175,6 +183,7 @@ describe("presentExportOutcome", () => {
       role: "alert",
       message: { key: "exportError.unknown" },
       detail: null,
+      recovery: { kind: "backToSetup" },
     });
   });
 
@@ -190,7 +199,22 @@ describe("presentExportOutcome", () => {
       expect(outcome.kind).toBe("failed");
       expect(outcome.tone).toBe("destructive");
       expect(outcome.message.key).toBe(`exportError.${code}`);
+      expect(outcome.recovery).toStrictEqual(
+        presentExportErrorRecovery(new ExportError({ code })),
+      );
     }
+  });
+
+  it("offers no recovery for a canceled export, whatever the status", () => {
+    expect(
+      presentExportOutcome({ status: "canceled", error: null }).recovery,
+    ).toBeNull();
+    expect(
+      presentExportOutcome({
+        status: "failed",
+        error: new ExportError({ code: "canceled" }),
+      }).recovery,
+    ).toBeNull();
   });
 
   it("uses a canceled status text that exists in both catalogs", () => {
@@ -201,5 +225,133 @@ describe("presentExportOutcome", () => {
       expect(typeof resolved).toBe("string");
       expect((resolved as string).trim().length).toBeGreaterThan(0);
     }
+  });
+});
+
+const OPEN_FFMPEG: ExportErrorRecovery = { kind: "openSettings", section: "ffmpeg" };
+const OPEN_PRESETS: ExportErrorRecovery = { kind: "openSettings", section: "presets" };
+const BACK: ExportErrorRecovery = { kind: "backToSetup" };
+
+/**
+ * The expected recovery of every code, written out here rather than read from the module, so
+ * a change to the mapping must change this table too. The `Record` type makes a code added
+ * to `EXPORT_ERROR_CODES` a type error here until the table names it.
+ */
+const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
+  appDataUnavailable: null,
+  settingsUnreadable: OPEN_PRESETS,
+  presetNotFound: OPEN_PRESETS,
+  ffmpegPairMissing: OPEN_FFMPEG,
+  ffprobeSpawnFailed: OPEN_FFMPEG,
+  ffprobeProcessFailed: null,
+  ffprobeParseFailed: null,
+  ffprobeTimedOut: BACK,
+  noSegments: null,
+  tooManySegments: null,
+  invalidSegment: null,
+  sourcePathInvalid: null,
+  sourceNotFound: null,
+  sourceNotFile: null,
+  outputPathInvalid: BACK,
+  outputDirectoryMissing: BACK,
+  outputEqualsSource: BACK,
+  outputNotWritable: BACK,
+  outputReadOnly: BACK,
+  sourceFrameRateUnknown: null,
+  sourceAudioRateUnknown: null,
+  encoderUnavailable: OPEN_FFMPEG,
+  ffmpegSpawnFailed: OPEN_FFMPEG,
+  ffmpegProcessFailed: BACK,
+  frameCountMismatch: BACK,
+  outputRenameFailed: BACK,
+  canceled: null,
+  commandExecutionFailed: BACK,
+  exportAlreadyRunning: BACK,
+  dialogFailed: BACK,
+  sourceRevisionChanged: null,
+  unknown: BACK,
+};
+
+describe("presentExportErrorRecovery", () => {
+  it.each(EXPORT_ERROR_CODES)(
+    "maps code '%s' to its recovery",
+    (code: ExportErrorCode) => {
+      expect(presentExportErrorRecovery(new ExportError({ code }))).toStrictEqual(
+        EXPECTED_RECOVERY[code],
+      );
+    },
+  );
+
+  it("names every code in the expected table, and no other key", () => {
+    expect(Object.keys(EXPECTED_RECOVERY).sort()).toStrictEqual(
+      [...EXPORT_ERROR_CODES].sort(),
+    );
+  });
+
+  it("opens a settings section that the settings dialog has", () => {
+    for (const code of EXPORT_ERROR_CODES) {
+      const recovery = presentExportErrorRecovery(new ExportError({ code }));
+      if (recovery?.kind === "openSettings") {
+        expect(SETTINGS_SECTIONS).toContain(recovery.section);
+      }
+    }
+  });
+
+  it("opens the FFmpeg section for the executable and encoder codes", () => {
+    for (const code of [
+      "ffmpegPairMissing",
+      "ffprobeSpawnFailed",
+      "ffmpegSpawnFailed",
+      "encoderUnavailable",
+    ] as const) {
+      expect(presentExportErrorRecovery(new ExportError({ code }))).toStrictEqual(
+        OPEN_FFMPEG,
+      );
+    }
+  });
+
+  it("opens the Presets section for the preset and settings file codes", () => {
+    for (const code of ["presetNotFound", "settingsUnreadable"] as const) {
+      expect(presentExportErrorRecovery(new ExportError({ code }))).toStrictEqual(
+        OPEN_PRESETS,
+      );
+    }
+  });
+
+  it("goes back to the setup step for the output and process codes", () => {
+    for (const code of [
+      "outputPathInvalid",
+      "outputDirectoryMissing",
+      "outputEqualsSource",
+      "outputNotWritable",
+      "outputReadOnly",
+      "outputRenameFailed",
+      "ffmpegProcessFailed",
+      "frameCountMismatch",
+      "dialogFailed",
+    ] as const) {
+      expect(presentExportErrorRecovery(new ExportError({ code }))).toStrictEqual(BACK);
+    }
+  });
+
+  it("offers nothing for a stop, or for the confirmation with its own actions", () => {
+    expect(
+      presentExportErrorRecovery(new ExportError({ code: "canceled" })),
+    ).toBeNull();
+    expect(
+      presentExportErrorRecovery(new ExportError({ code: "sourceRevisionChanged" })),
+    ).toBeNull();
+  });
+
+  it("gives an absent error the recovery of the unknown code", () => {
+    expect(presentExportErrorRecovery(null)).toStrictEqual(BACK);
+  });
+
+  it("gives a code absent from the catalog the recovery of the unknown code", () => {
+    const error = new ExportError({
+      code: "notARealCode" as unknown as ExportErrorCode,
+    });
+
+    expect(presentExportErrorRecovery(error)).toStrictEqual(BACK);
   });
 });

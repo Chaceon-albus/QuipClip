@@ -50,6 +50,46 @@ describe("dialog focus return", () => {
     expect(rule.takeCloseTarget()).toBe(gear);
   });
 
+  it("returns the named return target in place of the opener", () => {
+    const rule = createDialogFocusReturn();
+    const openSettingsButton = fakeTarget(false);
+    const exportButton = fakeTarget();
+
+    rule.noteOpened(openSettingsButton, exportButton);
+    rule.noteInteraction("keyboard");
+
+    expect(rule.takeCloseTarget()).toBe(exportButton);
+  });
+
+  it("returns the opener when the caller names no return target", () => {
+    const withNull = createDialogFocusReturn();
+    const gear = fakeTarget();
+    withNull.noteOpened(gear, null);
+    expect(withNull.takeCloseTarget()).toBe(gear);
+
+    const withUndefined = createDialogFocusReturn();
+    withUndefined.noteOpened(gear, undefined);
+    expect(withUndefined.takeCloseTarget()).toBe(gear);
+  });
+
+  it("returns nothing when the named return target left the document", () => {
+    const rule = createDialogFocusReturn();
+
+    rule.noteOpened(fakeTarget(), fakeTarget(false));
+    rule.noteInteraction("keyboard");
+
+    expect(rule.takeCloseTarget()).toBeNull();
+  });
+
+  it("applies the pointer rule to a named return target", () => {
+    const rule = createDialogFocusReturn();
+
+    rule.noteOpened(fakeTarget(), fakeTarget());
+    rule.noteInteraction("pointer");
+
+    expect(rule.takeCloseTarget()).toBeNull();
+  });
+
   it("returns nothing when no element held the focus at open", () => {
     const rule = createDialogFocusReturn();
 

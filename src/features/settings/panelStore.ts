@@ -7,6 +7,9 @@
  *
  * It also holds the name of a preset draft with unsaved edits. The dialog writes it, and the
  * quit guard reads it, because a quit drops the draft (ADR 027).
+ *
+ * A caller can also name the element that takes the focus back when the dialog closes. See
+ * `SettingsPanelState.returnFocus`.
  */
 
 import { useStore } from "zustand";
@@ -31,9 +34,28 @@ export function isSettingsSection(value: unknown): value is SettingsSection {
   );
 }
 
+/**
+ * The part of an element that the settings dialog reads to give the focus back, so a test
+ * can pass a fake. An `HTMLElement` satisfies it.
+ */
+export interface SettingsFocusReturnTarget {
+  /** False after the element left the document. A detached element cannot take the focus. */
+  readonly isConnected: boolean;
+  focus: () => void;
+}
+
 export type SettingsPanelState = {
   open: boolean;
   section: SettingsSection;
+  /**
+   * The element that takes the focus back when the dialog closes, or null. When it is null,
+   * the dialog gives the focus back to the element that held it when the dialog opened.
+   *
+   * A caller sets it when its own control leaves the document as the dialog opens. The
+   * "Open Settings..." button of the export dialog is one: the export dialog closes first,
+   * so the button that held the focus is gone when the settings dialog closes.
+   */
+  returnFocus: SettingsFocusReturnTarget | null;
   /**
    * The name that the prompts show for a preset draft with unsaved edits, or null when no
    * draft holds an unsaved edit. The name can be empty, for a new preset with no name yet.
@@ -44,9 +66,13 @@ export type SettingsPanelState = {
 export type SettingsPanelActions = {
   /**
    * Opens the dialog. With a section, the dialog also switches to that section. Without one,
-   * it keeps the section it showed last.
+   * it keeps the section it showed last. `returnFocus` sets `SettingsPanelState.returnFocus`,
+   * and every call without it clears that field.
    */
-  show: (section?: SettingsSection) => void;
+  show: (
+    section?: SettingsSection,
+    returnFocus?: SettingsFocusReturnTarget | null,
+  ) => void;
   hide: () => void;
   /** Changes the visible section and does not change the open state. */
   setSection: (section: SettingsSection) => void;
@@ -63,9 +89,14 @@ export function createSettingsPanelStore(
     open: initialState?.open ?? false,
     section: initialState?.section ?? DEFAULT_SETTINGS_SECTION,
     unsavedPresetName: initialState?.unsavedPresetName ?? null,
-    show: (section?: SettingsSection) =>
-      set(section === undefined ? { open: true } : { open: true, section }),
-    hide: () => set({ open: false }),
+    returnFocus: initialState?.returnFocus ?? null,
+    show: (section?: SettingsSection, returnFocus?: SettingsFocusReturnTarget | null) =>
+      set(
+        section === undefined
+          ? { open: true, returnFocus: returnFocus ?? null }
+          : { open: true, section, returnFocus: returnFocus ?? null },
+      ),
+    hide: () => set({ open: false, returnFocus: null }),
     setSection: (section: SettingsSection) => set({ section }),
     setUnsavedPresetName: (name: string | null) => set({ unsavedPresetName: name }),
   }));

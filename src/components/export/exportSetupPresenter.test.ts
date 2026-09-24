@@ -4,6 +4,7 @@ import {
   formatFps,
   presentPresetSummary,
   presentSetupBlocker,
+  presentSetupSettingsSection,
   resolveExportSetupStepState,
   resolveSetupPresetId,
 } from "./exportSetupPresenter";
@@ -413,6 +414,21 @@ describe("exportSetupPresenter", () => {
           status: "ready",
         }),
       ).toBe("ready");
+    });
+  });
+
+  describe("presentSetupSettingsSection", () => {
+    it("opens the Presets section when the library holds no preset", () => {
+      expect(presentSetupSettingsSection("empty")).toBe("presets");
+    });
+
+    it("opens the Presets section when the settings file did not load", () => {
+      expect(presentSetupSettingsSection("error")).toBe("presets");
+    });
+
+    it("offers no section while the settings load or when a preset can be chosen", () => {
+      expect(presentSetupSettingsSection("loading")).toBeNull();
+      expect(presentSetupSettingsSection("ready")).toBeNull();
     });
   });
 });

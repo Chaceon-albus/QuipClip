@@ -244,11 +244,13 @@ export function SettingsDialog() {
         className="flex h-[min(85vh,48rem)] flex-col overflow-hidden sm:max-w-2xl"
         onOpenAutoFocus={() => {
           // Radix dispatches this before it moves the focus, so the active element is still
-          // the element that opened the dialog.
+          // the element that opened the dialog. A caller whose control leaves the document as
+          // this dialog opens names another element in the panel store.
           focusReturn.noteOpened(
             document.activeElement instanceof HTMLElement
               ? document.activeElement
               : null,
+            settingsPanelStore.getState().returnFocus,
           );
         }}
         onKeyDownCapture={() => {

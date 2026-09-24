@@ -303,6 +303,7 @@ describe("Export Types & Wire Constants", () => {
         fps: null,
         speed: null,
         cancelRequested: false,
+        tracking: false,
         error: null,
         startExport: () => Promise.resolve(null),
         cancelExport: () => Promise.resolve(true),
