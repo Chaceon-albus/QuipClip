@@ -15,10 +15,15 @@ import {
 } from "@/features/media";
 import {
   playbackStore,
+  resolveTimecodeDisplay,
   usePlaybackStore,
   type PlaybackStoreState,
   type SeekOptions,
 } from "@/features/playback";
+import {
+  useTimecodePreference,
+  type TimecodePreferenceState,
+} from "@/features/settings/timecodePreference";
 import {
   calculateAnchorRatio,
   calculateAnchoredScrollLeft,
@@ -41,11 +46,9 @@ import {
   TrackPlayhead,
   type ScrubSurfaceHandlers,
 } from "./PlayheadLayer";
+import { countRulerEdgeAnchors } from "./rulerLabel";
 import { SegmentLayer } from "./SegmentLayer";
-import {
-  calculateRulerTickStepSeconds,
-  generateRulerMarkersForStep,
-} from "./timelineMarkers";
+import { calculateRulerScale, generateRulerTicks } from "./timelineMarkers";
 import { TimelineRuler } from "./TimelineRuler";
 import { createTimelineScrubGesture, type TimelineScrubGesture } from "./timelineScrub";
 
@@ -66,6 +69,8 @@ const selectIsReady = (state: PlaybackStoreState) => state.isReady;
 const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
 
 const selectSetSource = (state: TimelineStoreState) => state.setSource;
+
+const selectTimecodeFormat = (state: TimecodePreferenceState) => state.format;
 
 /**
  * The timeline panel shell: the layout, the scroll container, the zoom and the viewport
@@ -301,13 +306,40 @@ export function TimelinePanel({
     calculateContentWidthPx(zoom, viewportWidthPx) - TIMELINE_GUTTER_WIDTH_PX,
   );
 
-  const step = useMemo(() => {
-    return calculateRulerTickStepSeconds(totalDurationSeconds, laneWidthPx);
-  }, [totalDurationSeconds, laneWidthPx]);
+  // The ruler labels follow the timecode format of the source, as the preview does
+  // (ADR 028).
+  const timecodePreference = useTimecodePreference(selectTimecodeFormat);
+  const probe = media?.probe;
+  const timecodeDisplay = useMemo(
+    () => resolveTimecodeDisplay(timecodePreference, probe),
+    [timecodePreference, probe],
+  );
 
-  const markers = useMemo(() => {
-    return generateRulerMarkersForStep(totalDurationSeconds, step);
-  }, [totalDurationSeconds, step]);
+  const rulerScale = useMemo(
+    () => calculateRulerScale(totalDurationSeconds, laneWidthPx, timecodeDisplay),
+    [totalDurationSeconds, laneWidthPx, timecodeDisplay],
+  );
+  // The scale is a new object for every lane width. Its fields are numbers and strings, so
+  // the ticks are generated again only when the step changes.
+  const majorUnit = rulerScale?.major.unit ?? null;
+  const majorValue = rulerScale?.major.value ?? null;
+  const minorSeconds = rulerScale?.minorSeconds ?? null;
+
+  const rulerTicks = useMemo(
+    () =>
+      majorUnit === null || majorValue === null
+        ? []
+        : generateRulerTicks(totalDurationSeconds, timecodeDisplay, {
+            unit: majorUnit,
+            value: majorValue,
+          }),
+    [totalDurationSeconds, timecodeDisplay, majorUnit, majorValue],
+  );
+
+  const rulerEdgeAnchors = useMemo(
+    () => countRulerEdgeAnchors(rulerTicks, laneWidthPx),
+    [rulerTicks, laneWidthPx],
+  );
 
   /**
    * Seeks to the timeline position under a client X coordinate (ADR 022).
@@ -451,8 +483,9 @@ export function TimelinePanel({
          * Putting the zoomed width on this shared ancestor ensures the ruler lane and
          * the track lane span one rectangle by construction, which seekFromClientX depends on.
          *
-         * overflow-x: clip cuts off content that goes past the end of the lane, such as a
-         * centred tick label at 100% or the playhead at the end of the source. Without it,
+         * overflow-x: clip cuts off content that goes past the end of the lane, such as the
+         * playhead at the end of the source. A tick label near the end is anchored inside
+         * the lane (see TimelineRuler), so the clip does not cut it. Without the clip,
          * that content adds to the scroll range, and the panel scrolls at zoom 1. `clip`
          * does not make a scroll container, but `hidden` does. So the sticky gutters keep
          * the outer scroll container as their scrollport.
@@ -503,9 +536,14 @@ export function TimelinePanel({
               {...scrubHandlers}
               className={`relative flex-1 touch-none border-b border-timeline-divider bg-timeline-ruler ${canSeek ? "cursor-pointer" : ""}`}
             >
-              {/* Timecode labels and ticks */}
+              {/* Timecode labels, major ticks and minor ticks (see TimelineRuler) */}
               <div className="relative h-full w-full font-mono text-[10px]">
-                <TimelineRuler markers={markers} />
+                <TimelineRuler
+                  ticks={rulerTicks}
+                  minorSeconds={minorSeconds}
+                  startAnchoredCount={rulerEdgeAnchors.start}
+                  endAnchoredCount={rulerEdgeAnchors.end}
+                />
               </div>
 
               {/*

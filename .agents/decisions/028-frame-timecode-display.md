@@ -35,12 +35,19 @@ The display names the frame that contains the time, by that frame's nominal star
 4. `FF` is `J` minus the index of the first frame that starts in that second.
 
 The margin is at least 1 µs. When the nominal frame interval is not a whole number of ticks
-of the source video time base, the margin is half a tick. Containers such as Matroska store
+of the source video time base, the margin is one tick. Containers such as Matroska store
 each PTS rounded to the millisecond, so at 29.97 fps a frame start can lie up to 0.5 ms
-before its nominal position. Without the margin, that frame shows the number of the frame
-before it, and a frame step repeats one number and skips the next. When the interval is a
-whole number of ticks, as with a time base of 1/25 at 25 fps, the frame starts lie exactly
-on the tick grid, and half a tick could be half a frame. The margin is then only 1 µs.
+before its nominal position, and up to one full tick before it when the first frame's PTS is
+also rounded, because elapsed time counts from that first frame. Without the margin, that
+frame shows the number of the frame before it, and a frame step repeats one number and skips
+the next. When the interval is a whole number of ticks, as with a time base of 1/25 at 25
+fps, the frame starts lie exactly on the tick grid, and one tick could be a whole frame. The
+margin is then only 1 µs.
+
+The margin must also stay less than half a frame interval minus 1 µs. When one tick is not
+less than that, the margin is a quarter of the interval, and at least 1 µs, so a time in the
+middle of a frame still shows that frame. This applies to coarse time bases, such as 1/24 at
+23.976 fps or 1/60 at 59.94 fps.
 
 The display rounds down and never to the nearest frame, so a seek target in the middle of a
 frame shows the same number as the frame that answers it (ADR 022).
@@ -63,8 +70,11 @@ The millisecond format is used when the source has no nominal frame rate. It is 
 when the average frame rate and the real frame rate differ, because the source then has a
 variable frame rate and `FF` would not name a frame.
 
-The ruler labels follow the same format, and they may shorten the label to the tick step,
-for example `00:05` or `00:05:12`.
+The ruler labels follow the same format. A label names the frame that the preview shows at
+its tick, and it leaves out the parts that the tick step does not need: for example `00:05`
+(`MM:SS`), `00:05:12` (`MM:SS:FF` at a frame step), or `0:05:12` (`H:MM:SS` for a source of
+one hour or longer). Below 1 fps a second can hold no frame start, so the ticks sit on frame
+starts, and each label names the second in which its frame starts.
 
 ## Consequences
 

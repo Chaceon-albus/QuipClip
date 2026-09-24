@@ -88,6 +88,8 @@
   --color-timeline-track-hover: var(--timeline-track-hover);
   --color-timeline-track-selected: var(--timeline-track-selected);
   --color-timeline-divider: var(--timeline-divider);
+  --color-timeline-tick: var(--timeline-tick);
+  --color-timeline-tick-minor: var(--timeline-tick-minor);
   --color-timeline-playhead: var(--timeline-playhead);
   --color-timeline-selection: var(--timeline-selection);
   --color-timeline-selection-muted: var(--timeline-selection-muted);
@@ -317,6 +319,12 @@
   --timeline-track-selected: oklch(0.9 0.022 192);
 
   --timeline-divider: oklch(0.84 0.012 200);
+
+  /* Ruler ticks. Against --timeline-ruler, the major tick has a contrast of 3.1:1 and the
+   * minor tick 2.1:1. The minor ticks are decorative, because the labels and the major
+   * ticks carry the time, so they stay below the 3:1 of WCAG 1.4.11 on purpose. */
+  --timeline-tick: oklch(0.6 0.012 205);
+  --timeline-tick-minor: oklch(0.71 0.012 205);
 
   --timeline-playhead: oklch(0.5 0.095 188);
 
@@ -615,6 +623,11 @@
 
   --timeline-divider: oklch(0.275 0.012 205);
 
+  /* Against --timeline-ruler, the major tick has a contrast of 3.1:1 and the minor tick
+   * 2.0:1. The minor ticks stay below WCAG 1.4.11 on purpose (see the light theme). */
+  --timeline-tick: oklch(0.49 0.012 205);
+  --timeline-tick-minor: oklch(0.39 0.012 205);
+
   --timeline-playhead: oklch(0.77 0.105 188);
 
   --timeline-selection: oklch(0.72 0.085 190);
@@ -697,4 +710,25 @@
   );
   background-size: var(--progress-flow-period, 12rem) 100%;
   background-repeat: repeat-x;
+}
+
+/* One ruler interval (TimelineRuler). The first layer is the major tick: a 1px line at the
+ * left edge, as tall as the element. The second layer is the minor ticks: 1px lines at
+ * each period of --ruler-minor-period, half as tall. The period is a percentage of the
+ * interval width, so the lines fall on the minor step inside every interval, and no
+ * rounding of a tile width adds up along the lane. The minor line at the left edge lies
+ * under the major tick. With no period, the only minor line is that one. */
+@utility timeline-ruler-interval {
+  background-image:
+    linear-gradient(var(--timeline-tick), var(--timeline-tick)),
+    repeating-linear-gradient(
+      to right,
+      var(--timeline-tick-minor) 0 1px,
+      transparent 1px var(--ruler-minor-period, 100%)
+    );
+  background-position: left bottom;
+  background-size:
+    1px 100%,
+    100% 50%;
+  background-repeat: no-repeat;
 }
