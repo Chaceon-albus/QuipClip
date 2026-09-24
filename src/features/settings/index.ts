@@ -12,3 +12,4 @@ export * from "./dialog";
 export * from "./panelStore";
 export * from "./timecodePreference";
 export * from "./themePreference";
+export * from "./previewMutePreference";

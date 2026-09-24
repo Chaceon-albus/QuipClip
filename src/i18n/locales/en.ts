@@ -165,6 +165,14 @@ export const en = {
       pause: "Pause",
       previousStep: "Step Back One Frame",
       nextStep: "Step Forward One Frame",
+      // A toggle. The name stays the same while it is on, and the button reports the state.
+      // It silences the preview and the frame step sound, not the export.
+      mute: "Mute Audio",
+    },
+    // The description of Mark In while an In point waits for its Out point. It is the second
+    // line of the tooltip, and assistive technology reads it on the button.
+    state: {
+      inPending: "An In point is pending. Mark an Out point to make a segment.",
     },
     disabledReason: {
       preciseMarkingUnavailable: "Precise marking is unavailable for this video.",

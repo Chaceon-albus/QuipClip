@@ -862,4 +862,54 @@ describe("Scrub Audio Controller", () => {
     expect(errorElement.currentTimeAssignments).toEqual([1.0, 1.02]);
     expect(errorElement.playCalls).toBe(2);
   });
+
+  it("runs the same seeks, plays and timers for a muted element, and never changes the mute", () => {
+    // The mute toggle sets `muted` on the element. The controller must not read it to skip a
+    // burst: the seek, the play, the continuation rule and the timers stay the same, and only
+    // the sound is silent.
+    const run = (muted: boolean) => {
+      const runTimers = createTestTimers();
+      const runController = createScrubAudioController(runTimers);
+      const runElement = Object.assign(createFakeAudioElement(), { muted });
+      const armed: number[] = [];
+      const setTimer = runTimers.setTimer;
+      runTimers.setTimer = (callback, milliseconds) => {
+        armed.push(milliseconds);
+        return setTimer(callback, milliseconds);
+      };
+
+      runController.attach(runElement);
+      runController.request(1.0, 1);
+      runElement.firePlaying();
+      // A held key: a forward request inside the tolerance continues the burst.
+      runElement.setCurrentTimeInternal(1.03);
+      runController.request(1.04, 1);
+      // A backward request always seeks.
+      runController.request(0.9, -1);
+      runElement.firePlaying();
+      const stopTimer = runTimers
+        .getArmedTimers()
+        .find((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000);
+      runTimers.fire(stopTimer!.id);
+
+      return {
+        muted: runElement.muted,
+        currentTimeAssignments: runElement.currentTimeAssignments,
+        playCalls: runElement.playCalls,
+        pauseCalls: runElement.pauseCalls,
+        armed,
+      };
+    };
+
+    const audible = run(false);
+    const silent = run(true);
+
+    expect(silent.muted).toBe(true);
+    expect(audible.muted).toBe(false);
+    expect(silent.currentTimeAssignments).toEqual([1.0, 0.9]);
+    expect(silent.currentTimeAssignments).toEqual(audible.currentTimeAssignments);
+    expect(silent.playCalls).toBe(audible.playCalls);
+    expect(silent.pauseCalls).toBe(audible.pauseCalls);
+    expect(silent.armed).toEqual(audible.armed);
+  });
 });

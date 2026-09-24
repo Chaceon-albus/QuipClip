@@ -6,6 +6,10 @@
  *
  * Amends ADR 019 via ADR 022: playhead dragging serves as a second caller for audio bursts.
  * The store, not the controller, tracks the drag direction and skips zero-distance moves.
+ *
+ * The controller never reads or writes `muted`. The mute toggle of the transport bar sets it
+ * on the element, so a muted cue still seeks, plays and keeps its timers and its continuation
+ * rule, and only its sound is silent.
  */
 
 /** Burst duration in seconds (50 ms), approximating one frame duration to provide an audible cue. */

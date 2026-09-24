@@ -136,6 +136,10 @@ export const zhCN: TranslationCatalog = {
       pause: "暂停",
       previousStep: "后退一帧",
       nextStep: "前进一帧",
+      mute: "静音",
+    },
+    state: {
+      inPending: "已有待定的入点。请标记出点以生成片段。",
     },
     disabledReason: {
       preciseMarkingUnavailable: "此视频无法精确标记。",

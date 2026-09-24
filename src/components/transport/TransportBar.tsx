@@ -1,8 +1,6 @@
 import { useId, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  ArrowLeftToLine,
-  ArrowRightToLine,
   ChevronLeft,
   ChevronRight,
   Pause,
@@ -12,6 +10,8 @@ import {
   SquarePlus,
   Trash2,
   Undo2,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
@@ -34,6 +34,10 @@ import {
   usePlaybackStore,
 } from "@/features/playback";
 import {
+  previewMutePreferenceStore,
+  usePreviewMutePreference,
+} from "@/features/settings/previewMutePreference";
+import {
   canMarkIn,
   canMarkOut,
   canSplitCurrentSegment,
@@ -42,6 +46,9 @@ import {
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
+import { cn } from "@/lib/utils";
+import { FrameStepButton } from "./FrameStepButton";
+import { MarkInIcon, MarkOutIcon } from "./markPointIcons";
 import {
   presentEditDisabledReason,
   presentStepDisabledReason,
@@ -66,6 +73,9 @@ const selectNewSegment = (s: TimelineStoreState) => s.newSegment;
 const selectDeleteSegment = (s: TimelineStoreState) => s.deleteSegment;
 const selectUndo = (s: TimelineStoreState) => s.undo;
 const selectRedo = (s: TimelineStoreState) => s.redo;
+
+// The preference action never changes, so it is read once.
+const { toggleMuted } = previewMutePreferenceStore.getState();
 
 /**
  * Keeps a mouse click from moving the focus to a transport button.
@@ -130,7 +140,6 @@ export function TransportBar() {
   );
   const isPlaying = usePlaybackStore((s) => s.isPlaying);
   const togglePlayback = playbackStore.getState().togglePlayback;
-  const seekNominal = playbackStore.getState().seekNominal;
 
   const hasNominalRate = hasNominalFrameRate(media?.probe);
 
@@ -188,10 +197,19 @@ export function TransportBar() {
   // `aria-describedby`, so assistive technology reads the reason on the button itself. The
   // tooltip only opens on hover or focus, and a disabled button takes neither.
   const markInReasonId = useId();
+  const markInPendingId = useId();
   const markOutReasonId = useId();
   const splitReasonId = useId();
-  const previousStepReasonId = useId();
-  const nextStepReasonId = useId();
+
+  // While an In mark waits for its Out mark, Mark In shows it in the primary tint. The button is
+  // not a toggle, so it takes no `aria-pressed`: a pressed state would say that a second press
+  // clears the mark, and a second press moves it. The state is a description instead, which the
+  // button names in `aria-describedby`, and the second line of the tooltip when no reason
+  // takes that line.
+  const isInPending = hasActiveSource && pendingInPts !== null;
+  const markInPendingText = isInPending ? t("transport.state.inPending") : null;
+
+  const isMuted = usePreviewMutePreference((s) => s.muted);
 
   // Every key name comes from the binding table (ADR 026).
   const undoShortcut = shortcutOf("undo");
@@ -218,16 +236,31 @@ export function TransportBar() {
   const isStepDisabled = !canStepFrames(hasActiveSource, hasNominalRate);
   const isPlayDisabled = !canTogglePlayback(hasActiveSource);
 
+  /*
+   * The bar is three columns. The play group sits in the centre column, so Play is in the
+   * middle of the window at every width. The left column holds the history and the mark
+   * groups, packed against the play group, and the right column holds the segment group and
+   * the mute toggle, packed the same way. The two outer columns are one fraction each, so they
+   * are always of equal width, which is what keeps the centre column centred. At the minimum
+   * window width of 1024 px, each outer column is 410 px wide, and the left one holds 375 px
+   * of controls in English and 388 px in Chinese. A column never shrinks below its content, so
+   * a longer label moves the play group off the centre and does not make the controls overlap.
+   *
+   * Every button is 40 px high, and Play is 44 px. A button with its label under the icon
+   * takes the 40 px row size, with the flex direction and the padding changed for the stack,
+   * and it keeps the 48 px width of the earlier square size.
+   */
   return (
-    <section className="flex h-[72px] shrink-0 items-center justify-center border-y border-border bg-card px-4 select-none">
-      <div className="flex items-center gap-4">
+    <section className="grid h-[72px] shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-4 border-y border-border bg-card px-4 select-none">
+      <div className="flex items-center justify-end gap-4">
         {/* Group 1: History (Undo / Redo with icon over label) */}
         <div className="flex items-center gap-1">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="tool-ghost"
-                size="tool"
+                size="tool-row"
+                className="min-w-12 flex-col gap-0.5 px-1.5"
                 disabled={isUndoDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={undo}
@@ -249,7 +282,8 @@ export function TransportBar() {
             <TooltipTrigger asChild>
               <Button
                 variant="tool-ghost"
-                size="tool"
+                size="tool-row"
+                className="min-w-12 flex-col gap-0.5 px-1.5"
                 disabled={isRedoDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={redo}
@@ -290,6 +324,9 @@ export function TransportBar() {
           <Tooltip>
             <TooltipTrigger asChild>
               <span className="inline-flex">
+                {/* The pending state keeps the label in the foreground colour: the primary
+                    text on its own tint is below 4.5:1 in the light theme. The border, the
+                    fill and the glyph carry the tint. */}
                 <Button
                   variant="tool"
                   size="tool-row"
@@ -303,12 +340,21 @@ export function TransportBar() {
                       markIn(frame.inferredSourcePts);
                     }
                   }}
-                  className="disabled:delay-150 motion-reduce:duration-0"
+                  className={cn(
+                    "disabled:delay-150 motion-reduce:duration-0",
+                    isInPending &&
+                      "border-primary bg-primary/10 hover:bg-primary/15 active:bg-primary/20",
+                  )}
                   aria-label={t("transport.action.markInAria")}
-                  aria-describedby={markInReasonId}
+                  aria-describedby={`${markInReasonId} ${markInPendingId}`}
                   aria-keyshortcuts={markInShortcut?.aria}
                 >
-                  <ArrowRightToLine className="size-4 text-muted-foreground" />
+                  <MarkInIcon
+                    className={cn(
+                      "size-4",
+                      isInPending ? "text-primary" : "text-muted-foreground",
+                    )}
+                  />
                   <span className="text-xs font-semibold">
                     {t("transport.action.markIn")}
                   </span>
@@ -316,12 +362,15 @@ export function TransportBar() {
                 <span id={markInReasonId} className="sr-only">
                   {reasonText(markInReason)}
                 </span>
+                <span id={markInPendingId} className="sr-only">
+                  {markInPendingText}
+                </span>
               </span>
             </TooltipTrigger>
             <ShortcutTooltipContent
               label={t("transport.action.markInAria")}
               keys={markInShortcut?.keys}
-              reason={reasonText(markInReason)}
+              reason={reasonText(markInReason) ?? markInPendingText}
             />
           </Tooltip>
 
@@ -344,7 +393,7 @@ export function TransportBar() {
                   aria-describedby={markOutReasonId}
                   aria-keyshortcuts={markOutShortcut?.aria}
                 >
-                  <ArrowLeftToLine className="size-4 text-muted-foreground" />
+                  <MarkOutIcon className="size-4 text-muted-foreground" />
                   <span className="text-xs font-semibold">
                     {t("transport.action.markOut")}
                   </span>
@@ -398,14 +447,69 @@ export function TransportBar() {
         </div>
 
         <Separator orientation="vertical" className="h-8 bg-border" />
+      </div>
 
-        {/* Group 3: Current segment (New / Delete, icon over label) */}
+      {/* Group 3: Playback Controls (Previous / Next nominal step, Play/Pause), in the centre
+          column. The two step buttons repeat while they are held (FrameStepButton). */}
+      <div className="flex items-center gap-2">
+        <FrameStepButton
+          delta={-1}
+          disabled={isStepDisabled}
+          label={t("transport.action.previousStep")}
+          shortcut={previousStepShortcut}
+          reason={reasonText(stepReason)}
+        >
+          <ChevronLeft className="size-4" />
+        </FrameStepButton>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="tool-icon-lg"
+              disabled={isPlayDisabled}
+              onMouseDown={preventFocusOnMouseDown}
+              onClick={togglePlayback}
+              className="shadow-xs"
+              aria-label={
+                isPlaying ? t("transport.action.pause") : t("transport.action.play")
+              }
+              aria-keyshortcuts={playShortcut?.aria}
+            >
+              {isPlaying ? (
+                <Pause className="size-5 fill-current" />
+              ) : (
+                <Play className="size-5 fill-current" />
+              )}
+            </Button>
+          </TooltipTrigger>
+          <ShortcutTooltipContent
+            label={isPlaying ? t("transport.action.pause") : t("transport.action.play")}
+            keys={playShortcut?.keys}
+          />
+        </Tooltip>
+
+        <FrameStepButton
+          delta={1}
+          disabled={isStepDisabled}
+          label={t("transport.action.nextStep")}
+          shortcut={nextStepShortcut}
+          reason={reasonText(stepReason)}
+        >
+          <ChevronRight className="size-4" />
+        </FrameStepButton>
+      </div>
+
+      <div className="flex items-center justify-start gap-4">
+        <Separator orientation="vertical" className="h-8 bg-border" />
+
+        {/* Group 4: Current segment (New / Delete, icon over label) */}
         <div className="flex items-center gap-1">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="tool-ghost"
-                size="tool"
+                size="tool-row"
+                className="min-w-12 flex-col gap-0.5 px-1.5"
                 disabled={isNewSegmentDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={newSegment}
@@ -428,7 +532,8 @@ export function TransportBar() {
             <TooltipTrigger asChild>
               <Button
                 variant="tool-ghost"
-                size="tool"
+                size="tool-row"
+                className="min-w-12 flex-col gap-0.5 px-1.5"
                 disabled={isDeleteSegmentDisabled}
                 onMouseDown={preventFocusOnMouseDown}
                 onClick={deleteSegment}
@@ -450,92 +555,34 @@ export function TransportBar() {
 
         <Separator orientation="vertical" className="h-8 bg-border" />
 
-        {/* Group 4: Playback Controls (Previous / Next nominal step, Play/Pause) */}
-        {/* The two step buttons take the same trigger span as the edit buttons, so their
-            tooltip can say why they are disabled. */}
-        <div className="flex items-center gap-2">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="inline-flex">
-                <Button
-                  variant="tool-ghost"
-                  size="tool-icon"
-                  disabled={isStepDisabled}
-                  onMouseDown={preventFocusOnMouseDown}
-                  onClick={() => seekNominal(-1)}
-                  aria-label={t("transport.action.previousStep")}
-                  aria-describedby={previousStepReasonId}
-                  aria-keyshortcuts={previousStepShortcut?.aria}
-                >
-                  <ChevronLeft className="size-4" />
-                </Button>
-                <span id={previousStepReasonId} className="sr-only">
-                  {reasonText(stepReason)}
-                </span>
-              </span>
-            </TooltipTrigger>
-            <ShortcutTooltipContent
-              label={t("transport.action.previousStep")}
-              keys={previousStepShortcut?.keys}
-              reason={reasonText(stepReason)}
-            />
-          </Tooltip>
-
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                size="tool-icon-lg"
-                disabled={isPlayDisabled}
-                onMouseDown={preventFocusOnMouseDown}
-                onClick={togglePlayback}
-                className="shadow-xs"
-                aria-label={
-                  isPlaying ? t("transport.action.pause") : t("transport.action.play")
-                }
-                aria-keyshortcuts={playShortcut?.aria}
-              >
-                {isPlaying ? (
-                  <Pause className="size-5 fill-current" />
-                ) : (
-                  <Play className="size-5 fill-current" />
-                )}
-              </Button>
-            </TooltipTrigger>
-            <ShortcutTooltipContent
-              label={
-                isPlaying ? t("transport.action.pause") : t("transport.action.play")
-              }
-              keys={playShortcut?.keys}
-            />
-          </Tooltip>
-
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="inline-flex">
-                <Button
-                  variant="tool-ghost"
-                  size="tool-icon"
-                  disabled={isStepDisabled}
-                  onMouseDown={preventFocusOnMouseDown}
-                  onClick={() => seekNominal(1)}
-                  aria-label={t("transport.action.nextStep")}
-                  aria-describedby={nextStepReasonId}
-                  aria-keyshortcuts={nextStepShortcut?.aria}
-                >
-                  <ChevronRight className="size-4" />
-                </Button>
-                <span id={nextStepReasonId} className="sr-only">
-                  {reasonText(stepReason)}
-                </span>
-              </span>
-            </TooltipTrigger>
-            <ShortcutTooltipContent
-              label={t("transport.action.nextStep")}
-              keys={nextStepShortcut?.keys}
-              reason={reasonText(stepReason)}
-            />
-          </Tooltip>
-        </div>
+        {/* Group 5: Mute. A preference and not an edit action, so it needs no source and is
+            never disabled. The name stays the same in both states, and aria-pressed says
+            whether it is on, so a screen reader does not hear a name that changes with the
+            state. The glyph and the fill show the state to the eye. While it is on, hover
+            goes one step past the rest fill, and press mixes the hover fill 5% toward the
+            foreground, the press of the secondary variant, so a press still shows. It has no
+            key: the free conventional key of media players, M, is the marker key of the
+            editors that ADR 026 follows. */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="tool-ghost"
+              size="tool-icon"
+              onMouseDown={preventFocusOnMouseDown}
+              onClick={toggleMuted}
+              className="aria-pressed:bg-muted aria-pressed:text-foreground aria-pressed:hover:bg-secondary-hover aria-pressed:active:bg-[color-mix(in_oklab,var(--secondary-hover),var(--foreground)_5%)]"
+              aria-label={t("transport.action.mute")}
+              aria-pressed={isMuted}
+            >
+              {isMuted ? (
+                <VolumeX className="size-4" />
+              ) : (
+                <Volume2 className="size-4" />
+              )}
+            </Button>
+          </TooltipTrigger>
+          <ShortcutTooltipContent label={t("transport.action.mute")} />
+        </Tooltip>
       </div>
     </section>
   );

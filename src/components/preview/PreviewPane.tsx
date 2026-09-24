@@ -28,6 +28,7 @@ import {
   usePlaybackStore,
   type PlaybackSource,
 } from "@/features/playback";
+import { usePreviewMutePreference } from "@/features/settings/previewMutePreference";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import {
   FRAME_TIMECODE_PLACEHOLDER,
@@ -285,6 +286,12 @@ export function PreviewPane() {
   const attachedSourceRevisionKey = usePlaybackStore(
     (s) => s.attachedSourceRevisionKey,
   );
+
+  // The mute toggle of the transport bar. Both media elements take it as the `muted`
+  // property, which React sets when it creates the node, so a stored value applies before the
+  // first play. It changes only what the user hears: the elements still seek, play and report
+  // their events, so the calibration, the seeks and the cue of ADR 019 run as before.
+  const isMuted = usePreviewMutePreference((s) => s.muted);
 
   const sourceRevisionKey = getSourceRevisionKey(media);
   const [previousMedia, setPreviousMedia] = useState(media);
@@ -712,6 +719,7 @@ export function PreviewPane() {
                   ref={videoRefCallback}
                   key={sourceRevisionKey}
                   playsInline
+                  muted={isMuted}
                   preload="metadata"
                   src={videoSrc}
                   aria-label={t("preview.videoPlayerLabel", {
@@ -790,6 +798,7 @@ export function PreviewPane() {
                   <audio
                     ref={scrubAudioRefCallback}
                     key={`scrub-${sourceRevisionKey}`}
+                    muted={isMuted}
                     preload="auto"
                     src={videoSrc}
                     aria-hidden="true"
