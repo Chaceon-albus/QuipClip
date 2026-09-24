@@ -55,6 +55,12 @@ import {
   followDeferredNavigation,
   reportAnchorWaitExpired,
 } from "./anchorWait";
+import {
+  INITIAL_PREVIEW_FRAME_RATIO_STATE,
+  previewFrameAspectRatio,
+  previewFrameStyle,
+  stepPreviewFrameRatio,
+} from "./previewAspectRatio";
 import { formatSupportedVideoFormats } from "./previewEmptyState";
 import { PreviewBufferingIndicator } from "./PreviewBufferingIndicator";
 import {
@@ -316,6 +322,9 @@ export function PreviewPane() {
     null,
   );
   const decodeFailed = failureTrigger !== null;
+  // The picture ratio that the video element last reported. The frame takes it while it holds
+  // the element (see `stepPreviewFrameRatio` and `previewFrameAspectRatio`).
+  const [frameRatio, setFrameRatio] = useState(INITIAL_PREVIEW_FRAME_RATIO_STATE);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -378,6 +387,13 @@ export function PreviewPane() {
   if (previousMedia !== media) {
     setPreviousMedia(media);
     setFailureTrigger(null);
+    // The ratio resets with no media, and a new source keeps it until its element reports.
+    setFrameRatio((current) =>
+      stepPreviewFrameRatio(current, {
+        type: "mediaChanged",
+        hasMedia: media !== null,
+      }),
+    );
   }
 
   // Reset playback store if media disappears
@@ -411,6 +427,12 @@ export function PreviewPane() {
             platform: currentPlatform(),
           }),
     [failureTrigger, mediaProbe, mediaFileName],
+  );
+
+  // The frame takes the ratio of the picture while it holds the video element, and 16:9 for
+  // the empty state, the loading state, the import-error view and the decode-failure panel.
+  const frameStyle = previewFrameStyle(
+    previewFrameAspectRatio(frameRatio, { hasMedia: media !== null, decodeFailed }),
   );
 
   // The picture check of the mounted video element. The ref callback clears it when the
@@ -588,6 +610,20 @@ export function PreviewPane() {
     syncBrowserTime(sourceRevisionKey, e.currentTarget);
   };
 
+  // Takes the picture ratio from the size the element reports, at `loadedmetadata` and at each
+  // `resize`. A zero size, such as that of a web view that decodes no picture, gives the
+  // default ratio. React renders again only when the ratio changes.
+  const syncPictureRatio = (element: HTMLVideoElement) => {
+    if (!sourceGuard.isActive(sourceRevisionKey)) {
+      return;
+    }
+    // The size is read now, because React can run the updater later.
+    const { videoWidth: width, videoHeight: height } = element;
+    setFrameRatio((current) =>
+      stepPreviewFrameRatio(current, { type: "pictureSize", width, height }),
+    );
+  };
+
   // An `error` event and a failed picture check take the same path. The element leaves the
   // tree on the next render, and its ref callback detaches it from the playback store.
   const handleDecodeFailure = (
@@ -727,144 +763,198 @@ export function PreviewPane() {
       aria-label={t("preview.regionLabel")}
       className="dark flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground scheme-dark outline-none select-none"
     >
-      {/* 16:9 Video Canvas Surface */}
-      <div className="relative flex min-h-0 flex-1 items-center justify-center">
-        {/* The frame takes a dashed border while it is empty, so it reads as a placeholder. */}
-        <div
-          className={cn(
-            "relative flex aspect-video h-full max-h-full w-auto max-w-full items-center justify-center overflow-hidden rounded-lg border border-preview-border bg-preview-surface shadow-xs",
-            !media && (status === "idle" || status === "error") && "border-dashed",
-          )}
-        >
-          {media ? (
-            <>
-              {/* Loaded Video Surface: Preserved during replacements or error states */}
-              {decodeFailed ? (
-                /* Decode-failure panel: what the system player cannot decode, the step
-                   that can make the file play, and the Open Media action for another file.
-                   The panel scrolls when the preview is too small to hold it. */
-                <div
-                  className="flex max-h-full max-w-md flex-col items-center gap-2 overflow-y-auto p-4 text-center"
-                  aria-live="polite"
-                >
-                  <AlertCircle
-                    aria-hidden="true"
-                    className="size-6 shrink-0 text-warning"
-                  />
-                  <h2 className="text-sm font-medium text-preview-foreground">
-                    {t("preview.decodeFailure.title")}
-                  </h2>
-                  {decodeFailure && (
-                    <div className="flex flex-col gap-1 text-xs text-preview-muted">
-                      {/* The values are identifiers a user can copy into a search. */}
-                      <p className="select-text">
-                        <DecodeFailureReasonText reason={decodeFailure.reason} />
-                      </p>
-                      {decodeFailure.hintKey !== null && (
-                        <p>{t(decodeFailure.hintKey)}</p>
-                      )}
-                    </div>
-                  )}
-                  <Button
-                    className="mt-1"
-                    onClick={openMedia}
-                    aria-keyshortcuts={openMediaShortcut?.aria}
+      {/* The preview area. It is a size container, so the frame fits itself into it with
+          CSS alone (`preview-frame-fit`), and it takes its size from the layout, so a new
+          frame ratio moves nothing around it. */}
+      <div className="@container-size relative flex min-h-0 flex-1 items-center justify-center">
+        {/* The frame, at the ratio of the picture while it shows one and at 16:9 otherwise.
+            The notices and the buffering spinner are anchored to its corners. They sit
+            outside the surface, so a notice wider than a narrow frame is not clipped. */}
+        <div className="relative preview-frame-fit" style={frameStyle}>
+          {/* The surface clips the picture to the corners of the frame. It takes a dashed
+              border while it is empty, so it reads as a placeholder. */}
+          <div
+            className={cn(
+              "flex size-full items-center justify-center overflow-hidden rounded-preview-frame border border-preview-border bg-preview-surface shadow-xs",
+              !media && (status === "idle" || status === "error") && "border-dashed",
+            )}
+          >
+            {media ? (
+              <>
+                {/* Loaded Video Surface: Preserved during replacements or error states */}
+                {decodeFailed ? (
+                  /* Decode-failure panel: what the system player cannot decode, the step
+                     that can make the file play, and the Open Media action for another file.
+                     The panel scrolls when the preview is too small to hold it. */
+                  <div
+                    className="flex max-h-full max-w-md flex-col items-center gap-2 overflow-y-auto p-4 text-center"
+                    aria-live="polite"
                   >
-                    {t("preview.decodeFailure.openAnother")}
-                  </Button>
-                </div>
-              ) : (
-                <video
-                  ref={videoRefCallback}
-                  key={sourceRevisionKey}
-                  playsInline
-                  muted={isMuted}
-                  preload="metadata"
-                  src={videoSrc}
-                  aria-label={t("preview.videoPlayerLabel", {
-                    fileName: media.fileName,
-                  })}
-                  className="h-full w-full object-contain"
-                  onPlay={(e) => {
-                    if (sourceGuard.isActive(sourceRevisionKey)) {
-                      syncPlay(sourceRevisionKey, e.currentTarget);
-                    }
-                  }}
-                  onPause={(e) => {
-                    if (sourceGuard.isActive(sourceRevisionKey)) {
-                      syncPause(sourceRevisionKey, e.currentTarget);
-                    }
-                  }}
-                  onEnded={(e) => {
-                    if (sourceGuard.isActive(sourceRevisionKey)) {
-                      syncEnded(sourceRevisionKey, e.currentTarget);
-                    }
-                  }}
-                  onTimeUpdate={handleTimeUpdate}
-                  onSeeked={(e) => {
-                    handleTimeUpdate(e);
-                    if (sourceGuard.isActive(sourceRevisionKey)) {
-                      syncSeeked(sourceRevisionKey, e.currentTarget);
-                    }
-                  }}
-                  onDurationChange={(e) => {
-                    if (sourceGuard.isActive(sourceRevisionKey)) {
-                      syncBrowserDuration(sourceRevisionKey, e.currentTarget);
-                    }
-                  }}
-                  onLoadedMetadata={(e) => {
-                    // A zero picture width here is only a suspicion. The picture check
-                    // holds the ready path until a size arrives, or it reports a failure.
-                    runPictureCheck(e.currentTarget, {
-                      type: "loadedMetadata",
-                      videoWidth: e.currentTarget.videoWidth,
-                      probeWidth: media.probe.width,
-                    });
-                  }}
-                  onResize={(e) => {
-                    runPictureCheck(e.currentTarget, {
-                      type: "resize",
-                      videoWidth: e.currentTarget.videoWidth,
-                    });
-                  }}
-                  onError={(e) => {
-                    handleDecodeFailure(e.currentTarget, {
-                      kind: "mediaError",
-                      code: e.currentTarget.error?.code ?? null,
-                    });
-                  }}
-                />
-              )}
-
-              {/* Hidden audio element for scrub bursts on frame step (ADR 019).
-                  Gated on:
-                  1. media.probe.audio: null when the source has no audio stream. Mount nothing then.
-                  2. !decodeFailed: web view could not decode the source. Mount nothing then.
-                  3. attachedSourceRevisionKey === sourceRevisionKey: the identity comparison keeps
-                     React from constructing the node at all, React assigns `src` at construction
-                     so a fetch would start before insertion, and a boolean such as isAttached
-                     cannot serve because the render that first carries a new source still holds
-                     the previous source store state.
-                  4. calibrationStatus !== "calibrating": keeps the element out until the calibration
-                     anchor is taken by the first requestVideoFrameCallback (ADR 003), preventing a
-                     competing range request during that window. A source whose calibration resolves
-                     straight to "unavailable" mounts at attach time, which is correct because such a
-                     source has no anchor to protect. */}
-              {media.probe.audio &&
-                !decodeFailed &&
-                attachedSourceRevisionKey === sourceRevisionKey &&
-                calibrationStatus !== "calibrating" && (
-                  <audio
-                    ref={scrubAudioRefCallback}
-                    key={`scrub-${sourceRevisionKey}`}
+                    <AlertCircle
+                      aria-hidden="true"
+                      className="size-6 shrink-0 text-warning"
+                    />
+                    <h2 className="text-sm font-medium text-preview-foreground">
+                      {t("preview.decodeFailure.title")}
+                    </h2>
+                    {decodeFailure && (
+                      <div className="flex flex-col gap-1 text-xs text-preview-muted">
+                        {/* The values are identifiers a user can copy into a search. */}
+                        <p className="select-text">
+                          <DecodeFailureReasonText reason={decodeFailure.reason} />
+                        </p>
+                        {decodeFailure.hintKey !== null && (
+                          <p>{t(decodeFailure.hintKey)}</p>
+                        )}
+                      </div>
+                    )}
+                    <Button
+                      className="mt-1"
+                      onClick={openMedia}
+                      aria-keyshortcuts={openMediaShortcut?.aria}
+                    >
+                      {t("preview.decodeFailure.openAnother")}
+                    </Button>
+                  </div>
+                ) : (
+                  <video
+                    ref={videoRefCallback}
+                    key={sourceRevisionKey}
+                    playsInline
                     muted={isMuted}
-                    preload="auto"
+                    preload="metadata"
                     src={videoSrc}
-                    aria-hidden="true"
-                    className="hidden"
+                    aria-label={t("preview.videoPlayerLabel", {
+                      fileName: media.fileName,
+                    })}
+                    className="h-full w-full object-contain"
+                    onPlay={(e) => {
+                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                        syncPlay(sourceRevisionKey, e.currentTarget);
+                      }
+                    }}
+                    onPause={(e) => {
+                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                        syncPause(sourceRevisionKey, e.currentTarget);
+                      }
+                    }}
+                    onEnded={(e) => {
+                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                        syncEnded(sourceRevisionKey, e.currentTarget);
+                      }
+                    }}
+                    onTimeUpdate={handleTimeUpdate}
+                    onSeeked={(e) => {
+                      handleTimeUpdate(e);
+                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                        syncSeeked(sourceRevisionKey, e.currentTarget);
+                      }
+                    }}
+                    onDurationChange={(e) => {
+                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                        syncBrowserDuration(sourceRevisionKey, e.currentTarget);
+                      }
+                    }}
+                    onLoadedMetadata={(e) => {
+                      syncPictureRatio(e.currentTarget);
+                      // A zero picture width here is only a suspicion. The picture check
+                      // holds the ready path until a size arrives, or it reports a failure.
+                      runPictureCheck(e.currentTarget, {
+                        type: "loadedMetadata",
+                        videoWidth: e.currentTarget.videoWidth,
+                        probeWidth: media.probe.width,
+                      });
+                    }}
+                    onResize={(e) => {
+                      syncPictureRatio(e.currentTarget);
+                      runPictureCheck(e.currentTarget, {
+                        type: "resize",
+                        videoWidth: e.currentTarget.videoWidth,
+                      });
+                    }}
+                    onError={(e) => {
+                      handleDecodeFailure(e.currentTarget, {
+                        kind: "mediaError",
+                        code: e.currentTarget.error?.code ?? null,
+                      });
+                    }}
                   />
                 )}
 
+                {/* Hidden audio element for scrub bursts on frame step (ADR 019).
+                    Gated on:
+                    1. media.probe.audio: null when the source has no audio stream. Mount nothing then.
+                    2. !decodeFailed: web view could not decode the source. Mount nothing then.
+                    3. attachedSourceRevisionKey === sourceRevisionKey: the identity comparison keeps
+                       React from constructing the node at all, React assigns `src` at construction
+                       so a fetch would start before insertion, and a boolean such as isAttached
+                       cannot serve because the render that first carries a new source still holds
+                       the previous source store state.
+                    4. calibrationStatus !== "calibrating": keeps the element out until the calibration
+                       anchor is taken by the first requestVideoFrameCallback (ADR 003), preventing a
+                       competing range request during that window. A source whose calibration resolves
+                       straight to "unavailable" mounts at attach time, which is correct because such a
+                       source has no anchor to protect. */}
+                {media.probe.audio &&
+                  !decodeFailed &&
+                  attachedSourceRevisionKey === sourceRevisionKey &&
+                  calibrationStatus !== "calibrating" && (
+                    <audio
+                      ref={scrubAudioRefCallback}
+                      key={`scrub-${sourceRevisionKey}`}
+                      muted={isMuted}
+                      preload="auto"
+                      src={videoSrc}
+                      aria-hidden="true"
+                      className="hidden"
+                    />
+                  )}
+              </>
+            ) : (
+              /* Full Empty / Loading / Error State when no media is loaded */
+              <>
+                {showLoading && (
+                  <div
+                    className="flex flex-col items-center justify-center gap-2 text-xs text-preview-muted"
+                    aria-live="polite"
+                  >
+                    <Loader2 className="size-6 animate-spin text-primary" />
+                    <span>{t("preview.loading")}</span>
+                  </div>
+                )}
+
+                {/* An import that failed with no video open: what failed, what to do, and
+                    the actions, in the layout of the empty state. */}
+                {status === "error" && error && <ImportErrorEmptyState error={error} />}
+
+                {/* Empty state: it says what to do, offers the File menu's Open Media action,
+                    and names the drop on the window as the other way to open a video. */}
+                {status === "idle" && (
+                  <div className="flex flex-col items-center gap-3 p-4 text-center">
+                    <div className="grid size-12 place-items-center rounded-xl border border-preview-border bg-preview-background text-preview-muted">
+                      <Film className="size-6" />
+                    </div>
+                    <h2 className="text-sm font-medium text-preview-foreground">
+                      {t("preview.empty.title")}
+                    </h2>
+                    <Button
+                      onClick={openMedia}
+                      aria-keyshortcuts={openMediaShortcut?.aria}
+                    >
+                      {t("preview.empty.openVideo")}
+                    </Button>
+                    <div className="flex flex-col items-center gap-1 text-xs text-preview-muted">
+                      <p>{t("preview.empty.dropHint")}</p>
+                      <p>{SUPPORTED_VIDEO_FORMATS}</p>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {media && (
+            <>
               {/* The buffering spinner, in the bottom-right corner, clear of the notices.
                   Keyed on the source, so a source change starts it again. */}
               {!decodeFailed && (
@@ -876,73 +966,41 @@ export function PreviewPane() {
 
               {/* The notification area. The notices stack from the top, so a loading
                   chip, an import error and a playback error never cover each other. The
-                  area lets the pointer through, and each notice takes it back. */}
-              <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex flex-col gap-2">
-                {showLoading && (
-                  <div
-                    className="pointer-events-auto flex items-center gap-2 self-start rounded-md border border-border/80 bg-background/90 px-2.5 py-1 text-xs text-foreground shadow-md backdrop-blur-xs"
-                    aria-live="polite"
-                  >
-                    <Loader2 className="size-3.5 animate-spin text-primary" />
-                    <span>{t("preview.loading")}</span>
-                  </div>
-                )}
-                {status === "error" && error && (
-                  <ImportErrorBanner
-                    error={error}
-                    onDismiss={dismissImportError}
-                    onReturnFocus={returnFocusToPreview}
-                  />
-                )}
-                {playbackError && !decodeFailed && (
-                  <PlaybackErrorBanner
-                    key={playbackError}
-                    code={playbackError}
-                    onDismiss={dismissPlaybackError}
-                    onReturnFocus={returnFocusToPreview}
-                  />
-                )}
+                  area lets the pointer through, and each notice takes it back, so the
+                  gaps between the notices pass the pointer to the picture. The area ends
+                  above the bottom of the preview area (`preview-notice-area`), and the
+                  stack scrolls when it is taller, so it never covers the timecode row. The
+                  stack widens past a frame too narrow to read the notices in, centred on
+                  the frame, and the chip keeps to the left edge of the banners
+                  (`preview-notice-fit`). */}
+              <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex preview-notice-area flex-col">
+                <div className="preview-notice-fit flex min-h-0 flex-col gap-2 overflow-y-auto empty:hidden">
+                  {showLoading && (
+                    <div
+                      className="pointer-events-auto flex items-center gap-2 self-start rounded-md border border-border/80 bg-background/90 px-2.5 py-1 text-xs text-foreground shadow-md backdrop-blur-xs"
+                      aria-live="polite"
+                    >
+                      <Loader2 className="size-3.5 animate-spin text-primary" />
+                      <span>{t("preview.loading")}</span>
+                    </div>
+                  )}
+                  {status === "error" && error && (
+                    <ImportErrorBanner
+                      error={error}
+                      onDismiss={dismissImportError}
+                      onReturnFocus={returnFocusToPreview}
+                    />
+                  )}
+                  {playbackError && !decodeFailed && (
+                    <PlaybackErrorBanner
+                      key={playbackError}
+                      code={playbackError}
+                      onDismiss={dismissPlaybackError}
+                      onReturnFocus={returnFocusToPreview}
+                    />
+                  )}
+                </div>
               </div>
-            </>
-          ) : (
-            /* Full Empty / Loading / Error State when no media is loaded */
-            <>
-              {showLoading && (
-                <div
-                  className="flex flex-col items-center justify-center gap-2 text-xs text-preview-muted"
-                  aria-live="polite"
-                >
-                  <Loader2 className="size-6 animate-spin text-primary" />
-                  <span>{t("preview.loading")}</span>
-                </div>
-              )}
-
-              {/* An import that failed with no video open: what failed, what to do, and
-                  the actions, in the layout of the empty state. */}
-              {status === "error" && error && <ImportErrorEmptyState error={error} />}
-
-              {/* Empty state: it says what to do, offers the File menu's Open Media action,
-                  and names the drop on the window as the other way to open a video. */}
-              {status === "idle" && (
-                <div className="flex flex-col items-center gap-3 p-4 text-center">
-                  <div className="grid size-12 place-items-center rounded-xl border border-preview-border bg-preview-background text-preview-muted">
-                    <Film className="size-6" />
-                  </div>
-                  <h2 className="text-sm font-medium text-preview-foreground">
-                    {t("preview.empty.title")}
-                  </h2>
-                  <Button
-                    onClick={openMedia}
-                    aria-keyshortcuts={openMediaShortcut?.aria}
-                  >
-                    {t("preview.empty.openVideo")}
-                  </Button>
-                  <div className="flex flex-col items-center gap-1 text-xs text-preview-muted">
-                    <p>{t("preview.empty.dropHint")}</p>
-                    <p>{SUPPORTED_VIDEO_FORMATS}</p>
-                  </div>
-                </div>
-              )}
             </>
           )}
         </div>

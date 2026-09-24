@@ -115,6 +115,9 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
+  /* The corners of the preview frame (`rounded-preview-frame`). The picture fills the frame,
+   * so a small radius keeps the corners from cutting the picture. */
+  --radius-preview-frame: 3px;
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -775,4 +778,59 @@
     1px 100%,
     100% 50%;
   background-repeat: no-repeat;
+}
+
+/* The size of the preview frame (PreviewPane): as large as fits in the preview area, at the
+ * width-to-height ratio in --preview-ar. The preview area is a size container, so 100cqw and
+ * 100cqh are its width and its height. The width is the area width, or the width that the
+ * area height gives at the ratio, whichever is less. The height takes the same rule. The fit
+ * applies the ratio inside the 1px border of the frame, so a picture at that ratio fills the
+ * frame with no bar. The area takes its size from the layout and not from the frame, so a
+ * new ratio moves nothing outside the frame, and a resize of the window runs no script. */
+@utility preview-frame-fit {
+  /* The 1px border at each side. */
+  --preview-frame-edges: 2px;
+  width: calc(
+    min(
+        100cqw - var(--preview-frame-edges),
+        (100cqh - var(--preview-frame-edges)) * var(--preview-ar)
+      ) +
+      var(--preview-frame-edges)
+  );
+  height: calc(
+    min(
+        100cqh - var(--preview-frame-edges),
+        (100cqw - var(--preview-frame-edges)) / var(--preview-ar)
+      ) +
+      var(--preview-frame-edges)
+  );
+}
+
+/* The notification area of the preview (PreviewPane). It starts 0.75rem below the top of the
+ * frame, and it ends at most 0.75rem above the bottom of the preview area, so a tall notice
+ * stack never covers the timecode row under the area. The frame is centred in the area, so
+ * the bottom of the area is (100cqh + 100%) / 2 below the top of the frame. `100cqh` is the
+ * height of the preview area, and `100%` is the height of the frame. */
+@utility preview-notice-area {
+  max-height: calc((100cqh + 100%) / 2 - 1.5rem);
+}
+
+/* The notice stack in the notification area (PreviewPane). The area keeps 0.75rem from each
+ * side of the frame, and a notice is as wide as the area. When that width is less than 16rem,
+ * as over a portrait picture in a small window, the negative margins widen the stack to
+ * 16rem, centred on the frame. The stack stays 0.75rem inside the preview area, so it is
+ * never wider than that area less 1.5rem. `100%` is the width of the notification area, and
+ * `100cqw` is the width of the preview area.
+ *
+ * The stack scrolls when the area is too short for it. A scroll box clips its content at its
+ * padding edge, so the stack has padding for the shadows of the notices, and margins of the
+ * same size, less than zero, keep the notices in their place. */
+@utility preview-notice-fit {
+  --preview-notice-shadow-room: 1rem;
+  margin-block: calc(-1 * var(--preview-notice-shadow-room));
+  margin-inline: calc(
+    min(0px, (100% - min(16rem, 100cqw - 1.5rem)) / 2) -
+      var(--preview-notice-shadow-room)
+  );
+  padding: var(--preview-notice-shadow-room);
 }
