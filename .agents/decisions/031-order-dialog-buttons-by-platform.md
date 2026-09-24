@@ -40,8 +40,8 @@ order, so the Tab order follows what the user sees.
 
 The footers of the export dialog use these roles:
 
-- Setup: Export... is `primary`.
-- The confirmation after a source change: Export Anyway is `primary`, Re-import is an
+- Setup: Export… is `primary`.
+- The confirmation after a source change: Export Anyway is `primary`, Re-import… is an
   alternative.
 - Run: Run in Background is `primary`, and Stop Export is `discard`, because it throws away
   the encode (ADR 025).
@@ -54,7 +54,7 @@ The footers of the export dialog use these roles:
 - A dialog that asks to confirm a lossy action focuses Cancel. That covers the quit and
   replace prompts of ADR 027, Delete Preset, Restore Built-in Presets and the unsaved-draft
   prompts.
-- The setup step focuses Export... When that button is disabled, the first control of the
+- The setup step focuses Export…. When that button is disabled, the first control of the
   step takes the focus, and otherwise the dialog itself.
 - The confirmation after a source change focuses Cancel. The finished step focuses Done. The
   run and result steps focus the dialog itself.

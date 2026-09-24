@@ -68,7 +68,7 @@ cancels by slot in `preparing` with no run identifier.
 ### The store holds the cancel request
 
 The dialog held two local flags: `cancelingRunId` and `unnamedCancelPending`. The status bar
-also has to show "Canceling...", and it cannot read the local state of the dialog. The store
+also has to show "Stopping…", and it cannot read the local state of the dialog. The store
 therefore holds `cancelRequested`.
 
 1. `cancelExport` sets `cancelRequested` to true before it calls the backend.

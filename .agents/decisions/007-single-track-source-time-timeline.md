@@ -68,7 +68,7 @@ way to tell which segment a guess will pick.
 
 So the target is named rather than inferred, and overlapping segments become legal.
 
-Mark In and Mark Out adjust the current segment's boundaries. **New Segment** ends the current
+Mark In and Mark Out adjust the current segment's boundaries. **New Segment** (the interface now calls it Finish Segment) ends the current
 segment, so the next Mark In starts a fresh one; the first segment of a session needs no press.
 Clicking a segment on the timeline makes it current. **Delete Segment** removes it and leaves
 nothing current, because selecting a neighbour automatically would make an unseen segment the

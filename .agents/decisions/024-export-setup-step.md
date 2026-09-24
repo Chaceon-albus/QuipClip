@@ -74,7 +74,7 @@ media path does nothing, and a call for another path replaces the old step, whos
 is then dropped. The check of the source revision waits at most 3 seconds, and a timeout
 counts as a failed read, so the setup step opens.
 
-(Changed on 2026-09-24.) Manage Presets... and Open Settings... in the setup step open
+(Changed on 2026-09-24.) Manage Presets… and Open Settings… in the setup step open
 Settings on the Presets tab with the preset that the step shows. The export flow, not the
 export store, keeps the chosen preset while Settings is open. When Settings closes by any
 path, the setup step opens again with this preset selected: the one the user selected in

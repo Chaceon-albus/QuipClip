@@ -100,7 +100,7 @@ Matroska. Where it is set, it runs earlier, inside `ffmpeg`, before the process 
 shared between the two phases would tell a reader that the bytes are still changing when they are
 not. `publishing` also matches the words `output.rs` and ADR 015 already use.
 
-The interface does not show that word. It shows "Finishing...". ADR 011 puts a stable code on the
+The interface does not show that word. It shows "Finishing…". ADR 011 puts a stable code on the
 wire and the sentence in the catalogs, and this follows that split.
 
 ### The encoder test reports only a known failure

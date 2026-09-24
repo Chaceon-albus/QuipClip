@@ -150,8 +150,8 @@ Windows.
 - `Ctrl`, `Cmd` and `Alt` stay with the system and the web view, except for the combinations
   in the table. `primary` with `=` or `-` is not claimed. Tauri turns off the zoom keys of the
   web view by default, so these combinations do nothing.
-- (Added on 2026-09-24.) The macOS application menu has Settings... on `Cmd+,`, and a File
-  menu with Open Media... on `Cmd+O`, Export... on `Cmd+E` and Close Window. Each of the
+- (Added on 2026-09-24.) The macOS application menu has Settings… on `Cmd+,`, and a File
+  menu with Open Media… on `Cmd+O`, Export… on `Cmd+E` and Close Window. Each of the
   three new items sends one event with the action name of this table, and the frontend runs
   the same plan with the same conditions as the keyboard layer: nothing happens while a
   dialog, a menu or the Open Media panel is open. The items stay enabled, as Quit does. A key
