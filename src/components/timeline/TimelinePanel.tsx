@@ -542,11 +542,16 @@ export function TimelinePanel({
        *
        * overscroll-behavior-x: contain stops a horizontal flick at the content edge from
        * engaging the web view's rubber-band or back gesture.
+       *
+       * The left scroll padding is the gutter width. The gutter is sticky and covers the left
+       * edge of the viewport, so a scroll that brings a focused segment into view stops to
+       * the right of the gutter and not under it.
        */}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
         className="flex min-h-0 flex-1 flex-col overflow-x-scroll overflow-y-hidden overscroll-x-contain"
+        style={{ scrollPaddingLeft: TIMELINE_GUTTER_WIDTH_PX }}
       >
         {/*
          * Shared width ancestor for both the ruler row and track row.
@@ -724,6 +729,9 @@ export function TimelinePanel({
                     videoStartPts={videoStartPts}
                     videoTimeBase={videoTimeBase}
                     totalDurationSeconds={totalDurationSeconds}
+                    laneWidthPx={laneWidthPx}
+                    timecodeDisplay={timecodeDisplay}
+                    viewportRef={scrollRef}
                   />
 
                   {/* Track playhead, after the segment group (see TrackPlayhead) */}

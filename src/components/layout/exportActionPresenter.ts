@@ -16,11 +16,10 @@
 import { isExportRunActive } from "@/components/export/exportCancelState";
 import type { ExportStatus } from "@/features/export";
 import { getActiveSourceSegmentEntries } from "@/features/timeline";
-import { isPtsString, segmentDurationTicks } from "@/lib/time";
+import { isPtsString, isValidSegmentRange } from "@/lib/time";
 import {
-  formatFrameCountTimecode,
-  formatMillisecondsFromTicks,
-  frameIndexOfTicks,
+  elapsedGridIndex,
+  formatGridCountTimecode,
   timecodePlaceholder,
   type TimecodeDisplay,
 } from "@/lib/timecode";
@@ -67,56 +66,36 @@ export interface ExportActionInput {
   readonly segmentCount: number;
   /**
    * The total duration of those segments, from `totalActiveSourceSegments` with the same
-   * source and the same display, or null when it is not known. Its unit depends on the
-   * display: frames in the frame format, ticks of the video time base in the millisecond
-   * format.
+   * display, or null when it is not known. Its unit depends on the display: whole frames in
+   * the frame format, whole milliseconds in the millisecond format.
    */
   readonly segmentTotal: bigint | null;
-  /** The video time base of the open source, or null with no media. */
-  readonly videoTimeBase: Rational | null;
   /** The timecode format of the open source (`resolveTimecodeDisplay`). */
   readonly display: TimecodeDisplay;
 }
 
 /**
- * The frame index `J` that the frame timecode names for a PTS: the frame of the elapsed time
- * `pts - videoStartPts` (ADR 028). The playhead timecode uses the same function, with the same
- * margin. Null for a PTS before the start.
- */
-function frameIndexOfPts(
-  pts: bigint,
-  startPts: bigint,
-  videoTimeBase: Rational,
-  display: Extract<TimecodeDisplay, { format: "frames" }>,
-): bigint | null {
-  return frameIndexOfTicks(
-    pts - startPts,
-    videoTimeBase,
-    display.rate,
-    display.videoTimeBase,
-  );
-}
-
-/**
  * Returns the exact total duration of the segments of the active source, as one bigint in
- * the unit that the display counts. A store selector can return it, because a bigint
- * compares by value: the selector then settles on a value that changes only with the total.
+ * the unit that the display counts: whole frames in the frame format, whole milliseconds in
+ * the millisecond format. A store selector can return it, because a bigint compares by value:
+ * the selector then settles on a value that changes only with the total.
  *
- * - Frame format: whole nominal frames. Each segment counts `J(outPts) - J(inPts)`, where `J`
- *   is the frame index that the frame timecode names for that PTS (ADR 028). The total is the
- *   sum of these counts, so it equals the sum of the frame counts of the segments. It is not
- *   made from a sum of tick lengths. A container can store each PTS rounded to its time base,
- *   so each tick length can be up to one tick more or less than a whole number of frames, and
- *   the errors of several segments add up to a wrong frame count.
- * - Millisecond format: ticks of the video time base, added exactly. The formatter rounds the
- *   sum once.
+ * Each segment counts `index(outPts - start) - index(inPts - start)`, where `index` is
+ * `elapsedGridIndex`: the frame index `J` of the frame timecode (ADR 028), or the whole
+ * milliseconds of the millisecond timecode, with the rule of the playhead (ADR 022). The total
+ * is the sum of these lengths, in both formats. The segment tooltip computes the length of
+ * each segment with the same rule (`formatElapsedTickSpan`). A segment with no width on the
+ * timeline has no tooltip, and it still counts here, because the export includes it. So the
+ * tooltip lengths add up to this total when every segment of the source has a width.
+ * The total is not a sum of tick lengths rounded once. A container can store each PTS rounded
+ * to its time base, so a tick length can be up to one tick more or less than a whole number of
+ * frames or milliseconds, and a rounded tick length can disagree with the two ends.
  *
  * Only the segments of the active source count. They share one time base, so their values can
  * be added (ADR 002, ADR 007).
  *
- * Returns null when the total is not known: no source, or a segment of the active source with
- * no valid range. In the frame format it also returns null with no valid start PTS, or for a
- * PTS before the start, because the frame timecode then names no frame.
+ * Returns null when the total is not known: no source, no valid start PTS, a segment of the
+ * active source with no valid range, or an end that has no index (see `elapsedGridIndex`).
  */
 export function totalActiveSourceSegments(
   segments: readonly Segment[],
@@ -124,65 +103,32 @@ export function totalActiveSourceSegments(
   source: SegmentTotalSource | null,
   display: TimecodeDisplay,
 ): bigint | null {
-  if (source === null) {
-    return null;
-  }
-  const entries = getActiveSourceSegmentEntries(segments, activeSourceId);
-
-  if (display.format === "milliseconds") {
-    let ticks = 0n;
-    for (const { segment } of entries) {
-      const length = segmentDurationTicks(segment.inPts, segment.outPts);
-      if (length === null) {
-        return null;
-      }
-      ticks += length;
-    }
-    return ticks;
-  }
-
-  if (!isPtsString(source.videoStartPts)) {
+  if (source === null || !isPtsString(source.videoStartPts)) {
     return null;
   }
   const startPts = BigInt(source.videoStartPts);
-  let frames = 0n;
-  for (const { segment } of entries) {
+  let total = 0n;
+  for (const { segment } of getActiveSourceSegmentEntries(segments, activeSourceId)) {
     // A valid range means two canonical PTS values with inPts < outPts.
-    if (segmentDurationTicks(segment.inPts, segment.outPts) === null) {
+    if (!isValidSegmentRange(segment.inPts, segment.outPts)) {
       return null;
     }
-    const inFrame = frameIndexOfPts(
-      BigInt(segment.inPts),
-      startPts,
+    const inIndex = elapsedGridIndex(
+      BigInt(segment.inPts) - startPts,
       source.videoTimeBase,
       display,
     );
-    const outFrame = frameIndexOfPts(
-      BigInt(segment.outPts),
-      startPts,
+    const outIndex = elapsedGridIndex(
+      BigInt(segment.outPts) - startPts,
       source.videoTimeBase,
       display,
     );
-    if (inFrame === null || outFrame === null) {
+    if (inIndex === null || outIndex === null) {
       return null;
     }
-    frames += outFrame - inFrame;
+    total += outIndex - inIndex;
   }
-  return frames;
-}
-
-/** Formats a value of `totalActiveSourceSegments` in the display that produced it. */
-function formatSegmentTotal(
-  total: bigint,
-  videoTimeBase: Rational | null,
-  display: TimecodeDisplay,
-): string {
-  if (display.format === "frames") {
-    return formatFrameCountTimecode(total, display.rate);
-  }
-  return videoTimeBase === null
-    ? timecodePlaceholder(display)
-    : formatMillisecondsFromTicks(total, videoTimeBase);
+  return total;
 }
 
 /**
@@ -230,7 +176,7 @@ export function presentExportAction(input: ExportActionInput): ExportActionView 
   const duration =
     input.segmentTotal === null
       ? timecodePlaceholder(input.display)
-      : formatSegmentTotal(input.segmentTotal, input.videoTimeBase, input.display);
+      : formatGridCountTimecode(input.segmentTotal, input.display);
 
   return {
     disabled: false,

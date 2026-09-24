@@ -59,7 +59,6 @@ function input(overrides: Partial<ExportActionInput> = {}): ExportActionInput {
     segmentCount: 2,
     // 251 frames at 25 fps.
     segmentTotal: 251n,
-    videoTimeBase: ms,
     display: framesDisplay(fps25),
     ...overrides,
   };
@@ -153,7 +152,7 @@ describe("presentExportAction", () => {
     });
   });
 
-  it("formats the tick total in the millisecond format", () => {
+  it("formats the millisecond total in the millisecond format", () => {
     const view = presentExportAction(
       input({ segmentTotal: 10_040n, display: MILLISECONDS_TIMECODE_DISPLAY }),
     );
@@ -182,8 +181,7 @@ describe("presentExportAction", () => {
     expect(
       presentExportAction(
         input({
-          segmentTotal: 10_040n,
-          videoTimeBase: null,
+          segmentTotal: -1n,
           display: MILLISECONDS_TIMECODE_DISPLAY,
         }),
       ).label,
@@ -295,6 +293,19 @@ describe("totalActiveSourceSegments", () => {
       ).toBe(0n);
     });
 
+    it("counts a PTS before the start with the signed index of its timecode", () => {
+      // From a start of 100 ms, [0, 400) is -100 to 300 ms. Its In timecode is
+      // -00:00:00:02 and its Out timecode 00:00:00:07, so the segment tooltip shows 9 frames.
+      expect(
+        totalActiveSourceSegments(
+          [segment("a", "src", "0", "400")],
+          "src",
+          source("100"),
+          framesDisplay(fps25),
+        ),
+      ).toBe(9n);
+    });
+
     it("reads the segments of the active source only", () => {
       const segments = [
         segment("a", "s1", "0", "400"),
@@ -315,10 +326,6 @@ describe("totalActiveSourceSegments", () => {
       expect(totalActiveSourceSegments(valid, "src", null, display)).toBeNull();
       expect(totalActiveSourceSegments(valid, "src", source(null), display)).toBeNull();
       expect(totalActiveSourceSegments(valid, "src", source("x"), display)).toBeNull();
-      // A PTS before the start names no frame.
-      expect(
-        totalActiveSourceSegments(valid, "src", source("100"), display),
-      ).toBeNull();
       expect(
         totalActiveSourceSegments(
           [segment("a", "src", "0", "400"), segment("b", "src", "500", "500")],
@@ -333,7 +340,7 @@ describe("totalActiveSourceSegments", () => {
   describe("in the millisecond format", () => {
     const display = MILLISECONDS_TIMECODE_DISPLAY;
 
-    it("adds the ticks of the segments of the active source only", () => {
+    it("adds the milliseconds of the segments of the active source only", () => {
       const segments = [
         segment("a", "s1", "100", "400"),
         segment("b", "s2", "0", "999999"),
@@ -345,7 +352,15 @@ describe("totalActiveSourceSegments", () => {
       );
     });
 
-    it("needs no start PTS", () => {
+    it("counts from the start PTS, and needs one, as the frame format does", () => {
+      expect(
+        totalActiveSourceSegments(
+          [segment("a", "s", "107", "407")],
+          "s",
+          source("7"),
+          display,
+        ),
+      ).toBe(300n);
       expect(
         totalActiveSourceSegments(
           [segment("a", "s", "100", "400")],
@@ -353,7 +368,31 @@ describe("totalActiveSourceSegments", () => {
           source(null),
           display,
         ),
-      ).toBe(300n);
+      ).toBeNull();
+    });
+
+    it("counts Out minus In on the millisecond grid of the playhead", () => {
+      // 30 fps with a 1/600 time base: frames 1, 2 and 3 start at 20, 40 and 60 ticks, which
+      // the playhead shows as 0.033, 0.067 and 0.100. Frame 1 lasts 34 ms and frame 2 33 ms,
+      // although each tick length is 33.33 ms.
+      const tb600: SegmentTotalSource = {
+        videoTimeBase: { n: 1, d: 600 },
+        videoStartPts: "0" as Pts,
+      };
+      expect(
+        totalActiveSourceSegments([segment("a", "s", "20", "40")], "s", tb600, display),
+      ).toBe(34n);
+      expect(
+        totalActiveSourceSegments(
+          [segment("a", "s", "20", "40"), segment("b", "s", "40", "60")],
+          "s",
+          tb600,
+          display,
+        ),
+      ).toBe(67n);
+      expect(
+        presentExportAction(input({ segmentTotal: 34n, display })).label,
+      ).toMatchObject({ duration: "00:00:00.034" });
     });
 
     it("returns zero with no segment of the active source, or no active source", () => {
@@ -363,12 +402,17 @@ describe("totalActiveSourceSegments", () => {
       expect(totalActiveSourceSegments(segments, null, source(), display)).toBe(0n);
     });
 
-    it("keeps the sum exact beyond the safe integer range", () => {
+    it("returns null for an end that the millisecond timecode cannot show", () => {
+      // Beyond the safe integer range, the playhead timecode cannot convert the ticks either.
       const big = "9007199254740993";
-      const segments = [segment("a", "s", "0", big), segment("b", "s", "0", big)];
-      expect(totalActiveSourceSegments(segments, "s", source(), display)).toBe(
-        18_014_398_509_481_986n,
-      );
+      expect(
+        totalActiveSourceSegments(
+          [segment("a", "s", "0", big)],
+          "s",
+          source(),
+          display,
+        ),
+      ).toBeNull();
     });
 
     it("returns null when the total is not known", () => {

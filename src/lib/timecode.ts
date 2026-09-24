@@ -17,12 +17,16 @@
  * interval. Each frame therefore has one number, and a seek target inside a frame shows the
  * same number as the frame that answers it (ADR 022).
  *
+ * `formatElapsedTickSpan` writes the start, the end and the duration of a span, such as a
+ * segment, in the same two formats.
+ *
  * `FF` is a display rule only. No edit, seek or export reads it, and a mark still stores the
  * PTS of the frame on screen (ADR 028). The functions here are pure. Which format applies to
  * a source is decided by `resolveTimecodeDisplay` in the playback feature.
  */
 
-import type { Rational } from "@/types/project";
+import { isPtsString, ticksToSeconds } from "@/lib/time";
+import type { Pts, Rational, TickCount } from "@/types/project";
 
 /** The timecode format that the user selects in Settings. */
 export type TimecodeFormat = "frames" | "milliseconds";
@@ -269,12 +273,20 @@ function formatClock(wholeSeconds: bigint): string {
   return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
 }
 
+/** Frame `frame` of the nominal grid, as the whole second of its start and `FF`. */
+interface GridFrame {
+  /** The whole seconds of the nominal start of the frame, `frame / rate` rounded down. */
+  readonly second: bigint;
+  /** `FF`, padded to the digit count of the rate. */
+  readonly ff: string;
+}
+
 /**
- * Names frame `frame` of the nominal grid, which starts at `frame / rate` seconds: the whole
- * seconds of that start, and the index of the frame among the frames that start in that
- * second. The caller validates the rate and passes a non-negative frame.
+ * Splits frame `frame` of the nominal grid, which starts at `frame / rate` seconds, into the
+ * whole seconds of that start and the index of the frame among the frames that start in that
+ * second (ADR 028). The caller validates the rate and passes a non-negative frame.
  */
-function formatGridFrame(frame: bigint, rate: Rational): string {
+function splitGridFrame(frame: bigint, rate: Rational): GridFrame {
   const n = BigInt(rate.n);
   const d = BigInt(rate.d);
   const second = (frame * d) / n;
@@ -283,6 +295,15 @@ function formatGridFrame(frame: bigint, rate: Rational): string {
   const ff = (frame - firstFrameOfSecond)
     .toString()
     .padStart(frameIndexDigits(rate), "0");
+  return { second, ff };
+}
+
+/**
+ * Names frame `frame` of the nominal grid as `HH:MM:SS:FF`. The caller validates the rate and
+ * passes a non-negative frame.
+ */
+function formatGridFrame(frame: bigint, rate: Rational): string {
+  const { second, ff } = splitGridFrame(frame, rate);
   return `${formatClock(second)}:${ff}`;
 }
 
@@ -399,34 +420,44 @@ export function formatFrameTimecodeFromTicks(
 }
 
 /**
+ * The whole milliseconds that the millisecond format shows for a non-negative time: the
+ * time rounded to the millisecond. Null for a value that is not finite, a negative value, or
+ * a result that is not a safe integer.
+ */
+function millisecondIndex(seconds: number): bigint | null {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+    return null;
+  }
+  const milliseconds = seconds * 1000;
+  if (!Number.isFinite(milliseconds)) {
+    return null;
+  }
+  const totalMs = Math.round(milliseconds);
+  if (!Number.isSafeInteger(totalMs)) {
+    return null;
+  }
+  return BigInt(totalMs);
+}
+
+/** The `.mmm` part of a non-negative count of whole milliseconds. */
+function millisecondPart(totalMs: bigint): string {
+  return `.${(totalMs % 1000n).toString().padStart(3, "0")}`;
+}
+
+/** Writes a non-negative count of whole milliseconds as `HH:MM:SS.mmm`. */
+function formatMillisecondIndex(totalMs: bigint): string {
+  return `${formatClock(totalMs / 1000n)}${millisecondPart(totalMs)}`;
+}
+
+/**
  * Formats a non-negative floating-point seconds value as `HH:MM:SS.mmm`, rounded to the
  * millisecond. An invalid value formats as `00:00:00.000`.
  *
  * @param seconds Non-negative finite duration in seconds.
  */
 export function formatMillisecondsTimecode(seconds: number): string {
-  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
-    return "00:00:00.000";
-  }
-
-  const milliseconds = seconds * 1000;
-  if (!Number.isFinite(milliseconds)) {
-    return "00:00:00.000";
-  }
-  const totalMs = Math.round(milliseconds);
-  if (!Number.isSafeInteger(totalMs)) {
-    return "00:00:00.000";
-  }
-  const ms = totalMs % 1000;
-  const totalSec = Math.floor(totalMs / 1000);
-  const ss = totalSec % 60;
-  const totalMin = Math.floor(totalSec / 60);
-  const mm = totalMin % 60;
-  const hh = Math.floor(totalMin / 60);
-
-  const pad3 = (n: number) => String(n).padStart(3, "0");
-
-  return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}.${pad3(ms)}`;
+  const totalMs = millisecondIndex(seconds);
+  return totalMs === null ? "00:00:00.000" : formatMillisecondIndex(totalMs);
 }
 
 /**
@@ -444,51 +475,296 @@ export function formatElapsedTimecode(
     : formatMillisecondsTimecode(elapsedSeconds);
 }
 
-/** The quotient `num / den` rounded to the nearest integer, with a half rounded up. */
-function roundHalfUp(num: bigint, den: bigint): bigint {
-  return (2n * num + den) / (2n * den);
+/**
+ * A signed tick count as a position on the grid of a display: a frame of the nominal grid
+ * in the frame format, or whole milliseconds in the millisecond format. A negative tick
+ * count has the position of its magnitude with a minus sign, because the timecode of a
+ * negative time is the timecode of its magnitude with a minus sign.
+ */
+interface GridPosition {
+  readonly negative: boolean;
+  /** The frame index or the whole milliseconds of the magnitude. */
+  readonly magnitude: bigint;
 }
 
 /**
- * Formats a non-negative whole number of nominal frames as `HH:MM:SS:FF`, such as the length
- * of a span in frames. It names the frame with that index on the nominal grid, as the
- * elapsed-time rule does, so 30 frames at 25 fps show `00:00:01:05`. A negative count or an
- * invalid rate returns the placeholder.
+ * Finds the grid position of a signed tick count, with the rule that its timecode uses.
  *
- * The frame count of the span from tick count `a` to tick count `b` is
- * `frameIndexOfTicks(b) - frameIndexOfTicks(a)`: the difference of the frame numbers that the
- * frame timecode shows at the two ends. For several spans, add these counts. Do not count the
- * frames of a tick length `b - a`. A container can store each PTS rounded to its time base, so
- * a tick length can be up to one tick more or less than a whole number of frames. A count from
- * it can then disagree with the two ends, and the errors of several spans add up.
+ * - The frame format takes the frame index `J` of the magnitude from `frameIndexOfTicks`, the
+ *   one frame index rule of the frame timecode (ADR 028), with the frame boundary margin of
+ *   the display. The arithmetic is exact BigInt.
+ * - The millisecond format converts the magnitude to seconds with the checked helper, then
+ *   rounds to the millisecond, as `formatMillisecondsTimecode` does for the playhead.
  *
- * @param frames The number of frames.
- * @param rate The nominal frame rate.
+ * Returns null for an invalid time base, a frame display with an invalid rate, or a
+ * magnitude that the checked conversion to seconds refuses.
  */
-export function formatFrameCountTimecode(frames: bigint, rate: Rational): string {
-  if (!isValidRate(rate)) {
+function gridPosition(
+  deltaTicks: bigint,
+  timeBase: Rational,
+  display: TimecodeDisplay,
+): GridPosition | null {
+  if (typeof deltaTicks !== "bigint" || !isValidRate(timeBase)) {
+    return null;
+  }
+  const negative = deltaTicks < 0n;
+  const magnitude = negative ? -deltaTicks : deltaTicks;
+  if (display.format === "frames") {
+    const frame = frameIndexOfTicks(
+      magnitude,
+      timeBase,
+      display.rate,
+      display.videoTimeBase,
+    );
+    return frame === null ? null : { negative, magnitude: frame };
+  }
+  const seconds = ticksToSeconds(magnitude.toString() as TickCount, timeBase);
+  const totalMs = seconds === null ? null : millisecondIndex(seconds);
+  return totalMs === null ? null : { negative, magnitude: totalMs };
+}
+
+/** The grid position as a signed count: frames or milliseconds. */
+function signedGridIndex(position: GridPosition): bigint {
+  return position.negative ? -position.magnitude : position.magnitude;
+}
+
+/** Writes a grid position as a timecode. A negative position takes a leading minus sign. */
+function formatGridPosition(position: GridPosition, display: TimecodeDisplay): string {
+  const formatted =
+    display.format === "frames"
+      ? formatGridFrame(position.magnitude, display.rate)
+      : formatMillisecondIndex(position.magnitude);
+  return position.negative ? `-${formatted}` : formatted;
+}
+
+/**
+ * Formats a signed tick count in a time base as elapsed time in a display's format. A
+ * negative count formats as its magnitude with a leading minus sign. The frame format uses
+ * exact rational arithmetic, with the frame boundary margin of the display. The millisecond
+ * format converts the magnitude to seconds with the checked helper.
+ *
+ * Returns null for an invalid time base, a frame display with an invalid rate, or a
+ * magnitude that is too large for the checked conversion to seconds.
+ *
+ * @param deltaTicks Ticks from the start of the source.
+ * @param timeBase Seconds per tick.
+ * @param display The format that applies to the source.
+ */
+export function formatSignedElapsedTicks(
+  deltaTicks: bigint,
+  timeBase: Rational,
+  display: TimecodeDisplay,
+): string | null {
+  const position = gridPosition(deltaTicks, timeBase, display);
+  return position === null ? null : formatGridPosition(position, display);
+}
+
+/**
+ * Formats a PTS as elapsed time from the start PTS of its video stream (ADR 003):
+ * `(pts - videoStartPts) * videoTimeBase`.
+ *
+ * The frame format computes `FF` from the exact tick delta, so an exact frame start never
+ * shows the frame before it. A negative elapsed time takes a leading minus sign. Invalid
+ * input formats as zero.
+ *
+ * @param pts A presentation timestamp of the source video stream.
+ * @param videoStartPts The presentation timestamp origin of the source video stream.
+ * @param videoTimeBase The rational time base of the video stream.
+ * @param display The timecode format of the source. Defaults to milliseconds.
+ */
+export function formatSourceRelativeTime(
+  pts: Pts,
+  videoStartPts: Pts,
+  videoTimeBase: Rational,
+  display: TimecodeDisplay = MILLISECONDS_TIMECODE_DISPLAY,
+): string {
+  const zero = formatElapsedTimecode(0, display);
+  if (!isPtsString(pts) || !isPtsString(videoStartPts) || !isValidRate(videoTimeBase)) {
+    return zero;
+  }
+  const deltaTicks = BigInt(pts) - BigInt(videoStartPts);
+  return formatSignedElapsedTicks(deltaTicks, videoTimeBase, display) ?? zero;
+}
+
+/**
+ * How a duration is written.
+ *
+ * - `full` has every group, as the playhead timecode does: `00:00:05:12` or `00:00:05.012`.
+ * - `compact` drops the leading groups that are zero. See `formatCompactClock`.
+ */
+type DurationStyle = "full" | "compact";
+
+/**
+ * Writes whole seconds and the part after them (`:FF` or `.mmm`) as a compact duration.
+ *
+ * It drops the hour group and the minute group while they are zero, and writes the first
+ * group that stays without a leading zero, except as below:
+ *
+ * - Frames: `SS:FF` below one minute, then `M:SS:FF`, then `H:MM:SS:FF`. The seconds keep two
+ *   digits below one minute. So a short duration is the tail of its full timecode (`05:12`
+ *   ends `00:00:05:12`), and it does not have the `M:SS` shape of a media player clock.
+ * - Milliseconds: `S.mmm` below one minute, then `M:SS.mmm`, then `H:MM:SS.mmm`. The decimal
+ *   point already marks the seconds.
+ */
+function formatCompactClock(
+  wholeSeconds: bigint,
+  rest: string,
+  padSeconds: boolean,
+): string {
+  const ss = wholeSeconds % 60n;
+  const totalMinutes = wholeSeconds / 60n;
+  const mm = totalMinutes % 60n;
+  const hh = totalMinutes / 60n;
+  if (hh > 0n) {
+    return `${hh.toString()}:${pad2(mm)}:${pad2(ss)}${rest}`;
+  }
+  if (mm > 0n) {
+    return `${mm.toString()}:${pad2(ss)}${rest}`;
+  }
+  return `${padSeconds ? pad2(ss) : ss.toString()}${rest}`;
+}
+
+/**
+ * Writes a non-negative count of frames or milliseconds as a duration. The full style is the
+ * timecode of the grid position `count`, so it uses the same formatters as the playhead.
+ */
+function formatGridDuration(
+  count: bigint,
+  display: TimecodeDisplay,
+  style: DurationStyle,
+): string {
+  if (display.format === "frames") {
+    if (style === "full") {
+      return formatGridFrame(count, display.rate);
+    }
+    const { second, ff } = splitGridFrame(count, display.rate);
+    return formatCompactClock(second, `:${ff}`, true);
+  }
+  if (style === "full") {
+    return formatMillisecondIndex(count);
+  }
+  return formatCompactClock(count / 1000n, millisecondPart(count), false);
+}
+
+/**
+ * Returns the signed grid index of an elapsed tick count: the frame index `J` in the frame
+ * format (`frameIndexOfTicks`), or the whole milliseconds in the millisecond format. Each
+ * index uses the rule that the playhead timecode uses, so an end shows the same number in a
+ * segment tooltip and on the playhead (ADR 022, ADR 028). A negative tick count has the index
+ * of its magnitude with a minus sign, as its timecode has.
+ *
+ * The length of a span of ticks `[a, b)` on the grid is `elapsedGridIndex(b) -
+ * elapsedGridIndex(a)`: the difference of the numbers that the timecode shows at the two
+ * ends. For several spans, add these lengths. Do not round a tick length `b - a`. A container
+ * can store each PTS rounded to its time base, so a tick length can be up to one tick more or
+ * less than a whole number of frames or milliseconds, and a length from it can disagree with
+ * the two ends. The errors of several spans also add up.
+ *
+ * Returns null for an invalid time base, a frame display with an invalid rate, or a
+ * magnitude that the checked conversion to seconds of the millisecond format refuses.
+ *
+ * @param deltaTicks Ticks from the start of the source.
+ * @param timeBase Seconds per tick.
+ * @param display The format that applies to the source.
+ */
+export function elapsedGridIndex(
+  deltaTicks: bigint,
+  timeBase: Rational,
+  display: TimecodeDisplay,
+): bigint | null {
+  const position = gridPosition(deltaTicks, timeBase, display);
+  return position === null ? null : signedGridIndex(position);
+}
+
+/**
+ * Formats a non-negative length on the grid of a display, such as a value that
+ * `elapsedGridIndex` differences add up to, in the full style: whole frames as
+ * `HH:MM:SS:FF` or whole milliseconds as `HH:MM:SS.mmm`. A frame count is written with the
+ * `FF` rule (ADR 028), so 30 frames at 25 fps show `00:00:01:05`, and 30 frames at 29.97 fps
+ * show `00:00:01:00`. A negative count, or a frame display with an invalid rate, returns the
+ * placeholder of the display.
+ *
+ * @param count Whole frames in the frame format, whole milliseconds in the millisecond format.
+ * @param display The format that applies to the source.
+ */
+export function formatGridCountTimecode(
+  count: bigint,
+  display: TimecodeDisplay,
+): string {
+  if (display.format === "frames" && !isValidRate(display.rate)) {
     return FRAME_TIMECODE_PLACEHOLDER;
   }
-  if (typeof frames !== "bigint" || frames < 0n) {
-    return frameTimecodePlaceholder(rate);
+  if (typeof count !== "bigint" || count < 0n) {
+    return timecodePlaceholder(display);
   }
-  return formatGridFrame(frames, rate);
+  return formatGridDuration(count, display, "full");
+}
+
+/** The In time, the Out time and the duration of a half-open span of ticks. */
+export interface ElapsedTickSpan {
+  /** The elapsed time of the start, as `formatSignedElapsedTicks` writes it. */
+  readonly inTime: string;
+  /** The elapsed time of the end, the first tick after the span (ADR 002). */
+  readonly outTime: string;
+  /** The duration in the full style: `00:00:05:12` or `00:00:05.012`. */
+  readonly duration: string;
+  /**
+   * The duration in the compact style: `05:12`, `1:05:12` or `1:01:05:12` for frames, and
+   * `5.012`, `1:05.012` or `1:01:05.012` for milliseconds.
+   */
+  readonly compactDuration: string;
 }
 
 /**
- * Formats a non-negative tick count in a time base as `HH:MM:SS.mmm`, such as a duration. It
- * rounds to the nearest millisecond, with a half rounded up, and the arithmetic is exact
- * (ADR 002). A negative tick count or an invalid time base returns the millisecond
- * placeholder, because the time is not known.
+ * Formats the start, the end and the duration of a half-open span `[inTicks, outTicks)` of
+ * elapsed ticks, such as a segment.
  *
- * @param ticks The tick count.
+ * The duration is the distance between the grid positions of the two ends: the frame index of
+ * the Out time minus the frame index of the In time, or the whole milliseconds of the Out time
+ * minus those of the In time. Each index uses the rule of its own timecode (ADR 028), so the
+ * three values always agree: the In time plus the duration is the Out time. The frame format
+ * uses exact BigInt arithmetic.
+ *
+ * The duration is written with the `HH:MM:SS:FF` rule (ADR 028) applied to the frame count:
+ * the whole seconds of the nominal start of frame `count`, and `FF`. So 30 frames at 29.97 fps
+ * is `01:00`, as frame 30 is `00:00:01:00`.
+ *
+ * Returns null when `inTicks` is after `outTicks`, or when either end has no grid position
+ * (see `formatSignedElapsedTicks`).
+ *
+ * @param inTicks The first tick of the span, from the start of the source.
+ * @param outTicks The first tick after the span, from the start of the source.
  * @param timeBase Seconds per tick.
+ * @param display The format that applies to the source.
  */
-export function formatMillisecondsFromTicks(ticks: bigint, timeBase: Rational): string {
-  if (typeof ticks !== "bigint" || ticks < 0n || !isValidRate(timeBase)) {
-    return MILLISECONDS_TIMECODE_PLACEHOLDER;
+export function formatElapsedTickSpan(
+  inTicks: bigint,
+  outTicks: bigint,
+  timeBase: Rational,
+  display: TimecodeDisplay,
+): ElapsedTickSpan | null {
+  if (
+    typeof inTicks !== "bigint" ||
+    typeof outTicks !== "bigint" ||
+    inTicks > outTicks
+  ) {
+    return null;
   }
-  const totalMs = roundHalfUp(ticks * BigInt(timeBase.n) * 1000n, BigInt(timeBase.d));
-  const ms = (totalMs % 1000n).toString().padStart(3, "0");
-  return `${formatClock(totalMs / 1000n)}.${ms}`;
+  const start = gridPosition(inTicks, timeBase, display);
+  const end = gridPosition(outTicks, timeBase, display);
+  if (start === null || end === null) {
+    return null;
+  }
+  // The grid position never decreases as the tick count increases, also across zero, so the
+  // count is not negative. The check keeps a broken rule from writing a negative length.
+  const count = signedGridIndex(end) - signedGridIndex(start);
+  if (count < 0n) {
+    return null;
+  }
+  return {
+    inTime: formatGridPosition(start, display),
+    outTime: formatGridPosition(end, display),
+    duration: formatGridDuration(count, display, "full"),
+    compactDuration: formatGridDuration(count, display, "compact"),
+  };
 }

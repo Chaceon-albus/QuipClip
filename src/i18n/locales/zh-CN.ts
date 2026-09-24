@@ -172,6 +172,15 @@ export const zhCN: TranslationCatalog = {
     seekSlider: "时间轴定位",
     segmentList: "时间轴片段",
     segment: "片段 {{index}}",
+    segmentLabel: "片段 {{index}}，{{inTime}} 至 {{outTime}}，时长 {{duration}}",
+    segmentDescription: "导出顺序：第 {{order}} 个，共 {{total}} 个。不含出点。",
+    segmentTooltip: {
+      exportOrder: "导出顺序：第 {{order}} 个，共 {{total}} 个",
+      in: "入点",
+      out: "出点",
+      notIncluded: "（不含）",
+      duration: "时长",
+    },
     pendingInFlag: "入点",
     zoom: {
       group: "时间轴缩放",

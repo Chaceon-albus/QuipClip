@@ -1,22 +1,26 @@
 import { describe, expect, it } from "vitest";
-import type { Rational } from "@/types/project";
+import type { Pts, Rational } from "@/types/project";
 import {
   FRAME_TIMECODE_PLACEHOLDER,
   MILLISECONDS_TIMECODE_DISPLAY,
   MILLISECONDS_TIMECODE_PLACEHOLDER,
   TIMECODE_FORMATS,
+  elapsedGridIndex,
+  formatElapsedTickSpan,
   formatElapsedTimecode,
-  formatFrameCountTimecode,
   formatFrameTimecode,
   formatFrameTimecodeFromTicks,
-  formatMillisecondsFromTicks,
+  formatGridCountTimecode,
   formatMillisecondsTimecode,
+  formatSignedElapsedTicks,
+  formatSourceRelativeTime,
   frameBoundaryMarginSeconds,
   frameIndexDigits,
   frameIndexOfTicks,
   isFrameGridExact,
   frameTimecodePlaceholder,
   timecodePlaceholder,
+  type TimecodeDisplay,
 } from "./timecode";
 
 const fps24: Rational = { n: 24, d: 1 };
@@ -960,7 +964,13 @@ describe("frameIndexOfTicks", () => {
     (_label, rate, timeBase, startPts, pts, frame, timecode) => {
       const elapsed = pts - startPts;
       expect(frameIndexOfTicks(elapsed, timeBase, rate, timeBase)).toBe(frame);
-      expect(formatFrameCountTimecode(frame, rate)).toBe(timecode);
+      expect(
+        formatGridCountTimecode(frame, {
+          format: "frames",
+          rate,
+          videoTimeBase: timeBase,
+        }),
+      ).toBe(timecode);
       expect(formatFrameTimecodeFromTicks(elapsed, timeBase, rate, timeBase)).toBe(
         timecode,
       );
@@ -988,44 +998,363 @@ describe("frameIndexOfTicks", () => {
   });
 });
 
-describe("formatFrameCountTimecode", () => {
+describe("formatGridCountTimecode", () => {
+  const frames = (rate: Rational): TimecodeDisplay => ({
+    format: "frames",
+    rate,
+    videoTimeBase: null,
+  });
+
   it("names the frame with that index on the nominal grid", () => {
-    expect(formatFrameCountTimecode(0n, fps25)).toBe("00:00:00:00");
-    expect(formatFrameCountTimecode(30n, fps25)).toBe("00:00:01:05");
-    expect(formatFrameCountTimecode(90_000n, fps25)).toBe("01:00:00:00");
+    expect(formatGridCountTimecode(0n, frames(fps25))).toBe("00:00:00:00");
+    expect(formatGridCountTimecode(30n, frames(fps25))).toBe("00:00:01:05");
+    expect(formatGridCountTimecode(90_000n, frames(fps25))).toBe("01:00:00:00");
     // 30 frames at 29.97 fps last 1.001 s: frame 30 is the first frame of second 1.
-    expect(formatFrameCountTimecode(29n, fps2997)).toBe("00:00:00:29");
-    expect(formatFrameCountTimecode(30n, fps2997)).toBe("00:00:01:00");
-    expect(formatFrameCountTimecode(119n, fps120)).toBe("00:00:00:119");
+    expect(formatGridCountTimecode(29n, frames(fps2997))).toBe("00:00:00:29");
+    expect(formatGridCountTimecode(30n, frames(fps2997))).toBe("00:00:01:00");
+    expect(formatGridCountTimecode(119n, frames(fps120))).toBe("00:00:00:119");
+  });
+
+  it("writes whole milliseconds in the millisecond format", () => {
+    expect(formatGridCountTimecode(0n, MILLISECONDS_TIMECODE_DISPLAY)).toBe(
+      "00:00:00.000",
+    );
+    expect(formatGridCountTimecode(34n, MILLISECONDS_TIMECODE_DISPLAY)).toBe(
+      "00:00:00.034",
+    );
+    expect(formatGridCountTimecode(3_723_456n, MILLISECONDS_TIMECODE_DISPLAY)).toBe(
+      "01:02:03.456",
+    );
   });
 
   it("returns the placeholder for a count it cannot format", () => {
-    expect(formatFrameCountTimecode(-1n, fps25)).toBe("--:--:--:--");
-    expect(formatFrameCountTimecode(-1n, fps120)).toBe("--:--:--:---");
-    expect(formatFrameCountTimecode(1n, { n: 0, d: 1 })).toBe(
+    expect(formatGridCountTimecode(-1n, frames(fps25))).toBe("--:--:--:--");
+    expect(formatGridCountTimecode(-1n, frames(fps120))).toBe("--:--:--:---");
+    expect(formatGridCountTimecode(-1n, MILLISECONDS_TIMECODE_DISPLAY)).toBe(
+      MILLISECONDS_TIMECODE_PLACEHOLDER,
+    );
+    expect(formatGridCountTimecode(1n, frames({ n: 0, d: 1 }))).toBe(
       FRAME_TIMECODE_PLACEHOLDER,
     );
   });
 });
 
-describe("formatMillisecondsFromTicks", () => {
+describe("elapsedGridIndex", () => {
   const tb = (n: number, d: number): Rational => ({ n, d });
 
-  it("rounds to the nearest millisecond, with a half rounded up", () => {
-    expect(formatMillisecondsFromTicks(0n, tb(1, 1000))).toBe("00:00:00.000");
-    expect(formatMillisecondsFromTicks(90_090n, tb(1, 90_000))).toBe("00:00:01.001");
-    // 0.5 ms rounds up, 0.4 ms rounds down.
-    expect(formatMillisecondsFromTicks(1n, tb(1, 2000))).toBe("00:00:00.001");
-    expect(formatMillisecondsFromTicks(2n, tb(1, 5000))).toBe("00:00:00.000");
-    expect(formatMillisecondsFromTicks(3_723_456n, tb(1, 1000))).toBe("01:02:03.456");
+  it("is the frame index of the frame timecode, with a sign for a negative count", () => {
+    const display: TimecodeDisplay = {
+      format: "frames",
+      rate: fps2997,
+      videoTimeBase: tb(1, 1000),
+    };
+    for (const ticks of [0n, 334n, 500n, 501n, 5372n, 123_456n]) {
+      expect(elapsedGridIndex(ticks, tb(1, 1000), display)).toBe(
+        frameIndexOfTicks(ticks, tb(1, 1000), fps2997, tb(1, 1000)),
+      );
+      expect(elapsedGridIndex(-ticks, tb(1, 1000), display)).toBe(
+        -(frameIndexOfTicks(ticks, tb(1, 1000), fps2997, tb(1, 1000)) ?? 0n),
+      );
+    }
   });
 
-  it("returns the millisecond placeholder for a value it cannot format", () => {
-    expect(formatMillisecondsFromTicks(-1n, tb(1, 1000))).toBe(
-      MILLISECONDS_TIMECODE_PLACEHOLDER,
+  it("is the whole milliseconds of the millisecond timecode, as the playhead rounds them", () => {
+    // 30 fps with a 1/600 time base: frame 1 starts at 20 ticks (33.33 ms), frame 2 at 40
+    // ticks (66.67 ms). The playhead shows 0.033 and 0.067, so the frame lasts 34 ms.
+    const tb600 = tb(1, 600);
+    expect(elapsedGridIndex(20n, tb600, MILLISECONDS_TIMECODE_DISPLAY)).toBe(33n);
+    expect(elapsedGridIndex(40n, tb600, MILLISECONDS_TIMECODE_DISPLAY)).toBe(67n);
+    expect(formatMillisecondsTimecode(20 / 600)).toBe("00:00:00.033");
+    expect(formatMillisecondsTimecode(40 / 600)).toBe("00:00:00.067");
+    // Each index is the number that the timecode of that end shows.
+    for (const ticks of [0n, 1n, 299n, 300n, 301n, 1_234_567n]) {
+      const shown = formatMillisecondsTimecode(Number(ticks) / 600);
+      const index =
+        elapsedGridIndex(ticks, tb600, MILLISECONDS_TIMECODE_DISPLAY) ?? -1n;
+      expect(formatGridCountTimecode(index, MILLISECONDS_TIMECODE_DISPLAY)).toBe(shown);
+    }
+    expect(elapsedGridIndex(-20n, tb600, MILLISECONDS_TIMECODE_DISPLAY)).toBe(-33n);
+  });
+
+  it("returns null for a value that has no index", () => {
+    expect(elapsedGridIndex(1n, tb(0, 1), MILLISECONDS_TIMECODE_DISPLAY)).toBeNull();
+    expect(
+      elapsedGridIndex(1n, tb(1, 25), {
+        format: "frames",
+        rate: tb(0, 1),
+        videoTimeBase: null,
+      }),
+    ).toBeNull();
+    // Beyond the safe integer range, the millisecond display cannot convert the ticks.
+    expect(
+      elapsedGridIndex(2n ** 60n, tb(1, 25), MILLISECONDS_TIMECODE_DISPLAY),
+    ).toBeNull();
+  });
+});
+
+describe("formatSignedElapsedTicks", () => {
+  const tb25: Rational = { n: 1, d: 25 };
+  const frames25: TimecodeDisplay = {
+    format: "frames",
+    rate: fps25,
+    videoTimeBase: tb25,
+  };
+
+  it("formats a tick count in both formats, with a minus sign for a negative count", () => {
+    expect(formatSignedElapsedTicks(37n, tb25, frames25)).toBe("00:00:01:12");
+    expect(formatSignedElapsedTicks(-37n, tb25, frames25)).toBe("-00:00:01:12");
+    expect(formatSignedElapsedTicks(37n, tb25, MILLISECONDS_TIMECODE_DISPLAY)).toBe(
+      "00:00:01.480",
     );
-    expect(formatMillisecondsFromTicks(1n, tb(0, 1))).toBe(
-      MILLISECONDS_TIMECODE_PLACEHOLDER,
+    expect(formatSignedElapsedTicks(-37n, tb25, MILLISECONDS_TIMECODE_DISPLAY)).toBe(
+      "-00:00:01.480",
     );
+  });
+
+  it("returns null for an invalid time base or rate, or an unsafe millisecond conversion", () => {
+    expect(formatSignedElapsedTicks(1n, { n: 0, d: 1 }, frames25)).toBeNull();
+    expect(
+      formatSignedElapsedTicks(1n, tb25, {
+        format: "frames",
+        rate: { n: 0, d: 1 },
+        videoTimeBase: null,
+      }),
+    ).toBeNull();
+    expect(
+      formatSignedElapsedTicks(2n ** 60n, tb25, MILLISECONDS_TIMECODE_DISPLAY),
+    ).toBeNull();
+    // The frame format is exact, so the same count formats.
+    expect(formatSignedElapsedTicks(2n ** 60n, tb25, frames25)).not.toBeNull();
+  });
+});
+
+describe("formatSourceRelativeTime", () => {
+  it("formats a PTS from the start PTS, and invalid input as zero", () => {
+    const tb25: Rational = { n: 1, d: 25 };
+    expect(formatSourceRelativeTime("5037" as Pts, "5000" as Pts, tb25)).toBe(
+      "00:00:01.480",
+    );
+    expect(formatSourceRelativeTime("x" as Pts, "0" as Pts, tb25)).toBe("00:00:00.000");
+  });
+});
+
+describe("formatElapsedTickSpan", () => {
+  const tb90k: Rational = { n: 1, d: 90000 };
+  const frames25: TimecodeDisplay = {
+    format: "frames",
+    rate: fps25,
+    videoTimeBase: tb90k,
+  };
+  const frames2997Mkv: TimecodeDisplay = {
+    format: "frames",
+    rate: fps2997,
+    videoTimeBase: { n: 1, d: 1000 },
+  };
+  const frames120: TimecodeDisplay = {
+    format: "frames",
+    rate: fps120,
+    videoTimeBase: null,
+  };
+
+  /** Ticks of a 1/90000 time base for a frame count at 25 fps. */
+  const at25 = (frames: bigint) => frames * 3600n;
+
+  /**
+   * The frame that a timecode names, or the frame count that a duration names: the first
+   * frame of its second, `ceil(second * rate)`, plus `FF`. A leading minus sign negates it.
+   */
+  function frameOf(timecode: string, rate: Rational): bigint {
+    const negative = timecode.startsWith("-");
+    const groups = (negative ? timecode.slice(1) : timecode).split(":").map(BigInt);
+    const ff = groups.pop()!;
+    const seconds = groups.reduce((total, group) => total * 60n + group, 0n);
+    const n = BigInt(rate.n);
+    const d = BigInt(rate.d);
+    const frame = (seconds * n + d - 1n) / d + ff;
+    return negative ? -frame : frame;
+  }
+
+  it("formats In, Out and the duration of a span at 25 fps", () => {
+    expect(formatElapsedTickSpan(at25(35n), at25(160n), tb90k, frames25)).toStrictEqual(
+      {
+        inTime: "00:00:01:10",
+        outTime: "00:00:06:10",
+        duration: "00:00:05:00",
+        compactDuration: "05:00",
+      },
+    );
+  });
+
+  it.each([
+    // [frames at 25 fps, full, compact]
+    [0n, "00:00:00:00", "00:00"],
+    [12n, "00:00:00:12", "00:12"],
+    [137n, "00:00:05:12", "05:12"],
+    [25n * 65n + 12n, "00:01:05:12", "1:05:12"],
+    [25n * 3665n + 12n, "01:01:05:12", "1:01:05:12"],
+    [25n * 360_000n, "100:00:00:00", "100:00:00:00"],
+  ])("writes a span of %i frames as %s and %s", (count, full, compact) => {
+    const span = formatElapsedTickSpan(at25(10n), at25(10n + count), tb90k, frames25);
+    expect(span?.duration).toBe(full);
+    expect(span?.compactDuration).toBe(compact);
+  });
+
+  it("counts frames as Out minus In, so a Matroska segment adds up", () => {
+    // Frame 10 and frame 161 at 29.97 fps, stored rounded to the millisecond.
+    const span = formatElapsedTickSpan(334n, 5372n, { n: 1, d: 1000 }, frames2997Mkv);
+    expect(span).toStrictEqual({
+      inTime: "00:00:00:10",
+      outTime: "00:00:05:11",
+      duration: "00:00:05:01",
+      compactDuration: "05:01",
+    });
+  });
+
+  it("writes an NTSC frame count with the FF rule of the elapsed timecode (ADR 028)", () => {
+    const tbNtsc: Rational = { n: 1001, d: 30000 };
+    const ntsc: TimecodeDisplay = {
+      format: "frames",
+      rate: fps2997,
+      videoTimeBase: tbNtsc,
+    };
+    const duration = (count: bigint) =>
+      formatElapsedTickSpan(0n, count, tbNtsc, ntsc)?.compactDuration;
+    expect(duration(29n)).toBe("00:29");
+    expect(duration(30n)).toBe("01:00");
+    expect(duration(59n)).toBe("01:29");
+    // Frame 1018 is the last frame that starts in second 33, and 1019 starts second 34.
+    expect(duration(1018n)).toBe("33:28");
+    expect(duration(1019n)).toBe("34:00");
+    // From frame 0, a span of n frames shows the timecode of frame n.
+    for (const count of [1n, 29n, 30n, 1018n, 1019n, 30001n]) {
+      expect(formatElapsedTickSpan(0n, count, tbNtsc, ntsc)?.duration).toBe(
+        formatFrameTimecodeFromTicks(count, tbNtsc, fps2997),
+      );
+    }
+  });
+
+  it("always adds up: the frame of In plus the duration is the frame of Out", () => {
+    const cases: readonly [Rational, TimecodeDisplay][] = [
+      [tb90k, frames25],
+      [{ n: 1, d: 1000 }, frames2997Mkv],
+      [
+        { n: 1, d: 1000 },
+        { format: "frames", rate: fps23976, videoTimeBase: { n: 1, d: 1000 } },
+      ],
+      [
+        { n: 1, d: 24000 },
+        { format: "frames", rate: fps23976, videoTimeBase: { n: 1, d: 24000 } },
+      ],
+      [
+        { n: 1, d: 1000 },
+        { format: "frames", rate: fps5994, videoTimeBase: { n: 1, d: 1000 } },
+      ],
+      [
+        { n: 1, d: 1_000_000 },
+        { format: "frames", rate: fps2997, videoTimeBase: null },
+      ],
+    ];
+    for (const [timeBase, display] of cases) {
+      if (display.format !== "frames") continue;
+      for (let inTicks = -40n; inTicks < 4000n; inTicks += 37n) {
+        for (const length of [1n, 17n, 33n, 34n, 1001n, 5038n, 123_457n]) {
+          const span = formatElapsedTickSpan(
+            inTicks,
+            inTicks + length,
+            timeBase,
+            display,
+          );
+          expect(span).not.toBeNull();
+          expect(
+            frameOf(span!.outTime, display.rate) - frameOf(span!.inTime, display.rate),
+          ).toBe(frameOf(span!.duration, display.rate));
+          expect(span!.inTime).toBe(
+            formatSignedElapsedTicks(inTicks, timeBase, display),
+          );
+        }
+      }
+    }
+  });
+
+  it("gives a span that starts before the source start the length its timecodes show", () => {
+    const tb25: Rational = { n: 1, d: 25 };
+    expect(
+      formatElapsedTickSpan(-5n, 25n, tb25, {
+        format: "frames",
+        rate: fps25,
+        videoTimeBase: tb25,
+      }),
+    ).toStrictEqual({
+      inTime: "-00:00:00:05",
+      outTime: "00:00:01:00",
+      duration: "00:00:01:05",
+      compactDuration: "01:05",
+    });
+  });
+
+  it("pads FF to three digits above 100 fps", () => {
+    const span = formatElapsedTickSpan(0n, 3n, { n: 1, d: 2 }, frames120);
+    expect(span?.duration).toBe("00:00:01:060");
+    expect(span?.compactDuration).toBe("01:060");
+  });
+
+  it("formats a span in milliseconds, in both styles", () => {
+    expect(
+      formatElapsedTickSpan(90000n, 591080n, tb90k, MILLISECONDS_TIMECODE_DISPLAY),
+    ).toStrictEqual({
+      inTime: "00:00:01.000",
+      outTime: "00:00:06.568",
+      duration: "00:00:05.568",
+      compactDuration: "5.568",
+    });
+    const ms = (length: bigint) =>
+      formatElapsedTickSpan(
+        0n,
+        length,
+        { n: 1, d: 1000 },
+        MILLISECONDS_TIMECODE_DISPLAY,
+      );
+    expect(ms(0n)?.compactDuration).toBe("0.000");
+    expect(ms(65_012n)?.compactDuration).toBe("1:05.012");
+    expect(ms(3_665_012n)?.compactDuration).toBe("1:01:05.012");
+    expect(ms(3_665_012n)?.duration).toBe("01:01:05.012");
+  });
+
+  it("counts milliseconds as Out minus In, so the rounded values add up", () => {
+    // 1.0004 s shows 1.000 and 2.0006 s shows 2.001, so the duration is 1.001 and not the
+    // 1.000 that the rounded exact length, 1.0002 s, would give.
+    expect(
+      formatElapsedTickSpan(
+        10_004n,
+        20_006n,
+        { n: 1, d: 10_000 },
+        MILLISECONDS_TIMECODE_DISPLAY,
+      ),
+    ).toStrictEqual({
+      inTime: "00:00:01.000",
+      outTime: "00:00:02.001",
+      duration: "00:00:01.001",
+      compactDuration: "1.001",
+    });
+  });
+
+  it("returns null for a reversed span or an end without a grid position", () => {
+    expect(formatElapsedTickSpan(10n, 9n, tb90k, frames25)).toBeNull();
+    expect(formatElapsedTickSpan(0n, 1n, { n: 0, d: 1 }, frames25)).toBeNull();
+    expect(
+      formatElapsedTickSpan(0n, 1n, tb90k, {
+        format: "frames",
+        rate: { n: 0, d: 1 },
+        videoTimeBase: null,
+      }),
+    ).toBeNull();
+    expect(
+      formatElapsedTickSpan(
+        0n,
+        2n ** 60n,
+        { n: 1, d: 25 },
+        MILLISECONDS_TIMECODE_DISPLAY,
+      ),
+    ).toBeNull();
   });
 });

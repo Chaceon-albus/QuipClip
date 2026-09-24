@@ -139,7 +139,6 @@ export function TitleBar() {
     exportStatus,
     segmentCount,
     segmentTotal,
-    videoTimeBase: probe?.videoTimeBase ?? null,
     display: timecodeDisplay,
   });
   const exportLabelText = labelTextOf(exportAction.label, t);

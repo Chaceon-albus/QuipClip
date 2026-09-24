@@ -1,12 +1,22 @@
-import { memo, useMemo } from "react";
+import { memo, useEffect, useId, useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import {
   calculateSegmentLayout,
-  getActiveSourceSegmentEntries,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
+import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
+import {
+  buildSegmentTooltipRows,
+  calculateSegmentWidthPx,
+  formatSegmentTimes,
+  measureSegmentLabel,
+  numberSegmentsInExportOrder,
+  resolveSegmentLabelTier,
+} from "./segmentLabels";
+import { SegmentTooltip, type SegmentTooltipEntry } from "./SegmentTooltip";
+import { createSegmentTooltipController } from "./segmentTooltipController";
 
 const selectSegments = (state: TimelineStoreState) => state.segments;
 const selectCurrentSegmentId = (state: TimelineStoreState) => state.currentSegmentId;
@@ -17,6 +27,28 @@ export interface SegmentLayerProps {
   videoStartPts: Pts | null | undefined;
   videoTimeBase: Rational | null | undefined;
   totalDurationSeconds: number | null;
+  /** The width of the lane in CSS pixels. It sets the label tier of each segment. */
+  laneWidthPx: number;
+  /** The timecode format of the source (ADR 028). The value must be memoized. */
+  timecodeDisplay: TimecodeDisplay;
+  /**
+   * The scroll container of the timeline. The tooltip reads its rectangle when it opens, to
+   * anchor on the visible part of a segment.
+   */
+  viewportRef: RefObject<HTMLElement | null>;
+}
+
+/**
+ * True when the element has keyboard focus. A click also focuses a button in Chromium, and
+ * that focus must not open the tooltip. An engine that does not know the pseudo-class
+ * treats every focus as a keyboard focus.
+ */
+function hasFocusVisible(element: Element): boolean {
+  try {
+    return element.matches(":focus-visible");
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -30,45 +62,116 @@ export interface SegmentLayerProps {
  * The ruler above still seeks at that position.
  *
  * The layer subscribes to the segment list and the selection, and not to the playback
- * position. It is memoized, and its props are percent-layout inputs, so neither a presented
- * frame nor a zoom renders it again.
+ * position. It is memoized, and no prop changes per presented frame, so a presented frame
+ * never renders it again. A zoom or a resize of the lane changes `laneWidthPx` and renders
+ * it again, because the label tier of a segment depends on its width in pixels. The layouts
+ * and the texts stay memoized, so that render only chooses the tiers.
+ *
+ * All segments share one tooltip (see SegmentTooltip). A hover renders that tooltip and not
+ * this layer.
  */
 export const SegmentLayer = memo(function SegmentLayer({
   sourceId,
   videoStartPts,
   videoTimeBase,
   totalDurationSeconds,
+  laneWidthPx,
+  timecodeDisplay,
+  viewportRef,
 }: SegmentLayerProps) {
   const { t } = useTranslation();
   const segments = useTimelineStore(selectSegments);
   const currentSegmentId = useTimelineStore(selectCurrentSegmentId);
   const selectSegment = useTimelineStore(selectSelectSegment);
+  const [tooltip] = useState(createSegmentTooltipController);
+  const descriptionIdPrefix = useId();
+  // A pending open must not fire after the layer unmounts.
+  useEffect(() => () => tooltip.dispose(), [tooltip]);
+  // A scroll of the timeline cancels a pending open and closes or moves the tooltip
+  // (`SegmentTooltipController.scroll`). Radix watches scrolls only while its content is
+  // mounted, so it cannot cancel an open that is still in its delay.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (viewport === null) {
+      return;
+    }
+    const onScroll = () => tooltip.scroll();
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    return () => viewport.removeEventListener("scroll", onScroll);
+  }, [viewportRef, tooltip]);
 
-  const activeSourceSegments = useMemo(
-    () => getActiveSourceSegmentEntries(segments, sourceId),
+  // The numbers and the total count only the segments of the active source, as the export
+  // does. They are taken before the zero-width filter below, because the export also joins a
+  // segment that has no width on the timeline.
+  const { entries: numberedSegments, total } = useMemo(
+    () => numberSegmentsInExportOrder(segments, sourceId),
     [segments, sourceId],
   );
   // A selection change renders this layer again, and none of these inputs depends on the
-  // selection. So the layouts, the labels and the numbers are built once per change of the
-  // segment list, the source or the extent, and not once per selection click.
+  // selection. So the layouts, the texts and the numbers are built once per change of the
+  // segment list, the source, the extent, the timecode format or the language, and not once
+  // per selection click or zoom step.
   const segmentLayouts = useMemo(
     () =>
-      activeSourceSegments
-        .map(({ segment, projectIndex }) => ({
-          segment,
-          number: projectIndex + 1,
-          label: t("timeline.segment", { index: projectIndex + 1 }),
-          layout: calculateSegmentLayout(
+      numberedSegments
+        .map(({ segment, projectIndex, number }) => {
+          const layout = calculateSegmentLayout(
             segment,
             videoStartPts,
             videoTimeBase,
             totalDurationSeconds,
-          ),
-        }))
+          );
+          const times = formatSegmentTimes(
+            segment,
+            videoStartPts,
+            videoTimeBase,
+            timecodeDisplay,
+          );
+          const tooltipEntry: SegmentTooltipEntry = {
+            id: segment.id,
+            number,
+            leftPercent: layout.leftPercent,
+            widthPercent: layout.widthPercent,
+            rows: buildSegmentTooltipRows(times),
+          };
+          return {
+            segment,
+            number,
+            layout,
+            compactDuration: times?.compactDuration ?? null,
+            labelWidths: measureSegmentLabel(number, times?.compactDuration ?? null),
+            label:
+              times === null
+                ? t("timeline.segment", { index: number })
+                : t("timeline.segmentLabel", {
+                    index: number,
+                    inTime: times.inTime,
+                    outTime: times.outTime,
+                    duration: times.duration,
+                  }),
+            description: t("timeline.segmentDescription", { order: number, total }),
+            // The index in the project array is unique, and an ID token cannot hold a space.
+            descriptionId: `${descriptionIdPrefix}-segment-${projectIndex}`,
+            tooltipEntry,
+          };
+        })
         // A zero-width overlay has no visible target. As a button it would also be a Tab
         // stop with nothing to show, which reads as a dead key press.
         .filter(({ layout }) => layout.widthPercent > 0),
-    [activeSourceSegments, videoStartPts, videoTimeBase, totalDurationSeconds, t],
+    [
+      numberedSegments,
+      total,
+      videoStartPts,
+      videoTimeBase,
+      totalDurationSeconds,
+      timecodeDisplay,
+      descriptionIdPrefix,
+      t,
+    ],
+  );
+  const tooltipEntries = useMemo(
+    () => segmentLayouts.map(({ tooltipEntry }) => tooltipEntry),
+    [segmentLayouts],
   );
   const segmentListLabel = useMemo(() => t("timeline.segmentList"), [t]);
 
@@ -102,10 +205,22 @@ export const SegmentLayer = memo(function SegmentLayer({
    * than its interval and cover the edge of a neighbour after a split.
    *
    * The button and the outline both have the true extent of the segment. The button has no
-   * padding and no border, so a narrow segment does not get a wider fill than its outline.
-   * The label has margins and not padding: a margin does not paint, and the label shrinks to
-   * zero width, so it disappears when it does not fit. The button does not clip its
-   * overflow, because a clip would also cut the hit area below.
+   * horizontal padding and no border, so a narrow segment does not get a wider fill than its
+   * outline. The label has margins and not padding: a margin does not paint, and the label
+   * shrinks to zero width, so it disappears when it does not fit. The button does not clip
+   * its overflow, because a clip would also cut the hit area below.
+   *
+   * The label is at the top left: the number, and under it the duration in the compact style
+   * of the source's timecode format. The label tier (`resolveSegmentLabelTier`) compares the
+   * width of the segment with the estimated width of that text, and drops the duration line,
+   * then the number, when it does not fit. So a narrow segment does not show a truncated
+   * fragment. The number tier has 4px margins instead of 8px, so the number fits a narrower
+   * segment. The accessible name gives the number, the In and Out times and the full
+   * duration in every tier, and the description gives the export order.
+   *
+   * Both lines take the full text colour of the fill. The number line is larger and heavier,
+   * and that difference sets the order of the two lines. A dimmed duration line fell below
+   * the 4.5:1 text contrast on the selected fill and on the hover fill.
    *
    * A narrow segment is hard to click, so the `::before` of an unselected button gives it a
    * hit area of at least 12px, centred on the segment. The hit area paints nothing. The
@@ -133,35 +248,74 @@ export const SegmentLayer = memo(function SegmentLayer({
       aria-label={segmentListLabel}
       className="pointer-events-none absolute inset-x-0 inset-y-2 z-10"
     >
-      {segmentLayouts.map(({ segment: seg, number, label, layout }) => {
-        // A string comparison at render time, so selection never rebuilds the memoized
-        // layouts.
-        const isCurrent = seg.id === currentSegmentId;
-        return (
-          <button
-            key={seg.id}
-            type="button"
-            aria-pressed={isCurrent}
-            aria-label={label}
-            // Selecting does not seek: the playhead is the operand of Mark In, Mark Out and
-            // Split, so a selection click must not move it.
-            onClick={() => selectSegment(seg.id)}
-            className={`pointer-events-auto absolute inset-y-1 flex items-center rounded-md focus-visible:z-50 focus-visible:inset-ring-3 focus-visible:inset-ring-background focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-foreground ${
-              isCurrent
-                ? "z-20 bg-clip-video-selected text-primary-foreground"
-                : "bg-clip-video text-clip-foreground before:absolute before:inset-y-0 before:left-1/2 before:-z-10 before:w-full before:min-w-3 before:-translate-x-1/2 hover:bg-clip-video-hover hover:transition-colors focus-visible:before:hidden"
-            }`}
-            style={{
-              left: layout.left,
-              width: layout.width,
-            }}
-          >
-            <span className="mx-2 min-w-0 truncate font-mono text-[10px] font-semibold">
-              #{number}
-            </span>
-          </button>
-        );
-      })}
+      {segmentLayouts.map(
+        ({
+          segment: seg,
+          number,
+          label,
+          description,
+          descriptionId,
+          compactDuration,
+          labelWidths,
+          layout,
+        }) => {
+          // A string comparison at render time, so selection never rebuilds the memoized
+          // layouts.
+          const isCurrent = seg.id === currentSegmentId;
+          const tier = resolveSegmentLabelTier(
+            calculateSegmentWidthPx(layout.widthPercent, laneWidthPx),
+            labelWidths,
+          );
+          return (
+            <button
+              key={seg.id}
+              type="button"
+              aria-pressed={isCurrent}
+              aria-label={label}
+              aria-describedby={descriptionId}
+              // Selecting does not seek: the playhead is the operand of Mark In, Mark Out and
+              // Split, so a selection click must not move it.
+              onClick={() => selectSegment(seg.id)}
+              onPointerEnter={(event) => tooltip.hover(seg.id, event)}
+              onPointerMove={(event) => tooltip.hover(seg.id, event)}
+              onPointerLeave={() => tooltip.leave(seg.id)}
+              onPointerDown={() => tooltip.press(seg.id)}
+              onFocus={(event) =>
+                tooltip.focus(seg.id, hasFocusVisible(event.currentTarget))
+              }
+              onBlur={() => tooltip.blur(seg.id)}
+              className={`pointer-events-auto absolute inset-y-1 flex items-start justify-start rounded-md pt-1 focus-visible:z-50 focus-visible:inset-ring-3 focus-visible:inset-ring-background focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-foreground ${
+                isCurrent
+                  ? "z-20 bg-clip-video-selected text-primary-foreground"
+                  : "bg-clip-video text-clip-foreground before:absolute before:inset-y-0 before:left-1/2 before:-z-10 before:w-full before:min-w-3 before:-translate-x-1/2 hover:bg-clip-video-hover hover:transition-colors focus-visible:before:hidden"
+              }`}
+              style={{
+                left: layout.left,
+                width: layout.width,
+              }}
+            >
+              {tier !== "none" && (
+                <span
+                  className={`flex min-w-0 flex-col text-left leading-tight ${tier === "full" ? "mx-2" : "mx-1"}`}
+                >
+                  <span className="truncate text-[11px] font-semibold tabular-nums">
+                    #{number}
+                  </span>
+                  {tier === "full" && compactDuration !== null && (
+                    <span className="truncate font-mono text-[10px] tabular-nums">
+                      {compactDuration}
+                    </span>
+                  )}
+                </span>
+              )}
+              {/* A referenced element gives its text to the description while it is hidden. */}
+              <span id={descriptionId} hidden>
+                {description}
+              </span>
+            </button>
+          );
+        },
+      )}
       {segmentLayouts.map(({ segment: seg, layout }) => {
         const isCurrent = seg.id === currentSegmentId;
         return (
@@ -180,6 +334,13 @@ export const SegmentLayer = memo(function SegmentLayer({
           />
         );
       })}
+      <SegmentTooltip
+        controller={tooltip}
+        entries={tooltipEntries}
+        total={total}
+        viewportRef={viewportRef}
+        laneWidthPx={laneWidthPx}
+      />
     </div>
   );
 });

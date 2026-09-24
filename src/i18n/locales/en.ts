@@ -202,6 +202,16 @@ export const en = {
     seekSlider: "Timeline seek",
     segmentList: "Timeline segments",
     segment: "Segment {{index}}",
+    segmentLabel: "Segment {{index}}, {{inTime}} to {{outTime}}, duration {{duration}}",
+    segmentDescription:
+      "Export order: {{order}} of {{total}}. The Out point is not included.",
+    segmentTooltip: {
+      exportOrder: "Export order: {{order}} of {{total}}",
+      in: "In",
+      out: "Out",
+      notIncluded: "(not included)",
+      duration: "Duration",
+    },
     pendingInFlag: "In",
     zoom: {
       group: "Timeline zoom",

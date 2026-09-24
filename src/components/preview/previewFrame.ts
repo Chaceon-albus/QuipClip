@@ -8,11 +8,11 @@
  */
 
 import { isPositiveRational } from "@/features/media/validation";
-import { isPtsString, isTickCountString, ticksToSeconds } from "@/lib/time";
+import { isTickCountString } from "@/lib/time";
 import {
   formatElapsedTimecode,
-  formatFrameTimecodeFromTicks,
-  formatMillisecondsTimecode,
+  formatSignedElapsedTicks,
+  formatSourceRelativeTime,
   MILLISECONDS_TIMECODE_DISPLAY,
   timecodePlaceholder,
   type TimecodeDisplay,
@@ -20,70 +20,9 @@ import {
 import type { Pts, Rational, TickCount } from "@/types/project";
 import type { CalibrationStatus, PresentedFrame } from "@/features/playback";
 
-/**
- * Formats a signed tick count in a time base. A negative count formats as its magnitude
- * with a leading minus sign. The frame format uses exact rational arithmetic, with the
- * frame boundary margin of the display. The millisecond format converts the magnitude to
- * seconds with the checked helper, and returns null when that conversion is not safe.
- */
-function formatSignedTicks(
-  deltaTicks: bigint,
-  timeBase: Rational,
-  display: TimecodeDisplay,
-): string | null {
-  const isNegative = deltaTicks < 0n;
-  const magnitude = isNegative ? -deltaTicks : deltaTicks;
-  let formatted: string;
-  if (display.format === "frames") {
-    formatted = formatFrameTimecodeFromTicks(
-      magnitude,
-      timeBase,
-      display.rate,
-      display.videoTimeBase,
-    );
-  } else {
-    const seconds = ticksToSeconds(magnitude.toString() as TickCount, timeBase);
-    if (seconds === null) {
-      return null;
-    }
-    formatted = formatMillisecondsTimecode(seconds);
-  }
-  return isNegative ? `-${formatted}` : formatted;
-}
-
-/**
- * Formats an inferred source PTS as source-relative elapsed time relative to the source
- * stream's `videoStartPts` (ADR 003).
- *
- * Formula:
- * `elapsedSeconds = (inferredPts - videoStartPts) * videoTimeBase`
- *
- * The frame format computes `FF` from the exact tick delta, so an exact frame start never
- * shows the frame before it. A negative elapsed time takes a leading minus sign. Invalid
- * input formats as zero.
- *
- * @param inferredPts Inferred presentation timestamp from calibrated RVFC.
- * @param videoStartPts Presentation timestamp origin of the source video stream.
- * @param videoTimeBase Rational timebase of the video stream.
- * @param display The timecode format of the source. Defaults to milliseconds.
- */
-export function formatSourceRelativeTime(
-  inferredPts: Pts,
-  videoStartPts: Pts,
-  videoTimeBase: Rational,
-  display: TimecodeDisplay = MILLISECONDS_TIMECODE_DISPLAY,
-): string {
-  const zero = formatElapsedTimecode(0, display);
-  if (
-    !isPtsString(inferredPts) ||
-    !isPtsString(videoStartPts) ||
-    !isPositiveRational(videoTimeBase)
-  ) {
-    return zero;
-  }
-  const deltaTicks = BigInt(inferredPts) - BigInt(videoStartPts);
-  return formatSignedTicks(deltaTicks, videoTimeBase, display) ?? zero;
-}
+// The elapsed-time formatter of a PTS lives in the timecode library, so the timeline can use
+// it without an import from the preview. The preview keeps its name for its callers.
+export { formatSourceRelativeTime } from "@/lib/timecode";
 
 /**
  * Formats approximate browser `currentTime` in seconds (ADR 003).
@@ -127,7 +66,7 @@ export function formatPreviewTotalDuration(
     isTickCountString(videoDurationTicks) &&
     isPositiveRational(videoTimeBase)
   ) {
-    const formatted = formatSignedTicks(
+    const formatted = formatSignedElapsedTicks(
       BigInt(videoDurationTicks),
       videoTimeBase,
       display,
