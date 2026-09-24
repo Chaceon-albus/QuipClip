@@ -65,6 +65,43 @@ release commits the frame that the browser presents at the end of the drag.
 - A click on an edge, with no movement past the drag threshold, still only seeks, as ADR 007
   says.
 
+### What the implementation settled
+
+(Changed on 2026-09-24.) Review of the first implementation changed these points.
+
+- **The frame grid.** A drag trim needs an exact frame grid: a ready calibration, a constant
+  rate and a time base fine enough for a real frame start to round to its own frame (ADR 022).
+  On any other source, such as a variable-rate source or a coarse time base, a press on an
+  edge is the click of ADR 007, and the user moves a boundary with Mark In and Mark Out. Off
+  the grid, only the timing of the browser events could tell which frame answers the release
+  seek, and WebView2 presents that frame before it sends `seeked`, so that rule is not
+  reliable.
+- **The committed frame.** `J` is the ADR 028 index of the release target, kept inside the
+  limit. If the frame on screen is `J`, its PTS is written at once. Otherwise the release
+  calls `seekToFrameIndex(J)`, and the first frame on screen that is `J` is written. A frame
+  with any other index is never written. A later request for another target drops the trim.
+- **The end of the source.** An Out edge dragged to the end stops on the last frame of the
+  extent, the same result as Mark Out on the last frame. The last frame is the extent rounded
+  to the nearest frame, minus one. When the probe gives no video duration in ticks, the extent
+  comes from the container duration, which can pass the last video frame. An Out trim to the
+  very end of such a source can then fail with the notice below, and End followed by Mark Out
+  is the path to that boundary. A container duration can also end before the last frame. The
+  cap for an Out edge is therefore never earlier than the frame of its stored Out, which the
+  browser already showed, so a drag never moves a stored Out back by itself.
+- **The snaps.** The press selects the segment, and a selection clears the pending In (ADR
+  007), so the pending In is not a snap target. The snap targets are the other boundaries of
+  the active source and the playhead at the start of the drag. A stored boundary writes its
+  PTS, and the release seeks with `seekToFrameIndex` to the frame of that boundary. The start
+  playhead is the frame on screen only when no seek was pending; it then writes its PTS. When
+  a seek was pending, it is only a seek target, and the trim commits its frame `J` as above.
+- **Escape** returns through `seekToFrameIndex` to the frame of the start playhead.
+- **A trim that cannot finish.** If no frame `J` arrives within 3 seconds of visible time
+  after the release, counted as the anchor wait of ADR 003 counts it, or if the calibration,
+  the source or the segment changes before it arrives, the trim is dropped, and a short
+  notice says "The trim was not applied." Escape and a cancel by the browser drop the trim
+  with no notice. While a trim drags, Mark In, Mark Out, Delete, Undo and Redo do nothing,
+  and Escape cancels the trim instead of finishing the segment (ADR 026).
+
 ## Consequences
 
 - A boundary always comes from a presented frame or from a stored boundary, never from a

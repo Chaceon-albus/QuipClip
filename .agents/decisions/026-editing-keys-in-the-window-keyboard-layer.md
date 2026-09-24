@@ -120,6 +120,10 @@ or change nothing:
 One case does not own the key press: `Escape` while a tooltip is open. Radix then closes
 the tooltip. A second `Escape` finishes the segment.
 
+(Changed on 2026-09-24.) While a drag trims a segment edge (ADR 030), `Escape` cancels the
+trim and does not finish the segment, and Mark In, Mark Out, Delete, Undo and Redo own the
+key press and do nothing.
+
 The actions behave as follows:
 
 - Mark In and Mark Out write the PTS of the frame the browser confirmed, as ADR 003 and
