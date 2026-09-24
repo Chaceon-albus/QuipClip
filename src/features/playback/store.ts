@@ -7,14 +7,16 @@
 
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
-import { getSourceRevisionKey } from "@/features/media";
+import { getSourceRevisionKey, isPositiveRational } from "@/features/media";
 import {
   assertPositiveTimeBase,
   isPtsString,
   mediaTimeToPts,
   ptsElapsedSeconds,
   ptsToMediaTime,
+  rationalsEqual,
 } from "@/lib/time";
+import { frameBoundaryMarginSeconds, isFrameGridExact } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
 import { scrubAudioController } from "./scrubAudio";
 import type {
@@ -53,6 +55,22 @@ export function getNominalFrameRate(
     return source.rFrameRate;
   }
   return null;
+}
+
+/**
+ * True when the source reports a valid average frame rate and a valid real frame rate, and the
+ * two differ. The source then has a variable frame rate: the frame timecode falls back to
+ * milliseconds (ADR 028), and a nominal frame step does not use the frame grid (ADR 022).
+ */
+export function hasVariableFrameRate(
+  source: Pick<PlaybackSource, "avgFrameRate" | "rFrameRate">,
+): boolean {
+  const { avgFrameRate, rFrameRate } = source;
+  return (
+    isPositiveRational(avgFrameRate) &&
+    isPositiveRational(rFrameRate) &&
+    !rationalsEqual(avgFrameRate, rFrameRate)
+  );
 }
 
 /** True when the source reports a frame rate the nominal step can use. */
@@ -98,6 +116,18 @@ export const ANCHOR_TOLERANCE_SECONDS = 1.0;
  * never moves against its direction, so its target is then the start position itself.
  */
 export const NOMINAL_STEP_EDGE_TOLERANCE_SECONDS = 1e-6;
+
+/**
+ * Seconds from the start of nominal frame 0 to the middle of nominal frame `frameIndex`:
+ * (frameIndex + 1/2) * frameRate.d / frameRate.n, written as
+ * ((2 * frameIndex + 1) * frameRate.d) / (2 * frameRate.n).
+ *
+ * The numerator and the denominator are integers. While both are safe integers, both are exact
+ * doubles, and the one division rounds the exact rational quotient once.
+ */
+function nominalFrameMiddleSeconds(frameIndex: number, frameRate: Rational): number {
+  return ((2 * frameIndex + 1) * frameRate.d) / (2 * frameRate.n);
+}
 
 /**
  * Factory function creating a vanilla Zustand store instance for playback state.
@@ -196,6 +226,30 @@ export function createPlaybackStore(
       }
       lastScrubAudioTarget = mediaTime;
       scrubAudioController.request(mediaTime, direction);
+    };
+
+    /**
+     * The pending display target to keep when the calibration stops holding, or undefined to
+     * keep the current one (ADR 022).
+     *
+     * While the calibration holds, seekToPts and a nominal step report their display target
+     * from the calibrated first frame, and a step reports the nominal start of its target
+     * frame. Without a calibration, the playhead counts from the start of the timeline, the
+     * axis of the approximate clock. A target that is still pending when the calibration
+     * stops holding therefore moves to that axis: the position of the last accepted request,
+     * measured from the start of the timeline. After play there is no such request; the
+     * target then stays until the next seeked event or frame callback clears it.
+     */
+    const timelineAxisTargetOnCalibrationLoss = (): number | undefined => {
+      const state = get();
+      if (
+        state.calibrationStatus !== "ready" ||
+        state.seekTargetSeconds === null ||
+        lastAcceptedSeek === null
+      ) {
+        return undefined;
+      }
+      return Math.max(0, lastAcceptedSeek.mediaTime - browserTimelineOriginSeconds);
     };
 
     // A media element aborts a running seek when currentTime is assigned again, so a fast series
@@ -705,11 +759,6 @@ export function createPlaybackStore(
           return;
         }
 
-        const deltaSeconds = (deltaFrames * fps.d) / fps.n;
-        if (!Number.isFinite(deltaSeconds)) {
-          return;
-        }
-
         const pending =
           queuedSeek ?? (lastAcceptedSeek?.scrub === true ? lastAcceptedSeek : null);
         const currentBrowserTime = pending?.mediaTime ?? attachedElement.currentTime;
@@ -720,16 +769,22 @@ export function createPlaybackStore(
           return;
         }
 
+        // The calibrated first frame, while the calibration holds. It is the frame videoStartPts
+        // names, so it is the start of nominal frame 0 and of the axis on which an inferred PTS
+        // reports elapsed seconds.
+        const calibratedOrigin =
+          state.calibrationStatus === "ready" ? calibratedMediaTime : null;
+
         // The bounds are positions on the browser media timeline, the axis of currentTime, which
         // ADR 003 does not require to start at 0. The lower bound is the start of that timeline,
         // or the calibrated first frame when it lies later, because no frame precedes the one
         // videoStartPts names. A target below the start would never equal the position the next
         // press reads back, because the browser moves it to the start, so each press would seek
         // again.
-        let lowerBound = browserTimelineOriginSeconds;
-        if (state.calibrationStatus === "ready" && calibratedMediaTime !== null) {
-          lowerBound = Math.max(lowerBound, calibratedMediaTime);
-        }
+        const lowerBound =
+          calibratedOrigin === null
+            ? browserTimelineOriginSeconds
+            : Math.max(browserTimelineOriginSeconds, calibratedOrigin);
         // The probe prefers the duration of the video stream, which counts from the first video
         // frame, so the approximate duration goes on the lower bound. The element stops a seek at
         // its own duration, an end position that caps any overshoot of that sum and that can be
@@ -760,44 +815,152 @@ export function createPlaybackStore(
           Math.min(currentBrowserTime, upperBound),
           lowerBound,
         );
-        let targetTime = Math.max(
-          Math.min(stepStart + deltaSeconds, upperBound),
-          lowerBound,
-        );
-        // A step never moves against its direction. The rule compares against the real start
-        // position, currentBrowserTime (the pending target when one exists, and currentTime when
-        // none exists), not against stepStart. The element can stand outside the bounds: the
-        // probe reports the duration of the video stream, and the element plays to the end of
-        // the container, which can lie later. A forward step from there would otherwise seek
-        // back, and a backward step from a position before the calibrated first frame would
-        // seek forward.
+
+        // The step names frames on the nominal grid only when three conditions hold:
+        // - A calibration holds. Frame 0 of the grid then starts at the calibrated first frame,
+        //   the origin of the elapsed seconds that the timecode shows for the presented frame
+        //   (videoStartPts), so the step and the timecode count the same frames (ADR 028).
+        //   Without a calibration no frame boundary is known: the start of the timeline is not
+        //   one when the audio starts before the video.
+        // - The frame rate is constant: the average and the real frame rate do not differ, the
+        //   test the timecode uses. At a variable rate the real frames do not follow the nominal
+        //   grid, and a grid target skips a frame after a dropped or a longer frame.
+        // - The grid is exact on the video time base (isFrameGridExact): the interval is a whole
+        //   number of ticks, or one tick is less than half the interval minus 1 us. A real frame
+        //   start lies less than one tick from its nominal start on every time base, so only
+        //   then does the frame on screen round to its own nominal frame. On a coarser time
+        //   base, such as 1/24 at 23.976 fps, one tick is almost a whole frame.
+        //
+        // On the grid, the step aims at the middle of the target frame, not at its nominal start.
+        // A container such as Matroska stores each PTS rounded to the millisecond, so a real frame
+        // can start after its nominal start, and a seek to the nominal start then presents the
+        // frame before it again. The middle lies half an interval from both ends of the frame.
+        //
+        // Off the grid, the step moves the start position by the nominal interval, as it did
+        // before the grid existed.
+        //
+        // A step of ten frames (ADR 026) is one request with ten frames, so it is one target and
+        // one cue.
+        const gridOrigin =
+          calibratedOrigin !== null &&
+          !hasVariableFrameRate(attachedSource) &&
+          isFrameGridExact(fps, attachedSource.videoTimeBase)
+            ? calibratedOrigin
+            : null;
+        let grid: {
+          readonly startFrame: number;
+          readonly targetFrame: number;
+          readonly frameIndexAt: (browserTime: number) => number;
+        } | null = null;
+        let unclampedTarget: number;
+        if (gridOrigin === null) {
+          unclampedTarget = stepStart + (deltaFrames * fps.d) / fps.n;
+        } else {
+          // The frame boundary margin of the timecode (ADR 028), from the same rate and time
+          // base, so the step and the timecode name the same frame for the same position. It is
+          // one tick when the interval is not a whole number of ticks, so a frame start that the
+          // container rounded early, also against a rounded first PTS, still counts as its own
+          // frame. On an exact grid it is less than half an interval minus 1 us, so the middle
+          // target of the step before never reads as the next frame.
+          const marginSeconds = frameBoundaryMarginSeconds(
+            fps,
+            attachedSource.videoTimeBase,
+          );
+          // The nominal frame that contains a browser position: the ADR 028 rule, rounded down
+          // after the margin. The position is converted once, to elapsed seconds on the grid, and
+          // the rate stays the exact rational of the probe.
+          const frameIndexAt = (browserTime: number): number =>
+            Math.floor(((browserTime - gridOrigin + marginSeconds) * fps.n) / fps.d);
+
+          // The start frame:
+          // - With no seek pending, no display target and a frame on screen, it is that frame.
+          //   RVFC reports the real start of the frame, which lies less than one tick from its
+          //   nominal start, and on an exact grid one tick is less than half an interval, so
+          //   rounding to the nearest frame is exact. currentTime can instead stand anywhere in
+          //   the frame after a click, a drag or a pause, up to a tick before the next real start,
+          //   where the rule below would name the next frame.
+          // - A display target that is still set means that the last seek has not reported its
+          //   frame. The frame on screen can then be the frame from before that seek: its late
+          //   callback can arrive while the seek runs. Starting from it would aim at the frame of
+          //   the pending target, and the edge rule would drop the press.
+          // - Otherwise it is the frame of the start position. A pending or reached target of an
+          //   earlier step is the middle of its frame, half an interval from each boundary, so a
+          //   held key advances exactly one frame for each press and never drifts (ADR 021). Each
+          //   target comes from a whole frame index and not from the earlier target plus an
+          //   interval, so no rounding error accumulates. A frame start from seekToPts lies within
+          //   one tick of its nominal start, which the margin covers.
+          const presented = state.presentedFrame;
+          let startFrame: number;
+          if (
+            pending === null &&
+            state.seekTargetSeconds === null &&
+            presented !== null
+          ) {
+            const exactFrame = ((presented.mediaTime - gridOrigin) * fps.n) / fps.d;
+            // A tie breaks away from zero (ADR 002).
+            startFrame =
+              exactFrame < 0 ? -Math.round(-exactFrame) : Math.round(exactFrame);
+          } else {
+            startFrame = frameIndexAt(stepStart);
+          }
+          const targetFrame = startFrame + deltaFrames;
+          if (!Number.isSafeInteger(startFrame) || !Number.isSafeInteger(targetFrame)) {
+            return;
+          }
+          unclampedTarget = gridOrigin + nominalFrameMiddleSeconds(targetFrame, fps);
+          grid = { startFrame, targetFrame, frameIndexAt };
+        }
+        if (!Number.isFinite(unclampedTarget)) {
+          return;
+        }
+        // The clamp can pull the target to a bound: the calibrated first frame or the start of
+        // the timeline, or the end position.
+        let targetTime = Math.max(Math.min(unclampedTarget, upperBound), lowerBound);
+        // A step never moves against its direction when it starts outside the bounds. The rule
+        // compares against the real start position, currentBrowserTime (the pending target when
+        // one exists, and currentTime when none exists), not against stepStart. The element can
+        // stand outside the bounds: the probe reports the duration of the video stream, and the
+        // element plays to the end of the container, which can lie later. A forward step from
+        // there would otherwise seek back, and a backward step from a position before the
+        // calibrated first frame would seek forward. Inside the bounds only a step from the frame
+        // on screen can aim behind currentTime, when playback moved currentTime past that frame
+        // before its callback, and the frame on screen is then the right start.
         if (
-          (deltaFrames > 0 && targetTime < currentBrowserTime) ||
-          (deltaFrames < 0 && targetTime > currentBrowserTime)
+          currentBrowserTime !== stepStart &&
+          ((deltaFrames > 0 && targetTime < currentBrowserTime) ||
+            (deltaFrames < 0 && targetTime > currentBrowserTime))
         ) {
           targetTime = currentBrowserTime;
         }
 
-        // A step at the first or the last position of the source cannot move it: the rules above
-        // return the position the step starts from. Such a step does nothing to the position. It
-        // dispatches no seek, keeps presentedFrame and seekTargetSeconds, and requests no cue. A
-        // seek that lands on the frame already on screen can produce no RVFC callback (ADR 022),
-        // so dispatching it would leave presentedFrame null and the edit actions disabled, and
-        // each press would play the ADR 019 cue again at the same position. Before the anchor is
-        // taken, it would also refuse the calibration (ADR 003). ADR 021 makes each key press
-        // one step; at an edge there is no frame to step to, so a press that does not move keeps
-        // that rule.
+        // A step at the first or the last frame of the source cannot move it. Such a step does
+        // nothing to the position. It dispatches no seek, keeps presentedFrame and
+        // seekTargetSeconds, and requests no cue. A seek that lands on the frame already on
+        // screen can produce no RVFC callback (ADR 022), so dispatching it would leave
+        // presentedFrame null and the edit actions disabled, and each press would play the
+        // ADR 019 cue again at the same position. Before the anchor is taken, it would also refuse
+        // the calibration (ADR 003). ADR 021 makes each key press one step; at an edge there is
+        // no frame to step to, so a press that does not move keeps that rule.
         //
-        // The comparison uses the real start position, currentBrowserTime, and not stepStart: the
-        // pending target when one exists, and currentTime when none exists. A pending exact seek
-        // to the edge therefore absorbs each later press toward that edge, and the element still
-        // receives that one seek. A pending scrub target does not count: fastSeek lands on a
-        // keyframe and not on its target, so an exact seek to the same time is still required
-        // (ADR 022).
+        // Two tests find that step:
+        // - The target is the position the step starts from: the rules above return it at a
+        //   bound, and the no-backward rule returns it outside the bounds. The comparison uses
+        //   the real start position, currentBrowserTime, and not stepStart: the pending target
+        //   when one exists, and currentTime when none exists. A pending exact seek to the edge
+        //   therefore absorbs each later press toward that edge, and the element still receives
+        //   that one seek.
+        // - On the frame grid, the clamped target lies in the frame the step starts from. A step
+        //   back from the middle of the first frame clamps to the start of that same frame, which
+        //   is a different position and the same picture. The same holds for a step forward that
+        //   the end position clamps inside the frame it starts from. Without a clamp, the target
+        //   is the middle of another frame and never matches.
+        // A pending scrub target does not count: fastSeek lands on a keyframe and not on its
+        // target, so an exact seek is still required (ADR 022).
         if (
           pending?.scrub !== true &&
-          Math.abs(targetTime - currentBrowserTime) <
-            NOMINAL_STEP_EDGE_TOLERANCE_SECONDS
+          (Math.abs(targetTime - currentBrowserTime) <
+            NOMINAL_STEP_EDGE_TOLERANCE_SECONDS ||
+            (grid !== null && grid.frameIndexAt(targetTime) === grid.startFrame))
         ) {
           // A frame step means that the user stops to look at frames (ADR 019, ADR 022), so an
           // edge press during playback still pauses, as the seek path does. pause stops the cue
@@ -823,10 +986,33 @@ export function createPlaybackStore(
         scrubAudioController.request(targetTime, deltaFrames > 0 ? 1 : -1);
 
         // Do not update inferred PTS optimistically after assigning currentTime.
-        const seekTargetSeconds = Math.max(
-          0,
-          targetTime - browserTimelineOriginSeconds,
-        );
+        //
+        // On the frame grid, the display target is the nominal start of the target frame, while
+        // the element seeks to its middle. The presented frame then reports its real start, which
+        // lies within one tick of that nominal start, so the playhead and the pending In region
+        // do not move back when the frame arrives, and a held key moves them one frame for each
+        // press (ADR 022). The timecode names the target frame from its nominal start (ADR 028).
+        // A target that the end position pulled back shows the nominal start of the frame that
+        // contains it, for the same reason. A target that the lower bound raised shows as it is.
+        //
+        // Off the grid, the target shows as it is. It counts from the calibrated first frame
+        // while a calibration holds, the origin of the elapsed seconds of the presented frame and
+        // of seekToPts, and from the start of the timeline, the origin of the approximate clock,
+        // without one.
+        let seekTargetSeconds: number;
+        if (grid !== null && targetTime === unclampedTarget) {
+          seekTargetSeconds = Math.max(0, (grid.targetFrame * fps.d) / fps.n);
+        } else if (grid !== null && targetTime < unclampedTarget) {
+          seekTargetSeconds = Math.max(
+            0,
+            (grid.frameIndexAt(targetTime) * fps.d) / fps.n,
+          );
+        } else {
+          seekTargetSeconds = Math.max(
+            0,
+            targetTime - (calibratedOrigin ?? browserTimelineOriginSeconds),
+          );
+        }
         set({
           isPlaying: false,
           error: null,
@@ -920,6 +1106,9 @@ export function createPlaybackStore(
         const markUnavailable = () => {
           const state = get();
           const shouldClearTarget = settled && state.seekTargetSeconds !== null;
+          // A target that stays pending moves to the axis of the approximate clock. The write
+          // happens only on the change from ready, which the first test below already covers.
+          const retarget = settled ? undefined : timelineAxisTargetOnCalibrationLoss();
           if (
             state.calibrationStatus !== "unavailable" ||
             state.presentedFrame !== null ||
@@ -928,7 +1117,11 @@ export function createPlaybackStore(
             set({
               calibrationStatus: "unavailable",
               presentedFrame: null,
-              ...(settled ? { seekTargetSeconds: null } : {}),
+              ...(settled
+                ? { seekTargetSeconds: null }
+                : retarget !== undefined
+                  ? { seekTargetSeconds: retarget }
+                  : {}),
             });
           }
         };
@@ -1058,10 +1251,17 @@ export function createPlaybackStore(
           return;
         }
 
+        // Read before the status changes: a pending target moves to the axis of the approximate
+        // clock only when the calibration held until now.
+        const retarget = timelineAxisTargetOnCalibrationLoss();
         calibratedMediaTime = null;
         lastPresentedMediaTime = null;
         lastInferredPts = null;
-        set({ calibrationStatus: "unavailable", presentedFrame: null });
+        set({
+          calibrationStatus: "unavailable",
+          presentedFrame: null,
+          ...(retarget !== undefined ? { seekTargetSeconds: retarget } : {}),
+        });
       },
 
       syncBrowserDuration: (

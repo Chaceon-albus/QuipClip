@@ -10,14 +10,23 @@ import {
 import { getSourceRevisionKey } from "@/features/media";
 import { canMarkIn } from "@/features/timeline";
 import * as timeLib from "@/lib/time";
-import type { Pts } from "@/types/project";
+import {
+  formatElapsedTimecode,
+  formatFrameTimecodeFromTicks,
+  frameBoundaryMarginSeconds,
+  isFrameGridExact,
+} from "@/lib/timecode";
+import type { Pts, Rational } from "@/types/project";
+import { getDisplayedElapsedSeconds } from "./presentation";
 import { scrubAudioController } from "./scrubAudio";
 import {
   createPlaybackStore,
   getNominalFrameRate,
   hasNominalFrameRate,
+  hasVariableFrameRate,
   type PlaybackStore,
 } from "./store";
+import { resolveTimecodeDisplay } from "./timecodeDisplay";
 import type { PlaybackMediaElement, PlaybackSource } from "./types";
 
 /**
@@ -906,11 +915,13 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
       store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
-      // The element moves on after metadata loaded, so the timeline origin stays 0.
-      video.currentTime = 0.02;
+      // The element moves on after metadata loaded, so the timeline origin stays 0. It stands
+      // inside frame 5 and presents that frame.
+      video.currentTime = 0.22;
       video.seeking = false;
+      store.getState().syncPresentedFrame(identityA, 0.2, 2, video);
 
-      // Seek -10 frames from 0.02s -> clamps to 0
+      // Seek -10 frames from frame 5 -> clamps to 0
       store.getState().seekNominal(-10);
       expect(video.currentTime).toBe(0);
       expect(store.getState().presentedFrame).toBeNull();
@@ -2491,7 +2502,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().seekNominal(1);
       expect(video.fastSeek).not.toHaveBeenCalled();
       expect(video.currentTimeSets).toBe(4);
-      expect(video.currentTime).toBeCloseTo(1.04, 5);
+      expect(video.currentTime).toBeCloseTo(1.06, 5);
     });
 
     it("a scrub seek queued while seeking, then flushed by seeked, uses fastSeek at flush time", () => {
@@ -2951,19 +2962,22 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(video.currentTime).toBe(1.0);
 
       // seekNominal(1 frame) should step from the pending scrub target (4.0), not currentTime (1.0).
-      // sourceA has 25fps (1 frame = 0.04s), so target should be 4.04s, not 1.04s.
+      // sourceA has 25fps (1 frame = 0.04s), and 4.0 s is frame 100, so the element seeks to the
+      // middle of frame 101, 4.06 s, not 1.06 s. The display target is the nominal start of
+      // frame 101.
       video.seeking = false;
       store.getState().seekNominal(1);
-      expect(video.currentTime).toBeCloseTo(4.04, 5);
+      expect(video.currentTime).toBeCloseTo(4.06, 5);
       expect(store.getState().seekTargetSeconds).toBeCloseTo(4.04, 5);
 
-      // Stepping backward (-2 frames = -0.08s) after an issued scrub to 4.0 steps to 3.92s
+      // Stepping backward 2 frames after an issued scrub to 4.0 (frame 100) seeks to the middle
+      // of frame 98, 3.94 s, and displays its nominal start
       video.currentTime = 1.0;
       video.seeking = false;
       store.getState().seekApproximate(4.0, { scrub: true });
       video.seeking = false;
       store.getState().seekNominal(-2);
-      expect(video.currentTime).toBeCloseTo(3.92, 5);
+      expect(video.currentTime).toBeCloseTo(3.94, 5);
       expect(store.getState().seekTargetSeconds).toBeCloseTo(3.92, 5);
     });
 
@@ -3262,11 +3276,12 @@ describe("Playback Store & PTS Presentation Engine", () => {
       const video = createFakeVideo();
       attachCalibrated(store, video);
 
-      // A press toward the edge first does nothing, and it leaves the next step intact.
+      // A press toward the edge first does nothing, and it leaves the next step intact. The step
+      // seeks to the middle of frame 1 and displays its nominal start.
       store.getState().seekNominal(-1);
       store.getState().seekNominal(1);
       expect(video.currentTimeSets).toBe(1);
-      expect(video.currentTime).toBeCloseTo(0.04, 9);
+      expect(video.currentTime).toBeCloseTo(0.06, 9);
       expect(store.getState().presentedFrame).toBeNull();
       expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
       expect(requestSpy).toHaveBeenCalledTimes(1);
@@ -3279,17 +3294,19 @@ describe("Playback Store & PTS Presentation Engine", () => {
       requestSpy.mockClear();
       const setsBefore = video.currentTimeSets;
 
+      // The element stands at the upper bound, 10 s, and presents frame 249. The step back starts
+      // from that frame, so it seeks to the middle of frame 248 and displays its nominal start.
       store.getState().seekNominal(1);
       store.getState().seekNominal(-1);
       expect(video.currentTimeSets).toBe(setsBefore + 1);
-      expect(video.currentTime).toBeCloseTo(9.96, 9);
+      expect(video.currentTime).toBeCloseTo(9.94, 9);
       expect(store.getState().presentedFrame).toBeNull();
-      expect(store.getState().seekTargetSeconds).toBeCloseTo(9.96, 9);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(9.92, 9);
       expect(requestSpy).toHaveBeenCalledTimes(1);
       expect(requestSpy).toHaveBeenLastCalledWith(video.currentTime, -1);
     });
 
-    it("quick presses toward the first position during a pending seek end at 0 without a trailing seek", () => {
+    it("quick presses toward the first frame during a pending seek end on it without a trailing seek", () => {
       const store = createPlaybackStore();
       const video = createFakeVideo();
       attachCalibrated(store, video);
@@ -3300,31 +3317,35 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().presentedFrame?.inferredSourcePts).toBe("2");
       const setsBefore = video.currentTimeSets;
 
-      // First press: the element is idle, so the seek to 0.04 s runs at once.
+      // First press: the element is idle, so the seek to the middle of frame 1 (0.06 s) runs at
+      // once.
       store.getState().seekNominal(-1);
       expect(video.currentTimeSets).toBe(setsBefore + 1);
-      expect(video.currentTime).toBeCloseTo(0.04, 9);
+      expect(video.currentTime).toBeCloseTo(0.06, 9);
       expect(video.seeking).toBe(true);
 
-      // Second press: the element still seeks, so the seek to 0 is queued.
+      // Second press: the element still seeks, so the seek to the middle of frame 0 (0.02 s) is
+      // queued. The display target is the nominal start of frame 0.
       store.getState().seekNominal(-1);
       expect(video.currentTimeSets).toBe(setsBefore + 1);
       expect(store.getState().seekTargetSeconds).toBe(0);
 
-      // Later presses build on the queued target 0, which is the edge, so they do nothing.
+      // Later presses build on the queued target, which lies in the first frame. The clamp pulls
+      // their targets to the start of that same frame, so they do nothing.
       store.getState().seekNominal(-1);
       store.getState().seekNominal(-1);
       expect(video.currentTimeSets).toBe(setsBefore + 1);
       expect(store.getState().seekTargetSeconds).toBe(0);
       expect(requestSpy.mock.calls).toHaveLength(2);
-      expect(requestSpy.mock.calls[0][0]).toBeCloseTo(0.04, 9);
+      expect(requestSpy.mock.calls[0][0]).toBeCloseTo(0.06, 9);
       expect(requestSpy.mock.calls[0][1]).toBe(-1);
-      expect(requestSpy.mock.calls[1]).toEqual([0, -1]);
+      expect(requestSpy.mock.calls[1][0]).toBeCloseTo(0.02, 9);
+      expect(requestSpy.mock.calls[1][1]).toBe(-1);
 
-      // The seeked event of the running seek starts the queued seek to 0.
+      // The seeked event of the running seek starts the queued seek to the first frame.
       fireSeeked(store, identityA, video);
       expect(video.currentTimeSets).toBe(setsBefore + 2);
-      expect(video.currentTime).toBe(0);
+      expect(video.currentTime).toBeCloseTo(0.02, 9);
 
       // The seek to 0 settles on the first frame.
       settle(store, video, 0.0, 3);
@@ -3349,33 +3370,36 @@ describe("Playback Store & PTS Presentation Engine", () => {
       settle(store, video, 0.04, 2);
       const setsBefore = video.currentTimeSets;
 
-      // The seek to 0 runs, and the next seek toward the edge is absorbed.
+      // The seek to the first frame (its middle, 0.02 s) runs, and the next seek toward the
+      // edge is absorbed. The display target is the nominal start of frame 0.
       store.getState().seekNominal(-1);
-      expect(video.currentTime).toBe(0);
+      expect(video.currentTime).toBeCloseTo(0.02, 9);
       expect(video.seeking).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBe(0);
       store.getState().seekNominal(-1);
+      expect(video.currentTimeSets).toBe(setsBefore + 1);
       expect(store.getState().seekTargetSeconds).toBe(0);
 
-      // While the element still seeks, a step forward queues 0.04 s, and a step back replaces
-      // it with a queued seek to the edge.
+      // While the element still seeks, a step forward queues the middle of frame 1 (0.06 s), and
+      // a step back replaces it with a queued seek to the first frame.
       store.getState().seekNominal(1);
+      expect(requestSpy.mock.lastCall?.[0]).toBeCloseTo(0.06, 9);
       expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
       store.getState().seekNominal(-1);
+      expect(requestSpy.mock.lastCall?.[0]).toBeCloseTo(0.02, 9);
       expect(store.getState().seekTargetSeconds).toBe(0);
 
       // A step away from the queued edge target still replaces the queued seek.
       store.getState().seekNominal(1);
       expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
-      expect(requestSpy).toHaveBeenLastCalledWith(
-        store.getState().seekTargetSeconds,
-        1,
-      );
+      expect(requestSpy.mock.lastCall?.[0]).toBeCloseTo(0.06, 9);
+      expect(requestSpy.mock.lastCall?.[1]).toBe(1);
       expect(video.currentTimeSets).toBe(setsBefore + 1);
 
       // The seeked event starts the latest queued seek, not the one to the edge.
       fireSeeked(store, identityA, video);
       expect(video.currentTimeSets).toBe(setsBefore + 2);
-      expect(video.currentTime).toBeCloseTo(0.04, 9);
+      expect(video.currentTime).toBeCloseTo(0.06, 9);
     });
 
     it("a pending scrub target at the edge does not absorb an exact step (ADR 022)", () => {
@@ -3551,13 +3575,13 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().seekTargetSeconds).toBeNull();
       expect(requestSpy).not.toHaveBeenCalled();
 
-      // The step back starts from the upper bound (10 s), not from 10.3 s, and lands one frame
-      // interval before it. That is the start of the last frame, which is already on screen,
-      // so the picture does not change: the same final-frame gap as the known-gap test above.
+      // The step back starts from the frame on screen, 249, not from 10.3 s or from the upper
+      // bound, so it seeks to the middle of frame 248 and the picture changes. It displays the
+      // nominal start of frame 248.
       store.getState().seekNominal(-1);
       expect(video.currentTimeSets).toBe(setsBefore + 1);
-      expect(video.currentTime).toBeCloseTo(9.96, 9);
-      expect(store.getState().seekTargetSeconds).toBeCloseTo(9.96, 9);
+      expect(video.currentTime).toBeCloseTo(9.94, 9);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(9.92, 9);
       expect(requestSpy).toHaveBeenCalledTimes(1);
       expect(requestSpy).toHaveBeenLastCalledWith(video.currentTime, -1);
     });
@@ -3590,10 +3614,12 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().presentedFrame?.inferredSourcePts).toBe("5");
       const setsBefore = video.currentTimeSets;
 
+      // The display target counts from the calibrated first frame, the origin from which the
+      // presented frame reports its elapsed seconds, so it is 0 and not 0.02.
       store.getState().seekNominal(-10);
       expect(video.currentTimeSets).toBe(setsBefore + 1);
       expect(video.currentTime).toBe(0.02);
-      expect(store.getState().seekTargetSeconds).toBe(0.02);
+      expect(store.getState().seekTargetSeconds).toBe(0);
       expect(requestSpy).toHaveBeenCalledTimes(1);
       expect(requestSpy).toHaveBeenLastCalledWith(0.02, -1);
 
@@ -3623,13 +3649,16 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().calibrationStatus).toBe("ready");
 
       // The step starts from the first frame, so it reaches frame 1 and not the frame that is
-      // already on screen.
+      // already on screen. The target is the middle of frame 1, 0.08 + 1.5 * 0.04 s.
       store.getState().seekNominal(1);
       expect(video.currentTimeSets).toBe(1);
-      expect(video.currentTime).toBeCloseTo(0.12, 9);
-      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.12, 9);
+      expect(video.currentTime).toBeCloseTo(0.14, 9);
       expect(requestSpy).toHaveBeenCalledTimes(1);
       expect(requestSpy).toHaveBeenLastCalledWith(video.currentTime, 1);
+      // The display target is the nominal start of frame 1, counted from the calibrated first
+      // frame: the frame whose PTS the callback then reports. Counted from the start of the
+      // timeline, it would lie in frame 3.
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
 
       settle(store, video, 0.12, 2);
       expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1");
@@ -3656,11 +3685,12 @@ describe("Playback Store & PTS Presentation Engine", () => {
         requestSpy.mockClear();
         const setsBefore = video.currentTimeSets;
 
-        // Twenty frames from PTS 240 pass the end of the stream, which is 0.08 s + 10 s.
+        // Twenty frames from PTS 240 pass the end of the stream, which is 0.08 s + 10 s. The
+        // display target counts from the calibrated first frame, so it is the 10 s of the stream.
         store.getState().seekNominal(20);
         expect(video.currentTimeSets).toBe(setsBefore + 1);
         expect(video.currentTime).toBe(10.08);
-        expect(store.getState().seekTargetSeconds).toBe(10.08);
+        expect(store.getState().seekTargetSeconds).toBe(10);
         expect(requestSpy).toHaveBeenLastCalledWith(10.08, 1);
 
         // The element presents the last frame, PTS 249, and the next press is at the edge.
@@ -3950,6 +3980,1031 @@ describe("Playback Store & PTS Presentation Engine", () => {
         store.getState().seekNominal(-1);
         expect(video.currentTimeSets).toBe(setsBefore + 1);
         expect(requestSpy).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  // A container such as Matroska stores each PTS rounded to the millisecond, so a real frame can
+  // start up to half a millisecond before or after its nominal start. A seek to the nominal start
+  // of the next frame then often lands before that frame, and the element presents the frame
+  // before it again. These tests simulate the element: it presents the last frame whose PTS is
+  // not after the target, which is the frame that contains the target.
+  describe("Nominal Step to the Middle of a Frame", () => {
+    let requestSpy: MockInstance<typeof scrubAudioController.request>;
+
+    beforeEach(() => {
+      requestSpy = vi.spyOn(scrubAudioController, "request");
+    });
+
+    afterEach(() => {
+      requestSpy.mockRestore();
+    });
+
+    // No interval of these rates is a whole number of milliseconds, so the frame boundary margin
+    // of the timecode is one tick (ADR 028).
+    const tbMs: Rational = { n: 1, d: 1000 };
+    const TICK_SECONDS = 0.001;
+    const SIMULATED_SECONDS = 10;
+    const fps2997: Rational = { n: 30000, d: 1001 };
+    const fps23976: Rational = { n: 24000, d: 1001 };
+    const fps5994: Rational = { n: 60000, d: 1001 };
+
+    /**
+     * Matroska-like sources. `firstFrame` is the nominal frame of the first video frame. A first
+     * frame after frame 0 has a rounded first PTS: 67 ms for frame 2 at 29.97 fps (66.73 ms),
+     * 42 ms for frame 1 at 23.976 fps (41.71 ms) and 17 ms for frame 1 at 59.94 fps (16.68 ms).
+     * Measured from that first PTS, a later frame can start up to one tick before its nominal
+     * start.
+     */
+    const matroskaCases: { label: string; fps: Rational; firstFrame: number }[] = [
+      { label: "29.97 fps, first frame 0", fps: fps2997, firstFrame: 0 },
+      { label: "23.976 fps, first frame 0", fps: fps23976, firstFrame: 0 },
+      { label: "59.94 fps, first frame 0", fps: fps5994, firstFrame: 0 },
+      { label: "29.97 fps, first frame 2", fps: fps2997, firstFrame: 2 },
+      { label: "23.976 fps, first frame 1", fps: fps23976, firstFrame: 1 },
+      { label: "59.94 fps, first frame 1", fps: fps5994, firstFrame: 1 },
+    ];
+
+    /** A source with frame PTS values `ptsTicks` in `timeBase`, calibrated on its first frame. */
+    interface SimulatedSource {
+      readonly source: PlaybackSource;
+      readonly identity: string;
+      readonly ptsTicks: readonly number[];
+      readonly startSeconds: readonly number[];
+    }
+
+    /**
+     * Frame i is nominal frame firstFrame + i. It starts at its nominal start, rounded to the
+     * nearest tick with a tie away from zero, as the FFmpeg rescale in a muxer does. Integer
+     * arithmetic keeps the rounding exact.
+     *
+     * The browser timeline starts at 0 and presents the first frame at its PTS. The browser time
+     * of a later frame is the conversion ptsToMediaTime makes from that calibration anchor, so a
+     * seek to a PTS lands exactly on the start of its frame.
+     */
+    function simulateSource(
+      fps: Rational,
+      timeBase: Rational,
+      frameCount: number,
+      firstFrame = 0,
+    ): SimulatedSource {
+      const ptsTicks: number[] = [];
+      for (let i = 0; i < frameCount; i++) {
+        const numerator = (firstFrame + i) * fps.d * timeBase.d;
+        const denominator = fps.n * timeBase.n;
+        const quotient = Math.floor(numerator / denominator);
+        const remainder = numerator - quotient * denominator;
+        ptsTicks.push(2 * remainder >= denominator ? quotient + 1 : quotient);
+      }
+      const anchor = (ptsTicks[0] * timeBase.n) / timeBase.d;
+      const startSeconds = ptsTicks.map(
+        (ticks) => anchor + ((ticks - ptsTicks[0]) * timeBase.n) / timeBase.d,
+      );
+      const source: PlaybackSource = {
+        path: `/media/sim-${fps.n}-${fps.d}-${timeBase.d}-${firstFrame}.mkv`,
+        size: 4096,
+        mtime: 1724977000,
+        videoTimeBase: timeBase,
+        videoStartPts: String(ptsTicks[0]) as Pts,
+        avgFrameRate: fps,
+        rFrameRate: fps,
+        approximateDurationSeconds: (frameCount * fps.d) / fps.n,
+      };
+      return { source, identity: getSourceRevisionKey(source), ptsTicks, startSeconds };
+    }
+
+    /** The frame the simulated element presents for a target: the one that contains it. */
+    function presentedIndex(startSeconds: readonly number[], target: number): number {
+      let index = 0;
+      while (index + 1 < startSeconds.length && startSeconds[index + 1] <= target) {
+        index++;
+      }
+      return index;
+    }
+
+    /** The frame timecode of frame k: its exact nominal start, k * fps.d / fps.n seconds. */
+    function frameLabel(fps: Rational, k: number): string {
+      return formatFrameTimecodeFromTicks(
+        BigInt(k) * BigInt(fps.d),
+        { n: 1, d: fps.n },
+        fps,
+      );
+    }
+
+    function attachSimulated(
+      store: PlaybackStore,
+      sim: SimulatedSource,
+      video: ReturnType<typeof createFakeVideo>,
+    ): void {
+      store.getState().attach(sim.source, video);
+      video.readyState = 1;
+      store.getState().syncReady(sim.identity, video);
+      store.getState().syncPresentedFrame(sim.identity, sim.startSeconds[0], 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+    }
+
+    /** Reports the frame the element presents for its position, as RVFC does. */
+    function presentFrameAtPosition(
+      store: PlaybackStore,
+      sim: SimulatedSource,
+      video: ReturnType<typeof createFakeVideo>,
+    ): number {
+      const index = presentedIndex(sim.startSeconds, video.currentTime);
+      store
+        .getState()
+        .syncPresentedFrame(sim.identity, sim.startSeconds[index], index + 2, video);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe(
+        String(sim.ptsTicks[index]),
+      );
+      return index;
+    }
+
+    /** Completes the running seek, and the element presents the frame that contains its target. */
+    function settleOnTarget(
+      store: PlaybackStore,
+      sim: SimulatedSource,
+      video: ReturnType<typeof createFakeVideo>,
+    ): number {
+      fireSeeked(store, sim.identity, video);
+      return presentFrameAtPosition(store, sim, video);
+    }
+
+    /** Seeks to the start of frame k, as Home or a go-to-mark does, and settles there. */
+    function goToFrameStart(
+      store: PlaybackStore,
+      sim: SimulatedSource,
+      video: ReturnType<typeof createFakeVideo>,
+      k: number,
+    ): void {
+      store.getState().seekToPts(String(sim.ptsTicks[k]) as Pts);
+      expect(video.currentTime).toBe(sim.startSeconds[k]);
+      expect(settleOnTarget(store, sim, video)).toBe(k);
+    }
+
+    /** The position the playhead and the pending In region show now (ADR 022). */
+    function displayedSeconds(store: PlaybackStore, sim: SimulatedSource): number {
+      return getDisplayedElapsedSeconds(
+        store.getState(),
+        sim.source.videoStartPts,
+        sim.source.videoTimeBase,
+      );
+    }
+
+    /**
+     * The timecode the preview shows now: the displayed position of ADR 022, in the frame
+     * format that ADR 028 resolves for the source, with its frame boundary margin.
+     */
+    function displayedLabel(store: PlaybackStore, sim: SimulatedSource): string {
+      const display = resolveTimecodeDisplay("frames", sim.source);
+      expect(display.format).toBe("frames");
+      return formatElapsedTimecode(displayedSeconds(store, sim), display);
+    }
+
+    /** The browser target of the last cue, which is the target the element receives. */
+    function lastCueTarget(): number {
+      const call = requestSpy.mock.lastCall;
+      expect(call).toBeDefined();
+      return call?.[0] ?? Number.NaN;
+    }
+
+    it.each(matroskaCases)(
+      "$label: a step from each real frame start presents the next or the previous real frame",
+      ({ fps, firstFrame }) => {
+        const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+        const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+
+        // Control: the old target, the start position plus one nominal interval, lands before
+        // the next real frame for many of these frames.
+        let nominalStartRepeats = 0;
+        for (let k = 0; k + 1 < frameCount; k++) {
+          if (
+            presentedIndex(sim.startSeconds, sim.startSeconds[k] + fps.d / fps.n) === k
+          ) {
+            nominalStartRepeats++;
+          }
+        }
+        expect(nominalStartRepeats).toBeGreaterThan(frameCount / 4);
+
+        for (let k = 0; k + 1 < frameCount; k++) {
+          goToFrameStart(store, sim, video, k);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k));
+
+          store.getState().seekNominal(1);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k + 1);
+          // The display target is the nominal start of the target frame, so the timecode names
+          // the frame that the callback then reports (ADR 022, ADR 028), and the playhead moves
+          // less than one tick when that frame arrives.
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k + 1));
+          const pendingSeconds = displayedSeconds(store, sim);
+          expect(settleOnTarget(store, sim, video)).toBe(k + 1);
+          expect(store.getState().seekTargetSeconds).toBeNull();
+          expect(Math.abs(displayedSeconds(store, sim) - pendingSeconds)).toBeLessThan(
+            TICK_SECONDS,
+          );
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k + 1));
+
+          if (k > 0) {
+            goToFrameStart(store, sim, video, k);
+            store.getState().seekNominal(-1);
+            expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k - 1);
+            expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k - 1));
+            expect(settleOnTarget(store, sim, video)).toBe(k - 1);
+          }
+        }
+      },
+    );
+
+    it.each(matroskaCases)(
+      "$label: a step while a seek to a real frame start is pending counts from that frame",
+      ({ fps, firstFrame }) => {
+        const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+        const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+
+        // No frame is on screen for the pending seek, so the start frame comes from its target,
+        // a real frame start. Measured from a rounded first PTS, that start can lie up to one
+        // tick before its nominal start, and the one-tick margin keeps it in its own frame.
+        for (let k = 0; k + 1 < frameCount; k++) {
+          const direction = k > 0 && k % 2 === 0 ? -1 : 1;
+          store.getState().seekToPts(String(sim.ptsTicks[k]) as Pts);
+          expect(video.seeking).toBe(true);
+          store.getState().seekNominal(direction);
+          expect(presentedIndex(sim.startSeconds, lastCueTarget())).toBe(k + direction);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k + direction));
+          fireSeeked(store, sim.identity, video);
+          expect(settleOnTarget(store, sim, video)).toBe(k + direction);
+        }
+      },
+    );
+
+    it.each(matroskaCases)(
+      "$label: repeated steps, each after its frame arrives, advance one real frame each, and the playhead never moves back",
+      ({ fps, firstFrame }) => {
+        const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+        const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+
+        // Each seek settles, and the callback of its frame arrives after the seeked event and
+        // clears the display target. Each press therefore starts from the frame on screen. The
+        // displayed position moves forward by about one frame for each press, and less than one
+        // tick when the frame arrives.
+        let settledSeconds = displayedSeconds(store, sim);
+        for (let k = 1; k < frameCount; k++) {
+          store.getState().seekNominal(1);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k));
+          const pendingSeconds = displayedSeconds(store, sim);
+          expect(pendingSeconds).toBeGreaterThan(settledSeconds);
+          expect(settleOnTarget(store, sim, video)).toBe(k);
+          settledSeconds = displayedSeconds(store, sim);
+          expect(Math.abs(settledSeconds - pendingSeconds)).toBeLessThan(TICK_SECONDS);
+        }
+        for (let k = frameCount - 2; k >= 0; k--) {
+          store.getState().seekNominal(-1);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k));
+          const pendingSeconds = displayedSeconds(store, sim);
+          expect(pendingSeconds).toBeLessThan(settledSeconds);
+          expect(settleOnTarget(store, sim, video)).toBe(k);
+          settledSeconds = displayedSeconds(store, sim);
+          expect(Math.abs(settledSeconds - pendingSeconds)).toBeLessThan(TICK_SECONDS);
+        }
+        // One cue for each press (ADR 019, ADR 021).
+        expect(requestSpy).toHaveBeenCalledTimes(2 * (frameCount - 1));
+      },
+    );
+
+    // RVFC can report the new frame before the element fires `seeked`. The display target then
+    // stays (ADR 022), so the next press has no settled frame on screen, and it starts from the
+    // middle target of the step before, which the element reports as currentTime.
+    it.each(matroskaCases)(
+      "$label: repeated steps from a reached middle target whose frame arrived before seeked advance one real frame each",
+      ({ fps, firstFrame }) => {
+        const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+        const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+
+        const settleCallbackFirst = (): number => {
+          expect(video.seeking).toBe(true);
+          const index = presentFrameAtPosition(store, sim, video);
+          fireSeeked(store, sim.identity, video);
+          expect(store.getState().seekTargetSeconds).not.toBeNull();
+          return index;
+        };
+
+        store.getState().seekNominal(1);
+        expect(settleCallbackFirst()).toBe(1);
+        for (let k = 2; k < frameCount; k++) {
+          store.getState().seekNominal(1);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k));
+          expect(settleCallbackFirst()).toBe(k);
+        }
+        for (let k = frameCount - 2; k >= 0; k--) {
+          store.getState().seekNominal(-1);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k));
+          expect(settleCallbackFirst()).toBe(k);
+        }
+      },
+    );
+
+    // A late frame callback can report the old frame while the seek of a step still runs. The
+    // display target is still set, so the next press starts from the pending middle target and
+    // not from that old frame. From the old frame it would aim at the pending target itself,
+    // and the edge rule would drop the press.
+    it.each(matroskaCases)(
+      "$label: a press after a late callback of the old frame during a step still moves one frame",
+      ({ fps, firstFrame }) => {
+        const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+        const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+
+        for (let k = 0; k + 2 < frameCount; k++) {
+          goToFrameStart(store, sim, video, k);
+          requestSpy.mockClear();
+          const setsBefore = video.currentTimeSets;
+
+          // The step to frame k + 1 is in flight.
+          store.getState().seekNominal(1);
+          expect(video.seeking).toBe(true);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k + 1);
+
+          // The late callback of frame k arrives while the seek runs. It sets presentedFrame,
+          // and the display target stays.
+          store
+            .getState()
+            .syncPresentedFrame(sim.identity, sim.startSeconds[k], k + 2, video);
+          expect(store.getState().presentedFrame?.inferredSourcePts).toBe(
+            String(sim.ptsTicks[k]),
+          );
+          expect(store.getState().seekTargetSeconds).not.toBeNull();
+
+          // The next press still moves one frame: it queues the middle of frame k + 2.
+          store.getState().seekNominal(1);
+          expect(requestSpy).toHaveBeenCalledTimes(2);
+          expect(presentedIndex(sim.startSeconds, lastCueTarget())).toBe(k + 2);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k + 2));
+          expect(video.currentTimeSets).toBe(setsBefore + 1);
+
+          // The seeked event starts the queued seek, and the element presents frame k + 2.
+          fireSeeked(store, sim.identity, video);
+          expect(video.currentTimeSets).toBe(setsBefore + 2);
+          expect(settleOnTarget(store, sim, video)).toBe(k + 2);
+        }
+      },
+    );
+
+    it.each(matroskaCases)(
+      "$label: presses during a pending seek build on the pending middle target, one frame each",
+      ({ fps, firstFrame }) => {
+        const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+        const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+        const presses = 90;
+
+        // The first press seeks at once. The element then reports seeking until fireSeeked, so
+        // every later press replaces the queued seek and steps from its target (ADR 022).
+        for (let k = 1; k <= presses; k++) {
+          store.getState().seekNominal(1);
+          expect(presentedIndex(sim.startSeconds, lastCueTarget())).toBe(k);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k));
+        }
+        expect(video.currentTimeSets).toBe(1);
+        for (let k = presses - 1; k >= presses - 30; k--) {
+          store.getState().seekNominal(-1);
+          expect(presentedIndex(sim.startSeconds, lastCueTarget())).toBe(k);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k));
+        }
+        expect(video.currentTimeSets).toBe(1);
+        expect(requestSpy).toHaveBeenCalledTimes(presses + 30);
+
+        // The seeked event starts the last queued seek, and the element presents its frame.
+        fireSeeked(store, sim.identity, video);
+        expect(video.currentTimeSets).toBe(2);
+        expect(settleOnTarget(store, sim, video)).toBe(presses - 30);
+      },
+    );
+
+    it.each(matroskaCases)(
+      "$label: a step of ten frames is one request that presents the tenth real frame",
+      ({ fps, firstFrame }) => {
+        const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+        const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+
+        for (let k = 0; k + 10 < frameCount; k++) {
+          goToFrameStart(store, sim, video, k);
+          requestSpy.mockClear();
+          const setsBefore = video.currentTimeSets;
+
+          store.getState().seekNominal(10);
+          expect(video.currentTimeSets).toBe(setsBefore + 1);
+          expect(requestSpy).toHaveBeenCalledTimes(1);
+          expect(requestSpy).toHaveBeenLastCalledWith(video.currentTime, 1);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k + 10);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k + 10));
+          expect(settleOnTarget(store, sim, video)).toBe(k + 10);
+
+          // Ten frames back from the frame on screen is the frame the step started on.
+          store.getState().seekNominal(-10);
+          expect(video.currentTimeSets).toBe(setsBefore + 2);
+          expect(requestSpy).toHaveBeenCalledTimes(2);
+          expect(requestSpy).toHaveBeenLastCalledWith(video.currentTime, -1);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k);
+          expect(settleOnTarget(store, sim, video)).toBe(k);
+        }
+      },
+    );
+
+    // After a click or a drag release, currentTime is the requested position, anywhere in the
+    // frame on screen, and it can lie one tick before the next real frame start. The frame on
+    // screen, which RVFC reported, is then the start of the step.
+    it.each(matroskaCases)(
+      "$label: a step after a click one tick before the next real frame start counts from the frame on screen",
+      ({ fps, firstFrame }) => {
+        const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+        const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+        const margin = frameBoundaryMarginSeconds(fps, tbMs);
+        const origin = sim.startSeconds[0];
+
+        // Control: the frame of that position after the margin is the next frame for many of
+        // these frames.
+        let nextFrameCount = 0;
+        for (let k = 0; k + 2 < frameCount; k++) {
+          const clickSeconds = (sim.ptsTicks[k + 1] - 1 - sim.ptsTicks[0]) / 1000;
+          if (Math.floor(((clickSeconds + margin) * fps.n) / fps.d) === k + 1) {
+            nextFrameCount++;
+          }
+        }
+        expect(nextFrameCount).toBeGreaterThan(frameCount / 10);
+
+        for (let k = 0; k + 2 < frameCount; k++) {
+          const direction = k > 0 && k % 2 === 1 ? -1 : 1;
+          // The click asks for the PTS one tick before the next frame starts.
+          store.getState().seekToPts(String(sim.ptsTicks[k + 1] - 1) as Pts);
+          expect(video.currentTime).toBeCloseTo(
+            origin + (sim.ptsTicks[k + 1] - 1 - sim.ptsTicks[0]) / 1000,
+            12,
+          );
+          expect(settleOnTarget(store, sim, video)).toBe(k);
+
+          store.getState().seekNominal(direction);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(
+            k + direction,
+          );
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k + direction));
+          expect(settleOnTarget(store, sim, video)).toBe(k + direction);
+        }
+      },
+    );
+
+    it.each(matroskaCases)(
+      "$label: a step after a pause 0.3 ms before the next real frame start counts from the frame on screen",
+      ({ fps, firstFrame }) => {
+        const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+        const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+        const margin = frameBoundaryMarginSeconds(fps, tbMs);
+        const origin = sim.startSeconds[0];
+
+        // Control: the frame of that position after the margin is the next frame for most of
+        // these frames.
+        let nextFrameCount = 0;
+        for (let k = 0; k + 2 < frameCount; k++) {
+          const pausedSeconds = sim.startSeconds[k + 1] - 0.0003 - origin;
+          if (Math.floor(((pausedSeconds + margin) * fps.n) / fps.d) === k + 1) {
+            nextFrameCount++;
+          }
+        }
+        expect(nextFrameCount).toBeGreaterThan(frameCount / 2);
+
+        for (let k = 0; k + 2 < frameCount; k++) {
+          const direction = k > 0 && k % 2 === 1 ? -1 : 1;
+          // Playback presents frame k and pauses 0.3 ms before frame k + 1 starts.
+          store.getState().play();
+          video.currentTime = sim.startSeconds[k + 1] - 0.0003;
+          video.seeking = false;
+          expect(presentFrameAtPosition(store, sim, video)).toBe(k);
+          store.getState().pause();
+          expect(store.getState().seekTargetSeconds).toBeNull();
+
+          store.getState().seekNominal(direction);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(
+            k + direction,
+          );
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k + direction));
+          expect(settleOnTarget(store, sim, video)).toBe(k + direction);
+        }
+      },
+    );
+
+    // Without a calibration no frame grid is known. The start of the timeline is not a frame
+    // boundary when the audio starts first, so the step moves the position by the nominal
+    // interval, as before the grid existed.
+    it("without a calibration, steps on an audio-first source advance one real frame each", () => {
+      const fps = fps2997;
+      const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+      // The first video frame starts 17 ms after the start of the timeline.
+      const startSeconds: number[] = [];
+      for (let i = 0; i < frameCount; i++) {
+        const numerator = i * fps.d * 1000;
+        const quotient = Math.floor(numerator / fps.n);
+        const remainder = numerator - quotient * fps.n;
+        startSeconds.push(
+          (17 + (2 * remainder >= fps.n ? quotient + 1 : quotient)) / 1000,
+        );
+      }
+      const source: PlaybackSource = {
+        path: "/media/audio-first.mkv",
+        size: 4096,
+        mtime: 1724977000,
+        videoTimeBase: tbMs,
+        videoStartPts: null,
+        avgFrameRate: fps,
+        rFrameRate: fps,
+        approximateDurationSeconds: (frameCount * fps.d) / fps.n,
+      };
+      const identity = getSourceRevisionKey(source);
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(source, video);
+      video.readyState = 1;
+      store.getState().syncReady(identity, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+
+      // Control: middle targets on a grid from the start of the timeline repeat or skip a frame
+      // for many presses.
+      let gridErrors = 0;
+      for (let p = 1; p + 1 < frameCount; p++) {
+        const before = presentedIndex(startSeconds, ((p - 0.5) * fps.d) / fps.n);
+        const after = presentedIndex(startSeconds, ((p + 0.5) * fps.d) / fps.n);
+        if (after - before !== 1) {
+          gridErrors++;
+        }
+      }
+      expect(gridErrors).toBeGreaterThan(frameCount / 5);
+
+      let previous = presentedIndex(startSeconds, video.currentTime);
+      for (let p = 1; p + 1 < frameCount; p++) {
+        store.getState().seekNominal(1);
+        expect(video.currentTime).toBeCloseTo((p * fps.d) / fps.n, 9);
+        const shown = presentedIndex(startSeconds, video.currentTime);
+        if (p > 1) {
+          expect(shown).toBe(previous + 1);
+        }
+        previous = shown;
+        fireSeeked(store, identity, video);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+      }
+      for (let p = frameCount - 3; p >= 1; p--) {
+        store.getState().seekNominal(-1);
+        const shown = presentedIndex(startSeconds, video.currentTime);
+        expect(shown).toBe(previous - 1);
+        previous = shown;
+        fireSeeked(store, identity, video);
+      }
+    });
+
+    /**
+     * A calibrated source whose frames start at `ptsTicks` in `timeBase`, with the rates the
+     * probe reports. The browser presents the first frame at its PTS.
+     */
+    function calibratedSourceFromPts(
+      ptsTicks: readonly number[],
+      timeBase: Rational,
+      avgFrameRate: Rational,
+      rFrameRate: Rational,
+      path: string,
+    ): SimulatedSource {
+      const anchor = (ptsTicks[0] * timeBase.n) / timeBase.d;
+      const startSeconds = ptsTicks.map(
+        (ticks) => anchor + ((ticks - ptsTicks[0]) * timeBase.n) / timeBase.d,
+      );
+      const last = startSeconds[startSeconds.length - 1];
+      const source: PlaybackSource = {
+        path,
+        size: 4096,
+        mtime: 1724977000,
+        videoTimeBase: timeBase,
+        videoStartPts: String(ptsTicks[0]) as Pts,
+        avgFrameRate,
+        rFrameRate,
+        approximateDurationSeconds:
+          last - anchor + (avgFrameRate.d / avgFrameRate.n) * 2,
+      };
+      return { source, identity: getSourceRevisionKey(source), ptsTicks, startSeconds };
+    }
+
+    /**
+     * Off the frame grid, a step moves the position by the nominal interval. From each real
+     * frame start it therefore presents the same frame or the next one, and never skips one.
+     */
+    function expectRelativeStepsFromEachFrameStart(
+      sim: SimulatedSource,
+      rate: Rational,
+    ): void {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachSimulated(store, sim, video);
+      const interval = rate.d / rate.n;
+      let skipped = 0;
+      for (let k = 0; k + 2 < sim.startSeconds.length; k++) {
+        goToFrameStart(store, sim, video, k);
+        store.getState().seekNominal(1);
+        expect(video.currentTime).toBeCloseTo(sim.startSeconds[k] + interval, 12);
+        // The display target is the target itself, counted from the calibrated first frame.
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(
+          video.currentTime - sim.startSeconds[0],
+          12,
+        );
+        const shown = settleOnTarget(store, sim, video);
+        expect(shown === k || shown === k + 1).toBe(true);
+        if (shown > k + 1) {
+          skipped++;
+        }
+      }
+      expect(skipped).toBe(0);
+    }
+
+    /**
+     * What single presses from each real frame start would do on the frame grid: round the
+     * frame on screen to its nominal frame and aim at the middle of the next one. `wrong`
+     * counts the presses that do not present the next frame, and `skipped` the presses that
+     * present a later one.
+     */
+    function gridOutcomes(
+      sim: SimulatedSource,
+      rate: Rational,
+    ): { wrong: number; skipped: number } {
+      const origin = sim.startSeconds[0];
+      let wrong = 0;
+      let skipped = 0;
+      for (let k = 0; k + 2 < sim.startSeconds.length; k++) {
+        const exact = ((sim.startSeconds[k] - origin) * rate.n) / rate.d;
+        const target = origin + ((2 * Math.round(exact) + 3) * rate.d) / (2 * rate.n);
+        const shown = presentedIndex(sim.startSeconds, target);
+        if (shown !== k + 1) {
+          wrong++;
+        }
+        if (shown > k + 1) {
+          skipped++;
+        }
+      }
+      return { wrong, skipped };
+    }
+
+    /** PTS of nominal frames `first` to `first + count - 1`, each rounded to the time base. */
+    function roundedPts(
+      rate: Rational,
+      timeBase: Rational,
+      first: number,
+      count: number,
+      keep: (k: number) => boolean = () => true,
+    ): number[] {
+      const ptsTicks: number[] = [];
+      for (let k = first; k < first + count; k++) {
+        if (keep(k)) {
+          const numerator = k * rate.d * timeBase.d;
+          const denominator = rate.n * timeBase.n;
+          const quotient = Math.floor(numerator / denominator);
+          const remainder = numerator - quotient * denominator;
+          ptsTicks.push(2 * remainder >= denominator ? quotient + 1 : quotient);
+        }
+      }
+      return ptsTicks;
+    }
+
+    it("at a variable frame rate, a calibrated step keeps the relative target and never skips a frame", () => {
+      // A 30 fps stream that drops 5% of its frames at pseudo-random places. The real rate is
+      // 30 fps, and the average rate is the kept frames over the duration. The probe reports
+      // both, and they differ, so the rate is variable.
+      let seed = 12345;
+      const random = (): number => {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return seed / 2147483648;
+      };
+      const rFrameRate: Rational = { n: 30, d: 1 };
+      const ptsTicks = roundedPts(
+        rFrameRate,
+        tbMs,
+        0,
+        3000,
+        (k) => k === 0 || random() >= 0.05,
+      );
+      const avgFrameRate: Rational = { n: ptsTicks.length, d: 100 };
+      const sim = calibratedSourceFromPts(
+        ptsTicks,
+        tbMs,
+        avgFrameRate,
+        rFrameRate,
+        "/media/dropped.mkv",
+      );
+      expect(hasVariableFrameRate(sim.source)).toBe(true);
+      // Control: the frame grid of the average rate would skip frames for many presses.
+      expect(gridOutcomes(sim, avgFrameRate).skipped).toBeGreaterThan(
+        sim.startSeconds.length / 20,
+      );
+
+      expectRelativeStepsFromEachFrameStart(sim, avgFrameRate);
+    });
+
+    it("on a time base where the frame grid is not exact, a calibrated step keeps the relative target", () => {
+      // 29.97 fps at 1/50: each PTS is the nominal start rounded to 20 ms, and the first frame
+      // is nominal frame 29, at 0.96 s. Measured from that rounded first PTS, a real start can
+      // lie more than half a frame from its nominal start.
+      const rate = fps2997;
+      const timeBase: Rational = { n: 1, d: 50 };
+      expect(isFrameGridExact(rate, timeBase)).toBe(false);
+      const sim = calibratedSourceFromPts(
+        roundedPts(rate, timeBase, 29, 600),
+        timeBase,
+        rate,
+        rate,
+        "/media/coarse.avi",
+      );
+      expect(hasVariableFrameRate(sim.source)).toBe(false);
+      // Control: rounding the frame on screen to the nominal grid would name the wrong frame
+      // for many presses.
+      expect(gridOutcomes(sim, rate).wrong).toBeGreaterThan(
+        sim.startSeconds.length / 20,
+      );
+
+      expectRelativeStepsFromEachFrameStart(sim, rate);
+    });
+
+    // During playback currentTime can run ahead of the frame that RVFC reported last. A step
+    // starts from the frame on screen, so its target can lie behind currentTime, and it must
+    // still seek. The rule that a step never moves against its direction applies only to a
+    // start position outside the bounds.
+    describe("A Step from the Frame on Screen Against currentTime", () => {
+      const k = 40;
+
+      function playingOnFrame(
+        store: PlaybackStore,
+        sim: SimulatedSource,
+        video: ReturnType<typeof createFakeVideo>,
+        currentTime: number,
+      ): void {
+        attachSimulated(store, sim, video);
+        store.getState().play();
+        video.currentTime = sim.startSeconds[k];
+        video.seeking = false;
+        expect(presentFrameAtPosition(store, sim, video)).toBe(k);
+        video.currentTime = currentTime;
+        video.seeking = false;
+        expect(store.getState().isPlaying).toBe(true);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        requestSpy.mockClear();
+      }
+
+      it("a step forward seeks to the middle of the next frame when currentTime is past it", () => {
+        const fps = fps2997;
+        const sim = simulateSource(fps, tbMs, 120);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        const nextMiddle = ((2 * (k + 1) + 1) * fps.d) / (2 * fps.n);
+        playingOnFrame(store, sim, video, nextMiddle + 0.005);
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekNominal(1);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBeCloseTo(nextMiddle, 12);
+        expect(requestSpy).toHaveBeenCalledTimes(1);
+        expect(requestSpy).toHaveBeenLastCalledWith(video.currentTime, 1);
+        expect(store.getState().isPlaying).toBe(false);
+        expect(settleOnTarget(store, sim, video)).toBe(k + 1);
+      });
+
+      it("a step back seeks to the middle of the previous frame when currentTime is before it", () => {
+        const fps = fps2997;
+        const sim = simulateSource(fps, tbMs, 120);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        const previousMiddle = ((2 * (k - 1) + 1) * fps.d) / (2 * fps.n);
+        playingOnFrame(store, sim, video, previousMiddle - 0.005);
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekNominal(-1);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBeCloseTo(previousMiddle, 12);
+        expect(requestSpy).toHaveBeenCalledTimes(1);
+        expect(requestSpy).toHaveBeenLastCalledWith(video.currentTime, -1);
+        expect(store.getState().isPlaying).toBe(false);
+        expect(settleOnTarget(store, sim, video)).toBe(k - 1);
+      });
+    });
+
+    it("at 29.97 fps, a step back from the middle of the first frame does nothing", () => {
+      const fps = fps2997;
+      const sim = simulateSource(fps, tbMs, 60);
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachSimulated(store, sim, video);
+
+      // At the calibrated first frame, a step back is at the edge.
+      store.getState().seekNominal(-1);
+      expect(video.currentTimeSets).toBe(0);
+
+      // Forward to frame 1, then back to the middle of frame 0.
+      store.getState().seekNominal(1);
+      expect(settleOnTarget(store, sim, video)).toBe(1);
+      store.getState().seekNominal(-1);
+      expect(video.currentTime).toBeCloseTo((0.5 * fps.d) / fps.n, 12);
+      expect(settleOnTarget(store, sim, video)).toBe(0);
+      const presented = store.getState().presentedFrame;
+      const setsBefore = video.currentTimeSets;
+      requestSpy.mockClear();
+
+      // The clamp pulls each target back to the start of frame 0, the frame on screen. A seek
+      // there could bring no frame callback (ADR 022), so the presses do nothing.
+      store.getState().seekNominal(-1);
+      store.getState().seekNominal(-10);
+      expect(video.currentTimeSets).toBe(setsBefore);
+      expect(store.getState().presentedFrame).toBe(presented);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(canMarkIn("ready", store.getState().presentedFrame, true)).toBe(true);
+
+      // A step forward still moves.
+      store.getState().seekNominal(1);
+      expect(video.currentTimeSets).toBe(setsBefore + 1);
+      expect(settleOnTarget(store, sim, video)).toBe(1);
+    });
+
+    it("at 29.97 fps, a step that the end position clamps inside the frame on screen does nothing", () => {
+      const fps = fps2997;
+      // Sixty frames. The last frame, 59, starts at 1.969 s. The element reports a duration of
+      // 1.99 s, which lies inside that frame.
+      const sim = simulateSource(fps, tbMs, 60);
+      expect(sim.startSeconds[59]).toBe(1.969);
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 1.99 });
+      attachSimulated(store, sim, video);
+      store.getState().syncBrowserDuration(sim.identity, video);
+      expect(store.getState().runtimeBrowserDurationSeconds).toBe(1.99);
+
+      // Ten frames from frame 55 pass the end, so the target clamps to the end position, which
+      // presents the last frame. The display target is the nominal start of the frame that
+      // contains the end position, so the playhead does not move back when that frame arrives.
+      goToFrameStart(store, sim, video, 55);
+      store.getState().seekNominal(10);
+      expect(video.currentTime).toBe(1.99);
+      expect(store.getState().seekTargetSeconds).toBe((59 * fps.d) / fps.n);
+      expect(displayedLabel(store, sim)).toBe(frameLabel(fps, 59));
+      const pendingSeconds = displayedSeconds(store, sim);
+      expect(settleOnTarget(store, sim, video)).toBe(59);
+      expect(Math.abs(displayedSeconds(store, sim) - pendingSeconds)).toBeLessThan(
+        TICK_SECONDS,
+      );
+      const setsBefore = video.currentTimeSets;
+      requestSpy.mockClear();
+
+      store.getState().seekNominal(1);
+      expect(video.currentTimeSets).toBe(setsBefore);
+      expect(requestSpy).not.toHaveBeenCalled();
+
+      // Back to frame 58, then forward to the middle of the last frame.
+      store.getState().seekNominal(-1);
+      expect(settleOnTarget(store, sim, video)).toBe(58);
+      store.getState().seekNominal(1);
+      expect(video.currentTime).toBeCloseTo((59.5 * fps.d) / fps.n, 12);
+      expect(settleOnTarget(store, sim, video)).toBe(59);
+      const presented = store.getState().presentedFrame;
+      const setsAtLast = video.currentTimeSets;
+      requestSpy.mockClear();
+
+      // The clamp pulls the target to 1.99 s. That is a different position in the same frame,
+      // so the presses do nothing.
+      store.getState().seekNominal(1);
+      store.getState().seekNominal(10);
+      expect(video.currentTimeSets).toBe(setsAtLast);
+      expect(store.getState().presentedFrame).toBe(presented);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(requestSpy).not.toHaveBeenCalled();
+    });
+
+    // At an integer rate with a time base whose ticks divide the interval, each frame starts on
+    // its nominal start, so the old target was the start of the next frame. The middle target
+    // lies in that same frame.
+    it.each([
+      { label: "1/25", timeBase: { n: 1, d: 25 } },
+      { label: "1/1000", timeBase: { n: 1, d: 1000 } },
+      { label: "1/12800", timeBase: { n: 1, d: 12800 } },
+    ])(
+      "at 25 fps with time base $label, a step presents the same frame as before",
+      ({ timeBase }) => {
+        const fps: Rational = { n: 25, d: 1 };
+        const frameCount = 250;
+        const sim = simulateSource(fps, timeBase, frameCount);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+
+        for (let k = 0; k + 1 < frameCount; k++) {
+          goToFrameStart(store, sim, video, k);
+          // The old target, (k + 1) / 25, was the nominal start of frame k + 1, and here also
+          // its real start.
+          expect(sim.startSeconds[k + 1]).toBeCloseTo((k + 1) / 25, 12);
+
+          store.getState().seekNominal(1);
+          expect(video.currentTime).toBeCloseTo((k + 1.5) / 25, 12);
+          expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k + 1);
+          // The display target is the nominal start, the position the old step displayed.
+          expect(store.getState().seekTargetSeconds).toBeCloseTo((k + 1) / 25, 12);
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k + 1));
+          expect(settleOnTarget(store, sim, video)).toBe(k + 1);
+
+          if (k > 0) {
+            goToFrameStart(store, sim, video, k);
+            store.getState().seekNominal(-1);
+            expect(video.currentTime).toBeCloseTo((k - 0.5) / 25, 12);
+            expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k - 1);
+            expect(settleOnTarget(store, sim, video)).toBe(k - 1);
+          }
+        }
+      },
+    );
+
+    // While the calibration holds, a step displays its target from the calibrated first frame.
+    // Without a calibration, the playhead counts from the start of the timeline.
+    describe("A Pending Display Target When the Calibration Stops Holding", () => {
+      /** Attaches sourceA (25 fps) whose first frame lies 0.08 s after the timeline start. */
+      function attachLateFirstFrame(
+        store: PlaybackStore,
+        video: ReturnType<typeof createFakeVideo>,
+      ): void {
+        store.getState().attach(sourceA, video);
+        video.readyState = 1;
+        store.getState().syncReady(identityA, video);
+        store.getState().syncPresentedFrame(identityA, 0.08, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+      }
+
+      it("moves to the timeline axis when a callback refuses the calibration during the seek", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachLateFirstFrame(store, video);
+
+        store.getState().seekNominal(1);
+        expect(video.currentTime).toBeCloseTo(0.14, 9);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+        expect(video.seeking).toBe(true);
+
+        // A distinct frame that infers the same PTS refuses the calibration (ADR 003) while the
+        // seek still runs. The target now counts from the start of the timeline.
+        store.getState().syncPresentedFrame(identityA, 0.09, 2, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(0.14, 9);
+
+        // The seeked event clears it, as for every seek without a calibration.
+        fireSeeked(store, identityA, video);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+      });
+
+      it("moves to the timeline axis when frame callbacks stop being available during the seek", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachLateFirstFrame(store, video);
+
+        store.getState().seekNominal(2);
+        expect(video.currentTime).toBeCloseTo(0.18, 9);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(0.08, 9);
+
+        store.getState().syncPresentationUnavailable(identityA, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(0.18, 9);
+      });
+
+      it("does not write a target when no seek is pending", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachLateFirstFrame(store, video);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+
+        store.getState().syncPresentationUnavailable(identityA, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(store.getState().seekTargetSeconds).toBeNull();
       });
     });
   });

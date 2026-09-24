@@ -73,7 +73,9 @@ interface ExactSeconds {
  * It absorbs floating-point error. For example, frame 04 of second 1 at 25 fps starts at
  * 1.16 s, but the nearest double lies below 1.16, and without the margin that value shows
  * frame 03. It also absorbs a web view that reports `currentTime` rounded to the
- * microsecond, because a nominal frame step adds one frame interval to that rounded time.
+ * microsecond, because a nominal frame step that cannot use the frame grid adds one frame
+ * interval to that rounded time: without a calibration, at a variable frame rate, or with a
+ * time base on which the grid is not exact (see `isFrameGridExact`).
  */
 const MIN_MARGIN: ExactSeconds = { num: 1n, den: 1_000_000n };
 
@@ -108,19 +110,46 @@ function isWholeTickInterval(rate: Rational, timeBase: Rational): boolean {
 }
 
 /**
+ * True when one tick of the time base plus the smallest margin is less than half the nominal
+ * frame interval, `rate.d / (2 * rate.n)`. The test is exact BigInt arithmetic by
+ * cross-multiplication. The caller validates both rationals.
+ */
+function isTickBelowHalfInterval(rate: Rational, timeBase: Rational): boolean {
+  const tickNum = BigInt(timeBase.n);
+  const tickDen = BigInt(timeBase.d);
+  // tick + MIN_MARGIN = (tickNum * MIN_MARGIN.den + MIN_MARGIN.num * tickDen) /
+  // (tickDen * MIN_MARGIN.den).
+  return (
+    (tickNum * MIN_MARGIN.den + MIN_MARGIN.num * tickDen) * 2n * BigInt(rate.n) <
+    BigInt(rate.d) * tickDen * MIN_MARGIN.den
+  );
+}
+
+/**
  * The frame boundary margin for a source (ADR 028). A time that lies no more than the
  * margin before the start of a frame counts as that frame. The margin moves a time forward
  * only, so the display still names the frame that contains the time, not the nearest frame.
  *
  * - When the nominal frame interval is not a whole number of ticks of the video time base,
- *   the margin is half a tick, and at least one microsecond. A container stores each PTS
+ *   the margin is one tick, and at least one microsecond. A container stores each PTS
  *   rounded to its time base. Matroska uses milliseconds, so at 29.97 fps a frame can start
- *   up to 0.5 ms before its nominal position, and without this margin it would show the
+ *   up to 0.5 ms before its nominal position. The elapsed time counts from the first PTS,
+ *   and that PTS can also be rounded, up to 0.5 ms the other way: a first frame at nominal
+ *   frame 2 starts at 67 ms, not at 66.73 ms. Measured from it, a later frame can start up
+ *   to one tick before its nominal position. Without this margin, that frame would show the
  *   number of the frame before it.
  * - When the interval is a whole number of ticks, such as 1/25 at 25 fps or 1/90000 at
  *   29.97 fps (3003 ticks), the frame starts lie exactly on the tick grid, and no PTS is
- *   rounded. Half a tick could then be as much as half a frame, so the margin is only one
- *   microsecond.
+ *   rounded. One tick can be as long as the whole interval there, as with 1/25 at 25 fps, so
+ *   the margin is only one microsecond.
+ * - One tick must stay less than half a frame interval minus one microsecond. When it does
+ *   not, the margin is a quarter of the interval, and at least one microsecond. A margin of
+ *   half an interval or more would show a time in the middle of a frame as the next frame,
+ *   and a nominal frame step aims at that middle (ADR 022). Only a tick of about half an
+ *   interval or more reaches this limit, for example 1/24 at 23.976 fps, 1/60 at 59.94 fps,
+ *   or 1/25, 1/50 and 1/10 at 29.97 fps. 1/60 at 29.97 fps stays just below it. On such a
+ *   time base a real frame start can lie up to a whole frame from its nominal start, so the
+ *   frame grid is not exact (see `isFrameGridExact`).
  * - With no valid time base or rate, the margin is one microsecond.
  */
 function frameBoundaryMargin(
@@ -134,14 +163,44 @@ function frameBoundaryMargin(
   ) {
     return MIN_MARGIN;
   }
-  const halfTick: ExactSeconds = {
-    num: BigInt(videoTimeBase.n),
-    den: 2n * BigInt(videoTimeBase.d),
-  };
-  // halfTick >= MIN_MARGIN, compared by cross-multiplication.
-  return halfTick.num * MIN_MARGIN.den >= MIN_MARGIN.num * halfTick.den
-    ? halfTick
+  const margin: ExactSeconds = isTickBelowHalfInterval(rate, videoTimeBase)
+    ? { num: BigInt(videoTimeBase.n), den: BigInt(videoTimeBase.d) }
+    : { num: BigInt(rate.d), den: 4n * BigInt(rate.n) };
+  // margin >= MIN_MARGIN, compared by cross-multiplication.
+  return margin.num * MIN_MARGIN.den >= MIN_MARGIN.num * margin.den
+    ? margin
     : MIN_MARGIN;
+}
+
+/**
+ * True when the nominal frame interval is a whole number of ticks of the video time base, or
+ * when one tick is less than half the interval minus one microsecond. The frame boundary
+ * margin is then one tick or one microsecond, and not a quarter interval (ADR 028). With no
+ * valid rate or time base there is no tick grid, and the result is false.
+ *
+ * A nominal frame step uses the frame grid only when this is true (ADR 022). It rounds the
+ * frame on screen to the nearest nominal frame, and it aims at the middle of the target
+ * frame. On every time base, a real frame start lies less than one tick from its nominal
+ * start, measured from a rounded first PTS. When the interval is a whole number of ticks,
+ * the starts lie on the tick grid. When one tick is less than half the interval, a real
+ * start rounds to its own nominal frame, and a middle target plus the margin stays inside
+ * its frame. On a coarser time base, such as 1/24 at 23.976 fps, one tick is almost a whole
+ * frame, and neither holds.
+ *
+ * @param rate The nominal frame rate.
+ * @param videoTimeBase The video time base of the source.
+ */
+export function isFrameGridExact(
+  rate: Rational | null | undefined,
+  videoTimeBase: Rational | null | undefined,
+): boolean {
+  if (!isValidRate(rate) || !isValidRate(videoTimeBase)) {
+    return false;
+  }
+  return (
+    isWholeTickInterval(rate, videoTimeBase) ||
+    isTickBelowHalfInterval(rate, videoTimeBase)
+  );
 }
 
 /**
@@ -277,10 +336,10 @@ export function frameIndexOfTicks(
  *
  * When the time plus the margin is exactly a frame start, this path and
  * `formatFrameTimecodeFromTicks` can differ by floating-point error. At 29.97 fps with
- * a 1/1000 time base, a PTS of 500 ms plus the 0.5 ms margin is exactly the start of
- * frame 15. The tick path shows frame 15, and this path shows frame 14, because the
- * double `0.5 + 0.0005` lies just below 0.5005. A real file never has that PTS: frame
- * 15 starts at 500.5 ms, and Matroska stores it as 501 ms.
+ * a 1/1000 time base, a PTS of 1000 ms plus the 1 ms margin is exactly the start of
+ * frame 30, 1001 ms. The tick path shows frame 30, and this path shows frame 29, because
+ * the double `1 + 0.001` lies just below 1.001. No frame starts at 1000 ms: frame 29
+ * starts at 968 ms, and frame 30 at 1001 ms.
  *
  * @param elapsedSeconds Seconds from the start of the source.
  * @param nominalRate Frames per second, as the status bar reports it.

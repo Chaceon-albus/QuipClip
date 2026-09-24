@@ -8,8 +8,7 @@ import {
   type TimecodeDisplay,
   type TimecodeFormat,
 } from "@/lib/timecode";
-import { rationalsEqual } from "@/lib/time";
-import { getNominalFrameRate } from "./store";
+import { getNominalFrameRate, hasVariableFrameRate } from "./store";
 import type { PlaybackSource } from "./types";
 
 /** Exactly the probe fields that the choice reads. */
@@ -45,15 +44,7 @@ export function resolveTimecodeDisplay(
     return MILLISECONDS_TIMECODE_DISPLAY;
   }
   const rate = getNominalFrameRate(source);
-  if (rate === null) {
-    return MILLISECONDS_TIMECODE_DISPLAY;
-  }
-  const { avgFrameRate, rFrameRate } = source;
-  if (
-    isPositiveRational(avgFrameRate) &&
-    isPositiveRational(rFrameRate) &&
-    !rationalsEqual(avgFrameRate, rFrameRate)
-  ) {
+  if (rate === null || hasVariableFrameRate(source)) {
     return MILLISECONDS_TIMECODE_DISPLAY;
   }
   const videoTimeBase = isPositiveRational(source.videoTimeBase)

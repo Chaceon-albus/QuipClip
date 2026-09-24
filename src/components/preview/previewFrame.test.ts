@@ -19,7 +19,7 @@ describe("Preview Frame Helpers & ADR 003 Math", () => {
   const tb90k: Rational = { n: 1, d: 90000 };
 
   // These displays use the smallest frame boundary margin, so the tests below check the
-  // routing of each position to the formatter. The half-tick margin has its own test.
+  // routing of each position to the formatter. The one-tick margin has its own test.
   const frames25: TimecodeDisplay = {
     format: "frames",
     rate: { n: 25, d: 1 },
@@ -159,7 +159,7 @@ describe("Preview Frame Helpers & ADR 003 Math", () => {
       expect(settled).toBe(whilePending);
     });
 
-    it("applies the half-tick margin of the display's time base to a PTS and a seek target", () => {
+    it("applies the one-tick margin of the display's time base to a PTS and a seek target", () => {
       // Matroska stores PTS in milliseconds. Frame 3 at 29.97 fps starts at 100.1 ms, and
       // its PTS is 100. Without the margin it would show frame 02.
       const tbMilli: Rational = { n: 1, d: 1000 };

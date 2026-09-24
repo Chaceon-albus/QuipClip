@@ -14,6 +14,7 @@ import {
   frameBoundaryMarginSeconds,
   frameIndexDigits,
   frameIndexOfTicks,
+  isFrameGridExact,
   frameTimecodePlaceholder,
   timecodePlaceholder,
 } from "./timecode";
@@ -395,13 +396,13 @@ describe("the frame boundary margin (ADR 028)", () => {
     ];
   }
 
-  it("is half a tick when the frame interval is not a whole number of ticks", () => {
+  it("is one tick when the frame interval is not a whole number of ticks", () => {
     // 29.97 fps at 1/1000: 33.366... ticks per frame.
-    expect(frameBoundaryMarginSeconds(fps2997, tbMilli)).toBe(0.0005);
-    expect(frameBoundaryMarginSeconds(fps24, tbMilli)).toBe(0.0005);
-    expect(frameBoundaryMarginSeconds(fps5994, tbMilli)).toBe(0.0005);
+    expect(frameBoundaryMarginSeconds(fps2997, tbMilli)).toBe(0.001);
+    expect(frameBoundaryMarginSeconds(fps24, tbMilli)).toBe(0.001);
+    expect(frameBoundaryMarginSeconds(fps5994, tbMilli)).toBe(0.001);
     // 29.97 fps at 1/15360: 512.512 ticks per frame.
-    expect(frameBoundaryMarginSeconds(fps2997, { n: 1, d: 15360 })).toBe(1 / 30720);
+    expect(frameBoundaryMarginSeconds(fps2997, { n: 1, d: 15360 })).toBe(1 / 15360);
   });
 
   it("is one microsecond when the frame interval is a whole number of ticks", () => {
@@ -416,13 +417,134 @@ describe("the frame boundary margin (ADR 028)", () => {
   });
 
   it("is never below one microsecond", () => {
-    // 29.97 fps at 1/1000000: half a tick is 0.5 us.
-    expect(frameBoundaryMarginSeconds(fps2997, { n: 1, d: 1_000_000 })).toBe(0.000001);
+    // 29.97 fps at 1/2000000 and at 1/10000000: one tick is 0.5 us and 0.1 us.
+    expect(frameBoundaryMarginSeconds(fps2997, { n: 1, d: 2_000_000 })).toBe(0.000001);
     expect(frameBoundaryMarginSeconds(fps2997, { n: 1, d: 10_000_000 })).toBe(0.000001);
     expect(frameBoundaryMarginSeconds(fps2997, null)).toBe(0.000001);
     expect(frameBoundaryMarginSeconds(fps2997, { n: 0, d: 1 })).toBe(0.000001);
     expect(frameBoundaryMarginSeconds(null, tbMilli)).toBe(0.000001);
+    // At 300000 fps, a quarter interval (0.83 us) is below one microsecond.
+    expect(frameBoundaryMarginSeconds({ n: 300_000, d: 1 }, { n: 1, d: 125_000 })).toBe(
+      0.000001,
+    );
   });
+
+  it("is a quarter interval when one tick is not less than half an interval minus 1 us", () => {
+    // 29.97 fps at 1/25: a tick of 40 ms is longer than the 33.37 ms interval, and it would
+    // move the middle of each frame into the next frame.
+    expect(frameBoundaryMarginSeconds(fps2997, { n: 1, d: 25 })).toBe(1001 / 120000);
+    // 30 fps at 1/24: 41.67 ms ticks for a 33.33 ms interval.
+    expect(frameBoundaryMarginSeconds(fps30, { n: 1, d: 24 })).toBe(1 / 120);
+    // 29.97 fps at 1/10 and at 1/50: 100 ms and 20 ms ticks.
+    expect(frameBoundaryMarginSeconds(fps2997, { n: 1, d: 10 })).toBe(1001 / 120000);
+    expect(frameBoundaryMarginSeconds(fps2997, { n: 1, d: 50 })).toBe(1001 / 120000);
+    // 23.976 fps at 1/24 and 59.94 fps at 1/60: 1.001 ticks per frame.
+    expect(frameBoundaryMarginSeconds(fps23976, { n: 1, d: 24 })).toBe(1001 / 96000);
+    expect(frameBoundaryMarginSeconds(fps5994, { n: 1, d: 60 })).toBe(1001 / 240000);
+  });
+
+  it("names the time bases on which the frame grid is exact", () => {
+    // One tick or one microsecond of margin.
+    expect(isFrameGridExact(fps2997, tbMilli)).toBe(true);
+    expect(isFrameGridExact(fps23976, tbMilli)).toBe(true);
+    expect(isFrameGridExact(fps5994, tbMilli)).toBe(true);
+    expect(isFrameGridExact(fps2997, tb90k)).toBe(true);
+    expect(isFrameGridExact(fps2997, { n: 1, d: 15360 })).toBe(true);
+    expect(isFrameGridExact(fps25, { n: 1, d: 25 })).toBe(true);
+    expect(isFrameGridExact(fps2997, { n: 1001, d: 30000 })).toBe(true);
+    expect(isFrameGridExact(fps2997, { n: 1, d: 60 })).toBe(true);
+    expect(isFrameGridExact(fps2997, { n: 1, d: 10_000_000 })).toBe(true);
+    // A quarter interval of margin: a real start can lie up to a frame from its nominal start.
+    expect(isFrameGridExact(fps23976, { n: 1, d: 24 })).toBe(false);
+    expect(isFrameGridExact(fps5994, { n: 1, d: 60 })).toBe(false);
+    expect(isFrameGridExact(fps2997, { n: 1, d: 50 })).toBe(false);
+    expect(isFrameGridExact(fps2997, { n: 1, d: 25 })).toBe(false);
+    expect(isFrameGridExact(fps2997, { n: 1, d: 10 })).toBe(false);
+    expect(isFrameGridExact(fps30, { n: 1, d: 24 })).toBe(false);
+    // No tick grid.
+    expect(isFrameGridExact(fps2997, null)).toBe(false);
+    expect(isFrameGridExact(fps2997, { n: 0, d: 1 })).toBe(false);
+    expect(isFrameGridExact(null, tbMilli)).toBe(false);
+    expect(isFrameGridExact({ n: 1, d: 0 }, tbMilli)).toBe(false);
+  });
+
+  it("calls the frame grid exact exactly when the margin is not a quarter interval", () => {
+    const timeBases: readonly Rational[] = [
+      { n: 1, d: 10 },
+      { n: 1, d: 24 },
+      { n: 1, d: 25 },
+      { n: 1, d: 30 },
+      { n: 1, d: 48 },
+      { n: 1, d: 50 },
+      { n: 1, d: 60 },
+      { n: 1, d: 120 },
+      { n: 1, d: 1000 },
+      { n: 1, d: 15360 },
+      { n: 1, d: 90000 },
+      { n: 1001, d: 30000 },
+      { n: 1001, d: 24000 },
+    ];
+    for (const [label, rate] of [...ALL_RATES, ["120", fps120] as const]) {
+      for (const timeBase of timeBases) {
+        const quarter = rate.d / (4 * rate.n);
+        const isQuarter = frameBoundaryMarginSeconds(rate, timeBase) === quarter;
+        expect(
+          isFrameGridExact(rate, timeBase),
+          `${label} fps at ${timeBase.n}/${timeBase.d}`,
+        ).toBe(!isQuarter);
+      }
+    }
+  });
+
+  it("keeps one tick just below that limit", () => {
+    // 29.97 fps at 1/60: 2.002 ticks per frame. One tick is 16.667 ms, and half an interval
+    // less 1 us is 16.682 ms.
+    expect(frameBoundaryMarginSeconds(fps2997, { n: 1, d: 60 })).toBe(1 / 60);
+    // 23.976 fps at 1/48 and 59.94 fps at 1/120: 2.002 ticks per frame.
+    expect(frameBoundaryMarginSeconds(fps23976, { n: 1, d: 48 })).toBe(1 / 48);
+    expect(frameBoundaryMarginSeconds(fps5994, { n: 1, d: 120 })).toBe(1 / 120);
+  });
+
+  it.each([
+    ["29.97 fps, 1/1000", fps2997, tbMilli],
+    ["23.976 fps, 1/1000", fps23976, tbMilli],
+    ["59.94 fps, 1/1000", fps5994, tbMilli],
+    ["29.97 fps, 1/15360", fps2997, { n: 1, d: 15360 }],
+    ["25 fps, 1/1000", fps25, tbMilli],
+    ["29.97 fps, 1/60", fps2997, { n: 1, d: 60 }],
+    ["23.976 fps, 1/48", fps23976, { n: 1, d: 48 }],
+    ["59.94 fps, 1/120", fps5994, { n: 1, d: 120 }],
+    ["23.976 fps, 1/24", fps23976, { n: 1, d: 24 }],
+    ["59.94 fps, 1/60", fps5994, { n: 1, d: 60 }],
+    ["29.97 fps, 1/25", fps2997, { n: 1, d: 25 }],
+    ["30 fps, 1/24", fps30, { n: 1, d: 24 }],
+    ["29.97 fps, 1/10", fps2997, { n: 1, d: 10 }],
+  ] as const)(
+    "shows the middle of each frame as that frame, the target of a nominal step (%s)",
+    (_label, rate, timeBase) => {
+      for (const [from, to] of frameRanges(rate)) {
+        const wrong: string[] = [];
+        for (let k = from; k < to; k++) {
+          const expected = expectedFrameStart(BigInt(k), rate);
+          const middle = ((2 * k + 1) * rate.d) / (2 * rate.n);
+          const fromSeconds = formatFrameTimecode(middle, rate, timeBase);
+          // The same middle in exact ticks of 1 / (2 * rate.n) s.
+          const fromTicks = formatFrameTimecodeFromTicks(
+            BigInt(2 * k + 1) * BigInt(rate.d),
+            { n: 1, d: 2 * rate.n },
+            rate,
+            timeBase,
+          );
+          if (fromSeconds !== expected || fromTicks !== expected) {
+            wrong.push(
+              `frame ${k}: ${fromSeconds} / ${fromTicks}, expected ${expected}`,
+            );
+          }
+        }
+        expect(wrong).toEqual([]);
+      }
+    },
+  );
 
   it.each([
     ["29.97", fps2997],
@@ -458,7 +580,57 @@ describe("the frame boundary margin (ADR 028)", () => {
     },
   );
 
-  it("needs the half tick: the smallest margin repeats and skips numbers on the same PTS", () => {
+  // The first video PTS can be rounded too. The elapsed time counts from it, so measured from
+  // it a later frame can start up to one tick before its nominal position.
+  it.each([
+    ["29.97 fps, first frame 2", fps2997, 2n],
+    ["23.976 fps, first frame 1", fps23976, 1n],
+    ["59.94 fps, first frame 1", fps5994, 1n],
+  ] as const)(
+    "steps through millisecond PTS with a rounded first PTS (%s) with no repeat and no skip",
+    (_label, rate, firstFrame) => {
+      for (const [from, to] of frameRanges(rate)) {
+        const first = matroskaPtsMs(firstFrame, rate);
+        const exact: string[] = [];
+        const float: string[] = [];
+        const wrong: string[] = [];
+        const halfTick: string[] = [];
+        for (let k = from; k < to; k++) {
+          const elapsed = matroskaPtsMs(BigInt(k) + firstFrame, rate) - first;
+          const fromTicks = formatFrameTimecodeFromTicks(
+            elapsed,
+            tbMilli,
+            rate,
+            tbMilli,
+          );
+          const fromSeconds = formatFrameTimecode(
+            Number(elapsed) / 1000,
+            rate,
+            tbMilli,
+          );
+          const expected = expectedFrameStart(BigInt(k), rate);
+          if (fromTicks !== expected || fromSeconds !== expected) {
+            wrong.push(
+              `frame ${k}: ${fromTicks} / ${fromSeconds}, expected ${expected}`,
+            );
+          }
+          exact.push(fromTicks);
+          float.push(fromSeconds);
+          // The earlier half-tick margin, 0.5 ms, as the time base 1/2000 gives it.
+          halfTick.push(
+            formatFrameTimecodeFromTicks(elapsed, tbMilli, rate, { n: 1, d: 2000 }),
+          );
+        }
+        expect(wrong).toEqual([]);
+        expect(stepErrors(exact)).toEqual([]);
+        expect(stepErrors(float)).toEqual([]);
+        // Control: half a tick repeats and skips numbers on these PTS.
+        expect(stepErrors(halfTick).length).toBeGreaterThan(0);
+      }
+    },
+  );
+
+  it("needs the tick margin: the smallest margin repeats and skips numbers on the same PTS", () => {
     for (const rate of [fps2997, fps24]) {
       const labels: string[] = [];
       for (let k = 0n; k < 300n; k++) {
@@ -514,14 +686,17 @@ describe("the frame boundary margin (ADR 028)", () => {
       "00:00:01:00",
     );
     expect(formatFrameTimecode(0.9999995, fps25, tb100ns)).toBe("00:00:01:00");
-    // Frame 60 at 30 fps starts at 2 s. 0.4 ms early in a millisecond time base is inside
-    // the half-tick margin, because 1/30 s is not a whole number of milliseconds.
+    // Frame 60 at 30 fps starts at 2 s. 0.4 ms and one tick early in a millisecond time base
+    // are inside the one-tick margin, because 1/30 s is not a whole number of milliseconds.
     expect(formatFrameTimecode(1.9996, fps30, tbMilli)).toBe("00:00:02:00");
+    expect(formatFrameTimecodeFromTicks(1_999n, tbMilli, fps30, tbMilli)).toBe(
+      "00:00:02:00",
+    );
     // A PTS outside the margin stays in the frame before.
     expect(formatFrameTimecodeFromTicks(9_999_980n, tb100ns, fps25, tb100ns)).toBe(
       "00:00:00:24",
     );
-    expect(formatFrameTimecodeFromTicks(1_999n, tbMilli, fps30, tbMilli)).toBe(
+    expect(formatFrameTimecodeFromTicks(1_998n, tbMilli, fps30, tbMilli)).toBe(
       "00:00:01:29",
     );
     // At 25 fps a frame is 40 ms, so the frame starts lie on the millisecond grid and the
@@ -658,7 +833,7 @@ describe("frameIndexOfTicks", () => {
 
   // [label, rate, time base, start PTS, PTS, frame index J, frame timecode]. The caller
   // passes the elapsed ticks, PTS - start PTS. The values come from exact arithmetic by
-  // hand: J = floor((elapsed + margin) * rate), with half a tick of margin when the frame
+  // hand: J = floor((elapsed + margin) * rate), with one tick of margin when the frame
   // interval is not a whole number of ticks, and one microsecond when it is.
   const cases: readonly [string, Rational, Rational, bigint, bigint, bigint, string][] =
     [
@@ -716,12 +891,14 @@ describe("frameIndexOfTicks", () => {
         107_893n,
         "01:00:00:00",
       ],
+      // Frame 1 starts 3753.75 ticks after the first frame. One tick of margin counts 3753
+      // ticks as frame 1, so the last tick of frame 0 is 3752.
       [
         "23.976 fps, 1/90000, before frame 1",
         fps23976,
         tb(1, 90_000),
         126_000n,
-        129_753n,
+        129_752n,
         0n,
         "00:00:00:00",
       ],
@@ -752,12 +929,14 @@ describe("frameIndexOfTicks", () => {
         171n,
         "00:00:02:51",
       ],
+      // Frame 171 starts 2852.85 ms after the first frame. One tick of margin counts 2852 ms
+      // as frame 171, so the last millisecond of frame 170 is 2851.
       [
         "59.94 fps, 1 ms, before frame 171",
         fps5994,
         tb(1, 1000),
         500n,
-        3352n,
+        3351n,
         170n,
         "00:00:02:50",
       ],
@@ -790,7 +969,8 @@ describe("frameIndexOfTicks", () => {
 
   it("applies the frame boundary margin of the video time base", () => {
     const ms = tb(1, 1000);
-    // Frame 15 at 29.97 fps starts at 500.5 ms. Half a tick of margin counts 500 ms as it.
+    // Frame 15 at 29.97 fps starts at 500.5 ms. One tick of margin counts 500 ms as it, and
+    // 499 ms stays in frame 14.
     expect(frameIndexOfTicks(501n, ms, fps2997, ms)).toBe(15n);
     expect(frameIndexOfTicks(500n, ms, fps2997, ms)).toBe(15n);
     expect(frameIndexOfTicks(499n, ms, fps2997, ms)).toBe(14n);

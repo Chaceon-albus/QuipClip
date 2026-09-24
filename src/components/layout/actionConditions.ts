@@ -35,7 +35,9 @@ export function canTogglePlayback(hasActiveSource: boolean): boolean {
 
 /**
  * A nominal frame step needs an active source and a valid nominal frame rate (ADR 021). It
- * does not need a calibrated source: `seekNominal` never reads the calibration.
+ * does not need a calibrated source. `seekNominal` aims at the frame grid when a calibration
+ * holds and the grid applies, and otherwise it moves the position by one nominal interval
+ * (ADR 022).
  */
 export function canStepFrames(
   hasActiveSource: boolean,
