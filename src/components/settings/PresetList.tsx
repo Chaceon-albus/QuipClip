@@ -21,6 +21,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { FfmpegState } from "@/features/ffmpeg/types";
 import { cn } from "@/lib/utils";
+import { DefaultBadge } from "./DefaultBadge";
 import { isUnsavedPresetRow } from "./presetDraftGuard";
 import type { PresetLibraryView } from "./presetLibraryController";
 import { decidePresetListKey } from "./presetListKeyboard";
@@ -29,10 +30,13 @@ import {
   findPresetRow,
   pickListTabStopId,
   PRESET_ROW_ID_ATTRIBUTE,
-  presentPresetRowSummary,
   type PresetToolbarActionView,
 } from "./presetListPresenter";
-import { joinDescribedBy, presentPresetEncoderMark } from "./presetPresenter";
+import {
+  joinDescribedBy,
+  presentPresetEncoderMark,
+  presentPresetRowSummary,
+} from "./presetPresenter";
 
 type Translate = (key: string, options?: Record<string, string | number>) => string;
 
@@ -188,19 +192,9 @@ export function PresetList({
                   <span className="sr-only">{` ${t("settings.preset.unsaved")}`}</span>
                 </>
               ) : null}
-              {/* The text takes `accent-foreground`, not `primary`. Measured with the WCAG 2
-                  formula against the palette in `globals.css`, over the /10 primary fill:
-                  | Row              | Light  | Dark    |
-                  | ---------------- | ------ | ------- |
-                  | Not selected     | 9.95:1 | 13.44:1 |
-                  | Pointer over it  | 9.37:1 | 12.95:1 |
-                  | Selected         | 7.93:1 | 10.12:1 |
-                  The `primary` text gave 4.40:1 on a row that is not selected and 3.51:1 on
-                  the selected row in the light theme. */}
+              {/* `DefaultBadge` holds the contrast ratios of its text on these rows. */}
               {preset.id === view.activePresetId ? (
-                <span className="ml-auto shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-2xs leading-none font-semibold text-accent-foreground">
-                  {t("settings.preset.defaultBadge")}
-                </span>
+                <DefaultBadge className="ml-auto" />
               ) : null}
             </span>
             <span className="flex min-w-0 items-center gap-1.5">

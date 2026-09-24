@@ -565,6 +565,7 @@ export const zhCN: TranslationCatalog = {
       open: "打开",
       done: "完成",
       openSettings: "打开设置...",
+      managePresets: "管理预设...",
       back: "返回",
     },
     details: {

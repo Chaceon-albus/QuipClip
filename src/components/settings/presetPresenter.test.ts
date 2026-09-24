@@ -7,11 +7,16 @@ import {
   type CopyNameForms,
 } from "@/features/settings/presetNaming";
 import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
 import {
   validatePresetFields,
   type PresetFieldIssue,
 } from "@/features/settings/limits";
-import type { Preset, PresetAudioSampleRate } from "@/features/settings/types";
+import type {
+  Preset,
+  PresetAudioSampleRate,
+  QualityKind,
+} from "@/features/settings/types";
 import type { EncoderProbeState } from "./encoderAvailability";
 import { CUSTOM_ENCODER_VALUE as CONTROLLER_CUSTOM_ENCODER_VALUE } from "./presetLibraryController";
 import {
@@ -33,6 +38,7 @@ import {
   presentNumericField,
   presentPresetEncoderMark,
   presentPresetIssue,
+  presentPresetRowSummary,
   presentQualityKind,
   presentResolutionInvalid,
   presentDuplicatePresetAction,
@@ -938,6 +944,126 @@ describe("presetPresenter", () => {
     });
   });
 
+  describe("presentPresetRowSummary", () => {
+    const formatter = new Intl.NumberFormat("en");
+
+    function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
+      return {
+        id,
+        name: `Preset ${id}`,
+        container: "mp4",
+        videoEncoder: "libx264",
+        audioEncoder: "aac",
+        audioBitrate: 320,
+        audioSampleRate: "source",
+        audioChannels: "source",
+        quality: { kind: "crf", value: 20 },
+        resolution: "source",
+        frameRate: "source",
+        ...overrides,
+      };
+    }
+
+    async function translatorFor(language: "en" | "zh-CN") {
+      const instance = await createI18nInstance({
+        initialPreference: language,
+        storage: null,
+        systemLanguages: [],
+      });
+      return instance.t as unknown as (
+        key: string,
+        options?: Record<string, string | number>,
+      ) => string;
+    }
+
+    it("names the container, the video encoder, and a CRF", () => {
+      expect(presentPresetRowSummary(createPreset("a"), formatter)).toStrictEqual({
+        key: "settings.preset.rowSummaryCrf",
+        values: { container: "MP4", encoder: "libx264", value: "20" },
+      });
+    });
+
+    it("selects the message of each quality kind", () => {
+      const keys = (["crf", "bitrate", "qualityScale"] as const).map(
+        (kind: QualityKind) =>
+          presentPresetRowSummary(
+            createPreset("a", { quality: { kind, value: 5 } }),
+            formatter,
+          ).key,
+      );
+      expect(keys).toStrictEqual([
+        "settings.preset.rowSummaryCrf",
+        "settings.preset.rowSummaryBitrate",
+        "settings.preset.rowSummaryQualityScale",
+      ]);
+    });
+
+    it("formats the quality value with the formatter of the interface language", () => {
+      const preset = createPreset("a", {
+        container: "mkv",
+        quality: { kind: "bitrate", value: 8000 },
+      });
+      expect(presentPresetRowSummary(preset, formatter).values).toStrictEqual({
+        container: "MKV",
+        encoder: "libx264",
+        value: "8,000",
+      });
+    });
+
+    // The line never asks the capability probe, so a hardware encoder that this machine does
+    // not have and a custom name both show verbatim. The encoder mark reports availability.
+    it.each(["h264_nvenc", "my-encoder_2.0", "a".repeat(64)])(
+      "shows the encoder name %s verbatim",
+      (encoder) => {
+        const summary = presentPresetRowSummary(
+          createPreset("a", { videoEncoder: encoder }),
+          formatter,
+        );
+        expect(summary.values?.encoder).toBe(encoder);
+      },
+    );
+
+    it("names only keys that both catalogs define", () => {
+      for (const kind of ["crf", "bitrate", "qualityScale"] as const) {
+        const { key } = presentPresetRowSummary(
+          createPreset("a", { quality: { kind, value: 1 } }),
+          formatter,
+        );
+        expect(typeof resolveCatalogKey(en, key)).toBe("string");
+        expect(typeof resolveCatalogKey(zhCN, key)).toBe("string");
+      }
+    });
+
+    it.each([
+      ["en", "crf", 20, "MP4 · libx264 · CRF 20"],
+      ["en", "bitrate", 8000, "MP4 · libx264 · 8,000 kbps"],
+      ["en", "qualityScale", 5, "MP4 · libx264 · Quality scale 5"],
+      ["zh-CN", "crf", 20, "MP4 · libx264 · CRF 20"],
+      ["zh-CN", "bitrate", 8000, "MP4 · libx264 · 8,000 kbps"],
+      ["zh-CN", "qualityScale", 5, "MP4 · libx264 · 质量系数 5"],
+    ] as const)(
+      "renders the %s line for %s %i",
+      async (language, kind, value, expected) => {
+        const translate = await translatorFor(language);
+        const summary = presentPresetRowSummary(
+          createPreset("a", { quality: { kind, value } }),
+          new Intl.NumberFormat(language),
+        );
+        expect(translate(summary.key, summary.values)).toBe(expected);
+      },
+    );
+
+    // A stored encoder name is user data. i18next must not escape it.
+    it("renders an encoder name with punctuation unchanged", async () => {
+      const translate = await translatorFor("en");
+      const summary = presentPresetRowSummary(
+        createPreset("a", { videoEncoder: "my-enc.v2_x" }),
+        formatter,
+      );
+      expect(translate(summary.key, summary.values)).toBe("MP4 · my-enc.v2_x · CRF 20");
+    });
+  });
+
   describe("presentNumericField", () => {
     it("renders NaN as an empty string", () => {
       expect(presentNumericField(Number.NaN)).toBe("");
@@ -1449,6 +1575,10 @@ describe("presetPresenter", () => {
       "settings.encoder.reasonNotProbed",
       // the preset row's encoder mark
       "settings.preset.encoderMarkTitle",
+      // the summary line of a preset, one message for each quality kind
+      "settings.preset.rowSummaryCrf",
+      "settings.preset.rowSummaryBitrate",
+      "settings.preset.rowSummaryQualityScale",
       // all three quality kinds
       "settings.quality.crf",
       "settings.quality.bitrate",

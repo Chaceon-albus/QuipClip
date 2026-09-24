@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { presentExportAction } from "@/components/layout/exportActionPresenter";
-import { presentFrameRateSelect } from "@/components/settings/presetPresenter";
+import {
+  presentFrameRateSelect,
+  presentPresetEncoderMark,
+  presentPresetRowSummary,
+} from "@/components/settings/presetPresenter";
+import type { FfmpegState } from "@/features/ffmpeg/types";
 import { SettingsError, type Preset, type Settings } from "@/features/settings/types";
 import { FRAME_RATE_CHOICES } from "@/features/settings/videoOutputChoices";
 import { en } from "@/i18n/locales/en";
@@ -17,6 +22,7 @@ import {
   isBelowOneKilobyte,
   isolateText,
   presentExportSummarySentence,
+  presentPresetOptions,
   presentPresetSummary,
   presentSetupBlocker,
   presentSetupSettingsSection,
@@ -31,6 +37,16 @@ import {
   type PresetSummarySource,
   type PresetSummaryView,
 } from "./exportSetupPresenter";
+
+/** Walks a dotted message key through a catalog, as i18next does. */
+function lookup(catalog: unknown, key: string): unknown {
+  return key.split(".").reduce<unknown>((node, part) => {
+    if (node !== null && typeof node === "object" && part in node) {
+      return (node as Record<string, unknown>)[part];
+    }
+    return undefined;
+  }, catalog);
+}
 
 function createPreset(overrides: Partial<Preset> = {}): Preset {
   return {
@@ -1005,15 +1021,6 @@ describe("exportSetupPresenter", () => {
   });
 
   describe("the summary keys", () => {
-    function lookup(catalog: unknown, key: string): unknown {
-      return key.split(".").reduce<unknown>((node, part) => {
-        if (node !== null && typeof node === "object" && part in node) {
-          return (node as Record<string, unknown>)[part];
-        }
-        return undefined;
-      }, catalog);
-    }
-
     it("name a message in both catalogs", () => {
       for (const key of [
         "export.setup.sourceResolution",
@@ -1174,6 +1181,135 @@ describe("exportSetupPresenter", () => {
     it("offers no section while the settings load or when a preset can be chosen", () => {
       expect(presentSetupSettingsSection("loading")).toBeNull();
       expect(presentSetupSettingsSection("ready")).toBeNull();
+    });
+  });
+
+  describe("presentPresetOptions", () => {
+    // Every encoder that the presets below name works, except the one hardware encoder.
+    const probe: Pick<FfmpegState, "status" | "results"> = {
+      status: "ready",
+      results: [
+        { name: "libx264", kind: "video", listed: true, status: "works" },
+        { name: "libx265", kind: "video", listed: true, status: "works" },
+        { name: "aac", kind: "audio", listed: true, status: "works" },
+        { name: "h264_nvenc", kind: "video", listed: false, status: "notListed" },
+      ],
+    };
+    const h264 = createPreset({ id: "h264", name: "H.264 MP4" });
+    const hevc = createPreset({
+      id: "hevc",
+      name: "HEVC MKV",
+      container: "mkv",
+      videoEncoder: "libx265",
+      quality: { kind: "bitrate", value: 8000 },
+    });
+    const nvenc = createPreset({
+      id: "nvenc",
+      name: "NVENC",
+      videoEncoder: "h264_nvenc",
+      quality: { kind: "qualityScale", value: 5 },
+    });
+
+    it("lists every preset in library order, with its stored name", () => {
+      const options = presentPresetOptions(
+        createSettings([nvenc, h264, hevc], "h264"),
+        probe,
+        formatter,
+      );
+      expect(options.map((option) => [option.id, option.name])).toStrictEqual([
+        ["nvenc", "NVENC"],
+        ["h264", "H.264 MP4"],
+        ["hevc", "HEVC MKV"],
+      ]);
+    });
+
+    it("marks the default preset, and only that preset", () => {
+      const options = presentPresetOptions(
+        createSettings([h264, hevc, nvenc], "hevc"),
+        probe,
+        formatter,
+      );
+      expect(options.map((option) => option.isDefault)).toStrictEqual([
+        false,
+        true,
+        false,
+      ]);
+    });
+
+    // The step then selects the first preset (`resolveSetupPresetId`), but that preset is not
+    // the default preset, so it carries no badge. The preset list shows no badge either.
+    it.each([
+      ["names no preset", "gone"],
+      ["is unset", undefined],
+    ])("marks no preset when the default id %s", (_label, activePresetId) => {
+      const settings = createSettings([h264, hevc], activePresetId);
+      expect(resolveSetupPresetId(settings, null)).toBe("h264");
+      const options = presentPresetOptions(settings, probe, formatter);
+      expect(options.some((option) => option.isDefault)).toBe(false);
+    });
+
+    it("gives each item the summary line of the preset list row", () => {
+      const options = presentPresetOptions(
+        createSettings([h264, hevc, nvenc], "h264"),
+        probe,
+        formatter,
+      );
+      expect(options.map((option) => option.summary)).toStrictEqual(
+        [h264, hevc, nvenc].map((preset) => presentPresetRowSummary(preset, formatter)),
+      );
+      expect(options[1]?.summary).toStrictEqual({
+        key: "settings.preset.rowSummaryBitrate",
+        values: { container: "MKV", encoder: "libx265", value: "8,000" },
+      });
+    });
+
+    it("gives each item the encoder mark of the preset list row", () => {
+      const options = presentPresetOptions(
+        createSettings([h264, nvenc], "h264"),
+        probe,
+        formatter,
+      );
+      expect(options[0]?.encoderMark).toBeNull();
+      expect(options[1]?.encoderMark).toStrictEqual(
+        presentPresetEncoderMark(probe, nvenc),
+      );
+      expect(options[1]?.encoderMark).toMatchObject({
+        encoderName: "h264_nvenc",
+        availability: "unavailable",
+        tone: "warning",
+      });
+    });
+
+    it("lists no item for an empty library", () => {
+      expect(presentPresetOptions(createSettings([]), probe, formatter)).toStrictEqual(
+        [],
+      );
+    });
+
+    it("names only keys that both catalogs define", () => {
+      const options = presentPresetOptions(
+        createSettings([h264, hevc, nvenc], "h264"),
+        probe,
+        formatter,
+      );
+      const keys = options.flatMap((option) => [
+        option.summary.key,
+        ...(option.encoderMark
+          ? [
+              option.encoderMark.badgeKey,
+              option.encoderMark.titleKey,
+              option.encoderMark.reasonKey,
+            ]
+          : []),
+      ]);
+      for (const key of [
+        ...keys,
+        "settings.preset.defaultBadge",
+        "export.action.managePresets",
+      ]) {
+        expect(typeof lookup(en, key)).toBe("string");
+        expect(typeof lookup(zhCN, key)).toBe("string");
+      }
     });
   });
 });

@@ -625,6 +625,8 @@ export const en = {
       open: "Open",
       done: "Done",
       openSettings: "Open Settings...",
+      // Under the preset select of the setup step. Opens the Presets tab of Settings.
+      managePresets: "Manage Presets...",
       back: "Back",
     },
     details: {

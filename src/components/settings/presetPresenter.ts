@@ -555,6 +555,40 @@ export function presentContainer(container: PresetContainer): string {
 }
 
 /**
+ * Presents the one-line summary of a preset: the container, the video encoder, and the
+ * quality, such as "MP4 · libx264 · CRF 20".
+ *
+ * Two places show it under the preset name: a row of the preset list in Settings, and an item
+ * of the preset select in the export setup step. Both call this function, so the two lines
+ * always agree.
+ *
+ * The encoder is the stored name, verbatim. The line does not ask the capability probe about
+ * it, so an encoder that this machine does not have, or a custom name, shows the same as any
+ * other name. The encoder mark beside the line reports whether the encoder works (ADR 013).
+ *
+ * The quality kind selects one of three complete messages, because each kind puts its unit in
+ * a different place.
+ */
+export function presentPresetRowSummary(
+  preset: Pick<Preset, "container" | "videoEncoder" | "quality">,
+  formatter: Intl.NumberFormat,
+): MessageView {
+  const values = {
+    container: presentContainer(preset.container),
+    encoder: preset.videoEncoder,
+    value: formatter.format(preset.quality.value),
+  };
+  switch (preset.quality.kind) {
+    case "crf":
+      return { key: "settings.preset.rowSummaryCrf", values };
+    case "bitrate":
+      return { key: "settings.preset.rowSummaryBitrate", values };
+    case "qualityScale":
+      return { key: "settings.preset.rowSummaryQualityScale", values };
+  }
+}
+
+/**
  * Renders a numeric draft field (quality value, resolution width/height, frame rate numerator
  * or denominator) for a controlled `<Input>`.
  *

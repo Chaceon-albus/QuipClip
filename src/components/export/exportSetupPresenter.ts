@@ -9,7 +9,12 @@
 import {
   formatAudioSampleRateKHz,
   presentContainer,
+  presentPresetEncoderMark,
+  presentPresetRowSummary,
+  type MessageView,
+  type PresetEncoderMarkView,
 } from "@/components/settings/presetPresenter";
+import type { FfmpegState } from "@/features/ffmpeg/types";
 import type { MediaProbe } from "@/features/media";
 import { getNominalFrameRate } from "@/features/playback";
 import {
@@ -852,4 +857,47 @@ export function presentSetupSettingsSection(
     case "ready":
       return null;
   }
+}
+
+/** One item of the preset select of the setup step. */
+export type PresetOptionView = {
+  id: string;
+  /** The stored name. It is user data, so it is never translated (ADR 013). */
+  name: string;
+  /**
+   * True for the default preset, which `activePresetId` names (ADR 024). The item and the
+   * closed select then show the Default badge of the preset list.
+   */
+  isDefault: boolean;
+  /** The line under the name: the same line as under the name of a preset list row. */
+  summary: MessageView;
+  /**
+   * The encoder mark of the preset list row, or null when both encoders are known to work.
+   * It does not block the export (ADR 024).
+   */
+  encoderMark: PresetEncoderMarkView | null;
+};
+
+/**
+ * Presents the items of the preset select, in the order of the library.
+ *
+ * Each item carries what a row of the preset list in Settings shows: the name, the Default
+ * badge, the summary line of `presentPresetRowSummary`, and the encoder mark of
+ * `presentPresetEncoderMark`. The select and the list therefore describe a preset the same way.
+ *
+ * An `activePresetId` that names no preset marks no item. The step then selects the first
+ * preset (`resolveSetupPresetId`), but that preset is not the default preset.
+ */
+export function presentPresetOptions(
+  settings: Pick<Settings, "presets" | "activePresetId">,
+  ffmpegState: Pick<FfmpegState, "status" | "results">,
+  formatter: Intl.NumberFormat,
+): PresetOptionView[] {
+  return settings.presets.map((preset) => ({
+    id: preset.id,
+    name: preset.name,
+    isDefault: preset.id === settings.activePresetId,
+    summary: presentPresetRowSummary(preset, formatter),
+    encoderMark: presentPresetEncoderMark(ffmpegState, preset),
+  }));
 }

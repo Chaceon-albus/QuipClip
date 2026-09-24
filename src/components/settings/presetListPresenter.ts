@@ -3,13 +3,13 @@
  *
  * The tab has two panes. The left pane is the preset list with a toolbar under it, and the
  * right pane is the editor of the selected preset. This module answers:
- * - What each row shows under the preset name.
  * - Which row the tab selects when it opens, and which row takes the selection after a delete.
  * - Which row holds the one Tab stop of the list.
  * - When each action of the toolbar is off, and why.
  *
- * Returns translation keys and values without calling the i18n runtime. Each row summary is
- * one complete catalog message, so no text is assembled from translated fragments (ADR 011).
+ * Returns translation keys and values without calling the i18n runtime (ADR 011). The line under
+ * the name of each row is `presentPresetRowSummary` in `presetPresenter.ts`, because the preset
+ * select of the export setup step shows the same line.
  *
  * `findPresetRow`, `findTabStopRow` and `findListFocusRow` are the functions that read the
  * document, and they read only the element that the caller passes.
@@ -19,41 +19,9 @@ import type { Preset } from "@/features/settings/types";
 import type { PresetLibraryView } from "./presetLibraryController";
 import {
   MAX_PRESETS,
-  presentContainer,
   presentDuplicatePresetAction,
   type DuplicatePresetActionView,
-  type MessageView,
 } from "./presetPresenter";
-
-/**
- * Presents the second line of a preset row: the container, the video encoder, and the quality,
- * such as "MP4 · libx264 · CRF 20".
- *
- * The encoder is the stored name, verbatim. The line does not ask the capability probe about
- * it, so an encoder that this machine does not have, or a custom name, shows the same as any
- * other name. The encoder mark of the row reports whether the encoder works (ADR 013).
- *
- * The quality kind selects one of three complete messages, because each kind puts its unit in
- * a different place.
- */
-export function presentPresetRowSummary(
-  preset: Pick<Preset, "container" | "videoEncoder" | "quality">,
-  formatter: Intl.NumberFormat,
-): MessageView {
-  const values = {
-    container: presentContainer(preset.container),
-    encoder: preset.videoEncoder,
-    value: formatter.format(preset.quality.value),
-  };
-  switch (preset.quality.kind) {
-    case "crf":
-      return { key: "settings.preset.rowSummaryCrf", values };
-    case "bitrate":
-      return { key: "settings.preset.rowSummaryBitrate", values };
-    case "qualityScale":
-      return { key: "settings.preset.rowSummaryQualityScale", values };
-  }
-}
 
 /**
  * Returns the preset that the tab selects when it opens: the default (active) preset, or the
