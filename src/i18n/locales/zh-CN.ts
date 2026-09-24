@@ -48,6 +48,7 @@ export const zhCN: TranslationCatalog = {
       dropHint: "或将视频文件拖到这里",
     },
     loading: "正在加载媒体...",
+    buffering: "正在缓冲",
     videoPlayerLabel: "视频预览：{{fileName}}",
     regionLabel: "预览",
     decodeFailure: {
@@ -234,6 +235,8 @@ export const zhCN: TranslationCatalog = {
     approximatePositionDetail: "播放头跟随浏览器时钟，而不是精确的帧时间戳。",
     approximatePositionMarks:
       "在获知精确的帧时间戳之前，标记入点、标记出点和分割保持不可用。",
+    preparingPosition: "正在准备预览...",
+    preparingPositionDetail: "预览正在等待视频的第一帧，以获取精确的帧时间戳。",
     settings: "设置",
     export: {
       preparing: "正在准备导出",

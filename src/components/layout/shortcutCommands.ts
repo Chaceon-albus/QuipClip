@@ -16,6 +16,7 @@ import {
   hasNominalFrameRate,
   NOMINAL_STEP_EDGE_TOLERANCE_SECONDS,
   type PlaybackState,
+  type SeekOptions,
 } from "@/features/playback";
 import {
   canMarkIn,
@@ -46,6 +47,16 @@ import type { ShortcutAction } from "./shortcutBindings";
 
 /** The number of nominal frame intervals that one Shift+Arrow step moves (ADR 026). */
 export const LARGE_FRAME_STEP = 10;
+
+/**
+ * The options of a `seekApproximate` command: Home on a source that cannot calibrate, and End.
+ * Both seek on the approximate clock also after the anchor, so a request that the store defers
+ * before the anchor keeps that clock (ADR 022). End then goes to the same place before and
+ * after the anchor, and a second End finds the element at the end.
+ */
+export const APPROXIMATE_SHORTCUT_SEEK_OPTIONS: SeekOptions = {
+  keepBrowserTimeline: true,
+};
 
 /** The probe facts that the plans read. */
 export type ShortcutProbe = Pick<
@@ -195,9 +206,12 @@ function isElementAtEnd(
 /**
  * The seek to one stored boundary PTS, or null when the seek must not run.
  *
- * `seekToPts` needs a calibrated source, and it reports a failed seek on any other source. The
- * plan therefore needs the calibration too, so an uncalibrated source never shows that error.
- * A target that is already on screen gives no seek (`isTargetOnScreen`).
+ * `seekToPts` reports a failed seek on a source that cannot calibrate, so the plan does nothing
+ * there, and an uncalibrated source never shows that error. While the calibration is open,
+ * the store defers the seek until the first frame callback takes the anchor, and then runs it
+ * on the calibrated mapping (ADR 022), so the plan asks for it then too. The latest request
+ * then wins, also over the frame steps before it. A target that is already on screen gives no
+ * seek (`isTargetOnScreen`); while the calibration is open no frame is on screen yet.
  *
  * Go to In, Go to Out and a click on the edge of a timeline segment use this one rule, so the
  * key and the edge seek under the same condition (ADR 026).
@@ -211,7 +225,7 @@ export function planBoundarySeek(
   hasActiveSource: boolean,
   target: Pts | null,
 ): ShortcutCommand | null {
-  if (!hasActiveSource || playback.calibrationStatus !== "ready") {
+  if (!hasActiveSource || playback.calibrationStatus === "unavailable") {
     return null;
   }
   if (target === null || !isPtsString(target)) {
@@ -284,21 +298,17 @@ export function planShortcutCommand(
     }
 
     case "goToStart": {
-      // While the calibration is open, a seek would refuse precise editing for the attachment
-      // (ADR 021), because the anchor frame would no longer be the frame `videoStartPts`
-      // names. Home owns the key press and performs nothing then (ADR 026).
-      if (
-        !hasActiveSource ||
-        probe === null ||
-        playback.calibrationStatus === "calibrating"
-      ) {
+      if (!hasActiveSource || probe === null) {
         return null;
       }
-      // A calibrated source goes to the frame that `videoStartPts` names. Any other source
-      // goes to time zero on the approximate clock, because `seekToPts` would report a failed
-      // seek there (ADR 026).
+      // A calibrated source goes to the frame that `videoStartPts` names. So does a source
+      // whose calibration is still open: the store defers the seek until the anchor, and then
+      // drops it, because the anchor is that frame and it is on screen (ADR 022). Home still
+      // replaces the frame steps before it, so the latest request wins. A source that cannot
+      // calibrate goes to time zero on the approximate clock, because `seekToPts` would report
+      // a failed seek there (ADR 026).
       if (
-        playback.calibrationStatus === "ready" &&
+        playback.calibrationStatus !== "unavailable" &&
         probe.videoStartPts !== null &&
         isPtsString(probe.videoStartPts)
       ) {
@@ -312,18 +322,15 @@ export function planShortcutCommand(
     }
 
     case "goToEnd": {
-      // The same rule as Home while the calibration is open.
-      if (
-        !hasActiveSource ||
-        probe === null ||
-        playback.calibrationStatus === "calibrating"
-      ) {
+      if (!hasActiveSource || probe === null) {
         return null;
       }
       // The end of the ruler, from the same extent rule and the same inputs as the timeline
       // (ADR 007). This is the seek that a press at the right end of the ruler makes on the
       // approximate clock, and `seekApproximate` clamps it to the duration of the element. An
-      // indeterminate extent has no end to go to, as it has no click-to-seek.
+      // indeterminate extent has no end to go to, as it has no click-to-seek. While the
+      // calibration is open, the store defers the seek until the anchor, and then runs it on
+      // the approximate clock too (APPROXIMATE_SHORTCUT_SEEK_OPTIONS, ADR 022).
       const endSeconds = getTimelineDurationSeconds({
         videoDurationTicks: probe.videoDurationTicks,
         videoTimeBase: probe.videoTimeBase,

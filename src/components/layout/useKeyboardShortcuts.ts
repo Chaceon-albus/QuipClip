@@ -16,6 +16,7 @@ import {
 import { quitGuard } from "./quitGuardController";
 import { getShortcutPlatform } from "./shortcutBindings";
 import {
+  APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
   planShortcutCommand,
   type ShortcutCommand,
   type ShortcutSnapshot,
@@ -38,7 +39,9 @@ function runShortcutCommand(command: ShortcutCommand): void {
       playback.seekToPts(command.pts);
       return;
     case "seekApproximate":
-      playback.seekApproximate(command.seconds);
+      // Home on a source that cannot calibrate, and End. Both seek on the approximate clock
+      // after the anchor, so a request deferred before the anchor keeps that clock (ADR 022).
+      playback.seekApproximate(command.seconds, APPROXIMATE_SHORTCUT_SEEK_OPTIONS);
       return;
     case "markIn":
       timeline.markIn(command.pts);

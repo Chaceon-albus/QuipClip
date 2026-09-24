@@ -44,6 +44,14 @@ export interface PlaybackMediaElement {
  */
 export interface SeekOptions {
   readonly scrub?: boolean;
+  /**
+   * For `seekApproximate` only. A seek that the store defers during calibration runs on the
+   * calibrated mapping once the calibration is ready, because the ruler of a calibrated source
+   * seeks there (ADR 022). With this option it runs on the browser media timeline instead, as
+   * the same call runs after the anchor. End passes it (ADR 026), so End goes to the same place
+   * before and after the anchor, and a second End finds the element at the end.
+   */
+  readonly keepBrowserTimeline?: boolean;
 }
 
 /**
@@ -97,9 +105,16 @@ export interface PlaybackState {
    * Seconds elapsed from the start of the source (the ruler axis, the same axis as
    * approximateBrowserTimeSeconds) of the last accepted seek request; display only; never
    * an edit position; canMarkIn/canMarkOut/canSplitCurrentSegment never read it (ADR 003, ADR 022).
+   * A request deferred during calibration counts as accepted, so the field shows its target.
    * Null when no seek is pending.
    */
   readonly seekTargetSeconds: number | null;
+  /**
+   * True while a navigation request waits for the calibration anchor (ADR 022). It is only
+   * true while `calibrationStatus` is "calibrating". The preview bounds that wait while it is
+   * true, and only then, so a source that nobody navigates keeps waiting for its first frame.
+   */
+  readonly hasDeferredNavigation: boolean;
   /** True when video is currently playing. */
   readonly isPlaying: boolean;
   /** True when a media element is attached. */
@@ -153,6 +168,8 @@ export interface PlaybackActions {
 
   /**
    * Explicitly starts playback. Synchronously calls video.play().
+   * Drops a navigation deferred during calibration and plays from where the element stands,
+   * because a seek before the calibration anchor would refuse the calibration (ADR 003).
    */
   play: () => void;
 
@@ -165,6 +182,9 @@ export interface PlaybackActions {
    * Seeks to a target PTS in source video time base using checked inverse calibrated mapping.
    * Does not update inferred PTS optimistically after setting currentTime; waits for RVFC.
    * Accepts optional SeekOptions for playhead scrubbing (ADR 022).
+   * While the calibration is "calibrating", the request is deferred and not refused: it runs
+   * on the calibrated mapping when the calibration is ready, and at its elapsed seconds on the
+   * approximate clock when the calibration is unavailable.
    */
   seekToPts: (targetPts: Pts, options?: SeekOptions) => void;
 
@@ -178,12 +198,20 @@ export interface PlaybackActions {
    * the case at the first and the last position of the source. Such a step still pauses
    * playback. A pending scrub target at the edge still gets one exact seek, because fastSeek
    * lands on a keyframe and not on its target (ADR 022).
+   * While the calibration is "calibrating", the step is deferred. Deferred steps add up, one
+   * frame for each press (ADR 021), and run as one step when the calibration settles. That step
+   * requests the cue once, but the scrub audio element mounts only after the calibration leaves
+   * "calibrating", so the controller has no element then and the step makes no sound (ADR 019).
    */
   seekNominal: (deltaFrames: number) => void;
 
   /**
    * Requests a checked browser-time seek without creating a canonical edit position.
    * Accepts optional SeekOptions for playhead scrubbing (ADR 022).
+   * While the calibration is "calibrating", the seek is deferred and replaces any earlier
+   * deferred request. It runs when the calibration settles: on the calibrated mapping when the
+   * calibration is ready, unless `keepBrowserTimeline` is set, and on the approximate clock
+   * when it is unavailable.
    */
   seekApproximate: (seconds: number, options?: SeekOptions) => void;
 
@@ -201,8 +229,10 @@ export interface PlaybackActions {
   ) => void;
 
   /**
-   * Marks precise presentation mapping unavailable when RVFC is unsupported.
-   * Playback and approximate browser timing remain available.
+   * Marks precise presentation mapping unavailable when RVFC is unsupported, or when the
+   * preview stops waiting for the first presented frame of a visible element while a
+   * navigation is deferred (the bounded wait for the anchor). Playback and approximate browser
+   * timing remain available. The deferred navigation then runs on the approximate path.
    */
   syncPresentationUnavailable: (
     sourceRevisionKey: string,

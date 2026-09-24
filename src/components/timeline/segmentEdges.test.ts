@@ -300,13 +300,29 @@ describe("planSegmentEdgeSeek", () => {
     expect(planSegmentEdgeSeek("in", seg, pending, true)).toBe("180000");
   });
 
-  it("does not seek without an active source or a ready calibration", () => {
+  it("does not seek without an active source or on a source that cannot calibrate", () => {
     expect(planSegmentEdgeSeek("in", seg, ready, false)).toBeNull();
-    for (const calibrationStatus of ["calibrating", "unavailable"] as const) {
-      expect(
-        planSegmentEdgeSeek("out", seg, { ...ready, calibrationStatus }, true),
-      ).toBeNull();
-    }
+    expect(
+      planSegmentEdgeSeek(
+        "out",
+        seg,
+        { ...ready, calibrationStatus: "unavailable" },
+        true,
+      ),
+    ).toBeNull();
+  });
+
+  it("seeks while the calibration is open, for the store to defer until the anchor", () => {
+    // The store defers seekToPts until the first frame callback and then runs it on the
+    // calibrated mapping (ADR 022), so the edge seeks as Shift+I and Shift+O do. No frame is
+    // on screen before the anchor.
+    const calibrating: BoundarySeekPlayback = {
+      calibrationStatus: "calibrating",
+      presentedFrame: null,
+      seekTargetSeconds: null,
+    };
+    expect(planSegmentEdgeSeek("in", seg, calibrating, true)).toBe("180000");
+    expect(planSegmentEdgeSeek("out", seg, calibrating, true)).toBe("270000");
   });
 
   it("does not seek to a malformed boundary", () => {

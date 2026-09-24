@@ -10,6 +10,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import { getSourceRevisionKey, isPositiveRational } from "@/features/media";
 import {
   assertPositiveTimeBase,
+  elapsedSecondsToPts,
   isPtsString,
   mediaTimeToPts,
   ptsElapsedSeconds,
@@ -130,6 +131,42 @@ function nominalFrameMiddleSeconds(frameIndex: number, frameRate: Rational): num
 }
 
 /**
+ * The absolute seek of a navigation that the store deferred during calibration.
+ * `keepBrowserTimeline` is the seek option of that name (see SeekOptions).
+ */
+type DeferredSeek =
+  | {
+      readonly kind: "approximate";
+      readonly seconds: number;
+      readonly scrub: boolean;
+      readonly keepBrowserTimeline: boolean;
+    }
+  | { readonly kind: "pts"; readonly pts: Pts; readonly scrub: boolean };
+
+/**
+ * The seek that a deferred seek runs as once the calibration settles: a PTS on the calibrated
+ * mapping, or seconds from the start of the source on the approximate clock.
+ */
+type SettledSeek =
+  | { readonly kind: "approximate"; readonly seconds: number; readonly scrub: boolean }
+  | { readonly kind: "pts"; readonly pts: Pts; readonly scrub: boolean };
+
+/**
+ * A navigation request that arrived while the calibration anchor was still open (ADR 003).
+ *
+ * The latest absolute seek replaces every earlier request, as a queued seek does (ADR 022).
+ * Nominal steps add up instead: ADR 021 makes each key press one step, so three presses are a
+ * step of three frames, and the latest press alone would drop two of them. The steps count
+ * from the seek, or from the position the element holds when there is no seek.
+ */
+interface DeferredNavigation {
+  /** The latest absolute seek, or null when the steps count from the element position. */
+  readonly seek: DeferredSeek | null;
+  /** The net number of nominal frames of the steps after that seek. */
+  readonly frames: number;
+}
+
+/**
  * Factory function creating a vanilla Zustand store instance for playback state.
  *
  * The attached HTMLVideoElement/PlaybackMediaElement, active PlaybackSource, and calibration
@@ -166,9 +203,31 @@ export function createPlaybackStore(
   // stays 0 until metadata loads, and it never reads seekable.start(0), which ADR 003 refuses
   // as a timestamp origin.
   let browserTimelineOriginSeconds = 0;
-  // True when the element was seeked after the attach and before the calibration anchor was
-  // taken. The frame such a seek presents is not the frame videoStartPts names.
+  // True when the store sent a seek to the element after the attach and before the calibration
+  // anchor was taken. The frame such a seek presents is not the frame videoStartPts names, so
+  // the anchor guard then refuses the anchor.
+  //
+  // The store defers every navigation while the calibration is "calibrating"
+  // (deferredNavigation), so no action of the store can make this true in that state, and a
+  // test calls every action before the anchor to hold that invariant. The flag stays as defence
+  // in depth: issueSeek, the one place where the store moves the element, sets it whenever no
+  // anchor exists, so a seek path that does not defer still cannot bind videoStartPts to a wrong
+  // frame. A seek that the store does not send, such as the browser moving currentTime on its
+  // own when metadata loads, is not recorded here; the position tests of the anchor guard cover
+  // it.
   let seekedBeforeCalibration = false;
+  // The navigation request that arrived while calibrationStatus was "calibrating", or null.
+  // Issuing it would move the element away from the anchor baseline before the first frame
+  // callback, and the attachment could then never calibrate (ADR 003). The store keeps the
+  // request here, shows its target as the display target (ADR 022), and runs it through the
+  // ordinary action when the calibration leaves "calibrating": on the calibrated path when it
+  // is ready, and on the approximate path when it is unavailable. It is only ever set while the
+  // status is "calibrating" and an element is attached and ready. A source change, a detach, a
+  // reset, a loss of readiness, a failed seek, play, and an element that starts to play on its
+  // own drop it. The public field hasDeferredNavigation reports it. The store has no timer:
+  // while that field is true, the preview bounds the wait for the first frame, and at the
+  // bound it reports frame callbacks as unavailable (syncPresentationUnavailable).
+  let deferredNavigation: DeferredNavigation | null = null;
   // Source revision keys that lost precise editing. ADR 003 denies precision per source, so the
   // denial must outlive the attachment that detected it.
   const precisionDeniedSources = new Set<string>();
@@ -202,6 +261,12 @@ export function createPlaybackStore(
         element.fastSeek(entry.mediaTime);
       } else {
         element.currentTime = entry.mediaTime;
+      }
+      if (calibratedMediaTime === null) {
+        // The element left the baseline of the anchor guard before any anchor, so a later first
+        // callback cannot identify videoStartPts. Defence in depth: while the calibration is
+        // open, no action reaches this line (see seekedBeforeCalibration).
+        seekedBeforeCalibration = true;
       }
     };
 
@@ -315,6 +380,421 @@ export function createPlaybackStore(
       return true;
     };
 
+    /**
+     * The bounds of a nominal step, as positions on the browser media timeline, the axis of
+     * currentTime, which ADR 003 does not require to start at 0.
+     *
+     * The lower bound is the start of that timeline, or the calibrated first frame when it lies
+     * later, because no frame precedes the one videoStartPts names. A target below the start
+     * would never equal the position the next press reads back, because the browser moves it to
+     * the start, so each press would seek again.
+     *
+     * The probe prefers the duration of the video stream, which counts from the first video
+     * frame, so the approximate duration goes on the lower bound. The element stops a seek at
+     * its own duration, an end position that caps any overshoot of that sum and that can be
+     * rounded to the clock of the web view. Clamp to it as seekApproximate does, so that the
+     * element reports back exactly the clamp value and the edge check of the step fires on the
+     * next step. When the stream duration is invalid, the probe falls back to the container
+     * duration, which counts from the container start, so the sum can overshoot by the distance
+     * from the origin to the first frame; the element duration caps that overshoot when the
+     * element reports one. Without either duration there is no upper bound.
+     */
+    const nominalStepBounds = (
+      source: PlaybackSource,
+      calibratedOrigin: number | null,
+    ): { readonly lower: number; readonly upper: number } => {
+      const lower =
+        calibratedOrigin === null
+          ? browserTimelineOriginSeconds
+          : Math.max(browserTimelineOriginSeconds, calibratedOrigin);
+      const approximateDuration = source.approximateDurationSeconds;
+      const approximateEnd =
+        typeof approximateDuration === "number" &&
+        Number.isFinite(approximateDuration) &&
+        approximateDuration > 0
+          ? lower + approximateDuration
+          : Number.POSITIVE_INFINITY;
+      const runtimeDuration = get().runtimeBrowserDurationSeconds;
+      const upper =
+        runtimeDuration === null
+          ? approximateEnd
+          : Math.min(approximateEnd, runtimeDuration);
+      return { lower, upper };
+    };
+
+    /**
+     * The position on the browser media timeline that seekApproximate moves the element to, or
+     * null when there is none.
+     *
+     * The caller passes seconds elapsed from the start of the source, the axis the ruler and the
+     * approximate clock both use, so the origin of the browser media timeline goes back on. The
+     * element stops a seek at its own duration.
+     */
+    const approximateSeekTarget = (seconds: number): number | null => {
+      let target = seconds + browserTimelineOriginSeconds;
+      const runtimeDuration = get().runtimeBrowserDurationSeconds;
+      if (runtimeDuration !== null) {
+        target = Math.min(target, runtimeDuration);
+      }
+      return Number.isFinite(target) && target >= 0 ? target : null;
+    };
+
+    /**
+     * The frames that the steps of a deferred navigation can reach, and where they are, or null
+     * when the source gives no step.
+     *
+     * The anchor is not known yet, so the frames are counted on the nominal grid from the lower
+     * bound of a step without a calibration, the start of the browser media timeline, where ADR
+     * 003 expects the first frame. The steps start from the target of the deferred seek, or
+     * from the position the element holds when there is no seek. A PTS goes through the same
+     * start. These values serve the display target and the edge rule of the deferred steps
+     * only. The steps themselves run through seekNominal when the calibration settles, and it
+     * applies its own grid, clamps and edges then (ADR 022).
+     */
+    const deferredStepGeometry = (
+      seek: DeferredSeek | null,
+    ): {
+      readonly fps: Rational;
+      readonly lower: number;
+      readonly upper: number;
+      readonly stepStart: number;
+      readonly startFrame: number;
+      readonly lastFrame: number;
+      readonly onGrid: boolean;
+    } | null => {
+      if (!attachedSource || !attachedElement) {
+        return null;
+      }
+      const fps = getNominalFrameRate(attachedSource);
+      if (fps === null) {
+        return null;
+      }
+      let start: number | null;
+      if (seek === null) {
+        start = attachedElement.currentTime;
+      } else if (seek.kind === "approximate") {
+        start = approximateSeekTarget(seek.seconds);
+      } else {
+        const elapsed =
+          attachedSource.videoStartPts === null
+            ? null
+            : ptsElapsedSeconds(
+                seek.pts,
+                attachedSource.videoStartPts,
+                attachedSource.videoTimeBase,
+              );
+        start = elapsed === null ? null : browserTimelineOriginSeconds + elapsed;
+      }
+      if (typeof start !== "number" || !Number.isFinite(start)) {
+        return null;
+      }
+      const { lower, upper } = nominalStepBounds(attachedSource, null);
+      const stepStart = Math.max(Math.min(start, upper), lower);
+      // The ADR 028 rule: the nominal frame that contains a position, rounded down after the
+      // frame boundary margin, as the step on the grid names frames.
+      const marginSeconds = frameBoundaryMarginSeconds(
+        fps,
+        attachedSource.videoTimeBase,
+      );
+      const frameIndexAt = (browserTime: number): number =>
+        Math.floor(((browserTime - lower + marginSeconds) * fps.n) / fps.d);
+      const startFrame = frameIndexAt(stepStart);
+      // The frame that contains the end position is the last frame a step reaches: a step past
+      // it clamps to the end, inside that same frame.
+      const lastFrame = Number.isFinite(upper)
+        ? Math.max(startFrame, frameIndexAt(upper))
+        : Number.POSITIVE_INFINITY;
+      if (!Number.isSafeInteger(startFrame)) {
+        return null;
+      }
+      return {
+        fps,
+        lower,
+        upper,
+        stepStart,
+        startFrame,
+        lastFrame,
+        onGrid:
+          !hasVariableFrameRate(attachedSource) &&
+          isFrameGridExact(fps, attachedSource.videoTimeBase),
+      };
+    };
+
+    /**
+     * The display target of a deferred navigation, in seconds from the start of the source, or
+     * null when it moves nothing (ADR 022).
+     *
+     * A deferred seek alone shows its target as seekApproximate and seekToPts show it. A step
+     * shows the nominal start of its target frame on a source where the step uses the frame
+     * grid, and its relative target elsewhere, as seekNominal shows it. The target frame is
+     * counted from the start of the timeline. When the calibrated first frame lies there, as it
+     * does for most sources, the playhead does not move when the request runs.
+     *
+     * The grid display assumes that the calibration becomes ready. When it becomes unavailable
+     * instead, the step runs off the grid, as the start position plus its intervals, and the
+     * playhead moves when it runs. It moves by the part of a frame at which the deferred seek
+     * lies, so by less than one frame, and not at all for a step from the element position,
+     * which stands at the start of a frame.
+     */
+    const deferredDisplaySeconds = (entry: DeferredNavigation): number | null => {
+      const { seek, frames } = entry;
+      if (frames === 0) {
+        if (seek === null) {
+          return null;
+        }
+        if (seek.kind === "approximate") {
+          const target = approximateSeekTarget(seek.seconds);
+          return target === null
+            ? null
+            : Math.max(0, target - browserTimelineOriginSeconds);
+        }
+        const elapsed =
+          attachedSource?.videoStartPts == null
+            ? null
+            : ptsElapsedSeconds(
+                seek.pts,
+                attachedSource.videoStartPts,
+                attachedSource.videoTimeBase,
+              );
+        return elapsed === null ? null : Math.max(0, elapsed);
+      }
+      const geometry = deferredStepGeometry(seek);
+      if (geometry === null) {
+        return null;
+      }
+      const { fps, lower, upper, stepStart, startFrame, onGrid } = geometry;
+      if (onGrid) {
+        return Math.max(0, ((startFrame + frames) * fps.d) / fps.n);
+      }
+      const target = Math.max(
+        Math.min(stepStart + (frames * fps.d) / fps.n, upper),
+        lower,
+      );
+      return Math.max(0, target - lower);
+    };
+
+    /**
+     * Keeps a navigation request while the calibration anchor is open, in place of a seek.
+     *
+     * The request stops playback, as a seek does, because a navigation means that the user
+     * stops to look at frames. A pause does not move the element, so the anchor keeps its
+     * baseline. The display target shows where the request goes (ADR 022). presentedFrame stays
+     * null: no frame is confirmed before the anchor (ADR 003).
+     */
+    const deferNavigation = (entry: DeferredNavigation): void => {
+      if (!attachedElement) {
+        return;
+      }
+      playSessionId++;
+      try {
+        attachedElement.pause();
+      } catch {
+        // Ignore DOM exception
+      }
+      // A step back to the position the element holds leaves nothing to do.
+      deferredNavigation = entry.seek === null && entry.frames === 0 ? null : entry;
+      set({
+        isPlaying: false,
+        error: null,
+        presentedFrame: null,
+        seekTargetSeconds: deferredDisplaySeconds(entry),
+        hasDeferredNavigation: deferredNavigation !== null,
+      });
+    };
+
+    /**
+     * True when a seek to the PTS shows the frame that the anchor presented, on a calibrated
+     * source whose element has not moved since the anchor.
+     *
+     * A target at or before videoStartPts shows the first frame. On the frame grid (ADR 022), a
+     * target inside nominal frame 0, counted from the calibrated first frame by the ADR 028 rule,
+     * shows it too. Off the grid no frame boundary is known, so only the first test applies.
+     */
+    const ptsShowsAnchorFrame = (pts: Pts): boolean => {
+      if (!attachedSource || !isPtsString(pts)) {
+        return false;
+      }
+      const startPts = attachedSource.videoStartPts;
+      const timeBase = attachedSource.videoTimeBase;
+      if (startPts === null || !isPtsString(startPts)) {
+        return false;
+      }
+      if (BigInt(pts) <= BigInt(startPts)) {
+        return true;
+      }
+      const fps = getNominalFrameRate(attachedSource);
+      if (
+        fps === null ||
+        hasVariableFrameRate(attachedSource) ||
+        !isFrameGridExact(fps, timeBase)
+      ) {
+        return false;
+      }
+      const elapsed = ptsElapsedSeconds(pts, startPts, timeBase);
+      if (elapsed === null) {
+        return false;
+      }
+      const marginSeconds = frameBoundaryMarginSeconds(fps, timeBase);
+      return Math.floor(((elapsed + marginSeconds) * fps.n) / fps.d) <= 0;
+    };
+
+    /**
+     * The seek that a deferred seek runs as once the calibration has left "calibrating", or
+     * null when it is dropped.
+     *
+     * Ready:
+     * - A seek with `keepBrowserTimeline`, such as End (ADR 026), stays on the browser media
+     *   timeline, as the same call runs after the anchor. A target at or before the anchor frame
+     *   is dropped for the reason below.
+     * - Any other ruler position becomes the PTS that the same position names on a calibrated
+     *   source: videoStartPts plus its seconds in ticks, the conversion of a click on the ruler
+     *   once the calibration holds (calculatePtsFromClientX). The deferred seconds count from the
+     *   start of the browser timeline, and the ruler of a calibrated source counts from the
+     *   calibrated first frame. Without the conversion, an audio-first lead would move the
+     *   playhead back by that lead when the seek runs, and the steps after it would jump by the
+     *   lead times the frame rate. The seconds are the ones the display target showed, clamped
+     *   to the element duration as seekApproximate clamps them.
+     * - A seek to the frame that the anchor presented is dropped (ptsShowsAnchorFrame). That
+     *   frame is on screen, and a seek to it can bring no frame callback (ADR 022), which would
+     *   leave presentedFrame null and the edit actions disabled. During playback the frame on
+     *   screen changes, so nothing is dropped.
+     *
+     * Unavailable: the approximate path. A PTS goes to its elapsed seconds on the approximate
+     * clock, because seekToPts has no mapping there.
+     */
+    const settleDeferredSeek = (
+      seek: DeferredSeek,
+      state: PlaybackState,
+    ): SettledSeek | null => {
+      if (!attachedSource) {
+        return null;
+      }
+      const startPts = attachedSource.videoStartPts;
+      const timeBase = attachedSource.videoTimeBase;
+      if (
+        state.calibrationStatus !== "ready" ||
+        calibratedMediaTime === null ||
+        startPts === null ||
+        !isPtsString(startPts)
+      ) {
+        if (seek.kind === "approximate") {
+          return seek;
+        }
+        const elapsed =
+          startPts === null ? null : ptsElapsedSeconds(seek.pts, startPts, timeBase);
+        return elapsed === null
+          ? null
+          : { kind: "approximate", seconds: Math.max(0, elapsed), scrub: seek.scrub };
+      }
+      let pts: Pts;
+      if (seek.kind === "approximate") {
+        const target = approximateSeekTarget(seek.seconds);
+        if (target === null) {
+          return null;
+        }
+        if (seek.keepBrowserTimeline) {
+          // Before or at the anchor frame, the browser shows that frame, which is on screen.
+          return !state.isPlaying &&
+            target <= calibratedMediaTime + NOMINAL_STEP_EDGE_TOLERANCE_SECONDS
+            ? null
+            : seek;
+        }
+        const converted = elapsedSecondsToPts(
+          Math.max(0, target - browserTimelineOriginSeconds),
+          startPts,
+          timeBase,
+        );
+        if (converted === null) {
+          // No safe PTS for the position: it stays on the browser timeline.
+          return seek;
+        }
+        pts = converted;
+      } else {
+        pts = seek.pts;
+      }
+      if (!state.isPlaying && ptsShowsAnchorFrame(pts)) {
+        return null;
+      }
+      return { kind: "pts", pts, scrub: seek.scrub };
+    };
+
+    /**
+     * Runs the deferred navigation once the calibration has left "calibrating", through the
+     * ordinary actions, so every rule of those actions applies: the coalesced seeks, the frame
+     * grid, the clamps and the edges of a step (ADR 022). The seek goes first, and the steps
+     * count from it (settleDeferredSeek).
+     *
+     * The executed step requests the cue once, as every step does (ADR 019), and the deferred
+     * presses requested none. The request makes no sound: the scrub audio element mounts only
+     * after the calibration leaves "calibrating", which happens in this same call, so the
+     * controller has no element when the request arrives.
+     *
+     * A seek with steps after it gives the element one seek, not two. Its target goes in as the
+     * queued seek, the pending target that seekNominal counts from (ADR 022), and the step
+     * replaces it. A step that cannot move from that target, at an edge, leaves it queued; the
+     * seek then runs alone. A dropped seek leaves the steps to count from the frame on screen.
+     */
+    const runDeferredNavigation = (): void => {
+      const entry = deferredNavigation;
+      if (entry === null) {
+        return;
+      }
+      deferredNavigation = null;
+      const state = get();
+      // The deferred request and its display target go. The action that runs sets its own.
+      set({ hasDeferredNavigation: false, seekTargetSeconds: null });
+      if (
+        !attachedSource ||
+        !attachedElement ||
+        !state.isReady ||
+        state.calibrationStatus === "calibrating"
+      ) {
+        return;
+      }
+      const seek = entry.seek === null ? null : settleDeferredSeek(entry.seek, state);
+      const runSeek = (settled: SettledSeek): void => {
+        if (settled.kind === "pts") {
+          get().seekToPts(settled.pts, { scrub: settled.scrub });
+        } else {
+          get().seekApproximate(settled.seconds, { scrub: settled.scrub });
+        }
+      };
+      if (entry.frames === 0) {
+        if (seek !== null) {
+          runSeek(seek);
+        }
+        return;
+      }
+      if (seek === null) {
+        get().seekNominal(entry.frames);
+        return;
+      }
+      const startPts = attachedSource.videoStartPts;
+      const seekMediaTime =
+        seek.kind === "approximate"
+          ? approximateSeekTarget(seek.seconds)
+          : calibratedMediaTime === null || startPts === null
+            ? null
+            : ptsToMediaTime(
+                seek.pts,
+                startPts,
+                calibratedMediaTime,
+                attachedSource.videoTimeBase,
+              );
+      if (seekMediaTime === null) {
+        runSeek(seek);
+        get().seekNominal(entry.frames);
+        return;
+      }
+      const placeholder = { mediaTime: seekMediaTime, scrub: seek.scrub };
+      queuedSeek = placeholder;
+      get().seekNominal(entry.frames);
+      if (queuedSeek === placeholder) {
+        queuedSeek = null;
+        runSeek(seek);
+      }
+    };
+
     return {
       presentedFrame: initialState?.presentedFrame ?? null,
       calibrationStatus: initialState?.calibrationStatus ?? "unavailable",
@@ -323,6 +803,7 @@ export function createPlaybackStore(
       approximateBrowserTimeSeconds:
         initialState?.approximateBrowserTimeSeconds ?? null,
       seekTargetSeconds: initialState?.seekTargetSeconds ?? null,
+      hasDeferredNavigation: initialState?.hasDeferredNavigation ?? false,
       isPlaying: initialState?.isPlaying ?? false,
       isAttached: initialState?.isAttached ?? false,
       attachedSourceRevisionKey: initialState?.attachedSourceRevisionKey ?? null,
@@ -400,6 +881,7 @@ export function createPlaybackStore(
         // the media timeline, so the origin waits for syncReady.
         browserTimelineOriginSeconds = 0;
         seekedBeforeCalibration = false;
+        deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
@@ -410,6 +892,7 @@ export function createPlaybackStore(
           runtimeBrowserDurationSeconds: null,
           approximateBrowserTimeSeconds: null,
           seekTargetSeconds: null,
+          hasDeferredNavigation: false,
           isPlaying: false,
           isAttached: true,
           attachedSourceRevisionKey: newIdentity,
@@ -451,6 +934,7 @@ export function createPlaybackStore(
         anchorBaselineTime = null;
         browserTimelineOriginSeconds = 0;
         seekedBeforeCalibration = false;
+        deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
 
@@ -460,6 +944,7 @@ export function createPlaybackStore(
           runtimeBrowserDurationSeconds: null,
           approximateBrowserTimeSeconds: null,
           seekTargetSeconds: null,
+          hasDeferredNavigation: false,
           isPlaying: false,
           isAttached: false,
           attachedSourceRevisionKey: null,
@@ -517,6 +1002,8 @@ export function createPlaybackStore(
         queuedSeek = null;
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
+        // A deferred navigation needs a ready element to run on.
+        deferredNavigation = null;
         playSessionId++;
         try {
           attachedElement.pause();
@@ -528,6 +1015,7 @@ export function createPlaybackStore(
           isReady: false,
           isPlaying: false,
           seekTargetSeconds: null,
+          hasDeferredNavigation: false,
         });
       },
 
@@ -553,7 +1041,7 @@ export function createPlaybackStore(
           try {
             // A queued seek or issued scrub seek must be flushed as EXACT before playing, so
             // playback starts at the last target and not at a keyframe (ADR 022).
-            attachedElement.currentTime = nextMediaTime;
+            issueSeek(attachedElement, { mediaTime: nextMediaTime, scrub: false });
           } catch {
             lastAcceptedSeek = null;
             lastScrubAudioTarget = null;
@@ -568,12 +1056,28 @@ export function createPlaybackStore(
           lastAcceptedSeek = null;
         }
 
+        // A navigation deferred during calibration is dropped, and playback starts where the
+        // element stands. play must call the element at once to keep the user activation, so
+        // it cannot wait for the anchor, and a seek before the anchor would refuse the
+        // calibration for the attachment (ADR 003). What the user loses is the position that
+        // the deferred request asked for, however long it waited: no deferred request moved the
+        // element, so playback starts from the position it held when the request arrived. The
+        // first frames of the playback can then take the anchor.
+        const droppedDeferred = deferredNavigation !== null;
+        deferredNavigation = null;
+
         const currentSession = ++playSessionId;
         const currentIdentity = getSourceRevisionKey(attachedSource);
         const targetElement = attachedElement;
 
         // Optimistically update playing state and clear previous error
-        set({ isPlaying: true, error: null });
+        set({
+          isPlaying: true,
+          error: null,
+          ...(droppedDeferred
+            ? { seekTargetSeconds: null, hasDeferredNavigation: false }
+            : {}),
+        });
 
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
@@ -646,60 +1150,45 @@ export function createPlaybackStore(
           scrubAudioController.stop();
         }
 
-        const state = get();
-        if (
-          !attachedSource ||
-          !attachedElement ||
-          !state.isReady ||
-          state.calibrationStatus !== "ready" ||
-          calibratedMediaTime === null ||
-          attachedSource.videoStartPts === null
-        ) {
+        // A failed request is the latest request, so it also drops the pending ones: the queued
+        // seek and a navigation deferred during calibration (ADR 022).
+        const failSeek = (): void => {
           queuedSeek = null;
           lastAcceptedSeek = null;
           lastScrubAudioTarget = null;
+          deferredNavigation = null;
           playSessionId++;
           try {
             attachedElement?.pause();
           } catch {
             // Ignore DOM exception
           }
-          set({ isPlaying: false, error: "seekFailed", seekTargetSeconds: null });
+          set({
+            isPlaying: false,
+            error: "seekFailed",
+            seekTargetSeconds: null,
+            hasDeferredNavigation: false,
+          });
+        };
+
+        const state = get();
+        // While the anchor is open the mapping is not known yet, but it will be at the first
+        // presented frame, so the request is deferred and not refused.
+        const deferring = state.calibrationStatus === "calibrating";
+        if (
+          !attachedSource ||
+          !attachedElement ||
+          !state.isReady ||
+          attachedSource.videoStartPts === null ||
+          (!deferring &&
+            (state.calibrationStatus !== "ready" || calibratedMediaTime === null))
+        ) {
+          failSeek();
           return;
         }
 
         if (!isPtsString(targetPts)) {
-          queuedSeek = null;
-          lastAcceptedSeek = null;
-          lastScrubAudioTarget = null;
-          playSessionId++;
-          try {
-            attachedElement.pause();
-          } catch {
-            // Ignore DOM exception
-          }
-          set({ isPlaying: false, error: "seekFailed", seekTargetSeconds: null });
-          return;
-        }
-
-        const targetMediaTime = ptsToMediaTime(
-          targetPts,
-          attachedSource.videoStartPts,
-          calibratedMediaTime,
-          attachedSource.videoTimeBase,
-        );
-
-        if (targetMediaTime === null) {
-          queuedSeek = null;
-          lastAcceptedSeek = null;
-          lastScrubAudioTarget = null;
-          playSessionId++;
-          try {
-            attachedElement.pause();
-          } catch {
-            // Ignore DOM exception
-          }
-          set({ isPlaying: false, error: "seekFailed", seekTargetSeconds: null });
+          failSeek();
           return;
         }
 
@@ -710,16 +1199,28 @@ export function createPlaybackStore(
         );
 
         if (rawElapsed === null) {
-          queuedSeek = null;
-          lastAcceptedSeek = null;
-          lastScrubAudioTarget = null;
-          playSessionId++;
-          try {
-            attachedElement.pause();
-          } catch {
-            // Ignore DOM exception
-          }
-          set({ isPlaying: false, error: "seekFailed", seekTargetSeconds: null });
+          failSeek();
+          return;
+        }
+
+        if (deferring) {
+          // The display target needs no anchor: it is the elapsed time from videoStartPts.
+          deferNavigation({ seek: { kind: "pts", pts: targetPts, scrub }, frames: 0 });
+          return;
+        }
+
+        const targetMediaTime =
+          calibratedMediaTime === null
+            ? null
+            : ptsToMediaTime(
+                targetPts,
+                attachedSource.videoStartPts,
+                calibratedMediaTime,
+                attachedSource.videoTimeBase,
+              );
+
+        if (targetMediaTime === null) {
+          failSeek();
           return;
         }
 
@@ -759,6 +1260,33 @@ export function createPlaybackStore(
           return;
         }
 
+        if (state.calibrationStatus === "calibrating") {
+          // The anchor is still open, so the step is deferred (ADR 003). The net frame count
+          // takes one frame for each press (ADR 021), inside the frames that the deferred steps
+          // can reach. A press past the first or the last of them is a press at an edge, which
+          // moves nothing, as below: it keeps the deferred request, and it still pauses.
+          const entry = deferredNavigation ?? { seek: null, frames: 0 };
+          const geometry = deferredStepGeometry(entry.seek);
+          if (geometry === null) {
+            return;
+          }
+          const frames = Math.min(
+            Math.max(entry.frames + deltaFrames, -geometry.startFrame),
+            geometry.lastFrame - geometry.startFrame,
+          );
+          if (!Number.isSafeInteger(frames)) {
+            return;
+          }
+          if (frames === entry.frames) {
+            if (state.isPlaying) {
+              get().pause();
+            }
+            return;
+          }
+          deferNavigation({ seek: entry.seek, frames });
+          return;
+        }
+
         const pending =
           queuedSeek ?? (lastAcceptedSeek?.scrub === true ? lastAcceptedSeek : null);
         const currentBrowserTime = pending?.mediaTime ?? attachedElement.currentTime;
@@ -775,36 +1303,12 @@ export function createPlaybackStore(
         const calibratedOrigin =
           state.calibrationStatus === "ready" ? calibratedMediaTime : null;
 
-        // The bounds are positions on the browser media timeline, the axis of currentTime, which
-        // ADR 003 does not require to start at 0. The lower bound is the start of that timeline,
-        // or the calibrated first frame when it lies later, because no frame precedes the one
-        // videoStartPts names. A target below the start would never equal the position the next
-        // press reads back, because the browser moves it to the start, so each press would seek
-        // again.
-        const lowerBound =
-          calibratedOrigin === null
-            ? browserTimelineOriginSeconds
-            : Math.max(browserTimelineOriginSeconds, calibratedOrigin);
-        // The probe prefers the duration of the video stream, which counts from the first video
-        // frame, so the approximate duration goes on the lower bound. The element stops a seek at
-        // its own duration, an end position that caps any overshoot of that sum and that can be
-        // rounded to the clock of the web view. Clamp to it as seekApproximate does, so that the
-        // element reports back exactly the clamp value and the edge check below fires on the
-        // next step. When the stream duration is invalid, the probe falls back to the container
-        // duration, which counts from the container start, so the sum can overshoot by the
-        // distance from the origin to the first frame; the element duration caps that overshoot
-        // when the element reports one. Without either duration there is no upper bound.
-        const approximateDuration = attachedSource.approximateDurationSeconds;
-        const approximateEnd =
-          typeof approximateDuration === "number" &&
-          Number.isFinite(approximateDuration) &&
-          approximateDuration > 0
-            ? lowerBound + approximateDuration
-            : Number.POSITIVE_INFINITY;
-        const upperBound =
-          state.runtimeBrowserDurationSeconds === null
-            ? approximateEnd
-            : Math.min(approximateEnd, state.runtimeBrowserDurationSeconds);
+        // The bounds on the browser media timeline (see nominalStepBounds). The edge check below
+        // relies on the element reporting back exactly a clamp value.
+        const { lower: lowerBound, upper: upperBound } = nominalStepBounds(
+          attachedSource,
+          calibratedOrigin,
+        );
 
         // The step starts from the start position moved into the bounds. A step forward from a
         // position before the calibrated first frame therefore reaches the frame after it, and
@@ -938,9 +1442,10 @@ export function createPlaybackStore(
         // seekTargetSeconds, and requests no cue. A seek that lands on the frame already on
         // screen can produce no RVFC callback (ADR 022), so dispatching it would leave
         // presentedFrame null and the edit actions disabled, and each press would play the
-        // ADR 019 cue again at the same position. Before the anchor is taken, it would also refuse
-        // the calibration (ADR 003). ADR 021 makes each key press one step; at an edge there is
-        // no frame to step to, so a press that does not move keeps that rule.
+        // ADR 019 cue again at the same position. Before the anchor is taken, the step does not
+        // reach this line: it is deferred above, with the same edge rule on the frames it counts.
+        // ADR 021 makes each key press one step; at an edge there is no frame to step to, so a
+        // press that does not move keeps that rule.
         //
         // Two tests find that step:
         // - The target is the position the step starts from: the rules above return it at a
@@ -975,12 +1480,6 @@ export function createPlaybackStore(
         // Its existing audio request stays unchanged (ADR 019, ADR 022).
         if (!dispatchSeek(attachedElement, targetTime, false)) {
           return;
-        }
-
-        if (calibratedMediaTime === null) {
-          // The element left the position the anchor guard holds as its baseline before the
-          // anchor was taken, so the next first callback cannot identify videoStartPts.
-          seekedBeforeCalibration = true;
         }
 
         scrubAudioController.request(targetTime, deltaFrames > 0 ? 1 : -1);
@@ -1041,22 +1540,29 @@ export function createPlaybackStore(
         // The caller passes seconds elapsed from the start of the source, the axis the ruler and
         // the approximate clock both use, so the origin of the browser media timeline goes back
         // on before the element is moved.
-        let target = seconds + browserTimelineOriginSeconds;
-        if (state.runtimeBrowserDurationSeconds !== null) {
-          target = Math.min(target, state.runtimeBrowserDurationSeconds);
+        const target = approximateSeekTarget(seconds);
+        if (target === null) {
+          return;
         }
-        if (!Number.isFinite(target) || target < 0) {
+
+        if (state.calibrationStatus === "calibrating") {
+          // The ruler takes a click as soon as metadata loads, which is before the anchor, so
+          // the seek is deferred until the anchor is taken (ADR 003). A scrub sample replaces the
+          // one before it, and the audio of the drag starts with the first seek that runs.
+          deferNavigation({
+            seek: {
+              kind: "approximate",
+              seconds,
+              scrub,
+              keepBrowserTimeline: options?.keepBrowserTimeline === true,
+            },
+            frames: 0,
+          });
           return;
         }
 
         if (!dispatchSeek(attachedElement, target, scrub)) {
           return;
-        }
-
-        if (calibratedMediaTime === null) {
-          // The element left the position the anchor guard holds as its baseline before the
-          // anchor was taken, so the next first callback cannot identify videoStartPts.
-          seekedBeforeCalibration = true;
         }
 
         // Do not update the approximate clock optimistically after assigning currentTime, for
@@ -1117,6 +1623,9 @@ export function createPlaybackStore(
             set({
               calibrationStatus: "unavailable",
               presentedFrame: null,
+              // The flag is true only while calibrating. runDeferredNavigation below reads the
+              // request itself, not this flag.
+              hasDeferredNavigation: false,
               ...(settled
                 ? { seekTargetSeconds: null }
                 : retarget !== undefined
@@ -1124,6 +1633,8 @@ export function createPlaybackStore(
                   : {}),
             });
           }
+          // A navigation deferred while the anchor was open now runs on the approximate path.
+          runDeferredNavigation();
         };
 
         if (
@@ -1160,9 +1671,11 @@ export function createPlaybackStore(
           // every later inferred PTS. Refuse the anchor and fall back to the approximate clock.
           //
           // The element can also leave the start before the first callback arrives. The ruler
-          // becomes clickable as soon as metadata loads, so an approximate or nominal seek can
-          // precede the anchor. Such a seek is recorded, because the browser moves currentTime
-          // on its own when metadata loads and a position alone cannot separate the two.
+          // and the step keys act as soon as metadata loads, which is before the anchor. The
+          // store defers their seeks until the anchor is taken (deferredNavigation), so they
+          // leave the element where it is. A seek that still reaches the element before the
+          // anchor is recorded, because the browser moves currentTime on its own when metadata
+          // loads and a position alone cannot separate the two.
           const hasMovedBeforeAttach =
             attachedStartTime !== null && attachedStartTime > ANCHOR_TOLERANCE_SECONDS;
           const hasMovedAfterAttach =
@@ -1183,8 +1696,11 @@ export function createPlaybackStore(
           set({
             calibrationStatus: "ready",
             presentedFrame: { mediaTime, inferredSourcePts: initialPts },
+            hasDeferredNavigation: false,
             ...(settled ? { seekTargetSeconds: null } : {}),
           });
+          // A navigation deferred while the anchor was open now runs on the calibrated path.
+          runDeferredNavigation();
           return;
         }
 
@@ -1260,8 +1776,11 @@ export function createPlaybackStore(
         set({
           calibrationStatus: "unavailable",
           presentedFrame: null,
+          hasDeferredNavigation: false,
           ...(retarget !== undefined ? { seekTargetSeconds: retarget } : {}),
         });
+        // A navigation deferred while the anchor was open now runs on the approximate path.
+        runDeferredNavigation();
       },
 
       syncBrowserDuration: (
@@ -1345,11 +1864,14 @@ export function createPlaybackStore(
           }
         } else if (
           lastAcceptedSeek?.scrub !== true &&
+          deferredNavigation === null &&
           get().calibrationStatus !== "ready" &&
           get().seekTargetSeconds !== null
         ) {
           // In non-ready calibration states, seeked clears the display target once settled,
           // but a scrub seek must not clear it because fastSeek lands on a keyframe (ADR 022).
+          // A deferred navigation has not reached the element, so no seeked event answers it,
+          // and its target stays until it runs.
           set({ seekTargetSeconds: null });
         }
       },
@@ -1371,7 +1893,18 @@ export function createPlaybackStore(
           return;
         }
 
-        set({ isPlaying: true, error: null });
+        // The element started to play without the store, for example from a media key. A
+        // navigation deferred during calibration is dropped, as play drops it: the element now
+        // moves on its own, so the deferred target no longer shows where it goes.
+        const droppedDeferred = deferredNavigation !== null;
+        deferredNavigation = null;
+        set({
+          isPlaying: true,
+          error: null,
+          ...(droppedDeferred
+            ? { seekTargetSeconds: null, hasDeferredNavigation: false }
+            : {}),
+        });
       },
 
       syncPause: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
@@ -1439,6 +1972,7 @@ export function createPlaybackStore(
         anchorBaselineTime = null;
         browserTimelineOriginSeconds = 0;
         seekedBeforeCalibration = false;
+        deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
         // precisionDeniedSources is kept: ADR 003 denies precise editing for the source, and a
@@ -1450,6 +1984,7 @@ export function createPlaybackStore(
           runtimeBrowserDurationSeconds: null,
           approximateBrowserTimeSeconds: null,
           seekTargetSeconds: null,
+          hasDeferredNavigation: false,
           isPlaying: false,
           isAttached: false,
           attachedSourceRevisionKey: null,

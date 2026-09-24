@@ -48,6 +48,9 @@ export const en = {
       dropHint: "or drop a video file here",
     },
     loading: "Loading media...",
+    // Screen reader text only. A polite live region says it once when the buffering spinner
+    // shows: during playback, the video waited for data for more than a short time.
+    buffering: "Buffering",
     videoPlayerLabel: "Video preview for {{fileName}}",
     // The accessible name of the preview area. The focus returns to it when a notice that
     // held the focus leaves.
@@ -273,6 +276,12 @@ export const en = {
       "The playhead follows the browser clock, not the exact frame timestamp.",
     approximatePositionMarks:
       "Mark In, Mark Out, and Split stay unavailable until the exact frame timestamp is known.",
+    // The neutral chip while a video that was just opened calibrates. It names the preview, so
+    // it cannot be read as `export.preparing`. Its tooltip shows `preparingPositionDetail`,
+    // then `approximatePositionMarks`.
+    preparingPosition: "Preparing the preview...",
+    preparingPositionDetail:
+      "The preview waits for the first frame of the video to find the exact frame timestamps.",
     settings: "Settings",
     export: {
       preparing: "Preparing export",

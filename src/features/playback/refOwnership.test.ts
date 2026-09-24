@@ -137,9 +137,13 @@ describe("Video Ref Ownership & Binding Helper", () => {
     expect(store.getState().isAttached).toBe(true);
     expect(store.getState().isReady).toBe(true);
 
-    // el2 can still be controlled
+    // el2 can still be controlled. The step waits for the calibration anchor of el2, and then
+    // it moves el2 to the middle of frame 5 on the frame grid.
     store.getState().seekNominal(5);
-    expect(el2.currentTime).toBeCloseTo(5 / 25, 9);
+    expect(el2.currentTime).toBe(0);
+    store.getState().syncPresentedFrame(identityA, 0, 1, el2);
+    expect(store.getState().calibrationStatus).toBe("ready");
+    expect(el2.currentTime).toBeCloseTo(5.5 / 25, 9);
   });
 
   it("handles React 19 StrictMode attach -> null -> attach lifecycle ordering correctly", () => {

@@ -220,8 +220,9 @@ export function calculateVisibleEdgeAnchor(
  *
  * The target is the stored boundary: `inPts` for the In edge, and `outPts` for the Out edge,
  * the first frame after the segment, as Go to the Out point does (ADR 026). The condition is
- * the one of Shift+I and Shift+O (`planBoundarySeek`): an active source, a ready calibration,
- * and a target that is not the frame already on screen.
+ * the one of Shift+I and Shift+O (`planBoundarySeek`): an active source, a calibration that is
+ * ready or still open, and a target that is not the frame already on screen. While the
+ * calibration is open, the store defers the seek until the anchor (ADR 022).
  *
  * @param edge The edge that the pointer clicked.
  * @param segment The PTS pair of the segment.

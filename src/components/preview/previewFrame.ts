@@ -135,23 +135,17 @@ export function formatPreviewCurrentTime(
 }
 
 /**
- * Returns true when the preview timecode badge should display the approximate marker.
- *
- * Reports a source that has no exact position for as long as its calibration is not ready (`calibrationStatus !== "ready"`).
- * Deliberately does NOT use `isPlaybackPositionApproximate`, because that predicate is also
- * true for the moment between a seek and the frame callback that answers it, which would make
- * the badge flicker on every frame step.
- *
- * @param calibrationStatus Calibration status of the active source.
- */
-export function isPreviewTimeApproximate(
-  calibrationStatus: CalibrationStatus,
-): boolean {
-  return calibrationStatus !== "ready";
-}
-
-/**
  * Reports whether the preview shows the approximate badge beside the timecode.
+ *
+ * The badge marks a source that cannot calibrate (`calibrationStatus === "unavailable"`),
+ * which stays on the approximate clock for the whole session. It keys on the calibration
+ * status and deliberately not on `isPlaybackPositionApproximate`, because that predicate is
+ * also true for the moment between a seek and the frame callback that answers it, which would
+ * make the badge flicker on every frame step.
+ *
+ * While the calibration runs, the badge does not show. That state ends at the first presented
+ * frame, and the status bar says "Preparing the preview..." in the neutral tone, so a warning
+ * mark there would flash on every open.
  *
  * While the decode-failure panel replaces the picture, the source plays nothing, so there is
  * no position for the badge to qualify. The calibration status is `unavailable` then, and
@@ -164,7 +158,7 @@ export function showsApproximateBadge(
   calibrationStatus: CalibrationStatus,
   decodeFailed: boolean,
 ): boolean {
-  return !decodeFailed && isPreviewTimeApproximate(calibrationStatus);
+  return !decodeFailed && calibrationStatus === "unavailable";
 }
 
 /**

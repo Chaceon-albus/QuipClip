@@ -7,7 +7,6 @@ import {
   formatPreviewCurrentTime,
   formatPreviewTotalDuration,
   formatSourceRelativeTime,
-  isPreviewTimeApproximate,
   showsApproximateBadge,
   SourceLifecycleController,
 } from "./previewFrame";
@@ -433,23 +432,19 @@ describe("Preview Frame Helpers & ADR 003 Math", () => {
     });
   });
 
-  describe("isPreviewTimeApproximate", () => {
-    it("identifies calibration and unavailable fallbacks", () => {
-      expect(isPreviewTimeApproximate("calibrating")).toBe(true);
-      expect(isPreviewTimeApproximate("unavailable")).toBe(true);
-    });
-
-    it("keeps a ready source non-approximate even when presentedFrame is null between a seek and its frame callback", () => {
-      // Locking down the frame step flicker regression: the badge depends on calibration status alone
-      expect(isPreviewTimeApproximate("ready")).toBe(false);
-    });
-  });
-
   describe("showsApproximateBadge", () => {
-    it("follows the calibration status while the picture plays", () => {
-      expect(showsApproximateBadge("calibrating", false)).toBe(true);
+    it("marks a source that cannot calibrate while the picture plays", () => {
       expect(showsApproximateBadge("unavailable", false)).toBe(true);
+    });
+
+    it("keeps a ready source unmarked even when presentedFrame is null between a seek and its frame callback", () => {
+      // Locking down the frame step flicker regression: the badge depends on calibration status alone
       expect(showsApproximateBadge("ready", false)).toBe(false);
+    });
+
+    it("does not mark the position while the calibration runs", () => {
+      // The status bar says Preparing in the neutral tone. The state ends at the first frame.
+      expect(showsApproximateBadge("calibrating", false)).toBe(false);
     });
 
     it("hides the badge while the decode-failure panel replaces the picture", () => {

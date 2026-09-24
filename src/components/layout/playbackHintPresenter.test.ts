@@ -54,10 +54,25 @@ describe("playbackHintPresenter", () => {
       });
     });
 
-    it("returns the warning view while calibration is still running", () => {
+    it("returns the neutral Preparing view, not the warning, while calibration is still running", () => {
       expect(
         presentPlaybackHint(createHintState({ calibrationStatus: "calibrating" })),
-      ).not.toBeNull();
+      ).toStrictEqual({
+        lineKey: "statusBar.preparingPosition",
+        detail: [
+          "statusBar.preparingPositionDetail",
+          "statusBar.approximatePositionMarks",
+        ],
+        tone: "neutral",
+      });
+    });
+
+    it("returns null with no ready source while calibration is still running", () => {
+      expect(
+        presentPlaybackHint(
+          createHintState({ hasReadySource: false, calibrationStatus: "calibrating" }),
+        ),
+      ).toBeNull();
     });
 
     // The three seek actions null presentedFrame and wait for RVFC. A calibrated source is
@@ -108,6 +123,8 @@ describe("playbackHintPresenter", () => {
       "statusBar.approximatePosition",
       "statusBar.approximatePositionDetail",
       "statusBar.approximatePositionMarks",
+      "statusBar.preparingPosition",
+      "statusBar.preparingPositionDetail",
     ];
 
     it.each(emittedKeys)(

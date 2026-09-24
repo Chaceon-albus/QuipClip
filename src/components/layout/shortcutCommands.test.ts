@@ -9,6 +9,7 @@ import { createTimelineStore, createTimelineViewportStore } from "@/features/tim
 import type { Pts, Segment, TickCount } from "@/types/project";
 import { SHORTCUT_ACTIONS, type ShortcutAction } from "./shortcutBindings";
 import {
+  APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
   LARGE_FRAME_STEP,
   planShortcutCommand,
   type ShortcutCommand,
@@ -143,8 +144,11 @@ function createFakeElement(): FakeElement {
  * The real playback and timeline stores on a 25 fps source whose PTS counts frames, with the
  * calibration anchored on PTS 0. `press` plans an action from the store states and runs the
  * planned call the way the keyboard hook does.
+ *
+ * With `anchored: false`, the metadata has loaded and the first frame has not arrived yet, so
+ * the calibration is still open. `anchor` then presents the first frame.
  */
-function createStoreHarness() {
+function createStoreHarness({ anchored = true }: { anchored?: boolean } = {}) {
   const source: PlaybackSource = {
     path: "/media/clip.mp4",
     size: 1024,
@@ -174,8 +178,14 @@ function createStoreHarness() {
   playback.getState().attach(source, element);
   playback.getState().syncReady(key, element);
   timeline.getState().setSource(SOURCE_ID, key);
-  // The first presented frame anchors the calibration on videoStartPts (ADR 003).
-  playback.getState().syncPresentedFrame(key, 0, ++presentedFrames, element);
+  // The first presented frame anchors the calibration on videoStartPts (ADR 003). A first frame
+  // after 0 on the browser timeline models an audio track that starts before the video.
+  const anchor = (mediaTime = 0): void => {
+    playback.getState().syncPresentedFrame(key, mediaTime, ++presentedFrames, element);
+  };
+  if (anchored) {
+    anchor();
+  }
 
   const snapshot = (): ShortcutSnapshot => ({
     probe,
@@ -190,7 +200,12 @@ function createStoreHarness() {
         playback.getState().seekToPts(command.pts);
         return;
       case "seekApproximate":
-        playback.getState().seekApproximate(command.seconds);
+        playback
+          .getState()
+          .seekApproximate(command.seconds, APPROXIMATE_SHORTCUT_SEEK_OPTIONS);
+        return;
+      case "seekNominal":
+        playback.getState().seekNominal(command.frames);
         return;
       case "markIn":
         timeline.getState().markIn(command.pts);
@@ -242,6 +257,7 @@ function createStoreHarness() {
     element,
     snapshot,
     press,
+    anchor,
     presentSeekedFrame,
     clickRulerAt,
     shownPts,
@@ -439,13 +455,21 @@ describe("planShortcutCommand", () => {
       });
     });
 
-    it("does nothing on Home or End while the calibration is open", () => {
-      // A seek in that window would refuse precise editing for the attachment (ADR 021).
+    it("plans Home and End while the calibration is open, for the store to defer", () => {
+      // The store defers a seek until the anchor, so a seek in that window no longer refuses
+      // precise editing (ADR 022). Home goes to videoStartPts, as on a calibrated source, and
+      // End goes to the end of the ruler.
       const calibrating = createSnapshot({
         playback: { calibrationStatus: "calibrating", presentedFrame: null },
       });
-      expect(planShortcutCommand("goToStart", calibrating)).toBeNull();
-      expect(planShortcutCommand("goToEnd", calibrating)).toBeNull();
+      expect(planShortcutCommand("goToStart", calibrating)).toEqual({
+        kind: "seekToPts",
+        pts: "0",
+      });
+      expect(planShortcutCommand("goToEnd", calibrating)).toEqual({
+        kind: "seekApproximate",
+        seconds: 10,
+      });
       // The frame step keeps the looser condition of the step buttons (ADR 021).
       expect(planShortcutCommand("stepForwardOneFrame", calibrating)).not.toBeNull();
     });
@@ -758,13 +782,26 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("goToSegmentOut", malformed)).toBeNull();
     });
 
-    it("does not go anywhere on a source that is not calibrated", () => {
+    it("does not go anywhere on a source that cannot calibrate", () => {
       // seekToPts would report a failed seek there.
-      for (const calibrationStatus of ["calibrating", "unavailable"] as const) {
-        const snapshot = withSegment({ playback: { calibrationStatus } });
-        expect(planShortcutCommand("goToSegmentIn", snapshot)).toBeNull();
-        expect(planShortcutCommand("goToSegmentOut", snapshot)).toBeNull();
-      }
+      const snapshot = withSegment({
+        playback: { calibrationStatus: "unavailable", presentedFrame: null },
+      });
+      expect(planShortcutCommand("goToSegmentIn", snapshot)).toBeNull();
+      expect(planShortcutCommand("goToSegmentOut", snapshot)).toBeNull();
+    });
+
+    it("goes while the calibration is open, for the store to defer", () => {
+      // The store defers seekToPts until the anchor, and then runs it on the calibrated
+      // mapping (ADR 022). No frame is on screen yet, so the target is never the frame there.
+      const snapshot = withSegment({
+        playback: { calibrationStatus: "calibrating", presentedFrame: null },
+      });
+      expect(planShortcutCommand("goToSegmentIn", snapshot)).toEqual({
+        kind: "seekToPts",
+        pts: "120000",
+      });
+      expect(planShortcutCommand("goToSegmentOut", snapshot)).not.toBeNull();
     });
 
     it("goes during a pending seek, which needs no presented frame", () => {
@@ -998,6 +1035,89 @@ describe("planShortcutCommand", () => {
       expect(h.press("goToSegmentIn")).toBeNull();
       expect(h.shownPts()).toBe("25");
       expect(h.press("goToSegmentOut")).toEqual({ kind: "seekToPts", pts: "75" });
+    });
+
+    // ADR 022: while the calibration is open, the store defers each seek until the first frame
+    // callback, and the latest request wins.
+    it("→ → → Home before the anchor: Home wins, and the first frame stays for Mark In", () => {
+      const h = createStoreHarness({ anchored: false });
+      expect(h.playback.getState().calibrationStatus).toBe("calibrating");
+
+      for (let press = 0; press < 3; press++) {
+        expect(h.press("stepForwardOneFrame")).toEqual({
+          kind: "seekNominal",
+          frames: 1,
+        });
+      }
+      expect(h.playback.getState().seekTargetSeconds).toBeCloseTo(0.12, 9);
+      expect(h.press("goToStart")).toEqual({ kind: "seekToPts", pts: "0" });
+      expect(h.playback.getState().seekTargetSeconds).toBe(0);
+
+      h.anchor();
+      expect(h.playback.getState().calibrationStatus).toBe("ready");
+      // The anchor is the first frame, so the seek to it is dropped and nothing moves
+      expect(h.element.currentTimeSets).toBe(0);
+      expect(h.shownPts()).toBe("0");
+      expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "0" });
+    });
+
+    it("→ → → before the anchor: the three steps run as one step of three frames", () => {
+      const h = createStoreHarness({ anchored: false });
+      for (let press = 0; press < 3; press++) {
+        h.press("stepForwardOneFrame");
+      }
+      h.anchor();
+      expect(h.element.currentTimeSets).toBe(1);
+      h.presentSeekedFrame(3 / 25);
+      expect(h.shownPts()).toBe("3");
+    });
+
+    it("End before the anchor goes to the last frame once the anchor arrives", () => {
+      const h = createStoreHarness({ anchored: false });
+      expect(h.press("goToEnd")).toEqual({ kind: "seekApproximate", seconds: 10 });
+      expect(h.element.currentTimeSets).toBe(0);
+      expect(h.playback.getState().seekTargetSeconds).toBe(10);
+
+      h.anchor();
+      expect(h.element.currentTimeSets).toBe(1);
+      expect(h.element.currentTime).toBeCloseTo(10, 9);
+      h.presentSeekedFrame(249 / 25);
+      expect(h.shownPts()).toBe("249");
+    });
+
+    it("End before the anchor goes where End goes after it, so a second End does nothing", () => {
+      const h = createStoreHarness({ anchored: false });
+      expect(h.press("goToEnd")).toEqual({ kind: "seekApproximate", seconds: 10 });
+
+      // The audio leads, so the first video frame is at 0.5 s on the browser timeline
+      h.anchor(0.5);
+      expect(h.playback.getState().calibrationStatus).toBe("ready");
+      // The approximate clock of End, as after the anchor: 10 s on the browser timeline
+      expect(h.element.currentTimeSets).toBe(1);
+      expect(h.element.currentTime).toBeCloseTo(10, 9);
+      h.presentSeekedFrame(9.96);
+      expect(h.playback.getState().approximateBrowserTimeSeconds).toBe(10);
+
+      const seeks = h.element.currentTimeSets;
+      expect(h.press("goToEnd")).toBeNull();
+      expect(h.element.currentTimeSets).toBe(seeks);
+    });
+
+    it("Shift+I and Shift+O before the anchor go to the mark once the anchor arrives", () => {
+      const h = createStoreHarness({ anchored: false });
+      h.timeline.getState().markIn(pts("25"));
+      h.timeline.getState().markOut(pts("75"));
+
+      expect(h.press("goToSegmentOut")).toEqual({ kind: "seekToPts", pts: "75" });
+      expect(h.press("goToSegmentIn")).toEqual({ kind: "seekToPts", pts: "25" });
+      expect(h.element.currentTimeSets).toBe(0);
+      expect(h.playback.getState().seekTargetSeconds).toBeCloseTo(1, 9);
+
+      h.anchor();
+      expect(h.element.currentTimeSets).toBe(1);
+      expect(h.element.currentTime).toBeCloseTo(1, 9);
+      h.presentSeekedFrame();
+      expect(h.shownPts()).toBe("25");
     });
   });
 });

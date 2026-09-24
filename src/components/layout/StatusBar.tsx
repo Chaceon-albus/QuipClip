@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
-import { Settings, TriangleAlert } from "lucide-react";
+import { Loader2, Settings, TriangleAlert } from "lucide-react";
+import { SHORT_STATE_INDICATOR_DELAY_MS } from "@/components/common/delayedIndicator";
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
+import { useDelayedVisibility } from "@/components/common/useDelayedIndicator";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -84,10 +86,20 @@ export function StatusBar() {
     selectHasReadySource(state, hasMedia),
   );
   const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
-  const playbackHint = useMemo(
+  const presentedHint = useMemo(
     () => presentPlaybackHint({ hasReadySource, calibrationStatus }),
     [hasReadySource, calibrationStatus],
   );
+  // The calibration usually ends at the first presented frame, a few milliseconds after the
+  // metadata loads. The neutral Preparing chip therefore shows only after it has lasted
+  // SHORT_STATE_INDICATOR_DELAY_MS, like the loading chip of the preview, so an open does not
+  // flash it. The warning chip shows at once.
+  const isPreparing = presentedHint?.tone === "neutral";
+  const showPreparing = useDelayedVisibility(
+    isPreparing,
+    SHORT_STATE_INDICATOR_DELAY_MS,
+  );
+  const playbackHint = isPreparing && !showPreparing ? null : presentedHint;
 
   const probe = media ? media.probe : null;
   const sourceInfo = useMemo(
@@ -108,7 +120,7 @@ export function StatusBar() {
 
   // Layout, from left to right:
   //
-  // - Left group: the open source and the approximate-position chip. The chip comes right
+  // - Left group: the open source and the playback-position chip. The chip comes right
   //   after the source, because it is the only place that says why Mark In, Mark Out, and
   //   Split are unavailable. The group takes the free width and clips what does not fit.
   // - Right group: the application services. FFmpeg, the export indicator, and the settings
@@ -120,7 +132,7 @@ export function StatusBar() {
   // The footer is a size container, so the text of the least important items collapses
   // first when the bar is narrow. The window is never narrower than 1024px, and at that
   // width every item shows its text. Below 56rem (896px), the ready or pending FFmpeg label
-  // becomes a status dot. Below 48rem (768px), the approximate-position chip and a warning
+  // becomes a status dot. Below 48rem (768px), the playback-position chip and a warning
   // FFmpeg chip keep only their icons. A collapsed label stays in the accessibility tree as
   // `sr-only` text, so the accessible name of each item does not change.
   //
@@ -156,9 +168,11 @@ export function StatusBar() {
         )}
 
         {/*
-         * Approximate-position hint. The timeline playhead carries no visual mark for this
+         * Playback-position hint. The timeline playhead carries no visual mark for this
          * state, so this chip is the only place that reports it. The icon and the words
-         * carry the state, so colour is not the only cue.
+         * carry the state, so colour is not the only cue: a warning triangle for the
+         * approximate position, and a spinner in the neutral tone while the calibration
+         * runs. The icon stays when the text collapses.
          */}
         {playbackHint && (
           <Tooltip>
@@ -169,10 +183,17 @@ export function StatusBar() {
                 className={cn(statusBarItem({ tone: playbackHint.tone }), "shrink-0")}
                 data-tone={playbackHint.tone}
               >
-                <TriangleAlert
-                  aria-hidden="true"
-                  className="size-3.5 shrink-0 text-warning-text"
-                />
+                {playbackHint.tone === "warning" ? (
+                  <TriangleAlert
+                    aria-hidden="true"
+                    className="size-3.5 shrink-0 text-warning-text"
+                  />
+                ) : (
+                  <Loader2
+                    aria-hidden="true"
+                    className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
+                  />
+                )}
                 <span className="min-w-0 truncate @max-3xl:sr-only">
                   {t(playbackHint.lineKey)}
                 </span>

@@ -19,13 +19,19 @@ export interface PlaybackHintState {
 }
 
 export type PlaybackHintDetailKey =
-  "statusBar.approximatePositionDetail" | "statusBar.approximatePositionMarks";
+  | "statusBar.approximatePositionDetail"
+  | "statusBar.approximatePositionMarks"
+  | "statusBar.preparingPositionDetail";
 
 export interface PlaybackHintView {
-  readonly lineKey: "statusBar.approximatePosition";
+  readonly lineKey: "statusBar.approximatePosition" | "statusBar.preparingPosition";
   /** Longer text for the tooltip. The footer line does not wrap, so it stays short. */
   readonly detail: readonly PlaybackHintDetailKey[];
-  readonly tone: "warning";
+  /**
+   * `warning` for a source that cannot calibrate. `neutral` while the calibration runs: that
+   * state ends by itself at the first presented frame.
+   */
+  readonly tone: "warning" | "neutral";
 }
 
 /**
@@ -59,10 +65,25 @@ export function selectCalibrationStatus(state: PlaybackStoreState): CalibrationS
  * step. The preview timecode badge keys on the calibration status for the same reason. The
  * calibration status holds for a whole session, and it is the state that disables Mark In,
  * Mark Out, and Split.
+ *
+ * While the calibration runs, the hint says "Preparing the preview..." in the neutral tone.
+ * The state ends at the first presented frame, and a navigation in it waits for that frame
+ * and does not lose precise editing, so it is not a warning. Only a source that cannot
+ * calibrate gets the warning.
  */
 export function presentPlaybackHint(state: PlaybackHintState): PlaybackHintView | null {
   if (!state.hasReadySource || state.calibrationStatus === "ready") {
     return null;
+  }
+  if (state.calibrationStatus === "calibrating") {
+    return {
+      lineKey: "statusBar.preparingPosition",
+      detail: [
+        "statusBar.preparingPositionDetail",
+        "statusBar.approximatePositionMarks",
+      ],
+      tone: "neutral",
+    };
   }
   return {
     lineKey: "statusBar.approximatePosition",

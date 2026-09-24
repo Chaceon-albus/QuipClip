@@ -9,6 +9,8 @@ import {
 import { Trans, useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { AlertCircle, Film, Loader2 } from "lucide-react";
+import { SHORT_STATE_INDICATOR_DELAY_MS } from "@/components/common/delayedIndicator";
+import { useDelayedVisibility } from "@/components/common/useDelayedIndicator";
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
@@ -48,7 +50,13 @@ import {
   type PictureCheckState,
   type PreviewPlatform,
 } from "./decodeFailure";
+import {
+  createAnchorWaitController,
+  followDeferredNavigation,
+  reportAnchorWaitExpired,
+} from "./anchorWait";
 import { formatSupportedVideoFormats } from "./previewEmptyState";
+import { PreviewBufferingIndicator } from "./PreviewBufferingIndicator";
 import {
   ImportErrorBanner,
   ImportErrorEmptyState,
@@ -276,6 +284,12 @@ export function PreviewPane() {
   const status = useMediaStore((s) => s.status);
   const media = useMediaStore((s) => s.media);
   const error = useMediaStore((s) => s.error);
+  // The loading indicators show only after a load has lasted SHORT_STATE_INDICATOR_DELAY_MS,
+  // so a fast open shows no flash.
+  const showLoading = useDelayedVisibility(
+    status === "loading",
+    SHORT_STATE_INDICATOR_DELAY_MS,
+  );
   const openMedia = useOpenMediaAction();
   // The Open button performs the Open Media action, so it declares the same key (ADR 026).
   const shortcutOf = useShortcutLabels();
@@ -314,6 +328,46 @@ export function PreviewPane() {
     sectionRef.current?.focus({ preventScroll: true });
   }, []);
   const [sourceGuard] = useState(() => createSourceLifecycleGuard());
+
+  // The bounded wait for the calibration anchor while a navigation waits for it (see
+  // `anchorWait.ts`). It runs only while the store reports a deferred navigation. When a visible
+  // element presents no frame for the whole wait, the pane reports that frame callbacks are not
+  // available, so the calibration leaves `calibrating` and the navigation runs on the
+  // approximate path. With nothing deferred, the calibration stays open until a frame comes.
+  const [anchorWait] = useState(() =>
+    createAnchorWaitController<HTMLVideoElement>(
+      {
+        setTimer: (callback, milliseconds) => window.setTimeout(callback, milliseconds),
+        clearTimer: (handle) => window.clearTimeout(handle),
+      },
+      (element) => {
+        reportAnchorWaitExpired(playbackStore, element, (key) =>
+          sourceGuard.isActive(key),
+        );
+      },
+    ),
+  );
+
+  // The wait follows the deferred navigation of the store, and it counts only while the
+  // document is visible, because a hidden window presents no frames.
+  useEffect(() => {
+    const isVisible = () => document.visibilityState !== "hidden";
+    const stopFollowing = followDeferredNavigation(
+      playbackStore,
+      anchorWait,
+      () => videoRef.current,
+      isVisible,
+    );
+    const onVisibilityChange = () => {
+      anchorWait.visibility(isVisible());
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      stopFollowing();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      anchorWait.disarm();
+    };
+  }, [anchorWait]);
 
   // The approximate clock needs no render-phase reset here. `attach` and `detach` null the
   // store field, which also covers an element replaced without a media change.
@@ -389,24 +443,29 @@ export function PreviewPane() {
   // accessors below would count as a ref reaching a function during render and
   // `react-hooks/refs` would reject it. A useCallback body runs only when React invokes the
   // callback, which is also the only time the accessors read or write videoRef.current.
-  const videoRefCallback = useCallback((element: HTMLVideoElement | null) => {
-    ownerRef.current ??= createVideoRefCallback<HTMLVideoElement>({
-      getElement: () => videoRef.current,
-      setElement: (node) => {
-        videoRef.current = node;
-      },
-      getSource: () => toPlaybackSource(mediaStore.getState().media),
-      attach: (source, node) => playbackStore.getState().attach(source, node),
-      detach: (sourceRevisionKey, node) =>
-        playbackStore.getState().detach(sourceRevisionKey, node),
-    });
-    ownerRef.current(element);
-    if (element === null) {
-      // A removed element ends its picture check, so a pending wait cannot act on it.
-      stopPictureCheckTimer(pictureCheckRef.current);
-      pictureCheckRef.current = null;
-    }
-  }, []);
+  const videoRefCallback = useCallback(
+    (element: HTMLVideoElement | null) => {
+      ownerRef.current ??= createVideoRefCallback<HTMLVideoElement>({
+        getElement: () => videoRef.current,
+        setElement: (node) => {
+          videoRef.current = node;
+        },
+        getSource: () => toPlaybackSource(mediaStore.getState().media),
+        attach: (source, node) => playbackStore.getState().attach(source, node),
+        detach: (sourceRevisionKey, node) =>
+          playbackStore.getState().detach(sourceRevisionKey, node),
+      });
+      ownerRef.current(element);
+      if (element === null) {
+        // A removed element ends its picture check and its wait for the anchor, so a pending
+        // wait cannot act on it.
+        stopPictureCheckTimer(pictureCheckRef.current);
+        pictureCheckRef.current = null;
+        anchorWait.disarm();
+      }
+    },
+    [anchorWait],
+  );
 
   // Registers and unregisters the hidden scrub audio element with exact ownership (ADR 019).
   // The callback identity is stable for the life of the component. The closure holds the element
@@ -806,11 +865,20 @@ export function PreviewPane() {
                   />
                 )}
 
+              {/* The buffering spinner, in the bottom-right corner, clear of the notices.
+                  Keyed on the source, so a source change starts it again. */}
+              {!decodeFailed && (
+                <PreviewBufferingIndicator
+                  key={`buffering-${sourceRevisionKey}`}
+                  videoRef={videoRef}
+                />
+              )}
+
               {/* The notification area. The notices stack from the top, so a loading
                   chip, an import error and a playback error never cover each other. The
                   area lets the pointer through, and each notice takes it back. */}
               <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex flex-col gap-2">
-                {status === "loading" && (
+                {showLoading && (
                   <div
                     className="pointer-events-auto flex items-center gap-2 self-start rounded-md border border-border/80 bg-background/90 px-2.5 py-1 text-xs text-foreground shadow-md backdrop-blur-xs"
                     aria-live="polite"
@@ -839,7 +907,7 @@ export function PreviewPane() {
           ) : (
             /* Full Empty / Loading / Error State when no media is loaded */
             <>
-              {status === "loading" && (
+              {showLoading && (
                 <div
                   className="flex flex-col items-center justify-center gap-2 text-xs text-preview-muted"
                   aria-live="polite"

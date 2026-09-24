@@ -7,6 +7,7 @@ import {
   vi,
   type MockInstance,
 } from "vitest";
+import { APPROXIMATE_SHORTCUT_SEEK_OPTIONS } from "@/components/layout/shortcutCommands";
 import { getSourceRevisionKey } from "@/features/media";
 import { canMarkIn } from "@/features/timeline";
 import * as timeLib from "@/lib/time";
@@ -689,16 +690,31 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().error).toBe("seekFailed");
     });
 
-    it("reports seekFailed when seekToPts is called before calibration is ready", () => {
+    it("reports seekFailed when seekToPts is called on a source that cannot calibrate", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
+
+      store.getState().seekToPts("25" as Pts);
+      expect(store.getState().error).toBe("seekFailed");
+      expect(video.currentTimeSets).toBe(0);
+    });
+
+    it("defers seekToPts while the calibration is still open, and reports no error", () => {
       const store = createPlaybackStore();
       const video = createFakeVideo();
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
 
-      // Still in calibrating state
+      // Still in calibrating state. The display target needs no anchor.
       store.getState().seekToPts("25" as Pts);
-      expect(store.getState().error).toBe("seekFailed");
+      expect(store.getState().error).toBeNull();
+      expect(video.currentTimeSets).toBe(0);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(1.0, 9);
     });
 
     it("reports seekFailed when video.currentTime setter throws", () => {
@@ -777,6 +793,8 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // A source that never calibrates steps on the approximate clock (ADR 021).
+      store.getState().syncPresentationUnavailable(identityA, video);
 
       // +1 frame hint at 25 fps -> +0.04s
       store.getState().seekNominal(1);
@@ -805,6 +823,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().attach(rFrameOnlySource, video);
       store.getState().syncReady(identity, video);
+      store.getState().syncPresentationUnavailable(identity, video);
 
       store.getState().seekNominal(1);
       expect(video.currentTime).toBeCloseTo(1001 / 30000, 9);
@@ -1084,6 +1103,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
       store.getState().syncBrowserDuration(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
 
       store.getState().seekApproximate(4);
       expect(video.currentTime).toBe(4);
@@ -1144,6 +1164,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       const store = createPlaybackStore();
       const video = attachWithOrigin(store, 5, 65);
       store.getState().syncBrowserDuration(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
 
       store.getState().seekApproximate(10);
       expect(video.currentTime).toBe(15);
@@ -1156,6 +1177,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       const store = createPlaybackStore();
       const video = attachWithOrigin(store, 5, 65);
       store.getState().syncBrowserDuration(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
 
       store.getState().seekApproximate(100);
       expect(video.currentTime).toBe(65);
@@ -1430,6 +1452,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       // sourceA has approximateDurationSeconds: 10.0
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
       // The element moves on after metadata loaded, so the timeline origin stays 0.
       video.currentTime = 9.98;
       video.seeking = false;
@@ -1595,7 +1618,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().presentedFrame).toBeNull();
     });
 
-    it("refuses the anchor after a ruler click that precedes the first presented frame", () => {
+    it("keeps the anchor after a ruler click that precedes the first presented frame", () => {
       const store = createPlaybackStore();
       const video = createFakeVideo({ duration: 600 });
 
@@ -1608,18 +1631,24 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().syncReady(identityA, video);
       store.getState().syncBrowserDuration(identityA, video);
 
-      // The user clicks the ruler at half of a 10-minute clip before the first RVFC callback
+      // The user clicks the ruler at half of a 10-minute clip before the first RVFC callback.
+      // The seek waits for the anchor, so the element stays at the start.
       store.getState().seekApproximate(300);
-      expect(video.currentTime).toBe(300);
+      expect(video.currentTimeSets).toBe(0);
+      expect(store.getState().seekTargetSeconds).toBe(300);
 
-      // The first callback reports the frame that seek presented. Binding videoStartPts to it
-      // would write PTS 0 for a picture five minutes into the source.
-      store.getState().syncPresentedFrame(identityA, 300, 1, video);
-      expect(store.getState().calibrationStatus).toBe("unavailable");
+      // The first callback reports the first frame, which anchors videoStartPts. The click
+      // then runs.
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(video.currentTime).toBe(300);
       expect(store.getState().presentedFrame).toBeNull();
+
+      store.getState().syncPresentedFrame(identityA, 300, 2, video);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("7500");
     });
 
-    it("refuses the anchor after a nominal step that precedes the first presented frame", () => {
+    it("keeps the anchor after a nominal step that precedes the first presented frame", () => {
       const store = createPlaybackStore();
       const video = createFakeVideo();
 
@@ -1627,14 +1656,18 @@ describe("Playback Store & PTS Presentation Engine", () => {
       video.readyState = 1;
       store.getState().syncReady(identityA, video);
 
-      // One frame at 25 fps stays well inside the tolerance, so only the recorded seek
-      // separates this callback from a true first frame
+      // The step waits for the anchor, so the first callback is still the first frame
       store.getState().seekNominal(1);
-      expect(video.currentTime).toBeCloseTo(0.04, 9);
+      expect(video.currentTimeSets).toBe(0);
 
-      store.getState().syncPresentedFrame(identityA, 0.04, 1, video);
-      expect(store.getState().calibrationStatus).toBe("unavailable");
-      expect(store.getState().presentedFrame).toBeNull();
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      // The step runs on the frame grid, to the middle of frame 1
+      expect(video.currentTime).toBeCloseTo(0.06, 9);
+
+      store.getState().syncPresentedFrame(identityA, 0.04, 2, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1");
     });
 
     it("keeps calibration ready for a seek that follows the anchor", () => {
@@ -1804,6 +1837,8 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // A source that never calibrates steps on the approximate clock (ADR 021).
+      store.getState().syncPresentationUnavailable(identityA, video);
 
       // sourceA has fps25 ({ n: 25, d: 1 }), so 1 frame = 1/25 = 0.04s.
       // Target time = 2.0 + 0.04 = 2.04s.
@@ -1820,6 +1855,8 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // A source that never calibrates steps on the approximate clock (ADR 021).
+      store.getState().syncPresentationUnavailable(identityA, video);
       // The element moves on after metadata loaded, so the timeline origin stays 0.
       video.currentTime = 2.0;
       video.seeking = false;
@@ -1839,6 +1876,8 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // A source that never calibrates steps on the approximate clock (ADR 021).
+      store.getState().syncPresentationUnavailable(identityA, video);
       // The element moves on after metadata loaded, so the timeline origin stays 0.
       video.currentTime = 0.01;
       video.seeking = false;
@@ -1857,6 +1896,8 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // A source that never calibrates steps on the approximate clock (ADR 021).
+      store.getState().syncPresentationUnavailable(identityA, video);
       // The element moves on after metadata loaded, so the timeline origin stays 0.
       video.currentTime = 9.99;
       video.seeking = false;
@@ -1879,6 +1920,8 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      // A source that never calibrates steps on the approximate clock (ADR 021).
+      store.getState().syncPresentationUnavailable(identityA, video);
 
       store.getState().seekNominal(1);
 
@@ -2034,6 +2077,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       video.seeking = false;
       store.getState().syncReady(identityA, video);
       store.getState().syncBrowserDuration(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
 
       // Seek 10s on ruler axis
       store.getState().seekApproximate(10);
@@ -2151,6 +2195,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().attach(sourceA, video);
       video.readyState = 1;
       store.getState().syncReady(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
 
       video.seeking = true;
       store.getState().seekApproximate(4.0);
@@ -2183,6 +2228,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       // 2. reset clears target and queue
       store.getState().attach(sourceA, video);
       store.getState().syncReady(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
       video.seeking = true;
       store.getState().seekApproximate(5.0);
       expect(store.getState().seekTargetSeconds).toBe(5.0);
@@ -2194,6 +2240,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().attach(sourceA, throwingVideo);
       throwingVideo.readyState = 1;
       store.getState().syncReady(identityA, throwingVideo);
+      store.getState().syncPresentationUnavailable(identityA, throwingVideo);
       store.getState().seekApproximate(3.0);
       expect(store.getState().error).toBe("seekFailed");
       expect(store.getState().seekTargetSeconds).toBeNull();
@@ -2205,6 +2252,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().attach(sourceA, video); // 25 fps, 1 frame = 0.04s
       video.readyState = 1;
       store.getState().syncReady(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
       video.currentTime = 1.0;
       video.seeking = false;
 
@@ -2334,6 +2382,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().attach(sourceA, video);
       video.readyState = 1;
       store.getState().syncReady(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
 
       video.seeking = true;
       store.getState().seekApproximate(8.0);
@@ -5005,6 +5054,968 @@ describe("Playback Store & PTS Presentation Engine", () => {
         store.getState().syncPresentationUnavailable(identityA, video);
         expect(store.getState().calibrationStatus).toBe("unavailable");
         expect(store.getState().seekTargetSeconds).toBeNull();
+      });
+    });
+  });
+
+  // A navigation that arrives while the calibration anchor is open waits for the anchor, so the
+  // element never moves before the first frame callback and the attachment still calibrates
+  // (ADR 003). The display target shows where the request goes (ADR 022), the steps add up to
+  // one step for each press (ADR 021), and the request runs once when the calibration settles.
+  describe("Navigation Deferred During Calibration", () => {
+    let requestSpy: MockInstance<typeof scrubAudioController.request>;
+
+    beforeEach(() => {
+      requestSpy = vi.spyOn(scrubAudioController, "request");
+    });
+
+    afterEach(() => {
+      requestSpy.mockRestore();
+    });
+
+    /** Loads the metadata of the source, which is before the first frame callback. */
+    function attachCalibrating(
+      store: PlaybackStore,
+      video: ReturnType<typeof createFakeVideo>,
+      source: PlaybackSource = sourceA,
+    ): void {
+      store.getState().attach(source, video);
+      video.readyState = 1;
+      store.getState().syncReady(getSourceRevisionKey(source), video);
+      store.getState().syncBrowserDuration(getSourceRevisionKey(source), video);
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+    }
+
+    function displayed(store: PlaybackStore, source: PlaybackSource = sourceA): number {
+      return getDisplayedElapsedSeconds(
+        store.getState(),
+        source.videoStartPts,
+        source.videoTimeBase,
+      );
+    }
+
+    function canMarkNow(store: PlaybackStore): boolean {
+      const state = store.getState();
+      return canMarkIn(state.calibrationStatus, state.presentedFrame, true);
+    }
+
+    it("defers a step, shows its target, and runs it once on the frame grid at the anchor", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+      const pauseCallsBefore = video.pauseCalls;
+
+      store.getState().seekNominal(1);
+
+      // The element stays where the anchor expects it, and the step stops playback as a seek does
+      expect(video.currentTimeSets).toBe(0);
+      expect(video.pauseCalls).toBe(pauseCallsBefore + 1);
+      expect(store.getState().isPlaying).toBe(false);
+      // The playhead goes to frame 1 at once, and no frame is confirmed
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+      expect(displayed(store)).toBeCloseTo(0.04, 9);
+      expect(store.getState().presentedFrame).toBeNull();
+      expect(canMarkNow(store)).toBe(false);
+      // No cue before the step runs
+      expect(requestSpy).not.toHaveBeenCalled();
+
+      // The first callback reports the first frame, which anchors videoStartPts
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+
+      // The step runs once, to the middle of frame 1, and requests the cue once from the same
+      // target. No scrub audio element is mounted before the calibration settles, so that
+      // request makes no sound (ADR 019).
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBeCloseTo(0.06, 9);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenCalledWith(video.currentTime, 1);
+      // The playhead does not move, and the marks wait for the frame of the step (ADR 003)
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+      expect(store.getState().presentedFrame).toBeNull();
+      expect(canMarkNow(store)).toBe(false);
+
+      fireSeeked(store, identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.04, 2, video);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1");
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(canMarkNow(store)).toBe(true);
+    });
+
+    it.each([
+      [
+        "frame callbacks are not available",
+        (store: PlaybackStore, video: PlaybackMediaElement) =>
+          store.getState().syncPresentationUnavailable(identityA, video),
+      ],
+      [
+        "the first callback reports no usable time",
+        (store: PlaybackStore, video: PlaybackMediaElement) =>
+          store.getState().syncPresentedFrame(identityA, Number.NaN, 1, video),
+      ],
+    ])(
+      "runs a deferred step on the approximate path when %s",
+      (_reason, makeUnavailable) => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachCalibrating(store, video);
+
+        store.getState().seekNominal(1);
+        expect(video.currentTimeSets).toBe(0);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+
+        makeUnavailable(store, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+
+        // One nominal interval from the position of the element, and one cue request
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBeCloseTo(0.04, 9);
+        expect(requestSpy).toHaveBeenCalledTimes(1);
+        expect(requestSpy).toHaveBeenCalledWith(video.currentTime, 1);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+        expect(canMarkNow(store)).toBe(false);
+
+        // The seeked event settles the approximate path
+        fireSeeked(store, identityA, video);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+      },
+    );
+
+    it("adds several steps into one seek and one cue request, one frame for each press", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+
+      // A held key: three presses forward, one back, one forward
+      store.getState().seekNominal(1);
+      store.getState().seekNominal(1);
+      store.getState().seekNominal(1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.12, 9);
+      store.getState().seekNominal(-1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.08, 9);
+      store.getState().seekNominal(1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.12, 9);
+      expect(video.currentTimeSets).toBe(0);
+      expect(requestSpy).not.toHaveBeenCalled();
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBeCloseTo(0.14, 9);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenCalledWith(video.currentTime, 1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.12, 9);
+
+      fireSeeked(store, identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.12, 2, video);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("3");
+    });
+
+    it("adds a ten-frame step as ten frames", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+
+      store.getState().seekNominal(10);
+      store.getState().seekNominal(1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.44, 9);
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(video.currentTime).toBeCloseTo(0.46, 9);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("treats a step back at the start as an edge press that does not take the next step", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+      const pauseCallsBefore = video.pauseCalls;
+
+      // No frame precedes the first one, so the press moves nothing (ADR 022)
+      store.getState().seekNominal(-1);
+      expect(video.pauseCalls).toBe(pauseCallsBefore);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      store.getState().seekNominal(1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(video.currentTime).toBeCloseTo(0.06, 9);
+    });
+
+    it("clears the deferred request when the steps return to the start", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+
+      store.getState().seekNominal(2);
+      store.getState().seekNominal(-5);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(video.currentTimeSets).toBe(0);
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+      expect(canMarkNow(store)).toBe(true);
+    });
+
+    it("stops the deferred steps at the frame that contains the end of the source", () => {
+      const shortSource: PlaybackSource = {
+        ...sourceA,
+        path: "/media/short.mp4",
+        approximateDurationSeconds: 0.1,
+      };
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video, shortSource);
+
+      // The end, 0.1 s, lies in frame 2
+      store.getState().seekNominal(5);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.08, 9);
+      // A press past it is an edge press, so the step back after it reaches frame 1
+      store.getState().seekNominal(1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.08, 9);
+      store.getState().seekNominal(-1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+
+      store
+        .getState()
+        .syncPresentedFrame(getSourceRevisionKey(shortSource), 0, 1, video);
+      expect(video.currentTime).toBeCloseTo(0.06, 9);
+    });
+
+    it.each([
+      [
+        "an approximate seek to 0",
+        (store: PlaybackStore) => store.getState().seekApproximate(0),
+      ],
+      [
+        "a seek to videoStartPts",
+        (store: PlaybackStore) => store.getState().seekToPts("0" as Pts),
+      ],
+    ])(
+      "keeps the anchor frame on screen after %s during calibration",
+      (_name, seekToStart) => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachCalibrating(store, video);
+
+        // The seek to the start is the latest request, so it replaces the steps
+        store.getState().seekNominal(3);
+        seekToStart(store);
+        expect(store.getState().seekTargetSeconds).toBe(0);
+        expect(store.getState().error).toBeNull();
+
+        store.getState().syncPresentedFrame(identityA, 0, 1, video);
+
+        // The anchor frame is the frame the seek asks for, so nothing moves, and that frame
+        // stays confirmed for Mark In
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(video.currentTimeSets).toBe(0);
+        expect(requestSpy).not.toHaveBeenCalled();
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(canMarkNow(store)).toBe(true);
+      },
+    );
+
+    it("counts a step after a seek to the start from the anchor frame", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+
+      store.getState().seekApproximate(0);
+      store.getState().seekNominal(1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBeCloseTo(0.06, 9);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("runs a deferred seek to the start on the approximate path when the calibration fails", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+
+      store.getState().seekApproximate(0);
+      store.getState().syncPresentationUnavailable(identityA, video);
+
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(0);
+      expect(store.getState().seekTargetSeconds).toBe(0);
+      fireSeeked(store, identityA, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("runs the latest deferred approximate seek once at the anchor", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 600 });
+      attachCalibrating(store, video);
+
+      store.getState().seekApproximate(3);
+      store.getState().seekApproximate(5, { scrub: true });
+      store.getState().seekApproximate(7);
+      expect(store.getState().seekTargetSeconds).toBe(7);
+      expect(video.currentTimeSets).toBe(0);
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(7);
+      expect(store.getState().seekTargetSeconds).toBe(7);
+      expect(store.getState().presentedFrame).toBeNull();
+
+      store.getState().syncPresentedFrame(identityA, 7, 2, video);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("175");
+    });
+
+    it("runs a deferred scrub sample as a scrub seek, so the drag goes on from a keyframe", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 600, fastSeek: true });
+      attachCalibrating(store, video);
+
+      store.getState().seekApproximate(5, { scrub: true });
+      expect(video.fastSeek).not.toHaveBeenCalled();
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(video.fastSeek).toHaveBeenCalledTimes(1);
+      expect(video.fastSeek).toHaveBeenCalledWith(5);
+      expect(video.currentTimeSets).toBe(0);
+    });
+
+    it("clamps the display target of a deferred approximate seek to the browser duration", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 8 });
+      attachCalibrating(store, video);
+
+      store.getState().seekApproximate(100);
+      expect(store.getState().seekTargetSeconds).toBe(8);
+    });
+
+    describe("A Deferred seekToPts", () => {
+      /** Loads sourceB on a browser timeline that starts at 1.5 s. */
+      function attachSourceBAtOrigin(
+        store: PlaybackStore,
+        video: ReturnType<typeof createFakeVideo>,
+      ): void {
+        store.getState().attach(sourceB, video);
+        video.readyState = 1;
+        video.currentTime = 1.5;
+        video.seeking = false;
+        store.getState().syncReady(identityB, video);
+        expect(store.getState().calibrationStatus).toBe("calibrating");
+      }
+
+      // sourceB: time base 1001/30000, videoStartPts 1000. PTS 1300 lies 300 ticks, 10.01 s,
+      // after the first frame.
+      it("runs on the calibrated mapping at the anchor", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSourceBAtOrigin(store, video);
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekToPts("1300" as Pts);
+        expect(video.currentTimeSets).toBe(setsBefore);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(10.01, 9);
+
+        store.getState().syncPresentedFrame(identityB, 1.5, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBeCloseTo(11.51, 9);
+
+        store.getState().syncPresentedFrame(identityB, video.currentTime, 2, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1300");
+      });
+
+      it("runs on the approximate clock when the calibration fails", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSourceBAtOrigin(store, video);
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekToPts("1300" as Pts);
+        store.getState().syncPresentationUnavailable(identityB, video);
+
+        // The elapsed time goes on the start of the browser timeline, and no error shows
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBeCloseTo(11.51, 9);
+        expect(store.getState().error).toBeNull();
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(10.01, 9);
+      });
+
+      it("drops the deferred request when it fails", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSourceBAtOrigin(store, video);
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekNominal(1);
+        store.getState().seekToPts("+5" as Pts);
+        expect(store.getState().error).toBe("seekFailed");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+
+        store.getState().syncPresentedFrame(identityB, 1.5, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(video.currentTimeSets).toBe(setsBefore);
+        expect(requestSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    it("counts deferred steps from a deferred seek, and gives the element one seek", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 600, fastSeek: true });
+      attachCalibrating(store, video);
+
+      store.getState().seekApproximate(2);
+      store.getState().seekNominal(2);
+      // The nominal start of frame 52 on the frame grid
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(2.08, 9);
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+
+      // The step counts from the seek target, and the element receives only the step: one
+      // seek, to the middle of frame 52
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.fastSeek).not.toHaveBeenCalled();
+      expect(video.currentTime).toBeCloseTo(2.1, 9);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(2.08, 9);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+      expect(requestSpy).toHaveBeenCalledWith(video.currentTime, 1);
+
+      // The seeked event of that seek starts nothing more
+      fireSeeked(store, identityA, video);
+      expect(video.currentTimeSets).toBe(1);
+      store.getState().syncPresentedFrame(identityA, 2.08, 2, video);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("52");
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("runs the seek alone when the step after it cannot move from its target", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 10 });
+      attachCalibrating(store, video);
+
+      // A click just before the end and one step. Counted from the start of the timeline, the
+      // step reaches the frame that contains the end.
+      store.getState().seekApproximate(9.98);
+      store.getState().seekNominal(1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(10, 9);
+
+      // The audio leads by 0.5 s, so on the calibrated axis the click lies past the end that
+      // the element reports, and the step there is an edge press. The click runs alone, as one
+      // seek to its PTS.
+      store.getState().syncPresentedFrame(identityA, 0.5, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBeCloseTo(10.5, 9);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(10, 9);
+      expect(requestSpy).not.toHaveBeenCalled();
+    });
+
+    it("shows the relative target of a deferred step on a source off the frame grid", () => {
+      const variableSource: PlaybackSource = {
+        ...sourceA,
+        path: "/media/variable.mp4",
+        rFrameRate: { n: 50, d: 1 },
+      };
+      const gridStore = createPlaybackStore();
+      attachCalibrating(gridStore, createFakeVideo({ duration: 600 }));
+      const variableStore = createPlaybackStore();
+      attachCalibrating(
+        variableStore,
+        createFakeVideo({ duration: 600 }),
+        variableSource,
+      );
+
+      for (const store of [gridStore, variableStore]) {
+        store.getState().seekApproximate(0.05);
+        store.getState().seekNominal(1);
+      }
+
+      // On the grid, the nominal start of frame 2. Off it, 0.05 s plus one interval.
+      expect(gridStore.getState().seekTargetSeconds).toBeCloseTo(0.08, 9);
+      expect(variableStore.getState().seekTargetSeconds).toBeCloseTo(0.09, 9);
+    });
+
+    it("counts a deferred step from the calibrated first frame when it lies after the timeline start", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+
+      store.getState().seekNominal(1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+
+      // The audio starts before the video, so the first frame is at 0.5 s
+      store.getState().syncPresentedFrame(identityA, 0.5, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(video.currentTime).toBeCloseTo(0.56, 9);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+    });
+
+    it("keeps the deferred target through a seeked event that it did not cause", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+
+      store.getState().seekNominal(1);
+      fireSeeked(store, identityA, video);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(video.currentTime).toBeCloseTo(0.06, 9);
+    });
+
+    it("drops the deferred request on a source change", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+      store.getState().seekNominal(2);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.08, 9);
+
+      const videoB = createFakeVideo();
+      store.getState().attach(sourceB, videoB);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      videoB.readyState = 1;
+      store.getState().syncReady(identityB, videoB);
+
+      store.getState().syncPresentedFrame(identityB, 0, 1, videoB);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(videoB.currentTimeSets).toBe(0);
+      expect(video.currentTimeSets).toBe(0);
+      expect(requestSpy).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        "a detach",
+        (store: PlaybackStore, video: ReturnType<typeof createFakeVideo>) => {
+          store.getState().detach(identityA, video);
+          store.getState().attach(sourceA, video);
+        },
+      ],
+      [
+        "a reset",
+        (store: PlaybackStore, video: ReturnType<typeof createFakeVideo>) => {
+          store.getState().reset();
+          store.getState().attach(sourceA, video);
+        },
+      ],
+      [
+        "a loss of readiness",
+        (store: PlaybackStore, video: ReturnType<typeof createFakeVideo>) => {
+          store.getState().syncUnready(identityA, video);
+        },
+      ],
+    ])("drops the deferred request on %s", (_name, drop) => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+      store.getState().seekNominal(2);
+
+      drop(store, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(video.currentTimeSets).toBe(0);
+      expect(requestSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops the deferred request on the playback toggle and plays from the start", async () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+      store.getState().seekNominal(2);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.08, 9);
+
+      store.getState().togglePlayback();
+      await flushAsync();
+
+      // play calls the element at once and does not seek it before the anchor
+      expect(video.playCalls).toBe(1);
+      expect(video.currentTimeSets).toBe(0);
+      expect(store.getState().isPlaying).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      // The first frame of the playback anchors the calibration, and the step does not run
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+      expect(video.currentTimeSets).toBe(0);
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(store.getState().isPlaying).toBe(true);
+
+      store.getState().togglePlayback();
+      expect(store.getState().isPlaying).toBe(false);
+    });
+
+    it("pauses playback for a step during calibration and defers the step", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+      store.getState().togglePlayback();
+      expect(store.getState().isPlaying).toBe(true);
+      const pauseCallsBefore = video.pauseCalls;
+
+      store.getState().seekNominal(1);
+      expect(video.pauseCalls).toBe(pauseCallsBefore + 1);
+      expect(store.getState().isPlaying).toBe(false);
+      expect(video.currentTimeSets).toBe(0);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.04, 9);
+    });
+
+    it("pauses playback for an edge press during calibration", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+      store.getState().togglePlayback();
+      expect(store.getState().isPlaying).toBe(true);
+
+      store.getState().seekNominal(-1);
+      expect(store.getState().isPlaying).toBe(false);
+      expect(video.currentTimeSets).toBe(0);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("defers nothing on a source whose calibration is unavailable from the attach", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      const noStartSource: PlaybackSource = {
+        ...sourceA,
+        path: "/media/no-start.mp4",
+        videoStartPts: null,
+      };
+      store.getState().attach(noStartSource, video);
+      video.readyState = 1;
+      store.getState().syncReady(getSourceRevisionKey(noStartSource), video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+
+      store.getState().seekNominal(1);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBeCloseTo(0.04, 9);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
+    });
+
+    describe("A Deferred Ruler Position When the Audio Leads", () => {
+      // The first video frame is presented 0.5 s after the start of the browser timeline. The
+      // ruler of a calibrated source counts from that frame, so a deferred click must land
+      // where the same click lands after the anchor.
+      const LEAD = 0.5;
+
+      it("runs a deferred click at the PTS that the same ruler position names", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600 });
+        attachCalibrating(store, video);
+
+        store.getState().seekApproximate(3);
+        expect(store.getState().seekTargetSeconds).toBe(3);
+
+        store.getState().syncPresentedFrame(identityA, LEAD, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+
+        // PTS 75 is 3 s after the calibrated first frame. The playhead does not move back.
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBeCloseTo(LEAD + 3, 9);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(3, 9);
+
+        fireSeeked(store, identityA, video);
+        store.getState().syncPresentedFrame(identityA, LEAD + 3, 2, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("75");
+      });
+
+      it("counts the steps after a deferred click from that PTS, so they do not jump", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600 });
+        attachCalibrating(store, video);
+
+        store.getState().seekApproximate(2);
+        store.getState().seekNominal(2);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(2.08, 9);
+
+        store.getState().syncPresentedFrame(identityA, LEAD, 1, video);
+
+        // One seek to the middle of frame 52 on the calibrated grid, and the playhead stays
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBeCloseTo(LEAD + 2.1, 9);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(2.08, 9);
+
+        fireSeeked(store, identityA, video);
+        store.getState().syncPresentedFrame(identityA, LEAD + 2.08, 2, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("52");
+      });
+
+      it("drops a deferred click at 0, whose frame is the anchor on screen", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600 });
+        attachCalibrating(store, video);
+
+        store.getState().seekApproximate(0);
+        store.getState().syncPresentedFrame(identityA, LEAD, 1, video);
+
+        expect(video.currentTimeSets).toBe(0);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+        expect(canMarkNow(store)).toBe(true);
+      });
+
+      it("keeps a deferred click on the browser timeline when the calibration fails", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600 });
+        attachCalibrating(store, video);
+
+        store.getState().seekApproximate(3);
+        store.getState().syncPresentationUnavailable(identityA, video);
+
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBe(3);
+        expect(store.getState().seekTargetSeconds).toBe(3);
+      });
+    });
+
+    describe("A Deferred Seek Into the Frame on Screen", () => {
+      // 25 fps on a time base of 1/90000: one frame is 3600 ticks, so a target can lie inside
+      // frame 0 without being videoStartPts.
+      const fineSource: PlaybackSource = {
+        ...sourceA,
+        path: "/media/fine.mp4",
+        videoTimeBase: { n: 1, d: 90000 },
+      };
+      const fineIdentity = getSourceRevisionKey(fineSource);
+
+      it.each([
+        [
+          "a ruler position",
+          (store: PlaybackStore) => store.getState().seekApproximate(0.02),
+        ],
+        ["a PTS", (store: PlaybackStore) => store.getState().seekToPts("1800" as Pts)],
+      ])("drops %s inside frame 0 on the frame grid", (_name, seekIntoFrameZero) => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600 });
+        attachCalibrating(store, video, fineSource);
+
+        seekIntoFrameZero(store);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(0.02, 9);
+
+        store.getState().syncPresentedFrame(fineIdentity, 0, 1, video);
+        expect(video.currentTimeSets).toBe(0);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(canMarkNow(store)).toBe(true);
+      });
+
+      it("still runs a seek into frame 1", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600 });
+        attachCalibrating(store, video, fineSource);
+
+        store.getState().seekToPts("3600" as Pts);
+        store.getState().syncPresentedFrame(fineIdentity, 0, 1, video);
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBeCloseTo(0.04, 9);
+      });
+
+      it("runs a seek inside frame 0 off the frame grid, where no frame boundary is known", () => {
+        const variableSource: PlaybackSource = {
+          ...fineSource,
+          path: "/media/fine-variable.mp4",
+          rFrameRate: { n: 50, d: 1 },
+        };
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600 });
+        attachCalibrating(store, video, variableSource);
+
+        store.getState().seekToPts("1800" as Pts);
+        store
+          .getState()
+          .syncPresentedFrame(getSourceRevisionKey(variableSource), 0, 1, video);
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBeCloseTo(0.02, 9);
+      });
+    });
+
+    it("drops the deferred request when the element starts to play on its own", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+      store.getState().seekNominal(2);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(0.08, 9);
+
+      // A media key starts the element, and the element reports it
+      store.getState().syncPlay(identityA, video);
+      expect(store.getState().isPlaying).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(video.currentTimeSets).toBe(0);
+      expect(requestSpy).not.toHaveBeenCalled();
+    });
+
+    describe("No Action Moves the Element Before the Anchor", () => {
+      // The anchor guard still refuses an anchor after a seek (seekedBeforeCalibration). This
+      // checks that no action of the store gives it a reason: each one defers, or it only
+      // plays. Home, End, Go to In and Go to Out are the calls that the keyboard layer plans
+      // for them while the calibration is open.
+      const ACTIONS: readonly [string, (store: PlaybackStore) => void][] = [
+        ["a step forward", (store) => store.getState().seekNominal(1)],
+        ["a step back", (store) => store.getState().seekNominal(-1)],
+        ["ten frames forward", (store) => store.getState().seekNominal(10)],
+        ["ten frames back", (store) => store.getState().seekNominal(-10)],
+        ["a ruler click", (store) => store.getState().seekApproximate(3)],
+        [
+          "a scrub sample",
+          (store) => store.getState().seekApproximate(4, { scrub: true }),
+        ],
+        [
+          "a scrub sample to a PTS",
+          (store) => store.getState().seekToPts("100" as Pts, { scrub: true }),
+        ],
+        ["a seek to a PTS", (store) => store.getState().seekToPts("50" as Pts)],
+        ["Home", (store) => store.getState().seekToPts("0" as Pts)],
+        [
+          "End",
+          (store) =>
+            store.getState().seekApproximate(10, APPROXIMATE_SHORTCUT_SEEK_OPTIONS),
+        ],
+        ["a ruler click at the end", (store) => store.getState().seekApproximate(10)],
+        ["Go to In", (store) => store.getState().seekToPts("25" as Pts)],
+        ["Go to Out", (store) => store.getState().seekToPts("75" as Pts)],
+        ["play", (store) => store.getState().play()],
+        ["the playback toggle", (store) => store.getState().togglePlayback()],
+      ];
+
+      it.each(ACTIONS)("%s neither seeks nor refuses the anchor", (_name, act) => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600, fastSeek: true });
+        attachCalibrating(store, video);
+
+        act(store);
+        expect(video.currentTimeSets).toBe(0);
+        expect(video.fastSeek).not.toHaveBeenCalled();
+
+        // The first frame still anchors the calibration. The deferred request may run then.
+        store.getState().syncPresentedFrame(identityA, 0, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+      });
+
+      it("all of them, one after the other, neither seek nor refuse the anchor", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600, fastSeek: true });
+        attachCalibrating(store, video);
+
+        for (const [, act] of ACTIONS) {
+          act(store);
+        }
+        expect(video.currentTimeSets).toBe(0);
+        expect(video.fastSeek).not.toHaveBeenCalled();
+
+        store.getState().syncPresentedFrame(identityA, 0, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+      });
+    });
+
+    describe("The Public Report of a Deferred Navigation", () => {
+      it("reports a deferral from the first request until it runs at the anchor", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        expect(store.getState().hasDeferredNavigation).toBe(false);
+        attachCalibrating(store, video);
+        expect(store.getState().hasDeferredNavigation).toBe(false);
+
+        store.getState().seekNominal(1);
+        expect(store.getState().hasDeferredNavigation).toBe(true);
+        store.getState().seekApproximate(3);
+        expect(store.getState().hasDeferredNavigation).toBe(true);
+
+        store.getState().syncPresentedFrame(identityA, 0, 1, video);
+        expect(store.getState().hasDeferredNavigation).toBe(false);
+      });
+
+      it("reports no deferral when the steps return to the element position", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachCalibrating(store, video);
+
+        store.getState().seekNominal(1);
+        store.getState().seekNominal(-1);
+        expect(store.getState().hasDeferredNavigation).toBe(false);
+        // A press at the edge defers nothing
+        store.getState().seekNominal(-1);
+        expect(store.getState().hasDeferredNavigation).toBe(false);
+      });
+
+      it.each([
+        ["play", (store: PlaybackStore) => store.getState().play()],
+        [
+          "a failed seek",
+          (store: PlaybackStore) => store.getState().seekToPts("+5" as Pts),
+        ],
+        [
+          "the calibration failing",
+          (store: PlaybackStore, video: PlaybackMediaElement) =>
+            store.getState().syncPresentationUnavailable(identityA, video),
+        ],
+      ])("reports the end of a deferral on %s", (_name, end) => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachCalibrating(store, video);
+        store.getState().seekNominal(1);
+
+        end(store, video);
+        expect(store.getState().hasDeferredNavigation).toBe(false);
+      });
+    });
+
+    describe("A Deferred Seek That Keeps the Browser Timeline", () => {
+      // End seeks on the approximate clock also after the anchor (ADR 026). Deferred, it keeps
+      // that clock, so it lands where the same End lands after the anchor.
+      const LEAD = 0.5;
+
+      it("lands where the same call lands after the anchor, also with an audio lead", () => {
+        const deferredStore = createPlaybackStore();
+        const deferredVideo = createFakeVideo({ duration: 600 });
+        attachCalibrating(deferredStore, deferredVideo);
+        deferredStore.getState().seekApproximate(3, { keepBrowserTimeline: true });
+        expect(deferredStore.getState().seekTargetSeconds).toBe(3);
+        deferredStore.getState().syncPresentedFrame(identityA, LEAD, 1, deferredVideo);
+
+        const laterStore = createPlaybackStore();
+        const laterVideo = createFakeVideo({ duration: 600 });
+        attachCalibrating(laterStore, laterVideo);
+        laterStore.getState().syncPresentedFrame(identityA, LEAD, 1, laterVideo);
+        laterStore.getState().seekApproximate(3, { keepBrowserTimeline: true });
+
+        expect(deferredVideo.currentTimeSets).toBe(1);
+        expect(deferredVideo.currentTime).toBe(3);
+        expect(laterVideo.currentTime).toBe(3);
+        expect(deferredStore.getState().seekTargetSeconds).toBe(
+          laterStore.getState().seekTargetSeconds,
+        );
+      });
+
+      it("drops such a seek at or before the anchor frame", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600 });
+        attachCalibrating(store, video);
+        store.getState().seekApproximate(0.2, { keepBrowserTimeline: true });
+        store.getState().syncPresentedFrame(identityA, LEAD, 1, video);
+
+        expect(video.currentTimeSets).toBe(0);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+      });
+
+      it("runs such a seek on the approximate clock when the calibration fails", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 600 });
+        attachCalibrating(store, video);
+        store.getState().seekApproximate(3, { keepBrowserTimeline: true });
+        store.getState().syncPresentationUnavailable(identityA, video);
+
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBe(3);
       });
     });
   });
