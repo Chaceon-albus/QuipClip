@@ -155,6 +155,9 @@ seeks across excluded source ranges.
 - Most supported files play without a proxy build.
 - Media without `start_pts` can play, but precise PTS editing stays unavailable.
 - Browser presentation and inferred source PTS remain separate runtime concepts.
-- Exact frame adjacency and final-frame boundary discovery remain future work.
+- Exact frame adjacency and final-frame boundary discovery remain future work. (Changed on
+  2026-09-24: End and the drag trim read the last frame from the video duration in ticks
+  that the probe gives (ADR 026, ADR 030). That duration is not a discovered boundary. When
+  it ends early, they stop on an earlier frame.)
 - Proxy generation must preserve or explicitly map source timing.
 - The UI must identify approximate playback state and disable edit actions in that state.

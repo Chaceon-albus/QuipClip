@@ -106,15 +106,26 @@ or change nothing:
 - A seek to the frame that is already on screen, when no seek is pending. ADR 022 says
   that such a seek may bring no frame callback. Mark In and Mark Out would then stay
   disabled. Go to the start, and go to the In or Out point, do nothing in this case.
-  End does nothing when the element is already within half a nominal frame of the end,
-  because End seeks on the approximate clock and has no exact PTS to compare.
+  (Changed on 2026-09-24.) End does nothing in this case too, by the rule of its target.
+  On the frame grid of ADR 022, End does nothing when the ADR 028 index of the frame on
+  screen is the index of the last frame or a later index. Off the grid, End does nothing
+  when the frame on screen starts at or after the last tick of the extent. The playback
+  store also does nothing when the element stands at or after that tick, or at the end of
+  the element when that is earlier, within 1 µs (`extentEnd`, ADR 022). On the
+  approximate clock, End does nothing when the element is within half a nominal frame of
+  the end of the ruler. Each of these tests needs a frame on screen, no pending seek and no
+  playback. The first two also need a ready calibration.
 - Home and End while the calibration is open. A seek in that window refuses precise
   editing for the attachment (ADR 021). (Changed on 2026-09-24: this case no longer
   exists. Home, End, Go to In, Go to Out and the edge click of ADR 007 now send their
   seek while the calibration is open, and the playback store defers it until the anchor
   (ADR 022). Home asks for the first frame, which the store drops at the anchor because
-  that frame is on screen. End keeps the approximate clock after the anchor too, so it
-  lands in the same place before and after it. Only an unavailable calibration refuses
+  that frame is on screen. End goes to the last frame before and after the anchor. On the
+  frame grid, the store keeps End as a seek to the first frame followed by that many frame
+  steps. At the anchor it drops the seek, and the steps run as one step from the first
+  frame. Off the grid, the store keeps the PTS of the last tick. End on the approximate
+  clock keeps that clock after the anchor too, so it lands in the same place before and
+  after it. Only an unavailable calibration refuses
   Go to In, Go to Out and the edge click.)
 
 One case does not own the key press: `Escape` while a tooltip is open. Radix then closes
@@ -134,9 +145,25 @@ The actions behave as follows:
   is the first frame after the segment. It is also the frame at which the user pressed
   Mark Out, so a mark and a return to it show the same frame.
 - Home and End need an attached, ready source. Home seeks to `videoStartPts` when the
-  source is calibrated, and to time zero on the approximate clock when it is not. End seeks
-  to the last frame on the approximate clock. ADR 021 refused a global `Home` because it
-  needed this second branch. This record supplies it.
+  source is calibrated, and to time zero on the approximate clock when it is not. ADR 021
+  refused a global `Home` because it needed this second branch. This record supplies it.
+- (Changed on 2026-09-24.) End goes to the last video frame of the extent when the
+  calibration is ready or still open, and the probe gives a valid `videoStartPts`, a
+  positive `videoDurationTicks` and a valid video time base. The target counts from
+  `videoStartPts`, so an audio track that starts before the video does not move it.
+  - On the frame grid, End calls `seekToFrameIndex` with the index of the last frame: the
+    last nominal frame whose start lies more than the margin of ADR 028 inside the extent.
+    The element seeks to the middle of that frame, and the playhead shows its nominal
+    start. An Out edge that a drag trims to the end (ADR 030) gets the same frame.
+  - Off the grid, End calls `seekToPts` with the last tick of the extent,
+    `videoStartPts + videoDurationTicks − 1`, and the option `extentEnd`. The browser shows
+    the frame that holds that tick.
+  - In all other cases, End seeks to the end of the ruler on the approximate clock, with
+    `keepBrowserTimeline`.
+
+  A typed time at or after the end makes the same call (ADR 028). On the frame grid, a
+  frame step forward from the last frame of the extent is the edge of ADR 022 and only
+  pauses.
 - Undo and redo act on the edit history. They do nothing inside a text field, because the
   layer does nothing there, and the field keeps its own undo.
 
@@ -170,6 +197,30 @@ Windows.
 - `Escape` finishes the named segment only when no dialog or menu is open. Radix keeps its
   own `Escape` for an open overlay, because the layer does nothing there.
 - `ArrowUp` and `ArrowDown` still stay with the containers that scroll and with the menus.
+- (Added on 2026-09-24.) End reads `videoDurationTicks` as the extent of the video frames.
+  ADR 002 does not make it the end of the last frame, and ADR 003 keeps the discovery of the
+  last frame as future work. When the extent ends early, End shows an earlier frame. When
+  it ends at the start of the real last frame, or within one tick of it, End, the frame step
+  and a typed time stop one frame before that frame. Only a click on the ruler or a scrub
+  reaches it. When the extent ends more than the margin of ADR 028 after the last frame,
+  for example because the last sample lasts longer than one frame interval, End targets a
+  frame that does not exist. The playhead then shows that frame first and moves back to the
+  last frame when it arrives, and a second End seeks onto the frame on screen, which may
+  bring no frame callback (ADR 022). On a grid whose frame interval is a whole number of
+  ticks, one extra tick is enough. No rule can tell this from a real last frame of one
+  tick. The durations of MP4 and MOV files rarely do this.
+- (Added on 2026-09-24.) Two short last frames are not End's target, because no rule can
+  tell them from a rounded extent. On an exact grid whose frame interval is not a whole
+  number of ticks, a last frame of one tick is dropped when its extent is also a one-tick
+  rounding of the end of the frame before it. When a tick is 1 µs or less, a last frame of
+  1 µs or less is dropped.
+- (Added on 2026-09-24.) Off the grid, the playhead first shows the last tick. When the frame
+  arrives, the playhead moves back to the start of that frame, by less than one frame. End
+  from inside the last frame, before its last tick, seeks onto the frame on screen, and that
+  seek may bring no frame callback (ADR 022).
+- (Added on 2026-09-24.) If the calibration becomes unavailable after a deferred End on the
+  frame grid, the request runs on the approximate clock as the first frame and that many
+  steps. A later End then goes to the end of the ruler.
 - The layer answers more keys, so more key presses are cancelled in the main window. A key
   in the table no longer reaches a focused button of the main window. `Enter` still
   operates every button.

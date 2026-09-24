@@ -81,13 +81,21 @@ release commits the frame that the browser presents at the end of the drag.
   calls `seekToFrameIndex(J)`, and the first frame on screen that is `J` is written. A frame
   with any other index is never written. A later request for another target drops the trim.
 - **The end of the source.** An Out edge dragged to the end stops on the last frame of the
-  extent, the same result as Mark Out on the last frame. The last frame is the extent rounded
-  to the nearest frame, minus one. When the probe gives no video duration in ticks, the extent
-  comes from the container duration, which can pass the last video frame. An Out trim to the
-  very end of such a source can then fail with the notice below, and End followed by Mark Out
-  is the path to that boundary. A container duration can also end before the last frame. The
-  cap for an Out edge is therefore never earlier than the frame of its stored Out, which the
-  browser already showed, so a drag never moves a stored Out back by itself.
+  extent, the same result as Mark Out on the last frame. (Changed on 2026-09-24.) When the
+  probe gives the video duration in ticks, the last frame is the frame that End goes to
+  (ADR 026): the last nominal frame whose start lies more than the margin of ADR 028 inside
+  that extent. When the probe gives no video duration in ticks, the extent comes from the
+  container duration, and the last frame is that extent rounded to the nearest frame, minus
+  one. A container duration usually ends a few milliseconds after the last video frame,
+  because the audio runs longer, and the rounding allows up to half a frame of that. It can
+  still pass the last video frame by more. An Out trim to the very end of such a source can
+  then fail with the notice below, and End followed by Mark Out is the path to that boundary.
+  A container duration can also end before the last frame. The cap for an Out edge is
+  therefore never earlier than the frame of its stored Out, which the browser already
+  showed, so a drag never moves a stored Out back by itself. When the reported extent ends at
+  the start of the real last frame, or within one tick of it, the cap is the frame before,
+  as End is (ADR 026). A stored Out on the real last frame then keeps the cap there, but a
+  release that must seek to it can stop one frame early and fail with the notice.
 - **The snaps.** The press selects the segment, and a selection clears the pending In (ADR
   007), so the pending In is not a snap target. The snap targets are the other boundaries of
   the active source and the playhead at the start of the drag. A stored boundary writes its

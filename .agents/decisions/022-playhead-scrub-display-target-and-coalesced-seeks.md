@@ -117,7 +117,10 @@ about 70% at 23.976 and 59.94 fps.
 - **Off the grid.** The step keeps the relative target: the position it steps from plus the
   step count times the frame interval. The edge no-op then tests the position only.
 - **The edges.** The clamps and the edge no-op still apply to the result. On the grid, a
-  clamped target that stays inside the start frame also counts as the edge.
+  clamped target that stays inside the start frame also counts as the edge. (Changed on
+  2026-09-24.) When the probe gives the extent in ticks, a forward step on the grid that the
+  end bound clamped is also the edge when it starts at the last frame of the extent (ADR 026)
+  or later, and the display of a clamped step shows that frame at most.
 - **Calibration lost during a step.** If the calibration leaves `ready` while a display
   target is set, the target moves to the axis of the browser timeline: the last accepted
   request, measured from the timeline start. After `play` there is no such request, so the
@@ -152,12 +155,17 @@ outside `calibrating`.
 - **Steps add up.** `seekNominal` adds its frames to the deferred request, counted from the
   deferred seek or from the position of the element, one frame for each press as ADR 021
   requires. The count stays between the first frame and the frame that contains the end. A
-  press past either end changes nothing and only pauses.
+  press past either end changes nothing and only pauses. (Changed on 2026-09-24.) When the
+  probe gives the extent in ticks, the upper limit is the last frame of the extent (ADR 026),
+  as it is after the anchor.
+- **A frame index.** `seekToFrameIndex` defers as a seek to the first frame followed by that
+  many steps.
 - **When calibration becomes ready.** The request runs through the ordinary actions.
   - A ruler position becomes a `seekToPts` of the same elapsed time, with the rounding of
     the ruler, so the playhead does not move when the seek runs. A seek that carries
-    `keepBrowserTimeline`, which the keyboard gives to End, stays a browser-time seek, so
-    End lands where End lands after the anchor.
+    `keepBrowserTimeline` stays a browser-time seek. (Changed on 2026-09-24.) The keyboard
+    gives this option only to End on the approximate clock, on a source whose probe gives no
+    extent in ticks (ADR 026). End then lands where it lands after the anchor.
   - A seek to the anchor frame is dropped, because that frame is on screen: a PTS at or
     before `videoStartPts`, or on the frame grid a target inside the first frame.
   - A seek followed by steps gives the element one seek. The seek target becomes the
@@ -169,6 +177,25 @@ outside `calibrating`.
   stands, because a seek before the anchor would spoil the calibration.
 - **The display of a deferred step** assumes the frame grid. If the calibration fails
   instead, the playhead moves by less than one frame when the step runs.
+
+(Added on 2026-09-24.) `seekToPts` takes the option `{ extentEnd: true }`. Only End off the
+frame grid gives it, and its target is then the last tick of the extent (ADR 026). With this
+option, the seek does nothing when all of these conditions are true:
+
+- The calibration is ready.
+- The element does not play.
+- A frame is on screen.
+- No seek is pending: there is no display target, no queued seek and no scrub target, and
+  the element does not report `seeking`.
+- The element stands at or after the target, or at or after the duration that the element
+  reports when that is earlier, within 1 µs.
+
+The frame that holds the last tick also holds every later position, so the frame on screen
+is that frame, and a seek to it may bring no frame callback. The element never stands after
+its duration, and a seek past it stops there, so the duration is the latest position that
+the seek can reach. The test reads the position only, as the edge no-op off the grid does.
+The option changes no other seek. A request that the store defers during the calibration
+runs without the option, because at the anchor the element stands on the first frame.
 
 ### Scrub mode: keyframes and sound during a drag
 
