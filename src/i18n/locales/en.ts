@@ -255,6 +255,7 @@ export const en = {
       preparing: "Preparing export",
       running: "Exporting {{percent}}",
       runningUnknown: "Exporting",
+      runningWithRemaining: "Exporting {{percent}} · {{time}} left",
       remaining: "{{time}} left",
       publishing: "Finishing",
       canceling: "Stopping",

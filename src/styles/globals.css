@@ -156,6 +156,26 @@
       transform: translateX(300%);
     }
   }
+
+  /* One flash of the success tint. It holds for the first quarter and then fades out. The
+   * keyframes have no end value, so the fade ends at the background that the element has
+   * without the animation. The animation runs once.
+   *
+   * The curve is the value of --ease-standard, written out. Tailwind emits a theme variable
+   * only while a utility or another emitted variable reads it, so a var() here could
+   * resolve to nothing. */
+  --animate-success-flash: success-flash var(--motion-flash) cubic-bezier(0.2, 0, 0, 1);
+
+  /* The tint is 12% of --success over --sidebar, the status bar background. With the tint
+   * at its full value, the muted text reaches 4.72:1 and the success icon 3.21:1 in the
+   * light theme, and 6.13:1 and 6.91:1 in the dark theme. 20% dropped the light values to
+   * 4.31:1 and 2.93:1, below the 4.5:1 for text and the 3:1 for an icon. */
+  @keyframes success-flash {
+    0%,
+    25% {
+      background-color: color-mix(in oklab, var(--success) 12%, transparent);
+    }
+  }
 }
 
 :root {
@@ -420,6 +440,9 @@
   --motion-moderate: 200ms;
   /* The width of the progress bar and other size changes. */
   --motion-slow: 300ms;
+  /* A highlight that shows once and fades out, such as the status bar result of an export
+   * that finished while its dialog was hidden. */
+  --motion-flash: 800ms;
 }
 
 /* Easing curves. They are in the `--ease-*` theme namespace, so the `ease-standard`,

@@ -224,6 +224,7 @@ export const zhCN: TranslationCatalog = {
       preparing: "正在准备导出",
       running: "正在导出 {{percent}}",
       runningUnknown: "正在导出",
+      runningWithRemaining: "正在导出 {{percent}} · 剩余 {{time}}",
       remaining: "剩余 {{time}}",
       publishing: "正在完成",
       canceling: "正在停止",

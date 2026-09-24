@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { DropOverlay } from "@/components/layout/DropOverlay";
+import { startExportAttentionSync } from "@/components/layout/exportAttentionSync";
 import { QuitGuardDialog } from "@/components/layout/QuitGuardDialog";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { TitleBar } from "@/components/layout/TitleBar";
@@ -21,6 +22,8 @@ export function AppShell() {
 
   // Mirror the export progress on the Dock and the task bar (ADR 025).
   useEffect(() => startTaskbarProgressSync(), []);
+  // Bounce the Dock icon or flash the task bar button when an export ends in the background.
+  useEffect(() => startExportAttentionSync(), []);
   // Name the open file in the native window title, which the system shows outside the window.
   useEffect(() => startWindowTitleSync(), []);
 
