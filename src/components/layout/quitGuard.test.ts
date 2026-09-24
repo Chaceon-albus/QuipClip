@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EXPORT_STATUSES, type ExportStatus } from "@/features/export";
+import { EXPORT_STATUSES, isExportRunLive, type ExportStatus } from "@/features/export";
 import { createI18nInstance } from "@/i18n";
 import type { Pts, Segment } from "@/types/project";
 import {
@@ -30,6 +30,7 @@ function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
   return {
     timeline: createTimeline(),
     exportStatus: "idle",
+    exportTracking: false,
     unsavedPresetName: null,
     openMediaPath: OPEN_PATH,
     ...overrides,
@@ -101,13 +102,34 @@ describe("decideQuit", () => {
     expect(decision).toEqual({ ask: true, loss: { ...NOTHING_LOST, pendingIn: true } });
   });
 
-  it("asks exactly while an export is preparing, running, or publishing", () => {
+  it("asks exactly while an export is preparing, running, or publishing, with no tracked run", () => {
     const active: readonly ExportStatus[] = ["preparing", "running", "publishing"];
     for (const exportStatus of EXPORT_STATUSES) {
       const decision = decideQuit(createInput({ exportStatus }));
       const isActive = active.includes(exportStatus);
       expect(decision.ask).toBe(isActive);
       expect(decision.loss.exportActive).toBe(isActive);
+    }
+  });
+
+  it("asks for a failure while the store still tracks the run", () => {
+    // A Stop request failed, and the backend still encodes. A quit stops that run (ADR 017).
+    expect(
+      decideQuit(createInput({ exportStatus: "failed", exportTracking: true })),
+    ).toEqual({ ask: true, loss: { ...NOTHING_LOST, exportActive: true } });
+  });
+
+  it("follows isExportRunLive for the export loss, in every status and tracking", () => {
+    for (const exportStatus of EXPORT_STATUSES) {
+      for (const exportTracking of [false, true]) {
+        const decision = decideQuit(createInput({ exportStatus, exportTracking }));
+        const live = isExportRunLive({
+          status: exportStatus,
+          tracking: exportTracking,
+        });
+        expect(decision.loss.exportActive).toBe(live);
+        expect(decision.ask).toBe(live);
+      }
     }
   });
 
@@ -129,6 +151,7 @@ describe("decideQuit", () => {
         pendingInPts: "2000" as Pts,
       }),
       exportStatus: "running",
+      exportTracking: true,
       unsavedPresetName: "Archive",
       openMediaPath: OPEN_PATH,
     });

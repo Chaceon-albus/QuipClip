@@ -12,6 +12,8 @@ function createInput(
     fps: { n: 30, d: 1 },
     speed: { n: 3, d: 2 },
     cancelRequested: false,
+    tracking: false,
+    encodeStarted: true,
     ...overrides,
   };
 }
@@ -28,6 +30,14 @@ describe("presentExportProgress", () => {
 
     it("returns null for failed status", () => {
       expect(presentExportProgress(createInput({ status: "failed" }))).toBeNull();
+    });
+
+    it("returns null for idle, finished, and canceled status with a tracked run", () => {
+      for (const status of ["finished", "canceled", "idle"] as const) {
+        expect(
+          presentExportProgress(createInput({ status, tracking: true })),
+        ).toBeNull();
+      }
     });
 
     it("returns null for canceled status", () => {
@@ -437,6 +447,73 @@ describe("presentExportProgress", () => {
         presentExportProgress(createInput({ speed: { n: 125, d: 100 } }))?.speed,
       ).toBe(1.25);
     });
+  });
+});
+
+describe("presentExportProgress for a failure that the store still tracks", () => {
+  // A Stop request failed, and the backend still prepares or encodes the run.
+  it("shows the encode once a frame was reported", () => {
+    const view = presentExportProgress(
+      createInput({ status: "failed", tracking: true, frame: 250 }),
+    );
+    expect(view).toMatchObject({
+      phase: "running",
+      basePhase: "running",
+      barValue: 25,
+      percentFraction: 0.25,
+    });
+    // The same view as the running status with the same fields.
+    expect(view).toEqual(
+      presentExportProgress(createInput({ status: "running", frame: 250 })),
+    );
+  });
+
+  it("shows the preparation before the encode started, with an indeterminate bar", () => {
+    const view = presentExportProgress(
+      createInput({
+        status: "failed",
+        tracking: true,
+        frame: null,
+        encodeStarted: false,
+      }),
+    );
+    expect(view).toMatchObject({
+      phase: "preparing",
+      basePhase: "preparing",
+      barValue: null,
+      percentFraction: null,
+      remainingSeconds: null,
+    });
+  });
+
+  it("shows the encode after `started` and before the first frame", () => {
+    // The backend encodes, and no `progress` block arrived yet.
+    const view = presentExportProgress(
+      createInput({
+        status: "failed",
+        tracking: true,
+        frame: null,
+        encodeStarted: true,
+      }),
+    );
+    expect(view).toMatchObject({ phase: "running", basePhase: "running", barValue: 0 });
+    expect(view).toEqual(
+      presentExportProgress(createInput({ status: "running", frame: null })),
+    );
+  });
+
+  it("shows a retried stop that is outstanding as canceling", () => {
+    const view = presentExportProgress(
+      createInput({ status: "failed", tracking: true, cancelRequested: true }),
+    );
+    expect(view?.phase).toBe("canceling");
+    expect(view?.basePhase).toBe("running");
+  });
+
+  it("returns null once the store no longer tracks the run", () => {
+    expect(
+      presentExportProgress(createInput({ status: "failed", tracking: false })),
+    ).toBeNull();
   });
 });
 

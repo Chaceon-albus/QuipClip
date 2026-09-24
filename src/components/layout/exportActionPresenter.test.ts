@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EXPORT_STATUSES, type ExportStatus } from "@/features/export";
+import { EXPORT_STATUSES, isExportRunLive, type ExportStatus } from "@/features/export";
 import { formatSegmentTotal } from "@/features/timeline";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
@@ -24,6 +24,7 @@ function input(overrides: Partial<ExportActionInput> = {}): ExportActionInput {
   return {
     hasMedia: true,
     exportStatus: "idle",
+    exportTracking: false,
     segmentCount: 2,
     // 251 frames at 25 fps.
     segmentTotal: 251n,
@@ -90,6 +91,29 @@ describe("presentExportAction", () => {
   it("is not busy in a status without an active run", () => {
     for (const exportStatus of IDLE_STATUSES) {
       expect(presentExportAction(input({ exportStatus })).busy).toBe(false);
+    }
+  });
+
+  it("shows the running export for a failure while the store still tracks the run", () => {
+    // A Stop request failed, and the backend still encodes. A click opens the dialog on the
+    // run (`ExportFlowController.run`), so the tooltip says that.
+    expect(
+      presentExportAction(input({ exportStatus: "failed", exportTracking: true })),
+    ).toEqual({
+      disabled: false,
+      busy: true,
+      label: { key: "titleBar.exportTooltip.showRunningExport" },
+      reason: null,
+    });
+  });
+
+  it("follows isExportRunLive for busy, in every status and tracking", () => {
+    for (const exportStatus of EXPORT_STATUSES) {
+      for (const exportTracking of [false, true]) {
+        expect(presentExportAction(input({ exportStatus, exportTracking })).busy).toBe(
+          isExportRunLive({ status: exportStatus, tracking: exportTracking }),
+        );
+      }
     }
   });
 

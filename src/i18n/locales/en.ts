@@ -291,6 +291,8 @@ export const en = {
       remaining: "{{time}} left",
       publishing: "Finishing",
       canceling: "Stopping",
+      // A Stop request failed, and the export continues (ADR 025).
+      stopFailed: "Stop failed · export continues",
       finished: "Export finished",
       failed: "Export failed",
       canceled: "Export stopped",
@@ -609,6 +611,8 @@ export const en = {
       cancelingNotePublishing:
         "The export is already finishing. It will still save the output file.",
       stopUnavailable: "The export is finishing. You cannot stop it now.",
+      // A Stop request that failed while the export continues (ADR 025).
+      stopFailed: "QuipClip could not stop the export. The export continues.",
     },
     // The readout of an active run in the dialog. `<num>` wraps the frame number, which the
     // dialog shows in a slot as wide as the total, so the line does not move as it counts.

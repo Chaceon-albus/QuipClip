@@ -278,15 +278,34 @@ export type ExportState = {
    */
   cancelRequested: boolean;
   /**
-   * True while the store tracks a run by its identifier: from the answer of `start_export`
-   * until the `finished` or `failed` event of that run, until a reset, or until a new
-   * `startExport`. A new start clears it at once, and sets it again when its own
-   * `start_export` answers with a run id.
+   * True once the tracked run reported that the encode started: its `started` event, or its
+   * first `progress` event. `startExport` and `reset` clear it. The status tells the phase
+   * of an active run. A `failed` that the store still tracks hides the phase, and this field
+   * tells whether the backend encodes or still prepares.
+   */
+  encodeStarted: boolean;
+  /**
+   * True while the store tracks a start or a run that the backend can still prepare or
+   * encode. It becomes true at `startExport`. It becomes false at each of these:
+   *
+   * - `start_export` refuses the start.
+   * - The `finished` or `failed` event of the run arrives.
+   * - `reset`.
+   * - `unsubscribe` while the store holds no run id. It invalidates the start in flight. A
+   *   run that the store knows by its id stays tracked.
+   *
+   * `reportError` never ends the tracking. It does nothing while the store tracks a live run.
+   *
+   * The run id comes with the answer of `start_export`, so `tracking` is true while `runId`
+   * is still null in `preparing`. A new `startExport` drops the run that the store tracked
+   * before, and tracks the new start.
    *
    * A `failed` status does not end the tracking by itself. The store also reports `failed`
-   * when a call from the interface rejects while the run continues, such as `cancel_export`
-   * at the IPC layer, and it keeps the run: the backend still encodes it, and its events
-   * still arrive. A reset in that state drops the only record of a live run.
+   * when a Stop request rejects while the run continues: `cancel_export`, or
+   * `cancel_active_export` while the start waits for its run id, at the IPC layer. It keeps
+   * the start or the run: the backend did not confirm the stop, and the `start_export`
+   * answer and the events still arrive. A reset in that state drops the only record of a
+   * live run (`isExportRunLive`).
    */
   tracking: boolean;
   /** Last error encountered during export, or null if idle or succeeded. */
@@ -327,6 +346,11 @@ export type ExportActions = {
    * allowing client-side failures to render through exactly the same path as
    * a backend failure. The store normalizes the error through `normalizeExportError`,
    * matching the media and settings slices.
+   *
+   * It does nothing while the store tracks a live run (`isExportRunLive` and `tracking`): a
+   * start that waits for its run id, or a run that the backend still prepares or encodes. A
+   * frontend error does not describe that run, and a `failed` status over it would let a
+   * reset drop it.
    *
    * @param error The raw error to normalize and record in the store.
    */

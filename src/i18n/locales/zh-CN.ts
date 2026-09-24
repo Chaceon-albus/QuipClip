@@ -246,6 +246,7 @@ export const zhCN: TranslationCatalog = {
       remaining: "剩余 {{time}}",
       publishing: "正在完成",
       canceling: "正在停止",
+      stopFailed: "停止失败 · 导出继续",
       finished: "导出完成",
       failed: "导出失败",
       canceled: "导出已停止",
@@ -543,6 +544,7 @@ export const zhCN: TranslationCatalog = {
       cancelingNote: "如果导出已进入完成阶段，仍可能生成输出文件。",
       cancelingNotePublishing: "导出正在完成，仍会生成输出文件。",
       stopUnavailable: "导出正在完成，现在无法停止。",
+      stopFailed: "QuipClip 无法停止导出。导出仍在继续。",
     },
     progress: {
       framesAndSpeed: "<num>{{frame}}</num> / {{expectedFrames}} 帧 · {{speed}}×",

@@ -1,11 +1,12 @@
 /**
  * Pure presenter for translating an export error into an i18next key for the export dialog,
- * for the notice that shows a failed or canceled export, and for the action that offers the
- * way out of a failure.
+ * for the notice that shows a failed or canceled export or a failed Stop request, and for
+ * the action that offers the way out of a failure.
  *
  * Follows the presenter pattern from `src/components/settings/settingsErrorPresenter.ts`.
  */
 
+import { isExportRunLive } from "@/features/export/runState";
 import {
   EXPORT_ERROR_CODES,
   type ExportError,
@@ -143,13 +144,18 @@ export function presentExportError(error: ExportError | null): ExportErrorView |
 }
 
 /**
- * The notice that shows how an export that did not finish ended.
+ * The notice that shows how an export that did not finish ended, or that a Stop request
+ * failed while the export continues.
  *
  * - `canceled`: the user stopped the export. This is not an error, so the notice is neutral,
  *   it is a `status`, it carries no diagnostic, and it offers no recovery.
  * - `failed`: the export stopped on an error. The notice is destructive, it is an `alert`, it
  *   carries the diagnostic text when the backend sent one, and it offers the recovery of its
  *   code.
+ * - `stopFailed`: a Stop request failed, and the export continues (`isExportRunLive`). The
+ *   request failed, and the export did not, so the notice is a warning and not destructive,
+ *   as the bar of the run stays in the default tone. It is an `alert`, it carries the
+ *   diagnostic text of the failed request, and it offers no recovery: the run is not over.
  */
 export type ExportOutcomeView =
   | {
@@ -167,15 +173,30 @@ export type ExportOutcomeView =
       message: ExportErrorView;
       detail: string | null;
       recovery: ExportErrorRecovery;
+    }
+  | {
+      kind: "stopFailed";
+      tone: "warning";
+      role: "alert";
+      message: { key: "export.status.stopFailed" };
+      detail: string | null;
+      recovery: null;
     };
 
 export interface ExportOutcomeInput {
   status: "failed" | "canceled";
   error: ExportError | null;
+  /** The `tracking` field of the store. A `failed` that the store tracks is still live. */
+  tracking: boolean;
 }
 
 /**
- * Presents the notice for an export that ended in `failed` or `canceled`.
+ * Presents the notice for an export that ended in `failed` or `canceled`, or for a `failed`
+ * status that the store still tracks.
+ *
+ * A `failed` status that the store still tracks comes first. A Stop request failed, and the
+ * backend still encodes, so the notice must not say that the export ended. The error code
+ * cannot tell this case apart: the request failed at the IPC layer, which gives `unknown`.
  *
  * The store sets `canceled` exactly when the error code is `canceled`. The presenter accepts
  * either signal, so a canceled export never shows in the error style.
@@ -186,7 +207,22 @@ export interface ExportOutcomeInput {
 export function presentExportOutcome({
   status,
   error,
+  tracking,
 }: ExportOutcomeInput): ExportOutcomeView {
+  // An empty diagnostic carries nothing to show.
+  const detail = error?.detail ? error.detail : null;
+
+  if (isExportRunLive({ status, tracking })) {
+    return {
+      kind: "stopFailed",
+      tone: "warning",
+      role: "alert",
+      message: { key: "export.status.stopFailed" },
+      detail,
+      recovery: null,
+    };
+  }
+
   if (status === "canceled" || error?.code === "canceled") {
     return {
       kind: "canceled",
@@ -198,14 +234,50 @@ export function presentExportOutcome({
     };
   }
 
-  // An empty diagnostic carries nothing to show.
-  const detail = error?.detail;
   return {
     kind: "failed",
     tone: "destructive",
     role: "alert",
     message: presentExportError(error) ?? { key: "exportError.unknown" },
-    detail: detail ? detail : null,
+    detail,
     recovery: presentExportErrorRecovery(error),
   };
+}
+
+/**
+ * True when the dialog shows the notice of `outcome`.
+ *
+ * The notice of a failed Stop request (`stopFailed`) hides while the next Stop request is
+ * outstanding (`cancelRequested`). The Stop button then says "Stopping...", and "QuipClip
+ * could not stop the export" beside it would contradict it. When that request fails too,
+ * `cancelRequested` is false again, and the notice of the new failure shows. Every other
+ * outcome always shows.
+ */
+export function showsOutcomeNotice(
+  outcome: ExportOutcomeView,
+  cancelRequested: boolean,
+): boolean {
+  return !(outcome.kind === "stopFailed" && cancelRequested);
+}
+
+const errorNoticeKeys = new WeakMap<ExportError, string>();
+let errorNoticeCount = 0;
+
+/**
+ * A React key for the notice of `error`: the same for one error instance, and new for each
+ * other instance. The store writes a new instance for each failure, also for two failed Stop
+ * requests with the same code and text. A keyed notice therefore mounts again for the second
+ * failure, and a screen reader announces its `alert` again.
+ */
+export function errorNoticeKey(error: ExportError | null): string {
+  if (error === null) {
+    return "no-error";
+  }
+  let key = errorNoticeKeys.get(error);
+  if (key === undefined) {
+    errorNoticeCount += 1;
+    key = `error-${errorNoticeCount}`;
+    errorNoticeKeys.set(error, key);
+  }
+  return key;
 }

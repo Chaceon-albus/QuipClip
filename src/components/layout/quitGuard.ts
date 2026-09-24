@@ -3,7 +3,7 @@
  * (ADR 027).
  *
  * Version 1 writes no project file, so the segments live only for the session. A quit loses
- * the segments and the pending In point of the open source, an active export, and an unsaved
+ * the segments and the pending In point of the open source, a live export, and an unsaved
  * preset draft.
  *
  * Opening another video keeps the segments, but it hides them: they belong to the source of
@@ -18,8 +18,8 @@
  * (ADR 011).
  */
 
-import { isExportRunActive } from "@/components/export/exportCancelState";
 import type { ExportStatus } from "@/features/export";
+import { isExportRunLive } from "@/features/export/runState";
 import { getActiveSourceSegmentEntries } from "@/features/timeline";
 import type { Pts, Segment } from "@/types/project";
 
@@ -37,6 +37,8 @@ export interface TimelineWorkInput {
 export interface QuitGuardInput {
   readonly timeline: TimelineWorkInput;
   readonly exportStatus: ExportStatus;
+  /** The `tracking` field of the export store. With the status, it decides `exportActive`. */
+  readonly exportTracking: boolean;
   /**
    * The name of the preset draft with unsaved edits, or null when no draft holds one. The
    * name can be empty, for a new preset with no name yet.
@@ -52,7 +54,11 @@ export interface QuitLoss {
   readonly segments: number;
   /** True when the open source has a pending In point. */
   readonly pendingIn: boolean;
-  /** True when an export is preparing, running, or publishing. A quit stops it (ADR 017). */
+  /**
+   * True while the export run is live (`isExportRunLive`): preparing, running, or publishing,
+   * or failed while the store still tracks the run. A Stop request that failed gives that
+   * `failed`, and the backend still encodes. A quit stops the run (ADR 017).
+   */
   readonly exportActive: boolean;
   /** The name of the preset draft with unsaved edits, or null. */
   readonly unsavedPreset: string | null;
@@ -145,13 +151,16 @@ export function isSameFilePath(first: string, second: string): boolean {
  * Decides whether a quit asks first, and what it would lose.
  *
  * The quit asks when it would lose one or more segments or the pending In point of the open
- * source, an active export, or an unsaved preset draft. Otherwise it continues at once.
+ * source, a live export, or an unsaved preset draft. Otherwise it continues at once.
  */
 export function decideQuit(input: QuitGuardInput): QuitDecision {
   const loss: QuitLoss = {
     segments: countOpenSourceSegments(input.timeline),
     pendingIn: hasPendingIn(input.timeline),
-    exportActive: isExportRunActive(input.exportStatus),
+    exportActive: isExportRunLive({
+      status: input.exportStatus,
+      tracking: input.exportTracking,
+    }),
     unsavedPreset: input.unsavedPresetName,
   };
   const ask =

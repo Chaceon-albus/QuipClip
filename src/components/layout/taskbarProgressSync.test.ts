@@ -1,6 +1,12 @@
 import { ProgressBarStatus, type ProgressBarState } from "@tauri-apps/api/window";
 import { describe, expect, it, vi } from "vitest";
-import { createExportStore, type ExportState } from "@/features/export";
+import {
+  createExportStore,
+  type ExportProgressEvent,
+  type ExportStart,
+  type ExportState,
+} from "@/features/export";
+import type { Pts } from "@/types/project";
 import type { TaskbarProgressInput } from "./taskbarProgressSync";
 import {
   resolveTaskbarProgress,
@@ -17,6 +23,8 @@ function createInput(
     fps: { n: 25, d: 1 },
     speed: { n: 1, d: 1 },
     cancelRequested: false,
+    tracking: true,
+    encodeStarted: true,
     ...overrides,
   };
 }
@@ -126,9 +134,34 @@ describe("resolveTaskbarProgress", () => {
   });
 
   it("shows a full error bar after a failure", () => {
-    expect(resolve({ status: "failed" })).toEqual({
+    expect(resolve({ status: "failed", tracking: false })).toEqual({
       status: ProgressBarStatus.Error,
       progress: 100,
+    });
+  });
+
+  it("shows the running state, not the error, for a failure that the store still tracks", () => {
+    // A Stop request failed, and the backend still encodes.
+    expect(resolve({ status: "failed", tracking: true, frame: 50 })).toEqual({
+      status: ProgressBarStatus.Normal,
+      progress: 50,
+    });
+    // Before the encode started, the run is still in its preparation.
+    const preparing = {
+      status: "failed",
+      tracking: true,
+      frame: null,
+      encodeStarted: false,
+    } as const;
+    expect(resolve(preparing)).toEqual({ status: ProgressBarStatus.Indeterminate });
+    expect(resolveTaskbarProgress(createInput(preparing), RESET)).toEqual({
+      status: ProgressBarStatus.Indeterminate,
+      progress: 0,
+    });
+    // After `started` and before the first frame, the encode runs at 0 percent.
+    expect(resolve({ status: "failed", tracking: true, frame: null })).toEqual({
+      status: ProgressBarStatus.Normal,
+      progress: 0,
     });
   });
 
@@ -232,6 +265,71 @@ describe("startTaskbarProgressSync", () => {
       stop();
     },
   );
+
+  it("never shows the error state while a failed Stop leaves the run live", async () => {
+    let emit!: (event: ExportProgressEvent) => void;
+    let answerStart: (start: ExportStart) => void = () => {};
+    const startFn = vi.fn(
+      () =>
+        new Promise<ExportStart>((resolve) => {
+          answerStart = resolve;
+        }),
+    );
+    const store = createExportStore({
+      subscribeExportProgress: (handler) => {
+        emit = handler;
+        return Promise.resolve(() => {});
+      },
+      startExport: startFn,
+      cancelActiveExport: () => Promise.reject(new Error("IPC closed")),
+    });
+    const setProgressBar = createSpy();
+    const stop = startTaskbarProgressSync({
+      store,
+      setProgressBar,
+      resetIndeterminateValue: false,
+    });
+
+    const starting = store.getState().startExport({
+      sourcePath: "/media/source.mp4",
+      outputPath: "/media/output.mp4",
+      segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+      presetId: "mp4-h264",
+    });
+    await vi.waitFor(() => {
+      expect(startFn).toHaveBeenCalled();
+    });
+    await store.getState().cancelExport();
+    expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
+    await flushPromises();
+
+    answerStart({
+      runId: "run-kept",
+      presetId: "mp4-h264",
+      outputPath: "/media/output.mp4",
+      segmentCount: 1,
+      totalDurationUs: 4_000_000,
+      expectedFrames: 100,
+    });
+    await starting;
+    emit({ event: "progress", runId: "run-kept", frame: 40 });
+    await flushPromises();
+    emit({
+      event: "finished",
+      runId: "run-kept",
+      outputPath: "/media/output.mp4",
+      frames: 100,
+    });
+    await flushPromises();
+
+    expect(callsOf(setProgressBar)).toEqual([
+      { status: ProgressBarStatus.None },
+      { status: ProgressBarStatus.Indeterminate },
+      { status: ProgressBarStatus.Normal, progress: 40 },
+      { status: ProgressBarStatus.None },
+    ]);
+    stop();
+  });
 
   it("clears the error bar when a failed export resets to idle", async () => {
     const { store, setProgressBar, stop } = setup({ status: "failed" });

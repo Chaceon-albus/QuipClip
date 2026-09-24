@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { presentExportProgress } from "@/components/export/exportProgressPresenter";
-import type { ExportStatus } from "@/features/export";
+import { EXPORT_STATUSES, ExportError, type ExportStatus } from "@/features/export";
 import { createI18nInstance, en, zhCN } from "@/i18n";
 import type {
   ExportIndicatorInput,
@@ -13,9 +13,11 @@ import {
   focusInsideAfterBlur,
   formatIndicatorLine,
   INDICATOR_SLOT_MARKERS,
+  liveStopFailureOf,
   outputNameOf,
   presentExportIndicator,
   presentIndicatorLine,
+  presentStopFailureAnnouncement,
   resultLabelKey,
   splitAtSlots,
 } from "./exportIndicatorPresenter";
@@ -33,6 +35,7 @@ function createInput(
     panelOpen: false,
     outputPath: "/path/to/exported_video.mp4",
     tracking: false,
+    encodeStarted: true,
     ...overrides,
   };
 }
@@ -606,22 +609,75 @@ describe("formatIndicatorLine", () => {
   });
 });
 
-describe("result dismissal", () => {
-  it("offers no dismissal for a failed run that the store still tracks", () => {
-    // A Stop that fails at the IPC layer reports `failed`, and the backend keeps the run.
-    expect(
-      presentExportIndicator(createInput({ status: "failed", tracking: true })),
-    ).toEqual({
-      kind: "failed",
+describe("a failed status that the store still tracks", () => {
+  // A Stop request failed at the IPC layer, and the backend still encodes the run.
+  it("shows the active item with its progress and the stop failure line", () => {
+    const input = createInput({ status: "failed", tracking: true });
+    const view = presentExportIndicator(input);
+
+    expect(view).toEqual({
+      kind: "active",
+      progress: presentExportProgress(input),
+      line: { key: "statusBar.export.stopFailed" },
       outputName: "exported_video.mp4",
-      canDismiss: false,
+    });
+    // The progress is the progress of the encode, so the bar keeps its fill.
+    expect(view?.kind === "active" && view.progress.barValue).toBe(50);
+  });
+
+  it("offers no dismissal and announces nothing", () => {
+    const view = presentExportIndicator(
+      createInput({ status: "failed", tracking: true }),
+    );
+    expect(view).not.toHaveProperty("canDismiss");
+    expect(announcementKeyOf(view)).toBeNull();
+  });
+
+  it("says Stopping while a retried stop is outstanding", () => {
+    const view = presentExportIndicator(
+      createInput({ status: "failed", tracking: true, cancelRequested: true }),
+    );
+    expect(view?.kind === "active" && view.line).toEqual({
+      key: "statusBar.export.canceling",
     });
   });
 
+  it("shows an indeterminate bar before the encode started", () => {
+    const view = presentExportIndicator(
+      createInput({
+        status: "failed",
+        tracking: true,
+        frame: null,
+        encodeStarted: false,
+      }),
+    );
+    expect(view?.kind === "active" && view.progress.barValue).toBeNull();
+    expect(view?.kind === "active" && view.line).toEqual({
+      key: "statusBar.export.stopFailed",
+    });
+  });
+
+  it("uses a stop failure line that exists in both catalogs", () => {
+    for (const catalog of [en, zhCN]) {
+      expect(catalog.statusBar.export.stopFailed.trim().length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("result dismissal", () => {
   it("offers the dismissal once the failed run is no longer tracked", () => {
     expect(
       presentExportIndicator(createInput({ status: "failed", tracking: false })),
     ).toMatchObject({ kind: "failed", canDismiss: true });
+  });
+
+  it("offers the dismissal for every result", () => {
+    for (const status of ["finished", "failed", "canceled"] as const) {
+      expect(presentExportIndicator(createInput({ status }))).toMatchObject({
+        kind: status,
+        canDismiss: true,
+      });
+    }
   });
 
   it("offers the dismissal for a finished or canceled result in every tracking state", () => {
@@ -729,5 +785,99 @@ describe("decideFocusRestore", () => {
         activeElement: "outside",
       }),
     ).toEqual({ restore: false, focusInside: false });
+  });
+});
+
+describe("liveStopFailureOf", () => {
+  it("gives the error of a failed status that the store still tracks", () => {
+    const error = new ExportError({ code: "unknown" });
+    expect(liveStopFailureOf({ status: "failed", tracking: true, error })).toBe(error);
+  });
+
+  it("gives null in every other state", () => {
+    const error = new ExportError({ code: "unknown" });
+    for (const status of EXPORT_STATUSES) {
+      for (const tracking of [false, true]) {
+        if (status === "failed" && tracking) {
+          continue;
+        }
+        expect(liveStopFailureOf({ status, tracking, error })).toBeNull();
+      }
+    }
+  });
+});
+
+describe("presentStopFailureAnnouncement", () => {
+  const first = new ExportError({ code: "unknown", detail: "IPC closed" });
+  const second = new ExportError({ code: "unknown", detail: "IPC closed" });
+
+  it("announces a failure that lands while the dialog is hidden", () => {
+    expect(
+      presentStopFailureAnnouncement({
+        failure: first,
+        panelOpen: false,
+        shownFailure: null,
+      }),
+    ).toEqual({ key: "export.status.stopFailed", shownFailure: null });
+  });
+
+  it("gives the same text for the same failure, so a progress event announces nothing", () => {
+    const input = { failure: first, panelOpen: false, shownFailure: null };
+    expect(presentStopFailureAnnouncement(input).key).toBe(
+      presentStopFailureAnnouncement(input).key,
+    );
+  });
+
+  it("notes a failure that the open dialog shows, and does not announce it after a hide", () => {
+    const open = presentStopFailureAnnouncement({
+      failure: first,
+      panelOpen: true,
+      shownFailure: null,
+    });
+    expect(open).toEqual({ key: null, shownFailure: first });
+
+    expect(
+      presentStopFailureAnnouncement({
+        failure: first,
+        panelOpen: false,
+        shownFailure: open.shownFailure,
+      }),
+    ).toEqual({ key: null, shownFailure: first });
+  });
+
+  it("announces the next failure while the dialog is hidden", () => {
+    expect(
+      presentStopFailureAnnouncement({
+        failure: second,
+        panelOpen: false,
+        shownFailure: first,
+      }),
+    ).toEqual({ key: "export.status.stopFailed", shownFailure: first });
+  });
+
+  it("speaks the sentence of the dialog notice, not the status bar line with its dot", () => {
+    // Some screen readers read the "·" of the visible line aloud.
+    const { key } = presentStopFailureAnnouncement({
+      failure: first,
+      panelOpen: false,
+      shownFailure: null,
+    });
+    expect(key).toBe("export.status.stopFailed");
+    for (const catalog of [en, zhCN]) {
+      expect(catalog.export.status.stopFailed).not.toContain("·");
+      expect(catalog.statusBar.export.stopFailed).toContain("·");
+    }
+  });
+
+  it("announces nothing when there is no failure, and keeps the noted one", () => {
+    for (const panelOpen of [false, true]) {
+      expect(
+        presentStopFailureAnnouncement({
+          failure: null,
+          panelOpen,
+          shownFailure: first,
+        }),
+      ).toEqual({ key: null, shownFailure: first });
+    }
   });
 });

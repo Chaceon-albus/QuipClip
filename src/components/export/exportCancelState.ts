@@ -1,9 +1,10 @@
-import type { ExportStatus } from "@/features/export";
+import type { ExportRunLiveState, ExportStatus } from "@/features/export";
+import { isExportRunLive } from "@/features/export/runState";
 
 /**
  * Kind of dismissal action performed when the export dialog is dismissed.
  *
- * "hide" hides the dialog while keeping an active export running behind it.
+ * "hide" hides the dialog while keeping a live export running behind it.
  * "close" closes the dialog and resets the export store.
  * See ADR 025.
  */
@@ -12,8 +13,10 @@ export type ExportDismissal = "hide" | "close";
 /**
  * True while a run is active: preparing, running, or publishing, with or without a run id.
  *
- * A dismissal of the export dialog hides it in these statuses (ADR 025), and a quit in
- * these statuses asks first, because it stops the run (ADR 027).
+ * The dialog shows the progress step in these statuses. A `failed` status that the store
+ * still tracks is not active, and it is still live (`isExportRunLive`): it shows the result
+ * step with the warning, and the Stop Export footer. The controls that must not drop a run
+ * read `isExportRunLive` instead.
  */
 export function isExportRunActive(status: ExportStatus): boolean {
   return status === "preparing" || status === "running" || status === "publishing";
@@ -23,11 +26,13 @@ export function isExportRunActive(status: ExportStatus): boolean {
  * Resolves whether dismissing the dialog hides it while the export continues,
  * or closes it and resets the store.
  *
- * "hide" in preparing, running, publishing (with or without a run id). "close" otherwise.
- * See ADR 025.
+ * "hide" while the run is live (`isExportRunLive`): preparing, running, or publishing, with
+ * or without a run id, and `failed` while the store still tracks the run. A Stop request
+ * that failed gives that `failed`, and the backend still encodes, so a reset would drop the
+ * only record of the run. "close" otherwise. See ADR 025.
  */
-export function resolveExportDismissal(status: ExportStatus): ExportDismissal {
-  return isExportRunActive(status) ? "hide" : "close";
+export function resolveExportDismissal(state: ExportRunLiveState): ExportDismissal {
+  return isExportRunLive(state) ? "hide" : "close";
 }
 
 /**
@@ -40,22 +45,23 @@ export interface ExportCancelStateInput {
   runId: string | null;
   /** Whether a cancel request asked for by the store is currently outstanding. */
   cancelRequested: boolean;
+  /** The `tracking` field of the store. A `failed` that the store tracks is still live. */
+  tracking: boolean;
 }
 
 /**
  * Answers whether a cancel request that the store asked for is currently outstanding.
  *
- * True in preparing, running, publishing when cancelRequested is true.
- * See ADR 025.
+ * True while the run is live (`isExportRunLive`) and cancelRequested is true: in
+ * preparing, running, publishing, and in a `failed` that the store still tracks, where the
+ * user asked for the stop again. See ADR 025.
  */
 export function isCancelOutstanding({
   status,
+  tracking,
   cancelRequested,
-}: Pick<ExportCancelStateInput, "status" | "cancelRequested">): boolean {
-  if (status !== "preparing" && status !== "running" && status !== "publishing") {
-    return false;
-  }
-  return cancelRequested;
+}: Pick<ExportCancelStateInput, "status" | "tracking" | "cancelRequested">): boolean {
+  return isExportRunLive({ status, tracking }) && cancelRequested;
 }
 
 /**
@@ -75,12 +81,20 @@ export function isCancelOutstanding({
  * the rename. The button would report a cancel that never happened while the export still
  * writes the file.
  *
- * Every other status carries no active run to stop and refuses. An outstanding cancel also
+ * "failed" while the store still tracks the run accepts a click. A Stop request failed, and
+ * the backend did not confirm the stop, so the user can ask again. The store asks by run id
+ * when it has one, and by slot while the start still waits for its run id. That `failed` is
+ * never the publication. The `publishing` event changes the status to `publishing`, and a
+ * Stop request that fails after that event keeps `publishing` (`reportStopFailure` in the
+ * store), so the button stays disabled for the whole rename.
+ *
+ * Every other status carries no live run to stop and refuses. An outstanding cancel also
  * refuses.
  */
 export function isCancelEnabled(input: ExportCancelStateInput): boolean {
-  const { status, runId } = input;
-  if (status !== "preparing" && status !== "running") {
+  const { status, runId, tracking } = input;
+  const liveFailure = status === "failed" && tracking;
+  if (status !== "preparing" && status !== "running" && !liveFailure) {
     return false;
   }
   if (status === "running" && runId === null) {

@@ -99,6 +99,7 @@ export function TitleBar() {
   const media = useMediaStore((state) => state.media);
   const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
   const exportStatus = useExportStore((state) => state.status);
+  const exportTracking = useExportStore((state) => state.tracking);
   const exportDialogOpen = useExportPanelStore((state) => state.open);
   const setExportDialogOpen = useExportPanelStore((state) => state.setOpen);
   // The key names come from the binding table (ADR 026).
@@ -130,6 +131,7 @@ export function TitleBar() {
   const exportAction = presentExportAction({
     hasMedia: media !== null,
     exportStatus,
+    exportTracking,
     segmentCount,
     segmentTotal,
     display: timecodeDisplay,

@@ -6,11 +6,7 @@
  * The caller passes a monotonic time in milliseconds, such as `performance.now()`.
  */
 
-import {
-  isExportRunLive,
-  type ExportRunTiming,
-  type ExportState,
-} from "@/features/export";
+import type { ExportRunTiming, ExportState } from "@/features/export";
 import {
   presentExportProgress,
   type ExportProgressInput,
@@ -20,11 +16,12 @@ import {
 
 /**
  * The fields of the store that change on each progress event. Only the run panel subscribes
- * to them, so a progress event renders the panel and not the whole dialog.
+ * to them, so a progress event renders the panel and not the whole dialog. `encodeStarted`
+ * changes with the first of those events.
  */
 export type ExportProgressFields = Pick<
   ExportState,
-  "frame" | "expectedFrames" | "fps" | "speed"
+  "frame" | "expectedFrames" | "fps" | "speed" | "encodeStarted"
 >;
 
 /**
@@ -39,6 +36,7 @@ export function selectExportProgressFields(
     expectedFrames: state.expectedFrames,
     fps: state.fps,
     speed: state.speed,
+    encodeStarted: state.encodeStarted,
   };
 }
 
@@ -211,10 +209,7 @@ export interface ExportRunBarView {
   decorative: boolean;
 }
 
-export interface ExportRunBarInput extends ExportProgressInput {
-  /** The `tracking` field of the store: true while the store follows a run by its id. */
-  tracking: boolean;
-}
+export type ExportRunBarInput = ExportProgressInput;
 
 /** The fill of a run that reached `frame` of `expectedFrames`, or null when either is unknown. */
 function reachedFill({ frame, expectedFrames }: ExportProgressInput): number | null {
@@ -229,15 +224,15 @@ function reachedFill({ frame, expectedFrames }: ExportProgressInput): number | n
  * its tone gives the result: success when finished, destructive when failed, and neutral when
  * the user stopped the run.
  *
- * An active run shows the bar of `presentExportProgress`. A finished run shows a full bar. A
- * failed or stopped run keeps the fill that it reached. Null when no fill is known: in
- * `idle`, and after a run that ended with no frame goal or no frame, because a moving
- * indeterminate bar does not suit a result.
+ * A live run (`isExportRunLive`) shows the bar of `presentExportProgress`. A finished run
+ * shows a full bar. A failed or stopped run keeps the fill that it reached. Null when no fill
+ * is known: in `idle`, and after a run that ended with no frame goal or no frame, because a
+ * moving indeterminate bar does not suit a result.
  *
- * A `failed` that the store still tracks is not a result (`isExportRunLive`): a Stop failed,
- * and the backend still encodes. Its bar stays the bar of a run, in the default tone and
- * flowing, and it keeps its fill as the frames arrive. A red bar that keeps filling would
- * report a failure that has not happened.
+ * A `failed` that the store still tracks is not a result: a Stop failed, and the backend
+ * still encodes. Its bar stays the bar of a run, in the default tone, and it keeps its fill
+ * as the frames arrive. A red bar that keeps filling would report a failure that has not
+ * happened.
  */
 export function presentExportRunBar(input: ExportRunBarInput): ExportRunBarView | null {
   const progress = presentExportProgress(input);
@@ -246,15 +241,6 @@ export function presentExportRunBar(input: ExportRunBarInput): ExportRunBarView 
       value: progress.barValue,
       tone: "default",
       flowing: progress.phase !== "canceling",
-      decorative: false,
-    };
-  }
-
-  if (isExportRunLive(input)) {
-    return {
-      value: reachedFill(input),
-      tone: "default",
-      flowing: true,
       decorative: false,
     };
   }

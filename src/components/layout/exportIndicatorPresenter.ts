@@ -5,7 +5,11 @@
  * The indicator is hidden when the export dialog is open or when status is idle.
  */
 
-import { isExportRunLive } from "@/features/export";
+import {
+  isExportRunLive,
+  type ExportError,
+  type ExportRunLiveState,
+} from "@/features/export";
 import { splitFilePath } from "@/lib/fileName";
 import {
   formatRemaining,
@@ -17,8 +21,6 @@ import {
 export type ExportIndicatorInput = ExportProgressInput & {
   panelOpen: boolean;
   outputPath: string | null;
-  /** The `tracking` field of the export store: true while it tracks a run by its id. */
-  tracking: boolean;
 };
 
 export type ExportResultKind = "finished" | "failed" | "canceled";
@@ -35,7 +37,8 @@ export type ExportIndicatorLine =
         | "statusBar.export.preparing"
         | "statusBar.export.runningUnknown"
         | "statusBar.export.publishing"
-        | "statusBar.export.canceling";
+        | "statusBar.export.canceling"
+        | "statusBar.export.stopFailed";
     }
   | { key: "statusBar.export.running"; percentFraction: number }
   | {
@@ -55,9 +58,9 @@ export type ExportIndicatorView =
       kind: ExportResultKind;
       outputName: string | null;
       /**
-       * False while the store reports `failed` and still tracks the run. A Stop that fails at
-       * the IPC layer gives that state: the backend still encodes the run, and a dismissal
-       * resets the store, which drops the only record of the live run.
+       * False while the run is live (`isExportRunLive`), because a dismissal resets the
+       * store and drops the only record of the run. A live `failed` shows as `active`, so a
+       * result is not live today. The field is a second guard on the dismiss control.
        */
       canDismiss: boolean;
     };
@@ -74,15 +77,23 @@ export function outputNameOf(path: string | null): string | null {
 }
 
 /**
- * The text of an active run.
+ * The text of a live run.
  *
  * The time estimate needs the percent: both come from `expectedFrames`, and the progress
  * presenter gives no estimate without it. The line with the estimate therefore always holds
  * the percent too.
+ *
+ * `stopFailed` is true for a `failed` status that the store still tracks: a Stop request
+ * failed, and the export continues. The line says that, until the user asks for the stop
+ * again. An outstanding request then shows "Stopping", as in every other phase.
  */
 export function presentIndicatorLine(
   progress: ExportProgressView,
+  stopFailed = false,
 ): ExportIndicatorLine {
+  if (stopFailed && progress.phase !== "canceling") {
+    return { key: "statusBar.export.stopFailed" };
+  }
   switch (progress.phase) {
     case "preparing":
       return { key: "statusBar.export.preparing" };
@@ -108,7 +119,14 @@ export function presentIndicatorLine(
   }
 }
 
-/** Null when the panel is open or the status is idle (ADR 025). */
+/**
+ * Null when the panel is open or the status is idle (ADR 025).
+ *
+ * A live run (`isExportRunLive`) shows as `active`, also a `failed` that the store still
+ * tracks. A Stop request failed there, and the backend still encodes, so the item shows the
+ * progress and not a result. A result would offer the dismissal and be announced as a
+ * failure that has not happened.
+ */
 export function presentExportIndicator(
   input: ExportIndicatorInput,
 ): ExportIndicatorView | null {
@@ -118,11 +136,7 @@ export function presentExportIndicator(
 
   const outputName = outputNameOf(input.outputPath);
 
-  if (
-    input.status === "preparing" ||
-    input.status === "running" ||
-    input.status === "publishing"
-  ) {
+  if (isExportRunLive(input)) {
     const progress = presentExportProgress(input);
     if (!progress) {
       return null;
@@ -130,7 +144,7 @@ export function presentExportIndicator(
     return {
       kind: "active",
       progress,
-      line: presentIndicatorLine(progress),
+      line: presentIndicatorLine(progress, input.status === "failed"),
       outputName,
     };
   }
@@ -171,7 +185,8 @@ export function resultLabelKey(kind: ExportResultKind): ExportResultLabelKey {
  *
  * Only a result is announced. A result item exists only while the dialog is hidden, so the
  * region speaks only for a run that ended behind the editor. The dialog announces its own
- * result. An active run gives null, so no progress change is announced.
+ * result. An active run gives null, so no progress change is announced. A failed Stop
+ * request has an announcement of its own (`presentStopFailureAnnouncement`).
  */
 export function announcementKeyOf(
   view: ExportIndicatorView | null,
@@ -180,6 +195,59 @@ export function announcementKeyOf(
     return null;
   }
   return resultLabelKey(view.kind);
+}
+
+/**
+ * The failure of a Stop request while the run continues: the error of a `failed` status that
+ * the store still tracks (`isExportRunLive`). Null in every other state. The store writes a
+ * new error instance for each failure, so the instance names one failure.
+ */
+export function liveStopFailureOf(
+  state: ExportRunLiveState & { error: ExportError | null },
+): ExportError | null {
+  return state.status === "failed" && isExportRunLive(state) ? state.error : null;
+}
+
+export interface StopFailureAnnouncementInput {
+  /** The failure of a Stop request while the run continues (`liveStopFailureOf`), or null. */
+  readonly failure: ExportError | null;
+  readonly panelOpen: boolean;
+  /** The last failure that the open dialog showed, or null. */
+  readonly shownFailure: ExportError | null;
+}
+
+export interface StopFailureAnnouncement {
+  /**
+   * The catalog key of the text for the polite live region, or null for no text. It is the
+   * sentence of the dialog notice, not the visible status bar line: some screen readers read
+   * the "·" of that line aloud.
+   */
+  readonly key: "export.status.stopFailed" | null;
+  /** The next value of `shownFailure`. The caller keeps it for the next call. */
+  readonly shownFailure: ExportError | null;
+}
+
+/**
+ * Decides whether the polite live region of the status bar announces a failed Stop request.
+ *
+ * The region announces each failure once, while the dialog is hidden. The text stays the same
+ * while the failure is current, so a progress event changes nothing and is not announced. A
+ * failure that the open dialog showed is not announced again when the dialog hides, because
+ * the dialog announced it with its own alert. The caller keeps `shownFailure` for that.
+ */
+export function presentStopFailureAnnouncement(
+  input: StopFailureAnnouncementInput,
+): StopFailureAnnouncement {
+  if (input.failure === null) {
+    return { key: null, shownFailure: input.shownFailure };
+  }
+  if (input.panelOpen) {
+    return { key: null, shownFailure: input.failure };
+  }
+  return {
+    key: input.failure === input.shownFailure ? null : "export.status.stopFailed",
+    shownFailure: input.shownFailure,
+  };
 }
 
 /**

@@ -3,6 +3,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   type FocusEvent,
   type ReactElement,
 } from "react";
@@ -26,6 +27,7 @@ import {
   useExportOutputActionStore,
   useExportPanelStore,
   useExportStore,
+  type ExportError,
 } from "@/features/export";
 import { getResolvedLanguage } from "@/i18n";
 import { isMacOS } from "@/lib/platform";
@@ -35,7 +37,9 @@ import {
   decideFocusRestore,
   focusInsideAfterBlur,
   formatIndicatorLine,
+  liveStopFailureOf,
   presentExportIndicator,
+  presentStopFailureAnnouncement,
   resultLabelKey,
   type ExportIndicatorView,
   type ExportResultKind,
@@ -95,13 +99,16 @@ const SLOT_CLASS: Record<IndicatorSlot, string> = {
  * not run. When the kind changes while the focus is inside the indicator, the first button of
  * the new content takes the focus, so a keyboard user keeps the place.
  *
- * A failed result shows no dismiss X while the store still tracks the run. A Stop that fails
- * at the IPC layer gives that state, and a reset would drop the only record of a run that the
- * backend still encodes.
+ * A `failed` status that the store still tracks shows as an active item, with the line "Stop
+ * failed · export continues". A Stop that fails at the IPC layer gives that state, and the
+ * backend still encodes. The item offers no dismiss X, because a reset would drop the only
+ * record of the run. The live region announces the failure once, and no result, because the
+ * run has not ended.
  *
  * The polite live region is always mounted, because a screen reader announces a change of
- * its content and not a region that appears with its content. It receives only the result of
- * a run that ended while the dialog was hidden, so no progress change is announced. It holds
+ * its content and not a region that appears with its content. It receives the result of a
+ * run that ended while the dialog was hidden, and each failed Stop request that the dialog
+ * did not show (`presentStopFailureAnnouncement`). No progress change is announced. It holds
  * text only, no control.
  */
 export function ExportStatusIndicator() {
@@ -121,6 +128,7 @@ export function ExportStatusIndicator() {
       cancelRequested: state.cancelRequested,
       outputPath: state.outputPath,
       tracking: state.tracking,
+      encodeStarted: state.encodeStarted,
     })),
   );
 
@@ -133,7 +141,23 @@ export function ExportStatusIndicator() {
     [exportData, panelOpen],
   );
 
-  const announcementKey = announcementKeyOf(view);
+  // The failure of a Stop request while the run continues. It is one error instance for one
+  // failure, so a progress event does not change it.
+  const stopFailure = useExportStore(liveStopFailureOf);
+  // The last failure that the open dialog showed. The dialog announced it, so the region
+  // does not announce it again when the dialog hides. The update during render is the React
+  // pattern for state that follows other state: React renders again at once.
+  const [shownFailure, setShownFailure] = useState<ExportError | null>(null);
+  const stopFailureAnnouncement = presentStopFailureAnnouncement({
+    failure: stopFailure,
+    panelOpen,
+    shownFailure,
+  });
+  if (stopFailureAnnouncement.shownFailure !== shownFailure) {
+    setShownFailure(stopFailureAnnouncement.shownFailure);
+  }
+
+  const announcementKey = announcementKeyOf(view) ?? stopFailureAnnouncement.key;
 
   // The keyed wrapper remounts when the view kind changes, and the focused button goes with
   // it. The browser then puts the focus on the body, and a keyboard user loses the place.
@@ -411,8 +435,8 @@ function ExportResultItem({
           <TooltipContent>{revealLabel}</TooltipContent>
         </Tooltip>
       )}
-      {/* No dismissal while the store still tracks a failed run: the reset would drop the
-          only record of a run that the backend still encodes. */}
+      {/* No dismissal while the run is live: the reset would drop the only record of a run
+          that the backend still encodes. */}
       {canDismiss && (
         <Tooltip>
           <TooltipTrigger asChild>

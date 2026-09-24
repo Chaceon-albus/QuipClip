@@ -19,6 +19,7 @@ import {
 } from "@/components/layout/exportFlowController";
 import {
   exportStore,
+  isExportRunLive,
   useExportOutputActionStore,
   useExportStore,
   type ExportOutputAction,
@@ -42,9 +43,18 @@ import {
   createOpenStepGeneration,
   guardOpenStepEffects,
 } from "./exportBackToSetup";
-import { isExportRunActive, resolveExportDismissal } from "./exportCancelState";
-import { resolveExportDialogStep, selectShownFrame } from "./exportDialogFrame";
-import { presentExportOutcome } from "./exportErrorPresenter";
+import { resolveExportDismissal } from "./exportCancelState";
+import {
+  resolveExportDialogFooter,
+  resolveExportDialogStep,
+  selectShownFrame,
+} from "./exportDialogFrame";
+import {
+  errorNoticeKey,
+  presentExportOutcome,
+  showsOutcomeNotice,
+  type ExportErrorView,
+} from "./exportErrorPresenter";
 import {
   outputActionErrorKey,
   presentFinishedExport,
@@ -188,13 +198,16 @@ export function ExportDialog({
   const outputActionFailure = useExportOutputActionStore((state) => state.failure);
   const runOutputAction = useExportOutputActionStore((state) => state.run);
 
-  // An armed state belongs to one run. When the run is no longer active, clear it, so a
-  // later run can never start with the confirmation label from this one. This component
-  // stays mounted while the dialog is hidden (ADR 025), so it sees every status change.
+  // An armed state belongs to one run. When the run is no longer live (`isExportRunLive`),
+  // clear it, so a later run can never start with the confirmation label from this one. A
+  // `failed` that the store still tracks is live, and it offers Stop Export again. This
+  // component stays mounted while the dialog is hidden (ADR 025), so it sees every change.
   useEffect(
     () =>
       exportStore.subscribe((state, previous) => {
-        if (state.status !== previous.status && !isExportRunActive(state.status)) {
+        const changed =
+          state.status !== previous.status || state.tracking !== previous.tracking;
+        if (changed && !isExportRunLive(state)) {
           setStopArmedAt(null);
         }
       }),
@@ -284,23 +297,36 @@ export function ExportDialog({
     frame.choosingDestination ||
     frame.backCheckPending;
 
-  // Dismissal hides the dialog while an export is active (preparing, running, publishing)
-  // and resets the store when in an idle or terminal status (ADR 025).
-  const isActive = resolveExportDismissal(frame.status) === "hide";
+  // Dismissal hides the dialog while the run is live, and resets the store in every other
+  // status (ADR 025). A live run is an active status, or `failed` while the store still
+  // tracks the run: a Stop request failed, and the backend still encodes.
+  const hidesOnDismiss =
+    resolveExportDismissal({ status: frame.status, tracking: frame.tracking }) ===
+    "hide";
+  // The footer. Every live run, also a `failed` that the store still tracks, shows the run
+  // footer: Stop Export and "Run in Background" (`resolveExportDialogFooter`).
+  const footer = resolveExportDialogFooter({
+    status: frame.status,
+    tracking: frame.tracking,
+    error: frame.error,
+  });
   // "publishing" always disables the button: the backend already ran its last cancel test
   // before it emitted the event that puts the interface into that phase (ADR 016), so a stop
   // there cannot stop the rename. "running" with no run id disables it, and an outstanding
-  // cancel disables it in any active status. `isCancelEnabled` holds these rules keyed to
-  // `cancelRequested` in the store (ADR 025), and `presentStopButton` applies them.
+  // cancel disables it in any live status. A `failed` that the store still tracks enables it,
+  // so the user can ask again after a Stop request that failed. `isCancelEnabled` holds these
+  // rules keyed to `cancelRequested` in the store (ADR 025), and `presentStopButton` applies
+  // them.
   const stopView = presentStopButton({
     status: frame.status,
     runId: frame.runId,
     cancelRequested: frame.cancelRequested,
+    tracking: frame.tracking,
     armed: frame.stopArmed,
   });
-  // The close control hides the dialog while an export is active, and the export continues.
+  // The close control hides the dialog while the run is live, and the export continues.
   // The label says so, because an X usually reads as "close".
-  const closeLabel = isActive ? t("export.action.hide") : t("common.close");
+  const closeLabel = hidesOnDismiss ? t("export.action.hide") : t("common.close");
 
   // Holds the frame on the screen before a close changes it. The progress fields are read
   // from the store here, because only the run panel subscribes to them. A close while the
@@ -322,7 +348,14 @@ export function ExportDialog({
     onOpenChange(false);
   };
 
+  // The store is read at the call and not at the render. A live run is never reset here,
+  // whatever the caller saw: the reset would drop the only record of a run that the backend
+  // still encodes, so the dialog hides instead, the same as a dismissal (ADR 025).
   const closeAndReset = () => {
+    if (resolveExportDismissal(exportStore.getState()) === "hide") {
+      hideDialog();
+      return;
+    }
     holdFrame();
     backStep.invalidate();
     onOpenChange(false);
@@ -357,12 +390,13 @@ export function ExportDialog({
 
   // A closed dialog has nothing to dismiss. During the exit animation, Escape can still reach
   // the closing layer, and a run that ended since the hide must not reset before the user
-  // sees its result. An open dialog renders the live frame, so `isActive` is live there.
+  // sees its result. An open dialog renders the live frame, so `hidesOnDismiss` is live
+  // there.
   const dismiss = () => {
     if (!open) {
       return;
     }
-    if (isActive) {
+    if (hidesOnDismiss) {
       hideDialog();
     } else {
       closeAndReset();
@@ -379,15 +413,18 @@ export function ExportDialog({
 
   // The replacement confirmation is not a failure the user can only close: it carries its own
   // three actions, so the standard footer is replaced while it shows.
-  const isSourceRevisionConfirmation =
-    frame.status === "failed" && frame.error?.code === "sourceRevisionChanged";
+  const isSourceRevisionConfirmation = footer === "confirmation";
 
   // The notice of a run that ended without an output, and the recovery that its footer
   // offers beside Close. Null in every other status, and for the confirmation.
   const outcome =
     (frame.status === "failed" || frame.status === "canceled") &&
     !isSourceRevisionConfirmation
-      ? presentExportOutcome({ status: frame.status, error: frame.error })
+      ? presentExportOutcome({
+          status: frame.status,
+          error: frame.error,
+          tracking: frame.tracking,
+        })
       : null;
   const recovery = outcome?.recovery ?? null;
   const recoverySettingsSection =
@@ -419,11 +456,11 @@ export function ExportDialog({
   };
 
   // Closes this dialog before the settings dialog opens, so two modal dialogs never show
-  // together. The failed panel and the setup step offer this, and neither holds an active
-  // run. The status is read at the click and not at the render, so a run that became active
-  // since the render is hidden and not reset, the same as a dismissal (ADR 025).
+  // together. The failed panel and the setup step offer this, and neither holds a live run.
+  // The store is read at the click and not at the render, so a run that became live since
+  // the render is hidden and not reset, the same as a dismissal (ADR 025).
   const handleOpenSettings = (section: SettingsSection) => {
-    if (resolveExportDismissal(exportStore.getState().status) === "hide") {
+    if (resolveExportDismissal(exportStore.getState()) === "hide") {
       hideDialog();
     } else {
       closeAndReset();
@@ -603,13 +640,23 @@ export function ExportDialog({
           );
         }
 
+        // The notice of a failed Stop request hides while the next Stop request is
+        // outstanding, because the Stop button then says "Stopping...".
+        if (!showsOutcomeNotice(outcome, frame.cancelRequested)) {
+          return null;
+        }
+
+        // A failure, or a failed Stop request while the run continues. Both carry the
+        // diagnostic text when there is one. The key is new for each error instance, so a
+        // second failed Stop request mounts a new alert, and a screen reader announces it.
+        const message: ExportErrorView = outcome.message;
         return (
-          <div className="space-y-2">
+          <div key={errorNoticeKey(frame.error)} className="space-y-2">
             <Notice tone={outcome.tone} role={outcome.role}>
               <p>
                 {(t as (k: string, opts?: Record<string, string | number>) => string)(
-                  outcome.message.key,
-                  outcome.message.values,
+                  message.key,
+                  message.values,
                 )}
               </p>
             </Notice>
@@ -722,7 +769,7 @@ export function ExportDialog({
         </div>
 
         <DialogFooter>
-          {step === "setup" ? (
+          {footer === "setup" ? (
             <>
               <Button variant="outline" onClick={closeAndReset}>
                 {t("common.cancel")}
@@ -741,7 +788,7 @@ export function ExportDialog({
                 {t("export.action.chooseDestination")}
               </Button>
             </>
-          ) : isSourceRevisionConfirmation ? (
+          ) : footer === "confirmation" ? (
             <>
               <Button variant="outline" onClick={closeAndReset}>
                 {t("common.cancel")}
@@ -753,7 +800,7 @@ export function ExportDialog({
                 {t("export.action.exportAnyway")}
               </Button>
             </>
-          ) : isActive ? (
+          ) : footer === "run" ? (
             <>
               {stopView.noteKey && (
                 <p
@@ -794,7 +841,7 @@ export function ExportDialog({
               </Button>
               <Button onClick={hideDialog}>{t("export.action.runInBackground")}</Button>
             </>
-          ) : frame.status === "finished" ? (
+          ) : footer === "finished" ? (
             <>
               {canActOnOutput && (
                 <>

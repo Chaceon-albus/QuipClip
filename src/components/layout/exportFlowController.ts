@@ -2,7 +2,7 @@
  * Pure export flow controller for QuipClip layout.
  *
  * Implements the two-step export flow per ADR 024:
- * 1. Open step (`run`): checks active export status, resets terminal store states,
+ * 1. Open step (`run`): shows a live run, resets the store after a run that ended,
  *    verifies media presence, validates that marked segments exist for the active source,
  *    and runs the source disk revision check before opening the modal at the setup step.
  * 2. Start step (`confirm`): validates the chosen preset, opens the native save dialog
@@ -13,12 +13,13 @@
 import {
   buildExportRequest,
   exportStore,
+  isExportRunLive,
   openExportSaveDialog,
   ExportError,
   type ExportErrorCode,
   type ExportRequest,
   type ExportStart,
-  type ExportStatus,
+  type ExportRunLiveState,
   type OpenExportSaveDialogOptions,
 } from "@/features/export";
 import {
@@ -106,9 +107,12 @@ export interface ExportFlowControllerOptions {
   loadSettings?: () => Promise<unknown>;
 
   /**
-   * Provider for current export status. Defaults to `exportStore.getState().status`.
+   * Provider for the status and the `tracking` field of the export store, read together.
+   * Defaults to the two fields of `exportStore.getState()`. Together they decide whether the
+   * store holds a live run (`isExportRunLive`). One provider gives both, so a caller cannot
+   * mix an injected status with the tracking of the production store.
    */
-  getExportStatus?: () => ExportStatus;
+  getExportState?: () => ExportRunLiveState;
 
   /**
    * Starts media export with the assembled request. Defaults to `exportStore.getState().startExport`.
@@ -155,7 +159,7 @@ export class ExportFlowController {
   private readonly getSourceIdFn: () => string | null;
   private readonly getSettingsFn: () => Settings | null;
   private readonly loadSettingsFn: () => Promise<unknown>;
-  private readonly getExportStatusFn: () => ExportStatus;
+  private readonly getExportStateFn: () => ExportRunLiveState;
   private readonly startExportFn: (
     request: ExportRequest,
   ) => Promise<ExportStart | null>;
@@ -179,8 +183,12 @@ export class ExportFlowController {
       options.getSettings ?? (() => settingsStore.getState().settings);
     this.loadSettingsFn =
       options.loadSettings ?? (() => settingsStore.getState().loadSettings());
-    this.getExportStatusFn =
-      options.getExportStatus ?? (() => exportStore.getState().status);
+    this.getExportStateFn =
+      options.getExportState ??
+      (() => {
+        const { status, tracking } = exportStore.getState();
+        return { status, tracking };
+      });
     this.startExportFn =
       options.startExport ?? ((req) => exportStore.getState().startExport(req));
     this.reportErrorFn =
@@ -195,9 +203,11 @@ export class ExportFlowController {
   /**
    * Executes the OPEN step of the export flow (ADR 024).
    *
-   * 1. If an export is already preparing, running, or publishing, re-opens modal immediately and returns false.
-   * 2. If the export store is in a terminal state (finished, failed, or canceled), resets it so the dialog
-   *    can display the setup step.
+   * 1. If the store holds a live run (`isExportRunLive`), re-opens modal immediately on that run
+   *    and returns false. A live run is preparing, running, or publishing, or failed while the
+   *    store still tracks it: a Stop request failed, and the backend still encodes (ADR 025).
+   * 2. If the export store is in a terminal state (finished, failed, or canceled) with no live run,
+   *    resets it so the dialog can display the setup step.
    * 3. Resolves current settings, awaiting loadSettings if absent.
    * 4. If no media is loaded, reports `sourceNotFound`, opens the modal, and returns false.
    * 5. If no segment has the active source id, reports `noSegments`, opens the modal, and returns false.
@@ -208,12 +218,10 @@ export class ExportFlowController {
    *    It must NOT open the save dialog.
    */
   async run(): Promise<boolean> {
-    const currentStatus = this.getExportStatusFn();
-    if (
-      currentStatus === "preparing" ||
-      currentStatus === "running" ||
-      currentStatus === "publishing"
-    ) {
+    const exportState = this.getExportStateFn();
+    const currentStatus = exportState.status;
+    // The reset below would drop the only record of a live run, so a live run shows instead.
+    if (isExportRunLive(exportState)) {
       this.setModalOpen(true);
       return false;
     }
@@ -312,7 +320,7 @@ export class ExportFlowController {
     if (!outputPath) {
       // If openExportSaveDialog failed and reported to the store, ensure modal shows it;
       // otherwise on cancel leave modal as-is on the setup step.
-      if (this.getExportStatusFn() === "failed") {
+      if (this.getExportStateFn().status === "failed") {
         this.setModalOpen(true);
       }
       return false;

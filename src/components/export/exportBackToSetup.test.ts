@@ -132,19 +132,28 @@ describe("Back after a stop request that the IPC layer rejected", () => {
   });
 });
 
-// This block pins a known limitation, not a wanted behavior. A later unit changes the store
-// so that a rejected slot cancel keeps the start. That unit must invert these expectations.
-describe("KNOWN LIMITATION: Back after a slot cancel that rejects during preparing", () => {
-  it("shows Back while the backend may still encode the start that the store dropped", async () => {
+describe("Back after a slot cancel that rejects during preparing", () => {
+  /**
+   * A store whose start waits until the test answers it, and whose `cancel_active_export`
+   * goes through the real client with an invoke that rejects. The Stop fails while the start
+   * still waits for its run id.
+   */
+  async function failTheStopWhileTheStartWaits() {
+    let emit!: (event: ExportProgressEvent) => void;
     let answerStart: (start: ExportStart) => void = () => {};
+    let refuseStart: (error: ExportError) => void = () => {};
     const startFn = vi.fn(
       () =>
-        new Promise<ExportStart>((resolve) => {
+        new Promise<ExportStart>((resolve, reject) => {
           answerStart = resolve;
+          refuseStart = reject;
         }),
     );
     const store = createExportStore({
-      subscribeExportProgress: () => Promise.resolve(() => {}),
+      subscribeExportProgress: (handler) => {
+        emit = handler;
+        return Promise.resolve(() => {});
+      },
       startExport: startFn,
       cancelActiveExport: () =>
         clientCancelActiveExport({ invoke: vi.fn().mockRejectedValue("IPC closed") }),
@@ -155,17 +164,57 @@ describe("KNOWN LIMITATION: Back after a slot cancel that rejects during prepari
       expect(startFn).toHaveBeenCalled();
     });
     await expect(store.getState().cancelExport()).resolves.toBe(false);
+    return {
+      store,
+      starting,
+      emit: (event: ExportProgressEvent) => {
+        emit(event);
+      },
+      answerStart: (start: ExportStart) => {
+        answerStart(start);
+      },
+      refuseStart: (error: ExportError) => {
+        refuseStart(error);
+      },
+    };
+  }
 
-    // The store dropped the start: failed, nothing tracked, and Back is offered.
+  it("is not offered while the backend can still encode the start that the store keeps", async () => {
+    const { store, starting, answerStart } = await failTheStopWhileTheStartWaits();
+
+    // The store keeps the start: failed, still tracked, and Back is not offered.
     expect(store.getState().status).toBe("failed");
+    expect(store.getState().tracking).toBe(true);
+    expect(canGoBackToSetup(store.getState())).toBe(false);
+
+    // The backend answers with the run that it encodes. The store takes the answer.
+    answerStart(startAnswer("run-kept"));
+    await expect(starting).resolves.toMatchObject({ runId: "run-kept" });
+
+    expect(store.getState().runId).toBe("run-kept");
+    expect(store.getState().tracking).toBe(true);
+    expect(canGoBackToSetup(store.getState())).toBe(false);
+  });
+
+  it("is offered once the kept run ends on a failure", async () => {
+    const { store, starting, answerStart, emit } =
+      await failTheStopWhileTheStartWaits();
+    answerStart(startAnswer("run-kept"));
+    await starting;
+
+    emit({ event: "failed", runId: "run-kept", code: "ffmpegProcessFailed" });
+
     expect(store.getState().tracking).toBe(false);
     expect(canGoBackToSetup(store.getState())).toBe(true);
+  });
 
-    // The backend answers with a run that it encodes. The store discards the answer.
-    answerStart(startAnswer("run-orphan"));
+  it("is offered once the backend refuses the kept start", async () => {
+    const { store, starting, refuseStart } = await failTheStopWhileTheStartWaits();
+
+    refuseStart(new ExportError({ code: "outputReadOnly" }));
     await expect(starting).resolves.toBeNull();
 
-    expect(store.getState().runId).toBeNull();
+    expect(store.getState().error?.code).toBe("outputReadOnly");
     expect(store.getState().tracking).toBe(false);
     expect(canGoBackToSetup(store.getState())).toBe(true);
   });
@@ -279,7 +328,7 @@ function startGuardedOpenStep(revision: Partial<MediaSourceRevisionDescriptor>) 
   const step = runExportFlow({
     ...guardOpenStepEffects(isCurrent, { setModalOpen, reportError }),
     filterName: "Video Files",
-    getExportStatus: () => "idle",
+    getExportState: () => ({ status: "idle", tracking: false }),
     getMedia: () => media,
     readSourceRevision,
     getSourceId: () => "src-1",

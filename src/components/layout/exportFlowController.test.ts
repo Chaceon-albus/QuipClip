@@ -6,7 +6,13 @@ import {
   runExportFlow,
   type MediaFlowDescriptor,
 } from "./exportFlowController";
-import type { ExportRequest } from "@/features/export";
+import {
+  cancelActiveExport as clientCancelActiveExport,
+  createExportStore,
+  type ExportProgressEvent,
+  type ExportRequest,
+  type ExportStart,
+} from "@/features/export";
 import type { MediaSourceRevisionDescriptor } from "@/features/media";
 import type { Preset, Settings } from "@/features/settings/types";
 import type { Pts, Segment } from "@/types/project";
@@ -106,7 +112,7 @@ describe("ExportFlowController", () => {
         startExport,
         reportError,
         filterName: "Video Files",
-        getExportStatus: () => "idle",
+        getExportState: () => ({ status: "idle", tracking: false }),
         getMedia: () => media,
         readSourceRevision: createMatchingReader(media),
         getSourceId: () => "source-1",
@@ -135,7 +141,7 @@ describe("ExportFlowController", () => {
         reportError,
         readSourceRevision,
         filterName: "Video Files",
-        getExportStatus: () => "idle",
+        getExportState: () => ({ status: "idle", tracking: false }),
         getMedia: () => null,
         getSourceId: () => null,
         getSegments: () => [],
@@ -162,7 +168,7 @@ describe("ExportFlowController", () => {
         openSaveDialog,
         reportError,
         filterName: "Video Files",
-        getExportStatus: () => "idle",
+        getExportState: () => ({ status: "idle", tracking: false }),
         getMedia: () => media,
         readSourceRevision: createMatchingReader(media),
         getSourceId: () => "source-1",
@@ -188,7 +194,7 @@ describe("ExportFlowController", () => {
           setModalOpen,
           reset,
           filterName: "Video Files",
-          getExportStatus: () => terminalStatus,
+          getExportState: () => ({ status: terminalStatus, tracking: false }),
           getMedia: () => media,
           readSourceRevision: createMatchingReader(media),
           getSourceId: () => "source-1",
@@ -215,7 +221,7 @@ describe("ExportFlowController", () => {
         setModalOpen,
         loadSettings,
         filterName: "Video Files",
-        getExportStatus: () => "idle",
+        getExportState: () => ({ status: "idle", tracking: false }),
         getSettings: () => currentSettings,
         getMedia: () => media,
         readSourceRevision: createMatchingReader(media),
@@ -237,7 +243,7 @@ describe("ExportFlowController", () => {
         setModalOpen,
         loadSettings,
         filterName: "Video Files",
-        getExportStatus: () => "idle",
+        getExportState: () => ({ status: "idle", tracking: false }),
         getSettings: () => null,
         getMedia: () => media,
         readSourceRevision: createMatchingReader(media),
@@ -260,7 +266,7 @@ describe("ExportFlowController", () => {
           setModalOpen,
           openSaveDialog,
           startExport,
-          getExportStatus: () => activeStatus,
+          getExportState: () => ({ status: activeStatus, tracking: false }),
           filterName: "Video Files",
         });
 
@@ -269,6 +275,149 @@ describe("ExportFlowController", () => {
         expect(openSaveDialog).not.toHaveBeenCalled();
         expect(startExport).not.toHaveBeenCalled();
       }
+    });
+
+    it("opens the modal on a failed run that the store still tracks, and does not reset it", async () => {
+      // A Stop request failed, and the backend still encodes. A reset would drop the only
+      // record of that run.
+      const setModalOpen = vi.fn();
+      const reset = vi.fn();
+      const reportError = vi.fn();
+      const openSaveDialog = vi.fn();
+      const media = createMedia("/media/video.mp4", "video.mp4");
+      const readSourceRevision = createMatchingReader(media);
+
+      const result = await runExportFlow({
+        setModalOpen,
+        reset,
+        reportError,
+        openSaveDialog,
+        filterName: "Video Files",
+        getExportState: () => ({ status: "failed", tracking: true }),
+        getMedia: () => media,
+        readSourceRevision,
+        getSourceId: () => "source-1",
+        getSegments: () => [createSegment("s1", "source-1", "0", "100")],
+        getSettings: () => createSettings([createPreset()]),
+      });
+
+      expect(result).toBe(false);
+      expect(setModalOpen).toHaveBeenCalledWith(true);
+      expect(reset).not.toHaveBeenCalled();
+      expect(reportError).not.toHaveBeenCalled();
+      expect(readSourceRevision).not.toHaveBeenCalled();
+      expect(openSaveDialog).not.toHaveBeenCalled();
+    });
+
+    describe("run on a real store after a slot cancel that the IPC layer rejected", () => {
+      /**
+       * Drives a real export store to `failed` with a tracked start: the Stop request fails
+       * while the start waits for its run id. The flow reads and resets that store.
+       */
+      async function failTheStopWhileTheStartWaits() {
+        let emit!: (event: ExportProgressEvent) => void;
+        let answerStart: (start: ExportStart) => void = () => {};
+        const startFn = vi.fn(
+          () =>
+            new Promise<ExportStart>((resolve) => {
+              answerStart = resolve;
+            }),
+        );
+        const store = createExportStore({
+          subscribeExportProgress: (handler) => {
+            emit = handler;
+            return Promise.resolve(() => {});
+          },
+          startExport: startFn,
+          cancelActiveExport: () =>
+            clientCancelActiveExport({
+              invoke: vi.fn().mockRejectedValue("IPC closed"),
+            }),
+        });
+        const starting = store.getState().startExport({
+          sourcePath: "/media/video.mp4",
+          outputPath: "/media/out.mp4",
+          segments: [{ inPts: "0" as Pts, outPts: "100" as Pts }],
+          presetId: "default",
+        });
+        await vi.waitFor(() => {
+          expect(startFn).toHaveBeenCalled();
+        });
+        await store.getState().cancelExport();
+        expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
+        return {
+          store,
+          starting,
+          emit: (event: ExportProgressEvent) => {
+            emit(event);
+          },
+          answerStart: (start: ExportStart) => {
+            answerStart(start);
+          },
+        };
+      }
+
+      function runOn(store: ReturnType<typeof createExportStore>) {
+        const setModalOpen = vi.fn();
+        const media = createMedia("/media/video.mp4", "video.mp4");
+        const result = runExportFlow({
+          setModalOpen,
+          filterName: "Video Files",
+          getExportState: () => store.getState(),
+          reset: () => {
+            store.getState().reset();
+          },
+          reportError: (err) => {
+            store.getState().reportError(err);
+          },
+          getMedia: () => media,
+          readSourceRevision: createMatchingReader(media),
+          getSourceId: () => "source-1",
+          getSegments: () => [createSegment("s1", "source-1", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+        });
+        return { result, setModalOpen };
+      }
+
+      it("shows the kept start, and the store still takes its answer", async () => {
+        const { store, starting, answerStart } = await failTheStopWhileTheStartWaits();
+
+        const { result, setModalOpen } = runOn(store);
+
+        await expect(result).resolves.toBe(false);
+        expect(setModalOpen).toHaveBeenCalledWith(true);
+        expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
+
+        answerStart({
+          runId: "run-kept",
+          presetId: "default",
+          outputPath: "/media/out.mp4",
+          segmentCount: 1,
+          totalDurationUs: 1_000_000,
+        });
+        await expect(starting).resolves.toMatchObject({ runId: "run-kept" });
+        expect(store.getState()).toMatchObject({ runId: "run-kept", tracking: true });
+      });
+
+      it("resets and reaches the setup step once the kept run ended", async () => {
+        const { store, starting, answerStart, emit } =
+          await failTheStopWhileTheStartWaits();
+        answerStart({
+          runId: "run-kept",
+          presetId: "default",
+          outputPath: "/media/out.mp4",
+          segmentCount: 1,
+          totalDurationUs: 1_000_000,
+        });
+        await starting;
+        emit({ event: "failed", runId: "run-kept", code: "ffmpegProcessFailed" });
+
+        const { result, setModalOpen } = runOn(store);
+
+        await expect(result).resolves.toBe(true);
+        expect(setModalOpen).toHaveBeenCalledWith(true);
+        expect(store.getState()).toMatchObject({ status: "idle", tracking: false });
+      });
     });
 
     describe("the source replacement check in run", () => {
@@ -288,7 +437,7 @@ describe("ExportFlowController", () => {
           reportError,
           openSaveDialog,
           readSourceRevision,
-          getExportStatus: () => "idle",
+          getExportState: () => ({ status: "idle", tracking: false }),
           getMedia: () => media,
           getSourceId: () => "src-1",
           getSegments: () => [createSegment("s1", "src-1", "0", "100")],
@@ -317,7 +466,7 @@ describe("ExportFlowController", () => {
           reportError,
           openSaveDialog,
           readSourceRevision: vi.fn().mockResolvedValue(touched),
-          getExportStatus: () => "idle",
+          getExportState: () => ({ status: "idle", tracking: false }),
           getMedia: () => media,
           getSourceId: () => "src-1",
           getSegments: () => [createSegment("s1", "src-1", "0", "100")],
@@ -345,7 +494,7 @@ describe("ExportFlowController", () => {
           openSaveDialog,
           readSourceRevision,
           skipSourceRevisionCheck: true,
-          getExportStatus: () => "idle",
+          getExportState: () => ({ status: "idle", tracking: false }),
           getMedia: () => media,
           getSourceId: () => "src-1",
           getSegments: () => [createSegment("s1", "src-1", "0", "100")],
@@ -370,7 +519,7 @@ describe("ExportFlowController", () => {
           setModalOpen,
           reportError,
           readSourceRevision,
-          getExportStatus: () => "idle",
+          getExportState: () => ({ status: "idle", tracking: false }),
           getMedia: () => media,
           getSourceId: () => "src-1",
           getSegments: () => [createSegment("s1", "src-1", "0", "100")],
@@ -400,7 +549,7 @@ describe("ExportFlowController", () => {
           reportError,
           startExport,
           readSourceRevision,
-          getExportStatus: () => "idle",
+          getExportState: () => ({ status: "idle", tracking: false }),
           getMedia: () => media,
           getSourceId: () => "src-1",
           getSegments: () => [],
@@ -431,7 +580,7 @@ describe("ExportFlowController", () => {
           setModalOpen,
           reportError,
           readSourceRevision,
-          getExportStatus: () => "idle",
+          getExportState: () => ({ status: "idle", tracking: false }),
           getMedia: () => media,
           getSourceId: () => "src-1",
           getSegments: () => [createSegment("s1", "src-other", "0", "100")],
@@ -527,7 +676,7 @@ describe("ExportFlowController", () => {
         startExport,
         saveSettings,
         filterName: "Video Files",
-        getExportStatus: () => "idle",
+        getExportState: () => ({ status: "idle", tracking: false }),
         getSettings: () => settings,
         getMedia: () => media,
         getSourceId: () => "s1",
@@ -581,7 +730,7 @@ describe("ExportFlowController", () => {
         setModalOpen,
         openSaveDialog,
         filterName: "Video Files",
-        getExportStatus: () => storeStatus,
+        getExportState: () => ({ status: storeStatus, tracking: false }),
         getSettings: () => createSettings([createPreset({ id: "p1" })]),
       });
 

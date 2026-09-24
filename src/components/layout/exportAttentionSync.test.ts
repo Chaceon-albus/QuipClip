@@ -5,6 +5,7 @@ import {
   EXPORT_STATUSES,
   ExportError,
   type ExportProgressEvent,
+  type ExportStart,
   type ExportState,
   type ExportStatus,
 } from "@/features/export";
@@ -317,6 +318,69 @@ describe("startExportAttentionSync", () => {
 
     emit({ event: "failed", runId: "run-1", code: "ffmpegProcessFailed" });
     expect(store.getState()).toMatchObject({ status: "failed", tracking: false });
+    await flushPromises();
+    expect(requestAttention).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("follows a failed slot Stop, the kept start, and its finish through the store actions", async () => {
+    let emit: (event: ExportProgressEvent) => void = () => {};
+    let answerStart: (start: ExportStart) => void = () => {};
+    const startFn = vi.fn(
+      () =>
+        new Promise<ExportStart>((resolve) => {
+          answerStart = resolve;
+        }),
+    );
+    const store = createExportStore({
+      startExport: startFn,
+      cancelActiveExport: () => Promise.reject(new Error("ipc failed")),
+      subscribeExportProgress: (handler) => {
+        emit = handler;
+        return Promise.resolve(() => {});
+      },
+    });
+    const isFocused = vi.fn<() => Promise<boolean>>(() => Promise.resolve(false));
+    const requestAttention = vi.fn<() => Promise<void>>(() => Promise.resolve());
+    const stop = startExportAttentionSync({
+      store,
+      isFocused,
+      requestAttention,
+      enabled: true,
+    });
+
+    const starting = store.getState().startExport({
+      sourcePath: "/media/source.mp4",
+      outputPath: "/media/output.mp4",
+      segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+      presetId: "mp4-h264",
+    });
+    await vi.waitFor(() => {
+      expect(startFn).toHaveBeenCalled();
+    });
+    await store.getState().cancelExport();
+    expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
+    await flushPromises();
+    // The failed Stop is not an end: the start is kept.
+    expect(isFocused).not.toHaveBeenCalled();
+
+    answerStart({
+      runId: "run-kept",
+      presetId: "mp4-h264",
+      outputPath: "/media/output.mp4",
+      segmentCount: 1,
+      totalDurationUs: 5_000_000,
+      expectedFrames: 150,
+    });
+    await starting;
+    emit({ event: "publishing", runId: "run-kept" });
+    emit({
+      event: "finished",
+      runId: "run-kept",
+      outputPath: "/media/output.mp4",
+      frames: 150,
+    });
+    expect(store.getState()).toMatchObject({ status: "finished", tracking: false });
     await flushPromises();
     expect(requestAttention).toHaveBeenCalledTimes(1);
     stop();

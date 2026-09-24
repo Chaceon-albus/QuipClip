@@ -539,6 +539,7 @@ describe("segment durations and the export total", () => {
           presentExportAction({
             hasMedia: true,
             exportStatus: "idle",
+            exportTracking: false,
             segmentCount: 40,
             segmentTotal: total,
             display,

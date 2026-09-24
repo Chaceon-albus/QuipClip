@@ -8,12 +8,12 @@
  *    the store tracks, and a run that the backend still encodes then has no owner (ADR 025).
  *    The store says whether it still tracks a run, so the rule reads that and not the code.
  *
- *    Known gap: "the store tracks no run" does not prove "the backend runs nothing". When a
- *    slot cancel (`cancel_active_export`) rejects during `preparing`, the store drops the
- *    start that still waits for its run id. It shows `failed` with no tracked run, and it
- *    discards the later `start_export` answer, while the backend can still encode that run.
- *    Back shows in that state. The fix belongs in the store, in a later unit, and a test in
- *    `exportBackToSetup.test.ts` pins the gap until then.
+ *    A failed Stop request keeps the tracking in both of its forms. A `cancel_export` that
+ *    rejects keeps the run, and a `cancel_active_export` that rejects during `preparing`
+ *    keeps the start that still waits for its run id: the store takes the later
+ *    `start_export` answer, and tracks the run to its end. So `failed` with no tracked run
+ *    comes only from a run that ended, a start that the backend refused, or a failure of the
+ *    open step.
  * 2. A step that answers after the dialog closed changes nothing. The source check reads the
  *    file, which on a share that stopped answering can take seconds. A step that answered
  *    late would otherwise open the closed dialog again, or report a failure into the store
@@ -33,10 +33,11 @@ export type BackToSetupInput = Pick<ExportState, "status" | "tracking">;
  *
  * `failed` is necessary and not sufficient: the store must also have stopped tracking the
  * run. A `failed` status says only that the interface shows a failure, not that the backend
- * has no run. The store also reports `failed` when a call from the interface rejects while
- * the run continues. `cancel_export` never answers with an error of its own, so its
- * rejection comes from the IPC layer, and the store records it as `unknown`, with the run
- * still tracked. The error code therefore cannot tell this case apart, and `tracking` can.
+ * has no run. The store also reports `failed` when a Stop request rejects while the run
+ * continues. `cancel_export` and `cancel_active_export` never answer with an error of their
+ * own, so a rejection comes from the IPC layer, and the store records it as `unknown`, with
+ * the start or the run still tracked. The error code therefore cannot tell this case apart,
+ * and `tracking` can.
  *
  * An active status holds a run that a reset would drop, and `idle`, `finished`, and
  * `canceled` do not offer Back.

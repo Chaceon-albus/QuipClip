@@ -6,12 +6,20 @@
  */
 
 import type { ExportState } from "@/features/export";
+import { isExportRunLive } from "@/features/export/runState";
 import { rationalToNumber } from "@/lib/time";
 import { isCancelOutstanding } from "./exportCancelState";
 
 export type ExportProgressInput = Pick<
   ExportState,
-  "status" | "frame" | "expectedFrames" | "fps" | "speed" | "cancelRequested"
+  | "status"
+  | "frame"
+  | "expectedFrames"
+  | "fps"
+  | "speed"
+  | "cancelRequested"
+  | "tracking"
+  | "encodeStarted"
 >;
 
 export type ExportProgressPhase = "preparing" | "running" | "publishing" | "canceling";
@@ -32,23 +40,33 @@ export interface ExportProgressView {
   expectedFrames: number | null;
 }
 
-/** Null when the status is not preparing, running, or publishing. */
+/**
+ * The progress of a live run (`isExportRunLive`), or null when the run is not live.
+ *
+ * A `failed` status that the store still tracks is live: a Stop request failed, and the
+ * backend still prepares or encodes. It shows the progress of that phase: `running` once the
+ * store saw the encode start (`encodeStarted`), and `preparing` before. It is never the
+ * publication. The `publishing` event changes the status to `publishing`, and a Stop request
+ * that fails after that event keeps `publishing` (`reportStopFailure` in the store).
+ */
 export function presentExportProgress(
   input: ExportProgressInput,
 ): ExportProgressView | null {
-  if (
-    input.status !== "preparing" &&
-    input.status !== "running" &&
-    input.status !== "publishing"
-  ) {
+  if (!isExportRunLive(input)) {
     return null;
   }
 
-  const basePhase: "preparing" | "running" | "publishing" = input.status;
-  const canceling = isCancelOutstanding({
-    status: input.status,
-    cancelRequested: input.cancelRequested,
-  });
+  let basePhase: "preparing" | "running" | "publishing";
+  if (
+    input.status === "preparing" ||
+    input.status === "running" ||
+    input.status === "publishing"
+  ) {
+    basePhase = input.status;
+  } else {
+    basePhase = input.encodeStarted ? "running" : "preparing";
+  }
+  const canceling = isCancelOutstanding(input);
   const phase: ExportProgressPhase = canceling ? "canceling" : basePhase;
 
   let barValue: number | null = null;

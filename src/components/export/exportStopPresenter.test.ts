@@ -31,6 +31,7 @@ function createButtonInput(overrides: Partial<StopButtonInput> = {}): StopButton
     status: "running",
     runId: RUN_ID,
     cancelRequested: false,
+    tracking: true,
     armed: false,
     ...overrides,
   };
@@ -298,6 +299,35 @@ describe("presentStopButton", () => {
       appearance: "outline",
       noteKey: null,
     });
+  });
+
+  it("offers the stop again, with the two-click rule, after a failed Stop request", () => {
+    // `failed` while the store still tracks the run: the backend did not confirm the stop.
+    for (const runId of [RUN_ID, null]) {
+      expect(presentStopButton(createButtonInput({ status: "failed", runId }))).toEqual(
+        {
+          labelKey: "export.action.stop",
+          enabled: true,
+          armed: false,
+          appearance: "destructive",
+          noteKey: null,
+        },
+      );
+      expect(
+        presentStopButton(createButtonInput({ status: "failed", runId, armed: true })),
+      ).toMatchObject({ labelKey: "export.action.stopConfirm", armed: true });
+      expect(
+        presentStopButton(
+          createButtonInput({ status: "failed", runId, cancelRequested: true }),
+        ),
+      ).toMatchObject({ labelKey: "export.status.canceling", enabled: false });
+    }
+  });
+
+  it("disables the button for a failure that the store no longer tracks", () => {
+    expect(
+      presentStopButton(createButtonInput({ status: "failed", tracking: false })),
+    ).toMatchObject({ enabled: false, appearance: "outline" });
   });
 
   it("uses the destructive style exactly when the button is enabled", () => {

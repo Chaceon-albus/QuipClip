@@ -1,8 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  cancelActiveExport as clientCancelActiveExport,
+  createExportStore,
+  exportStore,
+  type ExportProgressEvent,
+  type ExportStart,
+} from "@/features/export";
 import type { ImportMediaResult } from "@/features/media";
 import type { Pts, Segment } from "@/types/project";
-import type { QuitGuardInput } from "./quitGuard";
-import { createQuitGuard, type QuitGuardDependencies } from "./quitGuardController";
+import { decideQuit, type QuitGuardInput } from "./quitGuard";
+import {
+  createQuitGuard,
+  readQuitGuardInput,
+  type QuitGuardDependencies,
+} from "./quitGuardController";
 
 const OPEN_SOURCE = "s-open";
 
@@ -14,6 +25,7 @@ function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
   return {
     timeline: { sourceId: OPEN_SOURCE, segments: [], pendingInPts: null },
     exportStatus: "idle",
+    exportTracking: false,
     unsavedPresetName: null,
     openMediaPath: "/videos/open.mp4",
     ...overrides,
@@ -315,5 +327,121 @@ describe("requestOpen", () => {
     await expect(guard.requestOpen("/videos/next.mp4")).resolves.toBeNull();
     expect(importPath).not.toHaveBeenCalled();
     expect(guard.store.getState().prompt?.kind).toBe("quit");
+  });
+});
+
+describe("the quit prompt for a live export after a failed Stop request", () => {
+  /**
+   * A real export store in `failed` with a tracked start: a slot cancel went through the
+   * real client to an IPC layer that rejects, while the start waited for its run id.
+   */
+  async function failTheStopWhileTheStartWaits() {
+    let emit!: (event: ExportProgressEvent) => void;
+    let answerStart: (start: ExportStart) => void = () => {};
+    const startFn = vi.fn(
+      () =>
+        new Promise<ExportStart>((resolve) => {
+          answerStart = resolve;
+        }),
+    );
+    const store = createExportStore({
+      subscribeExportProgress: (handler) => {
+        emit = handler;
+        return Promise.resolve(() => {});
+      },
+      startExport: startFn,
+      cancelActiveExport: () =>
+        clientCancelActiveExport({ invoke: vi.fn().mockRejectedValue("IPC closed") }),
+    });
+    const starting = store.getState().startExport({
+      sourcePath: "/videos/open.mp4",
+      outputPath: "/videos/out.mp4",
+      segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+      presetId: "default",
+    });
+    await vi.waitFor(() => {
+      expect(startFn).toHaveBeenCalled();
+    });
+    await store.getState().cancelExport();
+    expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
+    return {
+      store,
+      starting,
+      emit: (event: ExportProgressEvent) => {
+        emit(event);
+      },
+      answerStart: (start: ExportStart) => {
+        answerStart(start);
+      },
+    };
+  }
+
+  function inputOf(store: ReturnType<typeof createExportStore>): QuitGuardInput {
+    const { status, tracking } = store.getState();
+    return createInput({ exportStatus: status, exportTracking: tracking });
+  }
+
+  it("asks first, names the export, and quits on confirm", async () => {
+    const { store } = await failTheStopWhileTheStartWaits();
+    const { guard, confirmQuit } = setup(createInput(), {
+      readInput: () => inputOf(store),
+    });
+
+    guard.requestQuit();
+
+    expect(confirmQuit).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt).toEqual({
+      kind: "quit",
+      loss: { segments: 0, pendingIn: false, exportActive: true, unsavedPreset: null },
+    });
+
+    // Rust then cancels the run that holds the export slot (ADR 017).
+    guard.confirm();
+    expect(confirmQuit).toHaveBeenCalledTimes(1);
+  });
+
+  it("quits at once when the kept run has ended and nothing else would be lost", async () => {
+    const { store, starting, answerStart, emit } =
+      await failTheStopWhileTheStartWaits();
+    answerStart({
+      runId: "run-kept",
+      presetId: "default",
+      outputPath: "/videos/out.mp4",
+      segmentCount: 1,
+      totalDurationUs: 1_000_000,
+    });
+    await starting;
+    const { guard, confirmQuit } = setup(createInput(), {
+      readInput: () => inputOf(store),
+    });
+
+    // Still live once the start answered.
+    guard.requestQuit();
+    expect(guard.store.getState().prompt?.kind).toBe("quit");
+    guard.cancel();
+
+    emit({ event: "failed", runId: "run-kept", code: "ffmpegProcessFailed" });
+    guard.requestQuit();
+
+    expect(guard.store.getState().prompt).toBeNull();
+    expect(confirmQuit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("readQuitGuardInput", () => {
+  it("reads the status and the tracking of the production export store", () => {
+    // The production store has no injected client, so the test writes its public state.
+    exportStore.setState({ status: "failed", tracking: true });
+    try {
+      const input = readQuitGuardInput();
+      expect(input).toMatchObject({ exportStatus: "failed", exportTracking: true });
+      expect(decideQuit(input).loss.exportActive).toBe(true);
+    } finally {
+      exportStore.getState().reset();
+    }
+    expect(readQuitGuardInput()).toMatchObject({
+      exportStatus: "idle",
+      exportTracking: false,
+    });
   });
 });

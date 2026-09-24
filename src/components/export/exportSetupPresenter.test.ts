@@ -277,6 +277,7 @@ describe("exportSetupPresenter", () => {
         const tooltip = presentExportAction({
           hasMedia: true,
           exportStatus: "idle",
+          exportTracking: false,
           segmentCount: input.segmentCount,
           segmentTotal: input.segmentTotal,
           display: input.display,

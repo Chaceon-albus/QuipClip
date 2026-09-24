@@ -76,13 +76,15 @@ export interface QuitGuard {
 /** Reads the production stores. */
 export function readQuitGuardInput(): QuitGuardInput {
   const timeline = timelineStore.getState();
+  const exportState = exportStore.getState();
   return {
     timeline: {
       sourceId: timeline.sourceId,
       segments: timeline.segments,
       pendingInPts: timeline.pendingInPts,
     },
-    exportStatus: exportStore.getState().status,
+    exportStatus: exportState.status,
+    exportTracking: exportState.tracking,
     unsavedPresetName: settingsPanelStore.getState().unsavedPresetName,
     openMediaPath: mediaStore.getState().media?.path ?? null,
   };

@@ -1,7 +1,8 @@
 /**
  * Mirrors the export progress on the macOS Dock icon and the Windows task bar (ADR 025).
  *
- * The mapping follows the export status only. A cancel request does not change it.
+ * The mapping follows the export status and the tracking. A cancel request does not change
+ * it.
  */
 
 import {
@@ -14,7 +15,7 @@ import {
   presentExportProgress,
   type ExportProgressInput,
 } from "@/components/export/exportProgressPresenter";
-import { exportStore, type ExportStoreState } from "@/features/export";
+import { exportStore, isExportRunLive, type ExportStoreState } from "@/features/export";
 import { isMacOS } from "@/lib/platform";
 
 export type TaskbarProgressInput = ExportProgressInput;
@@ -31,7 +32,14 @@ export interface TaskbarProgressOptions {
   resetIndeterminateValue: boolean;
 }
 
-/** Pure mapping from the export state to the task bar state (ADR 025). */
+/**
+ * Pure mapping from the export state to the task bar state (ADR 025).
+ *
+ * A live run (`isExportRunLive`) shows its progress. That includes a `failed` status that the
+ * store still tracks: a Stop request failed, and the backend still encodes, so the bar shows
+ * the phase of the run and not the error state. A `failed` with no tracked run shows the
+ * error state.
+ */
 export function resolveTaskbarProgress(
   input: TaskbarProgressInput,
   options: TaskbarProgressOptions,
@@ -40,17 +48,10 @@ export function resolveTaskbarProgress(
     ? { status: ProgressBarStatus.Indeterminate, progress: 0 }
     : { status: ProgressBarStatus.Indeterminate };
 
-  switch (input.status) {
-    case "idle":
-    case "finished":
-    case "canceled":
-      return { status: ProgressBarStatus.None };
-    case "failed":
-      return { status: ProgressBarStatus.Error, progress: 100 };
-    case "preparing":
-    case "running":
-    case "publishing":
-      break;
+  if (!isExportRunLive(input)) {
+    return input.status === "failed"
+      ? { status: ProgressBarStatus.Error, progress: 100 }
+      : { status: ProgressBarStatus.None };
   }
 
   const view = presentExportProgress(input);

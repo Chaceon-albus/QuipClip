@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  errorNoticeKey,
   presentExportError,
   presentExportErrorRecovery,
   presentExportOutcome,
+  showsOutcomeNotice,
   type ExportErrorRecovery,
 } from "./exportErrorPresenter";
 import { en } from "@/i18n/locales/en";
@@ -105,6 +107,7 @@ describe("presentExportOutcome", () => {
     const outcome = presentExportOutcome({
       status: "canceled",
       error: new ExportError({ code: "canceled" }),
+      tracking: false,
     });
 
     expect(outcome).toStrictEqual({
@@ -121,6 +124,7 @@ describe("presentExportOutcome", () => {
     const outcome = presentExportOutcome({
       status: "canceled",
       error: new ExportError({ code: "canceled", detail: "process killed" }),
+      tracking: false,
     });
 
     expect(outcome.kind).toBe("canceled");
@@ -128,15 +132,16 @@ describe("presentExportOutcome", () => {
   });
 
   it("presents a canceled status with no error as canceled", () => {
-    expect(presentExportOutcome({ status: "canceled", error: null }).kind).toBe(
-      "canceled",
-    );
+    expect(
+      presentExportOutcome({ status: "canceled", error: null, tracking: false }).kind,
+    ).toBe("canceled");
   });
 
   it("presents a canceled code as canceled even in the failed status", () => {
     const outcome = presentExportOutcome({
       status: "failed",
       error: new ExportError({ code: "canceled" }),
+      tracking: false,
     });
 
     expect(outcome.kind).toBe("canceled");
@@ -150,6 +155,7 @@ describe("presentExportOutcome", () => {
         code: "ffmpegProcessFailed",
         detail: "Conversion failed!",
       }),
+      tracking: false,
     });
 
     expect(outcome).toStrictEqual({
@@ -166,10 +172,12 @@ describe("presentExportOutcome", () => {
     const withoutDetail = presentExportOutcome({
       status: "failed",
       error: new ExportError({ code: "outputRenameFailed" }),
+      tracking: false,
     });
     const emptyDetail = presentExportOutcome({
       status: "failed",
       error: new ExportError({ code: "outputRenameFailed", detail: "" }),
+      tracking: false,
     });
 
     expect(withoutDetail.detail).toBeNull();
@@ -177,7 +185,9 @@ describe("presentExportOutcome", () => {
   });
 
   it("falls back to exportError.unknown for a failed status with no error", () => {
-    expect(presentExportOutcome({ status: "failed", error: null })).toStrictEqual({
+    expect(
+      presentExportOutcome({ status: "failed", error: null, tracking: false }),
+    ).toStrictEqual({
       kind: "failed",
       tone: "destructive",
       role: "alert",
@@ -195,6 +205,7 @@ describe("presentExportOutcome", () => {
       const outcome = presentExportOutcome({
         status: "failed",
         error: new ExportError({ code }),
+        tracking: false,
       });
       expect(outcome.kind).toBe("failed");
       expect(outcome.tone).toBe("destructive");
@@ -207,24 +218,89 @@ describe("presentExportOutcome", () => {
 
   it("offers no recovery for a canceled export, whatever the status", () => {
     expect(
-      presentExportOutcome({ status: "canceled", error: null }).recovery,
+      presentExportOutcome({ status: "canceled", error: null, tracking: false })
+        .recovery,
     ).toBeNull();
     expect(
       presentExportOutcome({
         status: "failed",
         error: new ExportError({ code: "canceled" }),
+        tracking: false,
       }).recovery,
     ).toBeNull();
   });
 
   it("uses a canceled status text that exists in both catalogs", () => {
-    const outcome = presentExportOutcome({ status: "canceled", error: null });
+    const outcome = presentExportOutcome({
+      status: "canceled",
+      error: null,
+      tracking: false,
+    });
 
     for (const catalog of [en, zhCN]) {
       const resolved = resolveCatalogKey(catalog, outcome.message.key);
       expect(typeof resolved).toBe("string");
       expect((resolved as string).trim().length).toBeGreaterThan(0);
     }
+  });
+
+  describe("a failed status that the store still tracks", () => {
+    it("presents a failed Stop request as a warning that the export continues", () => {
+      // A Stop request that the IPC layer rejects gives `unknown` with its text as detail.
+      const outcome = presentExportOutcome({
+        status: "failed",
+        error: new ExportError({ code: "unknown", detail: "IPC closed" }),
+        tracking: true,
+      });
+
+      expect(outcome).toStrictEqual({
+        kind: "stopFailed",
+        tone: "warning",
+        role: "alert",
+        message: { key: "export.status.stopFailed" },
+        detail: "IPC closed",
+        recovery: null,
+      });
+    });
+
+    it("offers no recovery and names no ended export, whatever the code", () => {
+      for (const code of EXPORT_ERROR_CODES) {
+        const outcome = presentExportOutcome({
+          status: "failed",
+          error: new ExportError({ code }),
+          tracking: true,
+        });
+        expect(outcome.kind).toBe("stopFailed");
+        expect(outcome.recovery).toBeNull();
+        expect(outcome.detail).toBeNull();
+      }
+    });
+
+    it("keeps the result of a run that ended once the store stops tracking it", () => {
+      const error = new ExportError({ code: "ffmpegProcessFailed" });
+
+      expect(
+        presentExportOutcome({ status: "failed", error, tracking: false }).kind,
+      ).toBe("failed");
+      // `canceled` is never live, so the tracking does not change it.
+      expect(
+        presentExportOutcome({ status: "canceled", error: null, tracking: true }).kind,
+      ).toBe("canceled");
+    });
+
+    it("uses a text that exists in both catalogs", () => {
+      const outcome = presentExportOutcome({
+        status: "failed",
+        error: null,
+        tracking: true,
+      });
+
+      for (const catalog of [en, zhCN]) {
+        const resolved = resolveCatalogKey(catalog, outcome.message.key);
+        expect(typeof resolved).toBe("string");
+        expect((resolved as string).trim().length).toBeGreaterThan(0);
+      }
+    });
   });
 });
 
@@ -353,5 +429,57 @@ describe("presentExportErrorRecovery", () => {
     });
 
     expect(presentExportErrorRecovery(error)).toStrictEqual(BACK);
+  });
+});
+
+describe("showsOutcomeNotice", () => {
+  const stopFailed = presentExportOutcome({
+    status: "failed",
+    error: new ExportError({ code: "unknown" }),
+    tracking: true,
+  });
+
+  it("hides the notice of a failed Stop while the next Stop request is outstanding", () => {
+    // The Stop button says "Stopping...", and "could not stop" beside it would contradict it.
+    expect(showsOutcomeNotice(stopFailed, true)).toBe(false);
+    expect(showsOutcomeNotice(stopFailed, false)).toBe(true);
+  });
+
+  it("always shows the notice of a failure or a stop that ended the run", () => {
+    const failed = presentExportOutcome({
+      status: "failed",
+      error: new ExportError({ code: "ffmpegProcessFailed" }),
+      tracking: false,
+    });
+    const canceled = presentExportOutcome({
+      status: "canceled",
+      error: null,
+      tracking: false,
+    });
+    for (const cancelRequested of [false, true]) {
+      expect(showsOutcomeNotice(failed, cancelRequested)).toBe(true);
+      expect(showsOutcomeNotice(canceled, cancelRequested)).toBe(true);
+    }
+  });
+});
+
+describe("errorNoticeKey", () => {
+  it("gives one key for one error instance", () => {
+    const error = new ExportError({ code: "unknown", detail: "IPC closed" });
+    expect(errorNoticeKey(error)).toBe(errorNoticeKey(error));
+  });
+
+  it("gives a new key for another instance with the same code and text", () => {
+    // A second failed Stop mounts a new alert, so a screen reader announces it.
+    const first = new ExportError({ code: "unknown", detail: "IPC closed" });
+    const second = new ExportError({ code: "unknown", detail: "IPC closed" });
+    expect(errorNoticeKey(second)).not.toBe(errorNoticeKey(first));
+  });
+
+  it("gives a fixed key for no error", () => {
+    expect(errorNoticeKey(null)).toBe(errorNoticeKey(null));
+    expect(errorNoticeKey(null)).not.toBe(
+      errorNoticeKey(new ExportError({ code: "unknown" })),
+    );
   });
 });

@@ -43,6 +43,8 @@ function createInput(
     fps: { n: 25, d: 1 },
     speed: { n: 9, d: 5 },
     cancelRequested: false,
+    tracking: false,
+    encodeStarted: true,
     ...overrides,
   };
 }
@@ -60,7 +62,7 @@ function barInput(overrides: Partial<ExportRunBarInput> = {}): ExportRunBarInput
 }
 
 describe("selectExportProgressFields", () => {
-  it("picks the four fields that change on each progress event", () => {
+  it("picks the fields that change with the progress events", () => {
     const state = {
       ...createInput(),
       runId: "run-1",
@@ -71,6 +73,7 @@ describe("selectExportProgressFields", () => {
       expectedFrames: 1000,
       fps: { n: 25, d: 1 },
       speed: { n: 9, d: 5 },
+      encodeStarted: true,
     });
   });
 });
@@ -300,6 +303,19 @@ describe("presentExportRunBar", () => {
           barInput({ status: "failed", tracking: true, expectedFrames: null }),
         ),
       ).toEqual({ value: null, tone: "default", flowing: true, decorative: false });
+    });
+
+    it("stops the gradient while a retried stop is outstanding", () => {
+      expect(
+        presentExportRunBar(
+          barInput({
+            status: "failed",
+            tracking: true,
+            frame: 400,
+            cancelRequested: true,
+          }),
+        ),
+      ).toEqual({ value: 40, tone: "default", flowing: false, decorative: false });
     });
 
     it("turns destructive only when the store stops tracking the run", () => {

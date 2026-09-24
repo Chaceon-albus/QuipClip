@@ -13,8 +13,8 @@
  * It returns translation keys and does not call the i18n runtime (ADR 011).
  */
 
-import { isExportRunActive } from "@/components/export/exportCancelState";
 import type { ExportStatus } from "@/features/export";
+import { isExportRunLive } from "@/features/export/runState";
 import { formatSegmentTotal } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import { canExportMedia } from "./actionConditions";
@@ -38,7 +38,7 @@ export type ExportActionLabel =
 export interface ExportActionView {
   /** The `disabled` state of the button and of the File menu item. */
   readonly disabled: boolean;
-  /** True while an export run is active. The button icon then becomes a spinner. */
+  /** True while an export run is live. The button icon then becomes a spinner. */
   readonly busy: boolean;
   readonly label: ExportActionLabel;
   readonly reason: ExportActionReasonKey | null;
@@ -47,6 +47,8 @@ export interface ExportActionView {
 export interface ExportActionInput {
   readonly hasMedia: boolean;
   readonly exportStatus: ExportStatus;
+  /** The `tracking` field of the export store. With the status, it decides `busy`. */
+  readonly exportTracking: boolean;
   /** The number of segments of the open source. */
   readonly segmentCount: number;
   /**
@@ -63,14 +65,15 @@ export interface ExportActionInput {
  * Returns what the export action shows. The rules apply in this order:
  *
  * 1. No media: disabled, with the reason "Open a video first".
- * 2. An active run (preparing, running or publishing): the icon is a spinner, and the
+ * 2. A live run (`isExportRunLive`): preparing, running or publishing, or failed while the
+ *    store still tracks the run after a failed Stop request. The icon is a spinner, and the
  *    tooltip says that a click shows the running export. The export flow opens the dialog
  *    on that run (ADR 025). The label of the button stays "Export".
  * 3. No segment of the open source: available, with the hint "Mark at least one segment
  *    first". A click opens the dialog on the `noSegments` message (ADR 024).
  * 4. Otherwise: the number of segments and their total duration.
  *
- * Media stays open once it is open, so rule 1 never meets an active run. The order only
+ * Media stays open once it is open, so rule 1 never meets a live run. The order only
  * decides the result for a state that the application does not reach.
  */
 export function presentExportAction(input: ExportActionInput): ExportActionView {
@@ -83,7 +86,7 @@ export function presentExportAction(input: ExportActionInput): ExportActionView 
     };
   }
 
-  if (isExportRunActive(input.exportStatus)) {
+  if (isExportRunLive({ status: input.exportStatus, tracking: input.exportTracking })) {
     return {
       disabled: false,
       busy: true,
