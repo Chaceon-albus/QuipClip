@@ -103,6 +103,29 @@ it was hidden.
 The indicator is a leaf component. It reads the progress fields itself, so a progress event
 does not render the whole status bar again.
 
+(Changed on 2026-09-24.) The store exposes `tracking`: true while it holds the run
+identifier of a run, from the `start_export` answer until that run's `finished` or `failed`
+event, or a reset. A Stop request that fails sets `failed` while the backend still encodes,
+so `failed` alone does not mean that the run ended.
+
+- Back in the failed dialog, and the dismiss control of a failed result in the status bar,
+  act only while `tracking` is false. Otherwise the reset would drop the only record of a
+  live run.
+- When a run ends in `finished` or `failed` with `tracking` false while the window does not
+  have the focus, the frontend calls `requestUserAttention(Informational)` once for that run.
+  macOS bounces the Dock icon once, and Windows flashes the taskbar button until the window
+  gets the focus. A `canceled` run does not ask, because the user chose that result. A start
+  that the backend refuses counts as an end, because the prepare step can take up to 30
+  seconds. A failed focus query or request is ignored. The capability file grants
+  `core:window:allow-request-user-attention`.
+- A polite live region in the status bar announces the result while the dialog is hidden.
+  It announces no progress.
+
+One gap is known. A cancel by slot that the IPC layer rejects while the run is preparing
+drops the start, and the store then discards the `start_export` answer. The backend keeps
+encoding with no record in the interface, so the statement above that no orphan is possible
+does not hold in that case. A later change keeps the start when that cancel is rejected.
+
 A hidden dialog is not in the document. The keyboard layer of ADR 021 therefore gives the
 window shortcuts back to the editor with no change.
 
