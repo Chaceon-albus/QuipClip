@@ -13,7 +13,8 @@ import { cva, type VariantProps } from "class-variance-authority";
  * Below 48rem the chip text collapses to its icon.
  *
  * Every item that uses these classes can take the focus, so the focus ring is in the base.
- * The ring is inset: the left group clips its overflow, and it would cut an outer ring.
+ * The ring is inset (`focus-ring-inset`): the left group clips its overflow, and it would cut
+ * an outer ring.
  *
  * - `tone: "warning"` draws a chip. The fill comes from the base token and the text from the
  *   `-text` token, like the warning Notice, because the base token does not reach 4.5:1 as
@@ -24,7 +25,7 @@ import { cva, type VariantProps } from "class-variance-authority";
  *   a warning chip stays in the warning colours.
  */
 export const statusBarItem = cva(
-  "inline-flex h-6 min-w-0 items-center gap-1.5 rounded-md px-1.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset",
+  "inline-flex h-6 min-w-0 items-center gap-1.5 rounded-md px-1.5 focus-ring-inset outline-none",
   {
     variants: {
       tone: {
@@ -40,7 +41,7 @@ export const statusBarItem = cva(
       {
         tone: "neutral",
         interactive: true,
-        className: "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+        className: "hover:bg-chrome-accent hover:text-chrome-accent-foreground",
       },
       {
         tone: "warning",

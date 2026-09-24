@@ -1265,7 +1265,7 @@ export function TimelinePanel({
              * stay in view at every scroll position. It is outside the lane, so a press on a
              * button there is not a scrub.
              */}
-            <div className="sticky left-0 z-40 flex w-[96px] shrink-0 items-center justify-center border-r border-b border-timeline-divider bg-sidebar">
+            <div className="sticky left-0 z-40 flex w-[96px] shrink-0 items-center justify-center border-r border-b border-timeline-divider bg-chrome">
               <TimelineZoomControls />
             </div>
 
@@ -1350,8 +1350,8 @@ export function TimelinePanel({
           {/* Single-Source Overview Track Row */}
           <div className="flex min-h-0 flex-1">
             {/* Left gutter (~96px wide) displaying Source Media lane header */}
-            <div className="sticky left-0 z-40 flex w-[96px] shrink-0 items-center border-r border-timeline-divider bg-sidebar px-3">
-              <span className="truncate text-xs font-semibold text-sidebar-foreground">
+            <div className="sticky left-0 z-40 flex w-[96px] shrink-0 items-center border-r border-timeline-divider bg-chrome px-3">
+              <span className="truncate text-xs font-semibold text-chrome-foreground">
                 {t("timeline.sourceLane")}
               </span>
             </div>

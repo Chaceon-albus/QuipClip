@@ -35,7 +35,7 @@ function ApproximateBadge() {
       <TooltipTrigger asChild>
         <span
           tabIndex={0}
-          className="mr-1.5 rounded-sm bg-warning/15 px-1 text-2xs text-warning-text focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          className="mr-1.5 rounded-sm bg-warning/15 px-1 text-2xs text-warning-text focus-ring outline-none"
         >
           <span aria-hidden="true">≈</span>
           <span className="sr-only">{t("statusBar.approximatePosition")}</span>
@@ -263,7 +263,7 @@ export function PreviewTimecode({
             disabled={!canEnterTime}
             onClick={open}
             aria-describedby={openHintId}
-            className="-mx-1 cursor-text rounded-sm px-1 py-0.5 text-primary transition-colors hover:bg-preview-foreground/10 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-default disabled:hover:bg-transparent"
+            className="-mx-1 cursor-text rounded-sm px-1 py-0.5 text-primary focus-ring transition-colors outline-none hover:bg-preview-foreground/10 disabled:cursor-default disabled:hover:bg-transparent"
           >
             <span className="sr-only">{t("preview.timecodeEntry.currentTime")} </span>
             {currentTimeDisplay}
@@ -275,7 +275,11 @@ export function PreviewTimecode({
       ) : (
         <span ref={fieldContainerRef} className="inline-flex">
           {/* `select-text` restores text selection, which the preview section turns off. A web
-              view that inherits `user-select: none` into a field can refuse to edit it. */}
+              view that inherits `user-select: none` into a field can refuse to edit it. The
+              1px ring is the edge of the field, as the border of an Input: --border-strong,
+              and the destructive colour while the text is not a time. The focus ring is the
+              one of every control, and it also takes the destructive colour while the text is
+              not a time (5.54:1 on the preview background). */}
           <input
             ref={fieldRef}
             type="text"
@@ -304,7 +308,7 @@ export function PreviewTimecode({
                 FIELD_MAX_WIDTH_CH,
               )}ch`,
             }}
-            className="-mx-1 h-6 rounded-sm bg-preview-surface px-1 text-preview-foreground ring-1 ring-ring outline-none select-text aria-invalid:ring-destructive"
+            className="-mx-1 h-6 rounded-sm bg-preview-surface px-1 text-preview-foreground ring-1 ring-border-strong focus-ring outline-none select-text aria-invalid:ring-destructive aria-invalid:focus-visible:outline-destructive"
           />
           <span id={fieldHintId} className="sr-only">
             {format === "frames"

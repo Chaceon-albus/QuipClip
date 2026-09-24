@@ -47,7 +47,7 @@ export function DiagnosticDetails({
         setOpen(event.currentTarget.open);
       }}
     >
-      <summary className="flex w-fit list-none items-center gap-1 rounded-sm text-muted-foreground outline-none select-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
+      <summary className="flex w-fit list-none items-center gap-1 rounded-sm text-muted-foreground focus-ring outline-none select-none hover:text-foreground [&::-webkit-details-marker]:hidden">
         <ChevronRight
           aria-hidden="true"
           className="size-3.5 transition-transform group-open:rotate-90 motion-reduce:transition-none"
@@ -59,7 +59,7 @@ export function DiagnosticDetails({
         <pre
           ref={textRef}
           tabIndex={0}
-          className="max-h-40 overflow-y-auto rounded-md border border-border bg-muted/40 p-2 font-mono text-xs wrap-break-word whitespace-pre-wrap text-foreground outline-none select-text focus-visible:ring-3 focus-visible:ring-ring/50"
+          className="max-h-40 overflow-y-auto rounded-md border border-border bg-muted/40 p-2 font-mono text-xs wrap-break-word whitespace-pre-wrap text-foreground focus-ring outline-none select-text"
         >
           {text}
         </pre>

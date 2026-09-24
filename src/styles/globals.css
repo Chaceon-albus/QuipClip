@@ -25,7 +25,6 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
   --color-tooltip: var(--tooltip);
@@ -45,9 +44,11 @@
   --color-secondary-hover: var(--secondary-hover);
   --color-secondary-foreground: var(--secondary-foreground);
 
+  --color-tool-ghost-hover: var(--tool-ghost-hover);
+  --color-tool-ghost-active: var(--tool-ghost-active);
+
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
-  --color-foreground-subtle: var(--foreground-subtle);
 
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
@@ -59,12 +60,10 @@
   --color-ring: var(--ring);
 
   --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
   --color-destructive-text: var(--destructive-text);
   --color-destructive-tint: var(--destructive-tint);
   --color-destructive-tint-hover: var(--destructive-tint-hover);
   --color-destructive-tint-active: var(--destructive-tint-active);
-  --color-destructive-ring: var(--destructive-ring);
   --color-success: var(--success);
   --color-success-text: var(--success-text);
   --color-warning: var(--warning);
@@ -72,10 +71,13 @@
   --color-info: var(--info);
   --color-info-text: var(--info-text);
 
-  --color-surface-0: var(--surface-0);
-  --color-surface-1: var(--surface-1);
   --color-surface-2: var(--surface-2);
-  --color-surface-3: var(--surface-3);
+
+  --color-chrome: var(--chrome);
+  --color-chrome-foreground: var(--chrome-foreground);
+  --color-chrome-accent: var(--chrome-accent);
+  --color-chrome-accent-foreground: var(--chrome-accent-foreground);
+  --color-chrome-border: var(--chrome-border);
 
   --color-preview-background: var(--preview-background);
   --color-preview-surface: var(--preview-surface);
@@ -87,13 +89,9 @@
   --color-timeline-ruler: var(--timeline-ruler);
   --color-timeline-track: var(--timeline-track);
   --color-timeline-track-hover: var(--timeline-track-hover);
-  --color-timeline-track-selected: var(--timeline-track-selected);
   --color-timeline-divider: var(--timeline-divider);
-  --color-timeline-tick: var(--timeline-tick);
-  --color-timeline-tick-minor: var(--timeline-tick-minor);
   --color-timeline-playhead: var(--timeline-playhead);
   --color-timeline-selection: var(--timeline-selection);
-  --color-timeline-selection-muted: var(--timeline-selection-muted);
 
   --color-clip-video: var(--clip-video);
   --color-clip-video-hover: var(--clip-video-hover);
@@ -102,38 +100,23 @@
   --color-clip-video-selected-border: var(--clip-video-selected-border);
   --color-clip-foreground: var(--clip-foreground);
 
-  --color-clip-audio: var(--clip-audio);
-  --color-clip-text: var(--clip-text);
-  --color-clip-effect: var(--clip-effect);
-
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
-
-  /* The corners of the preview frame (`rounded-preview-frame`). The picture fills the frame,
-   * so a small radius keeps the corners from cutting the picture. */
+  /* Corner radii, in whole pixels, so no corner renders at a fractional size. The steps
+   * are 4, 6, 8 and 12 pixels. The corners of the preview frame (`rounded-preview-frame`)
+   * are 3 pixels: the picture fills the frame, so a small radius keeps the corners from
+   * cutting the picture. */
   --radius-preview-frame: 3px;
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
 
   /*
-   * Elevation. These are theme shadows, so `shadow-raised`, `shadow-floating` and
-   * `shadow-dialog` exist. They are inline, so each element reads the `--elevation-*`
-   * value of its own theme scope. The dark theme needs a stronger alpha, because the
-   * default Tailwind shadows are not visible on a dark background. The name is not
-   * `popover`, because `shadow-popover` is also the shadow colour from `--color-popover`.
+   * Elevation. These are theme shadows, so `shadow-floating` and `shadow-dialog` exist.
+   * They are inline, so each element reads the `--elevation-*` value of its own theme
+   * scope. The dark theme needs a stronger alpha, because the default Tailwind shadows are
+   * not visible on a dark background. The name is not `popover`, because `shadow-popover`
+   * is also the shadow colour from `--color-popover`.
    */
-  --shadow-raised: var(--elevation-raised);
   --shadow-floating: var(--elevation-floating);
   --shadow-dialog: var(--elevation-dialog);
 
@@ -170,7 +153,7 @@
    * resolve to nothing. */
   --animate-success-flash: success-flash var(--motion-flash) cubic-bezier(0.2, 0, 0, 1);
 
-  /* The tint is 12% of --success over --sidebar, the status bar background. With the tint
+  /* The tint is 12% of --success over --chrome, the status bar background. With the tint
    * at its full value, the muted text reaches 4.72:1 and the success icon 3.21:1 in the
    * light theme, and 6.13:1 and 6.91:1 in the dark theme. 20% dropped the light values to
    * 4.31:1 and 2.93:1, below the 4.5:1 for text and the 3:1 for an icon. */
@@ -197,7 +180,6 @@
   --foreground: oklch(0.235 0.018 205);
 
   --card: oklch(0.995 0.003 195);
-  --card-foreground: oklch(0.235 0.018 205);
 
   --popover: oklch(0.995 0.003 195);
   --popover-foreground: oklch(0.235 0.018 205);
@@ -215,12 +197,10 @@
   /* ---------------------------------------------------------
    * Elevation
    *
-   * raised: a control just above its surface.
    * floating: menus, select lists and tooltips.
    * dialog: a modal dialog above its scrim.
    * --------------------------------------------------------- */
 
-  --elevation-raised: 0 1px 2px rgb(0 0 0 / 0.06);
   --elevation-floating: 0 4px 12px rgb(0 0 0 / 0.1), 0 1px 3px rgb(0 0 0 / 0.08);
   --elevation-dialog: 0 16px 48px rgb(0 0 0 / 0.18), 0 4px 12px rgb(0 0 0 / 0.1);
 
@@ -256,14 +236,25 @@
   --secondary-hover: oklch(0.915 0.015 195);
   --secondary-foreground: oklch(0.28 0.022 202);
 
+  /* The hover fill and the press fill of a borderless transport button (the `tool-ghost`
+   * Button variant). The transport bar is on --background, where --muted keeps only 1.08:1
+   * in the light theme. So the light theme takes --secondary-hover, 1.19:1 against the bar,
+   * and presses one step past it, 5% toward --foreground (1.33:1). The dark theme keeps
+   * --muted (1.13:1) and presses to --secondary-hover. A custom property that reads another
+   * one resolves on the element that declares it, so the dark block declares these again. */
+  --tool-ghost-hover: var(--secondary-hover);
+  --tool-ghost-active: color-mix(
+    in oklab,
+    var(--secondary-hover),
+    var(--foreground) 5%
+  );
+
   /* ---------------------------------------------------------
    * Muted
    * --------------------------------------------------------- */
 
   --muted: oklch(0.95 0.007 200);
   --muted-foreground: oklch(0.5 0.015 205);
-
-  --foreground-subtle: oklch(0.62 0.012 205);
 
   /* ---------------------------------------------------------
    * Accent / Selection
@@ -275,6 +266,18 @@
 
   /* ---------------------------------------------------------
    * Border / Input / Focus
+   *
+   * --border-strong is the border of a text field and a select, and the thumb of a
+   * scroll bar. It keeps 1.96:1 against the dialog surface, where --border keeps 1.50:1.
+   *
+   * --ring is the colour of the focus ring (`focus-ring`). It keeps at least 3:1 against
+   * every rest and hover fill that a ring can touch. The lowest is 3.51:1, on a hovered
+   * warning chip of the status bar. The others: 3.60:1 on the accent fill of a selected
+   * preset row and of a hovered chrome control, 3.85:1 on a warning chip at rest, 4.21:1 on
+   * the chrome, 4.33:1 on the background, 4.46:1 on the timeline track and 4.59:1 on a
+   * dialog. While a chrome control is pressed, its press fill gives 2.95:1 for the length of
+   * the press. The Windows close button draws a white ring on its red hover fill
+   * (TitleBar). In the always-dark preview, the dark --ring keeps 8.59:1.
    * --------------------------------------------------------- */
 
   --border: oklch(0.86 0.012 200);
@@ -291,16 +294,14 @@
    * --------------------------------------------------------- */
 
   --destructive: oklch(0.58 0.2 25);
-  --destructive-foreground: oklch(0.98 0.01 25);
 
-  /* The tinted destructive button: its fill, its hover fill, its press fill and its focus
-   * ring. Each one is --destructive with an alpha, and the dark theme uses a higher alpha.
-   * A custom property that reads another one resolves on the element that declares it, so
-   * the dark block declares these again. */
+  /* The tinted destructive button: its fill, its hover fill and its press fill. Each one is
+   * --destructive with an alpha, and the dark theme uses a higher alpha. A custom property
+   * that reads another one resolves on the element that declares it, so the dark block
+   * declares these again. The focus ring of the button is the same as on every control. */
   --destructive-tint: color-mix(in oklab, var(--destructive) 10%, transparent);
   --destructive-tint-hover: color-mix(in oklab, var(--destructive) 20%, transparent);
   --destructive-tint-active: color-mix(in oklab, var(--destructive) 30%, transparent);
-  --destructive-ring: color-mix(in oklab, var(--destructive) 20%, transparent);
 
   --success: oklch(0.58 0.13 145);
   --warning: oklch(0.68 0.14 82);
@@ -313,12 +314,41 @@
 
   /* ---------------------------------------------------------
    * Surface hierarchy
+   *
+   * The window chrome is the frame, and the content surfaces sit over it: each step is
+   * lighter, in both themes. The preview is dark in both themes. From the frame to the top
+   * layer, with the OKLCH lightness in the light and the dark theme:
+   *
+   * - --chrome (0.965, 0.125): the title bar, the status bar and the timeline gutter.
+   * - --background (0.975, 0.145): the window body and the transport bar.
+   * - --timeline-track (0.985, 0.175): the track, where the segments are. The ruler row
+   *   above it is darker than the chrome in the light theme (0.925), so that its ticks keep
+   *   their contrast, and between the background and the track in the dark theme (0.155).
+   * - --card and --popover (0.995; 0.175 and 0.185): the raised surfaces. The bordered
+   *   transport buttons, the dialogs, the menus and the select lists.
+   *
+   * Thus the transport bar is one step over the chrome and one step under the track, and it
+   * is never the lightest strip of the window.
+   *
+   * --surface-2 (0.965, 0.155) is the fill of a text field and a select. A field is a well,
+   * one step darker than the dialog surface under it, and its border is --border-strong.
    * --------------------------------------------------------- */
 
-  --surface-0: oklch(0.995 0.003 195);
-  --surface-1: oklch(0.975 0.006 200);
-  --surface-2: oklch(0.945 0.008 200);
-  --surface-3: oklch(0.925 0.012 195);
+  --surface-2: oklch(0.965 0.007 200);
+
+  /* ---------------------------------------------------------
+   * Chrome
+   *
+   * The title bar, the status bar and the timeline gutter.
+   * --------------------------------------------------------- */
+
+  --chrome: oklch(0.965 0.006 200);
+  --chrome-foreground: oklch(0.28 0.02 205);
+
+  --chrome-accent: oklch(0.91 0.03 190);
+  --chrome-accent-foreground: oklch(0.34 0.05 190);
+
+  --chrome-border: oklch(0.86 0.012 200);
 
   /* ---------------------------------------------------------
    * Preview
@@ -340,9 +370,8 @@
   --timeline-background: oklch(0.945 0.007 200);
   --timeline-ruler: oklch(0.925 0.009 200);
 
-  --timeline-track: oklch(0.975 0.005 200);
+  --timeline-track: oklch(0.985 0.005 200);
   --timeline-track-hover: oklch(0.93 0.014 195);
-  --timeline-track-selected: oklch(0.9 0.022 192);
 
   --timeline-divider: oklch(0.84 0.012 200);
 
@@ -355,7 +384,6 @@
   --timeline-playhead: oklch(0.5 0.095 188);
 
   --timeline-selection: oklch(0.53 0.075 190);
-  --timeline-selection-muted: oklch(0.86 0.035 190);
 
   /* ---------------------------------------------------------
    * Video clips
@@ -379,36 +407,6 @@
   --clip-video-selected-border: oklch(0.36 0.06 190);
 
   --clip-foreground: oklch(0.3 0.02 205);
-
-  /* ---------------------------------------------------------
-   * Future clip types
-   * --------------------------------------------------------- */
-
-  --clip-audio: oklch(0.84 0.035 155);
-  --clip-text: oklch(0.84 0.03 255);
-  --clip-effect: oklch(0.84 0.035 305);
-
-  /* ---------------------------------------------------------
-   * Sidebar
-   * --------------------------------------------------------- */
-
-  --sidebar: oklch(0.965 0.006 200);
-  --sidebar-foreground: oklch(0.28 0.02 205);
-
-  --sidebar-primary: oklch(0.53 0.075 190);
-  --sidebar-primary-foreground: oklch(0.98 0.006 195);
-
-  --sidebar-accent: oklch(0.91 0.03 190);
-  --sidebar-accent-foreground: oklch(0.34 0.05 190);
-
-  --sidebar-border: oklch(0.86 0.012 200);
-  --sidebar-ring: oklch(0.55 0.085 190);
-
-  /* ---------------------------------------------------------
-   * Geometry
-   * --------------------------------------------------------- */
-
-  --radius: 0.5rem;
 }
 
 /* =========================================================
@@ -433,17 +431,15 @@
    ========================================================= */
 
 /* Durations. Both themes use the same values, so these are root variables and not theme
- * variables. A utility reads one with the `duration-(--motion-fast)` syntax. */
+ * variables. A utility reads one with the `duration-(--motion-base)` syntax.
+ *
+ * Timeline objects, the playhead and the selection do not animate: they follow the pointer
+ * and the media clock directly. */
 :root {
-  /* No animation. Timeline objects, the playhead and the selection follow the pointer
-   * and the media clock directly. */
-  --motion-instant: 0ms;
   /* A hover or press colour change, a focus ring, and the exit of an overlay. */
   --motion-fast: 100ms;
   /* The entry of a tooltip, a menu or a select list. */
   --motion-base: 150ms;
-  /* The entry of a dialog. */
-  --motion-moderate: 200ms;
   /* The width of the progress bar and other size changes. */
   --motion-slow: 300ms;
   /* A highlight that shows once and fades out, such as the status bar result of an export
@@ -451,18 +447,16 @@
   --motion-flash: 800ms;
 }
 
-/* Easing curves. They are in the `--ease-*` theme namespace, so the `ease-standard`,
- * `ease-enter` and `ease-exit` utilities exist. The two `--default-transition-*`
- * variables are the Tailwind defaults for each `transition` and `transition-*` utility
- * when the element has no `duration-*` or `ease-*` utility. They do not change the
- * tw-animate-css `animate-in` and `animate-out` keyframes. */
+/* Easing curves. They are in the `--ease-*` theme namespace, so the `ease-standard` and
+ * `ease-enter` utilities exist. The two `--default-transition-*` variables are the Tailwind
+ * defaults for each `transition` and `transition-*` utility when the element has no
+ * `duration-*` or `ease-*` utility. They do not change the tw-animate-css `animate-in` and
+ * `animate-out` keyframes. */
 @theme {
   /* A state change on an element that stays on screen. */
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   /* An element that comes onto the screen. It starts fast and then settles. */
   --ease-enter: cubic-bezier(0, 0, 0, 1);
-  /* An element that goes off the screen. It starts slowly and then accelerates. */
-  --ease-exit: cubic-bezier(0.3, 0, 1, 1);
 
   /* The default duration of a transition utility. */
   --default-transition-duration: var(--motion-fast);
@@ -515,7 +509,6 @@
   --foreground: oklch(0.925 0.01 200);
 
   --card: oklch(0.175 0.012 205);
-  --card-foreground: oklch(0.925 0.01 200);
 
   --popover: oklch(0.185 0.014 205);
   --popover-foreground: oklch(0.925 0.01 200);
@@ -537,7 +530,6 @@
    * The same geometry as the light theme, with a stronger alpha.
    * --------------------------------------------------------- */
 
-  --elevation-raised: 0 1px 2px rgb(0 0 0 / 0.5);
   --elevation-floating: 0 4px 12px rgb(0 0 0 / 0.5), 0 1px 3px rgb(0 0 0 / 0.5);
   --elevation-dialog: 0 16px 48px rgb(0 0 0 / 0.6), 0 4px 12px rgb(0 0 0 / 0.5);
 
@@ -572,14 +564,15 @@
   --secondary-hover: oklch(0.27 0.024 195);
   --secondary-foreground: oklch(0.9 0.012 195);
 
+  --tool-ghost-hover: var(--muted);
+  --tool-ghost-active: var(--secondary-hover);
+
   /* ---------------------------------------------------------
    * Muted
    * --------------------------------------------------------- */
 
   --muted: oklch(0.215 0.012 205);
   --muted-foreground: oklch(0.68 0.015 200);
-
-  --foreground-subtle: oklch(0.56 0.014 200);
 
   /* ---------------------------------------------------------
    * Accent / Selection
@@ -591,6 +584,11 @@
 
   /* ---------------------------------------------------------
    * Border / Input / Focus
+   *
+   * --border-strong keeps 1.87:1 against the dialog surface, where --border keeps 1.37:1.
+   * --ring keeps at least 6:1 against every rest and hover fill that a ring can touch
+   * (6.02:1 on the accent fill of a selected preset row), and 5.84:1 on a pressed chrome
+   * control.
    * --------------------------------------------------------- */
 
   --border: oklch(0.3 0.014 205);
@@ -605,12 +603,10 @@
    * --------------------------------------------------------- */
 
   --destructive: oklch(0.64 0.2 25);
-  --destructive-foreground: oklch(0.96 0.01 25);
 
   --destructive-tint: color-mix(in oklab, var(--destructive) 20%, transparent);
   --destructive-tint-hover: color-mix(in oklab, var(--destructive) 30%, transparent);
   --destructive-tint-active: color-mix(in oklab, var(--destructive) 40%, transparent);
-  --destructive-ring: color-mix(in oklab, var(--destructive) 40%, transparent);
 
   --success: oklch(0.7 0.13 145);
   --warning: oklch(0.78 0.14 82);
@@ -623,12 +619,23 @@
 
   /* ---------------------------------------------------------
    * Surface hierarchy
+   *
+   * The same order as the light theme. Each content surface is lighter than the chrome.
    * --------------------------------------------------------- */
 
-  --surface-0: oklch(0.105 0.008 215);
-  --surface-1: oklch(0.145 0.01 210);
-  --surface-2: oklch(0.175 0.012 205);
-  --surface-3: oklch(0.215 0.018 200);
+  --surface-2: oklch(0.155 0.012 205);
+
+  /* ---------------------------------------------------------
+   * Chrome
+   * --------------------------------------------------------- */
+
+  --chrome: oklch(0.125 0.009 212);
+  --chrome-foreground: oklch(0.88 0.012 200);
+
+  --chrome-accent: oklch(0.225 0.025 195);
+  --chrome-accent-foreground: oklch(0.92 0.012 195);
+
+  --chrome-border: oklch(0.27 0.012 205);
 
   /* ---------------------------------------------------------
    * Preview
@@ -650,7 +657,6 @@
 
   --timeline-track: oklch(0.175 0.012 205);
   --timeline-track-hover: oklch(0.205 0.016 202);
-  --timeline-track-selected: oklch(0.235 0.027 195);
 
   --timeline-divider: oklch(0.275 0.012 205);
 
@@ -662,7 +668,6 @@
   --timeline-playhead: oklch(0.77 0.105 188);
 
   --timeline-selection: oklch(0.72 0.085 190);
-  --timeline-selection-muted: oklch(0.4 0.055 190);
 
   /* ---------------------------------------------------------
    * Video clips
@@ -676,30 +681,6 @@
   --clip-video-selected-border: oklch(0.88 0.055 190);
 
   --clip-foreground: oklch(0.92 0.01 200);
-
-  /* ---------------------------------------------------------
-   * Future clip types
-   * --------------------------------------------------------- */
-
-  --clip-audio: oklch(0.46 0.06 155);
-  --clip-text: oklch(0.52 0.055 255);
-  --clip-effect: oklch(0.52 0.06 305);
-
-  /* ---------------------------------------------------------
-   * Sidebar
-   * --------------------------------------------------------- */
-
-  --sidebar: oklch(0.125 0.009 212);
-  --sidebar-foreground: oklch(0.88 0.012 200);
-
-  --sidebar-primary: oklch(0.72 0.085 190);
-  --sidebar-primary-foreground: oklch(0.17 0.018 195);
-
-  --sidebar-accent: oklch(0.225 0.025 195);
-  --sidebar-accent-foreground: oklch(0.92 0.012 195);
-
-  --sidebar-border: oklch(0.27 0.012 205);
-  --sidebar-ring: oklch(0.72 0.085 190);
 }
 
 @layer base {
@@ -748,6 +729,58 @@
 
   ::-webkit-scrollbar-corner {
     background: transparent;
+  }
+}
+
+/* The focus ring of every control. It shows on `:focus-visible`: the web view matches it when
+ * the keyboard moved the focus and on a focused text field, and not after a mouse press on a
+ * button. It is a solid 2px outline in --ring, 1px outside the border box. The 1px gap shows
+ * the surface under the control, so a filled control, such as the primary button, keeps its
+ * ring apart from its fill.
+ *
+ * The ring is an outline and not a box shadow. It takes no layout space, and forced-colors
+ * mode draws an outline in a system colour, where it removes a box shadow.
+ *
+ * The colour, the width and the offset apply at rest, and `:focus-visible` sets only the
+ * style. A control with `transition-colors` also animates `outline-color`, so a colour that
+ * changed on focus would fade in from the colour of the base layer. `outline-none` at rest
+ * keeps the style `none`, and the `:focus-visible` rule is more specific, so it still wins.
+ * A state that needs another ring colour, such as an invalid field, sets `outline-color` in
+ * a variant.
+ *
+ * `focus-ring-inset` draws the ring inside the border box instead. Use it for a control that
+ * sits against the window edge, or in a container that clips or scrolls its content, where a
+ * ring outside the box would be cut. It draws the ring on its own, and a control that already
+ * has `focus-ring`, such as a Button, can take it as a second class: both rules read the same
+ * offset. The offset is a registered property that does not inherit, so the inset ring of a
+ * control never moves the ring of a control inside it.
+ *
+ * A positioned child that covers the edge of its parent paints over the outline of that
+ * parent. Such a control keeps the outer ring, as the seek slider of the timeline does. */
+@property --focus-ring-offset {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 1px;
+}
+
+@utility focus-ring {
+  outline-color: var(--ring);
+  outline-width: 2px;
+  outline-offset: var(--focus-ring-offset);
+
+  &:focus-visible {
+    outline-style: solid;
+  }
+}
+
+@utility focus-ring-inset {
+  --focus-ring-offset: -2px;
+  outline-color: var(--ring);
+  outline-width: 2px;
+  outline-offset: var(--focus-ring-offset);
+
+  &:focus-visible {
+    outline-style: solid;
   }
 }
 

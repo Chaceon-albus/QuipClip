@@ -26,7 +26,7 @@ describe("cn", () => {
       );
     });
 
-    it.each(["shadow-raised", "shadow-floating", "shadow-dialog"])(
+    it.each(["shadow-floating", "shadow-dialog"])(
       "treats %s as a shadow size, not a ring or a colour",
       (shadow) => {
         expect(cn(shadow, "ring-1 ring-foreground/10", "shadow-black/20")).toBe(

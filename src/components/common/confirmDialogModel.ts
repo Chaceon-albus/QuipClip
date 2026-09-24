@@ -8,10 +8,12 @@
 /**
  * Classes that turn the default button into a solid destructive button.
  *
- * The text takes the color of the dialog surface (`popover`), not `destructive-foreground`.
- * Measured with the WCAG 2 formula against the palette in `globals.css`:
+ * The text takes the color of the dialog surface (`popover`), not the near-white of the
+ * shadcn `destructive-foreground` (oklch(0.98 0.01 25) in the light theme and
+ * oklch(0.96 0.01 25) in the dark theme), which the palette no longer has. Measured with the
+ * WCAG 2 formula against the palette in `globals.css`:
  *
- * | Theme | State | This style | `destructive-foreground` text | Tinted variant, `-text` token |
+ * | Theme | State | This style | Near-white text               | Tinted variant, `-text` token |
  * | ----- | ----- | ---------- | ----------------------------- | ----------------------------- |
  * | Light | Rest  | 4.67:1     | 4.46:1                        | 4.88:1                        |
  * | Light | Hover | 5.34:1     | 3.97:1 (`/90`)                | 4.21:1 (`/20`)                |

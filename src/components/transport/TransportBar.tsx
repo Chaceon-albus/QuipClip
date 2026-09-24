@@ -240,9 +240,13 @@ export function TransportBar() {
    * Every button is 40 px high, and Play is 44 px. A button with its label under the icon
    * takes the 40 px row size, with the flex direction and the padding changed for the stack,
    * and it keeps the 48 px width of the earlier square size.
+   *
+   * The bar is on the window background, one step over the chrome and not above the timeline
+   * track (globals.css, the surface hierarchy). The bordered buttons keep the raised card
+   * fill.
    */
   return (
-    <section className="grid h-[72px] shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-4 border-y border-border bg-card px-4 select-none">
+    <section className="grid h-[72px] shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-4 border-y border-border bg-background px-4 select-none">
       <div className="flex items-center justify-end gap-4">
         {/* Group 1: History (Undo / Redo with icon over label) */}
         <div className="flex items-center gap-1">

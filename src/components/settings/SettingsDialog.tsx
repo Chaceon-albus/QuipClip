@@ -478,7 +478,7 @@ function SettingsTab({
   return (
     <TabsPrimitive.Trigger
       value={value}
-      className="inline-flex h-full items-center justify-center rounded-md border border-transparent px-3 text-sm font-medium whitespace-nowrap text-foreground/60 transition-colors hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm dark:text-muted-foreground dark:hover:text-foreground dark:data-[state=active]:border-input dark:data-[state=active]:bg-input/30 dark:data-[state=active]:text-foreground"
+      className="inline-flex h-full items-center justify-center rounded-md border border-transparent px-3 text-sm font-medium whitespace-nowrap text-foreground/60 focus-ring transition-colors outline-none hover:text-foreground disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm dark:text-muted-foreground dark:hover:text-foreground dark:data-[state=active]:border-input dark:data-[state=active]:bg-input/30 dark:data-[state=active]:text-foreground"
     >
       {children}
     </TabsPrimitive.Trigger>
@@ -506,7 +506,7 @@ function SettingsPanel({
       value={value}
       forceMount
       className={cn(
-        "rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 data-[state=inactive]:hidden",
+        "rounded-md focus-ring outline-none data-[state=inactive]:hidden",
         className,
       )}
     >

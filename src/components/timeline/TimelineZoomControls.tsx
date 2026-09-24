@@ -90,7 +90,9 @@ function ZoomButton({ label, disabled, onClick, shortcut, children }: ZoomButton
  * and the start of the lane. The panel applies the anchor after it commits the new width.
  *
  * The glyphs follow the status bar rule for a standalone icon button: a 24px box with a 16px
- * glyph at a stroke of 1.75. The chrome variant gives hover the sidebar accent of the gutter.
+ * glyph at a stroke of 1.75. The chrome variant gives hover the chrome accent of the gutter,
+ * and an inset focus ring: the gutter is in the scroll container of the panel, which clips a
+ * ring outside the 24px button in the 28px ruler row.
  */
 export function TimelineZoomControls() {
   const { t } = useTranslation();

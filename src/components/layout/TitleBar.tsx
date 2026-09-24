@@ -63,11 +63,11 @@ const INACTIVE_TITLE_CLASS = "group-data-inactive/title-bar:opacity-75";
  * anti-aliased close glyph would then straddle two pixel rows. The 1 pixel bottom padding
  * makes the content box 38 pixels, so the glyph starts on a whole pixel, 14 pixels down.
  *
- * The focus ring is inset, so the edge of the window does not clip it. `outline-hidden`
- * keeps a transparent outline, which forced-colors mode draws as a visible focus mark.
+ * The focus ring is inset (`focus-ring-inset`), so the edge of the window does not clip it.
+ * The ring is an outline, so forced-colors mode draws it as a visible focus mark.
  */
 const WINDOW_BUTTON_CLASS =
-  "group/window-button inline-flex w-[46px] items-center justify-center pb-px text-sidebar-foreground transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden focus-visible:ring-inset";
+  "group/window-button inline-flex w-[46px] items-center justify-center pb-px text-chrome-foreground transition-colors focus-ring-inset";
 
 /** The hover and press fills of the minimize and maximize buttons. */
 const WINDOW_BUTTON_FILL_CLASS =
@@ -76,9 +76,13 @@ const WINDOW_BUTTON_FILL_CLASS =
 /**
  * The hover and press fills of the close button. The red is the fixed Windows 11 close colour.
  * The system uses it in the light theme and in the dark theme, so no palette token replaces it.
+ *
+ * On the red fill the focus ring is white, like the glyph: --ring keeps only 1.22:1 (light)
+ * and 2.37:1 (dark) against that red, and white keeps 5.66:1. The ring utility sets its colour
+ * at rest, so these state classes replace it.
  */
 const CLOSE_BUTTON_FILL_CLASS =
-  "hover:bg-[#c42b1c] hover:text-white active:bg-[#c42b1c]/90 active:text-white";
+  "hover:bg-[#c42b1c] hover:text-white hover:outline-white active:bg-[#c42b1c]/90 active:text-white active:outline-white";
 
 /**
  * The glyph of a window button. While the window does not have the focus, the glyph dims, as
@@ -189,7 +193,7 @@ export function TitleBar() {
         // `TITLE_BAR_CONTENT_HEIGHT` (39, this height less the border), and
         // `titleBarLayout.ts` holds the same numbers and the fallback. A change to either one
         // must change both files.
-        "group/title-bar relative flex h-10 shrink-0 items-center justify-between border-b border-border bg-sidebar text-xs select-none",
+        "group/title-bar relative flex h-10 shrink-0 items-center justify-between border-b border-border bg-chrome text-xs select-none",
         // The reserved width for the native macOS window buttons, which
         // titleBarStyle: "Overlay" draws over the top left of the web view. It is free again
         // in full screen, where macOS hides them.
@@ -211,13 +215,13 @@ export function TitleBar() {
             />
             <span
               className={cn(
-                "text-sm font-medium text-sidebar-foreground",
+                "text-sm font-medium text-chrome-foreground",
                 INACTIVE_TITLE_CLASS,
               )}
             >
               {t("app.name")}
             </span>
-            <Separator orientation="vertical" className="h-4 bg-sidebar-border" />
+            <Separator orientation="vertical" className="h-4 bg-chrome-border" />
           </>
         )}
         <DropdownMenu>
@@ -429,7 +433,7 @@ function TitleBarFile({ fileName, path, segmentCount }: TitleBarFileProps) {
         onPointerLeave={handlePointerLeave}
       >
         <div className="flex min-w-0 items-center gap-1.5">
-          <span className="flex min-w-0 font-medium text-sidebar-foreground">
+          <span className="flex min-w-0 font-medium text-chrome-foreground">
             <span className="truncate">{stem}</span>
             <span className="shrink-0 text-muted-foreground">{extension}</span>
           </span>

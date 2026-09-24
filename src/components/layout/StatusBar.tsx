@@ -143,7 +143,7 @@ export function StatusBar() {
   // left, into the 12px left padding, so the text of its first item, inside its own 6px
   // padding, also sits 12px from the edge.
   return (
-    <footer className="@container flex h-7 shrink-0 items-center gap-3 border-t border-border bg-sidebar pr-2 pl-3 text-xs text-muted-foreground select-none">
+    <footer className="@container flex h-7 shrink-0 items-center gap-3 border-t border-border bg-chrome pr-2 pl-3 text-xs text-muted-foreground select-none">
       {/* Left: the open source and its playback-position state */}
       <div className="-ml-1.5 flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
         {sourceInfo && (
@@ -277,8 +277,9 @@ export function StatusBar() {
         {/*
          * Status bar sizing rule: a standalone icon button is a 24px box with a 16px glyph,
          * and an icon inline with text is 14px. The 24px controls fit the 28px bar without
-         * making it taller. The chrome variant gives hover and the open dialog the sidebar
-         * accent in both themes, like the export indicator next to this button.
+         * making it taller. The chrome variant gives hover and the open dialog the chrome
+         * accent in both themes, like the export indicator next to this button, and an inset
+         * focus ring, because the bar sits against the window edge.
          *
          * The button opens the settings dialog directly. The dialog is mounted in AppShell,
          * so this button is not a Radix DialogTrigger and sets the two attributes that a

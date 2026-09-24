@@ -165,9 +165,10 @@ export function PresetList({
             onClick={() => onSelectRow(preset.id)}
             onKeyDown={(event) => handleKeyDown(event, preset.id)}
             className={cn(
-              // The ring is inset, because the scrolling pane around the list would clip a
-              // ring drawn outside the row. A row keeps the arrow cursor of a native list.
-              "flex cursor-default flex-col gap-0.5 rounded px-2 py-1.5 text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+              // The ring is inset (`focus-ring-inset`), because the scrolling pane around the
+              // list would clip a ring drawn outside the row. A row keeps the arrow cursor of
+              // a native list.
+              "flex cursor-default flex-col gap-0.5 rounded px-2 py-1.5 text-xs focus-ring-inset transition-colors outline-none",
               selected
                 ? "bg-accent text-accent-foreground"
                 : "text-foreground hover:bg-muted/50",

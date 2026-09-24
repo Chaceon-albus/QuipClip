@@ -192,9 +192,14 @@ export function TimelineSeekSlider({
       // WebView2 then draws the focus ring around the whole track at the next key press,
       // such as Space or an arrow key. The scrub runs on the pointer events, so the gesture
       // does not change. The Tab key still focuses the slider.
+      //
+      // The focus ring is outside the slider, in the 8px of track above and below it. Its two
+      // ends lie under the gutter and past the clip of the lane. An inset ring would not show:
+      // the source bar is a positioned child that fills the slider, and it paints over the
+      // outline of the slider.
       onMouseDown={preventFocusOnMouseDown}
       {...scrubHandlers}
-      className={`absolute inset-x-0 inset-y-2 touch-none ${canSeek ? "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
+      className={`absolute inset-x-0 inset-y-2 touch-none ${canSeek ? "focus-ring outline-none" : ""}`}
     >
       {children}
     </div>
