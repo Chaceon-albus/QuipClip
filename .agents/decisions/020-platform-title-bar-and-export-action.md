@@ -52,6 +52,17 @@ identity the user needs.
 The 78 pixel reservation stays. It is the width the three system buttons need.
 The space to the left of the File menu is empty on macOS, and that is correct.
 
+(Changed on 2026-09-24.) The three system buttons are centred vertically in the 40 pixel
+bar. Tauri 2.11 cannot move them in a window that is already open, so on macOS the main
+window is not created from the configuration (`create: false`). A setup hook measures the
+close button of a hidden probe window of the same style, its height `h` and its distance
+`b` from the bottom of the title bar, and builds the main window from the same
+configuration with the vertical position `y = floor((39 − h) / 2) + b` and the horizontal
+position 12. On macOS 26 and later that gives `y = 21`, which is also the configured
+fallback. The reservation is 84 pixels: 12, three buttons at a 23 point spacing, and a 12
+pixel gap. In full screen the buttons are hidden, and the reservation becomes the normal
+12 pixel padding.
+
 The right zone holds the export button, before the window buttons. The zone is
 empty on macOS, so the button sits at the right edge there. The button sits to
 the left of the minimize button on Windows. Both positions agree with the

@@ -150,6 +150,15 @@ Windows.
 - `Ctrl`, `Cmd` and `Alt` stay with the system and the web view, except for the combinations
   in the table. `primary` with `=` or `-` is not claimed. Tauri turns off the zoom keys of the
   web view by default, so these combinations do nothing.
+- (Added on 2026-09-24.) The macOS application menu has Settings... on `Cmd+,`, and a File
+  menu with Open Media... on `Cmd+O`, Export... on `Cmd+E` and Close Window. Each of the
+  three new items sends one event with the action name of this table, and the frontend runs
+  the same plan with the same conditions as the keyboard layer: nothing happens while a
+  dialog, a menu or the Open Media panel is open. The items stay enabled, as Quit does. A key
+  press that the page handles never reaches the menu: WebKit gives a `Cmd` key to the page
+  first, and the layer cancels every press that it owns. A key that the layer does not own,
+  for example inside a dialog, reaches the menu item, and its handler then does nothing. So
+  one press runs an action at most once.
 - On macOS the default application menu of Tauri binds `Cmd+Z` and `Shift+Cmd+Z` to its Edit
   menu. The implementation must confirm in the built application that the web view receives
   these key presses first. If the menu takes them, a later unit routes them from a custom

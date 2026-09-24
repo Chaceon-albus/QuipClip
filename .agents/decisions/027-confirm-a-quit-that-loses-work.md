@@ -43,7 +43,8 @@ Every way to close goes through the same frontend decision.
    2.11 and tao 0.35 that raises only `RunEvent::Exit`, which cannot be prevented, and not
    `ExitRequested`. The application therefore supplies its own macOS menu: the default
    menu, with the Quit item replaced by an item on `Cmd+Q` that calls `exit(0)`, and with
-   the Show All item that the default menu leaves out. The `exit(0)` call
+   the Show All item that the default menu leaves out. (Changed on 2026-09-24: the menu
+   also has Settings, Open Media and Export, as ADR 026 states.) The `exit(0)` call
    raises `ExitRequested`. While a window is open and the quit is not confirmed, Rust calls
    `prevent_exit` and sends an event to the frontend. The frontend then runs the decision.
 3. **The decision.** If nothing would be lost, the frontend calls the `confirm_quit`

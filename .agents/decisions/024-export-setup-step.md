@@ -69,6 +69,11 @@ name `activePresetId`.
 The export button and the File menu item still call one handler (ADR 020). That handler runs
 step 1.
 
+(Changed on 2026-09-24.) Step 1 runs once at a time for one file: a second call for the same
+media path does nothing, and a call for another path replaces the old step, whose late result
+is then dropped. The check of the source revision waits at most 3 seconds, and a timeout
+counts as a failed read, so the setup step opens.
+
 ## Consequences
 
 - An export needs one more click.

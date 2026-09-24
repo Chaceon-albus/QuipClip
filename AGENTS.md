@@ -35,6 +35,7 @@ src-tauri/      Rust backend
   src/ffmpeg/       locate, probe, capabilities, export
   src/settings/     the settings file
   src/menu.rs       the macOS application menu
+  src/traffic_lights.rs  the macOS window buttons and the main window
   src/fsutil.rs     atomic file replacement
   src/procutil.rs   child processes without a Windows console window
   src/project/      the project file
