@@ -76,6 +76,11 @@ function eventForBinding(
       break;
     case "character":
       key = binding.key.character;
+      // A row with no position matches the typed symbol, so any code names it.
+      code = binding.key.code ?? "Unidentified";
+      break;
+    case "numpad":
+      key = binding.key.character;
       code = binding.key.code;
       break;
   }
@@ -130,6 +135,17 @@ function newKeyEvents(
     createKeyEvent({ key: "o", code: "KeyO", ...primary, ...overrides }),
     createKeyEvent({ key: "e", code: "KeyE", ...primary, ...overrides }),
     createKeyEvent({ key: ",", code: "Comma", ...primary, ...overrides }),
+    // The zoom keys type characters, so a text field must keep every one of them.
+    createKeyEvent({ key: "=", code: "Equal", ...overrides }),
+    createKeyEvent({ key: "-", code: "Minus", ...overrides }),
+    createKeyEvent({ key: "+", code: "NumpadAdd", ...overrides }),
+    createKeyEvent({ key: "-", code: "NumpadSubtract", ...overrides }),
+    createKeyEvent({ key: "\\", code: "Backslash", ...overrides }),
+    // The layout variants and Shift+Z type characters too: +, = and a capital Z.
+    createKeyEvent({ key: "+", code: "Equal", shiftKey: true, ...overrides }),
+    createKeyEvent({ key: "=", code: "Minus", shiftKey: true, ...overrides }),
+    createKeyEvent({ key: "+", code: "BracketRight", ...overrides }),
+    createKeyEvent({ key: "Z", code: "KeyZ", shiftKey: true, ...overrides }),
   ];
 }
 
@@ -414,6 +430,8 @@ describe("keyboardShortcutController", () => {
         createKeyEvent({ key: "o", code: "KeyO", ctrlKey: true }),
         createKeyEvent({ key: "e", code: "KeyE", ctrlKey: true }),
         createKeyEvent({ key: ",", code: "Comma", ctrlKey: true }),
+        createKeyEvent({ key: "\\", code: "Backslash" }),
+        createKeyEvent({ key: "Z", code: "KeyZ", shiftKey: true }),
       ];
       for (const event of taken) {
         expect(resolveShortcut({ ...event, repeat: true }, allAvailable)).toEqual(
@@ -434,6 +452,13 @@ describe("keyboardShortcutController", () => {
           "redo",
         ],
         [createKeyEvent({ key: "y", code: "KeyY", ctrlKey: true }), "redo"],
+        [createKeyEvent({ key: "=", code: "Equal" }), "zoomIn"],
+        [createKeyEvent({ key: "-", code: "Minus" }), "zoomOut"],
+        [createKeyEvent({ key: "+", code: "NumpadAdd" }), "zoomIn"],
+        [createKeyEvent({ key: "-", code: "NumpadSubtract" }), "zoomOut"],
+        [createKeyEvent({ key: "+", code: "Equal", shiftKey: true }), "zoomIn"],
+        [createKeyEvent({ key: "=", code: "Minus", shiftKey: true }), "zoomIn"],
+        [createKeyEvent({ key: "+", code: "BracketRight" }), "zoomIn"],
       ];
       for (const [event, action] of acts) {
         expect(resolveShortcut({ ...event, repeat: true }, allAvailable)).toEqual({
@@ -933,6 +958,116 @@ describe("keyboardShortcutController", () => {
   });
 
   // ADR 026: Escape while a tooltip is open is not owned, so Radix closes the tooltip first.
+  describe("the zoom keys", () => {
+    const zoomKeys: readonly [string, ShortcutKeyEvent, ShortcutAction][] = [
+      ["=", createKeyEvent({ key: "=", code: "Equal" }), "zoomIn"],
+      ["-", createKeyEvent({ key: "-", code: "Minus" }), "zoomOut"],
+      ["numpad +", createKeyEvent({ key: "+", code: "NumpadAdd" }), "zoomIn"],
+      ["numpad -", createKeyEvent({ key: "-", code: "NumpadSubtract" }), "zoomOut"],
+      ["\\", createKeyEvent({ key: "\\", code: "Backslash" }), "zoomToFit"],
+    ];
+
+    for (const platform of PLATFORMS) {
+      for (const [name, event, action] of zoomKeys) {
+        it(`claims ${name} as ${action} on ${platform}`, () => {
+          expect(resolveShortcut(event, contextWith("all", platform))).toEqual({
+            claimed: true,
+            action,
+          });
+        });
+
+        it(`owns ${name} and does nothing at the limit on ${platform}`, () => {
+          // At zoom 1 Zoom Out and Fit are unavailable, and at the ceiling Zoom In is. A held
+          // key that reaches the limit still reaches no other handler.
+          expect(resolveShortcut(event, contextWith([], platform))).toEqual(
+            CLAIMED_WITHOUT_ACTION,
+          );
+          expect(
+            resolveShortcut({ ...event, repeat: true }, contextWith([], platform)),
+          ).toEqual(CLAIMED_WITHOUT_ACTION);
+        });
+      }
+    }
+
+    it("does not claim primary with = and -", () => {
+      for (const platform of PLATFORMS) {
+        const primary: Partial<ShortcutKeyEvent> =
+          platform === "macos" ? { metaKey: true } : { ctrlKey: true };
+        for (const event of [
+          createKeyEvent({ key: "=", code: "Equal", ...primary }),
+          createKeyEvent({ key: "-", code: "Minus", ...primary }),
+          createKeyEvent({ key: "+", code: "NumpadAdd", ...primary }),
+          createKeyEvent({ key: "\\", code: "Backslash", ...primary }),
+        ]) {
+          expect(resolveShortcut(event, contextWith("all", platform))).toEqual(
+            NOT_CLAIMED,
+          );
+        }
+      }
+    });
+
+    it("claims the layout variants of = and +, which zoom in and act on a repeat", () => {
+      for (const platform of PLATFORMS) {
+        for (const event of [
+          // US Shift+Equal types +.
+          createKeyEvent({ key: "+", code: "Equal", shiftKey: true }),
+          // JIS Shift+Minus types =.
+          createKeyEvent({ key: "=", code: "Minus", shiftKey: true }),
+          // The German + key is unshifted.
+          createKeyEvent({ key: "+", code: "BracketRight" }),
+        ]) {
+          expect(resolveShortcut(event, contextWith("all", platform))).toEqual({
+            claimed: true,
+            action: "zoomIn",
+          });
+          expect(
+            resolveShortcut({ ...event, repeat: true }, contextWith("all", platform)),
+          ).toEqual({ claimed: true, action: "zoomIn" });
+        }
+      }
+    });
+
+    it("claims Shift+Z as Fit and takes its repeat, apart from undo and redo", () => {
+      for (const platform of PLATFORMS) {
+        const primary: Partial<ShortcutKeyEvent> =
+          platform === "macos" ? { metaKey: true } : { ctrlKey: true };
+        const shiftZ = createKeyEvent({ key: "Z", code: "KeyZ", shiftKey: true });
+        expect(resolveShortcut(shiftZ, contextWith("all", platform))).toEqual({
+          claimed: true,
+          action: "zoomToFit",
+        });
+        expect(
+          resolveShortcut({ ...shiftZ, repeat: true }, contextWith("all", platform)),
+        ).toEqual(CLAIMED_WITHOUT_ACTION);
+        expect(
+          resolveShortcut({ ...shiftZ, ...primary }, contextWith("all", platform)),
+        ).toEqual({ claimed: true, action: "redo" });
+        expect(
+          resolveShortcut(
+            createKeyEvent({ key: "z", code: "KeyZ", ...primary }),
+            contextWith("all", platform),
+          ),
+        ).toEqual({ claimed: true, action: "undo" });
+      }
+    });
+
+    it("does not claim Shift with - or \\, or Alt with a zoom key", () => {
+      for (const platform of PLATFORMS) {
+        for (const event of [
+          createKeyEvent({ key: "_", code: "Minus", shiftKey: true }),
+          createKeyEvent({ key: "|", code: "Backslash", shiftKey: true }),
+          createKeyEvent({ key: "=", code: "Equal", altKey: true }),
+          createKeyEvent({ key: "+", code: "BracketRight", altKey: true }),
+          createKeyEvent({ key: "Z", code: "KeyZ", shiftKey: true, altKey: true }),
+        ]) {
+          expect(resolveShortcut(event, contextWith("all", platform))).toEqual(
+            NOT_CLAIMED,
+          );
+        }
+      }
+    });
+  });
+
   describe("Escape and an open tooltip", () => {
     const escape = (overrides: Partial<ShortcutKeyEvent> = {}) =>
       createKeyEvent({ key: "Escape", ...overrides });

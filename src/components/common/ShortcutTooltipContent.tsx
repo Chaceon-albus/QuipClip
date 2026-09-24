@@ -12,8 +12,11 @@ interface ShortcutTooltipContentProps extends Omit<
 > {
   /** The name of the action. */
   readonly label: string;
-  /** The key chip text, or null when the action has no key. */
-  readonly keys?: string | null;
+  /**
+   * The key chip text, or the texts of several chips for an action with more than one key
+   * (`ShortcutLabel.chips`), or null when the action has no key.
+   */
+  readonly keys?: string | readonly string[] | null;
   /** A second, muted line: what the user must do first, or null. */
   readonly reason?: string | null;
 }
@@ -36,6 +39,9 @@ export function ShortcutTooltipContent({
   ...props
 }: ShortcutTooltipContentProps) {
   const hasReason = reason !== undefined && reason !== null && reason !== "";
+  const chips = (typeof keys === "string" ? [keys] : (keys ?? [])).filter(
+    (chip) => chip !== "",
+  );
   return (
     <TooltipContent
       sideOffset={sideOffset}
@@ -49,7 +55,18 @@ export function ShortcutTooltipContent({
     >
       <span className="inline-flex items-center gap-1.5">
         <span>{label}</span>
-        {keys ? <Kbd>{keys}</Kbd> : null}
+        {/* Two chips side by side could read as a key sequence, so a slash stands between
+            two keys that each perform the action. */}
+        {chips.map((chip, index) => (
+          <span key={chip} className="inline-flex items-center gap-1.5">
+            {index > 0 ? (
+              <span aria-hidden="true" className="text-tooltip-foreground/60">
+                /
+              </span>
+            ) : null}
+            <Kbd>{chip}</Kbd>
+          </span>
+        ))}
       </span>
       {hasReason ? <span className="text-tooltip-foreground/70">{reason}</span> : null}
     </TooltipContent>

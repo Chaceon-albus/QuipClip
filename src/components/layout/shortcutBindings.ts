@@ -45,6 +45,9 @@ export const SHORTCUT_ACTIONS = [
   "openMedia",
   "export",
   "openSettings",
+  "zoomIn",
+  "zoomOut",
+  "zoomToFit",
 ] as const;
 
 export type ShortcutAction = (typeof SHORTCUT_ACTIONS)[number];
@@ -92,13 +95,30 @@ export type ShortcutLetter =
  *   layout the user selected, so a Dvorak user presses the key that shows the letter. The
  *   second rule covers a Cyrillic or Greek layout, a dead key, and the character that
  *   `Option` makes on macOS. `Caps Lock` does not change a match.
- * - `character`: a punctuation key, with the same two rules: it matches `event.key` when that
- *   value is one printable ASCII character, and `event.code` otherwise.
+ * - `character`: a punctuation key. It matches `event.key` when that value is one printable
+ *   ASCII character. Otherwise it matches `event.code` when the row names a position in
+ *   `code`, and nothing when `code` is null. The comma of primary+`,` names its position,
+ *   because a Cyrillic layout types a letter there and its users press that key. The zoom
+ *   rows name none: on other layouts the US positions of `=`, `-` and `\` show other
+ *   symbols, such as the German `´` and `ß` and the Spanish `ç`, and those must not zoom.
+ * - `numpad`: a key of the numeric keypad. It matches `event.code` only, so the position names
+ *   it on every layout and in both Num Lock states. `character` is the symbol on its key cap,
+ *   which the labels show. ADR 026 names the numpad `+` and `-` this way.
  */
 export type ShortcutKey =
   | { readonly kind: "named"; readonly key: ShortcutNamedKey }
   | { readonly kind: "letter"; readonly letter: ShortcutLetter }
-  | { readonly kind: "character"; readonly character: string; readonly code: string };
+  | {
+      readonly kind: "character";
+      readonly character: string;
+      /** The position to match when `event.key` is not ASCII, or null for none. */
+      readonly code: string | null;
+    }
+  | {
+      readonly kind: "numpad";
+      readonly character: string;
+      readonly code: `Numpad${string}`;
+    };
 
 /**
  * A modifier a binding can hold. `primary` is `Cmd` on macOS and `Ctrl` on Windows.
@@ -130,6 +150,14 @@ export interface ShortcutBinding {
    * closes first. The next press reaches the binding (ADR 026).
    */
   readonly yieldsToOpenTooltip?: boolean;
+  /**
+   * True for a second binding of a symbol that some layouts type with `Shift` and others
+   * without, such as `=` on JIS or `+` on a German keyboard. The layer matches it like any
+   * other binding. `aria-keyshortcuts` leaves it out, because it names a symbol that the
+   * attribute already lists, and the chip never names it, because it is never the first
+   * binding of its action.
+   */
+  readonly layoutVariant?: boolean;
 }
 
 /** The part of a key press that the table reads. */
@@ -149,8 +177,14 @@ const letter = (value: ShortcutLetter): ShortcutKey => ({
   letter: value,
 });
 
-const character = (value: string, code: string): ShortcutKey => ({
+const character = (value: string, code: string | null): ShortcutKey => ({
   kind: "character",
+  character: value,
+  code,
+});
+
+const numpad = (value: string, code: `Numpad${string}`): ShortcutKey => ({
+  kind: "numpad",
   character: value,
   code,
 });
@@ -158,9 +192,9 @@ const character = (value: string, code: string): ShortcutKey => ({
 /**
  * The key table of ADR 026.
  *
- * Extension point: the zoom rows of ADR 026 (`=` and `-`, the numpad `+` and `-`, and `\`)
- * join this table in the same unit that adds the timeline zoom controls, with their actions
- * added to `SHORTCUT_ACTIONS`. A binding without its action would be a dead row.
+ * The order decides two things. `findShortcutBinding` returns the first binding that matches,
+ * and a label names the first binding of an action (`shortcutFor`). So `=` and `-` come before
+ * the numpad keys, and the chip of Zoom In shows `=`.
  */
 export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
   { key: named(" "), modifiers: [], action: "togglePlayback", repeat: "taken" },
@@ -222,6 +256,63 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     action: "openSettings",
     repeat: "taken",
   },
+  // The zoom of the timeline (ADR 007). A held zoom key zooms on every repeat, as a wheel does.
+  //
+  // Every zoom punctuation row matches only the symbol that the layout types, and names no
+  // position (`code` null). The US positions show other symbols on other layouts: Equal is the
+  // German `´` dead key, Minus is the German `ß`, and Backslash is the Spanish `ç`, the
+  // Italian `ù` and the Portuguese `~` dead key. A fallback to those positions would zoom from
+  // keys whose caps show no zoom symbol. The numpad keys are the zoom keys that a position
+  // names, and they have rows of their own.
+  { key: character("=", null), modifiers: [], action: "zoomIn", repeat: "acts" },
+  { key: character("-", null), modifiers: [], action: "zoomOut", repeat: "acts" },
+  // The numpad keys match by position (ADR 026). The numpad plus types `+`, which the `=` row
+  // does not match. The numpad minus types `-`, so the `-` row above already matches it first.
+  // Its row states the numpad key of the ADR table all the same, and it does not change what a
+  // key press does.
+  { key: numpad("+", "NumpadAdd"), modifiers: [], action: "zoomIn", repeat: "acts" },
+  {
+    key: numpad("-", "NumpadSubtract"),
+    modifiers: [],
+    action: "zoomOut",
+    repeat: "acts",
+  },
+  { key: character("\\", null), modifiers: [], action: "zoomToFit", repeat: "taken" },
+  // The layout variants of the zoom keys. The modifier match is exact, so a layout that types
+  // `=` or `+` with Shift needs a row that holds Shift:
+  //
+  // - `=` with Shift: JIS types it on Shift+Minus, and German on Shift+Digit0. On US,
+  //   Shift+Equal types `+`, so this row never matches there, and the `+` row below takes it.
+  // - `+` without Shift: German has an unshifted `+` key (BracketRight).
+  // - `+` with Shift: US types it on Shift+Equal, and JIS on Shift+Semicolon.
+  //
+  // The numpad `+` row above comes first and still takes the numpad plus, so both rows are
+  // reachable: the numpad row takes the numpad key, and the `+` row takes a main-row `+`.
+  {
+    key: character("=", null),
+    modifiers: ["shift"],
+    action: "zoomIn",
+    repeat: "acts",
+    layoutVariant: true,
+  },
+  {
+    key: character("+", null),
+    modifiers: [],
+    action: "zoomIn",
+    repeat: "acts",
+    layoutVariant: true,
+  },
+  {
+    key: character("+", null),
+    modifiers: ["shift"],
+    action: "zoomIn",
+    repeat: "acts",
+    layoutVariant: true,
+  },
+  // Final Cut Pro's Zoom to Fit, for a layout where `\` needs AltGr or Option, which no
+  // binding holds. The modifier match is exact, so this row and primary+Z (undo) and
+  // primary+Shift+Z (redo) never match the same key press.
+  { key: letter("Z"), modifiers: ["shift"], action: "zoomToFit", repeat: "taken" },
 ];
 
 /** True when the binding exists on the platform. */
@@ -259,6 +350,9 @@ export function matchesShortcutKey(
       if (PRINTABLE_ASCII.test(press.key)) {
         return press.key === key.character;
       }
+      // A row with no position matches the typed symbol only.
+      return key.code !== null && press.code === key.code;
+    case "numpad":
       return press.code === key.code;
   }
 }

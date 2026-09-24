@@ -5,10 +5,13 @@ import {
   canDeleteSegment,
   canExportMedia,
   canFinishSegment,
+  canFitTimeline,
   canRedoEdit,
   canStepFrames,
   canTogglePlayback,
   canUndoEdit,
+  canZoomTimelineIn,
+  canZoomTimelineOut,
   isSourceActive,
 } from "./actionConditions";
 
@@ -75,5 +78,22 @@ describe("actionConditions", () => {
   it("exports whenever media is open", () => {
     expect(canExportMedia(true)).toBe(true);
     expect(canExportMedia(false)).toBe(false);
+  });
+
+  it("zooms in with open media below the ceiling only", () => {
+    expect(canZoomTimelineIn(true, 1, 8)).toBe(true);
+    expect(canZoomTimelineIn(true, 7.99, 8)).toBe(true);
+    expect(canZoomTimelineIn(true, 8, 8)).toBe(false);
+    // An indeterminate extent has a ceiling of 1.
+    expect(canZoomTimelineIn(true, 1, 1)).toBe(false);
+    expect(canZoomTimelineIn(false, 1, 8)).toBe(false);
+  });
+
+  it("zooms out and fits with open media above zoom 1 only", () => {
+    for (const condition of [canZoomTimelineOut, canFitTimeline]) {
+      expect(condition(true, 1.25)).toBe(true);
+      expect(condition(true, 1)).toBe(false);
+      expect(condition(false, 1.25)).toBe(false);
+    }
   });
 });

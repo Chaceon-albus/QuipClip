@@ -3,7 +3,7 @@ import { exportPanelStore } from "@/features/export";
 import { mediaStore, openMediaFileDialog } from "@/features/media";
 import { playbackStore } from "@/features/playback";
 import { settingsPanelStore } from "@/features/settings/panelStore";
-import { timelineStore } from "@/features/timeline";
+import { timelineStore, timelineViewportStore } from "@/features/timeline";
 import { i18n } from "@/i18n";
 import { runExportFlow } from "./exportFlowController";
 import {
@@ -76,6 +76,17 @@ function runShortcutCommand(command: ShortcutCommand): void {
       // The call of the settings button of the status bar.
       settingsPanelStore.getState().show();
       return;
+    case "zoomIn":
+      // The calls of the zoom buttons of the timeline. Each one anchors on the playhead when
+      // it is in the visible lane, and on the centre of the visible lane otherwise.
+      timelineViewportStore.getState().zoomIn();
+      return;
+    case "zoomOut":
+      timelineViewportStore.getState().zoomOut();
+      return;
+    case "zoomToFit":
+      timelineViewportStore.getState().fit();
+      return;
   }
 }
 
@@ -130,6 +141,7 @@ export function useKeyboardShortcuts(): void {
         probe: mediaStore.getState().media?.probe ?? null,
         playback: playbackStore.getState(),
         timeline: timelineStore.getState(),
+        viewport: timelineViewportStore.getState(),
       };
 
       const resolution = resolveShortcut(shortcutEvent, {

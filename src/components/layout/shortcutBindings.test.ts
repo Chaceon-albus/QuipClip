@@ -42,8 +42,8 @@ function actionOf(
 
 describe("shortcutBindings", () => {
   describe("the table of ADR 026", () => {
-    // One row for each binding of ADR 026 except the zoom rows. The key press is the plain
-    // US-layout press that names the key.
+    // One row for each binding of ADR 026. The key press is the plain US-layout press that
+    // names the key.
     const rows: readonly {
       readonly name: string;
       readonly press: (platform: ShortcutPlatform) => ShortcutKeyPress;
@@ -165,6 +165,61 @@ describe("shortcutBindings", () => {
         action: "openSettings",
         repeat: "taken",
       },
+      {
+        name: "=",
+        press: () => press({ key: "=", code: "Equal" }),
+        action: "zoomIn",
+        repeat: "acts",
+      },
+      {
+        name: "-",
+        press: () => press({ key: "-", code: "Minus" }),
+        action: "zoomOut",
+        repeat: "acts",
+      },
+      {
+        name: "numpad +",
+        press: () => press({ key: "+", code: "NumpadAdd" }),
+        action: "zoomIn",
+        repeat: "acts",
+      },
+      {
+        name: "numpad -",
+        press: () => press({ key: "-", code: "NumpadSubtract" }),
+        action: "zoomOut",
+        repeat: "acts",
+      },
+      {
+        name: "\\",
+        press: () => press({ key: "\\", code: "Backslash" }),
+        action: "zoomToFit",
+        repeat: "taken",
+      },
+      // The layout variants. Each press is the one of the layout that needs the row.
+      {
+        name: "Shift+= (JIS Shift+Minus)",
+        press: () => press({ key: "=", code: "Minus", shiftKey: true }),
+        action: "zoomIn",
+        repeat: "acts",
+      },
+      {
+        name: "+ (the German + key)",
+        press: () => press({ key: "+", code: "BracketRight" }),
+        action: "zoomIn",
+        repeat: "acts",
+      },
+      {
+        name: "Shift++ (US Shift+Equal)",
+        press: () => press({ key: "+", code: "Equal", shiftKey: true }),
+        action: "zoomIn",
+        repeat: "acts",
+      },
+      {
+        name: "Shift+Z",
+        press: () => press({ key: "Z", code: "KeyZ", shiftKey: true }),
+        action: "zoomToFit",
+        repeat: "taken",
+      },
     ];
 
     for (const platform of PLATFORMS) {
@@ -215,7 +270,9 @@ describe("shortcutBindings", () => {
             ? `named:${key.key}`
             : key.kind === "letter"
               ? `letter:${key.letter}`
-              : `character:${key.character}`;
+              : key.kind === "numpad"
+                ? `numpad:${key.code}`
+                : `character:${key.character}`;
         return `${name}|${[...binding.modifiers].sort().join("+")}`;
       };
       for (const platform of PLATFORMS) {
@@ -231,18 +288,70 @@ describe("shortcutBindings", () => {
       }
     });
 
-    it("has no zoom binding yet: the zoom keys stay with the web view", () => {
-      // The zoom rows of ADR 026 arrive with the timeline zoom controls.
+    it("does not claim primary with = and -", () => {
       for (const platform of PLATFORMS) {
         for (const p of [
-          press({ key: "=", code: "Equal" }),
-          press({ key: "-", code: "Minus" }),
-          press({ key: "+", code: "NumpadAdd" }),
-          press({ key: "-", code: "NumpadSubtract" }),
-          press({ key: "\\", code: "Backslash" }),
+          press({ key: "=", code: "Equal", ...primary(platform) }),
+          press({ key: "-", code: "Minus", ...primary(platform) }),
+          press({ key: "+", code: "NumpadAdd", ...primary(platform) }),
+          press({ key: "-", code: "NumpadSubtract", ...primary(platform) }),
+          press({ key: "\\", code: "Backslash", ...primary(platform) }),
+          // The layout variants hold Shift or nothing, never primary.
+          press({ key: "+", code: "Equal", shiftKey: true, ...primary(platform) }),
+          press({ key: "=", code: "Minus", shiftKey: true, ...primary(platform) }),
+          press({ key: "+", code: "BracketRight", ...primary(platform) }),
         ]) {
           expect(findShortcutBinding(p, platform)).toBeNull();
         }
+      }
+    });
+
+    it("lists = and - first, so a chip names them and not a numpad or a variant row", () => {
+      const zoomIn = SHORTCUT_BINDINGS.filter((b) => b.action === "zoomIn");
+      const zoomOut = SHORTCUT_BINDINGS.filter((b) => b.action === "zoomOut");
+      const zoomToFit = SHORTCUT_BINDINGS.filter((b) => b.action === "zoomToFit");
+      expect(zoomIn[0]?.key).toStrictEqual({
+        kind: "character",
+        character: "=",
+        code: null,
+      });
+      expect(zoomOut[0]?.key).toStrictEqual({
+        kind: "character",
+        character: "-",
+        code: null,
+      });
+      expect(zoomToFit[0]?.key).toStrictEqual({
+        kind: "character",
+        character: "\\",
+        code: null,
+      });
+      // Every other zoom binding is the numpad key of the ADR table, a layout variant, or
+      // the Shift+Z of Fit.
+      for (const binding of [...zoomIn.slice(1), ...zoomOut.slice(1)]) {
+        expect(binding.key.kind === "numpad" || binding.layoutVariant === true).toBe(
+          true,
+        );
+      }
+      expect(zoomToFit.slice(1).map((b) => b.layoutVariant)).toStrictEqual([undefined]);
+    });
+
+    it("keeps the numpad + row reachable ahead of the main-row + rows", () => {
+      for (const platform of PLATFORMS) {
+        const binding = findShortcutBinding(
+          press({ key: "+", code: "NumpadAdd" }),
+          platform,
+        );
+        expect(binding?.key.kind).toBe("numpad");
+        const german = findShortcutBinding(
+          press({ key: "+", code: "BracketRight" }),
+          platform,
+        );
+        expect(german?.key).toStrictEqual({
+          kind: "character",
+          character: "+",
+          code: null,
+        });
+        expect(german?.layoutVariant).toBe(true);
       }
     });
 
@@ -313,18 +422,47 @@ describe("shortcutBindings", () => {
       }
     });
 
-    it("rejects Shift with Home, End, Delete, Escape and Z", () => {
+    it("rejects Shift with Home, End, Delete and Escape", () => {
       for (const platform of PLATFORMS) {
         for (const [key, code] of [
           ["Home", "Home"],
           ["End", "End"],
           ["Delete", "Delete"],
           ["Escape", "Escape"],
-          ["Z", "KeyZ"],
         ]) {
           expect(actionOf(press({ key, code, shiftKey: true }), platform)).toBeNull();
         }
       }
+    });
+
+    it("keeps Shift+Z, primary+Z and primary+Shift+Z apart by the exact modifier set", () => {
+      for (const platform of PLATFORMS) {
+        expect(
+          actionOf(press({ key: "Z", code: "KeyZ", shiftKey: true }), platform),
+        ).toBe("zoomToFit");
+        expect(
+          actionOf(press({ key: "z", code: "KeyZ", ...primary(platform) }), platform),
+        ).toBe("undo");
+        expect(
+          actionOf(
+            press({ key: "Z", code: "KeyZ", shiftKey: true, ...primary(platform) }),
+            platform,
+          ),
+        ).toBe("redo");
+        // Alt, and Ctrl on macOS, match none of the three.
+        expect(
+          actionOf(
+            press({ key: "Z", code: "KeyZ", shiftKey: true, altKey: true }),
+            platform,
+          ),
+        ).toBeNull();
+      }
+      expect(
+        actionOf(
+          press({ key: "Z", code: "KeyZ", shiftKey: true, ctrlKey: true }),
+          "macos",
+        ),
+      ).toBeNull();
     });
 
     it("rejects a plain Z, E and comma, which need primary", () => {
@@ -559,6 +697,146 @@ describe("shortcutBindings", () => {
         expect(
           actionOf(press({ key: "z", code: "Slash", ...primary(platform) }), platform),
         ).toBe("undo");
+      }
+    });
+
+    it("matches a numpad key by event.code only", () => {
+      const numpadPlus: ShortcutKey = {
+        kind: "numpad",
+        character: "+",
+        code: "NumpadAdd",
+      };
+      expect(matchesShortcutKey(numpadPlus, { key: "+", code: "NumpadAdd" })).toBe(
+        true,
+      );
+      // The + of another key, such as the unshifted + of a German layout, is not the numpad.
+      expect(matchesShortcutKey(numpadPlus, { key: "+", code: "BracketRight" })).toBe(
+        false,
+      );
+      expect(
+        matchesShortcutKey(numpadPlus, { key: "Unidentified", code: "NumpadAdd" }),
+      ).toBe(true);
+    });
+
+    it("matches a character row with no position by event.key only", () => {
+      const equal: ShortcutKey = { kind: "character", character: "=", code: null };
+      expect(matchesShortcutKey(equal, { key: "=", code: "Equal" })).toBe(true);
+      expect(matchesShortcutKey(equal, { key: "=", code: "Digit0" })).toBe(true);
+      expect(matchesShortcutKey(equal, { key: "Dead", code: "Equal" })).toBe(false);
+      expect(matchesShortcutKey(equal, { key: "Unidentified", code: "Equal" })).toBe(
+        false,
+      );
+    });
+
+    it("matches =, - and \\ by the symbol that the layout types, never by the position", () => {
+      for (const platform of PLATFORMS) {
+        // A layout that types - on another key zooms out from that key.
+        expect(actionOf(press({ key: "-", code: "Slash" }), platform)).toBe("zoomOut");
+        // The Equal position that types another ASCII character is not =.
+        expect(actionOf(press({ key: "'", code: "Equal" }), platform)).toBeNull();
+        // German: the ´ dead key on Equal does not zoom in, and ß on Minus does not zoom out.
+        expect(actionOf(press({ key: "Dead", code: "Equal" }), platform)).toBeNull();
+        expect(actionOf(press({ key: "ß", code: "Minus" }), platform)).toBeNull();
+        // Spanish ç, Italian ù and the Portuguese ~ dead key sit on Backslash, and none fits.
+        expect(actionOf(press({ key: "ç", code: "Backslash" }), platform)).toBeNull();
+        expect(actionOf(press({ key: "ù", code: "Backslash" }), platform)).toBeNull();
+        expect(
+          actionOf(press({ key: "Dead", code: "Backslash" }), platform),
+        ).toBeNull();
+        // The same holds for a Cyrillic layout, which types letters on these positions.
+        expect(actionOf(press({ key: "ъ", code: "Equal" }), platform)).toBeNull();
+      }
+    });
+
+    it("keeps the position of the comma of primary+, for a Cyrillic layout", () => {
+      // The comma row is a system convention, and it keeps its fallback to Comma.
+      for (const platform of PLATFORMS) {
+        expect(
+          actionOf(press({ key: "б", code: "Comma", ...primary(platform) }), platform),
+        ).toBe("openSettings");
+      }
+    });
+
+    it("zooms in from the = and + that each layout types", () => {
+      for (const platform of PLATFORMS) {
+        // US: = is unshifted on Equal, and Shift+Equal types +.
+        expect(actionOf(press({ key: "=", code: "Equal" }), platform)).toBe("zoomIn");
+        expect(
+          actionOf(press({ key: "+", code: "Equal", shiftKey: true }), platform),
+        ).toBe("zoomIn");
+        // JIS: Shift+Minus types =, and Shift+Semicolon types +. The unshifted Equal key
+        // types ^, which is no zoom key.
+        expect(
+          actionOf(press({ key: "=", code: "Minus", shiftKey: true }), platform),
+        ).toBe("zoomIn");
+        expect(
+          actionOf(press({ key: "+", code: "Semicolon", shiftKey: true }), platform),
+        ).toBe("zoomIn");
+        expect(actionOf(press({ key: "^", code: "Equal" }), platform)).toBeNull();
+        // JIS minus is unshifted on Minus, as on US.
+        expect(actionOf(press({ key: "-", code: "Minus" }), platform)).toBe("zoomOut");
+        // German: + is unshifted on BracketRight, Shift+Digit0 types =, and - is unshifted
+        // on Slash.
+        expect(actionOf(press({ key: "+", code: "BracketRight" }), platform)).toBe(
+          "zoomIn",
+        );
+        expect(
+          actionOf(press({ key: "=", code: "Digit0", shiftKey: true }), platform),
+        ).toBe("zoomIn");
+        expect(actionOf(press({ key: "-", code: "Slash" }), platform)).toBe("zoomOut");
+        // German Shift+BracketRight types *, which is no zoom key.
+        expect(
+          actionOf(press({ key: "*", code: "BracketRight", shiftKey: true }), platform),
+        ).toBeNull();
+      }
+    });
+
+    it("never lets a variant row match a position", () => {
+      for (const platform of PLATFORMS) {
+        // A Russian layout types ъ on BracketRight, the German + position.
+        expect(
+          actionOf(press({ key: "ъ", code: "BracketRight" }), platform),
+        ).toBeNull();
+        // A German layout types the grave dead key on Shift+Equal, the US + position.
+        expect(
+          actionOf(press({ key: "Dead", code: "Equal", shiftKey: true }), platform),
+        ).toBeNull();
+        // No row names a numpad position for = either.
+        expect(
+          actionOf(
+            press({ key: "Unidentified", code: "NumpadEqual", shiftKey: true }),
+            platform,
+          ),
+        ).toBeNull();
+      }
+    });
+
+    it("gives Fit a letter key for a layout where \\ needs AltGr or Option", () => {
+      for (const platform of PLATFORMS) {
+        // German Windows types a backslash with AltGr+ß, which reports Ctrl and Alt, and a
+        // German Mac needs Option+Shift+7. No binding holds Alt.
+        expect(
+          actionOf(
+            press({ key: "\\", code: "Minus", ctrlKey: true, altKey: true }),
+            platform,
+          ),
+        ).toBeNull();
+        expect(
+          actionOf(
+            press({ key: "\\", code: "Digit7", altKey: true, shiftKey: true }),
+            platform,
+          ),
+        ).toBeNull();
+        // Shift+Z follows the layout like every letter: German QWERTZ puts Z on KeyY, and a
+        // Cyrillic layout falls back to KeyZ.
+        expect(
+          actionOf(press({ key: "Z", code: "KeyY", shiftKey: true }), platform),
+        ).toBe("zoomToFit");
+        expect(
+          actionOf(press({ key: "Я", code: "KeyZ", shiftKey: true }), platform),
+        ).toBe("zoomToFit");
+        // Caps Lock gives an uppercase Z with no Shift, which is no binding.
+        expect(actionOf(press({ key: "Z", code: "KeyZ" }), platform)).toBeNull();
       }
     });
 

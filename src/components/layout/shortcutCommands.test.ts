@@ -5,7 +5,7 @@ import {
   type PlaybackMediaElement,
   type PlaybackSource,
 } from "@/features/playback";
-import { createTimelineStore } from "@/features/timeline";
+import { createTimelineStore, createTimelineViewportStore } from "@/features/timeline";
 import type { Pts, Segment, TickCount } from "@/types/project";
 import { SHORTCUT_ACTIONS, type ShortcutAction } from "./shortcutBindings";
 import {
@@ -46,11 +46,13 @@ interface SnapshotOverrides {
   readonly probe?: ShortcutProbe | null;
   readonly playback?: Partial<ShortcutSnapshot["playback"]>;
   readonly timeline?: Partial<ShortcutSnapshot["timeline"]>;
+  readonly viewport?: Partial<ShortcutSnapshot["viewport"]>;
 }
 
 /**
  * A calibrated, attached, ready and paused source at 1 s (PTS 90000), with no segment, no
- * pending In mark and an empty edit history.
+ * pending In mark and an empty edit history. The timeline is zoomed to 2 of a ceiling of 8,
+ * so every zoom action can act.
  */
 function createSnapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
   return {
@@ -75,6 +77,11 @@ function createSnapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
       canRedo: false,
       ...overrides.timeline,
     },
+    viewport: {
+      zoom: 2,
+      maxZoom: 8,
+      ...overrides.viewport,
+    },
   };
 }
 
@@ -90,6 +97,17 @@ const INACTIVE_SNAPSHOTS: readonly [string, ShortcutSnapshot][] = [
 
 /** The actions whose control carries no source condition. */
 const SOURCE_FREE_ACTIONS: readonly ShortcutAction[] = ["openMedia", "openSettings"];
+
+/**
+ * The actions whose control needs open media only: Export, and the zoom, which is view state
+ * over the extent of the probe (ADR 007) and needs no attached element.
+ */
+const MEDIA_ONLY_ACTIONS: readonly ShortcutAction[] = [
+  "export",
+  "zoomIn",
+  "zoomOut",
+  "zoomToFit",
+];
 
 /** A media element that records each seek and reports `seeking` until the test settles it. */
 interface FakeElement extends PlaybackMediaElement {
@@ -163,6 +181,7 @@ function createStoreHarness() {
     probe,
     playback: playback.getState(),
     timeline: timeline.getState(),
+    viewport: { zoom: 1, maxZoom: 1 },
   });
 
   const run = (command: ShortcutCommand): void => {
@@ -230,15 +249,15 @@ function createStoreHarness() {
 }
 
 describe("planShortcutCommand", () => {
-  describe("every action needs an active source, except the three app commands", () => {
+  describe("every action needs an active source, except the app commands and the zoom", () => {
     for (const [name, snapshot] of INACTIVE_SNAPSHOTS) {
-      it(`plans nothing but the app commands while ${name}`, () => {
+      it(`plans nothing but the app commands and the zoom while ${name}`, () => {
         for (const action of SHORTCUT_ACTIONS) {
           const command = planShortcutCommand(action, snapshot);
           if (SOURCE_FREE_ACTIONS.includes(action)) {
             expect(command).not.toBeNull();
-          } else if (action === "export") {
-            // The Export button needs open media only.
+          } else if (MEDIA_ONLY_ACTIONS.includes(action)) {
+            // The Export button and the zoom buttons need open media only.
             expect(command === null).toBe(snapshot.probe === null);
           } else {
             expect(command).toBeNull();
@@ -246,6 +265,78 @@ describe("planShortcutCommand", () => {
         }
       });
     }
+  });
+
+  describe("the zoom of the timeline", () => {
+    it("zooms in, zooms out and fits between the limits", () => {
+      const snapshot = createSnapshot({ viewport: { zoom: 2, maxZoom: 8 } });
+      expect(planShortcutCommand("zoomIn", snapshot)).toEqual({ kind: "zoomIn" });
+      expect(planShortcutCommand("zoomOut", snapshot)).toEqual({ kind: "zoomOut" });
+      expect(planShortcutCommand("zoomToFit", snapshot)).toEqual({ kind: "zoomToFit" });
+    });
+
+    it("does not zoom in at the ceiling", () => {
+      const snapshot = createSnapshot({ viewport: { zoom: 8, maxZoom: 8 } });
+      expect(planShortcutCommand("zoomIn", snapshot)).toBeNull();
+      expect(planShortcutCommand("zoomOut", snapshot)).toEqual({ kind: "zoomOut" });
+      expect(planShortcutCommand("zoomToFit", snapshot)).toEqual({ kind: "zoomToFit" });
+    });
+
+    it("does not zoom out or fit at zoom 1, where the whole source fits", () => {
+      const snapshot = createSnapshot({ viewport: { zoom: 1, maxZoom: 8 } });
+      expect(planShortcutCommand("zoomIn", snapshot)).toEqual({ kind: "zoomIn" });
+      expect(planShortcutCommand("zoomOut", snapshot)).toBeNull();
+      expect(planShortcutCommand("zoomToFit", snapshot)).toBeNull();
+    });
+
+    it("does not zoom an indeterminate extent, whose ceiling is 1", () => {
+      const snapshot = createSnapshot({ viewport: { zoom: 1, maxZoom: 1 } });
+      for (const action of ["zoomIn", "zoomOut", "zoomToFit"] as const) {
+        expect(planShortcutCommand(action, snapshot)).toBeNull();
+      }
+    });
+
+    it("zooms while a seek is pending and while the source plays", () => {
+      for (const snapshot of [
+        createSnapshot({ playback: { seekTargetSeconds: 3, presentedFrame: null } }),
+        createSnapshot({ playback: { isPlaying: true } }),
+        createSnapshot({ playback: { calibrationStatus: "calibrating" } }),
+      ]) {
+        expect(planShortcutCommand("zoomIn", snapshot)).toEqual({ kind: "zoomIn" });
+        expect(planShortcutCommand("zoomOut", snapshot)).toEqual({ kind: "zoomOut" });
+      }
+    });
+
+    it("a held zoom key stops at each limit on the real viewport store", () => {
+      const viewport = createTimelineViewportStore({ maxZoom: 3 });
+      const press = (action: ShortcutAction): ShortcutCommand | null => {
+        const command = planShortcutCommand(
+          action,
+          createSnapshot({ viewport: viewport.getState() }),
+        );
+        if (command?.kind === "zoomIn") viewport.getState().zoomIn();
+        if (command?.kind === "zoomOut") viewport.getState().zoomOut();
+        if (command?.kind === "zoomToFit") viewport.getState().fit();
+        return command;
+      };
+
+      // 1.25^5 > 3, so five repeats reach the ceiling, and every repeat after that does
+      // nothing.
+      for (let repeat = 0; repeat < 5; repeat++) {
+        expect(press("zoomIn")).toEqual({ kind: "zoomIn" });
+      }
+      expect(viewport.getState().zoom).toBe(3);
+      expect(press("zoomIn")).toBeNull();
+
+      expect(press("zoomOut")).toEqual({ kind: "zoomOut" });
+      expect(viewport.getState().zoom).toBeCloseTo(3 / 1.25, 12);
+
+      expect(press("zoomToFit")).toEqual({ kind: "zoomToFit" });
+      expect(viewport.getState().zoom).toBe(1);
+      expect(viewport.getState().anchor).toEqual({ kind: "start" });
+      expect(press("zoomToFit")).toBeNull();
+      expect(press("zoomOut")).toBeNull();
+    });
   });
 
   describe("playback and frame steps", () => {

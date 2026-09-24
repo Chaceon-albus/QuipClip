@@ -6,6 +6,7 @@ import {
   calculatePausedFollow,
   calculatePendingNavigation,
   calculatePlayheadLayout,
+  shouldWriteFollowScrollLeft,
   PLAYHEAD_FOLLOW_LEAD_FRACTION,
   TIMELINE_GUTTER_WIDTH_PX,
 } from "@/features/timeline";
@@ -26,9 +27,14 @@ function applyFollowScrollLeft(
   const maxScrollLeftPx = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
   const nextScrollLeft = Math.min(targetScrollLeft, maxScrollLeftPx);
 
-  if (scrollLeftRef.current !== nextScrollLeft) {
+  // A difference under one pixel is the snap of the mirror, except a target of exactly 0
+  // (shouldWriteFollowScrollLeft).
+  if (shouldWriteFollowScrollLeft(scrollLeftRef.current, nextScrollLeft)) {
     scrollEl.scrollLeft = nextScrollLeft;
-    scrollLeftRef.current = nextScrollLeft;
+    // The browser snaps the value to the device pixel grid. The mirror takes the value it
+    // kept, so the scroll event of this write matches the mirror, and the panel does not take
+    // the write for a pan by the user.
+    scrollLeftRef.current = scrollEl.scrollLeft;
   }
 }
 
@@ -95,7 +101,8 @@ export function PlayheadFollow({
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollLeft = 0;
-      scrollLeftRef.current = 0;
+      // The mirror takes the value the element kept, as applyFollowScrollLeft does.
+      scrollLeftRef.current = scrollRef.current.scrollLeft;
     }
   }, [sourceId, scrollRef, scrollLeftRef]);
 

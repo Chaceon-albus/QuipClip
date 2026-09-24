@@ -13,7 +13,7 @@
  * a boolean, and the tests need no document.
  */
 
-import type { CurrentSegmentRef } from "@/features/timeline";
+import { MIN_TIMELINE_ZOOM, type CurrentSegmentRef } from "@/features/timeline";
 import type { Pts } from "@/types/project";
 
 /**
@@ -80,4 +80,27 @@ export function canDeleteSegment(
  */
 export function canExportMedia(hasMedia: boolean): boolean {
   return hasMedia;
+}
+
+/**
+ * Zoom In needs open media and a zoom factor below the ceiling. The zoom is view state over
+ * the extent of the probe (ADR 007), so it does not need an attached element. An
+ * indeterminate extent has a ceiling of 1, so it cannot zoom.
+ */
+export function canZoomTimelineIn(
+  hasMedia: boolean,
+  zoom: number,
+  maxZoom: number,
+): boolean {
+  return hasMedia && zoom < maxZoom;
+}
+
+/** Zoom Out needs open media and a lane wider than the panel, which is a zoom above 1. */
+export function canZoomTimelineOut(hasMedia: boolean, zoom: number): boolean {
+  return hasMedia && zoom > MIN_TIMELINE_ZOOM;
+}
+
+/** Fit has the condition of Zoom Out: at zoom 1 the whole source already fits the panel. */
+export function canFitTimeline(hasMedia: boolean, zoom: number): boolean {
+  return canZoomTimelineOut(hasMedia, zoom);
 }

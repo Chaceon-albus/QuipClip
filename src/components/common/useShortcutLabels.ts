@@ -6,6 +6,7 @@ import {
 } from "@/components/layout/shortcutBindings";
 import {
   ariaKeyShortcutsFor,
+  chipShortcutsFor,
   formatShortcut,
   resolveShortcutKeyNames,
   shortcutFor,
@@ -13,8 +14,16 @@ import {
 
 /** What a control shows and declares for the key of its action. */
 export interface ShortcutLabel {
-  /** The text of the key chip, formatted for the platform, such as `⇧⌘Z`. */
+  /**
+   * The text of the chip of the first binding, formatted for the platform, such as `⇧⌘Z`. A
+   * menu item shows it as its shortcut.
+   */
   readonly keys: string;
+  /**
+   * The text of every chip that a tooltip shows (`chipShortcutsFor`), first binding first.
+   * One chip for every action except Fit, which also shows Shift+Z.
+   */
+  readonly chips: readonly string[];
   /** The `aria-keyshortcuts` value, such as `Meta+Shift+Z`. */
   readonly aria: string;
 }
@@ -40,6 +49,9 @@ export function useShortcutLabels(): ShortcutLabelLookup {
       }
       return {
         keys: formatShortcut(binding, platform, keyNames),
+        chips: chipShortcutsFor(action, platform).map((chip) =>
+          formatShortcut(chip, platform, keyNames),
+        ),
         aria: ariaKeyShortcutsFor(action, platform) ?? "",
       };
     };

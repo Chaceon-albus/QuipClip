@@ -8,7 +8,14 @@ import {
   calculatePausedFollow,
   calculatePendingNavigation,
   calculateWheelZoomFactor,
+  clampScrollLeftToFollowWindow,
   clampTimelineZoom,
+  resolvePlayheadOrCentreAnchor,
+  settleTimelineZoom,
+  shouldWriteFollowScrollLeft,
+  stepTimelineZoom,
+  FOLLOW_WINDOW_MARGIN_PX,
+  FOLLOW_WRITE_TOLERANCE_PX,
   MAX_TIMELINE_CONTENT_WIDTH_PX,
   MAX_TIMELINE_PIXELS_PER_SECOND,
   MAX_WHEEL_DELTA_PER_EVENT_PX,
@@ -17,8 +24,100 @@ import {
   TIMELINE_GUTTER_WIDTH_PX,
   TIMELINE_MIN_CONTENT_WIDTH_PX,
   TIMELINE_WHEEL_ZOOM_BASE,
+  TIMELINE_ZOOM_STEP_FACTOR,
   type PausedFollowInput,
+  type PlayheadOrCentreAnchor,
+  type TimelineZoomAnchorPoint,
 } from "./viewport";
+
+/**
+ * The scrollLeft that the panel writes after it commits a zoom to `nextZoom`, measured the way
+ * the panel measures it: the scroll container at client x 0, with the browser clamp of the old
+ * scrollLeft to the new range already applied.
+ */
+function applyAnchorAfterCommit(
+  point: TimelineZoomAnchorPoint,
+  nextZoom: number,
+  viewportWidthPx: number,
+  scrollLeftBeforePx: number,
+): number {
+  const contentWidthPx = calculateContentWidthPx(nextZoom, viewportWidthPx);
+  const maxScrollLeftPx = contentWidthPx - viewportWidthPx;
+  const scrollLeftNowPx = Math.min(scrollLeftBeforePx, maxScrollLeftPx);
+  return calculateAnchoredScrollLeft(
+    scrollLeftNowPx,
+    point.ratio,
+    point.viewportOffsetPx,
+    TIMELINE_GUTTER_WIDTH_PX - scrollLeftNowPx,
+    contentWidthPx - TIMELINE_GUTTER_WIDTH_PX,
+    maxScrollLeftPx,
+  );
+}
+
+/**
+ * The scrollLeft that the panel writes after a zoom from a key or a button: the anchored
+ * value, and for a held playhead the clamp into the follow's window, then the scroll range.
+ * The DOM geometry uses the fractional width, and the follow uses the rounded one.
+ */
+function zoomLikeThePanel(
+  anchor: PlayheadOrCentreAnchor,
+  nextZoom: number,
+  fractionalWidthPx: number,
+  followWidthPx: number,
+  scrollLeftBeforePx: number,
+): number {
+  const anchored = applyAnchorAfterCommit(
+    anchor,
+    nextZoom,
+    fractionalWidthPx,
+    scrollLeftBeforePx,
+  );
+  if (anchor.heldPlayheadPercent === null) {
+    return anchored;
+  }
+  const maxScrollLeftPx = Math.max(
+    0,
+    calculateContentWidthPx(nextZoom, fractionalWidthPx) - fractionalWidthPx,
+  );
+  const inFollowWindow = clampScrollLeftToFollowWindow({
+    scrollLeftPx: anchored,
+    playheadPercent: anchor.heldPlayheadPercent,
+    zoom: nextZoom,
+    followViewportWidthPx: followWidthPx,
+  });
+  return Math.max(0, Math.min(maxScrollLeftPx, inFollowWindow));
+}
+
+/** True when the playback follow sees the playhead, with the inputs the panel gives it. */
+function followSees(
+  playheadPercent: number,
+  zoom: number,
+  followWidthPx: number,
+  scrollLeftPx: number,
+): boolean {
+  return (
+    calculateFollowScrollLeft(
+      playheadPercent,
+      calculateContentWidthPx(zoom, followWidthPx) - TIMELINE_GUTTER_WIDTH_PX,
+      TIMELINE_GUTTER_WIDTH_PX,
+      scrollLeftPx,
+      followWidthPx,
+      PLAYHEAD_FOLLOW_LEAD_FRACTION,
+    ) === null
+  );
+}
+
+/** The distance of a ratio of the extent from the left edge of the viewport. */
+function viewportOffsetOf(
+  ratio: number,
+  zoom: number,
+  viewportWidthPx: number,
+  scrollLeftPx: number,
+): number {
+  const laneWidthPx =
+    calculateContentWidthPx(zoom, viewportWidthPx) - TIMELINE_GUTTER_WIDTH_PX;
+  return TIMELINE_GUTTER_WIDTH_PX + ratio * laneWidthPx - scrollLeftPx;
+}
 
 describe("timeline viewport module", () => {
   describe("exported constants", () => {
@@ -1087,6 +1186,762 @@ describe("timeline viewport module", () => {
       expect(backwardPages).toBeGreaterThan(0);
       expect(forwardPages).toBeLessThanOrEqual(Math.ceil(frameCount / 90));
       expect(backwardPages).toBeLessThanOrEqual(Math.ceil(frameCount / 90));
+    });
+  });
+
+  describe("settleTimelineZoom and stepTimelineZoom", () => {
+    it("steps by the zoom of one 100px wheel notch", () => {
+      expect(TIMELINE_ZOOM_STEP_FACTOR).toBe(TIMELINE_WHEEL_ZOOM_BASE);
+      expect(TIMELINE_ZOOM_STEP_FACTOR).toBe(1 / calculateWheelZoomFactor(100, 0));
+      expect(stepTimelineZoom(1, "in", 8)).toBe(1.25);
+      expect(stepTimelineZoom(2, "out", 8)).toBe(1.6);
+    });
+
+    it("clamps a step to 1 and to the maximum", () => {
+      expect(stepTimelineZoom(1, "out", 8)).toBe(1);
+      expect(stepTimelineZoom(1.1, "out", 8)).toBe(1);
+      expect(stepTimelineZoom(7, "in", 8)).toBe(8);
+      expect(stepTimelineZoom(8, "in", 8)).toBe(8);
+      // An indeterminate extent has a ceiling of 1.
+      expect(stepTimelineZoom(1, "in", 1)).toBe(1);
+    });
+
+    it("snaps a rounding error next to a bound to that bound", () => {
+      expect(settleTimelineZoom(1 + 1e-12, 8)).toBe(1);
+      expect(settleTimelineZoom(8 - 1e-12, 8)).toBe(8);
+      expect(settleTimelineZoom(1.001, 8)).toBe(1.001);
+      // Wheel factors that are not powers of the step return to exactly 1.
+      let zoom = 1;
+      for (const factor of [1.07, 1.3, 1.11, 1.02]) {
+        zoom = settleTimelineZoom(zoom * factor, 8);
+      }
+      for (const factor of [1.02, 1.11, 1.3, 1.07]) {
+        zoom = settleTimelineZoom(zoom / factor, 8);
+      }
+      expect(zoom).toBe(1);
+    });
+
+    it("returns to exactly 1 after the same number of steps in and out", () => {
+      let zoom = 1;
+      for (let i = 0; i < 12; i++) zoom = stepTimelineZoom(zoom, "in", 1000);
+      for (let i = 0; i < 12; i++) zoom = stepTimelineZoom(zoom, "out", 1000);
+      expect(zoom).toBe(1);
+    });
+
+    it("treats a zoom that is not finite as 1, and an invalid maximum as 1", () => {
+      expect(stepTimelineZoom(Number.NaN, "in", 8)).toBe(1.25);
+      expect(settleTimelineZoom(Number.NaN, 8)).toBe(1);
+      expect(settleTimelineZoom(4, Number.NaN)).toBe(1);
+    });
+  });
+
+  describe("resolvePlayheadOrCentreAnchor", () => {
+    const viewportWidthPx = 1096;
+    // At zoom 4 the lane is 4 * 1000 = 4000px wide. scrollLeft 1000 shows content x 1096 to
+    // 2096, which is lane x 1000 to 2000, or 25% to 50% of the lane.
+    const zoom = 4;
+    const scrollLeftPx = 1000;
+    const centre = { ratio: 0.375, viewportOffsetPx: 596 };
+    // A whole-pixel width, where the drawn lane and the lane of the follow are the same.
+    const whole = { zoom, viewportWidthPx, followViewportWidthPx: viewportWidthPx };
+
+    it("anchors on the playhead when it is in the visible lane", () => {
+      const point = resolvePlayheadOrCentreAnchor({
+        ...whole,
+        scrollLeftPx,
+        playheadPercent: 30,
+      });
+      expect(point.ratio).toBe(0.3);
+      expect(point.viewportOffsetPx).toBeCloseTo(296, 9);
+    });
+
+    it("anchors on the centre of the visible lane when the playhead is outside it", () => {
+      // The visible lane runs from offset 96 to 1096, so its centre is 596. That offset shows
+      // lane x 1500, or 37.5% of the lane.
+      for (const playheadPercent of [10, 90, null]) {
+        const point = resolvePlayheadOrCentreAnchor({
+          ...whole,
+          scrollLeftPx,
+          playheadPercent,
+        });
+        expect(point.viewportOffsetPx).toBe(centre.viewportOffsetPx);
+        expect(point.ratio).toBeCloseTo(centre.ratio, 12);
+      }
+    });
+
+    it("takes a playhead on either edge of the visible lane as visible", () => {
+      // The left edge of the visible lane is the right edge of the gutter.
+      expect(
+        resolvePlayheadOrCentreAnchor({ ...whole, scrollLeftPx, playheadPercent: 25 }),
+      ).toEqual({ ratio: 0.25, viewportOffsetPx: 96, heldPlayheadPercent: 25 });
+      expect(
+        resolvePlayheadOrCentreAnchor({ ...whole, scrollLeftPx, playheadPercent: 50 }),
+      ).toEqual({ ratio: 0.5, viewportOffsetPx: 1096, heldPlayheadPercent: 50 });
+    });
+
+    it("agrees with the follow about a visible playhead", () => {
+      const laneWidthPx = calculateContentWidthPx(zoom, viewportWidthPx) - 96;
+      for (let percent = 0; percent <= 100; percent += 0.5) {
+        const point = resolvePlayheadOrCentreAnchor({
+          ...whole,
+          scrollLeftPx,
+          playheadPercent: percent,
+        });
+        const isVisible =
+          calculateFollowScrollLeft(
+            percent,
+            laneWidthPx,
+            96,
+            scrollLeftPx,
+            viewportWidthPx,
+            0.1,
+          ) === null;
+        if (isVisible) {
+          expect(point.ratio).toBe(percent / 100);
+        } else {
+          expect(point.viewportOffsetPx).toBe(centre.viewportOffsetPx);
+          expect(point.ratio).toBeCloseTo(centre.ratio, 12);
+        }
+      }
+    });
+
+    describe("the 0.5 px edge band of a fractional width", () => {
+      // The panel passes the fractional width of the container and the rounded width that the
+      // follow reads. The follow places the playhead on a lane of the rounded width and tests
+      // it against the rounded bound, so both differ from the drawn lane in this band.
+      const followViewportWidthPx = 1096;
+      const followLaneWidthPx =
+        calculateContentWidthPx(zoom, followViewportWidthPx) - 96;
+      const isFollowVisible = (percent: number): boolean =>
+        calculateFollowScrollLeft(
+          percent,
+          followLaneWidthPx,
+          96,
+          scrollLeftPx,
+          followViewportWidthPx,
+          PLAYHEAD_FOLLOW_LEAD_FRACTION,
+        ) === null;
+
+      it("anchors on the centre when the follow places the playhead past the rounded edge", () => {
+        // Width 1095.6: the drawn lane is 3998.4px, so 50.01% is drawn at offset 1095.59984,
+        // inside the fractional edge. The follow places it at 96 + 2000.4 - 1000 = 1096.4,
+        // past its bound of 1096, so it would page. The zoom must not hold it.
+        expect(isFollowVisible(50.01)).toBe(false);
+        const point = resolvePlayheadOrCentreAnchor({
+          zoom,
+          viewportWidthPx: 1095.6,
+          followViewportWidthPx,
+          scrollLeftPx,
+          playheadPercent: 50.01,
+        });
+        expect(point.viewportOffsetPx).toBe((96 + 1095.6) / 2);
+      });
+
+      it("anchors on the playhead when the follow sees it, past the fractional edge", () => {
+        // Width 1096.4: the drawn lane is 4001.6px, so 50% is drawn at offset 1096.8, past the
+        // fractional edge. The follow places it at 1096, on its bound, so it sees it.
+        expect(isFollowVisible(50)).toBe(true);
+        const point = resolvePlayheadOrCentreAnchor({
+          zoom,
+          viewportWidthPx: 1096.4,
+          followViewportWidthPx,
+          scrollLeftPx,
+          playheadPercent: 50,
+        });
+        expect(point.ratio).toBe(0.5);
+        // The point to hold is where the lane draws the playhead.
+        expect(point.viewportOffsetPx).toBeCloseTo(1096.8, 9);
+      });
+
+      it("agrees with the follow at every percent, for both roundings", () => {
+        for (const fractionalWidthPx of [1095.6, 1096.4]) {
+          for (let step = 0; step <= 10_000; step++) {
+            const percent = step / 100;
+            const point = resolvePlayheadOrCentreAnchor({
+              zoom,
+              viewportWidthPx: fractionalWidthPx,
+              followViewportWidthPx,
+              scrollLeftPx,
+              playheadPercent: percent,
+            });
+            if (isFollowVisible(percent)) {
+              expect(point.ratio).toBe(percent / 100);
+            } else {
+              expect(point.viewportOffsetPx).toBe((96 + fractionalWidthPx) / 2);
+            }
+          }
+        }
+      });
+    });
+
+    it("anchors on the centre when the rounded width is not usable", () => {
+      // The follow returns null for inputs it cannot use, which must not read as visible.
+      for (const followViewportWidthPx of [0, Number.NaN]) {
+        expect(
+          resolvePlayheadOrCentreAnchor({
+            zoom: 1,
+            viewportWidthPx,
+            followViewportWidthPx,
+            scrollLeftPx: 0,
+            playheadPercent: 80,
+          }),
+        ).toEqual({ ratio: 0.5, viewportOffsetPx: 596, heldPlayheadPercent: null });
+      }
+    });
+
+    it("anchors on the playhead at zoom 1, where the whole lane is visible", () => {
+      expect(
+        resolvePlayheadOrCentreAnchor({
+          ...whole,
+          zoom: 1,
+          scrollLeftPx: 0,
+          playheadPercent: 80,
+        }),
+      ).toEqual({ ratio: 0.8, viewportOffsetPx: 96 + 800, heldPlayheadPercent: 80 });
+    });
+
+    it("anchors on the end of the extent, and clamps a playhead past it to the end", () => {
+      // calculatePlayheadLayout never gives more than 100. The follow places 150 past the end
+      // of the view, but at zoom 1 the view cannot scroll, so its page moves nothing and the
+      // anchor holds the playhead, with the ratio clamped to the extent.
+      expect(
+        resolvePlayheadOrCentreAnchor({
+          ...whole,
+          zoom: 1,
+          scrollLeftPx: 0,
+          playheadPercent: 100,
+        }),
+      ).toEqual({ ratio: 1, viewportOffsetPx: 1096, heldPlayheadPercent: 100 });
+      expect(
+        resolvePlayheadOrCentreAnchor({
+          ...whole,
+          zoom: 1,
+          scrollLeftPx: 0,
+          playheadPercent: 150,
+        }),
+      ).toEqual({ ratio: 1, viewportOffsetPx: 1096, heldPlayheadPercent: 150 });
+      // Where the view can scroll to it, the follow would page, so the zoom holds the centre.
+      expect(
+        resolvePlayheadOrCentreAnchor({
+          ...whole,
+          zoom: 4,
+          scrollLeftPx: 1000,
+          playheadPercent: 150,
+        }),
+      ).toEqual({ ...centre, heldPlayheadPercent: null });
+    });
+
+    it("falls back to the start of the lane for inputs that are not usable", () => {
+      const fallback = { ratio: 0, viewportOffsetPx: 96, heldPlayheadPercent: null };
+      expect(
+        resolvePlayheadOrCentreAnchor({
+          ...whole,
+          zoom: Number.NaN,
+          scrollLeftPx: 0,
+          playheadPercent: 50,
+        }),
+      ).toEqual(fallback);
+      expect(
+        resolvePlayheadOrCentreAnchor({
+          zoom: 2,
+          viewportWidthPx: 50,
+          followViewportWidthPx: 50,
+          scrollLeftPx: 0,
+          playheadPercent: 50,
+        }),
+      ).toEqual(fallback);
+      expect(
+        resolvePlayheadOrCentreAnchor({
+          ...whole,
+          zoom: 2,
+          scrollLeftPx: Number.POSITIVE_INFINITY,
+          playheadPercent: 50,
+        }),
+      ).toEqual(fallback);
+    });
+  });
+
+  describe("a zoom from a key or a button, applied after the commit", () => {
+    const viewportWidthPx = 1096;
+
+    it("holds a visible playhead at its place in the viewport", () => {
+      const scrollLeftPx = 1000;
+      const point = resolvePlayheadOrCentreAnchor({
+        zoom: 4,
+        viewportWidthPx,
+        followViewportWidthPx: viewportWidthPx,
+        scrollLeftPx,
+        playheadPercent: 30,
+      });
+      const before = viewportOffsetOf(0.3, 4, viewportWidthPx, scrollLeftPx);
+      for (const nextZoom of [5, 3.2]) {
+        const next = applyAnchorAfterCommit(
+          point,
+          nextZoom,
+          viewportWidthPx,
+          scrollLeftPx,
+        );
+        expect(viewportOffsetOf(0.3, nextZoom, viewportWidthPx, next)).toBeCloseTo(
+          before,
+          9,
+        );
+      }
+    });
+
+    it("holds the time at the centre of the visible lane", () => {
+      const scrollLeftPx = 1000;
+      const point = resolvePlayheadOrCentreAnchor({
+        zoom: 4,
+        viewportWidthPx,
+        followViewportWidthPx: viewportWidthPx,
+        scrollLeftPx,
+        playheadPercent: 90,
+      });
+      const next = applyAnchorAfterCommit(point, 5, viewportWidthPx, scrollLeftPx);
+      expect(viewportOffsetOf(0.375, 5, viewportWidthPx, next)).toBeCloseTo(596, 9);
+    });
+
+    it("keeps a visible playhead visible when the scroll range clamps the anchor", () => {
+      // Near the end of the source, a zoom out cannot hold the playhead in place, because the
+      // view cannot scroll past the end. The clamp moves the playhead within the view.
+      const scrollLeftPx = 4000 + 96 - viewportWidthPx;
+      const point = resolvePlayheadOrCentreAnchor({
+        zoom: 4,
+        viewportWidthPx,
+        followViewportWidthPx: viewportWidthPx,
+        scrollLeftPx,
+        playheadPercent: 98,
+      });
+      expect(point.ratio).toBe(0.98);
+      for (const nextZoom of [1, 1.25, 3.2]) {
+        const next = applyAnchorAfterCommit(
+          point,
+          nextZoom,
+          viewportWidthPx,
+          scrollLeftPx,
+        );
+        const nextLaneWidthPx =
+          calculateContentWidthPx(nextZoom, viewportWidthPx) - TIMELINE_GUTTER_WIDTH_PX;
+        expect(
+          calculateFollowScrollLeft(
+            98,
+            nextLaneWidthPx,
+            96,
+            next,
+            viewportWidthPx,
+            0.1,
+          ),
+        ).toBeNull();
+      }
+    });
+
+    it("does not make the follow page, paused or playing (the E4 rule)", () => {
+      const scrollLeftPx = 1000;
+      const zoomBefore = 4;
+      const playheadPercent = 30;
+      const elapsedSeconds = 30;
+      // A whole-pixel width, and the two roundings of a fractional one. The follow reads the
+      // rounded width, 1096, for all three.
+      for (const fractionalWidthPx of [1096, 1095.6, 1096.4]) {
+        const followWidthPx = Math.round(fractionalWidthPx);
+        let zoom = zoomBefore;
+        let scroll = scrollLeftPx;
+        // Five steps in, then five steps out, each anchored on the playhead.
+        const steps: ("in" | "out")[] = ["in", "in", "in", "in", "in"];
+        steps.push("out", "out", "out", "out", "out");
+        for (const direction of steps) {
+          const anchor = resolvePlayheadOrCentreAnchor({
+            zoom,
+            viewportWidthPx: fractionalWidthPx,
+            followViewportWidthPx: followWidthPx,
+            scrollLeftPx: scroll,
+            playheadPercent,
+          });
+          expect(anchor.heldPlayheadPercent).toBe(playheadPercent);
+          const nextZoom = stepTimelineZoom(zoom, direction, 50);
+          scroll = zoomLikeThePanel(
+            anchor,
+            nextZoom,
+            fractionalWidthPx,
+            followWidthPx,
+            scroll,
+          );
+          zoom = nextZoom;
+          const laneWidthPx =
+            calculateContentWidthPx(zoom, followWidthPx) - TIMELINE_GUTTER_WIDTH_PX;
+
+          // Playing: the playhead is in the window of the follow, so it does not page.
+          expect(followSees(playheadPercent, zoom, followWidthPx, scroll)).toBe(true);
+
+          // Paused: a zoom does not move the playhead in seconds, so it is not a navigation,
+          // even while a seek that another control sent is pending.
+          const decision = calculatePausedFollow({
+            playheadPercent,
+            elapsedSeconds,
+            previousElapsedSeconds: elapsedSeconds,
+            isNavigationPending: true,
+            isGestureActive: false,
+            laneWidthPx,
+            laneLeftOffsetPx: TIMELINE_GUTTER_WIDTH_PX,
+            scrollLeftPx: scroll,
+            viewportWidthPx: followWidthPx,
+            leadFraction: PLAYHEAD_FOLLOW_LEAD_FRACTION,
+          });
+          expect(decision).toEqual({ isNavigation: false, scrollLeftPx: null });
+        }
+        expect(zoom).toBe(zoomBefore);
+        if (fractionalWidthPx === followWidthPx) {
+          expect(scroll).toBeCloseTo(scrollLeftPx, 6);
+        }
+      }
+    });
+
+    describe("at a fractional width, where the drawn lane and the follow's lane differ", () => {
+      const followWidthPx = 1096;
+
+      it("keeps the playhead in the follow's window: width 1095.6, zoom 40 to 50 at 50%", () => {
+        // The reviewer's case. Before the zoom, the follow places the playhead at offset
+        // 96 + 20000 - 19001 = 1095, inside its window. The anchor holds the drawn offset,
+        // 96 + 19992 - 19001 = 1087. At zoom 50 the anchored scrollLeft is 23999, and the
+        // follow places the playhead at 25096 - 23999 = 1097, past its bound of 1096.
+        const anchor = resolvePlayheadOrCentreAnchor({
+          zoom: 40,
+          viewportWidthPx: 1095.6,
+          followViewportWidthPx: followWidthPx,
+          scrollLeftPx: 19001,
+          playheadPercent: 50,
+        });
+        expect(anchor.heldPlayheadPercent).toBe(50);
+        const anchored = applyAnchorAfterCommit(anchor, 50, 1095.6, 19001);
+        expect(anchored).toBeCloseTo(23999, 6);
+        expect(followSees(50, 50, followWidthPx, anchored)).toBe(false);
+
+        // The clamp moves it into the window, one margin inside the bound.
+        const next = zoomLikeThePanel(anchor, 50, 1095.6, followWidthPx, 19001);
+        expect(next).toBeCloseTo(25096 - followWidthPx + FOLLOW_WINDOW_MARGIN_PX, 6);
+        expect(followSees(50, 50, followWidthPx, next)).toBe(true);
+      });
+
+      it("keeps the playhead in the follow's window: width 1096.4, near the gutter", () => {
+        // The drawn lane is wider than the follow's lane here, so the follow places the
+        // playhead to the left of the drawn one. At scrollLeft 19999 and zoom 40 the follow
+        // places 50% at offset 97. At zoom 50 the anchored scrollLeft is 25001, and the
+        // follow places the playhead at 95, behind the gutter.
+        const anchor = resolvePlayheadOrCentreAnchor({
+          zoom: 40,
+          viewportWidthPx: 1096.4,
+          followViewportWidthPx: followWidthPx,
+          scrollLeftPx: 19999,
+          playheadPercent: 50,
+        });
+        expect(anchor.heldPlayheadPercent).toBe(50);
+        const anchored = applyAnchorAfterCommit(anchor, 50, 1096.4, 19999);
+        expect(anchored).toBeCloseTo(25001, 6);
+        expect(followSees(50, 50, followWidthPx, anchored)).toBe(false);
+
+        const next = zoomLikeThePanel(anchor, 50, 1096.4, followWidthPx, 19999);
+        expect(next).toBeCloseTo(
+          25096 - TIMELINE_GUTTER_WIDTH_PX - FOLLOW_WINDOW_MARGIN_PX,
+          6,
+        );
+        expect(followSees(50, 50, followWidthPx, next)).toBe(true);
+      });
+
+      it("keeps every held playhead in the follow's window, also after the pixel snap", () => {
+        // The panel reads scrollLeft back, and the browser snaps it to the device pixel grid:
+        // half a CSS pixel at a device pixel ratio of 2, and one CSS pixel at a ratio of 1.
+        const snaps = [
+          (value: number) => value,
+          (value: number) => Math.round(value * 2) / 2,
+          (value: number) => Math.round(value),
+        ];
+        for (const fractionalWidthPx of [1095.6, 1096.4]) {
+          for (const scrollLeftPx of [19001, 19500, 19999]) {
+            for (let step = 4700; step <= 5300; step++) {
+              const percent = step / 100;
+              const anchor = resolvePlayheadOrCentreAnchor({
+                zoom: 40,
+                viewportWidthPx: fractionalWidthPx,
+                followViewportWidthPx: followWidthPx,
+                scrollLeftPx,
+                playheadPercent: percent,
+              });
+              if (anchor.heldPlayheadPercent === null) {
+                continue;
+              }
+              for (const nextZoom of [50, 32]) {
+                const next = zoomLikeThePanel(
+                  anchor,
+                  nextZoom,
+                  fractionalWidthPx,
+                  followWidthPx,
+                  scrollLeftPx,
+                );
+                for (const snap of snaps) {
+                  expect(followSees(percent, nextZoom, followWidthPx, snap(next))).toBe(
+                    true,
+                  );
+                }
+              }
+            }
+          }
+        }
+      });
+    });
+  });
+
+  describe("clampScrollLeftToFollowWindow", () => {
+    // At zoom 4 and width 1096 the follow's lane is 4000px, so 50% is at content x 2096. The
+    // follow sees it for scrollLeft from 2096 - 1096 = 1000 to 2096 - 96 = 2000.
+    const base = { playheadPercent: 50, zoom: 4, followViewportWidthPx: 1096 };
+
+    it("keeps a scrollLeft inside the window", () => {
+      expect(clampScrollLeftToFollowWindow({ ...base, scrollLeftPx: 1500 })).toBe(1500);
+    });
+
+    it("moves a scrollLeft outside the window to its edge, one margin inside", () => {
+      expect(clampScrollLeftToFollowWindow({ ...base, scrollLeftPx: 900 })).toBe(
+        1000 + FOLLOW_WINDOW_MARGIN_PX,
+      );
+      expect(clampScrollLeftToFollowWindow({ ...base, scrollLeftPx: 2100 })).toBe(
+        2000 - FOLLOW_WINDOW_MARGIN_PX,
+      );
+    });
+
+    it("returns the input for inputs that are not usable or an empty window", () => {
+      expect(
+        clampScrollLeftToFollowWindow({ ...base, scrollLeftPx: 900, zoom: Number.NaN }),
+      ).toBe(900);
+      expect(
+        clampScrollLeftToFollowWindow({
+          ...base,
+          scrollLeftPx: 900,
+          playheadPercent: Number.NaN,
+        }),
+      ).toBe(900);
+      expect(
+        clampScrollLeftToFollowWindow({
+          ...base,
+          scrollLeftPx: 900,
+          followViewportWidthPx: 97,
+        }),
+      ).toBe(900);
+    });
+  });
+
+  describe("the follow-window clamp at the ends of the lane", () => {
+    const followWidthPx = 1096;
+    const widths = [1096, 1095.6, 1096.4];
+    // The panel reads scrollLeft back, and the browser snaps it to the device pixel grid.
+    const snaps = [
+      (value: number) => value,
+      (value: number) => Math.round(value * 2) / 2,
+      (value: number) => Math.round(value),
+    ];
+
+    /** The playback follow's page after the zoom, clamped to the scroll range, moves nothing. */
+    const expectNoPage = (
+      percent: number,
+      zoom: number,
+      fractionalWidthPx: number,
+      scrollLeftPx: number,
+    ) => {
+      const target = calculateFollowScrollLeft(
+        percent,
+        calculateContentWidthPx(zoom, followWidthPx) - TIMELINE_GUTTER_WIDTH_PX,
+        TIMELINE_GUTTER_WIDTH_PX,
+        scrollLeftPx,
+        followWidthPx,
+        PLAYHEAD_FOLLOW_LEAD_FRACTION,
+      );
+      if (target === null) {
+        return;
+      }
+      const maxScrollLeftPx = Math.max(
+        0,
+        calculateContentWidthPx(zoom, fractionalWidthPx) - fractionalWidthPx,
+      );
+      expect(
+        shouldWriteFollowScrollLeft(scrollLeftPx, Math.min(target, maxScrollLeftPx)),
+      ).toBe(false);
+    };
+
+    it("at 0%: the range clamp wins at scrollLeft 0, and the follow sees the playhead", () => {
+      for (const widthPx of widths) {
+        const anchor = resolvePlayheadOrCentreAnchor({
+          zoom: 4,
+          viewportWidthPx: widthPx,
+          followViewportWidthPx: followWidthPx,
+          scrollLeftPx: 0,
+          playheadPercent: 0,
+        });
+        expect(anchor.heldPlayheadPercent).toBe(0);
+        for (const nextZoom of [5, 3.2, 1]) {
+          // The follow's window for 0% ends one margin before scrollLeft 0.
+          expect(
+            clampScrollLeftToFollowWindow({
+              scrollLeftPx: 0,
+              playheadPercent: 0,
+              zoom: nextZoom,
+              followViewportWidthPx: followWidthPx,
+            }),
+          ).toBe(-FOLLOW_WINDOW_MARGIN_PX);
+          const next = zoomLikeThePanel(anchor, nextZoom, widthPx, followWidthPx, 0);
+          expect(next).toBe(0);
+          expect(followSees(0, nextZoom, followWidthPx, next)).toBe(true);
+          expectNoPage(0, nextZoom, widthPx, next);
+        }
+      }
+    });
+
+    it("at 100%: the range clamp wins at the maximum scrollLeft, and no page follows", () => {
+      for (const widthPx of widths) {
+        const maxBeforePx = calculateContentWidthPx(4, widthPx) - widthPx;
+        const anchor = resolvePlayheadOrCentreAnchor({
+          zoom: 4,
+          viewportWidthPx: widthPx,
+          followViewportWidthPx: followWidthPx,
+          scrollLeftPx: maxBeforePx,
+          playheadPercent: 100,
+        });
+        // Held at every width. At 1095.6 the follow never sees 100%, but at the maximum
+        // scrollLeft its page is a no-op, so the zoom must not move the view to the centre.
+        expect(anchor.heldPlayheadPercent).toBe(100);
+        for (const nextZoom of [5, 1.25, 1]) {
+          const maxAfterPx = Math.max(
+            0,
+            calculateContentWidthPx(nextZoom, widthPx) - widthPx,
+          );
+          if (widthPx === 1095.6) {
+            // The follow's window lies past the end of the scroll range, so the range wins.
+            expect(
+              clampScrollLeftToFollowWindow({
+                scrollLeftPx: maxAfterPx,
+                playheadPercent: 100,
+                zoom: nextZoom,
+                followViewportWidthPx: followWidthPx,
+              }),
+            ).toBeGreaterThan(maxAfterPx);
+          }
+          const next = zoomLikeThePanel(
+            anchor,
+            nextZoom,
+            widthPx,
+            followWidthPx,
+            maxBeforePx,
+          );
+          // The end of the lane stays at the right edge of the view.
+          expect(next).toBeCloseTo(maxAfterPx, 6);
+          for (const snap of snaps) {
+            expectNoPage(100, nextZoom, widthPx, snap(next));
+          }
+        }
+      }
+    });
+
+    it("for a zoom out to 1: the whole lane fits, the range wins at 0, and no page follows", () => {
+      for (const widthPx of widths) {
+        const cases: readonly [zoom: number, percent: number, scrollLeftPx: number][] =
+          [
+            // The last key step, 1.25 to 1, and a larger zoom out from 4.
+            [1.25, 30, 100],
+            [4, 30, 1000],
+            // The end of the lane at the maximum scrollLeft of zoom 1.25.
+            [1.25, 100, calculateContentWidthPx(1.25, widthPx) - widthPx],
+          ];
+        for (const [zoom, percent, scrollLeftPx] of cases) {
+          const anchor = resolvePlayheadOrCentreAnchor({
+            zoom,
+            viewportWidthPx: widthPx,
+            followViewportWidthPx: followWidthPx,
+            scrollLeftPx,
+            playheadPercent: percent,
+          });
+          expect(anchor.heldPlayheadPercent).toBe(percent);
+          const next = zoomLikeThePanel(
+            anchor,
+            1,
+            widthPx,
+            followWidthPx,
+            scrollLeftPx,
+          );
+          // At zoom 1 the lane fits the view, so the scroll range is 0 and it wins. The
+          // fractional widths leave a rounding error of the range at most.
+          expect(next).toBeCloseTo(0, 9);
+          expect(followSees(percent, 1, followWidthPx, next)).toBe(true);
+          expectNoPage(percent, 1, widthPx, next);
+        }
+      }
+    });
+  });
+
+  describe("shouldWriteFollowScrollLeft", () => {
+    it("skips a snap residual at the maximum scrollLeft", () => {
+      // At width 1095.6 and zoom 4 the maximum scrollLeft is 2998.8, and the follow's target
+      // at the end of the lane clamps to it on every frame. The browser keeps 2999, or 2998.5
+      // at a device pixel ratio of 2.
+      const maxScrollLeftPx = calculateContentWidthPx(4, 1095.6) - 1095.6;
+      expect(maxScrollLeftPx).toBeCloseTo(2998.8, 9);
+      for (const mirror of [2999, 2998.5, maxScrollLeftPx]) {
+        expect(shouldWriteFollowScrollLeft(mirror, maxScrollLeftPx)).toBe(false);
+      }
+    });
+
+    it("writes 0 from a snap residual such as 0.5, and not 0 from 0", () => {
+      expect(shouldWriteFollowScrollLeft(0.5, 0)).toBe(true);
+      expect(shouldWriteFollowScrollLeft(0.25, 0)).toBe(true);
+      expect(shouldWriteFollowScrollLeft(0, 0)).toBe(false);
+      // A residual next to a target that is not 0 stays.
+      expect(shouldWriteFollowScrollLeft(0.5, 0.2)).toBe(false);
+      expect(FOLLOW_WRITE_TOLERANCE_PX).toBe(1);
+    });
+
+    it("always writes a real page, on the left and on the right", () => {
+      const scrollLeftPx = 1000;
+      // 1024 is the narrowest window, where the lead is 102.4px.
+      for (const widthPx of [1024, 1096, 1920]) {
+        const laneWidthPx = 4 * (widthPx - TIMELINE_GUTTER_WIDTH_PX);
+        const leadPx = Math.max(
+          TIMELINE_GUTTER_WIDTH_PX,
+          PLAYHEAD_FOLLOW_LEAD_FRACTION * widthPx,
+        );
+        const pageFor = (contentX: number): number => {
+          const percent = ((contentX - TIMELINE_GUTTER_WIDTH_PX) / laneWidthPx) * 100;
+          const target = calculateFollowScrollLeft(
+            percent,
+            laneWidthPx,
+            TIMELINE_GUTTER_WIDTH_PX,
+            scrollLeftPx,
+            widthPx,
+            PLAYHEAD_FOLLOW_LEAD_FRACTION,
+          );
+          if (target === null) {
+            throw new Error("the follow sees the playhead, so it does not page");
+          }
+          return target;
+        };
+
+        // Left: the playhead just behind the gutter. The page moves by the lead minus the
+        // gutter, which is the smallest page: 13.6px at 1096, and 6.4px at 1024.
+        const left = pageFor(scrollLeftPx + TIMELINE_GUTTER_WIDTH_PX - 0.01);
+        expect(scrollLeftPx - left).toBeCloseTo(
+          leadPx - TIMELINE_GUTTER_WIDTH_PX + 0.01,
+          6,
+        );
+        // Right: the playhead just past the right edge. The page moves by the width minus the
+        // lead: 986.4px at 1096.
+        const right = pageFor(scrollLeftPx + widthPx + 0.01);
+        expect(right - scrollLeftPx).toBeCloseTo(widthPx - leadPx + 0.01, 6);
+
+        for (const mirror of [scrollLeftPx, scrollLeftPx + 0.5, scrollLeftPx - 0.5]) {
+          expect(shouldWriteFollowScrollLeft(mirror, left)).toBe(true);
+          expect(shouldWriteFollowScrollLeft(mirror, right)).toBe(true);
+        }
+      }
+    });
+
+    it("does not write a target that is not a number", () => {
+      expect(shouldWriteFollowScrollLeft(1000, Number.NaN)).toBe(false);
     });
   });
 });

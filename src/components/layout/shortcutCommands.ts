@@ -1,10 +1,10 @@
 /**
  * Plans the store call for a shortcut action of the window keyboard layer (ADR 026).
  *
- * `planShortcutCommand` reads one snapshot of the media, playback and timeline state. It
- * returns the call that the action makes, or null when the condition of the action is false.
- * The condition and the target of the call come from the same snapshot, so they cannot
- * disagree. The keyboard layer uses a null plan as "owned, no action".
+ * `planShortcutCommand` reads one snapshot of the media, playback, timeline and viewport
+ * state. It returns the call that the action makes, or null when the condition of the action
+ * is false. The condition and the target of the call come from the same snapshot, so they
+ * cannot disagree. The keyboard layer uses a null plan as "owned, no action".
  *
  * Every condition that a control also carries comes from `actionConditions.ts`, or from the
  * timeline feature for Mark In and Mark Out. The module has no React, DOM or store dependency.
@@ -25,6 +25,7 @@ import {
   getTimelineDurationSeconds,
   type CurrentSegmentRef,
   type TimelineState,
+  type TimelineViewportState,
 } from "@/features/timeline";
 import { isPtsString } from "@/lib/time";
 import type { Pts } from "@/types/project";
@@ -32,10 +33,13 @@ import {
   canDeleteSegment,
   canExportMedia,
   canFinishSegment,
+  canFitTimeline,
   canRedoEdit,
   canStepFrames,
   canTogglePlayback,
   canUndoEdit,
+  canZoomTimelineIn,
+  canZoomTimelineOut,
   isSourceActive,
 } from "./actionConditions";
 import type { ShortcutAction } from "./shortcutBindings";
@@ -78,6 +82,8 @@ export interface ShortcutSnapshot {
     | "canUndo"
     | "canRedo"
   >;
+  /** The zoom of the timeline (ADR 007), which is view state and not timeline state. */
+  readonly viewport: Pick<TimelineViewportState, "zoom" | "maxZoom">;
 }
 
 /** The store call that one shortcut action makes. */
@@ -94,7 +100,10 @@ export type ShortcutCommand =
   | { readonly kind: "redo" }
   | { readonly kind: "openMedia" }
   | { readonly kind: "export" }
-  | { readonly kind: "openSettings" };
+  | { readonly kind: "openSettings" }
+  | { readonly kind: "zoomIn" }
+  | { readonly kind: "zoomOut" }
+  | { readonly kind: "zoomToFit" };
 
 function currentSegmentOf(
   timeline: ShortcutSnapshot["timeline"],
@@ -222,7 +231,7 @@ export function planShortcutCommand(
   action: ShortcutAction,
   snapshot: ShortcutSnapshot,
 ): ShortcutCommand | null {
-  const { probe, playback, timeline } = snapshot;
+  const { probe, playback, timeline, viewport } = snapshot;
   const hasMedia = probe !== null;
   const hasActiveSource = isSourceActive(
     hasMedia,
@@ -380,5 +389,18 @@ export function planShortcutCommand(
     case "openSettings":
       // The settings button of the status bar has no condition.
       return { kind: "openSettings" };
+
+    // The zoom buttons of the timeline carry the same conditions. At a limit the key press is
+    // owned and does nothing, so a held key that reaches the limit stops there.
+    case "zoomIn":
+      return canZoomTimelineIn(hasMedia, viewport.zoom, viewport.maxZoom)
+        ? { kind: "zoomIn" }
+        : null;
+
+    case "zoomOut":
+      return canZoomTimelineOut(hasMedia, viewport.zoom) ? { kind: "zoomOut" } : null;
+
+    case "zoomToFit":
+      return canFitTimeline(hasMedia, viewport.zoom) ? { kind: "zoomToFit" } : null;
   }
 }

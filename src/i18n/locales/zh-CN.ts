@@ -161,6 +161,7 @@ export const zhCN: TranslationCatalog = {
       escape: "Esc",
       ctrl: "Ctrl",
       shift: "Shift",
+      numpad: "小键盘",
     },
   },
   timeline: {
@@ -172,6 +173,12 @@ export const zhCN: TranslationCatalog = {
     segmentList: "时间轴片段",
     segment: "片段 {{index}}",
     pendingInFlag: "入点",
+    zoom: {
+      group: "时间轴缩放",
+      zoomIn: "放大",
+      zoomOut: "缩小",
+      fit: "缩放至适合",
+    },
   },
   mediaError: {
     invalidPath: "所选文件路径无效。",

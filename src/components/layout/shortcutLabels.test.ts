@@ -11,6 +11,7 @@ import {
 import {
   SHORTCUT_KEY_NAME_KEYS,
   ariaKeyShortcutsFor,
+  chipShortcutsFor,
   formatAriaKeyShortcut,
   formatShortcut,
   resolveShortcutKeyNames,
@@ -47,7 +48,9 @@ function idOf(binding: ShortcutBinding): string {
         : binding.key.key
       : binding.key.kind === "letter"
         ? binding.key.letter
-        : binding.key.character;
+        : binding.key.kind === "numpad"
+          ? binding.key.code
+          : binding.key.character;
   return [binding.action, ...binding.modifiers, key].join(":");
 }
 
@@ -190,6 +193,60 @@ const ROWS: readonly Row[] = [
     ariaMacos: "Meta+,",
     ariaWindows: "Control+,",
   },
+  { id: "zoomIn:=", macos: "=", windows: "=", ariaMacos: "=", ariaWindows: "=" },
+  // The chip draws the hyphen-minus as the minus sign U+2212.
+  {
+    id: "zoomOut:-",
+    macos: "−",
+    windows: "−",
+    ariaMacos: "-",
+    ariaWindows: "-",
+  },
+  {
+    id: "zoomIn:NumpadAdd",
+    macos: "Num +",
+    windows: "Num +",
+    ariaMacos: "Plus",
+    ariaWindows: "Plus",
+  },
+  {
+    id: "zoomOut:NumpadSubtract",
+    macos: "Num −",
+    windows: "Num −",
+    ariaMacos: "-",
+    ariaWindows: "-",
+  },
+  {
+    id: "zoomToFit:\\",
+    macos: "\\",
+    windows: "\\",
+    ariaMacos: "\\",
+    ariaWindows: "\\",
+  },
+  // The layout variants. No chip names them, because none is the first binding of its action,
+  // and ariaKeyShortcutsFor leaves them out. The Windows form of Shift with + is `Shift++`.
+  {
+    id: "zoomIn:shift:=",
+    macos: "⇧=",
+    windows: "Shift+=",
+    ariaMacos: "Shift+=",
+    ariaWindows: "Shift+=",
+  },
+  { id: "zoomIn:+", macos: "+", windows: "+", ariaMacos: "Plus", ariaWindows: "Plus" },
+  {
+    id: "zoomIn:shift:+",
+    macos: "⇧+",
+    windows: "Shift++",
+    ariaMacos: "Shift+Plus",
+    ariaWindows: "Shift+Plus",
+  },
+  {
+    id: "zoomToFit:shift:Z",
+    macos: "⇧Z",
+    windows: "Shift+Z",
+    ariaMacos: "Shift+Z",
+    ariaWindows: "Shift+Z",
+  },
 ];
 
 function rowOf(binding: ShortcutBinding): Row {
@@ -254,6 +311,7 @@ describe("shortcutLabels", () => {
         escape: "<escape>",
         ctrl: "<ctrl>",
         shift: "<shift>",
+        numpad: "<numpad>",
       };
       const label = (
         action: Parameters<typeof shortcutFor>[0],
@@ -272,6 +330,38 @@ describe("shortcutLabels", () => {
       // macOS draws the modifiers and the delete keys as symbols.
       expect(label("redo", "macos")).toBe("⇧⌘Z");
       expect(label("deleteSegment", "macos")).toBe("⌫");
+      // The punctuation of the zoom keys is a symbol in every language.
+      expect(label("zoomIn", "macos")).toBe("=");
+      expect(label("zoomOut", "windows")).toBe("−");
+      expect(label("zoomToFit", "windows")).toBe("\\");
+
+      const numpadPlus = SHORTCUT_BINDINGS.find(
+        (binding) => binding.key.kind === "numpad" && binding.key.code === "NumpadAdd",
+      );
+      expect(numpadPlus && formatShortcut(numpadPlus, "windows", names)).toBe(
+        "<numpad> +",
+      );
+    });
+
+    it("names the zoom keys = and − on the chips, not the numpad keys", () => {
+      for (const platform of PLATFORMS) {
+        const zoomIn = shortcutFor("zoomIn", platform);
+        const zoomOut = shortcutFor("zoomOut", platform);
+        const fit = shortcutFor("zoomToFit", platform);
+        expect(zoomIn && formatShortcut(zoomIn, platform, EN_NAMES)).toBe("=");
+        expect(zoomOut && formatShortcut(zoomOut, platform, EN_NAMES)).toBe("−");
+        expect(fit && formatShortcut(fit, platform, EN_NAMES)).toBe("\\");
+      }
+    });
+
+    it("uses the Simplified Chinese numpad word before the numpad symbol", () => {
+      const numpadMinus = SHORTCUT_BINDINGS.find(
+        (binding) =>
+          binding.key.kind === "numpad" && binding.key.code === "NumpadSubtract",
+      );
+      expect(numpadMinus && formatShortcut(numpadMinus, "windows", ZH_NAMES)).toBe(
+        "小键盘 −",
+      );
     });
 
     it("uses the Simplified Chinese name of the space bar and keeps the key cap labels", () => {
@@ -370,6 +460,71 @@ describe("shortcutLabels", () => {
       expect(ariaKeyShortcutsFor("redo", "macos")).toBe("Meta+Shift+Z");
       expect(ariaKeyShortcutsFor("deleteSegment", "macos")).toBe("Backspace Delete");
       expect(ariaKeyShortcutsFor("deleteSegment", "windows")).toBe("Delete Backspace");
+      expect(ariaKeyShortcutsFor("zoomIn", "macos")).toBe("= Plus");
+      expect(ariaKeyShortcutsFor("zoomIn", "windows")).toBe("= Plus");
+    });
+
+    it("lists a token once when two bindings share it, as the two minus keys do", () => {
+      for (const platform of PLATFORMS) {
+        expect(ariaKeyShortcutsFor("zoomOut", platform)).toBe("-");
+      }
+    });
+
+    it("leaves the layout variants out, and keeps Shift+Z for Fit", () => {
+      for (const platform of PLATFORMS) {
+        // Not "= Plus Shift+= Shift+Plus": the variants name = and + again.
+        expect(ariaKeyShortcutsFor("zoomIn", platform)).toBe("= Plus");
+        expect(ariaKeyShortcutsFor("zoomToFit", platform)).toBe("\\ Shift+Z");
+      }
+      // Every binding that is not a variant appears.
+      for (const action of SHORTCUT_ACTIONS) {
+        for (const platform of PLATFORMS) {
+          const tokens = ariaKeyShortcutsFor(action, platform)?.split(" ") ?? [];
+          for (const binding of shortcutsFor(action, platform)) {
+            if (binding.layoutVariant !== true) {
+              expect(tokens).toContain(formatAriaKeyShortcut(binding, platform));
+            }
+          }
+        }
+      }
+    });
+
+    it("keeps the chip of Fit on \\, the first binding", () => {
+      for (const platform of PLATFORMS) {
+        const fit = shortcutFor("zoomToFit", platform);
+        expect(fit && formatShortcut(fit, platform, EN_NAMES)).toBe("\\");
+      }
+    });
+  });
+
+  describe("chipShortcutsFor", () => {
+    const chipsOf = (
+      action: Parameters<typeof chipShortcutsFor>[0],
+      platform: ShortcutPlatform,
+    ) =>
+      chipShortcutsFor(action, platform).map((binding) =>
+        formatShortcut(binding, platform, EN_NAMES),
+      );
+
+    it("gives Fit two chips, \\ and Shift+Z, for a layout that needs AltGr or Option", () => {
+      expect(chipsOf("zoomToFit", "macos")).toStrictEqual(["\\", "⇧Z"]);
+      expect(chipsOf("zoomToFit", "windows")).toStrictEqual(["\\", "Shift+Z"]);
+    });
+
+    it("gives every other action the chip of its first binding only", () => {
+      for (const action of SHORTCUT_ACTIONS) {
+        if (action === "zoomToFit") {
+          continue;
+        }
+        for (const platform of PLATFORMS) {
+          expect(chipShortcutsFor(action, platform)).toStrictEqual([
+            shortcutFor(action, platform),
+          ]);
+        }
+      }
+      // Zoom In keeps =, and its layout variants and the numpad key are no chips.
+      expect(chipsOf("zoomIn", "windows")).toStrictEqual(["="]);
+      expect(chipsOf("redo", "windows")).toStrictEqual(["Ctrl+Shift+Z"]);
     });
 
     it("lists one binding for an action with one binding", () => {
@@ -398,11 +553,12 @@ describe("shortcutLabels", () => {
         escape: "Esc",
         ctrl: "Ctrl",
         shift: "Shift",
+        numpad: "Num",
       });
     });
 
-    it("localize only the space bar in Simplified Chinese", () => {
-      expect(ZH_NAMES).toStrictEqual({ ...EN_NAMES, space: "空格" });
+    it("localize only the space bar and the numpad word in Simplified Chinese", () => {
+      expect(ZH_NAMES).toStrictEqual({ ...EN_NAMES, space: "空格", numpad: "小键盘" });
     });
   });
 });

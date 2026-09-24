@@ -1,8 +1,9 @@
 /**
  * Pure math and layout helpers for timeline zoom and pan.
  *
- * Implements mouse-wheel zooming anchored to the pointer position,
- * content width scaling, zoom clamping, and wheel delta normalization.
+ * Implements mouse-wheel zooming anchored to the pointer position, the zoom step of the keys
+ * and the buttons with its playhead-or-centre anchor, content width scaling, zoom clamping,
+ * and wheel delta normalization.
  */
 
 /**
@@ -28,6 +29,20 @@ export const MAX_TIMELINE_PIXELS_PER_SECOND = 200;
 
 export const TIMELINE_WHEEL_ZOOM_BASE = 1.25;
 export const MAX_WHEEL_DELTA_PER_EVENT_PX = 400;
+
+/**
+ * The factor of one step of the zoom keys and the zoom buttons. It is the zoom of one 100px
+ * wheel notch (`calculateWheelZoomFactor`), so a key press, a button click and a wheel notch
+ * zoom by the same amount.
+ */
+export const TIMELINE_ZOOM_STEP_FACTOR = TIMELINE_WHEEL_ZOOM_BASE;
+
+/**
+ * The relative distance under which a zoom factor snaps to a bound. A product of steps in and
+ * steps out can land one rounding error away from 1 or from the maximum. Without the snap, a
+ * factor of 1.0000000001 would keep Zoom Out and Fit enabled on a lane that already fits.
+ */
+const TIMELINE_ZOOM_SNAP_TOLERANCE = 1e-9;
 
 /**
  * Ratio in 0..1 of a client x coordinate across the lane rectangle.
@@ -144,6 +159,250 @@ export function clampTimelineZoom(zoom: number, maxZoom: number): number {
 }
 
 /**
+ * Clamps a zoom factor to 1 and the maximum, and snaps a factor within a rounding error of a
+ * bound to that bound. Every zoom change of the viewport store goes through this function, so
+ * `zoom === MIN_TIMELINE_ZOOM` and `zoom === maxZoom` are exact tests for the two limits.
+ */
+export function settleTimelineZoom(zoom: number, maxZoom: number): number {
+  const safeMax = clampTimelineZoom(Infinity, maxZoom);
+  const clamped = clampTimelineZoom(zoom, maxZoom);
+  if (clamped - MIN_TIMELINE_ZOOM <= TIMELINE_ZOOM_SNAP_TOLERANCE * MIN_TIMELINE_ZOOM) {
+    return MIN_TIMELINE_ZOOM;
+  }
+  if (safeMax - clamped <= TIMELINE_ZOOM_SNAP_TOLERANCE * safeMax) {
+    return safeMax;
+  }
+  return clamped;
+}
+
+/** The zoom factor after one step of the zoom keys or the zoom buttons. */
+export function stepTimelineZoom(
+  zoom: number,
+  direction: "in" | "out",
+  maxZoom: number,
+): number {
+  const safeZoom = Number.isFinite(zoom) ? zoom : MIN_TIMELINE_ZOOM;
+  const next =
+    direction === "in"
+      ? safeZoom * TIMELINE_ZOOM_STEP_FACTOR
+      : safeZoom / TIMELINE_ZOOM_STEP_FACTOR;
+  return settleTimelineZoom(next, maxZoom);
+}
+
+/**
+ * A point of the time axis that a zoom holds at one position in the viewport.
+ *
+ * After the new lane width is committed, the panel passes the point to
+ * `calculateAnchoredScrollLeft`, with `viewportOffsetPx` added to the left edge of the scroll
+ * container as the anchor client x.
+ */
+export interface TimelineZoomAnchorPoint {
+  /** The position on the time axis, as a ratio from 0 to 1 of the source extent. */
+  readonly ratio: number;
+  /** The distance of the point from the left edge of the scroll container, in pixels. */
+  readonly viewportOffsetPx: number;
+}
+
+/** Inputs of `resolvePlayheadOrCentreAnchor`. All of them describe the view before the zoom. */
+export interface PlayheadOrCentreAnchorInput {
+  /** The zoom factor of the lane before the change. */
+  readonly zoom: number;
+  /**
+   * The fractional width of the scroll container, which is the `100%` of the lane width rule.
+   * The anchor point comes from it, so the zoom holds the playhead or the centre where the
+   * lane really draws it.
+   */
+  readonly viewportWidthPx: number;
+  /**
+   * The rounded width that the follow reads (`viewportWidthPx` of the panel). The test for a
+   * visible playhead uses it, so the zoom and the follow agree in the edge band that the
+   * rounding makes.
+   */
+  readonly followViewportWidthPx: number;
+  /** The scrollLeft of the scroll container before the change. */
+  readonly scrollLeftPx: number;
+  /**
+   * The drawn playhead, in percent of the source extent, as `calculatePlayheadLayout` gives it
+   * to the follow, or null when no playhead is drawn.
+   */
+  readonly playheadPercent: number | null;
+}
+
+/** The result of `resolvePlayheadOrCentreAnchor`. */
+export interface PlayheadOrCentreAnchor extends TimelineZoomAnchorPoint {
+  /**
+   * The playhead percent that the anchor holds, or null when it holds the centre of the
+   * visible lane. After the zoom, the panel keeps that playhead in the window of the follow
+   * (`clampScrollLeftToFollowWindow`).
+   */
+  readonly heldPlayheadPercent: number | null;
+}
+
+/**
+ * The anchor of a zoom from a key or a button: the playhead when it is in the visible lane,
+ * and the centre of the visible lane otherwise.
+ *
+ * The visible lane is the part of the viewport to the right of the sticky gutter. The test for
+ * a visible playhead is `calculateFollowScrollLeft` with the inputs that the follow gives it:
+ * the rounded width for the bound and for the lane width. The follow places the playhead on a
+ * lane of the rounded width, which differs from the drawn lane by up to half a pixel times the
+ * zoom, so a test on the bound alone would still disagree with the follow. A playhead whose
+ * follow page the scroll range cancels counts as visible too, because the follow does not
+ * move the view for it (`shouldWriteFollowScrollLeft`). The paused follow
+ * never pages after a zoom, because a zoom does not move the playhead in seconds
+ * (`calculatePausedFollow`). The playback follow does not page either, because the panel
+ * keeps a held playhead in the window of the follow (`clampScrollLeftToFollowWindow`).
+ *
+ * The point to hold uses the fractional width. The lane width before the zoom comes from
+ * `calculateContentWidthPx`, which mirrors the CSS rule of the lane, because the DOM already
+ * holds the new width when the panel resolves the anchor.
+ */
+export function resolvePlayheadOrCentreAnchor(
+  input: PlayheadOrCentreAnchorInput,
+): PlayheadOrCentreAnchor {
+  const fallback: PlayheadOrCentreAnchor = {
+    ratio: 0,
+    viewportOffsetPx: TIMELINE_GUTTER_WIDTH_PX,
+    heldPlayheadPercent: null,
+  };
+  if (
+    !Number.isFinite(input.zoom) ||
+    !Number.isFinite(input.viewportWidthPx) ||
+    !Number.isFinite(input.scrollLeftPx) ||
+    input.viewportWidthPx <= TIMELINE_GUTTER_WIDTH_PX
+  ) {
+    return fallback;
+  }
+  const laneWidthPx =
+    calculateContentWidthPx(input.zoom, input.viewportWidthPx) -
+    TIMELINE_GUTTER_WIDTH_PX;
+  if (laneWidthPx <= 0) {
+    return fallback;
+  }
+
+  const playheadPercent = input.playheadPercent;
+  // `calculateFollowScrollLeft` also returns null for inputs it cannot use, so a width that is
+  // not usable must not reach it, or it would read as a visible playhead.
+  if (
+    playheadPercent !== null &&
+    Number.isFinite(playheadPercent) &&
+    Number.isFinite(input.followViewportWidthPx) &&
+    input.followViewportWidthPx > TIMELINE_GUTTER_WIDTH_PX
+  ) {
+    // The follow computes its lane width in the panel with the same rule.
+    const followLaneWidthPx = Math.max(
+      0,
+      calculateContentWidthPx(input.zoom, input.followViewportWidthPx) -
+        TIMELINE_GUTTER_WIDTH_PX,
+    );
+    const followTarget = calculateFollowScrollLeft(
+      playheadPercent,
+      followLaneWidthPx,
+      TIMELINE_GUTTER_WIDTH_PX,
+      input.scrollLeftPx,
+      input.followViewportWidthPx,
+      PLAYHEAD_FOLLOW_LEAD_FRACTION,
+    );
+    // The follow keeps the view when it sees the playhead, and also when its page, clamped to
+    // the scroll range as applyFollowScrollLeft clamps it, moves nothing. The second case is a
+    // playhead at the end of the lane that the lane of the follow places just past the view:
+    // at a width such as 1095.6 the follow never sees 100%, and at the maximum scrollLeft its
+    // page is a no-op. Holding the centre there would move the view away from the end, and
+    // the follow would then page back to it.
+    const maxScrollLeftPx = Math.max(
+      0,
+      calculateContentWidthPx(input.zoom, input.viewportWidthPx) -
+        input.viewportWidthPx,
+    );
+    const followKeepsView =
+      followTarget === null ||
+      !shouldWriteFollowScrollLeft(
+        input.scrollLeftPx,
+        Math.min(followTarget, maxScrollLeftPx),
+      );
+    if (followKeepsView) {
+      const ratio = Math.max(0, Math.min(1, playheadPercent / 100));
+      return {
+        ratio,
+        viewportOffsetPx:
+          TIMELINE_GUTTER_WIDTH_PX + ratio * laneWidthPx - input.scrollLeftPx,
+        heldPlayheadPercent: playheadPercent,
+      };
+    }
+  }
+
+  const centreOffset = (TIMELINE_GUTTER_WIDTH_PX + input.viewportWidthPx) / 2;
+  const centreRatio =
+    (input.scrollLeftPx + centreOffset - TIMELINE_GUTTER_WIDTH_PX) / laneWidthPx;
+  return {
+    ratio: Math.max(0, Math.min(1, centreRatio)),
+    viewportOffsetPx: centreOffset,
+    heldPlayheadPercent: null,
+  };
+}
+
+/**
+ * The margin that `clampScrollLeftToFollowWindow` keeps inside the window of the follow. The
+ * panel reads scrollLeft back after it writes it, and the browser snaps the value to the
+ * device pixel grid, which moves it by less than one CSS pixel. Without the margin, a value
+ * on the edge of the window could fall one snap outside it.
+ */
+export const FOLLOW_WINDOW_MARGIN_PX = 1;
+
+/** Inputs of `clampScrollLeftToFollowWindow`. All of them describe the view after the zoom. */
+export interface FollowWindowInput {
+  /** The scrollLeft that the anchor gives. */
+  readonly scrollLeftPx: number;
+  /** The held playhead, in percent of the source extent (`heldPlayheadPercent`). */
+  readonly playheadPercent: number;
+  /** The zoom factor after the change. */
+  readonly zoom: number;
+  /** The rounded width that the follow reads, as in `PlayheadOrCentreAnchorInput`. */
+  readonly followViewportWidthPx: number;
+}
+
+/**
+ * Clamps a scrollLeft into the window in which the playback follow sees the held playhead
+ * after a zoom, so the follow does not page after the zoom.
+ *
+ * The follow places the playhead at `x = gutter + percent / 100 * W`, on a lane `W` of the
+ * rounded width at the new zoom, and it sees the playhead while
+ * `scrollLeft + gutter <= x <= scrollLeft + width` (`calculateFollowScrollLeft`). So the
+ * window of scrollLeft is `[x - width, x - gutter]`, here with `FOLLOW_WINDOW_MARGIN_PX`
+ * inside each edge. The anchor holds the drawn playhead in place, and the drawn lane differs
+ * from the lane of the follow by up to half a pixel times the zoom. After a large zoom the
+ * anchored scrollLeft can therefore leave the window. The clamp moves the drawn playhead by
+ * no more than that difference.
+ *
+ * The result can be outside the scroll range, so the caller clamps it to that range after.
+ * Returns the input scrollLeft when an input is not usable or the window is empty.
+ */
+export function clampScrollLeftToFollowWindow(input: FollowWindowInput): number {
+  const { scrollLeftPx, playheadPercent, zoom, followViewportWidthPx } = input;
+  if (
+    !Number.isFinite(scrollLeftPx) ||
+    !Number.isFinite(playheadPercent) ||
+    !Number.isFinite(zoom) ||
+    !Number.isFinite(followViewportWidthPx)
+  ) {
+    return scrollLeftPx;
+  }
+  // The lane of the follow, with the rule that the panel uses for the follow.
+  const followLaneWidthPx = Math.max(
+    0,
+    calculateContentWidthPx(zoom, followViewportWidthPx) - TIMELINE_GUTTER_WIDTH_PX,
+  );
+  const playheadContentX =
+    TIMELINE_GUTTER_WIDTH_PX + (playheadPercent / 100) * followLaneWidthPx;
+  const lowest = playheadContentX - followViewportWidthPx + FOLLOW_WINDOW_MARGIN_PX;
+  const highest = playheadContentX - TIMELINE_GUTTER_WIDTH_PX - FOLLOW_WINDOW_MARGIN_PX;
+  if (lowest > highest) {
+    return scrollLeftPx;
+  }
+  return Math.max(lowest, Math.min(highest, scrollLeftPx));
+}
+
+/**
  * Normalizes deltaMode and returns the multiplicative zoom factor for one wheel event.
  */
 export function calculateWheelZoomFactor(deltaY: number, deltaMode: number): number {
@@ -167,6 +426,32 @@ export function calculateWheelZoomFactor(deltaY: number, deltaMode: number): num
 
 /** Where the playhead lands, as a fraction of the visible window, after a follow scroll. */
 export const PLAYHEAD_FOLLOW_LEAD_FRACTION = 0.1;
+
+/** The distance under which a follow target counts as the scroll position already there. */
+export const FOLLOW_WRITE_TOLERANCE_PX = 1;
+
+/**
+ * True when the follow must write its target scrollLeft to the scroll container.
+ *
+ * The mirror holds the value that the element kept, which the browser snapped to the device
+ * pixel grid, and the target is not snapped. A difference under `FOLLOW_WRITE_TOLERANCE_PX`
+ * is that snap, so the follow does not write again. At the end of the lane it would otherwise
+ * write on every frame, because the clamped target never equals the snapped mirror.
+ *
+ * A target of exactly 0 is written whenever the mirror is not 0, so a snap residual at the
+ * start of the lane does not stay. A real page moves far more than the tolerance: the smallest
+ * page on the left moves by the lead minus the gutter, about 14px at a width of 1096, and a
+ * page on the right moves by about the width minus the lead.
+ */
+export function shouldWriteFollowScrollLeft(
+  mirrorScrollLeftPx: number,
+  targetScrollLeftPx: number,
+): boolean {
+  return (
+    (targetScrollLeftPx === 0 && mirrorScrollLeftPx !== 0) ||
+    Math.abs(mirrorScrollLeftPx - targetScrollLeftPx) >= FOLLOW_WRITE_TOLERANCE_PX
+  );
+}
 
 /**
  * Returns the scrollLeft that brings the playhead back into view, or null when the

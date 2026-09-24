@@ -10,7 +10,9 @@
  * modifier names and the key with `+`, in the order `Ctrl`, `Alt`, `Shift`.
  *
  * Only the key names that are words come from the catalog (ADR 011), through
- * `ShortcutKeyNames`. Symbols, letters and punctuation are the same in every language.
+ * `ShortcutKeyNames`. Symbols, letters and punctuation are the same in every language. The
+ * chip draws the `-` key as the minus sign `−`, which reads as the key cap at the chip size,
+ * and a numpad key as the numpad word and its symbol, such as `Num +`.
  *
  * The module has no React, DOM or store dependency, so the tests need no document.
  */
@@ -43,6 +45,8 @@ export interface ShortcutKeyNames {
   readonly ctrl: string;
   /** The `Shift` modifier, as Windows labels it. macOS shows the `⇧` symbol. */
   readonly shift: string;
+  /** The word before the symbol of a numpad key, such as `Num` in `Num +`. */
+  readonly numpad: string;
 }
 
 /** The catalog key of each word in `ShortcutKeyNames`. */
@@ -55,6 +59,7 @@ export const SHORTCUT_KEY_NAME_KEYS = {
   escape: "shortcut.key.escape",
   ctrl: "shortcut.key.ctrl",
   shift: "shortcut.key.shift",
+  numpad: "shortcut.key.numpad",
 } as const satisfies Record<keyof ShortcutKeyNames, string>;
 
 export type ShortcutKeyNameKey =
@@ -73,6 +78,7 @@ export function resolveShortcutKeyNames(
     escape: translate(SHORTCUT_KEY_NAME_KEYS.escape),
     ctrl: translate(SHORTCUT_KEY_NAME_KEYS.ctrl),
     shift: translate(SHORTCUT_KEY_NAME_KEYS.shift),
+    numpad: translate(SHORTCUT_KEY_NAME_KEYS.numpad),
   };
 }
 
@@ -83,6 +89,15 @@ const MAC_FORWARD_DELETE = "⌦";
 const MAC_BACKWARD_DELETE = "⌫";
 const ARROW_LEFT = "←";
 const ARROW_RIGHT = "→";
+
+/**
+ * The symbol that a chip shows for a punctuation key. A hyphen-minus is short and sits low in
+ * most fonts, so the chip shows the minus sign U+2212, which has the width and the height of
+ * the `+` beside it. Every other character shows as it is.
+ */
+function formatCharacter(character: string): string {
+  return character === "-" ? "\u2212" : character;
+}
 
 /** The label of a named key on the platform. */
 function formatNamedKey(
@@ -121,7 +136,9 @@ function formatKey(
     case "letter":
       return key.letter;
     case "character":
-      return key.character;
+      return formatCharacter(key.character);
+    case "numpad":
+      return `${keyNames.numpad} ${formatCharacter(key.character)}`;
   }
 }
 
@@ -157,8 +174,16 @@ export function formatShortcut(
 
 /**
  * The `event.key` value that WAI-ARIA names for a key. The spec writes the space bar as
- * `Space`, and every other key as its `KeyboardEvent.key` value.
+ * `Space`, and every other key as its `KeyboardEvent.key` value. The `+` key is `Plus`,
+ * because a bare `+` is the separator of the tokens.
+ *
+ * A numpad key has the `event.key` value of its symbol, so the attribute cannot tell it from
+ * the main key with the same symbol.
  */
+function ariaCharacterName(character: string): string {
+  return character === "+" ? "Plus" : character;
+}
+
 function ariaKeyName(key: ShortcutKey): string {
   switch (key.kind) {
     case "named":
@@ -166,7 +191,8 @@ function ariaKeyName(key: ShortcutKey): string {
     case "letter":
       return key.letter;
     case "character":
-      return key.character;
+    case "numpad":
+      return ariaCharacterName(key.character);
   }
 }
 
@@ -255,9 +281,41 @@ export function shortcutFor(
 }
 
 /**
+ * The number of bindings that the tooltip chips of an action name. Every other action names
+ * its first binding only. Fit also names Shift+Z, because a layout that needs AltGr or Option
+ * to type `\` cannot press the first key: no binding holds Alt.
+ */
+const CHIP_BINDING_COUNT: { readonly [A in ShortcutAction]?: number } = {
+  zoomToFit: 2,
+};
+
+/**
+ * The bindings that the tooltip chips of the action name on the platform: the first binding
+ * (`shortcutFor`), and for an action in `CHIP_BINDING_COUNT` the next bindings in table order.
+ * A layout variant is never a chip. Empty when the action has no binding on the platform.
+ */
+export function chipShortcutsFor(
+  action: ShortcutAction,
+  platform: ShortcutPlatform,
+): readonly ShortcutBinding[] {
+  const count = CHIP_BINDING_COUNT[action] ?? 1;
+  return shortcutsFor(action, platform)
+    .filter((binding, index) => index === 0 || binding.layoutVariant !== true)
+    .slice(0, count);
+}
+
+/**
  * The `aria-keyshortcuts` value of a control that performs the action: every binding of the
  * action on the platform, canonical first, separated by spaces as the attribute requires.
  * Undefined when the action has no binding, so React leaves the attribute out.
+ *
+ * Two bindings with the same token appear once. The numpad `-` and the main `-` are both `-`
+ * in the attribute.
+ *
+ * A layout variant (`ShortcutBinding.layoutVariant`) is left out. It names `=` or `+` again,
+ * with the Shift that one layout needs to type it, and the attribute already lists the
+ * symbol. Zoom In therefore stays `= Plus`, and not `= Plus Shift+= Shift+Plus`. A second key
+ * that is not a variant stays in, so Fit is `\ Shift+Z`.
  */
 export function ariaKeyShortcutsFor(
   action: ShortcutAction,
@@ -267,5 +325,8 @@ export function ariaKeyShortcutsFor(
   if (bindings.length === 0) {
     return undefined;
   }
-  return bindings.map((binding) => formatAriaKeyShortcut(binding, platform)).join(" ");
+  const tokens = bindings
+    .filter((binding, index) => index === 0 || binding.layoutVariant !== true)
+    .map((binding) => formatAriaKeyShortcut(binding, platform));
+  return [...new Set(tokens)].join(" ");
 }

@@ -14,6 +14,7 @@ import {
   type MediaStoreState,
 } from "@/features/media";
 import {
+  getDisplayedElapsedSeconds,
   playbackStore,
   resolveTimecodeDisplay,
   usePlaybackStore,
@@ -29,14 +30,20 @@ import {
   calculateAnchoredScrollLeft,
   calculateContentWidthPx,
   calculateMaxZoom,
+  calculatePlayheadLayout,
   calculatePtsFromClientX,
   calculateTimelineSecondsFromClientX,
   calculateWheelZoomFactor,
-  clampTimelineZoom,
+  clampScrollLeftToFollowWindow,
   getTimelineDurationSeconds,
+  resolvePlayheadOrCentreAnchor,
+  timelineViewportStore,
   useTimelineStore,
+  useTimelineViewportStore,
   TIMELINE_GUTTER_WIDTH_PX,
   type TimelineStoreState,
+  type TimelineViewportStoreState,
+  type TimelineZoomAnchorPoint,
 } from "@/features/timeline";
 import { PendingInFlag, PendingInTrackMarks } from "./PendingInLayer";
 import { PlayheadFollow } from "./PlayheadFollow";
@@ -50,6 +57,7 @@ import { countRulerEdgeAnchors } from "./rulerLabel";
 import { SegmentLayer } from "./SegmentLayer";
 import { calculateRulerScale, generateRulerTicks } from "./timelineMarkers";
 import { TimelineRuler } from "./TimelineRuler";
+import { TimelineZoomControls } from "./TimelineZoomControls";
 import { createTimelineScrubGesture, type TimelineScrubGesture } from "./timelineScrub";
 
 export interface TimelinePanelProps {
@@ -72,9 +80,15 @@ const selectSetSource = (state: TimelineStoreState) => state.setSource;
 
 const selectTimecodeFormat = (state: TimecodePreferenceState) => state.format;
 
+const selectZoom = (state: TimelineViewportStoreState) => state.zoom;
+
 /**
  * The timeline panel shell: the layout, the scroll container, the zoom and the viewport
  * state, the pointer gesture, and the empty and loading states.
+ *
+ * The zoom factor lives in the viewport store, so the zoom buttons and the window keyboard
+ * layer can change it. The panel reports the ceiling of the zoom to that store, and it owns
+ * the scroll position: it applies the anchor of each zoom after it commits the new width.
  *
  * The shell subscribes to no value that changes per presented frame. The layers that draw
  * the displayed position subscribe to it themselves: RulerPlayhead, TrackPlayhead, the
@@ -139,10 +153,10 @@ export function TimelinePanel({
     onApproximateSeek !== undefined;
   const canSeek = canUsePreciseSeek || canUseApproximateSeek;
 
-  const [zoom, setZoom] = useState<number>(1);
-  const zoomRef = useRef<number>(1);
-  const maxZoomRef = useRef<number>(1);
-  const pendingAnchorRef = useRef<{ ratio: number; clientX: number } | null>(null);
+  const zoom = useTimelineViewportStore(selectZoom);
+  // The zoom factor of the last commit. The layout effect that applies an anchor reads it as
+  // the factor of the view before the zoom, because the DOM already has the new width then.
+  const committedZoomRef = useRef<number>(zoom);
 
   const [viewportWidthPx, setViewportWidthPx] = useState<number>(0);
   const lastWidthRef = useRef<number>(0);
@@ -208,15 +222,10 @@ export function TimelinePanel({
 
   const maxZoom = calculateMaxZoom(totalDurationSeconds, viewportWidthPx);
 
-  // Keeps zoomRef in sync for zoom updates outside the wheel handler (such as viewport clamp or source reset).
-  // The wheel handler cannot rely on this passive effect because wheel events are not flushed synchronously,
-  // so zoomRef is advanced synchronously in onWheel.
-  useEffect(() => {
-    zoomRef.current = zoom;
-  }, [zoom]);
-
-  useEffect(() => {
-    maxZoomRef.current = maxZoom;
+  // Reports the ceiling to the viewport store, which clamps the zoom to it, as a resize or a
+  // new extent requires. A layout effect, so a clamped zoom renders before the paint.
+  useLayoutEffect(() => {
+    timelineViewportStore.getState().setMaxZoom(maxZoom);
   }, [maxZoom]);
 
   // Non-passive wheel listener allows preventDefault() on zoom gestures
@@ -224,7 +233,8 @@ export function TimelinePanel({
     const el = scrollRef.current;
     if (!el) return;
     const onWheel = (event: WheelEvent) => {
-      if (maxZoomRef.current <= 1) return;
+      const viewport = timelineViewportStore.getState();
+      if (viewport.maxZoom <= 1) return;
       if (event.shiftKey) return;
       // event.ctrlKey is deliberately NOT excluded because trackpad pinch gestures
       // arrive as wheel events with event.ctrlKey = true. Handling them here and
@@ -241,64 +251,124 @@ export function TimelinePanel({
       const rect = laneEl.getBoundingClientRect();
       const ratio = calculateAnchorRatio(event.clientX, rect.left, rect.width);
       const factor = calculateWheelZoomFactor(event.deltaY, event.deltaMode);
-      const currentZoom = zoomRef.current;
-      const nextZoom = clampTimelineZoom(currentZoom * factor, maxZoomRef.current);
 
-      if (nextZoom === currentZoom) return;
-
-      // The wheel event runs at ContinuousEventPriority and setZoom does not flush
-      // synchronously, so the passive useEffect([zoom]) cannot run in time for rapid wheel
-      // events or before another wheel event arrives. The handler must advance zoomRef
-      // synchronously so consecutive events do not read a stale zoom or leak an anchor.
-      zoomRef.current = nextZoom;
-      pendingAnchorRef.current = { ratio, clientX: event.clientX };
-      setZoom(nextZoom);
+      // The store changes synchronously, so a second wheel event before the next render reads
+      // the advanced zoom, and its anchor replaces the first one. The lane rectangle is then
+      // still the one of the last commit, and the time under the pointer is the same in both.
+      viewport.zoomBy(factor, {
+        kind: "point",
+        point: {
+          ratio,
+          viewportOffsetPx: event.clientX - el.getBoundingClientRect().left,
+        },
+      });
     };
 
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
-  // Write scrollLeft after React commits the new width so browser does not clamp against old scrollWidth
+  // The drawn playhead in percent of the extent, as PlayheadFollow computes it, or null when
+  // none is drawn. The panel does not subscribe to the position, which changes on every
+  // presented frame, so a zoom that anchors on the playhead reads it from the store. The ref
+  // holds the reader of the latest render. It is updated in a layout effect that comes before
+  // the zoom effect below, so both run in that order in one commit.
+  const readPlayheadPercent = (): number | null => {
+    if (!media || isIndeterminate) {
+      return null;
+    }
+    const elapsedSeconds = getDisplayedElapsedSeconds(
+      playbackStore.getState(),
+      media.probe.videoStartPts,
+      media.probe.videoTimeBase,
+    );
+    return calculatePlayheadLayout(elapsedSeconds, totalDurationSeconds).percent;
+  };
+  const readPlayheadPercentRef = useRef(readPlayheadPercent);
   useLayoutEffect(() => {
-    const pendingAnchor = pendingAnchorRef.current;
-    pendingAnchorRef.current = null;
-    if (!pendingAnchor) return;
+    readPlayheadPercentRef.current = readPlayheadPercent;
+  });
+
+  // Writes scrollLeft after React commits the new width, so the browser does not clamp it
+  // against the old scrollWidth. The anchor of the zoom decides the value:
+  //
+  // - `point` (the wheel) holds the time under the pointer.
+  // - `playheadOrCentre` (the keys and the buttons) resolves the playhead, or the centre of
+  //   the visible lane, from the view before the zoom: the zoom of the last commit, the
+  //   mirror of scrollLeft and the width of the container. The mirror still holds the value
+  //   from before the zoom, because a scroll that the new width causes has not reached
+  //   handleScroll yet. A held playhead then stays in the window of the follow.
+  // - `start` (Fit) goes to scrollLeft 0.
+  //
+  // A zoom with no anchor, such as the clamp from a resize, keeps the scroll position.
+  useLayoutEffect(() => {
+    const previousZoom = committedZoomRef.current;
+    committedZoomRef.current = zoom;
+    const anchor = timelineViewportStore.getState().takeAnchor();
+    if (!anchor) return;
 
     const scrollEl = scrollRef.current;
     const laneEl = laneRef.current;
     if (!scrollEl || !laneEl) return;
 
-    const rect = laneEl.getBoundingClientRect();
-    const maxScrollLeftPx = scrollEl.scrollWidth - scrollEl.clientWidth;
+    let nextScrollLeft = 0;
+    if (anchor.kind !== "start") {
+      const scrollRect = scrollEl.getBoundingClientRect();
+      // The point to hold comes from the fractional width of the container, which is the
+      // `100%` of the lane width rule. The rounded width would place it off by up to half a
+      // pixel times the zoom. The visibility test takes the rounded width that PlayheadFollow
+      // reads (`lastWidthRef` holds the value of `viewportWidthPx`), so the two agree.
+      let point: TimelineZoomAnchorPoint;
+      let heldPlayheadPercent: number | null = null;
+      if (anchor.kind === "point") {
+        point = anchor.point;
+      } else {
+        const resolved = resolvePlayheadOrCentreAnchor({
+          zoom: previousZoom,
+          viewportWidthPx: scrollRect.width,
+          followViewportWidthPx: lastWidthRef.current,
+          scrollLeftPx: scrollLeftRef.current,
+          playheadPercent: readPlayheadPercentRef.current(),
+        });
+        point = resolved;
+        heldPlayheadPercent = resolved.heldPlayheadPercent;
+      }
 
-    const nextScrollLeft = calculateAnchoredScrollLeft(
-      scrollEl.scrollLeft,
-      pendingAnchor.ratio,
-      pendingAnchor.clientX,
-      rect.left,
-      rect.width,
-      maxScrollLeftPx,
-    );
+      const laneRect = laneEl.getBoundingClientRect();
+      const maxScrollLeftPx = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
+      nextScrollLeft = calculateAnchoredScrollLeft(
+        scrollEl.scrollLeft,
+        point.ratio,
+        scrollRect.left + point.viewportOffsetPx,
+        laneRect.left,
+        laneRect.width,
+        maxScrollLeftPx,
+      );
+
+      // A held playhead stays where the follow sees it, so the playback follow does not page
+      // after the zoom. The clamp can leave the scroll range, and the range wins.
+      if (heldPlayheadPercent !== null) {
+        const inFollowWindow = clampScrollLeftToFollowWindow({
+          scrollLeftPx: nextScrollLeft,
+          playheadPercent: heldPlayheadPercent,
+          zoom,
+          followViewportWidthPx: lastWidthRef.current,
+        });
+        nextScrollLeft = Math.max(0, Math.min(maxScrollLeftPx, inFollowWindow));
+      }
+    }
 
     scrollEl.scrollLeft = nextScrollLeft;
-    scrollLeftRef.current = nextScrollLeft;
+    // The browser clamps the value and snaps it to the device pixel grid. The mirror takes
+    // the value it kept, so the scroll event of this write matches the mirror, and handleScroll
+    // does not take the write for a pan by the user.
+    scrollLeftRef.current = scrollEl.scrollLeft;
   }, [zoom]);
-
-  // Clamp zoom when viewport width changes
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setZoom((prevZoom) => {
-      const clamped = clampTimelineZoom(prevZoom, maxZoom);
-      return clamped !== prevZoom ? clamped : prevZoom;
-    });
-  }, [maxZoom]);
 
   // Reset zoom when the active source changes. PlayheadFollow resets scrollLeft for the same
   // change, because that write must come before its follow effects in the commit.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setZoom(1);
+    timelineViewportStore.getState().reset();
   }, [sourceId]);
 
   const laneWidthPx = Math.max(
@@ -507,8 +577,14 @@ export function TimelinePanel({
            * playhead scrolls behind it.
            */}
           <div className="flex h-7 shrink-0">
-            {/* Gutter header pinned sticky on the left */}
-            <div className="sticky left-0 z-40 w-[96px] shrink-0 border-r border-b border-timeline-divider bg-sidebar" />
+            {/*
+             * Gutter header pinned sticky on the left. It holds the zoom controls, so they
+             * stay in view at every scroll position. It is outside the lane, so a press on a
+             * button there is not a scrub.
+             */}
+            <div className="sticky left-0 z-40 flex w-[96px] shrink-0 items-center justify-center border-r border-b border-timeline-divider bg-sidebar">
+              <TimelineZoomControls />
+            </div>
 
             {/*
              * Ruler track with time markers and tick marks, and the pointer scrub

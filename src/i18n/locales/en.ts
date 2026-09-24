@@ -191,6 +191,7 @@ export const en = {
       escape: "Esc",
       ctrl: "Ctrl",
       shift: "Shift",
+      numpad: "Num",
     },
   },
   timeline: {
@@ -202,6 +203,12 @@ export const en = {
     segmentList: "Timeline segments",
     segment: "Segment {{index}}",
     pendingInFlag: "In",
+    zoom: {
+      group: "Timeline zoom",
+      zoomIn: "Zoom In",
+      zoomOut: "Zoom Out",
+      fit: "Zoom to Fit",
+    },
   },
   mediaError: {
     invalidPath: "The selected file path is invalid.",
