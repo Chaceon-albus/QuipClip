@@ -79,6 +79,61 @@ speed of the decoder.
 `currentTime` when none exists. A held arrow key therefore continues from the last
 request.
 
+(Changed on 2026-09-23.) On the frame grid, the step aims at the middle of the target
+nominal frame, not at its nominal start. Containers such as Matroska store each PTS rounded
+to the millisecond, so a real frame can start after its nominal start. A target on the
+nominal start then lies before the real frame, and the browser shows the old frame again.
+A simulation of Matroska files found that repeat in about 37% of steps at 29.97 fps and in
+about 70% at 23.976 and 59.94 fps.
+
+- **When the grid applies.** All three conditions must hold:
+  - The calibration is ready, so the first video frame is known.
+  - The rate is constant: the average and the real frame rate agree, by the test that ADR
+    028 uses. On a variable-rate source the nominal grid does not follow the frames.
+  - The grid is exact for the time base: the margin of ADR 028 is one tick or 1 µs, not a
+    quarter of the interval. On a coarse time base, such as 1/24 at 23.976 fps, a real frame
+    start can lie most of a frame away from its nominal start.
+- **The frame the step starts from.** When no seek is pending, no display target is set and
+  a frame is on screen, the step starts from the frame on screen. That is the presented
+  frame's time, measured from the calibrated first frame, times the rate, rounded to the
+  nearest whole frame. On the grid a real frame start lies within one tick of its nominal
+  start, so the rounding is exact. Otherwise, when a seek is pending, a display target is
+  set, or no frame is on screen, the step counts from the pending target, or else from
+  `currentTime`, rounded down after the margin of ADR 028. The pending target of an earlier
+  step is the middle of a frame, so repeated steps advance by exactly one frame each.
+- **What the display shows.** The element seeks to the middle of the target frame. The
+  playhead and the timecode show the nominal start of that frame, so the playhead does not
+  jump back by half a frame when the frame arrives. A target that the end bound pulled back
+  shows the nominal start of the frame that contains it. A target that the lower bound
+  raised shows its time. While a calibration holds, on the grid or off it, the display
+  target of a step counts from the calibrated first frame. `seekApproximate`, and a step
+  without a calibration, still count from the start of the browser timeline.
+- **The audio cue.** ADR 019 plays the cue from the same target as the element, so a step on
+  the grid starts its cue at the middle of the frame, about half a frame later than before.
+- **The direction of a step.** A step that starts outside the bounds never moves against its
+  direction. Inside the bounds, a step from the frame on screen can aim behind `currentTime`
+  during playback, when the element has run past the frame that it last reported. The step
+  then goes to the frame next to the one on screen, which is the frame that the user sees.
+- **Off the grid.** The step keeps the relative target: the position it steps from plus the
+  step count times the frame interval. The edge no-op then tests the position only.
+- **The edges.** The clamps and the edge no-op still apply to the result. On the grid, a
+  clamped target that stays inside the start frame also counts as the edge.
+- **Calibration lost during a step.** If the calibration leaves `ready` while a display
+  target is set, the target moves to the axis of the browser timeline: the last accepted
+  request, measured from the timeline start. After `play` there is no such request, so the
+  target stays until the next `seeked` event or frame callback clears it.
+
+On a coarse time base or a variable-rate source, the step keeps the relative target, and
+the picture and the frame label can still repeat or skip a frame, as they did before this
+change. Such sources are rare.
+
+This supersedes two statements of ADR 021: that the step reads `currentTime` and adds one
+nominal frame interval, and that calibration never enters that path. The step now reads the
+calibration to choose the grid. ADR 021 still lets the step keys and buttons act without a
+calibrated source. It also qualifies the axis that the section above gives for
+`seekTargetSeconds`: while a calibration holds, the display target of a step counts from the
+calibrated first frame, not from the start of the browser timeline.
+
 A scrub seek that already started also counts as the pending target while it is the last
 accepted request, because its `fastSeek` can land on a keyframe away from the target. `play`
 then assigns its time as an exact seek, and `seekNominal` calculates its step from it.

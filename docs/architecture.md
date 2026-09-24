@@ -196,9 +196,11 @@ publishes the value, and adds it back for an approximate seek, so both axes agre
 is the same reading the calibration anchor guard already trusts. QuipClip does not use
 `seekable.start(0)` as the source timestamp origin.
 
-V1 navigation buttons request a nominal frame interval. They use `avg_frame_rate`, then
-`r_frame_rate`. RVFC reports the frame that the browser actually presented. Exact adjacent
-frame stepping needs future frame-boundary discovery or another decoder.
+V1 navigation buttons step by a nominal frame interval. They use `avg_frame_rate`, then
+`r_frame_rate`. On a calibrated source with a constant rate and a fine time base, a step aims
+at the middle of the next nominal frame, because a container can round the real frame start
+past its nominal start (ADR 022). RVFC reports the frame that the browser actually presented.
+Exact adjacent frame stepping needs future frame-boundary discovery or another decoder.
 
 A frame step also plays a short piece of the sound at the new position, because the picture
 alone frequently does not identify the correct frame. A second, hidden `<audio>` element
