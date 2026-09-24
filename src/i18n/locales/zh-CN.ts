@@ -539,6 +539,13 @@ export const zhCN: TranslationCatalog = {
       cancelingNotePublishing: "导出正在完成，仍会生成输出文件。",
       stopUnavailable: "导出正在完成，现在无法停止。",
     },
+    progress: {
+      framesAndSpeed: "<num>{{frame}}</num> / {{expectedFrames}} 帧 · {{speed}}×",
+      frames: "<num>{{frame}}</num> / {{expectedFrames}} 帧",
+      frameCountAndSpeed: "第 {{frame}} 帧 · {{speed}}×",
+      frameCount: "第 {{frame}} 帧",
+      elapsed: "已用时 {{time}}",
+    },
     finished: {
       title: "导出完成",
       folder: "位于 {{folder}}",

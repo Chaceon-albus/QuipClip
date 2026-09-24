@@ -39,6 +39,7 @@
   --color-progress-track: var(--progress-track);
   --color-progress-track-success: var(--progress-track-success);
   --color-progress-track-destructive: var(--progress-track-destructive);
+  --color-progress-track-neutral: var(--progress-track-neutral);
 
   --color-secondary: var(--secondary);
   --color-secondary-hover: var(--secondary-hover);
@@ -236,10 +237,12 @@
   --progress-track: oklch(0.53 0.075 190 / 0.16);
   --progress-track-success: oklch(0.58 0.13 145 / 0.16);
   --progress-track-destructive: oklch(0.58 0.2 25 / 0.16);
+  --progress-track-neutral: oklch(0.5 0.015 205 / 0.16);
   --progress-from: var(--primary);
   --progress-to: oklch(0.66 0.12 172);
   --progress-to-success: oklch(0.68 0.13 145);
   --progress-to-destructive: oklch(0.68 0.2 25);
+  --progress-to-neutral: oklch(0.62 0.012 205);
   --progress-flow-period: 12rem;
 
   /* ---------------------------------------------------------
@@ -551,10 +554,12 @@
   --progress-track: oklch(0.72 0.085 190 / 0.24);
   --progress-track-success: oklch(0.7 0.13 145 / 0.24);
   --progress-track-destructive: oklch(0.64 0.2 25 / 0.24);
+  --progress-track-neutral: oklch(0.68 0.015 200 / 0.24);
   --progress-from: var(--primary);
   --progress-to: oklch(0.86 0.11 172);
   --progress-to-success: oklch(0.82 0.13 145);
   --progress-to-destructive: oklch(0.82 0.2 25);
+  --progress-to-neutral: oklch(0.8 0.012 200);
 
   /* ---------------------------------------------------------
    * Secondary
@@ -722,6 +727,22 @@
   ::-webkit-scrollbar-corner {
     background: transparent;
   }
+}
+
+/* The two ends of the progress fill gradient. They are registered as colours, so a change
+ * of the tone of a ProgressBar fades them: an unregistered custom property can only change
+ * at once. The theme rules above give their values. The initial value applies only where no
+ * rule does. */
+@property --progress-from {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+
+@property --progress-to {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
 }
 
 @utility progress-fill {

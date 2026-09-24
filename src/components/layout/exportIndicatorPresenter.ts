@@ -5,6 +5,7 @@
  * The indicator is hidden when the export dialog is open or when status is idle.
  */
 
+import { isExportRunLive } from "@/features/export";
 import { splitFilePath } from "@/lib/fileName";
 import {
   formatRemaining,
@@ -142,7 +143,7 @@ export function presentExportIndicator(
     return {
       kind: input.status,
       outputName,
-      canDismiss: !(input.status === "failed" && input.tracking),
+      canDismiss: !isExportRunLive(input),
     };
   }
 

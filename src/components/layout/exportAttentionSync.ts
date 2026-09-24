@@ -15,12 +15,13 @@ import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import type { StoreApi } from "zustand/vanilla";
 import {
   exportStore,
-  type ExportState,
+  isExportRunLive,
+  type ExportRunLiveState,
   type ExportStoreState,
 } from "@/features/export";
 
 /** The two fields of the export store that decide whether a run ended. */
-export type ExportAttentionState = Pick<ExportState, "status" | "tracking">;
+export type ExportAttentionState = ExportRunLiveState;
 
 export interface ExportAttentionInput {
   /** The store before the change. */
@@ -34,25 +35,8 @@ export interface ExportAttentionInput {
 }
 
 /**
- * True while the store holds a run that can still end: `preparing`, `running` or
- * `publishing`, or `failed` while the store still tracks the run.
- *
- * The store reports `failed` with `tracking` still true when a call from the interface
- * rejects while the run continues, such as a Stop that fails at the IPC layer. The backend
- * still encodes that run, and its own `finished` or `failed` event comes later.
- */
-function holdsLiveRun(state: ExportAttentionState): boolean {
-  return (
-    state.status === "preparing" ||
-    state.status === "running" ||
-    state.status === "publishing" ||
-    (state.status === "failed" && state.tracking)
-  );
-}
-
-/**
  * True when the change ends a run in a result that the user did not ask for: the store goes
- * from a live run (`holdsLiveRun`) to `finished` or `failed`, and no longer tracks a run.
+ * from a live run (`isExportRunLive`) to `finished` or `failed`, and no longer tracks a run.
  *
  * - A `failed` with `tracking` still true is not an end. The run continues, and its real end
  *   comes later, as `failed` to `failed` or through `publishing` to `finished`.
@@ -68,7 +52,7 @@ export function endsRunForAttention(
   next: ExportAttentionState,
 ): boolean {
   return (
-    holdsLiveRun(previous) &&
+    isExportRunLive(previous) &&
     (next.status === "finished" || next.status === "failed") &&
     !next.tracking
   );

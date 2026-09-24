@@ -11,7 +11,6 @@
  * The rename of the button is wording only. The stop is the cancel of ADR 016 and ADR 025.
  */
 
-import type { ExportStatus } from "@/features/export";
 import {
   isCancelEnabled,
   isCancelOutstanding,
@@ -29,24 +28,6 @@ export const STOP_CONFIRM_WINDOW_MS = 3_000;
  * interval on Windows and on macOS, so one double-click cannot arm and stop.
  */
 export const STOP_CONFIRM_MIN_DELAY_MS = 500;
-
-/**
- * Gives the time at which the current export started.
- *
- * Call it each time the status changes. The first active status (preparing, running, or
- * publishing) records `now`. Later active statuses keep the recorded time. Every other
- * status clears it, so the next export records its own start.
- */
-export function trackExportStart(
-  previous: number | null,
-  status: ExportStatus,
-  now: number,
-): number | null {
-  if (status !== "preparing" && status !== "running" && status !== "publishing") {
-    return null;
-  }
-  return previous ?? now;
-}
 
 /**
  * Answers whether the button is armed at `now`: the first click came less than
@@ -74,7 +55,12 @@ export function stopArmRemainingMs(armedAt: number, now: number): number {
 export interface StopClickInput {
   /** The time of the click. */
   now: number;
-  /** The time the export started, from `trackExportStart`. */
+  /**
+   * The time the export started, from `trackExportRunTiming` in
+   * `src/features/export/runTiming.ts`, or null when no start is known. The caller passes
+   * null once the run has ended, when the timing holds an end, so an old start never decides
+   * a click.
+   */
   startedAt: number | null;
   /** The time of the click that armed the button, or null when it is not armed. */
   armedAt: number | null;

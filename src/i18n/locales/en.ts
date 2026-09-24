@@ -596,6 +596,16 @@ export const en = {
         "The export is already finishing. It will still save the output file.",
       stopUnavailable: "The export is finishing. You cannot stop it now.",
     },
+    // The readout of an active run in the dialog. `<num>` wraps the frame number, which the
+    // dialog shows in a slot as wide as the total, so the line does not move as it counts.
+    // Each combination of the frame count and the speed is one sentence (ADR 011).
+    progress: {
+      framesAndSpeed: "Frame <num>{{frame}}</num> of {{expectedFrames}} · {{speed}}×",
+      frames: "Frame <num>{{frame}}</num> of {{expectedFrames}}",
+      frameCountAndSpeed: "Frame {{frame}} · {{speed}}×",
+      frameCount: "Frame {{frame}}",
+      elapsed: "Elapsed {{time}}",
+    },
     finished: {
       title: "Export finished",
       folder: "In {{folder}}",

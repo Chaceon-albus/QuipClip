@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EXPORT_STATUSES, type ExportStatus } from "@/features/export";
+import { EXPORT_STATUSES } from "@/features/export";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n";
 import {
@@ -11,7 +11,6 @@ import {
   presentStopButton,
   refreshStopArmedAt,
   stopArmRemainingMs,
-  trackExportStart,
   type StopButtonInput,
 } from "./exportStopPresenter";
 
@@ -46,46 +45,6 @@ describe("stop confirmation constants", () => {
   it("ignores a second click within the 500 ms double-click interval", () => {
     expect(STOP_CONFIRM_MIN_DELAY_MS).toBe(500);
     expect(STOP_CONFIRM_MIN_DELAY_MS).toBeLessThan(STOP_CONFIRM_WINDOW_MS);
-  });
-});
-
-describe("trackExportStart", () => {
-  it("records now on the first active status", () => {
-    expect(trackExportStart(null, "preparing", 500)).toBe(500);
-  });
-
-  it("keeps the recorded start through later active statuses", () => {
-    let startedAt = trackExportStart(null, "preparing", 500);
-    startedAt = trackExportStart(startedAt, "running", 9_000);
-    expect(startedAt).toBe(500);
-    startedAt = trackExportStart(startedAt, "publishing", 60_000);
-    expect(startedAt).toBe(500);
-  });
-
-  it("records now when the first active status seen is running", () => {
-    expect(trackExportStart(null, "running", 700)).toBe(700);
-  });
-
-  it("clears the start in every status that is not active", () => {
-    const inactive: ExportStatus[] = ["idle", "finished", "failed", "canceled"];
-    for (const status of inactive) {
-      expect(trackExportStart(500, status, 9_000)).toBeNull();
-    }
-  });
-
-  it("gives the next export its own start after a terminal status", () => {
-    let startedAt = trackExportStart(null, "running", 500);
-    startedAt = trackExportStart(startedAt, "canceled", 40_000);
-    startedAt = trackExportStart(startedAt, "preparing", 50_000);
-    expect(startedAt).toBe(50_000);
-  });
-
-  it("covers every status in EXPORT_STATUSES", () => {
-    for (const status of EXPORT_STATUSES) {
-      const isActive =
-        status === "preparing" || status === "running" || status === "publishing";
-      expect(trackExportStart(null, status, 42)).toBe(isActive ? 42 : null);
-    }
   });
 });
 

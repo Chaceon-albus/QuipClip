@@ -1,10 +1,9 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useShallow } from "zustand/react/shallow";
 import { CircleCheck, CircleSlash, Loader2, XIcon } from "lucide-react";
 import { DESTRUCTIVE_CONFIRM_CLASS } from "@/components/common/confirmDialogModel";
 import { Notice } from "@/components/common/Notice";
-import { ProgressBar } from "@/components/common/ProgressBar";
+import { StepFade, StepFadeScope } from "@/components/common/StepFade";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -23,6 +22,10 @@ import {
   useExportOutputActionStore,
   useExportStore,
   type ExportOutputAction,
+  useExportRunTiming,
+  type ExportOutputActionState,
+  type ExportRunTiming,
+  type ExportState,
 } from "@/features/export";
 import { openMediaFileDialog } from "@/features/media";
 import {
@@ -30,32 +33,71 @@ import {
   useSettingsStore,
   type SettingsSection,
 } from "@/features/settings";
-import { getResolvedLanguage } from "@/i18n";
 import { isMacOS } from "@/lib/platform";
 import { ExportErrorDetails } from "./ExportErrorDetails";
+import { ExportRunPanel } from "./ExportRunPanel";
 import { ExportSetup } from "./ExportSetup";
 import {
   canGoBackToSetup,
   createOpenStepGeneration,
   guardOpenStepEffects,
 } from "./exportBackToSetup";
-import { resolveExportDismissal } from "./exportCancelState";
+import { isExportRunActive, resolveExportDismissal } from "./exportCancelState";
+import { resolveExportDialogStep, selectShownFrame } from "./exportDialogFrame";
 import { presentExportOutcome } from "./exportErrorPresenter";
 import {
-  elapsedAtFinish,
   outputActionErrorKey,
   presentFinishedExport,
   revealLabelKey,
 } from "./exportFinishedPresenter";
-import { formatRemaining, presentExportProgress } from "./exportProgressPresenter";
+import {
+  exportElapsedMs,
+  selectExportProgressFields,
+  type ExportProgressFields,
+} from "./exportRunPresenter";
 import { presentSetupBlocker, resolveSetupPresetId } from "./exportSetupPresenter";
 import {
   decideStopClick,
   presentStopButton,
   refreshStopArmedAt,
   stopArmRemainingMs,
-  trackExportStart,
 } from "./exportStopPresenter";
+
+/**
+ * The dialog top sits at a fixed height, so the dialog grows only downward when a step
+ * changes its height. The height stops above the bottom of the window, and the body between
+ * the header and the footer scrolls. At the minimum window height of 640 px, the dialog can
+ * be 521 px tall.
+ */
+const DIALOG_CONTENT_CLASS =
+  "top-[16vh] flex max-h-[calc(84vh-1rem)] translate-y-0 flex-col sm:max-w-md";
+
+/**
+ * Everything the dialog renders that can change while it closes.
+ *
+ * The dialog holds the frame that showed when a close started, and renders it until the
+ * exit animation ends (`selectShownFrame`). A close can reset the store and the local state
+ * at once, and a hidden run can end during the animation. Without the held frame, the content
+ * would collapse or change to another step while it fades out.
+ */
+interface ExportDialogFrame
+  extends
+    Pick<
+      ExportState,
+      "status" | "runId" | "outputPath" | "cancelRequested" | "tracking" | "error"
+    >,
+    Pick<ExportOutputActionState, "pending" | "failure"> {
+  requestedPresetId: string | null;
+  choosingDestination: boolean;
+  backCheckPending: boolean;
+  stopArmed: boolean;
+  timing: ExportRunTiming;
+  /**
+   * The progress fields of the store, in a held frame only. A live frame leaves them to the
+   * run panel, which subscribes to them, so a progress event does not render the dialog.
+   */
+  progress: ExportProgressFields | null;
+}
 
 export interface ExportDialogProps {
   open: boolean;
@@ -76,140 +118,6 @@ export interface ExportDialogProps {
    * error panel never reaches into the media store.
    */
   onReimport?: () => void;
-}
-
-/**
- * Progress readout for an active export.
- *
- * `frame`, `fps`, and `speed` are written once per drained ffmpeg `-progress` block, so they change
- * many times per second for the whole encode. They are subscribed HERE, in a leaf, rather than in
- * `ExportDialog`, so a progress write re-renders this element alone instead of the whole
- * Radix dialog subtree. The observable output is identical.
- */
-function ExportProgress() {
-  const { t, i18n } = useTranslation();
-  const exportData = useExportStore(
-    useShallow((state) => ({
-      status: state.status,
-      frame: state.frame,
-      expectedFrames: state.expectedFrames,
-      fps: state.fps,
-      speed: state.speed,
-      cancelRequested: state.cancelRequested,
-    })),
-  );
-
-  const view = presentExportProgress(exportData);
-  const resolvedLanguage = getResolvedLanguage(i18n);
-
-  const percentFormatter = useMemo(
-    () =>
-      new Intl.NumberFormat(resolvedLanguage, {
-        style: "percent",
-        maximumFractionDigits: 0,
-      }),
-    [resolvedLanguage],
-  );
-
-  const frameFormatter = useMemo(
-    () => new Intl.NumberFormat(resolvedLanguage),
-    [resolvedLanguage],
-  );
-
-  const speedFormatter = useMemo(
-    () =>
-      new Intl.NumberFormat(resolvedLanguage, {
-        minimumFractionDigits: 1,
-        maximumFractionDigits: 1,
-      }),
-    [resolvedLanguage],
-  );
-
-  if (!view) {
-    return null;
-  }
-
-  let title = "";
-  switch (view.phase) {
-    case "canceling":
-      title = t("export.status.canceling");
-      break;
-    case "preparing":
-      title = t("export.status.preparing");
-      break;
-    case "publishing":
-      title = t("export.status.publishing");
-      break;
-    case "running":
-      title =
-        view.percentFraction !== null
-          ? t("export.status.runningPercent", {
-              percent: percentFormatter.format(view.percentFraction),
-            })
-          : t("export.status.running");
-      break;
-  }
-
-  const remaining =
-    view.remainingSeconds !== null
-      ? t("export.status.remaining", {
-          time: formatRemaining(view.remainingSeconds),
-        })
-      : null;
-
-  let detail: string | null = null;
-  if (view.basePhase === "running") {
-    const parts: string[] = [];
-    if (view.frame !== null && view.expectedFrames !== null) {
-      parts.push(
-        t("export.status.frames", {
-          frame: frameFormatter.format(view.frame),
-          expectedFrames: frameFormatter.format(view.expectedFrames),
-        }),
-      );
-    }
-    if (view.speed !== null) {
-      parts.push(
-        t("export.status.speed", {
-          speed: speedFormatter.format(view.speed),
-        }),
-      );
-    }
-    if (parts.length > 0) {
-      detail = parts.join(" · ");
-    }
-  }
-
-  let cancelNote: string | null = null;
-  if (view.phase === "canceling") {
-    if (view.basePhase === "running") {
-      cancelNote = t("export.status.cancelingNote");
-    } else if (view.basePhase === "publishing") {
-      cancelNote = t("export.status.cancelingNotePublishing");
-    }
-  }
-
-  return (
-    <div className="space-y-2 py-2">
-      <div className="flex items-baseline justify-between gap-4 text-sm">
-        <span>{title}</span>
-        {remaining && (
-          <span className="text-muted-foreground tabular-nums">{remaining}</span>
-        )}
-      </div>
-      <ProgressBar
-        size="md"
-        value={view.barValue}
-        flowing={view.phase !== "canceling"}
-        aria-label={t("export.title")}
-        aria-valuetext={title}
-      />
-      {detail && (
-        <div className="text-xs text-muted-foreground tabular-nums">{detail}</div>
-      )}
-      {cancelNote && <p className="text-xs text-muted-foreground/80">{cancelNote}</p>}
-    </div>
-  );
 }
 
 export function ExportDialog({
@@ -241,13 +149,25 @@ export function ExportDialog({
   // from `performance.now()`, which is monotonic, so a change of the system clock cannot
   // shorten or lengthen the window.
   const [stopArmedAt, setStopArmedAt] = useState<number | null>(null);
-  // The time the current export started, on the same clock. Only the click handler reads it,
-  // so it is a ref and a change does not render the dialog again. This component stays
-  // mounted while the dialog is hidden (ADR 025), so it sees every status change.
-  const exportStartedAtRef = useRef<number | null>(null);
-  // The time the last export took, taken when its status became `finished`, or null. The
-  // finished panel shows it.
-  const [finishedElapsedMs, setFinishedElapsedMs] = useState<number | null>(null);
+  // The start and the end of the run, on the same clock. The Stop Export rule, the elapsed
+  // time of the readout, and the time on the finished panel read it. Its store changes
+  // inside the same update as the status, so the render of a status change already has the
+  // timing of that change, and the first frame of a finished panel has its time
+  // (`runTiming.ts` in the export feature).
+  const timing = useExportRunTiming();
+  // The frame that showed when the last close started, or null. It shows until the content
+  // unmounts at the end of the exit animation (`ExportDialogFrame`).
+  const [heldFrame, setHeldFrame] = useState<ExportDialogFrame | null>(null);
+  // An open dialog drops the held frame, so a reopen during the exit animation can never
+  // leave an old frame for a later close to show. The update during render is the React
+  // pattern for state that follows a prop: React renders again at once, before it commits.
+  const [shownOpen, setShownOpen] = useState(open);
+  if (open !== shownOpen) {
+    setShownOpen(open);
+    if (open) {
+      setHeldFrame(null);
+    }
+  }
   // The primary action of the finished panel. It takes the focus when that panel shows.
   const doneButtonRef = useRef<HTMLButtonElement>(null);
   const stopNoteId = useId();
@@ -268,20 +188,18 @@ export function ExportDialog({
   const outputActionFailure = useExportOutputActionStore((state) => state.failure);
   const runOutputAction = useExportOutputActionStore((state) => state.run);
 
-  useEffect(() => {
-    const now = performance.now();
-    const previousStartedAt = exportStartedAtRef.current;
-    const startedAt = trackExportStart(previousStartedAt, status, now);
-    exportStartedAtRef.current = startedAt;
-    // The change to `finished` clears the recorded start, so the time the export took is
-    // taken here, from the start that this change clears. No protocol field carries it.
-    setFinishedElapsedMs(elapsedAtFinish(previousStartedAt, status, now));
-    // An armed state belongs to one run. When the run is no longer active, clear it, so a
-    // later run can never start with the confirmation label from this one.
-    if (startedAt === null) {
-      setStopArmedAt(null);
-    }
-  }, [status]);
+  // An armed state belongs to one run. When the run is no longer active, clear it, so a
+  // later run can never start with the confirmation label from this one. This component
+  // stays mounted while the dialog is hidden (ADR 025), so it sees every status change.
+  useEffect(
+    () =>
+      exportStore.subscribe((state, previous) => {
+        if (state.status !== previous.status && !isExportRunActive(state.status)) {
+          setStopArmedAt(null);
+        }
+      }),
+    [],
+  );
 
   // Reverts an armed Stop Export button when its window ends. A hidden or occluded window can
   // delay the timer, so the armed time is also checked against the clock when the window
@@ -333,42 +251,79 @@ export function ExportDialog({
     }
   }, [backClicks]);
 
+  // Everything below renders from `frame`: the live values while the dialog is open, and
+  // the held frame while it closes. A closing dialog is inert, so no handler runs on a held
+  // frame, and the two are equal whenever a handler can run.
+  const liveFrame: ExportDialogFrame = {
+    status,
+    runId,
+    outputPath,
+    cancelRequested,
+    tracking,
+    error,
+    pending: outputActionPending,
+    failure: outputActionFailure,
+    requestedPresetId,
+    choosingDestination,
+    backCheckPending,
+    stopArmed: stopArmedAt !== null,
+    timing,
+    progress: null,
+  };
+  const frame = selectShownFrame(open, liveFrame, heldFrame);
+  const step = resolveExportDialogStep(frame.status);
+
   const settings = useSettingsStore((state) => state.settings);
-  const effectivePresetId = resolveSetupPresetId(settings, requestedPresetId);
+  const effectivePresetId = resolveSetupPresetId(settings, frame.requestedPresetId);
   const selectedPreset =
     settings?.presets.find((preset) => preset.id === effectivePresetId) ?? null;
   const blocker = presentSetupBlocker(selectedPreset);
   const exportDisabled =
     effectivePresetId === null ||
     blocker !== null ||
-    choosingDestination ||
-    backCheckPending;
+    frame.choosingDestination ||
+    frame.backCheckPending;
 
   // Dismissal hides the dialog while an export is active (preparing, running, publishing)
   // and resets the store when in an idle or terminal status (ADR 025).
-  const dismissal = resolveExportDismissal(status);
-  const isActive = dismissal === "hide";
+  const isActive = resolveExportDismissal(frame.status) === "hide";
   // "publishing" always disables the button: the backend already ran its last cancel test
   // before it emitted the event that puts the interface into that phase (ADR 016), so a stop
   // there cannot stop the rename. "running" with no run id disables it, and an outstanding
   // cancel disables it in any active status. `isCancelEnabled` holds these rules keyed to
   // `cancelRequested` in the store (ADR 025), and `presentStopButton` applies them.
   const stopView = presentStopButton({
-    status,
-    runId,
-    cancelRequested,
-    armed: stopArmedAt !== null,
+    status: frame.status,
+    runId: frame.runId,
+    cancelRequested: frame.cancelRequested,
+    armed: frame.stopArmed,
   });
   // The close control hides the dialog while an export is active, and the export continues.
   // The label says so, because an X usually reads as "close".
   const closeLabel = isActive ? t("export.action.hide") : t("common.close");
 
+  // Holds the frame on the screen before a close changes it. The progress fields are read
+  // from the store here, because only the run panel subscribes to them. A close while the
+  // dialog is already closed keeps the first frame, because the live frame can then show a
+  // reset store.
+  const holdFrame = () => {
+    if (!open) {
+      return;
+    }
+    setHeldFrame({
+      ...liveFrame,
+      progress: selectExportProgressFields(exportStore.getState()),
+    });
+  };
+
   const hideDialog = () => {
+    holdFrame();
     setStopArmedAt(null);
     onOpenChange(false);
   };
 
   const closeAndReset = () => {
+    holdFrame();
     backStep.invalidate();
     onOpenChange(false);
     setRequestedPresetId(null);
@@ -382,14 +337,14 @@ export function ExportDialog({
 
   // The state of Show and Open shows only for the run that it names.
   const outputFailure =
-    outputActionFailure !== null && outputActionFailure.runId === runId
-      ? outputActionFailure
+    frame.failure !== null && frame.failure.runId === frame.runId
+      ? frame.failure
       : null;
   const busyOutputAction =
-    outputActionPending !== null && outputActionPending.runId === runId
-      ? outputActionPending.action
+    frame.pending !== null && frame.pending.runId === frame.runId
+      ? frame.pending.action
       : null;
-  const canActOnOutput = runId !== null && outputPath !== null;
+  const canActOnOutput = frame.runId !== null && frame.outputPath !== null;
 
   // The store ignores a second request for the run while one is in flight. The busy button
   // stays enabled, with `aria-busy`, so it keeps the focus.
@@ -400,7 +355,13 @@ export function ExportDialog({
     void runOutputAction(action, runId);
   };
 
+  // A closed dialog has nothing to dismiss. During the exit animation, Escape can still reach
+  // the closing layer, and a run that ended since the hide must not reset before the user
+  // sees its result. An open dialog renders the live frame, so `isActive` is live there.
   const dismiss = () => {
+    if (!open) {
+      return;
+    }
     if (isActive) {
       hideDialog();
     } else {
@@ -419,13 +380,14 @@ export function ExportDialog({
   // The replacement confirmation is not a failure the user can only close: it carries its own
   // three actions, so the standard footer is replaced while it shows.
   const isSourceRevisionConfirmation =
-    status === "failed" && error?.code === "sourceRevisionChanged";
+    frame.status === "failed" && frame.error?.code === "sourceRevisionChanged";
 
   // The notice of a run that ended without an output, and the recovery that its footer
   // offers beside Close. Null in every other status, and for the confirmation.
   const outcome =
-    (status === "failed" || status === "canceled") && !isSourceRevisionConfirmation
-      ? presentExportOutcome({ status, error })
+    (frame.status === "failed" || frame.status === "canceled") &&
+    !isSourceRevisionConfirmation
+      ? presentExportOutcome({ status: frame.status, error: frame.error })
       : null;
   const recovery = outcome?.recovery ?? null;
   const recoverySettingsSection =
@@ -545,7 +507,7 @@ export function ExportDialog({
     }
     const decision = decideStopClick({
       now: performance.now(),
-      startedAt: exportStartedAtRef.current,
+      startedAt: timing.endedAt === null ? timing.startedAt : null,
       armedAt: stopArmedAt,
     });
     if (decision.kind === "ignore") {
@@ -559,27 +521,15 @@ export function ExportDialog({
     void cancelExport();
   };
 
-  const renderContent = () => {
-    switch (status) {
-      case "idle":
-        return open ? (
-          <ExportSetup
-            selectedPresetId={effectivePresetId}
-            selectedPreset={selectedPreset}
-            blocker={blocker}
-            onSelect={setRequestedPresetId}
-            onOpenSettings={handleOpenSettings}
-            firstControlRef={setupFirstControlRef}
-          />
-        ) : null;
-
-      case "preparing":
-      case "running":
-      case "publishing":
-        return <ExportProgress />;
-
+  // The content of the result step. The run panel shows it below the bar of the run, or
+  // alone after a failure of the open step, which has no bar.
+  const renderResult = () => {
+    switch (frame.status) {
       case "finished": {
-        const finished = presentFinishedExport(outputPath, finishedElapsedMs);
+        const finished = presentFinishedExport(
+          frame.outputPath,
+          exportElapsedMs(frame.timing, null),
+        );
         let location: string | null = null;
         if (finished?.folderName) {
           location =
@@ -590,10 +540,8 @@ export function ExportDialog({
                 })
               : t("export.finished.folder", { folder: finished.folderName });
         }
-        // `min-w-0` lets this grid item shrink below the width of the file name, so the name
-        // truncates instead of widening the dialog.
         return (
-          <div className="min-w-0 space-y-2 py-2">
+          <div className="space-y-2">
             <Notice
               id={finishedNoticeId}
               tone="success"
@@ -640,28 +588,23 @@ export function ExportDialog({
         // `outcome` is null here only for the confirmation.
         if (isSourceRevisionConfirmation || outcome === null) {
           return (
-            <div className="py-2">
-              <Notice tone="warning" role="alert">
-                {t("exportError.sourceRevisionChanged")}
-              </Notice>
-            </div>
+            <Notice tone="warning" role="alert">
+              {t("exportError.sourceRevisionChanged")}
+            </Notice>
           );
         }
 
         // A stop that the user asked for is a result, not an error, so it is neutral.
         if (outcome.kind === "canceled") {
           return (
-            <div className="py-2">
-              <Notice tone={outcome.tone} role={outcome.role} icon={CircleSlash}>
-                {t(outcome.message.key)}
-              </Notice>
-            </div>
+            <Notice tone={outcome.tone} role={outcome.role} icon={CircleSlash}>
+              {t(outcome.message.key)}
+            </Notice>
           );
         }
 
-        // `min-w-0` lets this grid item shrink below the width of a long diagnostic line.
         return (
-          <div className="min-w-0 space-y-2 py-2">
+          <div className="space-y-2">
             <Notice tone={outcome.tone} role={outcome.role}>
               <p>
                 {(t as (k: string, opts?: Record<string, string | number>) => string)(
@@ -677,7 +620,45 @@ export function ExportDialog({
           </div>
         );
       }
+
+      default:
+        return null;
     }
+  };
+
+  // Each block is keyed, so a new block mounts new content and `StepFade` fades it in. The
+  // run panel is one block from the progress step into the result, so the change from the
+  // setup fades the bar and the readout together, and the bar stays mounted into the
+  // result. Inside the panel, the change from the progress to the result fades on its own.
+  const renderBody = () => {
+    if (step === "setup") {
+      return (
+        <StepFade key="setup">
+          <ExportSetup
+            selectedPresetId={effectivePresetId}
+            selectedPreset={selectedPreset}
+            blocker={blocker}
+            onSelect={setRequestedPresetId}
+            onOpenSettings={handleOpenSettings}
+            firstControlRef={setupFirstControlRef}
+          />
+        </StepFade>
+      );
+    }
+    return (
+      <StepFade key="run">
+        <ExportRunPanel
+          step={step}
+          status={frame.status}
+          cancelRequested={frame.cancelRequested}
+          tracking={frame.tracking}
+          outputPath={frame.outputPath}
+          timing={frame.timing}
+          held={frame.progress}
+          result={step === "result" ? renderResult() : undefined}
+        />
+      </StepFade>
+    );
   };
 
   return (
@@ -685,7 +666,10 @@ export function ExportDialog({
       <DialogContent
         showCloseButton={false}
         aria-describedby={undefined}
-        className="sm:max-w-md"
+        className={DIALOG_CONTENT_CLASS}
+        // A closing dialog takes no input, so a repeated key press or a click during the exit
+        // animation cannot act on the held content.
+        inert={!open}
         onOpenAutoFocus={(event) => {
           // Radix would focus the first tabbable element, which is the close button. A Radix
           // tooltip opens on every focus that no pointer press on its trigger started, so the
@@ -705,6 +689,11 @@ export function ExportDialog({
           if (target instanceof HTMLElement) {
             target.focus();
           }
+        }}
+        // The content unmounted, so the held frame has done its work. A later close that
+        // holds no frame then shows the live content and never an old frame.
+        onCloseAutoFocus={() => {
+          setHeldFrame(null);
         }}
       >
         <DialogHeader>
@@ -726,30 +715,32 @@ export function ExportDialog({
           <TooltipContent>{closeLabel}</TooltipContent>
         </Tooltip>
 
-        {renderContent()}
+        {/* The body scrolls when the dialog reaches its maximum height. The negative margin
+            and the padding give the focus rings of the controls room inside the scroll box. */}
+        <div className="-m-1 min-h-0 overflow-y-auto p-1">
+          <StepFadeScope step={step}>{renderBody()}</StepFadeScope>
+        </div>
 
         <DialogFooter>
-          {status === "idle" ? (
-            open ? (
-              <>
-                <Button variant="outline" onClick={closeAndReset}>
-                  {t("common.cancel")}
-                </Button>
-                <Button
-                  disabled={exportDisabled}
-                  aria-busy={backCheckPending || undefined}
-                  onClick={() => void handleConfirmExport()}
-                >
-                  {backCheckPending && (
-                    <Loader2
-                      aria-hidden="true"
-                      className="animate-spin motion-reduce:animate-none"
-                    />
-                  )}
-                  {t("export.action.chooseDestination")}
-                </Button>
-              </>
-            ) : null
+          {step === "setup" ? (
+            <>
+              <Button variant="outline" onClick={closeAndReset}>
+                {t("common.cancel")}
+              </Button>
+              <Button
+                disabled={exportDisabled}
+                aria-busy={frame.backCheckPending || undefined}
+                onClick={() => void handleConfirmExport()}
+              >
+                {frame.backCheckPending && (
+                  <Loader2
+                    aria-hidden="true"
+                    className="animate-spin motion-reduce:animate-none"
+                  />
+                )}
+                {t("export.action.chooseDestination")}
+              </Button>
+            </>
           ) : isSourceRevisionConfirmation ? (
             <>
               <Button variant="outline" onClick={closeAndReset}>
@@ -803,7 +794,7 @@ export function ExportDialog({
               </Button>
               <Button onClick={hideDialog}>{t("export.action.runInBackground")}</Button>
             </>
-          ) : status === "finished" ? (
+          ) : frame.status === "finished" ? (
             <>
               {canActOnOutput && (
                 <>
@@ -859,7 +850,10 @@ export function ExportDialog({
                 </Button>
               )}
               {recovery?.kind === "backToSetup" &&
-                canGoBackToSetup({ status, tracking }) && (
+                canGoBackToSetup({
+                  status: frame.status,
+                  tracking: frame.tracking,
+                }) && (
                   <Button onClick={handleBackToSetup}>{t("export.action.back")}</Button>
                 )}
             </>

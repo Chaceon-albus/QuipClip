@@ -10,16 +10,26 @@ export interface ProgressBarProps extends Omit<
 > {
   /** 0 to 100. Null or undefined draws the indeterminate bar. */
   value?: number | null;
-  /** Tone variant of the bar: "default", "success", or "destructive". Default "default". */
-  tone?: "default" | "success" | "destructive";
+  /**
+   * Tone variant of the bar: "default", "success", "destructive", or "neutral". Default
+   * "default". A change of tone fades the colours, so a bar that stays mounted from a run
+   * into its result does not jump to the colour of the result.
+   */
+  tone?: "default" | "success" | "destructive" | "neutral";
   /** Height variant: "xs" (h-1), "sm" (h-1.5), or "md" (h-2). Default "md". */
   size?: "xs" | "sm" | "md";
-  /** Moves the gradient along the filled part. Default true. */
+  /**
+   * Moves the gradient along the filled part. Default true. On a determinate bar, false
+   * pauses the gradient where it is, so a bar that stops flowing does not jump.
+   */
   flowing?: boolean;
 }
 
+// The tone sets the two ends of the fill gradient on the track, and the fill inherits them.
+// `globals.css` registers both as colours, so the transition on the track fades them. The
+// colour change is not motion, so it stays when the system asks for reduced motion.
 const trackVariants = cva(
-  "relative w-full overflow-hidden rounded-full bg-progress-track",
+  "relative w-full overflow-hidden rounded-full bg-progress-track transition-[background-color,--progress-from,--progress-to] duration-(--motion-slow) ease-standard",
   {
     variants: {
       size: {
@@ -33,6 +43,8 @@ const trackVariants = cva(
           "bg-progress-track-success [--progress-from:var(--success)] [--progress-to:var(--progress-to-success)]",
         destructive:
           "bg-progress-track-destructive [--progress-from:var(--destructive)] [--progress-to:var(--progress-to-destructive)]",
+        neutral:
+          "bg-progress-track-neutral [--progress-from:var(--muted-foreground)] [--progress-to:var(--progress-to-neutral)]",
       },
     },
     defaultVariants: {
@@ -44,7 +56,7 @@ const trackVariants = cva(
 
 /**
  * Reusable progress bar supporting determinate and indeterminate modes,
- * three tone variants, three heights, and an animated gradient fill.
+ * four tone variants, three heights, and an animated gradient fill.
  * The caller must give the bar an accessible name with `aria-label` or `aria-labelledby`.
  */
 export function ProgressBar({
@@ -71,8 +83,8 @@ export function ProgressBar({
       {model.mode === "determinate" ? (
         <div
           className={cn(
-            "h-full rounded-full progress-fill transition-[width] duration-300 ease-out motion-reduce:transition-none",
-            flowing && "animate-progress-flow motion-reduce:animate-none",
+            "h-full animate-progress-flow rounded-full progress-fill transition-[width] duration-300 ease-out motion-reduce:animate-none motion-reduce:transition-none",
+            !flowing && "[animation-play-state:paused]",
           )}
           style={{ width: `${model.fillPercent}%` }}
         />

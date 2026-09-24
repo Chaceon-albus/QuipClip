@@ -2,15 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   BACKEND_EXPORT_OUTPUT_ERROR_CODES,
   type ExportOutputErrorCode,
-  type ExportStatus,
 } from "@/features/export";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import {
-  elapsedAtFinish,
   formatElapsed,
   outputActionErrorKey,
   presentFinishedExport,
+  presentOutputFile,
   revealLabelKey,
 } from "./exportFinishedPresenter";
 
@@ -24,31 +23,6 @@ function resolveCatalogKey(catalog: unknown, key: string): unknown {
   }, catalog);
 }
 
-describe("elapsedAtFinish", () => {
-  it("gives the time from the recorded start when the status becomes finished", () => {
-    expect(elapsedAtFinish(1_000, "finished", 84_500)).toBe(83_500);
-  });
-
-  it("gives null when no start was recorded", () => {
-    expect(elapsedAtFinish(null, "finished", 84_500)).toBeNull();
-  });
-
-  it.each<ExportStatus>([
-    "idle",
-    "preparing",
-    "running",
-    "publishing",
-    "failed",
-    "canceled",
-  ])("gives null for the status %s", (status) => {
-    expect(elapsedAtFinish(1_000, status, 84_500)).toBeNull();
-  });
-
-  it("never gives a negative time", () => {
-    expect(elapsedAtFinish(5_000, "finished", 4_000)).toBe(0);
-  });
-});
-
 describe("formatElapsed", () => {
   it("rounds down to whole seconds", () => {
     expect(formatElapsed(83_999)).toBe("1:23");
@@ -57,6 +31,29 @@ describe("formatElapsed", () => {
 
   it("adds the hours from one hour", () => {
     expect(formatElapsed(3_723_000)).toBe("1:02:03");
+  });
+});
+
+describe("presentOutputFile", () => {
+  it("splits the name so that a display can keep the extension", () => {
+    expect(presentOutputFile("/Users/me/Movies/a long clip name.mov")).toEqual({
+      fileName: "a long clip name.mov",
+      fileStem: "a long clip name",
+      fileExtension: ".mov",
+      fullPath: "/Users/me/Movies/a long clip name.mov",
+      folderName: "Movies",
+    });
+  });
+
+  it("gives an empty extension for a name with none", () => {
+    expect(presentOutputFile("C:\\Videos\\clip")).toEqual(
+      expect.objectContaining({ fileStem: "clip", fileExtension: "" }),
+    );
+  });
+
+  it("gives null when the path is unknown or empty", () => {
+    expect(presentOutputFile(null)).toBeNull();
+    expect(presentOutputFile("")).toBeNull();
   });
 });
 

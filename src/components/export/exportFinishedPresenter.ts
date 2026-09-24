@@ -3,36 +3,24 @@
  * took, and the labels of the show and open actions.
  */
 
-import type { ExportStatus, ExportOutputErrorCode } from "@/features/export";
+import type { ExportOutputErrorCode } from "@/features/export";
 import { splitFileName, splitFilePath } from "@/lib/fileName";
 import { formatRemaining } from "./exportProgressPresenter";
 
 /**
- * Gives the time the export took, in milliseconds, when the status becomes `finished`.
+ * "m:ss" below one hour and "h:mm:ss" from one hour, rounded down to whole seconds.
  *
- * `startedAt` is the start that `trackExportStart` recorded before this status change, on the
- * same monotonic clock as `now`. Null for every other status, and when no start was recorded.
+ * `exportElapsedMs` in `exportRunPresenter.ts` gives the time, for the finished panel and for
+ * the readout of an active run.
  */
-export function elapsedAtFinish(
-  startedAt: number | null,
-  status: ExportStatus,
-  now: number,
-): number | null {
-  if (status !== "finished" || startedAt === null) {
-    return null;
-  }
-  return Math.max(0, now - startedAt);
-}
-
-/** "m:ss" below one hour and "h:mm:ss" from one hour, rounded down to whole seconds. */
 export function formatElapsed(milliseconds: number): string {
   return formatRemaining(Math.floor(milliseconds / 1000));
 }
 
-export interface FinishedExportView {
+export interface OutputFileView {
   fileName: string;
   /**
-   * The file name before its extension, and the extension. The panel truncates the stem and
+   * The file name before its extension, and the extension. A display truncates the stem and
    * keeps the extension visible, as the title bar does.
    */
   fileStem: string;
@@ -40,15 +28,13 @@ export interface FinishedExportView {
   /** The complete path, for the tooltip of the file name. */
   fullPath: string;
   folderName: string | null;
-  /** Null when the time is unknown. */
-  elapsed: string | null;
 }
 
-/** Null when the output path is unknown or has no segment. */
-export function presentFinishedExport(
-  outputPath: string | null,
-  elapsedMs: number | null,
-): FinishedExportView | null {
+/**
+ * Splits the output path for display. The finished panel and the readout of an active run
+ * both show the name this way. Null when the path is unknown or has no segment.
+ */
+export function presentOutputFile(outputPath: string | null): OutputFileView | null {
   if (outputPath === null) {
     return null;
   }
@@ -63,8 +49,24 @@ export function presentFinishedExport(
     fileExtension: extension,
     fullPath: outputPath,
     folderName: parts.folderName,
-    elapsed: elapsedMs === null ? null : formatElapsed(elapsedMs),
   };
+}
+
+export interface FinishedExportView extends OutputFileView {
+  /** Null when the time is unknown. */
+  elapsed: string | null;
+}
+
+/** Null when the output path is unknown or has no segment. */
+export function presentFinishedExport(
+  outputPath: string | null,
+  elapsedMs: number | null,
+): FinishedExportView | null {
+  const file = presentOutputFile(outputPath);
+  if (file === null) {
+    return null;
+  }
+  return { ...file, elapsed: elapsedMs === null ? null : formatElapsed(elapsedMs) };
 }
 
 export type RevealLabelKey = "export.action.revealMac" | "export.action.revealWindows";
