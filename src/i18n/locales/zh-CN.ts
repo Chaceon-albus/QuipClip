@@ -176,7 +176,8 @@ export const zhCN: TranslationCatalog = {
     seekSlider: "时间轴定位",
     segmentList: "时间轴片段",
     segment: "片段 {{index}}",
-    segmentLabel: "片段 {{index}}，{{inTime}} 至 {{outTime}}，时长 {{duration}}",
+    segmentLabel:
+      "片段 {{index}}，入点 {{inTime}}，出点 {{outTime}}，时长 {{duration}}",
     segmentDescription: "导出顺序：第 {{order}} 个，共 {{total}} 个。不含出点。",
     segmentTooltip: {
       exportOrder: "导出顺序：第 {{order}} 个，共 {{total}} 个",

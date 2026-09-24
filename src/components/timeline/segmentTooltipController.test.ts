@@ -55,6 +55,7 @@ describe("createSegmentTooltipController", () => {
     const { controller } = setup();
     expect(controller.getState()).toStrictEqual({
       targetId: null,
+      part: "body",
       delayed: false,
       trigger: null,
       measure: 0,
@@ -69,6 +70,7 @@ describe("createSegmentTooltipController", () => {
     advance(1);
     expect(controller.getState()).toStrictEqual({
       targetId: "a",
+      part: "body",
       delayed: true,
       trigger: "pointer",
       measure: 0,
@@ -183,6 +185,7 @@ describe("createSegmentTooltipController", () => {
     controller.focus("a", true);
     expect(controller.getState()).toStrictEqual({
       targetId: "a",
+      part: "body",
       delayed: false,
       trigger: "focus",
       measure: 0,
@@ -304,6 +307,7 @@ describe("createSegmentTooltipController", () => {
     controller.scroll();
     expect(controller.getState()).toStrictEqual({
       targetId: "a",
+      part: "body",
       delayed: false,
       trigger: "focus",
       measure: 2,
@@ -351,6 +355,7 @@ describe("createSegmentTooltipController", () => {
     controller.tooltipClosed({ explicit: false, scrolled: true });
     expect(controller.getState()).toStrictEqual({
       targetId: "a",
+      part: "body",
       delayed: false,
       trigger: "focus",
       measure: 1,
@@ -392,6 +397,119 @@ describe("createSegmentTooltipController", () => {
     controller.focus("a", false);
     expect(controller.getState()).toBe(open);
     expect(notifications()).toBe(1);
+  });
+
+  it("opens an edge after the delay and shows the part under the pointer when it ends", () => {
+    const { controller, advance } = setup();
+    controller.hover("a", mouse);
+    advance(SEGMENT_TOOLTIP_DELAY_MS - 100);
+    // A move onto the In edge keeps the delay that started on the body.
+    controller.hover("a", mouse, "in");
+    advance(100);
+    expect(controller.getState()).toStrictEqual({
+      targetId: "a",
+      part: "in",
+      delayed: true,
+      trigger: "pointer",
+      measure: 0,
+    });
+  });
+
+  it("moves an open tooltip between the body and the edges at once", () => {
+    const { controller, advance, notifications } = setup();
+    controller.hover("a", mouse);
+    advance(SEGMENT_TOOLTIP_DELAY_MS);
+    const before = notifications();
+    controller.hover("a", mouse, "out");
+    expect(controller.getState()).toMatchObject({
+      targetId: "a",
+      part: "out",
+      delayed: false,
+      trigger: "pointer",
+    });
+    // A move inside the same part changes nothing.
+    controller.hover("a", mouse, "out");
+    expect(notifications()).toBe(before + 1);
+    controller.hover("a", mouse);
+    expect(controller.getState().part).toBe("body");
+    // A move to the edge of another segment moves the tooltip there at once.
+    controller.hover("b", mouse, "in");
+    expect(controller.getState()).toMatchObject({ targetId: "b", part: "in" });
+  });
+
+  it("closes an edge tooltip when the pointer leaves the segment, and resets the part", () => {
+    const { controller, advance } = setup();
+    controller.hover("a", mouse, "in");
+    advance(SEGMENT_TOOLTIP_DELAY_MS);
+    controller.leave("a");
+    expect(controller.getState()).toStrictEqual({
+      targetId: null,
+      part: "body",
+      delayed: false,
+      trigger: null,
+      measure: 0,
+    });
+  });
+
+  it("keeps an edge closed after a press on it, until the pointer leaves the segment", () => {
+    const { controller, advance } = setup();
+    controller.hover("a", mouse, "in");
+    advance(SEGMENT_TOOLTIP_DELAY_MS);
+    controller.press("a");
+    expect(controller.getState().targetId).toBeNull();
+    controller.hover("a", mouse, "in");
+    controller.hover("a", mouse, "out");
+    advance(SEGMENT_TOOLTIP_DELAY_MS);
+    expect(controller.getState().targetId).toBeNull();
+    controller.leave("a");
+    controller.hover("a", mouse, "out");
+    advance(SEGMENT_TOOLTIP_DELAY_MS);
+    expect(controller.getState()).toMatchObject({ targetId: "a", part: "out" });
+  });
+
+  it("opens the body for keyboard focus, also when a pointer showed an edge", () => {
+    const { controller, advance } = setup();
+    controller.hover("a", mouse, "in");
+    advance(SEGMENT_TOOLTIP_DELAY_MS);
+    controller.focus("a", true);
+    expect(controller.getState()).toMatchObject({
+      targetId: "a",
+      part: "body",
+      trigger: "focus",
+    });
+  });
+
+  it("keeps a focus tooltip through an edge hover, so a scroll keeps it and measures again", () => {
+    const { controller } = setup();
+    controller.focus("x", true);
+    controller.hover("x", mouse, "in");
+    expect(controller.getState()).toStrictEqual({
+      targetId: "x",
+      part: "in",
+      delayed: false,
+      trigger: "focus",
+      measure: 0,
+    });
+    controller.scroll();
+    expect(controller.getState()).toStrictEqual({
+      targetId: "x",
+      part: "in",
+      delayed: false,
+      trigger: "focus",
+      measure: 1,
+    });
+    // Back on the body, the trigger stays too.
+    controller.hover("x", mouse);
+    expect(controller.getState()).toMatchObject({ part: "body", trigger: "focus" });
+  });
+
+  it("never opens an edge for a touch pointer or a pointer with a button held", () => {
+    const { controller, advance, pendingTimers } = setup();
+    controller.hover("a", { pointerType: "touch", buttons: 0 }, "in");
+    controller.hover("a", { pointerType: "mouse", buttons: 1 }, "out");
+    expect(pendingTimers()).toBe(0);
+    advance(SEGMENT_TOOLTIP_DELAY_MS);
+    expect(controller.getState().targetId).toBeNull();
   });
 
   it("stops notifying a listener after it unsubscribes", () => {

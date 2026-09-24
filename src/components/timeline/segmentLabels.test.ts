@@ -259,7 +259,7 @@ describe("segment messages", () => {
     [
       "en",
       {
-        label: "Segment 2, 00:00:01:10 to 00:00:06:10, duration 00:00:05:00",
+        label: "Segment 2, In 00:00:01:10, Out 00:00:06:10, duration 00:00:05:00",
         description: "Export order: 2 of 5. The Out point is not included.",
         title: "Segment 2",
         exportOrder: "Export order: 2 of 5",
@@ -272,7 +272,7 @@ describe("segment messages", () => {
     [
       "zh-CN",
       {
-        label: "片段 2，00:00:01:10 至 00:00:06:10，时长 00:00:05:00",
+        label: "片段 2，入点 00:00:01:10，出点 00:00:06:10，时长 00:00:05:00",
         description: "导出顺序：第 2 个，共 5 个。不含出点。",
         title: "片段 2",
         exportOrder: "导出顺序：第 2 个，共 5 个",

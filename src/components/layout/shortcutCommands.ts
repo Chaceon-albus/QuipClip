@@ -105,6 +105,12 @@ export type ShortcutCommand =
   | { readonly kind: "zoomOut" }
   | { readonly kind: "zoomToFit" };
 
+/** The playback facts that a seek to a stored boundary PTS reads. */
+export type BoundarySeekPlayback = Pick<
+  ShortcutSnapshot["playback"],
+  "calibrationStatus" | "presentedFrame" | "seekTargetSeconds"
+>;
+
 function currentSegmentOf(
   timeline: ShortcutSnapshot["timeline"],
 ): CurrentSegmentRef | null {
@@ -127,10 +133,7 @@ function currentSegmentOf(
  *
  * The comparison is exact, with `BigInt`, on two parsed PTS values.
  */
-function isTargetOnScreen(
-  playback: ShortcutSnapshot["playback"],
-  target: Pts,
-): boolean {
+function isTargetOnScreen(playback: BoundarySeekPlayback, target: Pts): boolean {
   const frame = playback.presentedFrame;
   if (
     frame === null ||
@@ -190,23 +193,49 @@ function isElementAtEnd(
 }
 
 /**
+ * The seek to one stored boundary PTS, or null when the seek must not run.
+ *
+ * `seekToPts` needs a calibrated source, and it reports a failed seek on any other source. The
+ * plan therefore needs the calibration too, so an uncalibrated source never shows that error.
+ * A target that is already on screen gives no seek (`isTargetOnScreen`).
+ *
+ * Go to In, Go to Out and a click on the edge of a timeline segment use this one rule, so the
+ * key and the edge seek under the same condition (ADR 026).
+ *
+ * @param playback The playback state of the snapshot.
+ * @param hasActiveSource True while media is open and its element is attached and ready.
+ * @param target The stored boundary PTS, or null when there is none.
+ */
+export function planBoundarySeek(
+  playback: BoundarySeekPlayback,
+  hasActiveSource: boolean,
+  target: Pts | null,
+): ShortcutCommand | null {
+  if (!hasActiveSource || playback.calibrationStatus !== "ready") {
+    return null;
+  }
+  if (target === null || !isPtsString(target)) {
+    return null;
+  }
+  // Already there: I then Shift+I, or O then Shift+O, moves nothing and keeps the frame.
+  if (isTargetOnScreen(playback, target)) {
+    return null;
+  }
+  return { kind: "seekToPts", pts: target };
+}
+
+/**
  * The PTS of the named segment that Go to In (`inPts`) or Go to Out (`outPts`) seeks to.
  *
  * With no current segment, Go to In goes to the pending In mark. The two never hold a value
  * together (ADR 007), so the order of the two tests does not decide anything. Go to Out has
  * no pending counterpart.
- *
- * `seekToPts` needs a calibrated source, and it reports a failed seek on any other source. The
- * plan therefore needs the calibration too, so an uncalibrated source never shows that error.
  */
 function planSegmentBoundarySeek(
   snapshot: ShortcutSnapshot,
   hasActiveSource: boolean,
   boundary: "inPts" | "outPts",
 ): ShortcutCommand | null {
-  if (!hasActiveSource || snapshot.playback.calibrationStatus !== "ready") {
-    return null;
-  }
   const current = currentSegmentOf(snapshot.timeline);
   let target: Pts | null;
   if (current !== null) {
@@ -214,14 +243,7 @@ function planSegmentBoundarySeek(
   } else {
     target = boundary === "inPts" ? snapshot.timeline.pendingInPts : null;
   }
-  if (target === null || !isPtsString(target)) {
-    return null;
-  }
-  // Already there: I then Shift+I, or O then Shift+O, moves nothing and keeps the frame.
-  if (isTargetOnScreen(snapshot.playback, target)) {
-    return null;
-  }
-  return { kind: "seekToPts", pts: target };
+  return planBoundarySeek(snapshot.playback, hasActiveSource, target);
 }
 
 /**

@@ -21,7 +21,20 @@
  * - A touch pointer never opens it.
  * - A pointer with a button held never opens it. With a button held, the pointer is in a
  *   drag, such as a scrub of the playhead, and the segments under it are not its subject.
+ *
+ * The tooltip shows one part of a segment. The body shows the whole segment. An edge (the In
+ * or the Out hit area, see `segmentEdges`) shows the time of that boundary only. A pointer
+ * that moves between the parts of the open segment moves the tooltip at once, as a move to
+ * another segment does. While an open waits for its delay, a move to another part of the same
+ * segment keeps the delay and changes the part that opens. Keyboard focus opens the body. A
+ * tooltip that keyboard focus opened shows the part under the pointer and keeps its trigger,
+ * so the scroll rule of a focus tooltip still applies to it.
  */
+
+import type { SegmentEdge } from "./segmentEdges";
+
+/** The part of a segment that the tooltip shows: the body or one edge. */
+export type SegmentTooltipPart = "body" | SegmentEdge;
 
 /** The hover delay before the tooltip opens, in milliseconds. */
 export const SEGMENT_TOOLTIP_DELAY_MS = 400;
@@ -35,6 +48,8 @@ export const SEGMENT_TOOLTIP_SKIP_DELAY_MS = 300;
 export interface SegmentTooltipState {
   /** The segment that the tooltip shows, or null while the tooltip is closed. */
   readonly targetId: string | null;
+  /** The part of the segment that the tooltip shows. It is `body` while the tooltip is closed. */
+  readonly part: SegmentTooltipPart;
   /** True when the tooltip opened after the hover delay. Only that open animates in. */
   readonly delayed: boolean;
   /** What opened the tooltip, or null while it is closed. */
@@ -66,8 +81,15 @@ export interface SegmentTooltipClock {
 export interface SegmentTooltipController {
   readonly getState: () => SegmentTooltipState;
   readonly subscribe: (listener: () => void) => () => void;
-  /** A pointer entered or moved over a segment. */
-  readonly hover: (segmentId: string, pointer: SegmentTooltipPointer) => void;
+  /**
+   * A pointer entered or moved over a segment. `part` is the part under the pointer, and the
+   * body when it is not given.
+   */
+  readonly hover: (
+    segmentId: string,
+    pointer: SegmentTooltipPointer,
+    part?: SegmentTooltipPart,
+  ) => void;
   /** The pointer left a segment. */
   readonly leave: (segmentId: string) => void;
   /** A pointer pressed a segment. */
@@ -112,6 +134,7 @@ export interface SegmentTooltipController {
 
 const CLOSED: SegmentTooltipState = Object.freeze({
   targetId: null,
+  part: "body",
   delayed: false,
   trigger: null,
   measure: 0,
@@ -135,6 +158,7 @@ export function createSegmentTooltipController(
 ): SegmentTooltipController {
   let state: SegmentTooltipState = CLOSED;
   let pendingId: string | null = null;
+  let pendingPart: SegmentTooltipPart = "body";
   let timer: unknown = null;
   // The segment that must not open the tooltip until the pointer leaves it or it loses focus.
   let suppressedId: string | null = null;
@@ -144,6 +168,7 @@ export function createSegmentTooltipController(
   const setState = (next: SegmentTooltipState) => {
     if (
       next.targetId === state.targetId &&
+      next.part === state.part &&
       next.delayed === state.delayed &&
       next.trigger === state.trigger &&
       next.measure === state.measure
@@ -160,11 +185,17 @@ export function createSegmentTooltipController(
       timer = null;
     }
     pendingId = null;
+    pendingPart = "body";
   };
 
-  const open = (segmentId: string, delayed: boolean, trigger: "pointer" | "focus") => {
+  const open = (
+    segmentId: string,
+    part: SegmentTooltipPart,
+    delayed: boolean,
+    trigger: "pointer" | "focus",
+  ) => {
     cancelPending();
-    setState({ targetId: segmentId, delayed, trigger, measure: 0 });
+    setState({ targetId: segmentId, part, delayed, trigger, measure: 0 });
   };
 
   const close = () => {
@@ -202,30 +233,46 @@ export function createSegmentTooltipController(
         listeners.delete(listener);
       };
     },
-    hover: (segmentId, pointer) => {
+    hover: (segmentId, pointer, part = "body") => {
       if (pointer.pointerType === "touch" || pointer.buttons !== 0) {
         return;
       }
-      if (
-        suppressedId === segmentId ||
-        state.targetId === segmentId ||
-        pendingId === segmentId
-      ) {
+      if (suppressedId === segmentId) {
+        return;
+      }
+      if (state.targetId === segmentId) {
+        if (state.part === part) {
+          return;
+        }
+        // Keyboard focus opened the tooltip on this segment. It keeps its trigger, so a scroll
+        // keeps it and measures it again, and it shows the part under the pointer.
+        if (state.trigger === "focus") {
+          setState({ ...state, part });
+          return;
+        }
+      }
+      // The delay counts from the entry into the segment. The open shows the part that is
+      // under the pointer when the delay ends.
+      if (pendingId === segmentId) {
+        pendingPart = part;
         return;
       }
       if (
         state.targetId !== null ||
         clock.now() - closedAt < SEGMENT_TOOLTIP_SKIP_DELAY_MS
       ) {
-        open(segmentId, false, "pointer");
+        open(segmentId, part, false, "pointer");
         return;
       }
       cancelPending();
       pendingId = segmentId;
+      pendingPart = part;
       timer = clock.setTimeout(() => {
+        const openPart = pendingPart;
         timer = null;
         pendingId = null;
-        open(segmentId, true, "pointer");
+        pendingPart = "body";
+        open(segmentId, openPart, true, "pointer");
       }, SEGMENT_TOOLTIP_DELAY_MS);
     },
     leave: (segmentId) => {
@@ -250,7 +297,7 @@ export function createSegmentTooltipController(
       if (suppressedId === segmentId) {
         suppressedId = null;
       }
-      open(segmentId, false, "focus");
+      open(segmentId, "body", false, "focus");
     },
     blur: (segmentId) => {
       if (suppressedId === segmentId) {

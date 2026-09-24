@@ -693,6 +693,7 @@ export function TimelinePanel({
                     ariaLabel={t("timeline.seekSlider")}
                     canSeek={canSeek}
                     scrubHandlers={scrubHandlers}
+                    timecodeDisplay={timecodeDisplay}
                   >
                     {/*
                      * Full-source background layer. The export cuts away each part of the

@@ -1,12 +1,25 @@
 import { memo, useEffect, useId, useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
+import { isSourceActive } from "@/components/layout/actionConditions";
+import { mediaStore } from "@/features/media";
+import { playbackStore } from "@/features/playback";
 import {
   calculateSegmentLayout,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
-import type { Pts, Rational } from "@/types/project";
+import type { Pts, Rational, Segment } from "@/types/project";
+import {
+  SEGMENT_EDGE_ATTRIBUTE,
+  SEGMENT_EDGE_HIT_WIDTH_PX,
+  buildSegmentEdgeEntries,
+  parseSegmentEdge,
+  planSegmentEdgeSeek,
+  resolveSegmentFocusRing,
+  showsSegmentEdgeHandles,
+  type SegmentEdge,
+} from "./segmentEdges";
 import {
   buildSegmentTooltipRows,
   calculateSegmentWidthPx,
@@ -48,6 +61,41 @@ function hasFocusVisible(element: Element): boolean {
     return element.matches(":focus-visible");
   } catch {
     return true;
+  }
+}
+
+/** The two edges of a segment, in the order of their hit areas. */
+const SEGMENT_EDGES: readonly SegmentEdge[] = ["in", "out"];
+
+/**
+ * The edge whose hit area holds the event target, or null when the target is the body of the
+ * segment. A click that the keyboard or assistive technology sends targets the button itself,
+ * so it names no edge.
+ */
+function findSegmentEdge(target: EventTarget | null): SegmentEdge | null {
+  if (typeof Element === "undefined" || !(target instanceof Element)) {
+    return null;
+  }
+  return parseSegmentEdge(
+    target.closest(`[${SEGMENT_EDGE_ATTRIBUTE}]`)?.getAttribute(SEGMENT_EDGE_ATTRIBUTE),
+  );
+}
+
+/**
+ * Seeks to the stored boundary that an edge names, under the condition of Shift+I and Shift+O
+ * (`planSegmentEdgeSeek`). It reads the stores at the click, so the layer does not subscribe to
+ * the playback state.
+ */
+function seekToSegmentEdge(segment: Segment, edge: SegmentEdge): void {
+  const playback = playbackStore.getState();
+  const hasActiveSource = isSourceActive(
+    mediaStore.getState().media !== null,
+    playback.isAttached,
+    playback.isReady,
+  );
+  const target = planSegmentEdgeSeek(edge, segment, playback, hasActiveSource);
+  if (target !== null) {
+    playback.seekToPts(target);
   }
 }
 
@@ -127,12 +175,21 @@ export const SegmentLayer = memo(function SegmentLayer({
             videoTimeBase,
             timecodeDisplay,
           );
+          const rows = buildSegmentTooltipRows(times);
+          const edges = buildSegmentEdgeEntries(
+            segment,
+            videoStartPts,
+            videoTimeBase,
+            totalDurationSeconds,
+            rows,
+          );
           const tooltipEntry: SegmentTooltipEntry = {
             id: segment.id,
             number,
             leftPercent: layout.leftPercent,
             widthPercent: layout.widthPercent,
-            rows: buildSegmentTooltipRows(times),
+            rows,
+            edges,
           };
           return {
             segment,
@@ -152,6 +209,7 @@ export const SegmentLayer = memo(function SegmentLayer({
             description: t("timeline.segmentDescription", { order: number, total }),
             // The index in the project array is unique, and an ID token cannot hold a space.
             descriptionId: `${descriptionIdPrefix}-segment-${projectIndex}`,
+            edges,
             tooltipEntry,
           };
         })
@@ -232,12 +290,45 @@ export const SegmentLayer = memo(function SegmentLayer({
    * hit area while it is at z-50.
    *
    * A focused button rises to z-50, so the outlines of its neighbours do not cover its focus
-   * ring. The ring is inside the box, like the other decorations. It is two-tone: a 2px
-   * outline in the foreground colour, and inside it a 1px line in the background colour,
-   * which is the part of the 3px inset ring that the outline does not cover. The brand ring
-   * colour would disappear on the selected fill, which is also the brand colour, and no
-   * single colour keeps 3:1 against both fills in the dark theme. With two tones, one of
-   * them keeps 3:1 against each fill.
+   * ring. At z-50 its fill also covers its own outline, so a focused button draws the border
+   * of its state itself, as an inset ring: 1px in the unselected border colour, or 2px in the
+   * selected border colour. The focus ring is a 2px dashed outline, 2px inside the box, so it
+   * lies inside the border of both states. The selected style is a fill and solid lines, so a
+   * dashed line differs from it in kind, on a selected and on an unselected segment. The
+   * colour of the ring follows the fill under it (`resolveSegmentFocusRing`): the foreground
+   * colour on the unselected fill and the hover fill (at least 9:1 in the light theme and
+   * 5.5:1 in the dark theme), and the brand foreground on the selected fill (4.8:1 and 8:1).
+   * No single colour keeps 3:1 against both fills in the dark theme. A segment narrower than
+   * `SEGMENT_FOCUS_RING_INSET_MIN_WIDTH_PX` has no room for the ring inside its box, so the
+   * ring goes on the outside, in the foreground colour, which keeps 15:1 against the track in
+   * both themes.
+   *
+   * Each end of a segment at least `SEGMENT_EDGE_HANDLES_MIN_WIDTH_PX` wide has an edge hit
+   * area, `SEGMENT_EDGE_HIT_WIDTH_PX` wide, inside the button. An edge is a control area of
+   * its own inside the segment control, and not a Tab stop: the keyboard path to a boundary is
+   * Shift+I and Shift+O (ADR 026).
+   *
+   * - The pointer over an edge shows a handle and a bubble with the time of that boundary (see
+   *   SegmentTooltip). The cursor stays the default one. A resize cursor would promise a drag,
+   *   and an edge has no drag until trimming exists.
+   * - The handle is a short bar, so it does not read as the playhead. It lies on the body side
+   *   of the hit area, 4px from the boundary, so a gap keeps it apart from the border and the
+   *   inset line of both states. It is in the selection colour on an unselected segment. The
+   *   selected fill is that colour, so there the handle is in the brand foreground. While the
+   *   pointer is on an edge, the body does not take the hover fill: the selection colour keeps
+   *   3:1 against the unselected fill (3.1:1 and 3.8:1) and not against the hover fill. The
+   *   fill also drops at once, with no fade, so the handle never shows on the hover fill.
+   * - The playhead hit area lies above the segment layer (ADR 022). While the playhead stands
+   *   on a boundary, it covers most of that edge, and a press there scrubs.
+   * - A click on an edge selects the segment and seeks to the stored boundary PTS
+   *   (`planSegmentEdgeSeek`). A click on the body, and a click from the keyboard, only select.
+   * - A press and a drag on an edge do nothing more than on the body: no scrub and no trim.
+   *   The click decides, when the release is on the same edge. A scrub would move the
+   *   playhead away from the boundary that the click then seeks to.
+   * - Below the minimum width a segment has no edges, so the two hit areas never overlap, and
+   *   the body between them keeps the 12px of the narrow hit area.
+   * - An edge whose boundary is outside the source extent has no handle
+   *   (`buildSegmentEdgeEntries`), because the layout clamps that end of the box.
    *
    * Only the hover animates. The transition is in the unselected state and only while the
    * pointer is over the segment, so a selection and a deselection both show at once.
@@ -258,14 +349,15 @@ export const SegmentLayer = memo(function SegmentLayer({
           compactDuration,
           labelWidths,
           layout,
+          edges,
         }) => {
           // A string comparison at render time, so selection never rebuilds the memoized
           // layouts.
           const isCurrent = seg.id === currentSegmentId;
-          const tier = resolveSegmentLabelTier(
-            calculateSegmentWidthPx(layout.widthPercent, laneWidthPx),
-            labelWidths,
-          );
+          const widthPx = calculateSegmentWidthPx(layout.widthPercent, laneWidthPx);
+          const tier = resolveSegmentLabelTier(widthPx, labelWidths);
+          const showsHandles = showsSegmentEdgeHandles(widthPx);
+          const focusRing = resolveSegmentFocusRing(widthPx, isCurrent);
           return (
             <button
               key={seg.id}
@@ -273,21 +365,43 @@ export const SegmentLayer = memo(function SegmentLayer({
               aria-pressed={isCurrent}
               aria-label={label}
               aria-describedby={descriptionId}
-              // Selecting does not seek: the playhead is the operand of Mark In, Mark Out and
-              // Split, so a selection click must not move it.
-              onClick={() => selectSegment(seg.id)}
-              onPointerEnter={(event) => tooltip.hover(seg.id, event)}
-              onPointerMove={(event) => tooltip.hover(seg.id, event)}
+              // A click on the body only selects: the playhead is the operand of Mark In, Mark
+              // Out and Split, so a selection click must not move it. A click on an edge also
+              // seeks to the boundary that the edge names.
+              onClick={(event) => {
+                selectSegment(seg.id);
+                const edge = findSegmentEdge(event.target);
+                if (edge !== null) {
+                  seekToSegmentEdge(seg, edge);
+                }
+              }}
+              onPointerEnter={(event) =>
+                tooltip.hover(seg.id, event, findSegmentEdge(event.target) ?? "body")
+              }
+              onPointerMove={(event) =>
+                tooltip.hover(seg.id, event, findSegmentEdge(event.target) ?? "body")
+              }
               onPointerLeave={() => tooltip.leave(seg.id)}
               onPointerDown={() => tooltip.press(seg.id)}
               onFocus={(event) =>
                 tooltip.focus(seg.id, hasFocusVisible(event.currentTarget))
               }
               onBlur={() => tooltip.blur(seg.id)}
-              className={`pointer-events-auto absolute inset-y-1 flex items-start justify-start rounded-md pt-1 focus-visible:z-50 focus-visible:inset-ring-3 focus-visible:inset-ring-background focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-foreground ${
+              // The `has-` selectors name the attribute of the edge hit areas
+              // (`SEGMENT_EDGE_ATTRIBUTE`): the body drops its hover fill at once while the
+              // pointer is on an edge.
+              className={`pointer-events-auto absolute inset-y-1 flex items-start justify-start rounded-md pt-1 focus-visible:z-50 focus-visible:outline-2 focus-visible:outline-dashed ${
+                focusRing.placement === "inset"
+                  ? "focus-visible:-outline-offset-4"
+                  : "focus-visible:outline-offset-0"
+              } ${
+                focusRing.tone === "primaryForeground"
+                  ? "focus-visible:outline-primary-foreground"
+                  : "focus-visible:outline-foreground"
+              } ${
                 isCurrent
-                  ? "z-20 bg-clip-video-selected text-primary-foreground"
-                  : "bg-clip-video text-clip-foreground before:absolute before:inset-y-0 before:left-1/2 before:-z-10 before:w-full before:min-w-3 before:-translate-x-1/2 hover:bg-clip-video-hover hover:transition-colors focus-visible:before:hidden"
+                  ? "z-20 bg-clip-video-selected text-primary-foreground focus-visible:inset-ring-2 focus-visible:inset-ring-clip-video-selected-border"
+                  : "bg-clip-video text-clip-foreground before:absolute before:inset-y-0 before:left-1/2 before:-z-10 before:w-full before:min-w-3 before:-translate-x-1/2 hover:transition-colors hover:not-has-[[data-segment-edge]:hover]:bg-clip-video-hover focus-visible:inset-ring focus-visible:inset-ring-clip-video-border focus-visible:before:hidden has-[[data-segment-edge]:hover]:transition-none"
               }`}
               style={{
                 left: layout.left,
@@ -308,6 +422,22 @@ export const SegmentLayer = memo(function SegmentLayer({
                   )}
                 </span>
               )}
+              {showsHandles &&
+                SEGMENT_EDGES.map((edge) =>
+                  edges[edge] === null ? null : (
+                    <span
+                      key={edge}
+                      data-segment-edge={edge}
+                      aria-hidden="true"
+                      className={`group/edge absolute inset-y-0 flex items-center ${edge === "in" ? "left-0 justify-end" : "right-0 justify-start"}`}
+                      style={{ width: SEGMENT_EDGE_HIT_WIDTH_PX }}
+                    >
+                      <span
+                        className={`hidden h-1/2 w-0.5 rounded-full group-hover/edge:block ${isCurrent ? "bg-primary-foreground" : "bg-timeline-selection"}`}
+                      />
+                    </span>
+                  ),
+                )}
               {/* A referenced element gives its text to the description while it is hidden. */}
               <span id={descriptionId} hidden>
                 {description}

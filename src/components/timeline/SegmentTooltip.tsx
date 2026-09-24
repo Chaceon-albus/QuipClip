@@ -9,16 +9,27 @@ import {
   useSyncExternalStore,
   type RefObject,
 } from "react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { TIMELINE_GUTTER_WIDTH_PX } from "@/features/timeline";
 import { cn } from "@/lib/utils";
 import {
+  calculateVisibleEdgeAnchor,
+  resolveShownSegmentEdge,
+  type SegmentEdge,
+  type SegmentEdgeEntries,
+} from "./segmentEdges";
+import {
+  calculateSegmentWidthPx,
   calculateVisibleSegmentAnchor,
   type SegmentAnchor,
   type SegmentTooltipRow,
 } from "./segmentLabels";
-import type { SegmentTooltipController } from "./segmentTooltipController";
+import type {
+  SegmentTooltipController,
+  SegmentTooltipPart,
+} from "./segmentTooltipController";
 
 /** The gap between a segment and its tooltip, in pixels. The control tooltips use 6 too. */
 const SEGMENT_TOOLTIP_OFFSET = 6;
@@ -35,6 +46,8 @@ export interface SegmentTooltipEntry {
   readonly leftPercent: number;
   readonly widthPercent: number;
   readonly rows: readonly SegmentTooltipRow[];
+  /** The edges that have a handle, with the row that the bubble of each one shows. */
+  readonly edges: SegmentEdgeEntries;
 }
 
 export interface SegmentTooltipProps {
@@ -48,9 +61,10 @@ export interface SegmentTooltipProps {
   readonly laneWidthPx: number;
 }
 
-/** The anchor of one open, for the segment that it names. */
+/** The anchor of one open, for the segment and the part that it names. */
 interface MeasuredAnchor extends SegmentAnchor {
   readonly id: string;
+  readonly part: SegmentTooltipPart;
   /**
    * Goes up each time the anchor of the open changes. The content remounts at each one. Only
    * generation 0, the first anchor of an open, plays the entry animation.
@@ -59,32 +73,52 @@ interface MeasuredAnchor extends SegmentAnchor {
 }
 
 /**
- * Measures the visible part of a segment. The anchor span is a child of the layer, and the
- * layer spans the lane. The sticky gutter covers the left edge of the viewport, so the
- * visible part of the lane starts at the right edge of the gutter.
+ * Measures the anchor of the part that the tooltip shows: the visible part of the segment for
+ * the body, and the boundary for an edge (`calculateVisibleEdgeAnchor`). The anchor span is a
+ * child of the layer, and the layer spans the lane. The sticky gutter covers the left edge of
+ * the viewport, so the visible part of the lane starts at the right edge of the gutter.
  */
 function measureAnchor(
   entry: SegmentTooltipEntry,
+  edge: SegmentEdge | null,
   anchorElement: HTMLElement | null,
   viewport: HTMLElement | null,
 ): SegmentAnchor {
   const layer = anchorElement?.parentElement ?? null;
-  if (layer === null || viewport === null) {
-    return calculateVisibleSegmentAnchor(
-      entry,
-      { left: 0, width: 0 },
-      { left: 0, right: 0 },
-    );
-  }
-  const laneRect = layer.getBoundingClientRect();
-  const viewportLeft = viewport.getBoundingClientRect().left;
-  return calculateVisibleSegmentAnchor(
-    entry,
-    { left: laneRect.left, width: laneRect.width },
-    {
+  let lane = { left: 0, width: 0 };
+  let visible = { left: 0, right: 0 };
+  if (layer !== null && viewport !== null) {
+    const laneRect = layer.getBoundingClientRect();
+    const viewportLeft = viewport.getBoundingClientRect().left;
+    lane = { left: laneRect.left, width: laneRect.width };
+    visible = {
       left: viewportLeft + TIMELINE_GUTTER_WIDTH_PX,
       right: viewportLeft + viewport.clientWidth,
-    },
+    };
+  }
+  const edgeEntry = edge === null ? null : entry.edges[edge];
+  return edge !== null && edgeEntry !== null
+    ? calculateVisibleEdgeAnchor(edge, edgeEntry.percent, lane, visible)
+    : calculateVisibleSegmentAnchor(entry, lane, visible);
+}
+
+/**
+ * The cells of one row of the tooltip: a label and a timecode, with the note of an excluded
+ * time. A plain function and not a component, so the row adds no component of its own.
+ */
+function renderTooltipRow(row: SegmentTooltipRow, t: TFunction) {
+  return (
+    <Fragment key={row.labelKey}>
+      <dt className="text-tooltip-foreground/70">{t(row.labelKey)}</dt>
+      <dd className="font-mono tabular-nums">
+        {row.value}
+        {row.excluded && (
+          <span className="ml-1 font-sans text-tooltip-foreground/70">
+            {t("timeline.segmentTooltip.notIncluded")}
+          </span>
+        )}
+      </dd>
+    </Fragment>
   );
 }
 
@@ -148,6 +182,10 @@ function measureAnchor(
  *
  * The content also mounts again when the tooltip moves to another segment.
  *
+ * An edge part shows a small bubble with the time of that boundary only, the In time or the
+ * Out time with its note. Its anchor is the boundary, so the arrow points at it. A move between
+ * the body and an edge measures the anchor again, and the content mounts again there.
+ *
  * Two tooltips can show at the same time in one case, and this is accepted. Radix sends a
  * document event when it opens a tooltip itself, and each open tooltip closes on that event.
  * An open from the controlled `open` prop sends no event. So when keyboard focus holds the
@@ -172,6 +210,17 @@ export const SegmentTooltip = memo(function SegmentTooltip({
     [entries],
   );
   const entry = state.targetId === null ? undefined : entriesById.get(state.targetId);
+  // An edge shows only while its handle does, so a zoom out that removes the handles shows the
+  // body again (`resolveShownSegmentEdge`).
+  const shownEdge =
+    entry === undefined
+      ? null
+      : resolveShownSegmentEdge(
+          state.part,
+          entry.edges,
+          calculateSegmentWidthPx(entry.widthPercent, laneWidthPx),
+        );
+  const shownPart: SegmentTooltipPart = shownEdge ?? "body";
   const anchorRef = useRef<HTMLSpanElement | null>(null);
   const [anchor, setAnchor] = useState<MeasuredAnchor | null>(null);
   // Set by Escape or by a press outside the content, just before Radix closes the tooltip.
@@ -204,35 +253,49 @@ export const SegmentTooltip = memo(function SegmentTooltip({
     controller.retain(new Set(entries.map((item) => item.id)));
   }, [entries, controller]);
 
-  // Measures the anchor before the tooltip opens, and again when the segment, the lane width
-  // or the measure counter of the controller changes. A layout effect runs before the browser
-  // paints, so the tooltip never shows at an old anchor. The state update is the purpose of
-  // this effect: it stores a layout measurement. The effect does not read `laneWidthPx` and
-  // `measureRequest`. They are dependencies only so that a change runs the measurement again.
+  // Measures the anchor before the tooltip opens, and again when the segment, the part, the
+  // lane width or the measure counter of the controller changes. A layout effect runs before
+  // the browser paints, so the tooltip never shows at an old anchor. The state update is the
+  // purpose of this effect: it stores a layout measurement. The effect does not read
+  // `laneWidthPx` and `measureRequest`. They are dependencies only so that a change runs the
+  // measurement again.
   const measureRequest = state.measure;
   useLayoutEffect(() => {
     if (entry === undefined) {
       setAnchor((previous) => (previous === null ? previous : null));
       return;
     }
-    const measured = measureAnchor(entry, anchorRef.current, viewportRef.current);
+    const measured = measureAnchor(
+      entry,
+      shownEdge,
+      anchorRef.current,
+      viewportRef.current,
+    );
     scrolledRef.current = false;
+    const part: SegmentTooltipPart = shownEdge ?? "body";
     setAnchor((previous) =>
       previous !== null &&
       previous.id === entry.id &&
+      previous.part === part &&
       previous.left === measured.left &&
       previous.width === measured.width &&
       previous.visible === measured.visible
         ? previous
         : {
             id: entry.id,
+            part,
             ...measured,
             generation: previous === null ? 0 : previous.generation + 1,
           },
     );
-  }, [entry, viewportRef, laneWidthPx, measureRequest]);
+  }, [entry, shownEdge, viewportRef, laneWidthPx, measureRequest]);
 
-  const isOpen = entry !== undefined && anchor !== null && anchor.id === entry.id;
+  const isOpen =
+    entry !== undefined &&
+    anchor !== null &&
+    anchor.id === entry.id &&
+    anchor.part === shownPart;
+  const edgeRow = shownEdge === null ? null : (entry?.edges[shownEdge]?.row ?? null);
 
   return (
     <Tooltip
@@ -282,36 +345,31 @@ export const SegmentTooltip = memo(function SegmentTooltip({
             !anchor.visible && "invisible",
           )}
         >
-          <div className="flex flex-col gap-1.5">
-            <div className="flex flex-col gap-0.5">
-              <span className="font-semibold">
-                {t("timeline.segment", { index: entry.number })}
-              </span>
-              <span className="text-tooltip-foreground/70">
-                {t("timeline.segmentTooltip.exportOrder", {
-                  order: entry.number,
-                  total,
-                })}
-              </span>
+          {edgeRow !== null ? (
+            // The bubble of an edge: the time of that boundary only.
+            <dl className="grid grid-cols-[auto_auto] gap-x-3">
+              {renderTooltipRow(edgeRow, t)}
+            </dl>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex flex-col gap-0.5">
+                <span className="font-semibold">
+                  {t("timeline.segment", { index: entry.number })}
+                </span>
+                <span className="text-tooltip-foreground/70">
+                  {t("timeline.segmentTooltip.exportOrder", {
+                    order: entry.number,
+                    total,
+                  })}
+                </span>
+              </div>
+              {entry.rows.length > 0 && (
+                <dl className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5">
+                  {entry.rows.map((row) => renderTooltipRow(row, t))}
+                </dl>
+              )}
             </div>
-            {entry.rows.length > 0 && (
-              <dl className="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5">
-                {entry.rows.map((row) => (
-                  <Fragment key={row.labelKey}>
-                    <dt className="text-tooltip-foreground/70">{t(row.labelKey)}</dt>
-                    <dd className="font-mono tabular-nums">
-                      {row.value}
-                      {row.excluded && (
-                        <span className="ml-1 font-sans text-tooltip-foreground/70">
-                          {t("timeline.segmentTooltip.notIncluded")}
-                        </span>
-                      )}
-                    </dd>
-                  </Fragment>
-                ))}
-              </dl>
-            )}
-          </div>
+          )}
         </TooltipContent>
       )}
     </Tooltip>

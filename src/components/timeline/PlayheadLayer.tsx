@@ -1,6 +1,8 @@
 import type { DOMAttributes, ReactNode } from "react";
 import { calculatePlayheadLayout } from "@/features/timeline";
+import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
+import { usePlayheadTimecode } from "./playheadTimecode";
 import { useDisplayedPlaybackPosition } from "./useDisplayedPlaybackPosition";
 
 /*
@@ -131,6 +133,8 @@ export interface TimelineSeekSliderProps extends PositionLayerProps {
   ariaLabel: string;
   canSeek: boolean;
   scrubHandlers: ScrubSurfaceHandlers;
+  /** The timecode format of the source (ADR 028). The value must be memoized. */
+  timecodeDisplay: TimecodeDisplay;
   /**
    * The content of the seek surface. The panel creates these elements, so a render of the
    * slider for a new position reuses them and does not render them again.
@@ -143,7 +147,10 @@ export interface TimelineSeekSliderProps extends PositionLayerProps {
  * pending In overlays, the hit area and the focus ring clear of the ruler divider and of
  * the lower panel edge.
  *
- * It renders per frame only for `aria-valuenow`, the displayed playhead position.
+ * It renders per frame only for `aria-valuenow` and `aria-valuetext`, the displayed playhead
+ * position. The value text is the timecode that the preview shows, in the format of the
+ * source, so a screen reader does not read a number of seconds. Both values come from the
+ * same subscription, so the text adds no render.
  */
 export function TimelineSeekSlider({
   videoStartPts,
@@ -152,11 +159,14 @@ export function TimelineSeekSlider({
   ariaLabel,
   canSeek,
   scrubHandlers,
+  timecodeDisplay,
   children,
 }: TimelineSeekSliderProps) {
   const { elapsedSeconds } = useDisplayedPlaybackPosition(videoStartPts, videoTimeBase);
+  const timecode = usePlayheadTimecode(videoStartPts, videoTimeBase, timecodeDisplay);
   // The same test as the panel's, repeated here so that it narrows the duration to a number.
   const isIndeterminate = totalDurationSeconds === null || totalDurationSeconds <= 0;
+  const hasValue = !isIndeterminate && Number.isFinite(elapsedSeconds);
 
   return (
     <div
@@ -166,10 +176,15 @@ export function TimelineSeekSlider({
       aria-valuemin={0}
       aria-valuemax={isIndeterminate ? undefined : totalDurationSeconds}
       aria-valuenow={
-        isIndeterminate || !Number.isFinite(elapsedSeconds)
-          ? undefined
-          : Math.max(0, Math.min(totalDurationSeconds, elapsedSeconds))
+        hasValue
+          ? Math.max(0, Math.min(totalDurationSeconds, elapsedSeconds))
+          : undefined
       }
+      // The value text names the time that the preview shows, and it is not clamped as the
+      // preview is not. So it can name a time outside [0, extent] while `aria-valuenow` is
+      // clamped to the extent, and it stays while the extent is unknown and there is no
+      // `aria-valuenow`.
+      aria-valuetext={timecode}
       tabIndex={canSeek ? 0 : undefined}
       {...scrubHandlers}
       className={`absolute inset-x-0 inset-y-2 touch-none ${canSeek ? "cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}

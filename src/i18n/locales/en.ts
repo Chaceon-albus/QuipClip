@@ -210,7 +210,8 @@ export const en = {
     seekSlider: "Timeline seek",
     segmentList: "Timeline segments",
     segment: "Segment {{index}}",
-    segmentLabel: "Segment {{index}}, {{inTime}} to {{outTime}}, duration {{duration}}",
+    segmentLabel:
+      "Segment {{index}}, In {{inTime}}, Out {{outTime}}, duration {{duration}}",
     segmentDescription:
       "Export order: {{order}} of {{total}}. The Out point is not included.",
     segmentTooltip: {
