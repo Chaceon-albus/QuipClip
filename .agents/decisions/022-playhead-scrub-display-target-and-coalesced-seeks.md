@@ -179,6 +179,35 @@ a click on it selects the segment without a seek.
 A drag that the browser cancels, or that ends because seeking stops being possible, sends
 one exact seek at the last pointer position. A drag therefore never ends on a keyframe.
 
+(Changed on 2026-09-24.) The drag has three aids.
+
+- **Snap.** A scrub sample, and the release or cancel of a drag, snaps to a boundary within
+  6 px of the pointer: the In and Out of each segment of the active source, and the pending
+  In. Only a boundary inside the visible lane and inside the source extent can snap. The
+  nearest boundary wins, and a tie goes to the direction of the drag. A snap seeks with
+  `seekToPts` to the stored PTS of the boundary, never to a PTS from the pointer position,
+  and only while the calibration is ready. The seek at pointer down of a click never snaps.
+  Holding `Alt` (`Option` on macOS) turns the snap off. A read-only listener on the window
+  follows that key in the capture phase. It never cancels the event, so the one keyboard
+  layer of ADR 021 stays the only owner of key presses. A change of `Alt`, of the segments,
+  of the pending In or of the calibration takes a new sample at once. A line and a diamond
+  show the snap while the playhead is drawn on the boundary.
+- **Auto-scroll.** Within 24 px of either edge of the visible lane, or past it, the view
+  scrolls. It starts only after the drag enters that zone, or after it moves toward the edge
+  inside the zone where it started. The speed grows with the distance past the start of the
+  zone, up to a cap. Each step writes `scrollLeft`, reads the kept value back, and takes a
+  sample at the pointer position clamped to the visible lane, so the playhead stays at the
+  edge. The lane ends at its true, fractional edge, so a drag can reach the exact start and
+  end of the source at any display scale. The follow of the playhead does not page while a
+  gesture runs.
+- **Hover line.** Over the ruler and the track, a thin line and an approximate time, marked
+  with ≈, follow the pointer when no drag runs. They are a display only. They are never a
+  seek target or an edit position.
+
+A blur of the window also cancels a drag, with one exact seek at the last clamped and snapped
+target. The cancel and the release use the same snap as the last sample, so a drag ends
+where the indicator showed.
+
 ## Consequences
 
 - The playhead moves in the same frame as the click or the pointer move, on every
@@ -206,7 +235,7 @@ one exact seek at the last pointer position. A drag therefore never ends on a ke
   starts the queued seek.
 - A drag during playback pauses it. The playback stays paused after the release.
 - The timeline does not scroll when a drag goes past the visible edge. That is a possible
-  later step.
+  later step. (Changed on 2026-09-24: the auto-scroll above does this now.)
 - The pending In region follows the same displayed position as the playhead: the seek
   target first, then the presented frame. This is a display only. Mark Out and every
   other edit action still read `presentedFrame`. (Changed on 2026-09-23. Before that,

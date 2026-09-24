@@ -50,6 +50,7 @@ document summarizes them and shows how the parts fit together.
 | [`027-confirm-a-quit-that-loses-work.md`](../.agents/decisions/027-confirm-a-quit-that-loses-work.md)                                       | A close or a quit that would lose work asks first               |
 | [`028-frame-timecode-display.md`](../.agents/decisions/028-frame-timecode-display.md)                                                       | Elapsed time shows as HH:MM:SS:FF by default                    |
 | [`029-show-and-open-the-export-output.md`](../.agents/decisions/029-show-and-open-the-export-output.md)                                     | Show and open the export output through its run                 |
+| [`030-trim-a-segment-edge-by-dragging.md`](../.agents/decisions/030-trim-a-segment-edge-by-dragging.md)                                     | Trim a segment edge by dragging it                              |
 
 ## Shape
 
