@@ -21,13 +21,17 @@ export const zhCN: TranslationCatalog = {
     menu: {
       file: "文件",
       openMedia: "打开媒体...",
-      newProject: "新建项目",
-      openProject: "打开项目...",
-      save: "保存",
       export: "导出...",
     },
     action: {
       export: "导出",
+    },
+    exportTooltip: {
+      openVideoFirst: "请先打开一个视频",
+      markSegmentFirst: "请先标记至少一个片段",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      exportSegments_other: "导出 {{count}} 个片段（{{duration}}）",
+      showRunningExport: "显示正在进行的导出",
     },
     source: {
       // Chinese selects the `other` plural category for every count, so it has no `_one` form.

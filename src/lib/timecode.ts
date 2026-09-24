@@ -228,21 +228,41 @@ function formatGridFrame(frame: bigint, rate: Rational): string {
 }
 
 /**
- * Formats exact non-negative elapsed seconds `num / den` as `HH:MM:SS:FF`. The margin is
- * added to the whole elapsed time first, then the frame that contains the result is found.
- * All arithmetic is BigInt, so the result has no rounding error. The caller validates the
- * rate.
+ * Returns the frame index `J` that the frame timecode names for a non-negative tick count
+ * (ADR 028). The elapsed time is `ticks * timeBase`. The frame boundary margin of the rate and
+ * the video time base is added to the whole elapsed time first, then `J` is the index of the
+ * nominal frame that contains the result: `floor((elapsed + margin) * rate)`.
+ * `formatFrameTimecodeFromTicks` shows this frame. All arithmetic is BigInt, so the result has
+ * no rounding error. A negative tick count or an invalid time base or rate returns null.
+ *
+ * @param ticks Ticks from the start of the source.
+ * @param timeBase Seconds per tick.
+ * @param nominalRate Frames per second.
+ * @param videoTimeBase The video time base of the source, or null for the smallest margin.
  */
-function formatFramesExact(
-  elapsed: ExactSeconds,
-  rate: Rational,
-  margin: ExactSeconds,
-): string {
+export function frameIndexOfTicks(
+  ticks: bigint,
+  timeBase: Rational,
+  nominalRate: Rational,
+  videoTimeBase: Rational | null = null,
+): bigint | null {
+  if (
+    !isValidRate(nominalRate) ||
+    typeof ticks !== "bigint" ||
+    ticks < 0n ||
+    !isValidRate(timeBase)
+  ) {
+    return null;
+  }
+  const elapsed: ExactSeconds = {
+    num: ticks * BigInt(timeBase.n),
+    den: BigInt(timeBase.d),
+  };
+  const margin = frameBoundaryMargin(nominalRate, videoTimeBase);
   // elapsed + margin = (elapsed.num * margin.den + margin.num * elapsed.den) / (elapsed.den * margin.den)
   const shiftedNum = elapsed.num * margin.den + margin.num * elapsed.den;
   const shiftedDen = elapsed.den * margin.den;
-  const frame = (shiftedNum * BigInt(rate.n)) / (shiftedDen * BigInt(rate.d));
-  return formatGridFrame(frame, rate);
+  return (shiftedNum * BigInt(nominalRate.n)) / (shiftedDen * BigInt(nominalRate.d));
 }
 
 /**
@@ -313,14 +333,10 @@ export function formatFrameTimecodeFromTicks(
   if (!isValidRate(nominalRate)) {
     return FRAME_TIMECODE_PLACEHOLDER;
   }
-  if (typeof ticks !== "bigint" || ticks < 0n || !isValidRate(timeBase)) {
-    return frameTimecodePlaceholder(nominalRate);
-  }
-  return formatFramesExact(
-    { num: ticks * BigInt(timeBase.n), den: BigInt(timeBase.d) },
-    nominalRate,
-    frameBoundaryMargin(nominalRate, videoTimeBase),
-  );
+  const frame = frameIndexOfTicks(ticks, timeBase, nominalRate, videoTimeBase);
+  return frame === null
+    ? frameTimecodePlaceholder(nominalRate)
+    : formatGridFrame(frame, nominalRate);
 }
 
 /**
@@ -367,4 +383,53 @@ export function formatElapsedTimecode(
   return display.format === "frames"
     ? formatFrameTimecode(elapsedSeconds, display.rate, display.videoTimeBase)
     : formatMillisecondsTimecode(elapsedSeconds);
+}
+
+/** The quotient `num / den` rounded to the nearest integer, with a half rounded up. */
+function roundHalfUp(num: bigint, den: bigint): bigint {
+  return (2n * num + den) / (2n * den);
+}
+
+/**
+ * Formats a non-negative whole number of nominal frames as `HH:MM:SS:FF`, such as the length
+ * of a span in frames. It names the frame with that index on the nominal grid, as the
+ * elapsed-time rule does, so 30 frames at 25 fps show `00:00:01:05`. A negative count or an
+ * invalid rate returns the placeholder.
+ *
+ * The frame count of the span from tick count `a` to tick count `b` is
+ * `frameIndexOfTicks(b) - frameIndexOfTicks(a)`: the difference of the frame numbers that the
+ * frame timecode shows at the two ends. For several spans, add these counts. Do not count the
+ * frames of a tick length `b - a`. A container can store each PTS rounded to its time base, so
+ * a tick length can be up to one tick more or less than a whole number of frames. A count from
+ * it can then disagree with the two ends, and the errors of several spans add up.
+ *
+ * @param frames The number of frames.
+ * @param rate The nominal frame rate.
+ */
+export function formatFrameCountTimecode(frames: bigint, rate: Rational): string {
+  if (!isValidRate(rate)) {
+    return FRAME_TIMECODE_PLACEHOLDER;
+  }
+  if (typeof frames !== "bigint" || frames < 0n) {
+    return frameTimecodePlaceholder(rate);
+  }
+  return formatGridFrame(frames, rate);
+}
+
+/**
+ * Formats a non-negative tick count in a time base as `HH:MM:SS.mmm`, such as a duration. It
+ * rounds to the nearest millisecond, with a half rounded up, and the arithmetic is exact
+ * (ADR 002). A negative tick count or an invalid time base returns the millisecond
+ * placeholder, because the time is not known.
+ *
+ * @param ticks The tick count.
+ * @param timeBase Seconds per tick.
+ */
+export function formatMillisecondsFromTicks(ticks: bigint, timeBase: Rational): string {
+  if (typeof ticks !== "bigint" || ticks < 0n || !isValidRate(timeBase)) {
+    return MILLISECONDS_TIMECODE_PLACEHOLDER;
+  }
+  const totalMs = roundHalfUp(ticks * BigInt(timeBase.n) * 1000n, BigInt(timeBase.d));
+  const ms = (totalMs % 1000n).toString().padStart(3, "0");
+  return `${formatClock(totalMs / 1000n)}.${ms}`;
 }

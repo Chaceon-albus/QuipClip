@@ -14,13 +14,15 @@ interface ShortcutTooltipContentProps extends Omit<
   readonly label: string;
   /** The key chip text, or null when the action has no key. */
   readonly keys?: string | null;
-  /** Why the control is disabled, or null when there is nothing to say. */
+  /** A second, muted line: what the user must do first, or null. */
   readonly reason?: string | null;
 }
 
 /**
- * The tooltip of a control: the name of its action, its key chip, and, while the control is
- * disabled, a second, muted line that says why.
+ * The tooltip of a control: the name of its action, its key chip, and a second, muted line
+ * that says what the user must do first. A disabled control shows why it is disabled there.
+ * An enabled control can also show it, when its action would only report a missing step
+ * (ADR 024).
  *
  * The name, the chip and the reason are three elements. None of them is assembled into a
  * translated sentence (ADR 011).

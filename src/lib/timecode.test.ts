@@ -6,11 +6,14 @@ import {
   MILLISECONDS_TIMECODE_PLACEHOLDER,
   TIMECODE_FORMATS,
   formatElapsedTimecode,
+  formatFrameCountTimecode,
   formatFrameTimecode,
   formatFrameTimecodeFromTicks,
+  formatMillisecondsFromTicks,
   formatMillisecondsTimecode,
   frameBoundaryMarginSeconds,
   frameIndexDigits,
+  frameIndexOfTicks,
   frameTimecodePlaceholder,
   timecodePlaceholder,
 } from "./timecode";
@@ -647,5 +650,202 @@ describe("placeholders", () => {
 
   it("lists frames first, as the default", () => {
     expect(TIMECODE_FORMATS).toEqual(["frames", "milliseconds"]);
+  });
+});
+
+describe("frameIndexOfTicks", () => {
+  const tb = (n: number, d: number): Rational => ({ n, d });
+
+  // [label, rate, time base, start PTS, PTS, frame index J, frame timecode]. The caller
+  // passes the elapsed ticks, PTS - start PTS. The values come from exact arithmetic by
+  // hand: J = floor((elapsed + margin) * rate), with half a tick of margin when the frame
+  // interval is not a whole number of ticks, and one microsecond when it is.
+  const cases: readonly [string, Rational, Rational, bigint, bigint, bigint, string][] =
+    [
+      [
+        "29.97 fps, 1 ms, frame 15 stored late",
+        fps2997,
+        tb(1, 1000),
+        1000n,
+        1501n,
+        15n,
+        "00:00:00:15",
+      ],
+      [
+        "29.97 fps, 1 ms, frame 15 stored early",
+        fps2997,
+        tb(1, 1000),
+        1000n,
+        1500n,
+        15n,
+        "00:00:00:15",
+      ],
+      [
+        "29.97 fps, 1 ms, before frame 15",
+        fps2997,
+        tb(1, 1000),
+        1000n,
+        1499n,
+        14n,
+        "00:00:00:14",
+      ],
+      [
+        "29.97 fps, 1 ms, frame 1000",
+        fps2997,
+        tb(1, 1000),
+        1000n,
+        34_367n,
+        1000n,
+        "00:00:33:10",
+      ],
+      [
+        "29.97 fps, 1 ms, one hour",
+        fps2997,
+        tb(1, 1000),
+        1000n,
+        3_601_000n,
+        107_892n,
+        "00:59:59:29",
+      ],
+      [
+        "29.97 fps, 1 ms, first frame of the hour",
+        fps2997,
+        tb(1, 1000),
+        1000n,
+        3_601_036n,
+        107_893n,
+        "01:00:00:00",
+      ],
+      [
+        "23.976 fps, 1/90000, before frame 1",
+        fps23976,
+        tb(1, 90_000),
+        126_000n,
+        129_753n,
+        0n,
+        "00:00:00:00",
+      ],
+      [
+        "23.976 fps, 1/90000, frame 1",
+        fps23976,
+        tb(1, 90_000),
+        126_000n,
+        129_754n,
+        1n,
+        "00:00:00:01",
+      ],
+      [
+        "23.976 fps, 1/90000, one minute",
+        fps23976,
+        tb(1, 90_000),
+        126_000n,
+        5_526_000n,
+        1438n,
+        "00:00:59:23",
+      ],
+      [
+        "59.94 fps, 1 ms, frame 171",
+        fps5994,
+        tb(1, 1000),
+        500n,
+        3353n,
+        171n,
+        "00:00:02:51",
+      ],
+      [
+        "59.94 fps, 1 ms, before frame 171",
+        fps5994,
+        tb(1, 1000),
+        500n,
+        3352n,
+        170n,
+        "00:00:02:50",
+      ],
+      ["25 fps, 1/25, frame 26", fps25, tb(1, 25), 10n, 36n, 26n, "00:00:01:01"],
+      [
+        "25 fps, 1/25, one hour",
+        fps25,
+        tb(1, 25),
+        10n,
+        90_010n,
+        90_000n,
+        "01:00:00:00",
+      ],
+      ["25 fps, 1 ms, before frame 1", fps25, tb(1, 1000), 20n, 59n, 0n, "00:00:00:00"],
+      ["25 fps, 1 ms, frame 1", fps25, tb(1, 1000), 20n, 60n, 1n, "00:00:00:01"],
+      ["25 fps, 1 ms, frame 29", fps25, tb(1, 1000), 20n, 1180n, 29n, "00:00:01:04"],
+    ];
+
+  it.each(cases)(
+    "names the frame of the elapsed time (%s)",
+    (_label, rate, timeBase, startPts, pts, frame, timecode) => {
+      const elapsed = pts - startPts;
+      expect(frameIndexOfTicks(elapsed, timeBase, rate, timeBase)).toBe(frame);
+      expect(formatFrameCountTimecode(frame, rate)).toBe(timecode);
+      expect(formatFrameTimecodeFromTicks(elapsed, timeBase, rate, timeBase)).toBe(
+        timecode,
+      );
+    },
+  );
+
+  it("applies the frame boundary margin of the video time base", () => {
+    const ms = tb(1, 1000);
+    // Frame 15 at 29.97 fps starts at 500.5 ms. Half a tick of margin counts 500 ms as it.
+    expect(frameIndexOfTicks(501n, ms, fps2997, ms)).toBe(15n);
+    expect(frameIndexOfTicks(500n, ms, fps2997, ms)).toBe(15n);
+    expect(frameIndexOfTicks(499n, ms, fps2997, ms)).toBe(14n);
+    // With no video time base, the margin is one microsecond.
+    expect(frameIndexOfTicks(500n, ms, fps2997)).toBe(14n);
+    // A whole-tick frame interval: each tick of 1/25 at 25 fps is one frame.
+    expect(frameIndexOfTicks(0n, tb(1, 25), fps25, tb(1, 25))).toBe(0n);
+    expect(frameIndexOfTicks(90_000n, tb(1, 25), fps25, tb(1, 25))).toBe(90_000n);
+  });
+
+  it("returns null for a value it cannot name", () => {
+    expect(frameIndexOfTicks(-1n, tb(1, 1000), fps25)).toBeNull();
+    expect(frameIndexOfTicks(1n, tb(0, 1), fps25)).toBeNull();
+    expect(frameIndexOfTicks(1n, tb(1, 1000), tb(1, 0))).toBeNull();
+  });
+});
+
+describe("formatFrameCountTimecode", () => {
+  it("names the frame with that index on the nominal grid", () => {
+    expect(formatFrameCountTimecode(0n, fps25)).toBe("00:00:00:00");
+    expect(formatFrameCountTimecode(30n, fps25)).toBe("00:00:01:05");
+    expect(formatFrameCountTimecode(90_000n, fps25)).toBe("01:00:00:00");
+    // 30 frames at 29.97 fps last 1.001 s: frame 30 is the first frame of second 1.
+    expect(formatFrameCountTimecode(29n, fps2997)).toBe("00:00:00:29");
+    expect(formatFrameCountTimecode(30n, fps2997)).toBe("00:00:01:00");
+    expect(formatFrameCountTimecode(119n, fps120)).toBe("00:00:00:119");
+  });
+
+  it("returns the placeholder for a count it cannot format", () => {
+    expect(formatFrameCountTimecode(-1n, fps25)).toBe("--:--:--:--");
+    expect(formatFrameCountTimecode(-1n, fps120)).toBe("--:--:--:---");
+    expect(formatFrameCountTimecode(1n, { n: 0, d: 1 })).toBe(
+      FRAME_TIMECODE_PLACEHOLDER,
+    );
+  });
+});
+
+describe("formatMillisecondsFromTicks", () => {
+  const tb = (n: number, d: number): Rational => ({ n, d });
+
+  it("rounds to the nearest millisecond, with a half rounded up", () => {
+    expect(formatMillisecondsFromTicks(0n, tb(1, 1000))).toBe("00:00:00.000");
+    expect(formatMillisecondsFromTicks(90_090n, tb(1, 90_000))).toBe("00:00:01.001");
+    // 0.5 ms rounds up, 0.4 ms rounds down.
+    expect(formatMillisecondsFromTicks(1n, tb(1, 2000))).toBe("00:00:00.001");
+    expect(formatMillisecondsFromTicks(2n, tb(1, 5000))).toBe("00:00:00.000");
+    expect(formatMillisecondsFromTicks(3_723_456n, tb(1, 1000))).toBe("01:02:03.456");
+  });
+
+  it("returns the millisecond placeholder for a value it cannot format", () => {
+    expect(formatMillisecondsFromTicks(-1n, tb(1, 1000))).toBe(
+      MILLISECONDS_TIMECODE_PLACEHOLDER,
+    );
+    expect(formatMillisecondsFromTicks(1n, tb(0, 1))).toBe(
+      MILLISECONDS_TIMECODE_PLACEHOLDER,
+    );
   });
 });

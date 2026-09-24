@@ -1,7 +1,8 @@
-import { useRef, useState } from "react";
+import { useCallback, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronDown, FileOutput } from "lucide-react";
+import { ChevronDown, FileOutput, Loader2 } from "lucide-react";
 import appIcon from "@/assets/brand/app-icon.svg";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,8 +19,10 @@ import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipConte
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { ExportDialog } from "@/components/export/ExportDialog";
-import { useExportPanelStore } from "@/features/export";
+import { useExportPanelStore, useExportStore } from "@/features/export";
 import { useMediaStore } from "@/features/media";
+import { resolveTimecodeDisplay } from "@/features/playback";
+import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import {
   getActiveSourceSegmentEntries,
   useTimelineStore,
@@ -28,7 +31,11 @@ import {
 import { splitFileName } from "@/lib/fileName";
 import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
-import { canExportMedia } from "./actionConditions";
+import {
+  presentExportAction,
+  totalActiveSourceSegments,
+  type ExportActionLabel,
+} from "./exportActionPresenter";
 import { runExportFlow } from "./exportFlowController";
 import { useWindowState } from "./useWindowState";
 import { CloseGlyph, MaximizeGlyph, MinimizeGlyph, RestoreGlyph } from "./WindowGlyphs";
@@ -98,12 +105,51 @@ export function TitleBar() {
   const isMac = isMacOS();
   const media = useMediaStore((state) => state.media);
   const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
+  const exportStatus = useExportStore((state) => state.status);
   const exportDialogOpen = useExportPanelStore((state) => state.open);
   const setExportDialogOpen = useExportPanelStore((state) => state.setOpen);
   // The key names come from the binding table (ADR 026).
   const shortcutOf = useShortcutLabels();
   const openMediaShortcut = shortcutOf("openMedia");
   const exportShortcut = shortcutOf("export");
+
+  // The duration in the tooltip uses the timecode format of the open source (ADR 028).
+  const timecodePreference = useTimecodePreference((state) => state.format);
+  const probe = media?.probe;
+  const timecodeDisplay = useMemo(
+    () => resolveTimecodeDisplay(timecodePreference, probe),
+    [timecodePreference, probe],
+  );
+  // One bigint or null. Both compare by value, so the title bar renders again only when the
+  // total changes, and not on each edit that keeps it.
+  const selectSegmentTotal = useCallback(
+    (state: TimelineStoreState) =>
+      totalActiveSourceSegments(
+        state.segments,
+        state.sourceId,
+        probe ?? null,
+        timecodeDisplay,
+      ),
+    [probe, timecodeDisplay],
+  );
+  const segmentTotal = useTimelineStore(selectSegmentTotal);
+  // The button and the File menu item read one view, so their disabled states are equal.
+  const exportAction = presentExportAction({
+    hasMedia: media !== null,
+    exportStatus,
+    segmentCount,
+    segmentTotal,
+    videoTimeBase: probe?.videoTimeBase ?? null,
+    display: timecodeDisplay,
+  });
+  const exportLabelText = labelTextOf(exportAction.label, t);
+  const exportReasonText = exportAction.reason === null ? null : t(exportAction.reason);
+  // The line that the tooltip adds to the button name. A disabled button takes no hover and
+  // no focus, so the button also names this text in `aria-describedby`.
+  const exportDescription =
+    exportReasonText ??
+    (exportAction.label.key === "titleBar.action.export" ? null : exportLabelText);
+  const exportDescriptionId = useId();
 
   // The empty preview offers the same action through its Open button.
   const handleOpenMedia = useOpenMediaAction();
@@ -186,16 +232,11 @@ export function TitleBar() {
                 </DropdownMenuShortcut>
               )}
             </DropdownMenuItem>
+            {/* The interface does not open or save a project yet, so the menu lists no
+                project items. */}
             <DropdownMenuSeparator />
-            <DropdownMenuItem disabled>
-              {t("titleBar.menu.newProject")}
-            </DropdownMenuItem>
-            <DropdownMenuItem disabled>
-              {t("titleBar.menu.openProject")}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem disabled>{t("titleBar.menu.save")}</DropdownMenuItem>
             <DropdownMenuItem
+              disabled={exportAction.disabled}
               onClick={handleExport}
               aria-keyshortcuts={exportShortcut?.aria}
             >
@@ -233,22 +274,42 @@ export function TitleBar() {
       {/* Right: Export button (constant), plus window controls on non-macOS platforms. The
           zone takes the full bar height, so the window buttons can fill it. */}
       <div className="flex items-center gap-1 self-stretch">
+        {/* A disabled button takes no pointer events, so its own tooltip could never open.
+            The span around it is the tooltip trigger: it takes the pointer while the button
+            is disabled, and the events of an enabled button reach it by bubbling. The span
+            has no tabIndex, so the Tab order does not change. The span is not a control, so
+            it opts out of the window drag: a press on the disabled button does not move the
+            window (ADR 020). */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button
-              size="sm"
-              variant="default"
-              disabled={!canExportMedia(media !== null)}
-              onClick={handleExport}
-              aria-keyshortcuts={exportShortcut?.aria}
-            >
-              <FileOutput />
-              {t("titleBar.action.export")}
-            </Button>
+            <span className="inline-flex" data-tauri-drag-region="false">
+              <Button
+                size="sm"
+                variant="default"
+                disabled={exportAction.disabled}
+                onClick={handleExport}
+                aria-describedby={exportDescription ? exportDescriptionId : undefined}
+                aria-keyshortcuts={exportShortcut?.aria}
+              >
+                {/* While a run is active, a click shows that run, and the icon says so. */}
+                {exportAction.busy ? (
+                  <Loader2 className="animate-spin motion-reduce:animate-none" />
+                ) : (
+                  <FileOutput />
+                )}
+                {t("titleBar.action.export")}
+              </Button>
+              {exportDescription && (
+                <span id={exportDescriptionId} className="sr-only">
+                  {exportDescription}
+                </span>
+              )}
+            </span>
           </TooltipTrigger>
           <ShortcutTooltipContent
-            label={t("titleBar.action.export")}
+            label={exportLabelText}
             keys={exportShortcut?.keys}
+            reason={exportReasonText}
           />
         </Tooltip>
         {!isMac && (
@@ -289,6 +350,16 @@ export function TitleBar() {
       <ExportDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />
     </header>
   );
+}
+
+/** The first tooltip line of the export action. */
+function labelTextOf(label: ExportActionLabel, t: TFunction): string {
+  switch (label.key) {
+    case "titleBar.exportTooltip.exportSegments":
+      return t(label.key, { count: label.count, duration: label.duration });
+    default:
+      return t(label.key);
+  }
 }
 
 interface TitleBarFileProps {

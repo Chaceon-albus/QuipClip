@@ -75,8 +75,8 @@ export function canDeleteSegment(
 }
 
 /**
- * The Export button of the title bar needs open media, and nothing more. The export flow
- * itself reports a missing segment in its dialog (ADR 024).
+ * The Export button and the Export item of the File menu need open media, and nothing more.
+ * The export flow itself reports a missing segment in its dialog (ADR 024).
  */
 export function canExportMedia(hasMedia: boolean): boolean {
   return hasMedia;

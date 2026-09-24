@@ -18,13 +18,20 @@ export const en = {
     menu: {
       file: "File",
       openMedia: "Open Media...",
-      newProject: "New Project",
-      openProject: "Open Project...",
-      save: "Save",
       export: "Export...",
     },
     action: {
       export: "Export",
+    },
+    // The tooltip of the Export button. openVideoFirst and markSegmentFirst are a second,
+    // muted line under "Export". {{duration}} is the total duration of the segments, as a
+    // timecode such as "00:01:23:04" or "00:01:23.160".
+    exportTooltip: {
+      openVideoFirst: "Open a video first",
+      markSegmentFirst: "Mark at least one segment first",
+      exportSegments_one: "Export {{count}} segment ({{duration}})",
+      exportSegments_other: "Export {{count}} segments ({{duration}})",
+      showRunningExport: "Show the running export",
     },
     source: {
       segmentCount_one: "{{count}} segment",
