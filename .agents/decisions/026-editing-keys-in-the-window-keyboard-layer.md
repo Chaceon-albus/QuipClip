@@ -109,7 +109,13 @@ or change nothing:
   End does nothing when the element is already within half a nominal frame of the end,
   because End seeks on the approximate clock and has no exact PTS to compare.
 - Home and End while the calibration is open. A seek in that window refuses precise
-  editing for the attachment (ADR 021).
+  editing for the attachment (ADR 021). (Changed on 2026-09-24: this case no longer
+  exists. Home, End, Go to In, Go to Out and the edge click of ADR 007 now send their
+  seek while the calibration is open, and the playback store defers it until the anchor
+  (ADR 022). Home asks for the first frame, which the store drops at the anchor because
+  that frame is on screen. End keeps the approximate clock after the anchor too, so it
+  lands in the same place before and after it. Only an unavailable calibration refuses
+  Go to In, Go to Out and the edge click.)
 
 One case does not own the key press: `Escape` while a tooltip is open. Radix then closes
 the tooltip. A second `Escape` finishes the segment.

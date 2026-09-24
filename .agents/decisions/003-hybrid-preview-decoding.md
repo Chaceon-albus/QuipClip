@@ -100,6 +100,20 @@ edit point.
 
 QuipClip does not use `seekable.start(0)` as a source timestamp origin.
 
+(Changed on 2026-09-24.) While calibration is `calibrating`, no action of the playback store
+moves the element. A frame step, a ruler click, a seek to a stored PTS, Home, End and the
+Go to In and Go to Out keys are deferred until the first frame callback takes the anchor
+(ADR 022), and play does not seek. The anchor is therefore always the first frame after the
+load. The store still records a seek that reached the element before the anchor, and the
+anchor guard still refuses the anchor after it, as a defence.
+
+A deferred navigation cannot wait for ever. While one waits, the preview counts the time
+that the window is visible. When no frame arrives within 8 seconds of visible time, the
+preview reports frame callbacks as unavailable, calibration becomes `unavailable` for that
+attachment, and the deferred request runs on the approximate clock. With nothing deferred,
+calibration waits for its first frame with no limit, so a slow first frame or the first
+frame of playback can still take the anchor.
+
 ### Seeking and nominal navigation
 
 To seek to a stored PTS, QuipClip applies the inverse calibrated mapping. It requests the

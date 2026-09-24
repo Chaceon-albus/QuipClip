@@ -188,7 +188,9 @@ updates the inferred PTS optimistically. Whether the interface marks the positio
 user is answered by the calibration status alone. The preview badge and the status bar both
 take the second answer. A mark that took the first appeared and disappeared on every frame
 step, at the rate of the key repeat, and reported a condition that was over before the user
-could read it.
+could read it. Only `unavailable` shows the approximate warning. While the calibration is
+still open, the status bar shows a neutral "Preparing the preview..." chip after a short
+delay, and a navigation in that time is deferred until the first frame (ADR 022).
 
 The browser clock is a position on the browser media timeline, which does not always start at
 zero, while every other value on the ruler is elapsed time from the start of the source. The

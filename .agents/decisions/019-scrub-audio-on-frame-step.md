@@ -109,6 +109,12 @@ report a fault that the user cannot correct.
 
 ## Consequences
 
+- (Added on 2026-09-24.) A frame step that the playback store deferred while the
+  calibration was open (ADR 022) runs at the anchor, and it requests its one cue there. The
+  hidden audio element mounts only after the calibration leaves `calibrating`, so no
+  element is attached yet, and that one step is silent. Every later step sounds. Keeping a
+  request that arrives before an element is attached is a possible later step.
+
 - A frame step from the arrow keys and a frame step from the transport buttons both make a
   sound. Both callers reach `seekNominal`, which is the one action that starts a burst.
 - This decision changes no Rust file and no command. The content security policy does not

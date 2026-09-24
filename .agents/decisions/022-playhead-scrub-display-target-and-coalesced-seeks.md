@@ -138,6 +138,38 @@ A scrub seek that already started also counts as the pending target while it is 
 accepted request, because its `fastSeek` can land on a keyframe away from the target. `play`
 then assigns its time as an exact seek, and `seekNominal` calculates its step from it.
 
+### Navigation while the calibration is open
+
+(Added on 2026-09-24.) While calibration is `calibrating`, `seekNominal`, `seekApproximate`
+and `seekToPts` do not move the element (ADR 003). The store keeps one deferred request.
+The flag `hasDeferredNavigation` is true while a request waits, and it is never true
+outside `calibrating`.
+
+- **Accepting a request.** A deferred request counts as accepted. It pauses the element as
+  a seek does, sets `seekTargetSeconds` as its action would, keeps `presentedFrame` null,
+  and requests no cue. A `seeked` event does not clear its target.
+- **The latest seek wins.** `seekApproximate` and `seekToPts` replace the deferred request.
+- **Steps add up.** `seekNominal` adds its frames to the deferred request, counted from the
+  deferred seek or from the position of the element, one frame for each press as ADR 021
+  requires. The count stays between the first frame and the frame that contains the end. A
+  press past either end changes nothing and only pauses.
+- **When calibration becomes ready.** The request runs through the ordinary actions.
+  - A ruler position becomes a `seekToPts` of the same elapsed time, with the rounding of
+    the ruler, so the playhead does not move when the seek runs. A seek that carries
+    `keepBrowserTimeline`, which the keyboard gives to End, stays a browser-time seek, so
+    End lands where End lands after the anchor.
+  - A seek to the anchor frame is dropped, because that frame is on screen: a PTS at or
+    before `videoStartPts`, or on the frame grid a target inside the first frame.
+  - A seek followed by steps gives the element one seek. The seek target becomes the
+    pending target, and one `seekNominal` with the net count replaces it.
+- **When calibration becomes unavailable.** The request runs on the approximate clock. A
+  PTS goes to its elapsed seconds, and then the steps run.
+- **What drops it.** Attach, detach, reset, a loss of readiness, a failed seek, `play` and
+  a play that the element starts by itself. `play` then plays from where the element
+  stands, because a seek before the anchor would spoil the calibration.
+- **The display of a deferred step** assumes the frame grid. If the calibration fails
+  instead, the playhead moves by less than one frame when the step runs.
+
 ### Scrub mode: keyframes and sound during a drag
 
 `seekToPts` and `seekApproximate` take the option `{ scrub: true }`. The timeline sets it

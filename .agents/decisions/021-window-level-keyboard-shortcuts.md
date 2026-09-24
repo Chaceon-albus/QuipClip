@@ -214,12 +214,11 @@ is the fault this record removes.
   calibration test. `seekToPts` reports a failed seek on a source that never
   calibrates, so a global `Home` needs a second branch on the approximate clock.
   That is a new behaviour, and not a move of this one.
-- A frame step taken while the calibration is still open refuses precise editing
-  for that attachment, because `seekNominal` records that the element left the
-  anchor baseline. This holds before this record: the two step buttons are enabled
-  from the moment the element reports its metadata, which is before the first frame
-  callback arrives. The window is about one frame wide. This record inherits the
-  condition and does not correct it.
+- A frame step taken while the calibration is still open does not refuse precise
+  editing. (Changed on 2026-09-24. Before that, such a step moved the element before
+  the anchor, and the attachment lost precise editing.) The playback store defers the
+  step until the first frame callback takes the anchor (ADR 022), and each press adds
+  one frame to the deferred step, so the step count still equals the press count.
 - ADR 019 names the two callers of `seekNominal` as the arrow keys of the focused
   timeline and the two step buttons. Both callers remain. The arrow keys move from
   the focused timeline to the window.
