@@ -349,6 +349,63 @@ export function frameIndexOfTicks(
 }
 
 /**
+ * Returns the index of the last nominal frame of a source extent: the number of frames in the
+ * extent, `round(extentTicks * timeBase * rate)` with a tie away from zero (ADR 002), minus one.
+ * All arithmetic is BigInt.
+ *
+ * The extent is the time from the first frame to the end of the last frame, so its end is the
+ * start of the frame after the last one. On an exact frame grid (`isFrameGridExact`) the
+ * rounding gives the frame count exactly, for one of two reasons:
+ *
+ * - On a whole-tick grid, where the interval is a whole number of ticks, the frame boundaries
+ *   lie on ticks, and the extent is a whole number of intervals. The quotient is then a whole
+ *   number, and the rounding does not change it.
+ * - On any other exact grid, a frame boundary lies within one tick of its nominal position, and
+ *   one tick is less than half an interval. The quotient is then less than half a frame from the
+ *   frame count, and the rounding reaches that count.
+ *
+ * `frameIndexOfTicks(extentTicks - 1)` does not give the last frame: when the interval is not a
+ * whole number of ticks, the frame boundary margin is one tick, and the last tick of the extent
+ * then counts as the frame after the last one. At 29.97 fps on a 1/1000 time base, an extent of
+ * 10010 ticks holds frames 0 to 299, and this function gives 299.
+ *
+ * Off the exact grid the result is only the nominal count. An extent from the container
+ * duration, and not from the video stream, can also disagree with the video frames in either
+ * direction. It can end after the last video frame, and the result then names a frame that the
+ * source does not have. It can also end before the end of the last frame, as a Matroska Duration
+ * written as the start of the last block does, and the result then names the frame before the
+ * last one. A caller that knows a frame the browser showed, such as a stored Out, can raise the
+ * result to that frame.
+ *
+ * Returns null for an extent shorter than half a frame, a negative extent, and an invalid time
+ * base or rate.
+ *
+ * @param extentTicks The extent in ticks of the time base, such as `videoDurationTicks`.
+ * @param timeBase Seconds per tick.
+ * @param rate The nominal frame rate, in frames per second.
+ */
+export function lastFrameIndexOfExtent(
+  extentTicks: bigint,
+  timeBase: Rational,
+  rate: Rational,
+): bigint | null {
+  if (
+    typeof extentTicks !== "bigint" ||
+    extentTicks < 0n ||
+    !isValidRate(timeBase) ||
+    !isValidRate(rate)
+  ) {
+    return null;
+  }
+  // frames = extentTicks * timeBase * rate, as the exact quotient numerator / denominator, and
+  // rounded to the nearest whole frame. The quotient is not negative, so the tie goes up.
+  const numerator = extentTicks * BigInt(timeBase.n) * BigInt(rate.n);
+  const denominator = BigInt(timeBase.d) * BigInt(rate.d);
+  const frames = (2n * numerator + denominator) / (2n * denominator);
+  return frames < 1n ? null : frames - 1n;
+}
+
+/**
  * Formats non-negative elapsed seconds as `HH:MM:SS:FF` at a nominal frame rate
  * (ADR 028).
  *

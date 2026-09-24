@@ -1,22 +1,28 @@
-import { memo, useEffect, useId, useMemo, useState, type RefObject } from "react";
+import {
+  memo,
+  useEffect,
+  useId,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+  type PointerEvent as ReactPointerEvent,
+  type RefObject,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
-import { isSourceActive } from "@/components/layout/actionConditions";
-import { mediaStore } from "@/features/media";
-import { playbackStore } from "@/features/playback";
 import {
   calculateSegmentLayout,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
-import type { Pts, Rational, Segment } from "@/types/project";
+import type { Pts, Rational } from "@/types/project";
+import { seekToSegmentEdge } from "./segmentEdgeClick";
 import {
   SEGMENT_EDGE_ATTRIBUTE,
   SEGMENT_EDGE_HIT_WIDTH_PX,
   buildSegmentEdgeEntries,
   parseSegmentEdge,
-  planSegmentEdgeSeek,
   resolveSegmentFocusRing,
   showsSegmentEdgeHandles,
   type SegmentEdge,
@@ -31,10 +37,34 @@ import {
 } from "./segmentLabels";
 import { SegmentTooltip, type SegmentTooltipEntry } from "./SegmentTooltip";
 import { createSegmentTooltipController } from "./segmentTooltipController";
+import { segmentTrimSession } from "./segmentTrimSession";
 
 const selectSegments = (state: TimelineStoreState) => state.segments;
 const selectCurrentSegmentId = (state: TimelineStoreState) => state.currentSegmentId;
 const selectSelectSegment = (state: TimelineStoreState) => state.selectSegment;
+
+/** The segment that a trim moves, or null. It changes at the start and the end of a trim. */
+const readTrimmedSegmentId = () => segmentTrimSession.getView()?.segmentId ?? null;
+
+/**
+ * The pointer handlers that the timeline panel gives to the edges of the segments, for the drag
+ * trim (ADR 030). The object must be stable, because the layer is memoized.
+ */
+export interface SegmentEdgePointerHandlers {
+  /** A pointer pressed the edge hit area of a segment. */
+  readonly onEdgePointerDown: (
+    segmentId: string,
+    edge: SegmentEdge,
+    event: ReactPointerEvent<HTMLElement>,
+  ) => void;
+  /**
+   * True for the click that follows the release of a press that the trim gesture held. That
+   * release already did what the click does, so the click then does nothing.
+   *
+   * @param detail The `detail` of the click event. A click from the keyboard has 0.
+   */
+  readonly shouldIgnoreClick: (detail: number) => boolean;
+}
 
 export interface SegmentLayerProps {
   sourceId: string | null;
@@ -50,6 +80,14 @@ export interface SegmentLayerProps {
    * anchor on the visible part of a segment.
    */
   viewportRef: RefObject<HTMLElement | null>;
+  /** The pointer handlers of the edges, for the drag trim. The value must be stable. */
+  edgePointerHandlers: SegmentEdgePointerHandlers;
+  /**
+   * True while a drag on an edge can trim it: the condition of Mark In and Mark Out, a usable
+   * time axis and an exact frame grid (ADR 030). The edges show the resize cursor only then. On
+   * any other source the edge press is the click of ADR 007.
+   */
+  canTrimEdges: boolean;
 }
 
 /**
@@ -83,24 +121,6 @@ function findSegmentEdge(target: EventTarget | null): SegmentEdge | null {
 }
 
 /**
- * Seeks to the stored boundary that an edge names, under the condition of Shift+I and Shift+O
- * (`planSegmentEdgeSeek`). It reads the stores at the click, so the layer does not subscribe to
- * the playback state.
- */
-function seekToSegmentEdge(segment: Segment, edge: SegmentEdge): void {
-  const playback = playbackStore.getState();
-  const hasActiveSource = isSourceActive(
-    mediaStore.getState().media !== null,
-    playback.isAttached,
-    playback.isReady,
-  );
-  const target = planSegmentEdgeSeek(edge, segment, playback, hasActiveSource);
-  if (target !== null) {
-    playback.seekToPts(target);
-  }
-}
-
-/**
  * Completed segment overlays. The layer takes the clicks of its buttons only, so uncovered
  * track stays a seek surface; over a segment, the ruler track above and the playhead hit
  * area are the seek surfaces. The `z-10` puts this layer under the pending region and the
@@ -118,6 +138,9 @@ function seekToSegmentEdge(segment: Segment, edge: SegmentEdge): void {
  *
  * All segments share one tooltip (see SegmentTooltip). A hover renders that tooltip and not
  * this layer.
+ *
+ * The layer also reads the segment that a trim moves (`segmentTrimSession`). That value changes
+ * at the start and at the end of a trim, and not per sample, so a drag renders the layer twice.
  */
 export const SegmentLayer = memo(function SegmentLayer({
   sourceId,
@@ -127,11 +150,17 @@ export const SegmentLayer = memo(function SegmentLayer({
   laneWidthPx,
   timecodeDisplay,
   viewportRef,
+  edgePointerHandlers,
+  canTrimEdges,
 }: SegmentLayerProps) {
   const { t } = useTranslation();
   const segments = useTimelineStore(selectSegments);
   const currentSegmentId = useTimelineStore(selectCurrentSegmentId);
   const selectSegment = useTimelineStore(selectSelectSegment);
+  const trimmedSegmentId = useSyncExternalStore(
+    segmentTrimSession.subscribe,
+    readTrimmedSegmentId,
+  );
   const [tooltip] = useState(createSegmentTooltipController);
   const descriptionIdPrefix = useId();
   // A pending open must not fire after the layer unmounts.
@@ -310,8 +339,10 @@ export const SegmentLayer = memo(function SegmentLayer({
    * Shift+I and Shift+O (ADR 026).
    *
    * - The pointer over an edge shows a handle and a bubble with the time of that boundary (see
-   *   SegmentTooltip). The cursor stays the default one. A resize cursor would promise a drag,
-   *   and an edge has no drag until trimming exists.
+   *   SegmentTooltip). While a drag can trim the edge (`canTrimEdges`: a ready calibration, a
+   *   usable time axis and an exact frame grid), it also shows the resize cursor (ADR 030).
+   *   Without that condition the drag does nothing, and the cursor stays the default one, so it
+   *   promises no drag.
    * - The handle is a short bar, so it does not read as the playhead. It lies on the body side
    *   of the hit area, 4px from the boundary, so a gap keeps it apart from the border and the
    *   inset line of both states. It is in the selection colour on an unselected segment. The
@@ -323,9 +354,16 @@ export const SegmentLayer = memo(function SegmentLayer({
    *   on a boundary, it covers most of that edge, and a press there scrubs.
    * - A click on an edge selects the segment and seeks to the stored boundary PTS
    *   (`planSegmentEdgeSeek`). A click on the body, and a click from the keyboard, only select.
-   * - A press and a drag on an edge do nothing more than on the body: no scrub and no trim.
-   *   The click decides, when the release is on the same edge. A scrub would move the
-   *   playhead away from the boundary that the click then seeks to.
+   * - A press on an edge goes to the timeline panel (`edgePointerHandlers`). With the condition
+   *   of a trim (`planSegmentTrimStart`), the panel holds the pointer: a release before the drag
+   *   threshold is the click above, and a drag past it trims the edge (ADR 030). The browser
+   *   then sends the click of that release to another element, or to this button, and the
+   *   button ignores it (`shouldIgnoreClick`, `SegmentClickGuard`), because the release already
+   *   did its work. Without the condition, the press is a plain click, and a drag does nothing
+   *   more.
+   * - While a trim moves a segment, the fill and the outline of the stored segment fade, and
+   *   the trim preview above the layer shows the new extent (see SegmentTrimPreview). The
+   *   stored segment does not change until the trim commits.
    * - Below the minimum width a segment has no edges, so the two hit areas never overlap, and
    *   the body between them keeps the 12px of the narrow hit area.
    * - An edge whose boundary is outside the source extent has no handle
@@ -359,6 +397,7 @@ export const SegmentLayer = memo(function SegmentLayer({
           const tier = resolveSegmentLabelTier(widthPx, labelWidths);
           const showsHandles = showsSegmentEdgeHandles(widthPx);
           const focusRing = resolveSegmentFocusRing(widthPx, isCurrent);
+          const isTrimmed = seg.id === trimmedSegmentId;
           return (
             <button
               key={seg.id}
@@ -370,6 +409,9 @@ export const SegmentLayer = memo(function SegmentLayer({
               // Out and Split, so a selection click must not move it. A click on an edge also
               // seeks to the boundary that the edge names.
               onClick={(event) => {
+                if (edgePointerHandlers.shouldIgnoreClick(event.detail)) {
+                  return;
+                }
                 selectSegment(seg.id);
                 const edge = findSegmentEdge(event.target);
                 if (edge !== null) {
@@ -409,7 +451,7 @@ export const SegmentLayer = memo(function SegmentLayer({
                 isCurrent
                   ? "z-20 bg-clip-video-selected text-primary-foreground focus-visible:inset-ring-2 focus-visible:inset-ring-clip-video-selected-border"
                   : "bg-clip-video text-clip-foreground before:absolute before:inset-y-0 before:left-1/2 before:-z-10 before:w-full before:min-w-3 before:-translate-x-1/2 hover:transition-colors hover:not-has-[[data-segment-edge]:hover]:bg-clip-video-hover focus-visible:inset-ring focus-visible:inset-ring-clip-video-border focus-visible:before:hidden has-[[data-segment-edge]:hover]:transition-none"
-              }`}
+              } ${isTrimmed ? "opacity-40" : ""}`}
               style={{
                 left: layout.left,
                 width: layout.width,
@@ -436,7 +478,10 @@ export const SegmentLayer = memo(function SegmentLayer({
                       key={edge}
                       data-segment-edge={edge}
                       aria-hidden="true"
-                      className={`group/edge absolute inset-y-0 flex items-center ${edge === "in" ? "left-0 justify-end" : "right-0 justify-start"}`}
+                      onPointerDown={(event) =>
+                        edgePointerHandlers.onEdgePointerDown(seg.id, edge, event)
+                      }
+                      className={`group/edge absolute inset-y-0 flex items-center ${canTrimEdges ? "cursor-ew-resize touch-none" : ""} ${edge === "in" ? "left-0 justify-end" : "right-0 justify-start"}`}
                       style={{ width: SEGMENT_EDGE_HIT_WIDTH_PX }}
                     >
                       <span
@@ -463,7 +508,7 @@ export const SegmentLayer = memo(function SegmentLayer({
               isCurrent
                 ? "z-40 border-2 border-clip-video-selected-border inset-ring-primary-foreground"
                 : "z-30 border border-clip-video-border inset-ring-clip-video"
-            }`}
+            } ${seg.id === trimmedSegmentId ? "opacity-40" : ""}`}
             style={{
               left: layout.left,
               width: layout.width,

@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
 import { exportPanelStore } from "@/features/export";
 import { mediaStore, openMediaFileDialog } from "@/features/media";
 import { playbackStore } from "@/features/playback";
@@ -33,6 +34,7 @@ export function readShortcutSnapshot(): ShortcutSnapshot {
     playback: playbackStore.getState(),
     timeline: timelineStore.getState(),
     viewport: timelineViewportStore.getState(),
+    isTrimDragging: segmentTrimSession.isDragging(),
   };
 }
 
@@ -70,6 +72,10 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       return;
     case "finishSegment":
       timeline.newSegment();
+      return;
+    case "cancelTrim":
+      // Escape during the drag trim of a segment edge (ADR 030).
+      segmentTrimSession.cancel();
       return;
     case "undo":
       timeline.undo();

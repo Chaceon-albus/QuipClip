@@ -16,12 +16,13 @@ import {
   planBoundarySeek,
   type BoundarySeekPlayback,
 } from "@/components/layout/shortcutCommands";
+import type { SegmentEdge } from "@/features/timeline";
 import { isPtsString, isValidSegmentRange, ptsElapsedSeconds } from "@/lib/time";
 import type { Pts, Rational, Segment } from "@/types/project";
 import type { SegmentAnchor, SegmentTooltipRow } from "./segmentLabels";
 
-/** One end of a segment. */
-export type SegmentEdge = "in" | "out";
+// One end of a segment. The timeline feature defines it, because its store trims an edge.
+export type { SegmentEdge };
 
 /** The width of the hit area inside each end of a segment, in CSS pixels. */
 export const SEGMENT_EDGE_HIT_WIDTH_PX = 6;

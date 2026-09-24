@@ -19,6 +19,7 @@ import {
   frameIndexOfTicks,
   isFrameGridExact,
   frameTimecodePlaceholder,
+  lastFrameIndexOfExtent,
   lastTickOfGridIndex,
   timecodePlaceholder,
   type TimecodeDisplay,
@@ -996,6 +997,54 @@ describe("frameIndexOfTicks", () => {
     expect(frameIndexOfTicks(-1n, tb(1, 1000), fps25)).toBeNull();
     expect(frameIndexOfTicks(1n, tb(0, 1), fps25)).toBeNull();
     expect(frameIndexOfTicks(1n, tb(1, 1000), tb(1, 0))).toBeNull();
+  });
+});
+
+describe("lastFrameIndexOfExtent", () => {
+  const r = (n: number, d: number): Rational => ({ n, d });
+
+  // [label, extent ticks, time base, rate, last frame index]
+  const cases: readonly [string, bigint, Rational, Rational, bigint][] = [
+    ["29.97 fps on 1/1000, 10.01 s", 10010n, r(1, 1000), r(30000, 1001), 299n],
+    ["30 fps on 1/1000, 10 s", 10000n, r(1, 1000), r(30, 1), 299n],
+    ["23.976 fps on 1/1000, 10.01 s", 10010n, r(1, 1000), r(24000, 1001), 239n],
+    ["59.94 fps on 1/1000, 10.01 s", 10010n, r(1, 1000), r(60000, 1001), 599n],
+    ["23.976 fps on 1/600, 41.7 s", 25025n, r(1, 600), r(24000, 1001), 999n],
+    ["25 fps on 1/90000, 10 s", 900000n, r(1, 90000), r(25, 1), 249n],
+    ["29.97 fps on 1/30000, 10.01 s", 300300n, r(1, 30000), r(30000, 1001), 299n],
+    ["29.97 fps on 1/60, 600 ticks", 600n, r(1, 60), r(30000, 1001), 299n],
+    ["29.97 fps on 1/60, 601 ticks", 601n, r(1, 60), r(30000, 1001), 299n],
+    ["25 fps on 1/25, 250 ticks", 250n, r(1, 25), r(25, 1), 249n],
+    ["30 fps on 1/60, 600 ticks", 600n, r(1, 60), r(30, 1), 299n],
+  ];
+
+  it.each(cases)("names the last frame: %s", (_label, extent, timeBase, rate, last) => {
+    expect(lastFrameIndexOfExtent(extent, timeBase, rate)).toBe(last);
+  });
+
+  it("differs from the frame of the last tick when the margin is one tick", () => {
+    // At 29.97 fps on 1/1000 the margin is one tick, so the last tick of the extent counts as
+    // the frame after the last one. That frame does not exist.
+    const timeBase = r(1, 1000);
+    const rate = r(30000, 1001);
+    expect(frameIndexOfTicks(10010n - 1n, timeBase, rate, timeBase)).toBe(300n);
+    expect(lastFrameIndexOfExtent(10010n, timeBase, rate)).toBe(299n);
+  });
+
+  it("stays the frame count minus one when a container rounded the extent by a tick", () => {
+    const timeBase = r(1, 1000);
+    const rate = r(30000, 1001);
+    expect(lastFrameIndexOfExtent(10009n, timeBase, rate)).toBe(299n);
+    expect(lastFrameIndexOfExtent(10011n, timeBase, rate)).toBe(299n);
+  });
+
+  it("gives no frame for an extent shorter than half a frame or for invalid input", () => {
+    expect(lastFrameIndexOfExtent(0n, r(1, 90000), r(25, 1))).toBeNull();
+    expect(lastFrameIndexOfExtent(1799n, r(1, 90000), r(25, 1))).toBeNull();
+    expect(lastFrameIndexOfExtent(1800n, r(1, 90000), r(25, 1))).toBe(0n);
+    expect(lastFrameIndexOfExtent(-1n, r(1, 90000), r(25, 1))).toBeNull();
+    expect(lastFrameIndexOfExtent(900000n, r(0, 1), r(25, 1))).toBeNull();
+    expect(lastFrameIndexOfExtent(900000n, r(1, 90000), r(25, 0))).toBeNull();
   });
 });
 

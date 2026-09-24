@@ -8,6 +8,12 @@
 import type { Pts, Segment } from "@/types/project";
 
 /**
+ * One boundary of a half-open segment `[inPts, outPts)` (ADR 002): `in` names `inPts`, and
+ * `out` names `outPts`, the first frame after the segment.
+ */
+export type SegmentEdge = "in" | "out";
+
+/**
  * Public, strictly serializable state of the timeline store.
  */
 export interface TimelineState {
@@ -111,6 +117,26 @@ export interface TimelineActions {
    * @param currentPts Presentation timestamp strictly inside the current segment.
    */
   split: (currentPts: Pts) => void;
+
+  /**
+   * Moves one boundary of a named segment to `pts`, and adds one history entry, so one undo
+   * restores the old boundary. The drag trim of a segment edge commits with it (ADR 030).
+   *
+   * The move has the semantics of Mark In and Mark Out on a current segment: it rejects
+   * silently, with no history entry, when there is no active source, `pts` is malformed, the
+   * move would not leave `inPts < outPts` (ADR 002), or `pts` already equals the stored
+   * boundary. It also rejects an unknown identifier and a segment of another source, as
+   * `findCurrentSegment` does.
+   *
+   * The segment is named by its identifier and not through `currentSegmentId`, because the
+   * selection can change between the start of a trim and the frame that commits it. The
+   * action changes neither `currentSegmentId` nor `pendingInPts`.
+   *
+   * @param segmentId Identifier of a segment of the active source.
+   * @param edge The boundary to move: `in` for `inPts`, `out` for `outPts`.
+   * @param pts Presentation timestamp in source video time base.
+   */
+  trimSegmentEdge: (segmentId: string, edge: SegmentEdge, pts: Pts) => void;
 
   /**
    * Ends whatever segment is in progress, so the next Mark In starts a new one.

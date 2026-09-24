@@ -13,8 +13,8 @@ import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { isPtsInsideSegment, isPtsString, isValidSegmentRange } from "@/lib/time";
 import type { Pts, Segment } from "@/types/project";
-import { findCurrentSegment, splitSegment } from "./math";
-import type { TimelineState, TimelineStoreState } from "./types";
+import { findCurrentSegment, splitSegment, type CurrentSegmentRef } from "./math";
+import type { SegmentEdge, TimelineState, TimelineStoreState } from "./types";
 
 /**
  * Dependencies that can be injected into the timeline store factory for testing.
@@ -130,6 +130,44 @@ export function createTimelineStore(
   let undoStack: TimelineHistoryEntry[] = [];
   let redoStack: TimelineHistoryEntry[] = [];
 
+  /**
+   * Moves one boundary of a segment of the active source, with one history entry. Mark In and
+   * Mark Out on a current segment, and the commit of a trim (ADR 030), share this one rule, so
+   * the three paths accept and refuse the same values.
+   *
+   * A canonical PTS is a canonical decimal string (ADR 010), so string equality is exact. A
+   * repeated boundary makes no change and no history entry, so a mark or a trim that ends on
+   * the stored boundary does not fill the undo stack. A move that would not leave
+   * `inPts < outPts` (ADR 002) makes no change either. The replacement keeps the array order,
+   * which is the export order (ADR 007).
+   */
+  const moveBoundary = (
+    set: StoreApi<TimelineStoreState>["setState"],
+    state: TimelineState,
+    target: CurrentSegmentRef,
+    edge: SegmentEdge,
+    pts: Pts,
+  ): void => {
+    const { index, segment } = target;
+    if (pts === (edge === "in" ? segment.inPts : segment.outPts)) {
+      return;
+    }
+    const moved: Segment =
+      edge === "in" ? { ...segment, inPts: pts } : { ...segment, outPts: pts };
+    if (!isValidSegmentRange(moved.inPts, moved.outPts)) {
+      return;
+    }
+
+    undoStack.push(historyEntry(state));
+    redoStack = [];
+
+    set({
+      segments: replaceSegmentAt(state.segments, index, moved),
+      canUndo: true,
+      canRedo: false,
+    });
+  };
+
   return createStore<TimelineStoreState>()((set, get) => ({
     sourceId: initialState?.sourceId ?? null,
     sourceRevisionKey: initialState?.sourceRevisionKey ?? null,
@@ -192,26 +230,7 @@ export function createTimelineStore(
         return;
       }
 
-      // A canonical PTS is a canonical decimal string (ADR 010), so string equality is
-      // exact. A repeated boundary must not fill the undo stack while the user scrubs.
-      if (pts === current.segment.inPts) {
-        return;
-      }
-      if (!isValidSegmentRange(pts, current.segment.outPts)) {
-        return;
-      }
-
-      undoStack.push(historyEntry(state));
-      redoStack = [];
-
-      set({
-        segments: replaceSegmentAt(state.segments, current.index, {
-          ...current.segment,
-          inPts: pts,
-        }),
-        canUndo: true,
-        canRedo: false,
-      });
+      moveBoundary(set, state, current, "in", pts);
     },
 
     markOut: (currentPts: Pts) => {
@@ -227,24 +246,7 @@ export function createTimelineStore(
       );
 
       if (current !== null) {
-        if (currentPts === current.segment.outPts) {
-          return;
-        }
-        if (!isValidSegmentRange(current.segment.inPts, currentPts)) {
-          return;
-        }
-
-        undoStack.push(historyEntry(state));
-        redoStack = [];
-
-        set({
-          segments: replaceSegmentAt(state.segments, current.index, {
-            ...current.segment,
-            outPts: currentPts,
-          }),
-          canUndo: true,
-          canRedo: false,
-        });
+        moveBoundary(set, state, current, "out", currentPts);
         return;
       }
 
@@ -312,6 +314,20 @@ export function createTimelineStore(
         canUndo: true,
         canRedo: false,
       });
+    },
+
+    trimSegmentEdge: (segmentId: string, edge: SegmentEdge, pts: Pts) => {
+      const state = get();
+      if (!state.sourceId || !isPtsString(pts) || (edge !== "in" && edge !== "out")) {
+        return;
+      }
+      // The resolution of the current segment, so an unknown identifier and a segment of
+      // another source are refused (ADR 002 forbids a cross-source PTS comparison).
+      const target = findCurrentSegment(state.segments, segmentId, state.sourceId);
+      if (target === null) {
+        return;
+      }
+      moveBoundary(set, state, target, edge, pts);
     },
 
     newSegment: () => {

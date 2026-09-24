@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { isSourceActive } from "@/components/layout/actionConditions";
 import {
   getGeneratedSourceId,
   getSourceRevisionKey,
@@ -64,7 +65,17 @@ import {
 import { countRulerEdgeAnchors } from "./rulerLabel";
 import { planScrubSeek, resolveSnapIndicatorRatio } from "./scrubSeekPlan";
 import { createSnapBoundaryCache, type SnapBoundary } from "./scrubSnap";
-import { SegmentLayer } from "./SegmentLayer";
+import { clickSegmentEdge } from "./segmentEdgeClick";
+import type { SegmentEdge } from "./segmentEdges";
+import { SegmentLayer, type SegmentEdgePointerHandlers } from "./SegmentLayer";
+import {
+  createTrimSnapBoundaryCache,
+  isTrimCurrent,
+  resolveTrimGridRate,
+  resolveTrimTarget,
+} from "./segmentTrim";
+import { SegmentTrimPreview } from "./SegmentTrimPreview";
+import { segmentTrimSession } from "./segmentTrimSession";
 import {
   RulerHoverLine,
   RulerSnapIndicator,
@@ -86,7 +97,17 @@ import {
 import { calculateRulerScale, generateRulerTicks } from "./timelineMarkers";
 import { TimelineRuler } from "./TimelineRuler";
 import { TimelineZoomControls } from "./TimelineZoomControls";
-import { createTimelineScrubGesture, type TimelineScrubGesture } from "./timelineScrub";
+import {
+  createSegmentClickGuard,
+  planPointerRelease,
+  type TrimPress,
+} from "./timelinePointerRelease";
+import {
+  createTimelineScrubGesture,
+  type TimelineScrubGesture,
+  type TimelineScrubPhase,
+} from "./timelineScrub";
+import { TrimNotice } from "./TrimNotice";
 
 export interface TimelinePanelProps {
   /** Stable project source ID when project state already owns one. */
@@ -148,6 +169,12 @@ function readVisibleLane(scrollEl: HTMLElement): ClientRange {
  *   past it, scrolls the view, and the playhead stays at that edge.
  * - The hover line (`timelineHover.ts`): with no drag running, a line and an approximate
  *   timecode show the time under the pointer.
+ *
+ * The same pointer gesture also trims a segment edge (ADR 030). A press on an edge hit area
+ * starts the gesture in the trim mode, and the ruler lane captures the pointer, as it does for
+ * a scrub. Past the drag threshold the trim starts (`segmentTrimSession`), each sample seeks
+ * with the snap and the auto-scroll above, and the release commits the frame that the browser
+ * presents. A release before the threshold is the click of the edge (ADR 007).
  */
 export function TimelinePanel({
   activeSourceId,
@@ -203,6 +230,12 @@ export function TimelinePanel({
     !isIndeterminate &&
     onApproximateSeek !== undefined;
   const canSeek = canUsePreciseSeek || canUseApproximateSeek;
+  // A drag on a segment edge trims it only on the exact frame grid (ADR 030), where the frame of
+  // the release target can be recognized when it arrives. On any other source the edge press is
+  // the click of ADR 007. The press, the resize cursor of the edges and the trim start all read
+  // this one condition.
+  const canTrimEdges =
+    canUsePreciseSeek && media !== null && resolveTrimGridRate(media.probe) !== null;
 
   const zoom = useTimelineViewportStore(selectZoom);
   // The zoom factor of the last commit. The layout effect that applies an anchor reads it as
@@ -241,6 +274,22 @@ export function TimelinePanel({
   const dragDirectionRef = useRef<number>(0);
   // The snap boundaries, built again only when the segments or the time axis change.
   const [readSnapBoundaries] = useState(createSnapBoundaryCache);
+  // The snap boundaries of a trim, built again also when a new trim starts.
+  const [readTrimSnapBoundaries] = useState(createTrimSnapBoundaryCache);
+
+  // The mode of the pointer gesture: a scrub of the playhead, or the trim of a segment edge
+  // (ADR 030). A press on an edge sets the trim mode, and the end of the gesture sets the scrub
+  // mode again. `trimPressRef` holds the edge of that press until the gesture ends.
+  const gestureModeRef = useRef<"scrub" | "trim">("scrub");
+  const trimPressRef = useRef<TrimPress | null>(null);
+  // True during the final sample that a pointer release sends. The trim commits at a release,
+  // and a cancel of the gesture by another path makes no change.
+  const isPointerReleaseRef = useRef<boolean>(false);
+  // The pointer of the last press in the trim mode, until its release. The click that the
+  // browser sends after that release does nothing (`segmentClickGuard`): the release already
+  // did the click of the edge, or it ended a drag.
+  const trimPointerIdRef = useRef<number | null>(null);
+  const [segmentClickGuard] = useState(createSegmentClickGuard);
 
   const hoverRef = useRef<TimelineHoverLine | null>(null);
   const autoScrollRef = useRef<EdgeAutoScroll | null>(null);
@@ -611,18 +660,118 @@ export function TimelinePanel({
     seekRef.current = seekFromClientX;
   });
 
+  /**
+   * One sample of the trim of a segment edge (ADR 030, `segmentTrim.ts`).
+   *
+   * The trim uses the rules of `seekFromClientX`, with three differences:
+   *
+   * - It seeks only with a PTS, so it needs the calibration gate. A trim whose calibration or
+   *   source stops holding is dropped with no change and with the notice of TrimNotice, and the
+   *   rest of the drag is a scrub of the playhead, which ends with the exact seek of ADR 022.
+   * - It snaps to the boundaries of `collectTrimSnapBoundaries`: those of the scrub without the
+   *   edge that it moves, plus the playhead at the start of the trim.
+   * - The seek target stops at the limit of the trim (`resolveTrimTarget`), one nominal frame
+   *   from the other edge.
+   *
+   * A scrub sample sends a scrub seek. The final sample of a release commits
+   * (`segmentTrimSession.release`), and the final sample of any other end of the gesture makes
+   * no change and sends the exact seek of a cancelled drag (`abandon`).
+   *
+   * No trim drags at the seek of pointer down, after the release, and after `Escape`. Such a
+   * sample sends nothing.
+   */
+  const trimFromClientX = (clientX: number, phase: TimelineScrubPhase) => {
+    const trim = segmentTrimSession.getDraggingTrim();
+    const laneEl = laneRef.current;
+    if (trim === null || !laneEl) {
+      hideSnapIndicator(snapElements());
+      return;
+    }
+    if (!canUsePreciseSeek || !isTrimCurrent(trim, playbackStore.getState())) {
+      // The trim cannot commit a frame any more, so the timeline says that it was not applied.
+      segmentTrimSession.fail();
+      gestureModeRef.current = "scrub";
+      seekFromClientX(clientX, phase);
+      return;
+    }
+
+    const laneRect = laneEl.getBoundingClientRect();
+    const scrollEl = scrollRef.current;
+    const snaps = readTrimSnapBoundaries({
+      trim,
+      segments: timelineStore.getState().segments,
+      totalDurationSeconds,
+    });
+    const plan = planScrubSeek({
+      pointerX: clientX,
+      phase,
+      isDragSample: true,
+      canSeek,
+      canSeekExactly: true,
+      canSeekApproximately: false,
+      lane: { left: laneRect.left, width: laneRect.width },
+      container: scrollEl ? scrollEl.getBoundingClientRect() : null,
+      totalDurationSeconds,
+      videoStartPts,
+      videoTimeBase,
+      boundaries: snaps.boundaries,
+      isSnapSuppressed: isSnapSuppressedRef.current,
+      previousLaneX: dragLaneXRef.current,
+      previousDirection: dragDirectionRef.current,
+    });
+    dragLaneXRef.current = plan.laneX;
+    dragDirectionRef.current = plan.direction;
+
+    const target = resolveTrimTarget(trim, plan.request, plan.snap, snaps);
+    if (phase === "scrub") {
+      segmentTrimSession.scrub(target);
+    } else if (isPointerReleaseRef.current) {
+      segmentTrimSession.release(target);
+    } else {
+      segmentTrimSession.abandon(target);
+    }
+
+    const state = playbackStore.getState();
+    gestureSeekTargetRef.current = state.seekTargetSeconds;
+    const snapRatio = resolveSnapIndicatorRatio(
+      target?.snap ?? null,
+      getDisplayedElapsedSeconds(state, videoStartPts, videoTimeBase),
+    );
+    if (snapRatio === null) {
+      hideSnapIndicator(snapElements());
+    } else {
+      showSnapIndicator(snapElements(), snapRatio);
+    }
+  };
+
+  const trimRef = useRef(trimFromClientX);
+  useLayoutEffect(() => {
+    trimRef.current = trimFromClientX;
+  });
+
   const getGesture = useCallback(() => {
     gestureRef.current ??= createTimelineScrubGesture({
       onSample: (clientX, phase) => {
-        seekRef.current(clientX, phase);
+        if (gestureModeRef.current === "trim") {
+          trimRef.current(clientX, phase);
+        } else {
+          seekRef.current(clientX, phase);
+        }
       },
       // The end of a gesture, by any path, ends its aids: the release, a cancel, a lost
       // capture, the cancel of PlayheadFollow when seeking stops being possible, and unmount.
+      // It also ends the trim mode. A trim that still drags here ended with no final sample,
+      // as at unmount, and it makes no change.
       onFinish: () => {
         autoScrollRef.current?.stop();
         hideSnapIndicator({ ruler: snapRulerRef.current, track: snapTrackRef.current });
         dragLaneXRef.current = null;
         dragDirectionRef.current = 0;
+        if (segmentTrimSession.isDragging()) {
+          segmentTrimSession.drop();
+        }
+        gestureModeRef.current = "scrub";
+        trimPressRef.current = null;
       },
     });
     return gestureRef.current;
@@ -823,8 +972,100 @@ export function TimelinePanel({
     // A press during an active gesture does not start another one, so it keeps the arming.
     if (!gesture.isActive()) {
       getAutoScroll().begin(event.clientX);
+      // A trim-mode press whose release never arrived, such as one that went to another
+      // application, no longer names this pointer.
+      trimPointerIdRef.current = null;
     }
     gesture.begin(event.pointerId, event.clientX);
+  };
+
+  /**
+   * A press on the edge hit area of a segment (ADR 030). With the condition of a trim, the
+   * press starts the gesture in the trim mode, and the ruler lane captures the pointer, so every
+   * later event of that pointer reaches the scrub handlers of the lane. The lane is always
+   * mounted, while a zoom or an edit can remove the edge under the pointer. The seek at pointer
+   * down of the gesture sends nothing in the trim mode (`trimFromClientX`), because a release
+   * before the drag threshold is the click of the edge, and that click seeks to the stored
+   * boundary.
+   *
+   * Without the condition (`canTrimEdges`: a precise seek and an exact frame grid), or when the
+   * capture fails, the press is left to the segment button, and its click is the click of the
+   * edge (ADR 007). A source that is not on the exact grid therefore never starts a trim.
+   *
+   * The trim runs on the gesture of the scrub, so it gets the scrub cursor of that gesture
+   * (`scrubCursor.ts`): past the drag threshold the resize cursor shows everywhere in the window
+   * until the gesture ends, by every path. A release before the threshold keeps the cursor of
+   * the element under the pointer, as a click does.
+   */
+  const handleEdgePointerDown = (
+    segmentId: string,
+    edge: SegmentEdge,
+    event: React.PointerEvent<HTMLElement>,
+  ) => {
+    const laneEl = laneRef.current;
+    const gesture = getGesture();
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      !laneEl ||
+      !canTrimEdges ||
+      gesture.isActive()
+    ) {
+      return;
+    }
+    const hasActiveSource = isSourceActive(media !== null, isAttached, isReady);
+    const probe = media?.probe ?? null;
+    if (
+      !segmentTrimSession.canBegin({
+        segmentId,
+        edge,
+        hasActiveSource,
+        probe,
+        totalDurationSeconds,
+      })
+    ) {
+      return;
+    }
+    try {
+      laneEl.setPointerCapture(event.pointerId);
+    } catch {
+      return;
+    }
+    gestureModeRef.current = "trim";
+    trimPressRef.current = { segmentId, edge };
+    trimPointerIdRef.current = event.pointerId;
+    isSnapSuppressedRef.current = event.altKey;
+    getHover().hide();
+    getAutoScroll().begin(event.clientX);
+    gesture.begin(event.pointerId, event.clientX);
+  };
+
+  /**
+   * Starts the trim when the gesture of an edge press passes the drag threshold. The session
+   * records the boundaries and the playhead before the first scrub seek, and selects the
+   * segment. The first sample then runs at once and not in the next frame, so the preview never
+   * draws the new edge at the playhead of the time before the trim. When the condition stopped
+   * holding after the press, the gesture ends with no seek, and the press did nothing (ADR 007).
+   */
+  const startTrimDrag = () => {
+    const press = trimPressRef.current;
+    const gesture = getGesture();
+    const hasActiveSource = isSourceActive(media !== null, isAttached, isReady);
+    if (
+      press !== null &&
+      canTrimEdges &&
+      segmentTrimSession.begin({
+        ...press,
+        hasActiveSource,
+        probe: media?.probe ?? null,
+        totalDurationSeconds,
+      })
+    ) {
+      gesture.sampleNow();
+      return;
+    }
+    trimPressRef.current = null;
+    gesture.cancel();
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -832,7 +1073,11 @@ export function TimelinePanel({
     if (gesture.isActive()) {
       isSnapSuppressedRef.current = event.altKey;
     }
+    const wasDragging = gesture.isDragging();
     gesture.move(event.pointerId, event.clientX);
+    if (!wasDragging && gesture.isDragging() && gestureModeRef.current === "trim") {
+      startTrimDrag();
+    }
     if (gesture.isDragging()) {
       getAutoScroll().update(event.clientX);
     }
@@ -850,12 +1095,83 @@ export function TimelinePanel({
     if (gesture.isActive()) {
       isSnapSuppressedRef.current = event.altKey;
     }
-    gesture.end(event.pointerId, event.clientX);
+    // The plan reads the gesture before its end, because the end clears the trim-mode press.
+    const release = planPointerRelease({
+      pointerId: event.pointerId,
+      mode: gestureModeRef.current,
+      isGestureActive: gesture.isActive(),
+      isDragging: gesture.isDragging(),
+      trimPress: trimPressRef.current,
+      trimPointerId: trimPointerIdRef.current,
+    });
+    isPointerReleaseRef.current = true;
+    try {
+      gesture.end(event.pointerId, event.clientX);
+    } finally {
+      isPointerReleaseRef.current = false;
+    }
+    if (release.endsTrimPointer) {
+      trimPointerIdRef.current = null;
+      segmentClickGuard.arm();
+    }
+    if (release.edgeClick !== null) {
+      clickSegmentEdge(release.edgeClick.segmentId, release.edgeClick.edge);
+    }
   };
 
   const handlePointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
     getGesture().cancel(event.pointerId);
   };
+
+  // The handlers of the segment edges. The segment layer is memoized, so the object is created
+  // once, and it calls the handler of the latest render through a ref.
+  const edgePointerDownRef = useRef(handleEdgePointerDown);
+  useLayoutEffect(() => {
+    edgePointerDownRef.current = handleEdgePointerDown;
+  });
+  const [segmentEdgeHandlers] = useState<SegmentEdgePointerHandlers>(() => ({
+    onEdgePointerDown: (segmentId, edge, event) => {
+      edgePointerDownRef.current(segmentId, edge, event);
+    },
+    shouldIgnoreClick: (detail) => segmentClickGuard.consume(detail),
+  }));
+
+  // Every pointer down in the window ends a click guard that no click consumed, so the guard
+  // never takes the click of a later press anywhere. The listener is in the capture phase, so
+  // it runs before any handler of the press, and it only reads the event: it never cancels or
+  // stops it.
+  useEffect(() => {
+    const onPointerDown = () => {
+      segmentClickGuard.clear();
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+    };
+  }, [segmentClickGuard]);
+
+  // `Escape` during a trim reaches the session from the window keyboard layer (ADR 026,
+  // ADR 030). The session ends the trim first, and then this canceller ends the gesture, so the
+  // final sample of the gesture finds no trim and sends no seek of its own.
+  //
+  // The bound of a released trim counts only visible time (ADR 030), as the wait for the
+  // calibration anchor does (ADR 003), so the panel reports each change of the visibility.
+  useEffect(() => {
+    segmentTrimSession.setDragCanceller(() => {
+      if (gestureModeRef.current === "trim") {
+        gestureRef.current?.cancel();
+      }
+    });
+    const onVisibilityChange = () => {
+      segmentTrimSession.visibilityChanged(document.visibilityState !== "hidden");
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      segmentTrimSession.setDragCanceller(null);
+      segmentTrimSession.drop();
+    };
+  }, []);
 
   // The hover handlers of the two lanes. A pointer event from a scrub surface or a segment
   // in the track lane bubbles to the lane, and the controller hides the line while a drag
@@ -884,7 +1200,7 @@ export function TimelinePanel({
   };
 
   return (
-    <section className="flex h-[180px] shrink-0 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
+    <section className="relative flex h-[180px] shrink-0 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
       {/*
        * overflow-x: scroll shows the horizontal scrollbar at every zoom factor, also when
        * nothing overflows. The `::-webkit-scrollbar` rules in globals.css make it a classic
@@ -1116,6 +1432,15 @@ export function TimelinePanel({
                     laneWidthPx={laneWidthPx}
                     timecodeDisplay={timecodeDisplay}
                     viewportRef={scrollRef}
+                    edgePointerHandlers={segmentEdgeHandlers}
+                    canTrimEdges={canTrimEdges}
+                  />
+
+                  {/* The new extent of a segment that a trim moves (see SegmentTrimPreview) */}
+                  <SegmentTrimPreview
+                    videoStartPts={videoStartPts}
+                    videoTimeBase={videoTimeBase}
+                    totalDurationSeconds={totalDurationSeconds}
                   />
 
                   {/* Track playhead, after the segment group (see TrackPlayhead) */}
@@ -1180,6 +1505,9 @@ export function TimelinePanel({
         gestureRef={gestureRef}
         gestureSeekTargetRef={gestureSeekTargetRef}
       />
+
+      {/* The notice of a trim that was not applied (see TrimNotice) */}
+      <TrimNotice />
     </section>
   );
 }

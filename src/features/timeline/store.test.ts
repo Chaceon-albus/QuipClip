@@ -542,3 +542,114 @@ describe("timeline store current segment", () => {
     expect(store.getState().currentSegmentId).toBeNull();
   });
 });
+
+describe("timeline store trimSegmentEdge", () => {
+  /** A store with two segments of source-1, and one of source-2 between them. */
+  function createTrimStore() {
+    return createTimelineStore(
+      { generateId: () => "unused" },
+      {
+        sourceId: "source-1",
+        sourceRevisionKey: "revision-1",
+        segments: [
+          { id: "a", sourceId: "source-1", inPts: pts("100"), outPts: pts("200") },
+          { id: "foreign", sourceId: "source-2", inPts: pts("0"), outPts: pts("50") },
+          { id: "b", sourceId: "source-1", inPts: pts("300"), outPts: pts("400") },
+        ],
+        currentSegmentId: "b",
+      },
+    );
+  }
+
+  it("moves one boundary of the named segment with one history entry", () => {
+    const store = createTrimStore();
+    store.getState().trimSegmentEdge("a", "in", pts("120"));
+    expect(shape(store)).toEqual([
+      { id: "a", inPts: "120", outPts: "200" },
+      { id: "foreign", inPts: "0", outPts: "50" },
+      { id: "b", inPts: "300", outPts: "400" },
+    ]);
+    expect(store.getState().canUndo).toBe(true);
+
+    store.getState().trimSegmentEdge("a", "out", pts("250"));
+    expect(shape(store)[0]).toEqual({ id: "a", inPts: "120", outPts: "250" });
+
+    // Each trim is one undo step.
+    store.getState().undo();
+    expect(shape(store)[0]).toEqual({ id: "a", inPts: "120", outPts: "200" });
+    store.getState().undo();
+    expect(shape(store)[0]).toEqual({ id: "a", inPts: "100", outPts: "200" });
+    expect(store.getState().canUndo).toBe(false);
+
+    store.getState().redo();
+    expect(shape(store)[0]).toEqual({ id: "a", inPts: "120", outPts: "200" });
+  });
+
+  it("names its segment and not the current one, and keeps the selection", () => {
+    const store = createTrimStore();
+    store.getState().trimSegmentEdge("a", "out", pts("150"));
+    expect(shape(store)[0]).toEqual({ id: "a", inPts: "100", outPts: "150" });
+    expect(shape(store)[2]).toEqual({ id: "b", inPts: "300", outPts: "400" });
+    expect(store.getState().currentSegmentId).toBe("b");
+    expect(store.getState().pendingInPts).toBeNull();
+  });
+
+  it("allows an overlap with a neighbour and keeps the array order", () => {
+    const store = createTrimStore();
+    // Overlap stays allowed (ADR 007, ADR 030), and the export order is the array order.
+    store.getState().trimSegmentEdge("a", "out", pts("350"));
+    expect(shape(store).map(({ id }) => id)).toEqual(["a", "foreign", "b"]);
+    expect(shape(store)[0]).toEqual({ id: "a", inPts: "100", outPts: "350" });
+  });
+
+  it("makes no change and no history entry for a move that breaks inPts < outPts", () => {
+    const store = createTrimStore();
+    const before = store.getState().segments;
+    store.getState().trimSegmentEdge("a", "in", pts("200"));
+    store.getState().trimSegmentEdge("a", "in", pts("250"));
+    store.getState().trimSegmentEdge("a", "out", pts("100"));
+    store.getState().trimSegmentEdge("a", "out", pts("50"));
+    expect(store.getState().segments).toBe(before);
+    expect(store.getState().canUndo).toBe(false);
+  });
+
+  it("makes no history entry for a boundary equal to the stored one", () => {
+    const store = createTrimStore();
+    const before = store.getState().segments;
+    store.getState().trimSegmentEdge("a", "in", pts("100"));
+    store.getState().trimSegmentEdge("a", "out", pts("200"));
+    expect(store.getState().segments).toBe(before);
+    expect(store.getState().canUndo).toBe(false);
+  });
+
+  it("refuses an unknown segment, a segment of another source, and a malformed PTS", () => {
+    const store = createTrimStore();
+    const before = store.getState().segments;
+    store.getState().trimSegmentEdge("ghost", "in", pts("120"));
+    store.getState().trimSegmentEdge("foreign", "in", pts("10"));
+    store.getState().trimSegmentEdge("a", "in", pts("01"));
+    store.getState().trimSegmentEdge("a", "in", pts("1.5"));
+    expect(store.getState().segments).toBe(before);
+    expect(store.getState().canUndo).toBe(false);
+  });
+
+  it("refuses every move while no source is active", () => {
+    const store = createTrimStore();
+    store.getState().setSource(null, null);
+    const before = store.getState().segments;
+    store.getState().trimSegmentEdge("a", "in", pts("120"));
+    expect(store.getState().segments).toBe(before);
+    expect(store.getState().canUndo).toBe(false);
+  });
+
+  it("clears the redo stack, as every other edit does", () => {
+    const store = createTrimStore();
+    store.getState().trimSegmentEdge("a", "in", pts("120"));
+    store.getState().undo();
+    expect(store.getState().canRedo).toBe(true);
+    store.getState().trimSegmentEdge("a", "in", pts("130"));
+    expect(store.getState().canRedo).toBe(false);
+    store.getState().redo();
+    expect(shape(store)[0]).toEqual({ id: "a", inPts: "130", outPts: "200" });
+  });
+});

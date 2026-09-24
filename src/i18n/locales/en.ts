@@ -266,6 +266,9 @@ export const en = {
     // timecode such as "00:01:23:04". It comes from a pixel position, so "≈" marks it as
     // approximate.
     hoverTime: "≈ {{time}}",
+    // The notice of a drag trim of a segment edge that ended with no change, because the frame
+    // of the target did not arrive in time or another action replaced the trim.
+    trimNotApplied: "The trim was not applied.",
     zoom: {
       group: "Timeline zoom",
       zoomIn: "Zoom In",

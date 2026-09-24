@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { calculateSegmentLayout } from "@/features/timeline";
 import type { Pts, Rational, Segment } from "@/types/project";
 import {
+  buildSnapBoundaries,
   collectSnapBoundaries,
   createSnapBoundaryCache,
   resolveDragDirection,
@@ -126,6 +127,24 @@ describe("collectSnapBoundaries", () => {
     expect(collectSnapBoundaries(source({ totalDurationSeconds: Infinity }))).toEqual(
       [],
     );
+  });
+
+  it("shares its candidate rule with buildSnapBoundaries", () => {
+    // Each PTS once, in time order, inside the extent, and only canonical PTS strings.
+    expect(
+      buildSnapBoundaries(
+        [pts("3000"), pts("1000"), pts("3000"), pts("9001"), pts("01"), pts("-1000")],
+        pts("-1000"),
+        timeBase,
+        10,
+      ),
+    ).toEqual([
+      { pts: "-1000", elapsedSeconds: 0, ratio: 0 },
+      { pts: "1000", elapsedSeconds: 2, ratio: 0.2 },
+      { pts: "3000", elapsedSeconds: 4, ratio: 0.4 },
+    ]);
+    expect(buildSnapBoundaries([pts("1000")], pts("-1000"), timeBase, 0)).toEqual([]);
+    expect(buildSnapBoundaries([pts("1000")], pts("-1000"), timeBase, NaN)).toEqual([]);
   });
 
   it("ignores a segment or a pending In that is not a canonical PTS", () => {

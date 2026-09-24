@@ -12,6 +12,7 @@ import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
   LARGE_FRAME_STEP,
   planShortcutCommand,
+  TRIM_LOCKED_ACTIONS,
   type ShortcutCommand,
   type ShortcutProbe,
   type ShortcutSnapshot,
@@ -883,6 +884,66 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("finishSegment", pending)).toEqual({
         kind: "finishSegment",
       });
+    });
+
+    it("cancels a trim with Escape while the drag runs, and never finishes the segment", () => {
+      const trimming = createSnapshot({
+        timeline: { segments: [segment("a", "0", "3000")], currentSegmentId: "a" },
+      });
+      expect(
+        planShortcutCommand("finishSegment", { ...trimming, isTrimDragging: true }),
+      ).toEqual({ kind: "cancelTrim" });
+      // The cancel does not need a segment in progress: the key always ends the drag.
+      expect(
+        planShortcutCommand("finishSegment", {
+          ...createSnapshot(),
+          isTrimDragging: true,
+        }),
+      ).toEqual({ kind: "cancelTrim" });
+      // With no drag, the key finishes the segment as before.
+      expect(
+        planShortcutCommand("finishSegment", { ...trimming, isTrimDragging: false }),
+      ).toEqual({ kind: "finishSegment" });
+      expect(planShortcutCommand("finishSegment", trimming)).toEqual({
+        kind: "finishSegment",
+      });
+    });
+
+    it("takes the edit keys and does nothing while a trim drags", () => {
+      // The frame on screen (PTS 90000) lies inside the segment, so each action can act.
+      const editable = createSnapshot({
+        timeline: {
+          segments: [segment("a", "0", "180000")],
+          currentSegmentId: "a",
+          canUndo: true,
+          canRedo: true,
+        },
+      });
+      for (const action of TRIM_LOCKED_ACTIONS) {
+        expect(planShortcutCommand(action, editable)).not.toBeNull();
+        expect(
+          planShortcutCommand(action, { ...editable, isTrimDragging: true }),
+        ).toBeNull();
+      }
+      expect([...TRIM_LOCKED_ACTIONS].sort()).toEqual(
+        ["deleteSegment", "markIn", "markOut", "redo", "undo"].sort(),
+      );
+      // Playback and the steps stay available.
+      expect(
+        planShortcutCommand("togglePlayback", { ...editable, isTrimDragging: true }),
+      ).toEqual({ kind: "togglePlayback" });
+    });
+
+    it("gives the trim cancel to no other action", () => {
+      const snapshot: ShortcutSnapshot = { ...createSnapshot(), isTrimDragging: true };
+      for (const action of SHORTCUT_ACTIONS) {
+        if (action === "finishSegment") {
+          continue;
+        }
+        expect(planShortcutCommand(action, snapshot)).not.toEqual({
+          kind: "cancelTrim",
+        });
+      }
     });
 
     it("undoes and redoes only with a history entry", () => {

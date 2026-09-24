@@ -95,7 +95,22 @@ export interface ShortcutSnapshot {
   >;
   /** The zoom of the timeline (ADR 007), which is view state and not timeline state. */
   readonly viewport: Pick<TimelineViewportState, "zoom" | "maxZoom">;
+  /**
+   * True while the pointer drags a segment edge to trim it (ADR 030). `Escape` then cancels
+   * the trim and does not finish the segment, and the edit keys do nothing
+   * (`TRIM_LOCKED_ACTIONS`). Absent means false.
+   */
+  readonly isTrimDragging?: boolean;
 }
+
+/**
+ * The edit actions that do nothing while a drag trims a segment edge (ADR 030). The layer
+ * still owns their key presses. An edit during the drag would change the segment under the
+ * trim, and the limit, the snap and the preview of the trim would then be stale.
+ */
+export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(
+  ["markIn", "markOut", "deleteSegment", "undo", "redo"],
+);
 
 /** The store call that one shortcut action makes. */
 export type ShortcutCommand =
@@ -107,6 +122,7 @@ export type ShortcutCommand =
   | { readonly kind: "markOut"; readonly pts: Pts }
   | { readonly kind: "deleteSegment" }
   | { readonly kind: "finishSegment" }
+  | { readonly kind: "cancelTrim" }
   | { readonly kind: "undo" }
   | { readonly kind: "redo" }
   | { readonly kind: "openMedia" }
@@ -143,8 +159,11 @@ function currentSegmentOf(
  * moving away from the presented frame, so the seek still runs then.
  *
  * The comparison is exact, with `BigInt`, on two parsed PTS values.
+ *
+ * The release of a segment trim reads the same rule, to tell a target that needs no seek
+ * (ADR 030).
  */
-function isTargetOnScreen(playback: BoundarySeekPlayback, target: Pts): boolean {
+export function isTargetOnScreen(playback: BoundarySeekPlayback, target: Pts): boolean {
   const frame = playback.presentedFrame;
   if (
     frame === null ||
@@ -324,6 +343,10 @@ export function planShortcutCommand(
     playback.isReady,
   );
 
+  if (snapshot.isTrimDragging === true && TRIM_LOCKED_ACTIONS.has(action)) {
+    return null;
+  }
+
   switch (action) {
     case "togglePlayback":
       return canTogglePlayback(hasActiveSource) ? { kind: "togglePlayback" } : null;
@@ -420,6 +443,12 @@ export function planShortcutCommand(
         : null;
 
     case "finishSegment":
+      // While a drag trims a segment edge, Escape cancels the trim (ADR 030). The layer
+      // still owns the key press under its own rules, so this is the one path of the key,
+      // and it never also finishes the segment that the trim selected.
+      if (snapshot.isTrimDragging === true) {
+        return { kind: "cancelTrim" };
+      }
       return canFinishSegment(
         hasActiveSource,
         currentSegmentOf(timeline),

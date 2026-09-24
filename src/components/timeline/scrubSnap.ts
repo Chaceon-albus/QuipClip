@@ -110,11 +110,32 @@ export function collectSnapBoundaries(source: SnapBoundarySource): SnapBoundary[
     candidates.push(pendingInPts);
   }
 
+  return buildSnapBoundaries(candidates, videoStartPts, videoTimeBase, total);
+}
+
+/**
+ * Turns candidate PTS values of one source into snap boundaries: each PTS once, in time
+ * order, and only inside the source extent `[0, total]`. `collectSnapBoundaries` and the snap
+ * of a segment trim (`segmentTrim.ts`) share it.
+ *
+ * All the candidates belong to one source, so their raw PTS values compare directly (ADR 002).
+ * A candidate that is not a canonical PTS, or that has no safe elapsed time, is left out. An
+ * extent that is not finite and positive gives an empty list.
+ */
+export function buildSnapBoundaries(
+  candidates: readonly Pts[],
+  videoStartPts: Pts,
+  videoTimeBase: Rational,
+  total: number,
+): SnapBoundary[] {
+  if (!Number.isFinite(total) || total <= 0) {
+    return [];
+  }
   const seen = new Set<string>();
   const boundaries: { boundary: SnapBoundary; order: bigint }[] = [];
   for (const pts of candidates) {
     // A PTS is a canonical decimal string (ADR 002), so equal strings are equal values.
-    if (seen.has(pts)) {
+    if (!isPtsString(pts) || seen.has(pts)) {
       continue;
     }
     seen.add(pts);
