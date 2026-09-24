@@ -7,12 +7,13 @@
  * preset library shows the same prompt when the user selects another preset or adds one.
  *
  * The rules have no DOM and no React, so the tests need no document. They read elements
- * through narrow interfaces, and `toPromptFocusTarget` is the one adapter that wraps a DOM
- * element for them. They return translation keys and values without calling the i18n
+ * through narrow interfaces, and `toPromptFocusTarget` in `components/common/focusTarget.ts`
+ * is the one adapter that wraps a DOM element for them. They return translation keys and values without calling the i18n
  * runtime. The prompt message is one complete catalog message, so no sentence is assembled
  * from fragments (ADR 011).
  */
 
+import { canTakeFocus, type PromptFocusTarget } from "@/components/common/focusTarget";
 import type { PresetLibraryView } from "./presetLibraryController";
 import type { MessageView } from "./presetPresenter";
 
@@ -273,72 +274,6 @@ export function decidePromptSaveOutcome(
     return "close";
   }
   return hasError ? "revealError" : "stay";
-}
-
-/** The narrow view of an element that the focus rules read, so a test can pass a fake. */
-export interface PromptFocusTarget {
-  /** False after the element left the document. */
-  readonly isConnected: boolean;
-  /**
-   * False while the element is not rendered. The settings panels are force-mounted, and an
-   * inactive panel is `display: none`, so a control in another tab is connected but cannot
-   * take the focus.
-   */
-  readonly isRendered: boolean;
-  /** True while the element cannot take the focus, such as a disabled button. */
-  readonly isDisabled: boolean;
-  focus: () => void;
-}
-
-/** The members of a DOM element that `isElementRendered` reads. */
-export interface RenderedElementProbe {
-  checkVisibility?: () => boolean;
-  readonly offsetParent: unknown;
-}
-
-/**
- * True when the element is rendered. `checkVisibility` answers directly where the web view
- * has it. An older web view falls back to `offsetParent`, which is null for an element inside
- * a `display: none` subtree. None of the prompt targets is `position: fixed`, the one other
- * case where `offsetParent` is null.
- */
-export function isElementRendered(element: RenderedElementProbe): boolean {
-  return element.checkVisibility?.() ?? element.offsetParent !== null;
-}
-
-/**
- * Wraps a DOM element for the focus rules, or returns null for no element. The members are
- * getters, because the rules read the element when the focus moves, not when it is wrapped.
- */
-export function toPromptFocusTarget(
-  element: HTMLElement | null,
-): PromptFocusTarget | null {
-  if (element === null) {
-    return null;
-  }
-  return {
-    get isConnected() {
-      return element.isConnected;
-    },
-    get isRendered() {
-      return isElementRendered(element);
-    },
-    get isDisabled() {
-      return element.matches(":disabled");
-    },
-    focus: () => {
-      element.focus();
-    },
-  };
-}
-
-/** True when the target is in the document, rendered, and enabled. */
-export function canTakeFocus<T extends PromptFocusTarget>(
-  target: T | null,
-): target is T {
-  return (
-    target !== null && target.isConnected && target.isRendered && !target.isDisabled
-  );
 }
 
 /**

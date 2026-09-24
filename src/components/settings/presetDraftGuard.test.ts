@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { PromptFocusTarget } from "@/components/common/focusTarget";
 import type { Preset, Settings } from "@/features/settings/types";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
@@ -9,7 +10,6 @@ import {
   decideLeavePromptKey,
   decideLeaveRequest,
   decidePromptSaveOutcome,
-  isElementRendered,
   isFocusLost,
   isInsideLeavePrompt,
   isUnsavedPresetRow,
@@ -21,10 +21,8 @@ import {
   presentPresetDraftStatus,
   presentSaveAndLeaveLabel,
   presentUnsavedDraftPrompt,
-  toPromptFocusTarget,
   type FocusHolderProbe,
   type PresetDraftStatus,
-  type PromptFocusTarget,
 } from "./presetDraftGuard";
 import {
   createPresetLibraryController,
@@ -394,23 +392,6 @@ describe("isUnsavedPresetRow", () => {
   });
 });
 
-describe("isElementRendered", () => {
-  it("uses checkVisibility where the web view has it", () => {
-    expect(isElementRendered({ checkVisibility: () => true, offsetParent: null })).toBe(
-      true,
-    );
-    expect(isElementRendered({ checkVisibility: () => false, offsetParent: {} })).toBe(
-      false,
-    );
-  });
-
-  it("falls back to offsetParent without checkVisibility", () => {
-    expect(isElementRendered({ offsetParent: {} })).toBe(true);
-    // An element inside a `display: none` subtree has no offset parent.
-    expect(isElementRendered({ offsetParent: null })).toBe(false);
-  });
-});
-
 describe("pickPromptOpenFocus", () => {
   it("gives the focus to Cancel", () => {
     const cancel = fakeTarget();
@@ -594,35 +575,5 @@ describe("pickCreateFailureFocus", () => {
     expect(pickCreateFailureFocus(fakeTarget({ isConnected: false }), body)).toBeNull();
     expect(pickCreateFailureFocus(fakeTarget({ isRendered: false }), body)).toBeNull();
     expect(pickCreateFailureFocus(null, body)).toBeNull();
-  });
-});
-
-describe("toPromptFocusTarget", () => {
-  it("returns null for no element", () => {
-    expect(toPromptFocusTarget(null)).toBeNull();
-  });
-
-  // The rules read the element when the focus moves, so a button that is enabled after it was
-  // wrapped can take the focus.
-  it("reads the element each time a member is read, and focuses it", () => {
-    let disabled = true;
-    let focused = 0;
-    const element = {
-      isConnected: true,
-      offsetParent: {},
-      matches: (selector: string) => selector === ":disabled" && disabled,
-      focus: () => {
-        focused++;
-      },
-    };
-    const target = toPromptFocusTarget(element as unknown as HTMLElement);
-
-    expect(target?.isConnected).toBe(true);
-    expect(target?.isRendered).toBe(true);
-    expect(target?.isDisabled).toBe(true);
-    disabled = false;
-    expect(target?.isDisabled).toBe(false);
-    target?.focus();
-    expect(focused).toBe(1);
   });
 });

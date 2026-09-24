@@ -1,7 +1,9 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { CircleCheck, CircleSlash, Loader2, XIcon } from "lucide-react";
 import { DESTRUCTIVE_CONFIRM_CLASS } from "@/components/common/confirmDialogModel";
+import { DialogActions } from "@/components/common/DialogActions";
+import { canTakeFocus, toPromptFocusTarget } from "@/components/common/focusTarget";
 import { Notice } from "@/components/common/Notice";
 import { StepFade, StepFadeScope } from "@/components/common/StepFade";
 import { Button } from "@/components/ui/button";
@@ -45,9 +47,12 @@ import {
 } from "./exportBackToSetup";
 import { resolveExportDismissal } from "./exportCancelState";
 import {
+  resolveExportDialogFocusOrder,
   resolveExportDialogFooter,
   resolveExportDialogStep,
+  resolveExportDialogTitleKey,
   selectShownFrame,
+  type ExportDialogFocusTarget,
 } from "./exportDialogFrame";
 import {
   errorNoticeKey,
@@ -81,6 +86,35 @@ import {
  */
 const DIALOG_CONTENT_CLASS =
   "top-[16vh] flex max-h-[calc(84vh-1rem)] translate-y-0 flex-col sm:max-w-md";
+
+// The modal layers: this dialog, and a dialog that opens above it, such as the quit guard.
+const ENCLOSING_DIALOG_SELECTOR = '[role="dialog"],[role="alertdialog"]';
+
+/**
+ * Gives the focus to the first element of `order` that can take it, and does nothing when
+ * none can. See `resolveExportDialogFocusOrder`.
+ *
+ * The dialog itself takes the focus with no test. It is rendered while it is open, and it is
+ * `position: fixed`, which the rendered test of an older web view reads as not rendered
+ * (`isElementRendered`).
+ */
+function focusFirstAvailable(
+  order: readonly ExportDialogFocusTarget[],
+  elements: Readonly<Record<ExportDialogFocusTarget, HTMLElement | null>>,
+): void {
+  for (const target of order) {
+    const element = elements[target];
+    if (target === "dialog") {
+      element?.focus();
+      return;
+    }
+    const candidate = toPromptFocusTarget(element);
+    if (canTakeFocus(candidate)) {
+      candidate.focus();
+      return;
+    }
+  }
+}
 
 /**
  * Everything the dialog renders that can change while it closes.
@@ -152,6 +186,13 @@ export function ExportDialog({
   // the effect below gives the focus to the first control of the setup step once per click.
   const [backClicks, setBackClicks] = useState(0);
   const setupFirstControlRef = useRef<HTMLButtonElement>(null);
+  // The default button of the setup step, and Cancel of the confirmation. Each takes the
+  // focus when its footer shows (`resolveExportDialogFocusOrder`).
+  const exportButtonRef = useRef<HTMLButtonElement>(null);
+  const confirmationCancelRef = useRef<HTMLButtonElement>(null);
+  // The dialog element, while it is mounted. It takes the focus when no control of the footer
+  // rule can.
+  const contentRef = useRef<HTMLDivElement>(null);
   // The element that held the focus when the dialog opened, or null. The settings dialog
   // gives the focus back to it, because the "Open Settings..." button is gone by then.
   const openerRef = useRef<HTMLElement | null>(null);
@@ -310,6 +351,47 @@ export function ExportDialog({
     tracking: frame.tracking,
     error: frame.error,
   });
+
+  // The elements that the focus rule names (`resolveExportDialogFocusOrder`). It reads the
+  // refs when it runs, so it sees the controls of the footer on the screen.
+  const readFocusTargets = useCallback(
+    (
+      dialog: HTMLElement | null,
+    ): Record<ExportDialogFocusTarget, HTMLElement | null> => ({
+      primary: exportButtonRef.current,
+      setupFirstControl: setupFirstControlRef.current,
+      cancel: confirmationCancelRef.current,
+      done: doneButtonRef.current,
+      dialog,
+    }),
+    [],
+  );
+
+  // Places the focus by the rule of the footer when the footer changes while the dialog is
+  // open, and when the dialog opens again during its exit animation, which does not run the
+  // open auto focus again. It acts only while no control of the dialog has the focus: the
+  // control that had it left with the old footer, the closing dialog was inert, or the focus
+  // is on the element outside that opened the dialog again. The dialog itself and the body
+  // count as no control. A control of the dialog that has the focus keeps it. That is the
+  // case after Back, because the effect of Back above runs first and gives the focus to the
+  // first control of the setup step. A dialog above this one, such as the quit guard, also
+  // keeps the focus. A dialog that is not mounted gets its focus from `onOpenAutoFocus`
+  // below, when Radix mounts it.
+  useEffect(() => {
+    const dialog = contentRef.current;
+    if (!open || dialog === null) {
+      return;
+    }
+    const active = document.activeElement;
+    const layer = active?.closest(ENCLOSING_DIALOG_SELECTOR) ?? null;
+    if (active !== dialog && layer !== null) {
+      return;
+    }
+    focusFirstAvailable(
+      resolveExportDialogFocusOrder(footer),
+      readFocusTargets(dialog),
+    );
+  }, [open, footer, readFocusTargets]);
   // "publishing" always disables the button: the backend already ran its last cancel test
   // before it emitted the event that puts the interface into that phase (ADR 016), so a stop
   // there cannot stop the rename. "running" with no run id disables it, and an outstanding
@@ -711,6 +793,7 @@ export function ExportDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
+        ref={contentRef}
         showCloseButton={false}
         aria-describedby={undefined}
         className={DIALOG_CONTENT_CLASS}
@@ -718,24 +801,23 @@ export function ExportDialog({
         // animation cannot act on the held content.
         inert={!open}
         onOpenAutoFocus={(event) => {
-          // Radix would focus the first tabbable element, which is the close button. A Radix
-          // tooltip opens on every focus that no pointer press on its trigger started, so the
-          // tooltip would show on each open, and the first Escape would close the tooltip and
-          // not the dialog. The dialog takes the focus instead, and Tab reaches the close
-          // button first. A finished run gives the focus to Done, its default button.
           // Radix dispatches this before it moves the focus, so the active element is still
           // the element that opened the dialog.
           const opener = document.activeElement;
           openerRef.current =
             opener instanceof HTMLElement && opener !== document.body ? opener : null;
+          // Radix would focus the first tabbable element. The footer names the control
+          // instead (`resolveExportDialogFocusOrder`): "Export..." on the setup step, Cancel
+          // on the confirmation, Done on a finished run, and else the dialog itself, so Tab
+          // reaches the first control of the body. The dialog is open here, so the footer is
+          // the live one.
           event.preventDefault();
-          const target =
-            status === "finished" && doneButtonRef.current
-              ? doneButtonRef.current
-              : event.currentTarget;
-          if (target instanceof HTMLElement) {
-            target.focus();
-          }
+          focusFirstAvailable(
+            resolveExportDialogFocusOrder(footer),
+            readFocusTargets(
+              event.currentTarget instanceof HTMLElement ? event.currentTarget : null,
+            ),
+          );
         }}
         // The content unmounted, so the held frame has done its work. A later close that
         // holds no frame then shows the live content and never an old frame.
@@ -744,9 +826,238 @@ export function ExportDialog({
         }}
       >
         <DialogHeader>
-          <DialogTitle>{t("export.title")}</DialogTitle>
+          <DialogTitle>{t(resolveExportDialogTitleKey(footer))}</DialogTitle>
         </DialogHeader>
 
+        {/* The body scrolls when the dialog reaches its maximum height. The negative margin
+            and the padding give the focus rings of the controls room inside the scroll box. */}
+        <div className="-m-1 min-h-0 overflow-y-auto p-1">
+          <StepFadeScope step={step}>{renderBody()}</StepFadeScope>
+        </div>
+
+        {/* Each footer is keyed, so a change of footer mounts new buttons. A button of the
+            old footer never stays under the focus with the label and the action of a button
+            of the new footer, and the focus rule of the new footer applies. */}
+        <DialogFooter>
+          {footer === "setup" ? (
+            <DialogActions
+              key="setup"
+              cancel={
+                <Button variant="outline" onClick={closeAndReset}>
+                  {t("common.cancel")}
+                </Button>
+              }
+              primary={
+                <Button
+                  ref={exportButtonRef}
+                  disabled={exportDisabled}
+                  aria-busy={frame.backCheckPending || undefined}
+                  onClick={() => void handleConfirmExport()}
+                  onKeyDown={(event) => {
+                    // The button has the focus when the step opens, so a held Enter can
+                    // reach it. A held Enter repeats its keydown, and each keydown clicks
+                    // the button, so only a separate press continues to the save dialog.
+                    if (event.key === "Enter" && event.repeat) {
+                      event.preventDefault();
+                    }
+                  }}
+                >
+                  {frame.backCheckPending && (
+                    <Loader2
+                      aria-hidden="true"
+                      className="animate-spin motion-reduce:animate-none"
+                    />
+                  )}
+                  {t("export.action.chooseDestination")}
+                </Button>
+              }
+            />
+          ) : footer === "confirmation" ? (
+            <DialogActions
+              key="confirmation"
+              cancel={
+                <Button
+                  ref={confirmationCancelRef}
+                  variant="outline"
+                  onClick={closeAndReset}
+                >
+                  {t("common.cancel")}
+                </Button>
+              }
+              extras={[
+                {
+                  key: "reimport",
+                  role: "alternative",
+                  node: (
+                    <Button variant="outline" onClick={handleReimport}>
+                      {t("export.action.reimport")}
+                    </Button>
+                  ),
+                },
+              ]}
+              primary={
+                <Button onClick={handleExportAnyway}>
+                  {t("export.action.exportAnyway")}
+                </Button>
+              }
+            />
+          ) : footer === "run" ? (
+            // Stop Export throws away the encode, so it is a discard: at the far left on
+            // macOS, apart from "Run in Background", and after it on Windows. The footer has
+            // no Cancel, because Cancel of the setup step only closes the dialog (ADR 025).
+            // The note is the leading content only while it shows, so an empty item never
+            // moves Stop Export away from the edge.
+            <DialogActions
+              key="run"
+              leading={
+                stopView.noteKey ? (
+                  <p id={stopNoteId} className="min-w-0 text-xs text-muted-foreground">
+                    {t(stopView.noteKey)}
+                  </p>
+                ) : null
+              }
+              extras={[
+                {
+                  key: "stop",
+                  role: "discard",
+                  node: (
+                    // One element in every state, so the focus stays on it after the first
+                    // click and a second Enter confirms.
+                    <Button
+                      variant={
+                        stopView.appearance === "outline" ? "outline" : "default"
+                      }
+                      className={
+                        stopView.appearance === "destructive"
+                          ? DESTRUCTIVE_CONFIRM_CLASS
+                          : undefined
+                      }
+                      onClick={handleStopClick}
+                      onKeyDown={(event) => {
+                        // A held Enter repeats its keydown, and each keydown clicks the
+                        // button. The repeat would confirm the stop that the first keydown
+                        // armed, so only a second, separate press confirms.
+                        if (event.key === "Enter" && event.repeat) {
+                          event.preventDefault();
+                        }
+                      }}
+                      disabled={!stopView.enabled}
+                      aria-describedby={stopView.noteKey ? stopNoteId : undefined}
+                    >
+                      {t(stopView.labelKey)}
+                    </Button>
+                  ),
+                },
+              ]}
+              primary={
+                <Button onClick={hideDialog}>
+                  {t("export.action.runInBackground")}
+                </Button>
+              }
+            />
+          ) : footer === "finished" ? (
+            <DialogActions
+              key="finished"
+              extras={[
+                {
+                  key: "reveal",
+                  role: "alternative",
+                  node: canActOnOutput && (
+                    <Button
+                      variant="outline"
+                      aria-busy={busyOutputAction === "reveal" || undefined}
+                      onClick={() => handleOutputAction("reveal")}
+                    >
+                      {busyOutputAction === "reveal" && (
+                        <Loader2
+                          aria-hidden="true"
+                          className="animate-spin motion-reduce:animate-none"
+                        />
+                      )}
+                      {t(revealLabelKey(isMacOS()))}
+                    </Button>
+                  ),
+                },
+                {
+                  key: "open",
+                  role: "alternative",
+                  node: canActOnOutput && (
+                    <Button
+                      variant="secondary"
+                      aria-busy={busyOutputAction === "open" || undefined}
+                      onClick={() => handleOutputAction("open")}
+                    >
+                      {busyOutputAction === "open" && (
+                        <Loader2
+                          aria-hidden="true"
+                          className="animate-spin motion-reduce:animate-none"
+                        />
+                      )}
+                      {t("export.action.open")}
+                    </Button>
+                  ),
+                },
+              ]}
+              // Done closes the dialog and changes nothing, so it takes the Cancel place:
+              // last on both platforms, as the Close button of a WinUI dialog. It is still the
+              // default button, so it keeps the filled style and takes the focus.
+              cancel={
+                <Button
+                  ref={doneButtonRef}
+                  aria-describedby={
+                    outputFailure
+                      ? `${finishedNoticeId} ${outputErrorId}`
+                      : finishedNoticeId
+                  }
+                  onClick={closeAndReset}
+                >
+                  {t("export.action.done")}
+                </Button>
+              }
+            />
+          ) : (
+            // The recovery of the error is the primary action.
+            <DialogActions
+              key="result"
+              cancel={
+                <Button variant="outline" onClick={closeAndReset}>
+                  {t("common.close")}
+                </Button>
+              }
+              primary={
+                recoverySettingsSection !== null ? (
+                  <Button onClick={() => handleOpenSettings(recoverySettingsSection)}>
+                    {t("export.action.openSettings")}
+                  </Button>
+                ) : (
+                  recovery?.kind === "backToSetup" &&
+                  canGoBackToSetup({
+                    status: frame.status,
+                    tracking: frame.tracking,
+                  }) && (
+                    <Button onClick={handleBackToSetup}>
+                      {t("export.action.back")}
+                    </Button>
+                  )
+                )
+              }
+            />
+          )}
+          {/* Announces the armed state of Stop Export. A screen reader does not reliably read
+              a name change of the focused button, and a live region must exist before its
+              content changes, so it mounts with the run footer. It is beside the buttons and
+              not in the row, so it takes no place there. */}
+          {footer === "run" && (
+            <span className="sr-only" aria-live="polite" aria-atomic="true">
+              {stopView.armed ? t("export.action.stopConfirm") : ""}
+            </span>
+          )}
+        </DialogFooter>
+
+        {/* The close control comes after the footer in the document, so it is the last stop
+            of the Tab order. It still draws at the top right corner. A Radix tooltip opens
+            on every focus that no pointer press on its trigger started, so the tooltip shows
+            when Tab reaches the control, and not when the dialog opens. */}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -761,151 +1072,6 @@ export function ExportDialog({
           </TooltipTrigger>
           <TooltipContent>{closeLabel}</TooltipContent>
         </Tooltip>
-
-        {/* The body scrolls when the dialog reaches its maximum height. The negative margin
-            and the padding give the focus rings of the controls room inside the scroll box. */}
-        <div className="-m-1 min-h-0 overflow-y-auto p-1">
-          <StepFadeScope step={step}>{renderBody()}</StepFadeScope>
-        </div>
-
-        <DialogFooter>
-          {footer === "setup" ? (
-            <>
-              <Button variant="outline" onClick={closeAndReset}>
-                {t("common.cancel")}
-              </Button>
-              <Button
-                disabled={exportDisabled}
-                aria-busy={frame.backCheckPending || undefined}
-                onClick={() => void handleConfirmExport()}
-              >
-                {frame.backCheckPending && (
-                  <Loader2
-                    aria-hidden="true"
-                    className="animate-spin motion-reduce:animate-none"
-                  />
-                )}
-                {t("export.action.chooseDestination")}
-              </Button>
-            </>
-          ) : footer === "confirmation" ? (
-            <>
-              <Button variant="outline" onClick={closeAndReset}>
-                {t("common.cancel")}
-              </Button>
-              <Button variant="outline" onClick={handleReimport}>
-                {t("export.action.reimport")}
-              </Button>
-              <Button onClick={handleExportAnyway}>
-                {t("export.action.exportAnyway")}
-              </Button>
-            </>
-          ) : footer === "run" ? (
-            <>
-              {stopView.noteKey && (
-                <p
-                  id={stopNoteId}
-                  className="self-center text-xs text-muted-foreground sm:mr-auto"
-                >
-                  {t(stopView.noteKey)}
-                </p>
-              )}
-              {/* Announces the armed state. A screen reader does not reliably read a name
-                  change of the focused button, and a live region must exist before its
-                  content changes. */}
-              <span className="sr-only" aria-live="polite" aria-atomic="true">
-                {stopView.armed ? t("export.action.stopConfirm") : ""}
-              </span>
-              {/* One element in every state, so the focus stays on it after the first click
-                  and a second Enter confirms. */}
-              <Button
-                variant={stopView.appearance === "outline" ? "outline" : "default"}
-                className={
-                  stopView.appearance === "destructive"
-                    ? DESTRUCTIVE_CONFIRM_CLASS
-                    : undefined
-                }
-                onClick={handleStopClick}
-                onKeyDown={(event) => {
-                  // A held Enter repeats its keydown, and each keydown clicks the button. The
-                  // repeat would confirm the stop that the first keydown armed, so only a
-                  // second, separate press confirms.
-                  if (event.key === "Enter" && event.repeat) {
-                    event.preventDefault();
-                  }
-                }}
-                disabled={!stopView.enabled}
-                aria-describedby={stopView.noteKey ? stopNoteId : undefined}
-              >
-                {t(stopView.labelKey)}
-              </Button>
-              <Button onClick={hideDialog}>{t("export.action.runInBackground")}</Button>
-            </>
-          ) : footer === "finished" ? (
-            <>
-              {canActOnOutput && (
-                <>
-                  <Button
-                    variant="outline"
-                    aria-busy={busyOutputAction === "reveal" || undefined}
-                    onClick={() => handleOutputAction("reveal")}
-                  >
-                    {busyOutputAction === "reveal" && (
-                      <Loader2
-                        aria-hidden="true"
-                        className="animate-spin motion-reduce:animate-none"
-                      />
-                    )}
-                    {t(revealLabelKey(isMacOS()))}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    aria-busy={busyOutputAction === "open" || undefined}
-                    onClick={() => handleOutputAction("open")}
-                  >
-                    {busyOutputAction === "open" && (
-                      <Loader2
-                        aria-hidden="true"
-                        className="animate-spin motion-reduce:animate-none"
-                      />
-                    )}
-                    {t("export.action.open")}
-                  </Button>
-                </>
-              )}
-              <Button
-                ref={doneButtonRef}
-                aria-describedby={
-                  outputFailure
-                    ? `${finishedNoticeId} ${outputErrorId}`
-                    : finishedNoticeId
-                }
-                onClick={closeAndReset}
-              >
-                {t("export.action.done")}
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button variant="outline" onClick={closeAndReset}>
-                {t("common.close")}
-              </Button>
-              {/* The recovery is the primary action, so it is the rightmost button. */}
-              {recoverySettingsSection !== null && (
-                <Button onClick={() => handleOpenSettings(recoverySettingsSection)}>
-                  {t("export.action.openSettings")}
-                </Button>
-              )}
-              {recovery?.kind === "backToSetup" &&
-                canGoBackToSetup({
-                  status: frame.status,
-                  tracking: frame.tracking,
-                }) && (
-                  <Button onClick={handleBackToSetup}>{t("export.action.back")}</Button>
-                )}
-            </>
-          )}
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

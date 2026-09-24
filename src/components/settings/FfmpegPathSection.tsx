@@ -44,7 +44,7 @@ import {
   type FfmpegSourceView,
   type FfmpegStatusIcon,
 } from "./ffmpegSectionPresenter";
-import { toPromptFocusTarget } from "./presetDraftGuard";
+import { toPromptFocusTarget } from "@/components/common/focusTarget";
 
 // The `-text` tokens reach 4.5:1 as text in both themes. The icon in front of the line takes
 // the same colour, and its shape carries the state, so the colour is never the only cue.

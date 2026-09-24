@@ -11,6 +11,8 @@ import {
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { DialogActions } from "@/components/common/DialogActions";
+import { toPromptFocusTarget } from "@/components/common/focusTarget";
 import { Notice } from "@/components/common/Notice";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,7 +55,6 @@ import {
   presentPresetDraftStatus,
   presentSaveAndLeaveLabel,
   presentUnsavedDraftPrompt,
-  toPromptFocusTarget,
   type PendingLeave,
   type PresetDraftGuard,
 } from "./presetDraftGuard";
@@ -1434,42 +1435,59 @@ export function PresetLibrarySection({
             }
           }}
         >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            {/* `tabIndex={-1}` lets the message take the focus while a save disables every
-                button, without adding a stop to the Tab order. */}
-            <span
-              ref={promptMessageRef}
-              tabIndex={-1}
-              className="min-w-0 wrap-break-word outline-none"
-            >
-              {translate(unsavedPrompt.message.key, unsavedPrompt.message.values)}
-            </span>
-            {/* Outline and ghost buttons inherit the text color. Reset it here so the
-                buttons do not take the warning color of the box. The order and the styles
-                match the unsaved-changes prompt in the settings dialog footer. */}
-            <div className="flex items-center gap-2 text-foreground">
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={unsavedPrompt.choicesDisabled}
-                onClick={() => {
-                  // `addPreset` refuses to add over an unsaved edit, so the edit goes first.
-                  controller.cancelDraft();
-                  leave(pendingLeave);
-                  setPendingLeave(null);
-                }}
+          {/* The order, the layout, and the styles match the unsaved-changes prompt in the
+              settings dialog footer. Discard Changes is a discard: at the far left of the
+              buttons on macOS, and after the save on Windows. Outline and ghost buttons
+              inherit the text color, so they reset it and do not take the warning color of
+              the box. */}
+          <DialogActions
+            leading={
+              // `tabIndex={-1}` lets the message take the focus while a save disables every
+              // button, without adding a stop to the Tab order.
+              <span
+                ref={promptMessageRef}
+                tabIndex={-1}
+                className="min-w-0 wrap-break-word outline-none"
               >
-                {t("settings.preset.discardConfirm")}
-              </Button>
+                {translate(unsavedPrompt.message.key, unsavedPrompt.message.values)}
+              </span>
+            }
+            extras={[
+              {
+                key: "discard",
+                role: "discard",
+                node: (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-foreground"
+                    disabled={unsavedPrompt.choicesDisabled}
+                    onClick={() => {
+                      // `addPreset` refuses to add over an unsaved edit, so the edit goes
+                      // first.
+                      controller.cancelDraft();
+                      leave(pendingLeave);
+                      setPendingLeave(null);
+                    }}
+                  >
+                    {t("settings.preset.discardConfirm")}
+                  </Button>
+                ),
+              },
+            ]}
+            cancel={
               <Button
                 ref={promptCancelRef}
                 variant="outline"
                 size="sm"
+                className="text-foreground"
                 disabled={unsavedPrompt.choicesDisabled}
                 onClick={handleKeepEditing}
               >
                 {t("settings.preset.discardCancel")}
               </Button>
+            }
+            primary={
               <Button
                 variant="default"
                 size="sm"
@@ -1480,8 +1498,8 @@ export function PresetLibrarySection({
               >
                 {translate(presentSaveAndLeaveLabel(pendingLeave))}
               </Button>
-            </div>
-          </div>
+            }
+          />
         </Notice>
       ) : null}
 

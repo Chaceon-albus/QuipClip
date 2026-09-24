@@ -629,6 +629,12 @@ export const en = {
       folder: "In {{folder}}",
       folderAndElapsed: "In {{folder}} · Took {{elapsed}}",
     },
+    // The title of the export dialog while it asks for a confirmation, because the video file
+    // on disk changed after it was opened. The dialog shows `exportError.sourceRevisionChanged`
+    // below the title, and the buttons Re-import, Cancel, and Export Anyway.
+    sourceChanged: {
+      title: "Export the changed video?",
+    },
     action: {
       chooseDestination: "Export…",
       exportAnyway: "Export Anyway",

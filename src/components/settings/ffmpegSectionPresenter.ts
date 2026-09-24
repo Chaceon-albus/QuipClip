@@ -16,13 +16,9 @@ import type {
 } from "@/components/layout/ffmpegStatusPresenter";
 import type { FfmpegState, FfmpegStatus } from "@/features/ffmpeg/types";
 import { isSameDisplayPath, stripVerbatimPrefix } from "@/lib/fileName";
+import { canTakeFocus, type PromptFocusTarget } from "@/components/common/focusTarget";
 import type { FfmpegPathView } from "./ffmpegPathController";
-import {
-  canTakeFocus,
-  isFocusLost,
-  type FocusHolderProbe,
-  type PromptFocusTarget,
-} from "./presetDraftGuard";
+import { isFocusLost, type FocusHolderProbe } from "./presetDraftGuard";
 
 /** The platform whose install instructions and PATH rules apply. */
 export type FfmpegPlatform = "macos" | "windows" | "other";

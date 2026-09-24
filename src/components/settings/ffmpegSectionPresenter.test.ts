@@ -28,7 +28,8 @@ import {
   type FfmpegSectionControl,
   type FfmpegSourceState,
 } from "./ffmpegSectionPresenter";
-import type { FocusHolderProbe, PromptFocusTarget } from "./presetDraftGuard";
+import type { PromptFocusTarget } from "@/components/common/focusTarget";
+import type { FocusHolderProbe } from "./presetDraftGuard";
 
 /** Walks a dotted key through a nested catalog, the way i18next does. */
 function resolveCatalogKey(catalog: unknown, key: string): unknown {

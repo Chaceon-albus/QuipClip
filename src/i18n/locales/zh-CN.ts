@@ -558,6 +558,9 @@ export const zhCN: TranslationCatalog = {
       folder: "位于 {{folder}}",
       folderAndElapsed: "位于 {{folder}} · 用时 {{elapsed}}",
     },
+    sourceChanged: {
+      title: "导出已更改的视频？",
+    },
     action: {
       chooseDestination: "导出…",
       exportAnyway: "仍然导出",

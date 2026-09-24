@@ -7,11 +7,22 @@ import {
   type ExportStatus,
 } from "@/features/export";
 import {
+  resolveExportDialogFocusOrder,
   resolveExportDialogFooter,
   resolveExportDialogStep,
+  resolveExportDialogTitleKey,
   selectShownFrame,
   type ExportDialogFooter,
+  type ExportDialogFocusTarget,
 } from "./exportDialogFrame";
+
+const FOOTERS: readonly ExportDialogFooter[] = [
+  "setup",
+  "run",
+  "confirmation",
+  "finished",
+  "result",
+];
 
 describe("resolveExportDialogStep", () => {
   it("maps each status to its step", () => {
@@ -109,6 +120,56 @@ describe("resolveExportDialogFooter", () => {
       expect(resolveExportDialogFooter({ status: "idle", tracking, error: null })).toBe(
         "setup",
       );
+    }
+  });
+});
+
+describe("resolveExportDialogTitleKey", () => {
+  it("gives the confirmation a title of its own", () => {
+    expect(resolveExportDialogTitleKey("confirmation")).toBe(
+      "export.sourceChanged.title",
+    );
+  });
+
+  it("gives every other footer the title of the dialog", () => {
+    for (const footer of FOOTERS.filter((entry) => entry !== "confirmation")) {
+      expect(resolveExportDialogTitleKey(footer)).toBe("export.title");
+    }
+  });
+});
+
+describe("resolveExportDialogFocusOrder", () => {
+  it("names the control of each footer, in order", () => {
+    const expected: Record<ExportDialogFooter, readonly ExportDialogFocusTarget[]> = {
+      setup: ["primary", "setupFirstControl", "dialog"],
+      confirmation: ["cancel", "dialog"],
+      finished: ["done", "dialog"],
+      run: ["dialog"],
+      result: ["dialog"],
+    };
+    for (const footer of FOOTERS) {
+      expect(resolveExportDialogFocusOrder(footer)).toStrictEqual(expected[footer]);
+    }
+  });
+
+  it("gives the setup step to the default button, Export...", () => {
+    expect(resolveExportDialogFocusOrder("setup")[0]).toBe("primary");
+  });
+
+  it("gives the source-change confirmation to Cancel, so Enter changes nothing", () => {
+    expect(resolveExportDialogFocusOrder("confirmation")[0]).toBe("cancel");
+  });
+
+  // The run footer holds Stop Export. A default focus on a footer button would let Enter
+  // arm or confirm the stop.
+  it("never gives a live run to a button of its footer", () => {
+    expect(resolveExportDialogFocusOrder("run")).toStrictEqual(["dialog"]);
+  });
+
+  it("ends every order with the dialog, which can always take the focus", () => {
+    for (const footer of FOOTERS) {
+      const order = resolveExportDialogFocusOrder(footer);
+      expect(order[order.length - 1]).toBe("dialog");
     }
   });
 });

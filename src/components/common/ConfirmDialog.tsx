@@ -3,6 +3,7 @@ import { AlertDialog as AlertDialogPrimitive } from "radix-ui";
 
 import { Button } from "@/components/ui/button";
 import { DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogActions } from "./DialogActions";
 import {
   DESTRUCTIVE_CONFIRM_CLASS,
   createConfirmFocusReturn,
@@ -86,8 +87,9 @@ function toDeferredFocusCandidate(resolve: () => HTMLElement | null): FocusCandi
  *
  * Radix gives the Cancel button the focus when the dialog opens, so Enter never confirms a
  * destructive action by accident. Escape closes only this dialog when it opens on top of
- * another one, because Radix dismisses only the highest layer. The footer order is Cancel and
- * then the confirm button, with the confirm button rightmost.
+ * another one, because Radix dismisses only the highest layer. The footer follows the order of
+ * the platform (`DialogActions`): the confirm button is rightmost on macOS, with Cancel at its
+ * left, and first on Windows, with Cancel at its right.
  *
  * The dialog has no trigger, so it owns the focus return. See `createConfirmFocusReturn`.
  */
@@ -141,25 +143,31 @@ export function ConfirmDialog({
             </AlertDialogPrimitive.Description>
           </DialogHeader>
           <DialogFooter>
-            <AlertDialogPrimitive.Cancel asChild>
-              <Button variant="outline">{cancelLabel}</Button>
-            </AlertDialogPrimitive.Cancel>
-            <AlertDialogPrimitive.Action asChild>
-              <Button
-                className={destructive ? DESTRUCTIVE_CONFIRM_CLASS : undefined}
-                disabled={confirmDisabled}
-                onClick={() => {
-                  focusReturn.noteConfirmed(
-                    confirmFocus === undefined
-                      ? null
-                      : toDeferredFocusCandidate(confirmFocus),
-                  );
-                  onConfirm();
-                }}
-              >
-                {confirmLabel}
-              </Button>
-            </AlertDialogPrimitive.Action>
+            <DialogActions
+              cancel={
+                <AlertDialogPrimitive.Cancel asChild>
+                  <Button variant="outline">{cancelLabel}</Button>
+                </AlertDialogPrimitive.Cancel>
+              }
+              primary={
+                <AlertDialogPrimitive.Action asChild>
+                  <Button
+                    className={destructive ? DESTRUCTIVE_CONFIRM_CLASS : undefined}
+                    disabled={confirmDisabled}
+                    onClick={() => {
+                      focusReturn.noteConfirmed(
+                        confirmFocus === undefined
+                          ? null
+                          : toDeferredFocusCandidate(confirmFocus),
+                      );
+                      onConfirm();
+                    }}
+                  >
+                    {confirmLabel}
+                  </Button>
+                </AlertDialogPrimitive.Action>
+              }
+            />
           </DialogFooter>
         </AlertDialogPrimitive.Content>
       </AlertDialogPrimitive.Portal>

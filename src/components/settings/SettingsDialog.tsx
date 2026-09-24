@@ -9,6 +9,8 @@ import {
 import { useTranslation } from "react-i18next";
 import { XIcon } from "lucide-react";
 import { Tabs as TabsPrimitive } from "radix-ui";
+import { DialogActions } from "@/components/common/DialogActions";
+import { toPromptFocusTarget } from "@/components/common/focusTarget";
 import { Notice } from "@/components/common/Notice";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,7 +38,6 @@ import {
   pickPromptOpenFocus,
   isInsideLeavePrompt,
   presentUnsavedDraftPrompt,
-  toPromptFocusTarget,
   type PresetDraftGuard,
 } from "./presetDraftGuard";
 import { presentSettingsError } from "./settingsErrorPresenter";
@@ -302,13 +303,6 @@ export function SettingsDialog() {
           <DialogTitle>{t("settings.title")}</DialogTitle>
         </DialogHeader>
 
-        <DialogClose asChild>
-          <Button variant="ghost" size="icon-sm" className="absolute top-2 right-2">
-            <XIcon />
-            <span className="sr-only">{t("common.close")}</span>
-          </Button>
-        </DialogClose>
-
         <TabsPrimitive.Root
           value={section}
           onValueChange={handleSectionChange}
@@ -378,49 +372,82 @@ export function SettingsDialog() {
 
         <DialogFooter>
           {unsavedPrompt !== null ? (
-            <div className="flex w-full flex-wrap items-center justify-end gap-2">
-              {/* `tabIndex={-1}` lets the message take the focus while a save disables
-                  every button, without adding a stop to the Tab order. */}
-              <p
-                ref={promptMessageRef}
-                role="alert"
-                tabIndex={-1}
-                className="mr-auto min-w-0 font-medium wrap-break-word outline-none"
-              >
-                {translate(unsavedPrompt.message.key, unsavedPrompt.message.values)}
-              </p>
-              <Button
-                variant="ghost"
-                disabled={unsavedPrompt.choicesDisabled}
-                onClick={handleDontSave}
-              >
-                {t("settings.preset.dontSave")}
-              </Button>
-              <Button
-                ref={promptCancelRef}
-                variant="outline"
-                disabled={unsavedPrompt.choicesDisabled}
-                onClick={cancelPrompt}
-              >
-                {t("common.cancel")}
-              </Button>
-              <Button
-                disabled={unsavedPrompt.saveDisabled}
-                onClick={() => {
-                  void handleSaveAndClose();
-                }}
-              >
-                {t("common.save")}
-              </Button>
-            </div>
+            // "Don't Save" is a discard: at the far left on macOS, and after Save on Windows.
+            // Each footer is keyed, so the buttons of the prompt never stay mounted as the
+            // Close button.
+            <DialogActions
+              key="prompt"
+              leading={
+                // `tabIndex={-1}` lets the message take the focus while a save disables
+                // every button, without adding a stop to the Tab order.
+                <p
+                  ref={promptMessageRef}
+                  role="alert"
+                  tabIndex={-1}
+                  className="min-w-0 font-medium wrap-break-word outline-none"
+                >
+                  {translate(unsavedPrompt.message.key, unsavedPrompt.message.values)}
+                </p>
+              }
+              extras={[
+                {
+                  key: "dontSave",
+                  role: "discard",
+                  node: (
+                    <Button
+                      variant="ghost"
+                      disabled={unsavedPrompt.choicesDisabled}
+                      onClick={handleDontSave}
+                    >
+                      {t("settings.preset.dontSave")}
+                    </Button>
+                  ),
+                },
+              ]}
+              cancel={
+                <Button
+                  ref={promptCancelRef}
+                  variant="outline"
+                  disabled={unsavedPrompt.choicesDisabled}
+                  onClick={cancelPrompt}
+                >
+                  {t("common.cancel")}
+                </Button>
+              }
+              primary={
+                <Button
+                  disabled={unsavedPrompt.saveDisabled}
+                  onClick={() => {
+                    void handleSaveAndClose();
+                  }}
+                >
+                  {t("common.save")}
+                </Button>
+              }
+            />
           ) : (
-            <DialogClose asChild>
-              <Button ref={footerCloseRef} variant="outline">
-                {t("common.close")}
-              </Button>
-            </DialogClose>
+            <DialogActions
+              key="close"
+              cancel={
+                <DialogClose asChild>
+                  <Button ref={footerCloseRef} variant="outline">
+                    {t("common.close")}
+                  </Button>
+                </DialogClose>
+              }
+            />
           )}
         </DialogFooter>
+
+        {/* The close button comes after the footer in the document, so it is the last stop
+            of the Tab order, and the first stop is the tab list. It still draws at the top
+            right corner. */}
+        <DialogClose asChild>
+          <Button variant="ghost" size="icon-sm" className="absolute top-2 right-2">
+            <XIcon />
+            <span className="sr-only">{t("common.close")}</span>
+          </Button>
+        </DialogClose>
       </DialogContent>
     </Dialog>
   );
