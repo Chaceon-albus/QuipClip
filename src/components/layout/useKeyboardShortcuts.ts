@@ -68,7 +68,7 @@ export function runShortcutCommand(command: ShortcutCommand): void {
     case "deleteSegment":
       timeline.deleteSegment();
       return;
-    case "newSegment":
+    case "finishSegment":
       timeline.newSegment();
       return;
     case "undo":

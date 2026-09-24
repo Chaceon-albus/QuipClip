@@ -74,7 +74,7 @@ struct CommandItem {
 /// Settings, in the application submenu.
 const SETTINGS_ITEM: CommandItem = CommandItem {
     id: "quipclip.settings",
-    label: "Settings...",
+    label: "Settings…",
     accelerator: "CmdOrCtrl+,",
     action: "openSettings",
 };
@@ -82,7 +82,7 @@ const SETTINGS_ITEM: CommandItem = CommandItem {
 /// Open Media, in the File submenu.
 const OPEN_MEDIA_ITEM: CommandItem = CommandItem {
     id: "quipclip.open-media",
-    label: "Open Media...",
+    label: "Open Media…",
     accelerator: "CmdOrCtrl+O",
     action: "openMedia",
 };
@@ -90,7 +90,7 @@ const OPEN_MEDIA_ITEM: CommandItem = CommandItem {
 /// Export, in the File submenu.
 const EXPORT_ITEM: CommandItem = CommandItem {
     id: "quipclip.export",
-    label: "Export...",
+    label: "Export…",
     accelerator: "CmdOrCtrl+E",
     action: "export",
 };
@@ -319,9 +319,10 @@ mod tests {
     #[test]
     fn the_labels_are_the_labels_of_the_title_bar_menu() {
         // `titleBar.menu.openMedia` and `titleBar.menu.export` in `src/i18n/locales/en.ts`.
-        // The settings item has no title bar entry, and its label is the standard one.
-        assert_eq!(OPEN_MEDIA_ITEM.label, "Open Media...");
-        assert_eq!(EXPORT_ITEM.label, "Export...");
-        assert_eq!(SETTINGS_ITEM.label, "Settings...");
+        // The settings item has no title bar entry, and its label is the standard one. Each
+        // label ends in the ellipsis character (U+2026), because each item opens a window.
+        assert_eq!(OPEN_MEDIA_ITEM.label, "Open Media…");
+        assert_eq!(EXPORT_ITEM.label, "Export…");
+        assert_eq!(SETTINGS_ITEM.label, "Settings…");
     }
 }

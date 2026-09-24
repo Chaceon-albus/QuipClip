@@ -122,7 +122,9 @@ export function StatusBar() {
   //
   // - Left group: the open source and the playback-position chip. The chip comes right
   //   after the source, because it is the only place that says why Mark In, Mark Out, and
-  //   Split are unavailable. The group takes the free width and clips what does not fit.
+  //   Split are unavailable. The group takes the free width. The source item keeps its full
+  //   width, and the chip can shrink: when the group is too narrow, its text ends in an
+  //   ellipsis before the group clips anything.
   // - Right group: the application services. FFmpeg, the export indicator, and the settings
   //   button. The group never shrinks.
   //
@@ -180,7 +182,7 @@ export function StatusBar() {
               {/* Focusable with no role, for the same reason as the source item. */}
               <span
                 tabIndex={0}
-                className={cn(statusBarItem({ tone: playbackHint.tone }), "shrink-0")}
+                className={statusBarItem({ tone: playbackHint.tone })}
                 data-tone={playbackHint.tone}
               >
                 {playbackHint.tone === "warning" ? (

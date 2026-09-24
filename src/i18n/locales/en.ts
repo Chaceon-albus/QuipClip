@@ -17,8 +17,8 @@ export const en = {
   titleBar: {
     menu: {
       file: "File",
-      openMedia: "Open Media...",
-      export: "Export...",
+      openMedia: "Open Media…",
+      export: "Export…",
     },
     action: {
       export: "Export",
@@ -44,10 +44,10 @@ export const en = {
   preview: {
     empty: {
       title: "Open a video to start marking segments",
-      openVideo: "Open Video...",
+      openVideo: "Open Video…",
       dropHint: "or drop a video file here",
     },
-    loading: "Loading media...",
+    loading: "Loading media…",
     // Screen reader text only. A polite live region says it once when the buffering spinner
     // shows: during playback, the video waited for data for more than a short time.
     buffering: "Buffering",
@@ -120,7 +120,7 @@ export const en = {
         convertH264: "Convert the video to H.264 (8-bit, 4:2:0) MP4 to preview it.",
         convertMp4: "Convert the video to MP4 to preview it.",
       },
-      openAnother: "Open Another File...",
+      openAnother: "Open Another File…",
     },
     // The notices over an open video. An import error stays until the user dismisses it or
     // opens another file. A playback error leaves by itself after a few seconds. `dismiss`
@@ -132,16 +132,17 @@ export const en = {
     // state: `title`, then the `mediaError` message, then `ffmpegHint` for an error that the
     // FFmpeg settings can correct, then the actions. `ffmpegHint` names the Settings dialog
     // and its FFmpeg tab (`settings.title`, `settings.tab.ffmpeg`), and the button
-    // `chooseAnother` with its exact label. `details.show` and `details.hide` label the
-    // disclosure of the diagnostic text from the operating system or ffprobe, which is never
-    // translated, while it is closed and while it is open. They match `export.details`. The
-    // Copy button and its feedback use `common.diagnostic`.
+    // `chooseAnother` with its label. Running text names a label without its ellipsis.
+    // `details.show` and `details.hide` label the disclosure of the diagnostic text from the
+    // operating system or ffprobe, which is never translated, while it is closed and while it
+    // is open. They match `export.details`. The Copy button and its feedback use
+    // `common.diagnostic`.
     importError: {
       title: "QuipClip could not open the video",
       ffmpegHint:
-        "Install FFmpeg, or set its location in Settings > FFmpeg. Then choose the video again with Choose Another File...",
-      chooseAnother: "Choose Another File...",
-      openSettings: "Open Settings...",
+        "Install FFmpeg, or set its location in Settings > FFmpeg. Then choose the video again with Choose Another File.",
+      chooseAnother: "Choose Another File…",
+      openSettings: "Open Settings…",
       details: {
         show: "Show Details",
         hide: "Hide Details",
@@ -186,11 +187,16 @@ export const en = {
       markIn: "In",
       markInAria: "Mark In Point",
       markOut: "Out",
-      markOutAria: "Mark Out Point (Exclusive)",
+      markOutAria: "Mark Out Point (First Frame After the Segment)",
       split: "Split",
       splitAria: "Split Segment at Playhead",
-      newSegment: "New",
-      newSegmentAria: "Start New Segment",
+      // Ends the segment that is being built: the current segment, or a pending In point.
+      // The next Mark In then starts a new segment. The English word "finish" also names
+      // the last phase of an export, when QuipClip saves the output file
+      // (`export.status.publishing`, `statusBar.export.publishing`). The two are different
+      // actions, so a translation can use a different word for each.
+      finishSegment: "Finish",
+      finishSegmentAria: "Finish Segment",
       deleteSegment: "Delete",
       deleteSegmentAria: "Delete Current Segment",
       play: "Play",
@@ -245,12 +251,14 @@ export const en = {
     segmentLabel:
       "Segment {{index}}, In {{inTime}}, Out {{outTime}}, duration {{duration}}",
     segmentDescription:
-      "Export order: {{order}} of {{total}}. The Out point is not included.",
+      "Export order: {{order}} of {{total}}. The Out point is the first frame after the segment.",
+    // `notIncluded` follows the Out time in the tooltip. The Out time is the first frame
+    // after the segment.
     segmentTooltip: {
       exportOrder: "Export order: {{order}} of {{total}}",
       in: "In",
       out: "Out",
-      notIncluded: "(not included)",
+      notIncluded: "(not in the segment)",
       duration: "Duration",
     },
     pendingInFlag: "In",
@@ -270,23 +278,24 @@ export const en = {
     pathNotFound: "The selected file was not found.",
     pathNotFile: "The selected path is not a regular file.",
     pathNotUnicode: "The file path contains invalid Unicode characters.",
-    metadataFailed: "Failed to read file metadata.",
+    metadataFailed: "QuipClip could not read the file metadata.",
     unsafeMetadata: "The file metadata exceeds safe limits.",
     appDataUnavailable: "The application data directory is unavailable.",
-    ffmpegPairMissing: "Required FFmpeg or ffprobe executable was not found.",
-    ffprobeSpawnFailed: "Failed to start the ffprobe process.",
-    ffprobeProcessFailed: "ffprobe failed to inspect the media file.",
-    ffprobeParseFailed: "Failed to parse media probe output.",
+    ffmpegPairMissing:
+      "QuipClip could not find the required FFmpeg or ffprobe program.",
+    ffprobeSpawnFailed: "QuipClip could not start the ffprobe process.",
+    ffprobeProcessFailed: "ffprobe could not examine the media file.",
+    ffprobeParseFailed: "QuipClip could not parse the ffprobe output.",
     ffprobeTimedOut:
       "ffprobe did not answer in time. The file might be on a drive or a share that stopped responding.",
-    assetScopeDenied: "Access to the media file was denied by the asset protocol.",
-    commandExecutionFailed: "The media import command failed to execute.",
-    dialogFailed: "Failed to open the file selection dialog.",
+    assetScopeDenied: "The asset protocol denied access to the media file.",
+    commandExecutionFailed: "QuipClip could not run the media import command.",
+    dialogFailed: "QuipClip could not open the file selection dialog.",
     unknown: "An unknown error occurred while importing media.",
   },
   playbackError: {
-    playbackFailed: "Failed to start playback.",
-    seekFailed: "Failed to seek to the requested position.",
+    playbackFailed: "QuipClip could not start playback.",
+    seekFailed: "QuipClip could not seek to the requested position.",
   },
   statusBar: {
     source: {
@@ -300,26 +309,32 @@ export const en = {
     ffmpeg: {
       settingsHint: "Click to open FFmpeg settings.",
     },
-    approximatePosition: "Approximate position",
+    // The warning chip for a video that cannot calibrate. It stays for the whole session, so
+    // its tooltip, `approximatePositionDetail` then `approximatePositionMarks`, gives a next
+    // step. `approximatePosition` is also the accessible name of the badge beside the
+    // preview timecode, which shows the same tooltip.
+    approximatePosition: "Approximate position · marking unavailable",
     approximatePositionDetail:
-      "The playhead follows the browser clock, not the exact frame timestamp.",
+      "The playhead follows the system player clock, not the exact frame timestamp.",
     approximatePositionMarks:
-      "Mark In, Mark Out, and Split stay unavailable until the exact frame timestamp is known.",
+      "Mark In, Mark Out, and Split are unavailable for this video. They can become available if you convert the video to MP4 and open the converted file.",
     // The neutral chip while a video that was just opened calibrates. It names the preview, so
     // it cannot be read as `export.preparing`. Its tooltip shows `preparingPositionDetail`,
-    // then `approximatePositionMarks`.
-    preparingPosition: "Preparing the preview...",
+    // then `preparingPositionMarks`.
+    preparingPosition: "Preparing the preview…",
     preparingPositionDetail:
       "The preview waits for the first frame of the video to find the exact frame timestamps.",
+    preparingPositionMarks:
+      "Mark In, Mark Out, and Split stay unavailable until the exact frame timestamp is known.",
     settings: "Settings",
     export: {
-      preparing: "Preparing export",
+      preparing: "Preparing export…",
       running: "Exporting {{percent}}",
-      runningUnknown: "Exporting",
+      runningUnknown: "Exporting…",
       runningWithRemaining: "Exporting {{percent}} · {{time}} left",
       remaining: "{{time}} left",
-      publishing: "Finishing",
-      canceling: "Stopping",
+      publishing: "Finishing…",
+      canceling: "Stopping…",
       // A Stop request failed, and the export continues (ADR 025).
       stopFailed: "Stop failed · export continues",
       finished: "Export finished",
@@ -362,13 +377,13 @@ export const en = {
       section: "FFmpeg Location",
       pathLabel: "FFmpeg in Use",
       pathUnset: "No path set",
-      chooseFolder: "Choose Folder...",
-      chooseFile: "Choose File...",
+      chooseFolder: "Choose Folder…",
+      chooseFile: "Choose File…",
       useAutomatic: "Use Automatic Detection",
       reprobe: "Check Again",
       // Spoken once when a check starts. The visible status line gives the steps.
-      checking: "Checking FFmpeg...",
-      hint: "Choose a folder or a single file. A folder that holds both FFmpeg and FFprobe is preferred.",
+      checking: "Checking FFmpeg…",
+      hint: "Choose a folder or a single file. If possible, choose a folder that holds both FFmpeg and ffprobe.",
       source: {
         user: "Chosen by you:",
         automatic: "Detected automatically:",
@@ -445,7 +460,7 @@ export const en = {
       restoreDialog: {
         title: "Restore the built-in presets?",
         description:
-          "This restores the built-in presets to their original settings and adds back any you deleted. It replaces the changes you made to them. Your own presets and the FFmpeg location stay as they are.",
+          "This restores the built-in presets to their original settings, including the built-in presets that you deleted. It replaces the changes that you made to them. Your own presets and the FFmpeg location stay as they are.",
       },
       groupGeneral: "General",
       groupVideo: "Video",
@@ -498,7 +513,7 @@ export const en = {
       reasonFailed: "The encoder failed its test on this machine.",
       reasonTimedOut: "The encoder did not respond in time.",
       reasonNotTested:
-        "QuipClip tests a fixed set of encoders, and this name is not in it. Whether this FFmpeg build has it is unknown until an export uses it.",
+        "QuipClip tests a fixed set of encoders, and this name is not in that set. QuipClip does not know whether this FFmpeg build has the encoder until an export uses it.",
       reasonNotProbed: "The capability probe has not reported on this encoder yet.",
       customLabel: "Custom Encoder Name",
       customHint:
@@ -522,7 +537,7 @@ export const en = {
     close: "Close",
     save: "Save",
     error: "Error",
-    loading: "Loading...",
+    loading: "Loading…",
     diagnostic: {
       copy: "Copy",
       copied: "Copied",
@@ -532,8 +547,8 @@ export const en = {
   },
   ffmpeg: {
     status: {
-      locating: "Locating FFmpeg...",
-      probing: "Probing FFmpeg ({{done}}/{{total}})...",
+      locating: "Locating FFmpeg…",
+      probing: "Probing FFmpeg ({{done}}/{{total}})…",
       ready: "FFmpeg {{version}} ({{working}} of {{tested}} encoders work)",
       readyShort: "FFmpeg {{version}}",
       missing: "FFmpeg missing",
@@ -564,32 +579,34 @@ export const en = {
   },
   ffmpegError: {
     appDataUnavailable: "The application data directory is unavailable.",
-    ffmpegPairMissing: "Required FFmpeg or ffprobe executable was not found.",
-    ffmpegSpawnFailed: "Failed to start the FFmpeg process.",
-    ffmpegProcessFailed: "FFmpeg process failed during capability probing.",
-    versionParseFailed: "Failed to parse FFmpeg version output.",
-    encoderListParseFailed: "Failed to parse FFmpeg encoder list.",
-    cacheUnavailable: "FFmpeg capability cache is unavailable.",
-    commandExecutionFailed: "The FFmpeg capability probe command failed to execute.",
+    ffmpegPairMissing:
+      "QuipClip could not find the required FFmpeg or ffprobe program.",
+    ffmpegSpawnFailed: "QuipClip could not start the FFmpeg process.",
+    ffmpegProcessFailed: "The FFmpeg process failed during capability probing.",
+    versionParseFailed: "QuipClip could not parse the FFmpeg version output.",
+    encoderListParseFailed: "QuipClip could not parse the FFmpeg encoder list.",
+    cacheUnavailable: "The FFmpeg capability cache is unavailable.",
+    commandExecutionFailed:
+      "QuipClip could not run the FFmpeg capability probe command.",
     unknown: "An unknown error occurred while probing FFmpeg.",
   },
   settingsError: {
     appDataUnavailable: "The application data directory is unavailable.",
-    readFailed: "Failed to read the settings file.",
-    permissionDenied: "Permission was denied while accessing the settings file.",
-    writeFailed: "Failed to write the settings file.",
+    readFailed: "QuipClip could not read the settings file.",
+    permissionDenied: "QuipClip does not have permission to access the settings file.",
+    writeFailed: "QuipClip could not write the settings file.",
     invalidJson: "The settings file contains invalid JSON.",
     invalidSettings: "The settings file contains invalid settings values.",
     unsafeSettingsValue: "A settings value exceeds safe limits.",
     futureSchemaVersion: "The settings file is from a newer version of QuipClip.",
     settingsUnreadable:
-      "The existing settings file could not be read, so it was not overwritten.",
+      "QuipClip could not read the existing settings file, so it did not overwrite the file.",
     settingsConflict:
-      "Another window or another copy of QuipClip saved the settings after this copy loaded them. This save was refused so that the other change is not lost. The settings shown are now the ones on disk. Apply your change again.",
-    backupFailed: "Failed to back up the existing settings file.",
+      "Another window or another copy of QuipClip saved the settings after this copy loaded them. QuipClip did not save your change, so that it does not replace the other change. The settings shown are now the ones on disk. Apply your change again.",
+    backupFailed: "QuipClip could not back up the existing settings file.",
     invalidPath: "The configured FFmpeg path is invalid.",
-    commandExecutionFailed: "The settings command failed to execute.",
-    dialogFailed: "Failed to open the file selection dialog.",
+    commandExecutionFailed: "QuipClip could not run the settings command.",
+    dialogFailed: "QuipClip could not open the file selection dialog.",
     unknown: "An unknown error occurred while processing settings.",
   },
   export: {
@@ -626,15 +643,15 @@ export const en = {
       settingsErrorHint: "Open Settings to repair or reset the settings file.",
     },
     status: {
-      preparing: "Preparing export...",
-      running: "Exporting...",
-      runningPercent: "Exporting... {{percent}}",
+      preparing: "Preparing export…",
+      running: "Exporting…",
+      runningPercent: "Exporting {{percent}}",
       remaining: "About {{time}} left",
       frames: "Frame {{frame}} of {{expectedFrames}}",
       speed: "{{speed}}×",
-      publishing: "Finishing...",
+      publishing: "Finishing…",
       canceled: "The export was stopped.",
-      canceling: "Stopping...",
+      canceling: "Stopping…",
       cancelingNote:
         "If the export is already finishing, it can still save the output file.",
       cancelingNotePublishing:
@@ -667,7 +684,7 @@ export const en = {
     action: {
       chooseDestination: "Export…",
       exportAnyway: "Export Anyway",
-      reimport: "Re-import",
+      reimport: "Re-import…",
       runInBackground: "Run in Background",
       stop: "Stop Export",
       stopConfirm: "Confirm Stop",
@@ -676,9 +693,9 @@ export const en = {
       revealWindows: "Show in File Explorer",
       open: "Open",
       done: "Done",
-      openSettings: "Open Settings...",
+      openSettings: "Open Settings…",
       // Under the preset select of the setup step. Opens the Presets tab of Settings.
-      managePresets: "Manage Presets...",
+      managePresets: "Manage Presets…",
       back: "Back",
     },
     details: {
@@ -699,39 +716,42 @@ export const en = {
   },
   exportError: {
     appDataUnavailable: "The application data directory is unavailable.",
-    settingsUnreadable: "The settings file could not be read.",
+    settingsUnreadable: "QuipClip could not read the settings file.",
     presetNotFound: "The selected export preset was not found.",
-    ffmpegPairMissing: "Required FFmpeg or ffprobe executable was not found.",
-    ffprobeSpawnFailed: "Failed to start the ffprobe process.",
-    ffprobeProcessFailed: "ffprobe failed to inspect the media file.",
-    ffprobeParseFailed: "Failed to parse media probe output.",
+    ffmpegPairMissing:
+      "QuipClip could not find the required FFmpeg or ffprobe program.",
+    ffprobeSpawnFailed: "QuipClip could not start the ffprobe process.",
+    ffprobeProcessFailed: "ffprobe could not examine the media file.",
+    ffprobeParseFailed: "QuipClip could not parse the ffprobe output.",
     ffprobeTimedOut:
       "ffprobe did not answer in time. The file might be on a drive or a share that stopped responding.",
     noSegments: "No segments are marked for export.",
     tooManySegments: "Too many segments are marked for export (maximum is 100).",
-    invalidSegment: "One or more export segments have invalid start or end points.",
+    invalidSegment: "One or more export segments have invalid In or Out points.",
     sourcePathInvalid: "The source file path is invalid.",
     sourceNotFound: "The source video file was not found.",
     sourceNotFile: "The selected source path is not a regular file.",
     outputPathInvalid: "The export destination path is invalid.",
     outputDirectoryMissing: "The export destination folder does not exist.",
     outputEqualsSource: "The export destination cannot be the same as the source file.",
-    outputNotWritable: "The destination folder cannot be written to.",
+    outputNotWritable: "QuipClip cannot write to the destination folder.",
     outputReadOnly:
       "The destination file is read-only. Unlock it, or export to a different file name.",
-    sourceFrameRateUnknown: "The source video frame rate could not be determined.",
+    sourceFrameRateUnknown:
+      "QuipClip could not determine the frame rate of the source video.",
     sourceAudioRateUnknown:
-      "The source audio sample rate could not be determined, so the audio cannot be cut exactly.",
+      "QuipClip could not determine the sample rate of the source audio, so it cannot cut the audio exactly.",
     encoderUnavailable: "The required encoder is not available on this system.",
-    ffmpegSpawnFailed: "Failed to start the FFmpeg process.",
+    ffmpegSpawnFailed: "QuipClip could not start the FFmpeg process.",
     ffmpegProcessFailed: "FFmpeg failed during video export.",
     frameCountMismatch:
-      "The exported video frame count was incorrect, so the output file was not saved.",
-    outputRenameFailed: "Failed to save the finished video to the destination path.",
+      "The frame count of the exported video was incorrect, so QuipClip did not save the output file.",
+    outputRenameFailed:
+      "QuipClip could not save the finished video to the destination path.",
     canceled: "The export was stopped.",
-    commandExecutionFailed: "The export command failed to execute.",
+    commandExecutionFailed: "QuipClip could not run the export command.",
     exportAlreadyRunning: "An export is already running.",
-    dialogFailed: "Failed to open the export save dialog.",
+    dialogFailed: "QuipClip could not open the export save dialog.",
     sourceRevisionChanged:
       "The video file on disk changed after it was opened. The marked segments may no longer name the same frames.",
     unknown: "An unknown error occurred during export.",

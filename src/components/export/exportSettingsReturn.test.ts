@@ -568,7 +568,7 @@ describe("the open step that a return runs", () => {
       expect(back.readSourceRevision).toHaveBeenCalled();
     });
 
-    // "Manage Presets..." closes the dialog, which makes the Back step stale, and the
+    // "Manage Presets…" closes the dialog, which makes the Back step stale, and the
     // settings dialog closes again before the check of the Back step answers.
     generation.invalidate();
     const again = pendingOpenStep();

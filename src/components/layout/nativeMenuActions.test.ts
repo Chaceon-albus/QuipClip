@@ -200,7 +200,7 @@ describe("the command items of the Rust menu", () => {
     expect(labels.get("openMedia")).toBe(en.titleBar.menu.openMedia);
     expect(labels.get("export")).toBe(en.titleBar.menu.export);
     // The title bar has no Settings item. The label is the standard macOS label, with the
-    // three-dot ellipsis of the catalogs.
-    expect(labels.get("openSettings")).toBe(`${en.settings.title}...`);
+    // ellipsis character of the catalogs.
+    expect(labels.get("openSettings")).toBe(`${en.settings.title}…`);
   });
 });

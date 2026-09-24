@@ -213,7 +213,7 @@ function createStoreHarness({ anchored = true }: { anchored?: boolean } = {}) {
       case "markOut":
         timeline.getState().markOut(command.pts);
         return;
-      case "newSegment":
+      case "finishSegment":
         timeline.getState().newSegment();
         return;
       default:
@@ -871,17 +871,17 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("deleteSegment", pending)).toBeNull();
     });
 
-    it("finishes a current segment or a pending In mark, with the New Segment call", () => {
+    it("finishes a current segment or a pending In mark, with the newSegment call", () => {
       expect(planShortcutCommand("finishSegment", createSnapshot())).toBeNull();
       const current = createSnapshot({
         timeline: { segments: [segment("a", "0", "3000")], currentSegmentId: "a" },
       });
       expect(planShortcutCommand("finishSegment", current)).toEqual({
-        kind: "newSegment",
+        kind: "finishSegment",
       });
       const pending = createSnapshot({ timeline: { pendingInPts: pts("0") } });
       expect(planShortcutCommand("finishSegment", pending)).toEqual({
-        kind: "newSegment",
+        kind: "finishSegment",
       });
     });
 
@@ -1006,7 +1006,7 @@ describe("planShortcutCommand", () => {
       expect(h.element.currentTimeSets).toBe(seeks);
       expect(h.shownPts()).toBe("50");
 
-      expect(h.press("finishSegment")).toEqual({ kind: "newSegment" });
+      expect(h.press("finishSegment")).toEqual({ kind: "finishSegment" });
       expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "50" });
       expect(h.timeline.getState().pendingInPts).toBe("50");
     });

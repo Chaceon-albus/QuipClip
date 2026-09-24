@@ -204,7 +204,7 @@ export function ExportDialog({
   const contentRef = useRef<HTMLDivElement>(null);
   // The element that held the focus when the dialog opened, or null. It takes the focus back
   // when the dialog closes. The settings dialog also gives the focus back to it, because the
-  // "Open Settings..." button is gone by then.
+  // "Open Settings…" button is gone by then.
   const openerRef = useRef<HTMLElement | null>(null);
   // What the setup step showed while the settings dialog that it opened is open. The dialog
   // opens again on the setup step when that settings dialog closes (`exportSettingsReturn.ts`).
@@ -823,7 +823,7 @@ export function ExportDialog({
         }
 
         // The notice of a failed Stop request hides while the next Stop request is
-        // outstanding, because the Stop button then says "Stopping...".
+        // outstanding, because the Stop button then says "Stopping…".
         if (!showsOutcomeNotice(outcome, frame.cancelRequested)) {
           return null;
         }
@@ -914,7 +914,7 @@ export function ExportDialog({
               opener instanceof HTMLElement && opener !== document.body ? opener : null;
           }
           // Radix would focus the first tabbable element. The footer names the control
-          // instead (`resolveExportDialogFocusOrder`): "Export..." on the setup step, Cancel
+          // instead (`resolveExportDialogFocusOrder`): "Export…" on the setup step, Cancel
           // on the confirmation, Done on a finished run, and else the dialog itself, so Tab
           // reaches the first control of the body. The dialog is open here, so the footer is
           // the live one.

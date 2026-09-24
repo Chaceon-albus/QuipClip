@@ -184,7 +184,7 @@ export type ExportProgressUpdateEvent = {
  * containers and not for Matroska, and where it is set it runs inside ffmpeg before the process
  * exits. That is why this phase is not called "finalizing" or "post-processing".
  *
- * The user interface must NOT show the word "publishing" -- it renders as "Finishing...".
+ * The user interface must NOT show the word "publishing" -- it renders as "Finishing…".
  * That is the ADR 011 split: a stable code crosses the boundary, the frontend translates.
  */
 export type ExportPublishingEvent = {

@@ -72,7 +72,7 @@ export type SettingsPanelState = {
    * the dialog gives the focus back to the element that held it when the dialog opened.
    *
    * A caller sets it when its own control leaves the document as the dialog opens. The
-   * "Open Settings..." button of the export dialog is one: the export dialog closes first,
+   * "Open Settings…" button of the export dialog is one: the export dialog closes first,
    * so the button that held the focus is gone when the settings dialog closes.
    */
   returnFocus: SettingsFocusReturnTarget | null;

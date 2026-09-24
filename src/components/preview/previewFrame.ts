@@ -144,7 +144,7 @@ export function formatPreviewCurrentTime(
  * make the badge flicker on every frame step.
  *
  * While the calibration runs, the badge does not show. That state ends at the first presented
- * frame, and the status bar says "Preparing the preview..." in the neutral tone, so a warning
+ * frame, and the status bar says "Preparing the preview…" in the neutral tone, so a warning
  * mark there would flash on every open.
  *
  * While the decode-failure panel replaces the picture, the source plays nothing, so there is

@@ -106,7 +106,7 @@ export type ShortcutCommand =
   | { readonly kind: "markIn"; readonly pts: Pts }
   | { readonly kind: "markOut"; readonly pts: Pts }
   | { readonly kind: "deleteSegment" }
-  | { readonly kind: "newSegment" }
+  | { readonly kind: "finishSegment" }
   | { readonly kind: "undo" }
   | { readonly kind: "redo" }
   | { readonly kind: "openMedia" }
@@ -425,7 +425,7 @@ export function planShortcutCommand(
         currentSegmentOf(timeline),
         timeline.pendingInPts,
       )
-        ? { kind: "newSegment" }
+        ? { kind: "finishSegment" }
         : null;
 
     case "undo":

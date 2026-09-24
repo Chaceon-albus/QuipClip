@@ -61,7 +61,7 @@ describe("playbackHintPresenter", () => {
         lineKey: "statusBar.preparingPosition",
         detail: [
           "statusBar.preparingPositionDetail",
-          "statusBar.approximatePositionMarks",
+          "statusBar.preparingPositionMarks",
         ],
         tone: "neutral",
       });
@@ -125,6 +125,7 @@ describe("playbackHintPresenter", () => {
       "statusBar.approximatePositionMarks",
       "statusBar.preparingPosition",
       "statusBar.preparingPositionDetail",
+      "statusBar.preparingPositionMarks",
     ];
 
     it.each(emittedKeys)(

@@ -238,7 +238,7 @@ describe("presentFfmpegSource", () => {
         kind: "unset",
       });
       // A choose or a check in flight keeps this state until its probe starts, so the tab
-      // does not say "Locating FFmpeg..." while the file picker is open.
+      // does not say "Locating FFmpeg…" while the file picker is open.
       expect(presentFfmpegSource(pathView({ pending: true }), state, "macos")).toEqual({
         kind: "unset",
       });

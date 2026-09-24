@@ -22,7 +22,7 @@ export function getDialogPlatform(): DialogPlatform {
  * What an action of a dialog footer does. The role decides where the action goes, and the
  * style of its button does not.
  *
- * - `primary`: the action that the dialog proposes, such as Save, "Export...", or Delete. It
+ * - `primary`: the action that the dialog proposes, such as Save, "Export…", or Delete. It
  *   is usually the default button. A footer has one at most.
  * - `cancel`: the button that goes back, or closes the dialog when nothing is left to do, and
  *   changes nothing, such as Cancel, Close, Done, or Keep Editing. It can be the default

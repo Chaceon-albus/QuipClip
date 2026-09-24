@@ -1010,7 +1010,7 @@ describe("i18next runtime initialization and fallback behavior", () => {
     expect(instanceWithFallback.language).toBe("fr");
 
     // i18next fallbackLng must kick in and return the English source message
-    expect(instanceWithFallback.t("titleBar.menu.openMedia")).toBe("Open Media...");
+    expect(instanceWithFallback.t("titleBar.menu.openMedia")).toBe("Open Media…");
     expect(instanceWithFallback.t("app.name")).toBe("QuipClip");
 
     // 2. Control instance without fallbackLng to prove fallbackLng is essential
@@ -1025,7 +1025,7 @@ describe("i18next runtime initialization and fallback behavior", () => {
       },
     });
 
-    // Without fallbackLng, i18next returns the raw key instead of "Open Media..."
+    // Without fallbackLng, i18next returns the raw key instead of "Open Media…"
     expect(instanceWithoutFallback.t("titleBar.menu.openMedia")).toBe(
       "titleBar.menu.openMedia",
     );
@@ -1042,7 +1042,7 @@ describe("immediate language change, event subscription, and persistence across 
     });
 
     expect(instance.isInitialized).toBe(true);
-    expect(instance.t("titleBar.menu.openMedia")).toBe("Open Media...");
+    expect(instance.t("titleBar.menu.openMedia")).toBe("Open Media…");
 
     // Setup languageChanged event subscriber
     const languageChangeEvents: string[] = [];
@@ -1058,7 +1058,7 @@ describe("immediate language change, event subscription, and persistence across 
     });
     expect(resolvedZh).toBe("zh-CN");
     expect(getResolvedLanguage(instance)).toBe("zh-CN");
-    expect(instance.t("titleBar.menu.openMedia")).toBe("打开媒体...");
+    expect(instance.t("titleBar.menu.openMedia")).toBe("打开媒体…");
     expect(storage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-CN");
     expect(subscriber).toHaveBeenCalledWith("zh-CN");
 
@@ -1069,7 +1069,7 @@ describe("immediate language change, event subscription, and persistence across 
     });
     expect(resolvedEn).toBe("en");
     expect(getResolvedLanguage(instance)).toBe("en");
-    expect(instance.t("titleBar.menu.openMedia")).toBe("Open Media...");
+    expect(instance.t("titleBar.menu.openMedia")).toBe("Open Media…");
     expect(storage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
     expect(subscriber).toHaveBeenCalledWith("en");
 
@@ -1090,7 +1090,7 @@ describe("immediate language change, event subscription, and persistence across 
 
     expect(recreatedInstance.isInitialized).toBe(true);
     expect(recreatedInstance.resolvedLanguage).toBe("zh-CN");
-    expect(recreatedInstance.t("titleBar.menu.openMedia")).toBe("打开媒体...");
+    expect(recreatedInstance.t("titleBar.menu.openMedia")).toBe("打开媒体…");
     expect(getLanguagePreference(storage)).toBe("zh-CN");
   });
 
@@ -1104,7 +1104,7 @@ describe("immediate language change, event subscription, and persistence across 
       initialPreference: "system",
     });
     expect(instance.resolvedLanguage).toBe("zh-CN");
-    expect(instance.t("titleBar.menu.export")).toBe("导出...");
+    expect(instance.t("titleBar.menu.export")).toBe("导出…");
 
     // 2. Override explicitly to English
     await setLanguagePreference("en", {
@@ -1113,7 +1113,7 @@ describe("immediate language change, event subscription, and persistence across 
       instance,
     });
     expect(getResolvedLanguage(instance)).toBe("en");
-    expect(instance.t("titleBar.menu.export")).toBe("Export...");
+    expect(instance.t("titleBar.menu.export")).toBe("Export…");
     expect(storage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
 
     // 3. Return setting to 'system'
@@ -1127,7 +1127,7 @@ describe("immediate language change, event subscription, and persistence across 
 
     // 4. Verify system resolution dictates active language (zh-CN for zh-TW)
     expect(getResolvedLanguage(instance)).toBe("zh-CN");
-    expect(instance.t("titleBar.menu.export")).toBe("导出...");
+    expect(instance.t("titleBar.menu.export")).toBe("导出…");
 
     // 5. Recreate runtime with system setting on an English system -> should resolve to en
     const enSystemInstance = await createI18nInstance({
@@ -1135,7 +1135,7 @@ describe("immediate language change, event subscription, and persistence across 
       systemLanguages: ["en-GB"],
     });
     expect(enSystemInstance.resolvedLanguage).toBe("en");
-    expect(enSystemInstance.t("titleBar.menu.export")).toBe("Export...");
+    expect(enSystemInstance.t("titleBar.menu.export")).toBe("Export…");
   });
 });
 
@@ -1351,8 +1351,8 @@ describe("application shell localization and status bar formatting", () => {
     // TitleBar
     expect(instance.t("app.name")).toBe("QuipClip");
     expect(instance.t("titleBar.menu.file")).toBe("File");
-    expect(instance.t("titleBar.menu.openMedia")).toBe("Open Media...");
-    expect(instance.t("titleBar.menu.export")).toBe("Export...");
+    expect(instance.t("titleBar.menu.openMedia")).toBe("Open Media…");
+    expect(instance.t("titleBar.menu.export")).toBe("Export…");
     expect(instance.t("titleBar.action.export")).toBe("Export");
     expect(instance.t("titleBar.exportTooltip.openVideoFirst")).toBe(
       "Open a video first",
@@ -1386,7 +1386,7 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("preview.empty.title")).toBe(
       "Open a video to start marking segments",
     );
-    expect(instance.t("preview.empty.openVideo")).toBe("Open Video...");
+    expect(instance.t("preview.empty.openVideo")).toBe("Open Video…");
 
     // TransportBar
     expect(instance.t("transport.action.undo")).toBe("Undo");
@@ -1395,10 +1395,12 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.markInAria")).toBe("Mark In Point");
     expect(instance.t("transport.action.markOut")).toBe("Out");
     expect(instance.t("transport.action.markOutAria")).toBe(
-      "Mark Out Point (Exclusive)",
+      "Mark Out Point (First Frame After the Segment)",
     );
     expect(instance.t("transport.action.split")).toBe("Split");
     expect(instance.t("transport.action.splitAria")).toBe("Split Segment at Playhead");
+    expect(instance.t("transport.action.finishSegment")).toBe("Finish");
+    expect(instance.t("transport.action.finishSegmentAria")).toBe("Finish Segment");
     expect(instance.t("transport.action.play")).toBe("Play");
     expect(instance.t("transport.action.pause")).toBe("Pause");
     expect(instance.t("transport.action.previousStep")).toBe("Step Back One Frame");
@@ -1427,12 +1429,12 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.ffmpeg.section")).toBe("FFmpeg Location");
     expect(instance.t("settings.ffmpeg.pathLabel")).toBe("FFmpeg in Use");
     expect(instance.t("settings.ffmpeg.pathUnset")).toBe("No path set");
-    expect(instance.t("settings.ffmpeg.chooseFolder")).toBe("Choose Folder...");
-    expect(instance.t("settings.ffmpeg.chooseFile")).toBe("Choose File...");
+    expect(instance.t("settings.ffmpeg.chooseFolder")).toBe("Choose Folder…");
+    expect(instance.t("settings.ffmpeg.chooseFile")).toBe("Choose File…");
     expect(instance.t("settings.ffmpeg.useAutomatic")).toBe("Use Automatic Detection");
     expect(instance.t("settings.ffmpeg.reprobe")).toBe("Check Again");
     expect(instance.t("settings.ffmpeg.hint")).toBe(
-      "Choose a folder or a single file. A folder that holds both FFmpeg and FFprobe is preferred.",
+      "Choose a folder or a single file. If possible, choose a folder that holds both FFmpeg and ffprobe.",
     );
 
     // Settings: export presets
@@ -1554,8 +1556,8 @@ describe("application shell localization and status bar formatting", () => {
     // TitleBar
     expect(instance.t("app.name")).toBe("QuipClip");
     expect(instance.t("titleBar.menu.file")).toBe("文件");
-    expect(instance.t("titleBar.menu.openMedia")).toBe("打开媒体...");
-    expect(instance.t("titleBar.menu.export")).toBe("导出...");
+    expect(instance.t("titleBar.menu.openMedia")).toBe("打开媒体…");
+    expect(instance.t("titleBar.menu.export")).toBe("导出…");
     expect(instance.t("titleBar.action.export")).toBe("导出");
     expect(instance.t("titleBar.exportTooltip.openVideoFirst")).toBe(
       "请先打开一个视频",
@@ -1587,7 +1589,7 @@ describe("application shell localization and status bar formatting", () => {
 
     // PreviewPane
     expect(instance.t("preview.empty.title")).toBe("打开视频，开始标记片段");
-    expect(instance.t("preview.empty.openVideo")).toBe("打开视频...");
+    expect(instance.t("preview.empty.openVideo")).toBe("打开视频…");
 
     // TransportBar
     expect(instance.t("transport.action.undo")).toBe("撤销");
@@ -1595,9 +1597,13 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.markIn")).toBe("入点");
     expect(instance.t("transport.action.markInAria")).toBe("标记入点");
     expect(instance.t("transport.action.markOut")).toBe("出点");
-    expect(instance.t("transport.action.markOutAria")).toBe("标记出点（不含）");
+    expect(instance.t("transport.action.markOutAria")).toBe(
+      "标记出点（片段后的第一帧）",
+    );
     expect(instance.t("transport.action.split")).toBe("分割");
     expect(instance.t("transport.action.splitAria")).toBe("在播放头处分割片段");
+    expect(instance.t("transport.action.finishSegment")).toBe("结束");
+    expect(instance.t("transport.action.finishSegmentAria")).toBe("结束片段");
     expect(instance.t("transport.action.play")).toBe("播放");
     expect(instance.t("transport.action.pause")).toBe("暂停");
     expect(instance.t("transport.action.previousStep")).toBe("后退一帧");
@@ -1620,12 +1626,12 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.ffmpeg.section")).toBe("FFmpeg 位置");
     expect(instance.t("settings.ffmpeg.pathLabel")).toBe("当前使用的 FFmpeg");
     expect(instance.t("settings.ffmpeg.pathUnset")).toBe("未设置路径");
-    expect(instance.t("settings.ffmpeg.chooseFolder")).toBe("选择文件夹...");
-    expect(instance.t("settings.ffmpeg.chooseFile")).toBe("选择文件...");
+    expect(instance.t("settings.ffmpeg.chooseFolder")).toBe("选择文件夹…");
+    expect(instance.t("settings.ffmpeg.chooseFile")).toBe("选择文件…");
     expect(instance.t("settings.ffmpeg.useAutomatic")).toBe("改用自动检测");
     expect(instance.t("settings.ffmpeg.reprobe")).toBe("重新检测");
     expect(instance.t("settings.ffmpeg.hint")).toBe(
-      "可以选择文件夹，也可以选择单个文件；建议选择同时包含 FFmpeg 和 FFprobe 的文件夹。",
+      "可以选择文件夹，也可以选择单个文件。如有可能，请选择同时包含 FFmpeg 和 ffprobe 的文件夹。",
     );
 
     // Settings: export presets

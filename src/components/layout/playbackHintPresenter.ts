@@ -21,7 +21,8 @@ export interface PlaybackHintState {
 export type PlaybackHintDetailKey =
   | "statusBar.approximatePositionDetail"
   | "statusBar.approximatePositionMarks"
-  | "statusBar.preparingPositionDetail";
+  | "statusBar.preparingPositionDetail"
+  | "statusBar.preparingPositionMarks";
 
 export interface PlaybackHintView {
   readonly lineKey: "statusBar.approximatePosition" | "statusBar.preparingPosition";
@@ -66,10 +67,14 @@ export function selectCalibrationStatus(state: PlaybackStoreState): CalibrationS
  * calibration status holds for a whole session, and it is the state that disables Mark In,
  * Mark Out, and Split.
  *
- * While the calibration runs, the hint says "Preparing the preview..." in the neutral tone.
+ * While the calibration runs, the hint says "Preparing the preview…" in the neutral tone.
  * The state ends at the first presented frame, and a navigation in it waits for that frame
  * and does not lose precise editing, so it is not a warning. Only a source that cannot
  * calibrate gets the warning.
+ *
+ * Each state has its own line about the mark actions. While the calibration runs, they wait
+ * for the exact frame timestamps. A source that cannot calibrate stays on the approximate
+ * clock for the whole session, so its line gives the next step instead.
  */
 export function presentPlaybackHint(state: PlaybackHintState): PlaybackHintView | null {
   if (!state.hasReadySource || state.calibrationStatus === "ready") {
@@ -78,10 +83,7 @@ export function presentPlaybackHint(state: PlaybackHintState): PlaybackHintView 
   if (state.calibrationStatus === "calibrating") {
     return {
       lineKey: "statusBar.preparingPosition",
-      detail: [
-        "statusBar.preparingPositionDetail",
-        "statusBar.approximatePositionMarks",
-      ],
+      detail: ["statusBar.preparingPositionDetail", "statusBar.preparingPositionMarks"],
       tone: "neutral",
     };
   }

@@ -40,7 +40,7 @@ describe("resolveExportDialogStep", () => {
     }
   });
 
-  // A deliberate tripwire. The setup step holds Manage Presets..., which closes this dialog
+  // A deliberate tripwire. The setup step holds Manage Presets…, which closes this dialog
   // and resets the export store, so the action must never show while an export runs. The step
   // itself does not check the run. It relies on this rule: only `idle` shows the setup step,
   // and no status of a live run does. A change here must move that guard into the step.
@@ -152,7 +152,7 @@ describe("resolveExportDialogFocusOrder", () => {
     }
   });
 
-  it("gives the setup step to the default button, Export...", () => {
+  it("gives the setup step to the default button, Export…", () => {
     expect(resolveExportDialogFocusOrder("setup")[0]).toBe("primary");
   });
 

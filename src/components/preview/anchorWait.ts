@@ -4,7 +4,7 @@
  * The playback store defers a navigation until the first presented frame takes the calibration
  * anchor. If the element never presents a frame, as in the case that `resolvePictureCheck`
  * describes, that navigation would never run, and the status bar would say "Preparing the
- * preview..." for good. The store holds no timers, so the pane bounds the wait.
+ * preview…" for good. The store holds no timers, so the pane bounds the wait.
  *
  * The wait runs only while the store reports a deferred navigation (`hasDeferredNavigation`).
  * It starts at the first deferred request and stops when the request runs or is dropped. With
@@ -29,7 +29,7 @@ import type {
  *
  * The two ways out cost different things. The give-up turns off precise editing for the rest of
  * the attachment, and a frame that comes later cannot turn it on again. A longer wait costs only
- * time: the playhead already shows the target, the status bar says "Preparing the preview...",
+ * time: the playhead already shows the target, the status bar says "Preparing the preview…",
  * and play ends the wait at once, because play drops the request and its first frames can take
  * the anchor. The value therefore leans long. A first frame normally follows the metadata within
  * a few hundred milliseconds, and within a few seconds from a slow drive. Eight seconds covers

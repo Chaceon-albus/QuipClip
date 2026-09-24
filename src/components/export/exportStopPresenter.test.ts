@@ -246,7 +246,7 @@ describe("presentStopButton", () => {
     });
   });
 
-  it("shows Stopping..., disabled and outlined, while a cancel is outstanding, even when armed", () => {
+  it("shows Stopping…, disabled and outlined, while a cancel is outstanding, even when armed", () => {
     expect(
       presentStopButton(createButtonInput({ cancelRequested: true, armed: true })),
     ).toEqual({

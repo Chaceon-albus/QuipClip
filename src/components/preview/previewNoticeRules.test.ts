@@ -83,14 +83,16 @@ describe("importErrorHintKey", () => {
     expect(zhCN.preview.importError.ffmpegHint).not.toBe("");
   });
 
-  it("quotes the exact label of the Choose Another File button in both catalogs", () => {
+  it("quotes the label of the Choose Another File button in both catalogs", () => {
     // The hint tells the user which button to press, so a changed label must change it too.
-    expect(en.preview.importError.ffmpegHint).toContain(
-      en.preview.importError.chooseAnother,
-    );
-    expect(zhCN.preview.importError.ffmpegHint).toContain(
-      zhCN.preview.importError.chooseAnother,
-    );
+    // Running text names a label without its ellipsis, so the hint quotes the label up to the
+    // ellipsis, and it does not quote the ellipsis.
+    for (const catalog of [en, zhCN]) {
+      const label = catalog.preview.importError.chooseAnother;
+      expect(label.endsWith("…")).toBe(true);
+      expect(catalog.preview.importError.ffmpegHint).toContain(label.slice(0, -1));
+      expect(catalog.preview.importError.ffmpegHint).not.toContain(label);
+    }
   });
 });
 

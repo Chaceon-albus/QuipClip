@@ -161,7 +161,7 @@ export function createSettingsStore(
       // This branch does NOT touch `latestRequestId`. The counter decides which of the
       // requests that were actually issued wins; a request rejected before any IPC has no
       // result to win with, and bumping the counter here would invalidate an in-flight
-      // load and leave the dialog on "Loading..." forever.
+      // load and leave the dialog on "Loading…" forever.
       if (!isSettings(next)) {
         set({
           status: "error",

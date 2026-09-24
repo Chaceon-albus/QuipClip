@@ -7,7 +7,7 @@ import {
   Play,
   Redo2,
   Scissors,
-  SquarePlus,
+  SquareCheck,
   Trash2,
   Undo2,
   Volume2,
@@ -70,7 +70,7 @@ const selectCurrentSegmentId = (s: TimelineStoreState) => s.currentSegmentId;
 const selectMarkIn = (s: TimelineStoreState) => s.markIn;
 const selectMarkOut = (s: TimelineStoreState) => s.markOut;
 const selectSplit = (s: TimelineStoreState) => s.split;
-const selectNewSegment = (s: TimelineStoreState) => s.newSegment;
+const selectFinishSegment = (s: TimelineStoreState) => s.newSegment;
 const selectDeleteSegment = (s: TimelineStoreState) => s.deleteSegment;
 const selectUndo = (s: TimelineStoreState) => s.undo;
 const selectRedo = (s: TimelineStoreState) => s.redo;
@@ -117,7 +117,7 @@ export function TransportBar() {
   const markIn = useTimelineStore(selectMarkIn);
   const markOut = useTimelineStore(selectMarkOut);
   const split = useTimelineStore(selectSplit);
-  const newSegment = useTimelineStore(selectNewSegment);
+  const finishSegment = useTimelineStore(selectFinishSegment);
   const deleteSegment = useTimelineStore(selectDeleteSegment);
   const undo = useTimelineStore(selectUndo);
   const redo = useTimelineStore(selectRedo);
@@ -207,7 +207,7 @@ export function TransportBar() {
   const redoShortcut = shortcutOf("redo");
   const markInShortcut = shortcutOf("markIn");
   const markOutShortcut = shortcutOf("markOut");
-  const newSegmentShortcut = shortcutOf("finishSegment");
+  const finishSegmentShortcut = shortcutOf("finishSegment");
   const deleteSegmentShortcut = shortcutOf("deleteSegment");
   const previousStepShortcut = shortcutOf("stepBackOneFrame");
   const playShortcut = shortcutOf("togglePlayback");
@@ -218,7 +218,7 @@ export function TransportBar() {
   const isMarkInDisabled = !isMarkInEnabled;
   const isMarkOutDisabled = !isMarkOutEnabled;
   const isSplitDisabled = !isSplitEnabled;
-  const isNewSegmentDisabled = !canFinishSegment(
+  const isFinishSegmentDisabled = !canFinishSegment(
     hasActiveSource,
     currentSegment,
     pendingInPts,
@@ -493,7 +493,7 @@ export function TransportBar() {
       <div className="flex items-center justify-start gap-4">
         <Separator orientation="vertical" className="h-8 bg-border" />
 
-        {/* Group 4: Current segment (New / Delete, icon over label) */}
+        {/* Group 4: Current segment (Finish / Delete, icon over label) */}
         <div className="flex items-center gap-1">
           <Tooltip>
             <TooltipTrigger asChild>
@@ -501,21 +501,21 @@ export function TransportBar() {
                 variant="tool-ghost"
                 size="tool-row"
                 className="min-w-12 flex-col gap-0.5 px-1.5"
-                disabled={isNewSegmentDisabled}
+                disabled={isFinishSegmentDisabled}
                 onMouseDown={preventFocusOnMouseDown}
-                onClick={newSegment}
-                aria-label={t("transport.action.newSegmentAria")}
-                aria-keyshortcuts={newSegmentShortcut?.aria}
+                onClick={finishSegment}
+                aria-label={t("transport.action.finishSegmentAria")}
+                aria-keyshortcuts={finishSegmentShortcut?.aria}
               >
-                <SquarePlus className="size-4" />
+                <SquareCheck className="size-4" />
                 <span className="text-2xs leading-none font-medium">
-                  {t("transport.action.newSegment")}
+                  {t("transport.action.finishSegment")}
                 </span>
               </Button>
             </TooltipTrigger>
             <ShortcutTooltipContent
-              label={t("transport.action.newSegmentAria")}
-              keys={newSegmentShortcut?.keys}
+              label={t("transport.action.finishSegmentAria")}
+              keys={finishSegmentShortcut?.keys}
             />
           </Tooltip>
 

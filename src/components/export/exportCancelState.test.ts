@@ -431,7 +431,7 @@ describe("isCancelEnabled on the state of a real store", () => {
     expect(store.getState().status).toBe("failed");
     expect(isCancelEnabled(store.getState())).toBe(true);
 
-    // The retry is outstanding, so the button shows "Stopping..." and takes no click.
+    // The retry is outstanding, so the button shows "Stopping…" and takes no click.
     void store.getState().cancelExport();
     expect(isCancelOutstanding(store.getState())).toBe(true);
     expect(isCancelEnabled(store.getState())).toBe(false);

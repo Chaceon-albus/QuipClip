@@ -90,7 +90,7 @@ export type ExportPhaseLabelKey =
   | "export.status.publishing"
   | "export.status.canceling";
 
-/** The catalog key of the word for a phase, such as "Finishing...". */
+/** The catalog key of the word for a phase, such as "Finishing…". */
 export function phaseLabelKey(phase: ExportProgressPhase): ExportPhaseLabelKey {
   switch (phase) {
     case "preparing":
@@ -134,8 +134,8 @@ export interface ExportReadoutView {
  * count and the speed. Each item shows only when it is known.
  *
  * A running encode with a percent shows no phase word, because the percent says that it
- * runs. Every other phase names itself: "Preparing export...", "Finishing...", "Stopping...",
- * and "Exporting..." when the total is unknown.
+ * runs. Every other phase names itself: "Preparing export…", "Finishing…", "Stopping…",
+ * and "Exporting…" when the total is unknown.
  */
 export function presentExportReadout(view: ExportProgressView): ExportReadoutView {
   const phase: ExportReadoutItem = { kind: "phase", key: phaseLabelKey(view.phase) };

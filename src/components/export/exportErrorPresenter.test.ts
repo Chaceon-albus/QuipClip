@@ -440,7 +440,7 @@ describe("showsOutcomeNotice", () => {
   });
 
   it("hides the notice of a failed Stop while the next Stop request is outstanding", () => {
-    // The Stop button says "Stopping...", and "could not stop" beside it would contradict it.
+    // The Stop button says "Stopping…", and "could not stop" beside it would contradict it.
     expect(showsOutcomeNotice(stopFailed, true)).toBe(false);
     expect(showsOutcomeNotice(stopFailed, false)).toBe(true);
   });

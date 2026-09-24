@@ -57,7 +57,7 @@ export function canRedoEdit(hasActiveSource: boolean, canRedo: boolean): boolean
 }
 
 /**
- * Finishing the named segment (New Segment) needs an active source and a segment in
+ * Finishing the named segment (Finish Segment) needs an active source and a segment in
  * progress: a current segment, or a pending In mark. With neither, nothing is in progress.
  */
 export function canFinishSegment(

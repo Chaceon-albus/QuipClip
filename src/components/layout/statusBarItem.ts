@@ -7,9 +7,10 @@ import { cva, type VariantProps } from "class-variance-authority";
  * Every item is a 24px box, so it fits the 28px bar without making it taller. An icon inline
  * with the text is 14px. The item text goes in a child span with `min-w-0 truncate`, which
  * keeps it on one line. The span shows an ellipsis only when its item is narrower than the
- * text. That happens only to the FFmpeg label, which has a maximum width. The source item and
- * the approximate-position chip are `shrink-0`: they keep their full width, and below 48rem
- * the chip text collapses to its icon before the chip could be cut.
+ * text. That happens to the FFmpeg label, which has a maximum width, and to the
+ * approximate-position chip when the left group of the bar is too full. The source item is
+ * `shrink-0`: it keeps its full width. The chip can shrink, and its icon keeps its size.
+ * Below 48rem the chip text collapses to its icon.
  *
  * Every item that uses these classes can take the focus, so the focus ring is in the base.
  * The ring is inset: the left group clips its overflow, and it would cut an outer ring.

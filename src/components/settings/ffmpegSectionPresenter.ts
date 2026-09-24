@@ -223,7 +223,7 @@ export function presentFfmpegSource(
 // ---------------------------------------------------------------------------------------
 
 export type FfmpegSectionActions = {
-  /** Choose File... and Choose Folder... */
+  /** Choose File… and Choose Folder… */
   chooseDisabled: boolean;
   /** Null when no user path is set, because automatic detection is then already in use. */
   useAutomatic: { disabled: boolean } | null;

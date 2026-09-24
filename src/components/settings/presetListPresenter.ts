@@ -48,7 +48,7 @@ export function pickDefaultPresetId(
  * Returns the preset that the tab selects when the dialog opens: the preset that the opener
  * named, when the library has it, and otherwise the default preset (`pickDefaultPresetId`).
  *
- * "Manage Presets..." of the export setup step names the preset that the step shows, so the
+ * "Manage Presets…" of the export setup step names the preset that the step shows, so the
  * tab opens on the preset that the user looked at (`SettingsPanelState.openingPresetId`).
  */
 export function pickOpeningPresetId(

@@ -513,10 +513,10 @@ describe("formatIndicatorLine", () => {
   it("gives a line with no values as one text part", async () => {
     const translate = await translatorFor("en");
     for (const [key, text] of [
-      ["statusBar.export.preparing", "Preparing export"],
-      ["statusBar.export.runningUnknown", "Exporting"],
-      ["statusBar.export.publishing", "Finishing"],
-      ["statusBar.export.canceling", "Stopping"],
+      ["statusBar.export.preparing", "Preparing export…"],
+      ["statusBar.export.runningUnknown", "Exporting…"],
+      ["statusBar.export.publishing", "Finishing…"],
+      ["statusBar.export.canceling", "Stopping…"],
     ] as const) {
       const line = formatIndicatorLine({ key }, translate, formatPercent);
       expect(line.label).toBe(text);

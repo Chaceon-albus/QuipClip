@@ -136,7 +136,7 @@ export interface StopButtonInput extends ExportCancelStateInput {
 /**
  * Presents the Stop Export button.
  *
- * An outstanding cancel shows "Stopping...". An armed, enabled button shows the confirmation
+ * An outstanding cancel shows "Stopping…". An armed, enabled button shows the confirmation
  * label. A disabled button uses the outline style. In `publishing` the button is disabled
  * (ADR 016), and the note says that the export can no longer be stopped. The note does not
  * show while a cancel is outstanding, because the progress readout already says that the stop

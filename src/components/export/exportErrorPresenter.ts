@@ -249,7 +249,7 @@ export function presentExportOutcome({
  * True when the dialog shows the notice of `outcome`.
  *
  * The notice of a failed Stop request (`stopFailed`) hides while the next Stop request is
- * outstanding (`cancelRequested`). The Stop button then says "Stopping...", and "QuipClip
+ * outstanding (`cancelRequested`). The Stop button then says "Stopping…", and "QuipClip
  * could not stop the export" beside it would contradict it. When that request fails too,
  * `cancelRequested` is false again, and the notice of the new failure shows. Every other
  * outcome always shows.

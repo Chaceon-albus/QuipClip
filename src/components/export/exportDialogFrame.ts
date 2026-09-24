@@ -27,7 +27,7 @@ export function resolveExportDialogStep(status: ExportStatus): ExportDialogStep 
  * The footers of the dialog. `DialogActions` puts the buttons of each footer in the order of
  * the platform.
  *
- * - `setup`: Cancel and "Export..." (ADR 024).
+ * - `setup`: Cancel and "Export…" (ADR 024).
  * - `run`: Stop Export and "Run in Background" (ADR 025). This is the footer of every live run
  *   (`isExportRunLive`): an active status, and also a `failed` that the store still tracks.
  *   A Stop request failed there, and the backend still encodes, so the footer offers the
@@ -84,7 +84,7 @@ export function resolveExportDialogTitleKey(
 /**
  * A control of the dialog that the focus rule can name.
  *
- * - `primary`: "Export..." of the setup step.
+ * - `primary`: "Export…" of the setup step.
  * - `setupFirstControl`: the first control of the setup step, the preset select, or Open
  *   Settings when no preset can be listed.
  * - `cancel`: Cancel of the confirmation.
@@ -100,7 +100,7 @@ export type ExportDialogFocusTarget =
  * order applies when the footer changes while the dialog is open and no control has the
  * focus, because the control that had it left with the old footer.
  *
- * - `setup`: "Export...", the default button, so Enter continues to the save dialog. While
+ * - `setup`: "Export…", the default button, so Enter continues to the save dialog. While
  *   it is disabled, the first control of the step takes the focus, because the user must
  *   change something there first. Back gives the focus to the first control in any case,
  *   because Export is disabled until the checks of the open step end (`canGoBackToSetup`).

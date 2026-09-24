@@ -1,7 +1,7 @@
 /**
  * Pure rules for the return from the settings dialog to the setup step of the export dialog.
  *
- * "Manage Presets..." and the "Open Settings..." buttons of the setup step open the settings
+ * "Manage Presets…" and the "Open Settings…" buttons of the setup step open the settings
  * dialog on the Presets tab. The export dialog closes first, so the two modal dialogs are
  * never open together. When the settings dialog closes, the export dialog opens again on the
  * setup step, with the preset choice kept, as Premiere Pro and Media Encoder do. The two
