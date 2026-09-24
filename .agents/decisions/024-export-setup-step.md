@@ -74,6 +74,21 @@ media path does nothing, and a call for another path replaces the old step, whos
 is then dropped. The check of the source revision waits at most 3 seconds, and a timeout
 counts as a failed read, so the setup step opens.
 
+(Changed on 2026-09-24.) Manage Presets... and Open Settings... in the setup step open
+Settings on the Presets tab with the preset that the step shows. The export flow, not the
+export store, keeps the chosen preset while Settings is open. When Settings closes by any
+path, the setup step opens again with this preset selected: the one the user selected in
+Settings, if it changed there and still exists; else the kept choice, if it still exists;
+else the default. The return is dropped when the store is not idle, when a run is live, or
+when the media closed or changed its path, size or modification time. A Settings opening from
+anywhere else never returns.
+
+Each return runs step 1 again, with its source check, and Export stays disabled until the
+check answers. That run replaces a step for the same file that still waits, for example the
+check of an earlier Back; otherwise that step would hold the guard, and the return would get
+no check. A close of the dialog while such a check waits leaves Export unavailable until the
+check answers, at most 3 seconds.
+
 ## Consequences
 
 - An export needs one more click.
