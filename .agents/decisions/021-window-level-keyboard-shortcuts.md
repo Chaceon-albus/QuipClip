@@ -164,6 +164,14 @@ A held `Space` starts or stops playback once. The layer takes the repeated key
 press and does nothing with it, so a held key neither scrolls the page nor starts
 and stops playback thirty times each second.
 
+(Changed on 2026-09-24.) The two step buttons repeat the same way when the user holds
+them. A primary press with no modifier steps at once. After 400 ms the button repeats
+about every 33 ms, and each repeat is one `seekNominal` request, like a key repeat. The
+click that ends the same press takes no second step. A click that no pointer press
+started, such as `Enter` or a click from assistive technology, steps once and never
+repeats. Release, a pointer that leaves the button, a lost window focus, a disabled
+button and an unmount end the repeat.
+
 ### Two fields, not one
 
 The pure function reports whether the layer owns the key press, and separately
@@ -184,8 +192,9 @@ is the fault this record removes.
   tooltips name the keys.
 - `Space` no longer operates a button that holds the focus in the main window.
   `Enter` still does. `Space` keeps its meaning inside a dialog and inside a menu,
-  where the layer does nothing, so the preset rows of the settings dialog and every
-  menu item still take it.
+  where the layer does nothing, so every menu item still takes it.
+  Later change: the preset list of the settings dialog is now a list box. Its rows
+  take the arrow keys, and `Space` there does nothing.
 - A button of the transport bar does not take the focus from a mouse click, so
   `Space` after a click on an edit action starts playback and does not repeat that
   action. A button still takes the focus from the Tab key.

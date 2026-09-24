@@ -93,6 +93,15 @@ the key of one source beside the calibration state of another.
 
 The cue is always on. There is no setting and no volume control.
 
+(Changed on 2026-09-24.) The cue still has no setting of its own and no volume control, but
+the Mute toggle of the transport bar silences it together with the preview `<video>`. The
+toggle sets the `muted` property of both elements, from the moment each element is created,
+so it applies before the first play and the first burst. The choice persists in the web view
+store under `quipclip.preview_muted`, not in the settings file. Mute changes only the sound.
+The controller does not read it, so a muted burst still seeks, plays, starts both timers and
+applies the continuation rule. The calibration of ADR 003 and the export do not change. The
+toggle has no key, because `M` adds a marker in the editors that ADR 026 follows.
+
 The application does not show an error when the cue fails. An element error, or a rejected
 `play` promise that is not an `AbortError`, disables the controller for that source. The
 cue helps the user find a frame. It is not an edit action, and a message about it would

@@ -57,7 +57,14 @@ the preset from the settings file by its identifier, and the file already holds 
 The settings store keeps the error of a failed save, and the Settings dialog shows it.
 
 The active preset therefore means the preset of the last export, or the preset that the user
-set in Settings. The "Set active" action in Settings stays.
+set in Settings. The action in Settings that sets it stays.
+
+(Changed on 2026-09-24.) The interface calls the active preset the default preset: the
+action is "Set as Default", and its row carries a Default badge. The default preset is still
+the preset of the last export or the one set in Settings, so an export with another preset
+moves the badge. The action that brings back the seeded presets is "Restore Built-in
+Presets", so the word "default" has one meaning. The settings file and the code keep the
+name `activePresetId`.
 
 The export button and the File menu item still call one handler (ADR 020). That handler runs
 step 1.
