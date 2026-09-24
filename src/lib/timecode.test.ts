@@ -19,6 +19,7 @@ import {
   frameIndexOfTicks,
   isFrameGridExact,
   frameTimecodePlaceholder,
+  lastTickOfGridIndex,
   timecodePlaceholder,
   type TimecodeDisplay,
 } from "./timecode";
@@ -1354,6 +1355,113 @@ describe("formatElapsedTickSpan", () => {
         2n ** 60n,
         { n: 1, d: 25 },
         MILLISECONDS_TIMECODE_DISPLAY,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("lastTickOfGridIndex", () => {
+  /** Frame rates and time bases, fine and coarse, exact grids and grids that are not exact. */
+  const cases: { label: string; rate: Rational; timeBase: Rational }[] = [
+    { label: "25 fps, 1/25", rate: { n: 25, d: 1 }, timeBase: { n: 1, d: 25 } },
+    { label: "25 fps, 1/1000", rate: { n: 25, d: 1 }, timeBase: { n: 1, d: 1000 } },
+    { label: "25 fps, 1/12800", rate: { n: 25, d: 1 }, timeBase: { n: 1, d: 12800 } },
+    { label: "24 fps, 1/1000", rate: { n: 24, d: 1 }, timeBase: { n: 1, d: 1000 } },
+    { label: "60 fps, 1/90000", rate: { n: 60, d: 1 }, timeBase: { n: 1, d: 90000 } },
+    { label: "29.97 fps, 1/1000", rate: fps2997, timeBase: { n: 1, d: 1000 } },
+    { label: "29.97 fps, 1/30000", rate: fps2997, timeBase: { n: 1, d: 30000 } },
+    { label: "29.97 fps, 1/90000", rate: fps2997, timeBase: { n: 1, d: 90000 } },
+    { label: "23.976 fps, 1/1000", rate: fps23976, timeBase: { n: 1, d: 1000 } },
+    { label: "23.976 fps, 1/24", rate: fps23976, timeBase: { n: 1, d: 24 } },
+    {
+      label: "59.94 fps, 1/60",
+      rate: { n: 60000, d: 1001 },
+      timeBase: { n: 1, d: 60 },
+    },
+    { label: "29.97 fps, 1/10", rate: fps2997, timeBase: { n: 1, d: 10 } },
+  ];
+
+  it.each(cases)(
+    "$label: the frame format inverts the frame index of every tick count",
+    ({ rate, timeBase }) => {
+      const display: TimecodeDisplay = {
+        format: "frames",
+        rate,
+        videoTimeBase: timeBase,
+      };
+      for (let index = 0n; index < 600n; index++) {
+        const last = lastTickOfGridIndex(index, timeBase, display);
+        expect(last).not.toBeNull();
+        if (last === null) {
+          return;
+        }
+        expect(last >= 0n).toBe(true);
+        const atLast = elapsedGridIndex(last, timeBase, display);
+        expect(atLast !== null && atLast <= index).toBe(true);
+        expect(elapsedGridIndex(last + 1n, timeBase, display)).toBeGreaterThan(index);
+      }
+    },
+  );
+
+  it.each(cases)(
+    "$label: the millisecond format inverts the millisecond of every tick count",
+    ({ timeBase }) => {
+      for (let index = 0n; index < 3000n; index++) {
+        const last = lastTickOfGridIndex(
+          index,
+          timeBase,
+          MILLISECONDS_TIMECODE_DISPLAY,
+        );
+        expect(last).not.toBeNull();
+        if (last === null) {
+          return;
+        }
+        const atLast = elapsedGridIndex(last, timeBase, MILLISECONDS_TIMECODE_DISPLAY);
+        expect(atLast !== null && atLast <= index).toBe(true);
+        expect(
+          elapsedGridIndex(last + 1n, timeBase, MILLISECONDS_TIMECODE_DISPLAY),
+        ).toBeGreaterThan(index);
+      }
+    },
+  );
+
+  it("gives the last tick of a frame on a whole-tick grid", () => {
+    const display: TimecodeDisplay = {
+      format: "frames",
+      rate: fps2997,
+      videoTimeBase: { n: 1, d: 30000 },
+    };
+    // Frame 10 covers ticks 10010 to 11010 at 1001 ticks each.
+    expect(lastTickOfGridIndex(10n, { n: 1, d: 30000 }, display)).toBe(11010n);
+    expect(lastTickOfGridIndex(0n, { n: 1, d: 30000 }, display)).toBe(1000n);
+  });
+
+  it("gives the last tick of a millisecond", () => {
+    // 1/90000: 5.0005 s is tick 450045, which rounds to 5001 ms.
+    expect(
+      lastTickOfGridIndex(5000n, { n: 1, d: 90000 }, MILLISECONDS_TIMECODE_DISPLAY),
+    ).toBe(450044n);
+    expect(
+      lastTickOfGridIndex(5000n, { n: 1, d: 1000 }, MILLISECONDS_TIMECODE_DISPLAY),
+    ).toBe(5000n);
+    expect(
+      lastTickOfGridIndex(0n, { n: 1, d: 1000 }, MILLISECONDS_TIMECODE_DISPLAY),
+    ).toBe(0n);
+  });
+
+  it("refuses a negative index, an invalid time base or an invalid rate", () => {
+    const display: TimecodeDisplay = {
+      format: "frames",
+      rate: fps25,
+      videoTimeBase: null,
+    };
+    expect(lastTickOfGridIndex(-1n, { n: 1, d: 25 }, display)).toBeNull();
+    expect(lastTickOfGridIndex(1n, { n: 0, d: 25 }, display)).toBeNull();
+    expect(
+      lastTickOfGridIndex(
+        1n,
+        { n: 1, d: 25 },
+        { format: "frames", rate: { n: 0, d: 1 }, videoTimeBase: null },
       ),
     ).toBeNull();
   });

@@ -206,6 +206,27 @@ export interface PlaybackActions {
   seekNominal: (deltaFrames: number) => void;
 
   /**
+   * Goes to nominal frame `frameIndex` of the frame grid, counted from the calibrated first frame
+   * (ADR 022, ADR 028). A typed frame timecode uses it.
+   *
+   * It runs the frame step of seekNominal with an absolute target frame: the element seeks to
+   * the middle of the frame, the display target is its nominal start, the clamps and the edge
+   * rule apply, and a target that is the frame the step would start from (the frame on screen,
+   * or the frame of a pending exact seek) does nothing. During playback it only pauses while the
+   * element is still inside that frame, and it seeks back to the frame once the element has left
+   * it. It is a jump, not a step, so it stops the cue and requests none (ADR 019).
+   *
+   * It acts only where the grid applies: a nominal rate, a constant rate and an exact grid
+   * (hasExactFrameGrid), and a ready calibration. While the calibration is "calibrating", the
+   * request is deferred as a seek to the first frame followed by `frameIndex` steps, so it runs on
+   * the grid at the anchor (ADR 022). It then runs as that one step, which requests the cue once,
+   * as every deferred step does, and no scrub audio element is mounted yet to sound it (ADR 019).
+   * Elsewhere, and for an index that is not a non-negative safe integer, it does nothing: off the
+   * grid the caller seeks by time (`planTimecodeEntrySeek`).
+   */
+  seekToFrameIndex: (frameIndex: number) => void;
+
+  /**
    * Requests a checked browser-time seek without creating a canonical edit position.
    * Accepts optional SeekOptions for playhead scrubbing (ADR 022).
    * While the calibration is "calibrating", the seek is deferred and replaces any earlier

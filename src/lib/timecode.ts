@@ -20,9 +20,12 @@
  * `formatElapsedTickSpan` writes the start, the end and the duration of a span, such as a
  * segment, in the same two formats.
  *
- * `FF` is a display rule only. No edit, seek or export reads it, and a mark still stores the
- * PTS of the frame on screen (ADR 028). The functions here are pure. Which format applies to
- * a source is decided by `resolveTimecodeDisplay` in the playback feature.
+ * `FF` is not an edit position. No edit or export reads it, and a mark still stores the PTS of
+ * the frame on screen (ADR 028). A typed timecode reads it, to find the frame that the user
+ * names (`parseTimecodeEntry`), and the seek then goes to that frame by its nominal grid index
+ * or by the last tick that the display names with the typed value (`lastTickOfGridIndex`). The
+ * functions here are pure. Which format applies to a source is decided by
+ * `resolveTimecodeDisplay` in the playback feature.
  */
 
 import { isPtsString, ticksToSeconds } from "@/lib/time";
@@ -674,6 +677,85 @@ export function elapsedGridIndex(
 ): bigint | null {
   const position = gridPosition(deltaTicks, timeBase, display);
   return position === null ? null : signedGridIndex(position);
+}
+
+/**
+ * Returns the last tick count whose timecode names grid index `index` or an earlier one: the
+ * last tick of frame `index` in the frame format, or of millisecond `index` in the millisecond
+ * format (ADR 028). It inverts `elapsedGridIndex` for a non-negative tick count: every count
+ * from 0 up to the result has a grid index at or below `index`, and the count after the result
+ * has a greater one.
+ *
+ * - Frames: the timecode names frame `J` for a tick count `T` when
+ *   `floor((T * timeBase + margin) * rate)` is `J`, so the result is
+ *   `ceil(((J + 1) / rate - margin) / timeBase) - 1`.
+ * - Milliseconds: the timecode rounds `T * timeBase * 1000` to the nearest whole millisecond,
+ *   with a tie up, so the result is `ceil((D + 1/2) / (1000 * timeBase)) - 1`.
+ *
+ * A seek to the result therefore shows the frame whose timecode is the typed value, when a
+ * frame starts inside that grid index: the element shows the frame with the latest start at or
+ * before the target, and a later frame starts after the result. When no frame starts inside the
+ * index, it shows the frame that contains the index. The arithmetic is exact BigInt, and the
+ * result is never negative.
+ *
+ * The millisecond display rounds a double (`gridPosition`), and a tick at an exact half
+ * millisecond can round down there, as 15015 ticks of 1/30000 s, 0.5005 s, show `.500`. The
+ * result follows the display, so it moves by that one tick. Otherwise a frame that starts on
+ * such a tick, as frame 15 at 29.97 fps does, would show `.500` and a typed `.500` would go to
+ * the frame before it.
+ *
+ * Returns null for a negative index, an invalid time base, or a frame display with an invalid
+ * rate.
+ *
+ * @param index The frame index `J` in the frame format, the whole milliseconds `D` in the
+ *   millisecond format.
+ * @param timeBase Seconds per tick.
+ * @param display The format that applies to the source.
+ */
+export function lastTickOfGridIndex(
+  index: bigint,
+  timeBase: Rational,
+  display: TimecodeDisplay,
+): bigint | null {
+  if (typeof index !== "bigint" || index < 0n || !isValidRate(timeBase)) {
+    return null;
+  }
+  const tbN = BigInt(timeBase.n);
+  const tbD = BigInt(timeBase.d);
+  let numerator: bigint;
+  let denominator: bigint;
+  if (display.format === "frames") {
+    if (!isValidRate(display.rate)) {
+      return null;
+    }
+    const n = BigInt(display.rate.n);
+    const d = BigInt(display.rate.d);
+    const margin = frameBoundaryMargin(display.rate, display.videoTimeBase);
+    // ((J + 1) * d / n - margin.num / margin.den) / (tbN / tbD). The margin is less than half
+    // a frame interval, so the numerator is positive.
+    numerator = ((index + 1n) * d * margin.den - margin.num * n) * tbD;
+    denominator = n * margin.den * tbN;
+  } else {
+    // (D + 1/2) / (1000 * tbN / tbD) = ((2D + 1) * tbD) / (2000 * tbN).
+    numerator = (2n * index + 1n) * tbD;
+    denominator = 2000n * tbN;
+  }
+  // ceil(numerator / denominator) - 1 for a positive numerator, and never below 0.
+  let last = (numerator + denominator - 1n) / denominator - 1n;
+  if (last < 0n) {
+    last = 0n;
+  }
+  if (display.format === "milliseconds") {
+    // The display decides a tick at an exact half millisecond (see above).
+    const next = elapsedGridIndex(last + 1n, timeBase, display);
+    const atLast = elapsedGridIndex(last, timeBase, display);
+    if (next !== null && next <= index) {
+      last += 1n;
+    } else if (atLast !== null && atLast > index && last > 0n) {
+      last -= 1n;
+    }
+  }
+  return last;
 }
 
 /**

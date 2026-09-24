@@ -690,6 +690,33 @@ describe("keyboardShortcutController", () => {
       expect(resolveShortcut(event, allAvailable)).toEqual(NOT_CLAIMED);
     });
 
+    // The typed timecode of the preview is an INPUT. Its text uses keys that the table binds:
+    // `+` and `-` zoom, Backspace deletes a segment, Escape finishes one, and the arrows, Home
+    // and End move the playhead. The field keeps all of them, and Escape closes the field.
+    it("leaves every key of the typed timecode field to the field", () => {
+      const field = createTarget({ tagName: "INPUT" });
+      const presses: Partial<ShortcutKeyEvent>[] = [
+        { key: "+", code: "Equal", shiftKey: true },
+        { key: "-", code: "Minus" },
+        { key: "=", code: "Equal" },
+        { key: "Backspace", code: "Backspace" },
+        { key: "Delete", code: "Delete" },
+        { key: "Escape", code: "Escape" },
+        { key: "ArrowLeft", code: "ArrowLeft" },
+        { key: "ArrowRight", code: "ArrowRight", shiftKey: true },
+        { key: "Home", code: "Home" },
+        { key: "End", code: "End" },
+        { key: " ", code: "Space" },
+        { key: "i", code: "KeyI" },
+        { key: "z", code: "KeyZ", metaKey: true },
+        { key: "z", code: "KeyZ", ctrlKey: true },
+      ];
+      for (const press of presses) {
+        const event = createKeyEvent({ ...press, target: field });
+        expect(resolveShortcut(event, allAvailable), press.key).toEqual(NOT_CLAIMED);
+      }
+    });
+
     it("suppresses when target is a TEXTAREA tag", () => {
       const event = createKeyEvent({
         key: " ",

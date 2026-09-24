@@ -52,6 +52,35 @@ export const en = {
     // shows: during playback, the video waited for data for more than a short time.
     buffering: "Buffering",
     videoPlayerLabel: "Video preview for {{fileName}}",
+    // The current time under the video is a button. It becomes a text field where the user
+    // types a time to go to (ADR 028). `currentTime` is screen reader text before the value on
+    // the button, and `openHint` describes the button. `fieldLabel` names the field, and
+    // `fieldHint` describes it in the timecode format of the video. An `error` message shows
+    // above the field when the typed text is not a time that QuipClip can go to. `+` and `-`
+    // are the characters that the user types. After `+` or `-` the user types a time in the
+    // same format: in the frame format `+10` is 10 frames, and in the millisecond format `+1.5`
+    // is 1.5 seconds.
+    timecodeEntry: {
+      currentTime: "Current time",
+      openHint: "Press Enter to type a time to go to.",
+      fieldLabel: "Go to time",
+      fieldHint: {
+        frames:
+          "Type a time as HH:MM:SS:FF. To go forward or back, type + or - and a time, for example +10 for 10 frames. Press Enter to go to the time. Press Escape to cancel.",
+        milliseconds:
+          "Type a time as HH:MM:SS.mmm. To go forward or back, type + or - and a time, for example +1.5 for 1.5 seconds. Press Enter to go to the time. Press Escape to cancel.",
+      },
+      error: {
+        invalid: {
+          frames:
+            "This is not a time. Type a time as HH:MM:SS:FF, for example 00:01:05:12, or type + or - and a time, for example +10 for 10 frames.",
+          milliseconds:
+            "This is not a time. Type a time as HH:MM:SS.mmm, for example 00:01:05.500, or type + or - and a time, for example +1.5 for 1.5 seconds.",
+        },
+        tooManyDecimals: "Type a maximum of three digits after the decimal point.",
+        tooLarge: "This time is too large.",
+      },
+    },
     // The accessible name of the preview area. The focus returns to it when a notice that
     // held the focus leaves.
     regionLabel: "Preview",

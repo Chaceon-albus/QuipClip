@@ -5056,6 +5056,305 @@ describe("Playback Store & PTS Presentation Engine", () => {
         expect(store.getState().seekTargetSeconds).toBeNull();
       });
     });
+
+    // A typed frame timecode goes to nominal frame J of the grid with the frame step of
+    // seekNominal and an absolute target frame (ADR 022, ADR 028).
+    describe("seekToFrameIndex", () => {
+      let stopSpy: MockInstance<typeof scrubAudioController.stop>;
+
+      beforeEach(() => {
+        stopSpy = vi.spyOn(scrubAudioController, "stop");
+      });
+
+      afterEach(() => {
+        stopSpy.mockRestore();
+      });
+
+      /** Sources on an exact grid: Matroska milliseconds, and fine time bases. */
+      const gridCases: {
+        label: string;
+        fps: Rational;
+        timeBase: Rational;
+        firstFrame: number;
+      }[] = [
+        ...matroskaCases.map((entry) => ({ ...entry, timeBase: tbMs })),
+        { label: "25 fps, 1/1000", fps: fps25, timeBase: tbMs, firstFrame: 0 },
+        {
+          label: "24 fps, 1/1000",
+          fps: { n: 24, d: 1 },
+          timeBase: tbMs,
+          firstFrame: 0,
+        },
+        { label: "25 fps, 1/25", fps: fps25, timeBase: tb25, firstFrame: 0 },
+        {
+          label: "29.97 fps, 1001/30000",
+          fps: fps2997,
+          timeBase: tbNtsc,
+          firstFrame: 0,
+        },
+        {
+          label: "29.97 fps, 1/30000",
+          fps: fps2997,
+          timeBase: { n: 1, d: 30000 },
+          firstFrame: 0,
+        },
+        {
+          label: "29.97 fps, 1/90000",
+          fps: fps2997,
+          timeBase: { n: 1, d: 90000 },
+          firstFrame: 3,
+        },
+      ];
+
+      it.each(gridCases)(
+        "$label: goes to the middle of each frame, shows its timecode, and presents it",
+        ({ fps, timeBase, firstFrame }) => {
+          const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+          const sim = simulateSource(fps, timeBase, frameCount, firstFrame);
+          const store = createPlaybackStore();
+          const video = createFakeVideo();
+          attachSimulated(store, sim, video);
+
+          for (let k = 0; k < frameCount; k++) {
+            // A jump from a frame far away, in both directions.
+            const from = (k * 37 + 11) % frameCount;
+            if (from === k) {
+              continue;
+            }
+            goToFrameStart(store, sim, video, from);
+            requestSpy.mockClear();
+            stopSpy.mockClear();
+            const setsBefore = video.currentTimeSets;
+
+            store.getState().seekToFrameIndex(k);
+            expect(video.currentTimeSets).toBe(setsBefore + 1);
+            // The middle of nominal frame k, from the calibrated first frame.
+            expect(video.currentTime).toBeCloseTo(
+              sim.startSeconds[0] + ((2 * k + 1) * fps.d) / (2 * fps.n),
+              9,
+            );
+            expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(k);
+            // The preview shows the typed timecode at once, and a jump sounds no cue.
+            expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k));
+            expect(requestSpy).not.toHaveBeenCalled();
+            expect(stopSpy).toHaveBeenCalled();
+            expect(store.getState().presentedFrame).toBeNull();
+
+            expect(settleOnTarget(store, sim, video)).toBe(k);
+            expect(store.getState().seekTargetSeconds).toBeNull();
+            expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k));
+          }
+        },
+      );
+
+      it("does nothing for the frame on screen while paused", () => {
+        const sim = simulateSource(fps2997, tbMs, 300, 2);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+        goToFrameStart(store, sim, video, 40);
+        const frameBefore = store.getState().presentedFrame;
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekToFrameIndex(40);
+        expect(video.currentTimeSets).toBe(setsBefore);
+        expect(store.getState().presentedFrame).toBe(frameBefore);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+      });
+
+      /**
+       * Settles on frame 40, starts playback, and lets the element play on to `position`
+       * without a seek, as playback moves currentTime before the next frame callback.
+       */
+      function playFromFrame40To(position: (sim: SimulatedSource) => number) {
+        const sim = simulateSource(fps2997, tbMs, 300, 2);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+        goToFrameStart(store, sim, video, 40);
+        store.getState().play();
+        expect(store.getState().isPlaying).toBe(true);
+        video.currentTime = position(sim);
+        video.seeking = false;
+        return { sim, store, video, frameBefore: store.getState().presentedFrame };
+      }
+
+      it("only pauses during playback while the element is still in the frame on screen", () => {
+        const { sim, store, video, frameBefore } = playFromFrame40To(
+          (source) => (source.startSeconds[40] + source.startSeconds[41]) / 2,
+        );
+        expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(40);
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekToFrameIndex(40);
+        // The edge rule of ADR 022: no seek onto the frame on screen, which could bring no frame
+        // callback, so presentedFrame stays valid and the marks stay enabled.
+        expect(store.getState().isPlaying).toBe(false);
+        expect(video.currentTimeSets).toBe(setsBefore);
+        expect(store.getState().presentedFrame).toBe(frameBefore);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+      });
+
+      it("seeks back during playback once the element has moved into the next frame", () => {
+        const { sim, store, video } = playFromFrame40To(
+          (source) => source.startSeconds[41] + 0.001,
+        );
+        expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(41);
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekToFrameIndex(40);
+        // Frame 40 is still the frame last reported, but the picture has moved on, so the typed
+        // frame is sought: the seek stops playback and goes to the middle of frame 40.
+        expect(store.getState().isPlaying).toBe(false);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(40);
+        expect(displayedLabel(store, sim)).toBe(frameLabel(fps2997, 40));
+        expect(settleOnTarget(store, sim, video)).toBe(40);
+      });
+
+      it("keeps the edge rule for a relative step during playback", () => {
+        const sim = simulateSource(fps2997, tbMs, 300, 2);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+        goToFrameStart(store, sim, video, 0);
+        store.getState().play();
+        const setsAtStart = video.currentTimeSets;
+
+        // A step back at the first frame only pauses.
+        store.getState().seekNominal(-1);
+        expect(store.getState().isPlaying).toBe(false);
+        expect(video.currentTimeSets).toBe(setsAtStart);
+      });
+
+      it("keeps a pending exact seek to the same frame, and replaces a pending scrub seek", () => {
+        const sim = simulateSource(fps25, tbMs, 250);
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ fastSeek: true });
+        attachSimulated(store, sim, video);
+
+        // A pending exact step to frame 10 already goes to the frame.
+        goToFrameStart(store, sim, video, 9);
+        store.getState().seekNominal(1);
+        const setsAfterStep = video.currentTimeSets;
+        store.getState().seekToFrameIndex(10);
+        expect(video.currentTimeSets).toBe(setsAfterStep);
+        expect(displayedLabel(store, sim)).toBe(frameLabel(fps25, 10));
+        expect(settleOnTarget(store, sim, video)).toBe(10);
+
+        // A scrub seek inside frame 10 lands on a keyframe, so the same frame still needs an
+        // exact seek.
+        const tenMiddle = (2 * 10 + 1) / (2 * 25);
+        store.getState().seekApproximate(0.41, { scrub: true });
+        expect(video.fastSeek).toHaveBeenCalledTimes(1);
+        const setsAfterScrub = video.currentTimeSets;
+        store.getState().seekToFrameIndex(10);
+        fireSeeked(store, sim.identity, video);
+        expect(video.currentTimeSets).toBe(setsAfterScrub + 1);
+        expect(video.currentTime).toBeCloseTo(tenMiddle, 9);
+      });
+
+      it("stops at the end of the source", () => {
+        const sim = simulateSource(fps25, tbMs, 250);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+
+        store.getState().seekToFrameIndex(10_000);
+        expect(video.currentTime).toBe(10);
+        expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(249);
+      });
+
+      it("does nothing off the grid, without a calibration, or for an index that is not a frame", () => {
+        // 1/24 at 23.976 fps: one tick is almost a whole frame.
+        const coarse = simulateSource(fps23976, { n: 1, d: 24 }, 240);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, coarse, video);
+        store.getState().seekToFrameIndex(50);
+        expect(video.currentTimeSets).toBe(0);
+
+        const noStart = createPlaybackStore();
+        const noStartVideo = createFakeVideo({ readyState: 1 });
+        noStart.getState().attach({ ...sourceA, videoStartPts: null }, noStartVideo);
+        expect(noStart.getState().calibrationStatus).toBe("unavailable");
+        noStart.getState().seekToFrameIndex(5);
+        expect(noStartVideo.currentTimeSets).toBe(0);
+
+        const exact = simulateSource(fps25, tbMs, 250);
+        const exactStore = createPlaybackStore();
+        const exactVideo = createFakeVideo();
+        attachSimulated(exactStore, exact, exactVideo);
+        for (const index of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53]) {
+          exactStore.getState().seekToFrameIndex(index);
+        }
+        expect(exactVideo.currentTimeSets).toBe(0);
+      });
+
+      it("is deferred while the calibration is open, and runs on the grid at the anchor", () => {
+        const sim = simulateSource(fps2997, tbMs, 300, 2);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        store.getState().attach(sim.source, video);
+        video.readyState = 1;
+        store.getState().syncReady(sim.identity, video);
+        expect(store.getState().calibrationStatus).toBe("calibrating");
+
+        store.getState().seekToFrameIndex(100);
+        expect(video.currentTimeSets).toBe(0);
+        expect(store.getState().hasDeferredNavigation).toBe(true);
+        expect(displayedLabel(store, sim)).toBe(frameLabel(fps2997, 100));
+
+        // A step after it adds to it, one frame for each press (ADR 021).
+        store.getState().seekNominal(2);
+        expect(displayedLabel(store, sim)).toBe(frameLabel(fps2997, 102));
+
+        // The first frame takes the anchor, and one seek goes to the middle of frame 102.
+        store
+          .getState()
+          .syncPresentedFrame(sim.identity, sim.startSeconds[0], 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().hasDeferredNavigation).toBe(false);
+        expect(video.currentTimeSets).toBe(1);
+        expect(presentedIndex(sim.startSeconds, video.currentTime)).toBe(102);
+        expect(displayedLabel(store, sim)).toBe(frameLabel(fps2997, 102));
+        expect(settleOnTarget(store, sim, video)).toBe(102);
+      });
+
+      it("is replaced by a later seek while the calibration is open", () => {
+        const sim = simulateSource(fps25, tbMs, 250);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        store.getState().attach(sim.source, video);
+        video.readyState = 1;
+        store.getState().syncReady(sim.identity, video);
+
+        store.getState().seekToFrameIndex(100);
+        store.getState().seekToPts(String(sim.ptsTicks[30]) as Pts);
+        store
+          .getState()
+          .syncPresentedFrame(sim.identity, sim.startSeconds[0], 1, video);
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBe(sim.startSeconds[30]);
+      });
+
+      it("runs on the approximate path when the calibration becomes unavailable", () => {
+        const sim = simulateSource(fps25, tbMs, 250);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        store.getState().attach(sim.source, video);
+        video.readyState = 1;
+        store.getState().syncReady(sim.identity, video);
+
+        store.getState().seekToFrameIndex(100);
+        store.getState().syncPresentationUnavailable(sim.identity, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        // The first frame and 100 steps from it, on the browser timeline.
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBeCloseTo(4, 9);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(4, 9);
+      });
+    });
   });
 
   // A navigation that arrives while the calibration anchor is open waits for the anchor, so the
@@ -5882,6 +6181,11 @@ describe("Playback Store & PTS Presentation Engine", () => {
         ["a ruler click at the end", (store) => store.getState().seekApproximate(10)],
         ["Go to In", (store) => store.getState().seekToPts("25" as Pts)],
         ["Go to Out", (store) => store.getState().seekToPts("75" as Pts)],
+        ["a typed frame timecode", (store) => store.getState().seekToFrameIndex(40)],
+        [
+          "a typed frame timecode at the first frame",
+          (store) => store.getState().seekToFrameIndex(0),
+        ],
         ["play", (store) => store.getState().play()],
         ["the playback toggle", (store) => store.getState().togglePlayback()],
       ];

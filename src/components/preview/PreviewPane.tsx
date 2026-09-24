@@ -14,7 +14,6 @@ import { useDelayedVisibility } from "@/components/common/useDelayedIndicator";
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   getSourceRevisionKey,
   mediaStore,
@@ -35,11 +34,9 @@ import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import {
   FRAME_TIMECODE_PLACEHOLDER,
   MILLISECONDS_TIMECODE_PLACEHOLDER,
-  type TimecodeDisplay,
 } from "@/lib/timecode";
 import { isMacOS, isWindows } from "@/lib/platform";
 import { cn } from "@/lib/utils";
-import type { Pts, Rational } from "@/types/project";
 import {
   PICTURE_CHECK_INTERVAL_MS,
   presentDecodeFailure,
@@ -68,12 +65,8 @@ import {
   ImportErrorEmptyState,
   PlaybackErrorBanner,
 } from "./PreviewNotices";
-import {
-  createSourceLifecycleGuard,
-  formatPreviewCurrentTime,
-  formatPreviewTotalDuration,
-  showsApproximateBadge,
-} from "./previewFrame";
+import { createSourceLifecycleGuard, formatPreviewTotalDuration } from "./previewFrame";
+import { PreviewTimecode } from "./PreviewTimecode";
 
 // The playback store actions never change, so they are read once instead of through a
 // subscription for each one.
@@ -146,79 +139,6 @@ function toPlaybackSource(media: ImportMediaResult | null): PlaybackSource | nul
     rFrameRate: media.probe.rFrameRate,
     reportedFrameCount: media.probe.reportedFrameCount,
   };
-}
-
-/**
- * Marks the current timecode as approximate. It is a small `≈` badge before the value, and
- * its tooltip gives the same explanation as the status bar's approximate-position chip. The
- * badge can take the focus, so a keyboard user can open the tooltip, and its accessible
- * name is the chip's label, because a screen reader would read the symbol alone as a
- * relation.
- *
- * The preview section is always dark, so the `-text` token resolves to its dark value here.
- */
-function ApproximateBadge() {
-  const { t } = useTranslation();
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span
-          tabIndex={0}
-          className="mr-1.5 rounded-sm bg-warning/15 px-1 text-2xs text-warning-text focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-        >
-          <span aria-hidden="true">≈</span>
-          <span className="sr-only">{t("statusBar.approximatePosition")}</span>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-md flex-col items-start gap-1 text-xs">
-        <p>{t("statusBar.approximatePositionDetail")}</p>
-        <p>{t("statusBar.approximatePositionMarks")}</p>
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
-/**
- * Current preview timecode. It subscribes to `presentedFrame` and to the approximate clock on
- * its own, so the surrounding pane, and with it the `<video>` element, does not re-render once
- * for every presented video frame or every `timeupdate`.
- */
-function PreviewTimecode({
-  videoStartPts,
-  videoTimeBase,
-  display,
-  decodeFailed,
-}: {
-  videoStartPts: Pts | null;
-  videoTimeBase: Rational;
-  display: TimecodeDisplay;
-  decodeFailed: boolean;
-}) {
-  const presentedFrame = usePlaybackStore((s) => s.presentedFrame);
-  const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
-  const approximateBrowserTimeSeconds = usePlaybackStore(
-    (s) => s.approximateBrowserTimeSeconds,
-  );
-  const seekTargetSeconds = usePlaybackStore((s) => s.seekTargetSeconds);
-
-  // The seek target first, then the source-relative time of a ready inferred PTS, then the
-  // approximate browser time (ADR 022), in the format of the source (ADR 028).
-  const currentTimeDisplay = formatPreviewCurrentTime(
-    presentedFrame,
-    calibrationStatus,
-    videoStartPts,
-    videoTimeBase,
-    approximateBrowserTimeSeconds ?? 0,
-    seekTargetSeconds,
-    display,
-  );
-
-  return (
-    <>
-      {showsApproximateBadge(calibrationStatus, decodeFailed) && <ApproximateBadge />}
-      <span className="text-primary">{currentTimeDisplay}</span>
-    </>
-  );
 }
 
 /** The tags of the decode-failure reason messages. `<mono>` wraps a technical value. */
@@ -1021,13 +941,14 @@ export function PreviewPane() {
       {/* Preview Bottom Row: Timecode. `h-6` holds the row at a fixed height, so the video
           frame above keeps its size. Tabular figures keep every digit the same width, so
           the value does not shift while it counts. With no media, both values are
-          placeholders in the muted colour, because no time is known. */}
-      <div className="flex shrink-0 items-center justify-between px-1 pt-2">
+          placeholders in the muted colour, because no time is known. The row is `relative`,
+          so the error of the typed timecode is placed against it and is never wider than the
+          pane (PreviewTimecode). */}
+      <div className="relative flex shrink-0 items-center justify-between px-1 pt-2">
         <div className="flex h-6 items-center font-mono text-[15px] leading-none font-medium tracking-tight tabular-nums">
           {media ? (
             <PreviewTimecode
-              videoStartPts={media.probe.videoStartPts}
-              videoTimeBase={media.probe.videoTimeBase}
+              probe={media.probe}
               display={timecodeDisplay}
               decodeFailed={decodeFailed}
             />

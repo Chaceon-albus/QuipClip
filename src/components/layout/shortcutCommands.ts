@@ -239,6 +239,55 @@ export function planBoundarySeek(
 }
 
 /**
+ * The end of the source on the ruler, in seconds from its start, or null when the extent is
+ * indeterminate. It is the extent rule of the timeline, with the same inputs (ADR 007).
+ */
+export function sourceEndSeconds(
+  playback: Pick<ShortcutSnapshot["playback"], "runtimeBrowserDurationSeconds">,
+  probe: ShortcutProbe,
+): number | null {
+  return getTimelineDurationSeconds({
+    videoDurationTicks: probe.videoDurationTicks,
+    videoTimeBase: probe.videoTimeBase,
+    approximateDurationSeconds: probe.approximateDurationSeconds,
+    runtimeBrowserDuration: playback.runtimeBrowserDurationSeconds,
+  });
+}
+
+/**
+ * The seek of End (ADR 026), or null when End must not seek.
+ *
+ * It goes to the end of the ruler (`sourceEndSeconds`). This is the seek that a press at the
+ * right end of the ruler makes on the approximate clock, and `seekApproximate` clamps it to the
+ * duration of the element. An indeterminate extent has no end to go to, as it has no
+ * click-to-seek. While the calibration is open, the store defers the seek until the anchor, and
+ * then runs it on the approximate clock too (APPROXIMATE_SHORTCUT_SEEK_OPTIONS, ADR 022). A typed
+ * time at or after the end uses the same seek (`planTimecodeEntrySeek`).
+ *
+ * @param playback The playback state of the snapshot.
+ * @param hasActiveSource True while media is open and its element is attached and ready.
+ * @param probe The probe of the open media, or null while no media is open.
+ */
+export function planEndSeek(
+  playback: ShortcutSnapshot["playback"],
+  hasActiveSource: boolean,
+  probe: ShortcutProbe | null,
+): ShortcutCommand | null {
+  if (!hasActiveSource || probe === null) {
+    return null;
+  }
+  const endSeconds = sourceEndSeconds(playback, probe);
+  if (endSeconds === null) {
+    return null;
+  }
+  // Already there: End, End moves nothing and keeps the frame for Mark Out.
+  if (isElementAtEnd(playback, probe, endSeconds)) {
+    return null;
+  }
+  return { kind: "seekApproximate", seconds: endSeconds };
+}
+
+/**
  * The PTS of the named segment that Go to In (`inPts`) or Go to Out (`outPts`) seeks to.
  *
  * With no current segment, Go to In goes to the pending In mark. The two never hold a value
@@ -321,31 +370,8 @@ export function planShortcutCommand(
       return { kind: "seekApproximate", seconds: 0 };
     }
 
-    case "goToEnd": {
-      if (!hasActiveSource || probe === null) {
-        return null;
-      }
-      // The end of the ruler, from the same extent rule and the same inputs as the timeline
-      // (ADR 007). This is the seek that a press at the right end of the ruler makes on the
-      // approximate clock, and `seekApproximate` clamps it to the duration of the element. An
-      // indeterminate extent has no end to go to, as it has no click-to-seek. While the
-      // calibration is open, the store defers the seek until the anchor, and then runs it on
-      // the approximate clock too (APPROXIMATE_SHORTCUT_SEEK_OPTIONS, ADR 022).
-      const endSeconds = getTimelineDurationSeconds({
-        videoDurationTicks: probe.videoDurationTicks,
-        videoTimeBase: probe.videoTimeBase,
-        approximateDurationSeconds: probe.approximateDurationSeconds,
-        runtimeBrowserDuration: playback.runtimeBrowserDurationSeconds,
-      });
-      if (endSeconds === null) {
-        return null;
-      }
-      // Already there: End, End moves nothing and keeps the frame for Mark Out.
-      if (isElementAtEnd(playback, probe, endSeconds)) {
-        return null;
-      }
-      return { kind: "seekApproximate", seconds: endSeconds };
-    }
+    case "goToEnd":
+      return planEndSeek(playback, hasActiveSource, probe);
 
     case "markIn": {
       // The same predicate as the Mark In button, and the same PTS: the frame that the browser

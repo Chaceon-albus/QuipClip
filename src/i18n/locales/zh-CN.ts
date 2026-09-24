@@ -50,6 +50,27 @@ export const zhCN: TranslationCatalog = {
     loading: "正在加载媒体...",
     buffering: "正在缓冲",
     videoPlayerLabel: "视频预览：{{fileName}}",
+    timecodeEntry: {
+      currentTime: "当前时间",
+      openHint: "按 Enter 键输入要跳转到的时间。",
+      fieldLabel: "跳转到时间",
+      fieldHint: {
+        frames:
+          "按 HH:MM:SS:FF 格式输入时间。要前进或后退，请输入 + 或 - 加时间，例如 +10 表示 10 帧。按 Enter 键跳转，按 Esc 键取消。",
+        milliseconds:
+          "按 HH:MM:SS.mmm 格式输入时间。要前进或后退，请输入 + 或 - 加时间，例如 +1.5 表示 1.5 秒。按 Enter 键跳转，按 Esc 键取消。",
+      },
+      error: {
+        invalid: {
+          frames:
+            "这不是有效的时间。请按 HH:MM:SS:FF 格式输入时间（例如 00:01:05:12），或输入 + 或 - 加时间（例如 +10 表示 10 帧）。",
+          milliseconds:
+            "这不是有效的时间。请按 HH:MM:SS.mmm 格式输入时间（例如 00:01:05.500），或输入 + 或 - 加时间（例如 +1.5 表示 1.5 秒）。",
+        },
+        tooManyDecimals: "小数点后最多输入三位数字。",
+        tooLarge: "此时间过大。",
+      },
+    },
     regionLabel: "预览",
     decodeFailure: {
       title: "无法预览此视频",
