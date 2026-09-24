@@ -467,6 +467,99 @@ describe("Media Store", () => {
     });
   });
 
+  describe("dismissError", () => {
+    it("clears a failed replacement and keeps the loaded media ready", async () => {
+      const loaded = createFakeMediaResult("loaded.mp4");
+      const store = createMediaStore(
+        {
+          importMedia: vi
+            .fn()
+            .mockRejectedValue({ code: "ffprobeProcessFailed", detail: "moov atom" }),
+        },
+        { status: "ready", media: loaded },
+      );
+
+      await store.getState().importPath("/media/broken.mp4");
+      expect(store.getState().status).toBe("error");
+
+      store.getState().dismissError();
+
+      const state = store.getState();
+      expect(state.status).toBe("ready");
+      expect(state.media).toBe(loaded);
+      expect(state.error).toBeNull();
+    });
+
+    it("returns to the idle empty state when no media is loaded", () => {
+      const store = createMediaStore();
+      store.getState().reportError({ code: "ffmpegPairMissing" });
+      expect(store.getState().status).toBe("error");
+
+      store.getState().dismissError();
+
+      const state = store.getState();
+      expect(state.status).toBe("idle");
+      expect(state.media).toBeNull();
+      expect(state.error).toBeNull();
+    });
+
+    it("does nothing while an import is loading, so the import still completes", async () => {
+      const deferred = createDeferred<ImportMediaResult>();
+      const store = createMediaStore({ importMedia: () => deferred.promise });
+      const importPromise = store.getState().importPath("/media/next.mp4");
+      const before = store.getState();
+
+      store.getState().dismissError();
+      expect(store.getState()).toBe(before);
+
+      const next = createFakeMediaResult("next.mp4");
+      deferred.resolve(next);
+      await expect(importPromise).resolves.toBe(next);
+      expect(store.getState().status).toBe("ready");
+      expect(store.getState().media).toBe(next);
+    });
+
+    it("clears the error it names while the store still holds it", () => {
+      const store = createMediaStore();
+      store.getState().reportError({ code: "ffprobeProcessFailed", detail: "a" });
+      const shown = store.getState().error;
+      expect(shown).not.toBeNull();
+
+      store.getState().dismissError(shown ?? undefined);
+
+      expect(store.getState().status).toBe("idle");
+      expect(store.getState().error).toBeNull();
+    });
+
+    it("keeps a newer error with the same code when a stale one is dismissed", () => {
+      const store = createMediaStore();
+      store.getState().reportError({ code: "ffprobeProcessFailed", detail: "first" });
+      const stale = store.getState().error;
+      // A second import fails with the same code before the notice renders the new error.
+      store.getState().reportError({ code: "ffprobeProcessFailed", detail: "second" });
+      const newer = store.getState().error;
+      expect(newer).not.toBe(stale);
+      const listener = vi.fn();
+      store.subscribe(listener);
+
+      store.getState().dismissError(stale ?? undefined);
+
+      expect(store.getState().status).toBe("error");
+      expect(store.getState().error).toBe(newer);
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it("does not notify subscribers when there is no error", () => {
+      const store = createMediaStore();
+      const listener = vi.fn();
+      store.subscribe(listener);
+
+      store.getState().dismissError();
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+  });
+
   describe("Default Store Singleton", () => {
     it("provides a default singleton store instance in idle state", () => {
       const state = mediaStore.getState();
@@ -475,6 +568,7 @@ describe("Media Store", () => {
       expect(state.error).toBeNull();
       expect(typeof state.importPath).toBe("function");
       expect(typeof state.reportError).toBe("function");
+      expect(typeof state.dismissError).toBe("function");
       expect(typeof state.reset).toBe("function");
     });
   });

@@ -8,7 +8,12 @@
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { importMedia } from "./client";
-import type { ImportMediaResult, MediaState, MediaStoreState } from "./types";
+import type {
+  ImportMediaError,
+  ImportMediaResult,
+  MediaState,
+  MediaStoreState,
+} from "./types";
 import { normalizeImportMediaError } from "./validation";
 
 /**
@@ -58,6 +63,20 @@ export function createMediaStore(
         media: state.media,
         error: normalized,
       }));
+    },
+
+    dismissError: (error?: ImportMediaError) => {
+      // Only the error goes away. No import is in flight while the status is `error`, so the
+      // request counter stays as it is.
+      set((state) =>
+        state.status !== "error" || (error !== undefined && state.error !== error)
+          ? state
+          : {
+              status: state.media ? "ready" : "idle",
+              media: state.media,
+              error: null,
+            },
+      );
     },
 
     importPath: async (path: string): Promise<ImportMediaResult | null> => {

@@ -49,6 +49,11 @@ import {
 } from "./decodeFailure";
 import { formatSupportedVideoFormats } from "./previewEmptyState";
 import {
+  ImportErrorBanner,
+  ImportErrorEmptyState,
+  PlaybackErrorBanner,
+} from "./PreviewNotices";
+import {
   createSourceLifecycleGuard,
   formatPreviewCurrentTime,
   formatPreviewTotalDuration,
@@ -69,7 +74,11 @@ const {
   syncPause,
   syncEnded,
   reset: resetPlayback,
+  dismissError: dismissPlaybackError,
 } = playbackStore.getState();
+
+// The media store actions never change either.
+const { dismissError: dismissImportError } = mediaStore.getState();
 
 // The format names in the empty state come from the list the file dialog filters on, so the
 // two cannot disagree.
@@ -288,6 +297,15 @@ export function PreviewPane() {
   const decodeFailed = failureTrigger !== null;
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  // The focus target when a notice that held the focus leaves: the user closed it, or the
+  // store removed it. The section holds the notices, so the focus stays where the user was,
+  // and the next Tab goes on from the preview. The section is not a control, so it does not
+  // own a key: Space and the other window shortcuts keep working.
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const returnFocusToPreview = useCallback(() => {
+    sectionRef.current?.focus({ preventScroll: true });
+  }, []);
   const [sourceGuard] = useState(() => createSourceLifecycleGuard());
 
   // The approximate clock needs no render-phase reset here. `attach` and `detach` null the
@@ -633,15 +651,23 @@ export function PreviewPane() {
   // styled scrollbars keep their contrast on the dark surface in the light theme.
   // `scheme-dark` gives native widgets, such as a future `<video controls>`, the dark color
   // scheme. Tooltips and menus render in a portal under <body>, so they keep the app theme.
+  // `tabIndex={-1}` lets `returnFocusToPreview` focus the section without a Tab stop, and
+  // `outline-none` hides a ring there, because the focus lands on no control. The label names
+  // the section, because a focusable area needs an accessible name.
   return (
-    <section className="dark flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground scheme-dark select-none">
+    <section
+      ref={sectionRef}
+      tabIndex={-1}
+      aria-label={t("preview.regionLabel")}
+      className="dark flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground scheme-dark outline-none select-none"
+    >
       {/* 16:9 Video Canvas Surface */}
       <div className="relative flex min-h-0 flex-1 items-center justify-center">
         {/* The frame takes a dashed border while it is empty, so it reads as a placeholder. */}
         <div
           className={cn(
             "relative flex aspect-video h-full max-h-full w-auto max-w-full items-center justify-center overflow-hidden rounded-lg border border-preview-border bg-preview-surface shadow-xs",
-            !media && status === "idle" && "border-dashed",
+            !media && (status === "idle" || status === "error") && "border-dashed",
           )}
         >
           {media ? (
@@ -771,50 +797,35 @@ export function PreviewPane() {
                   />
                 )}
 
-              {/* Restrained Overlay when replacement media is loading */}
-              {status === "loading" && (
-                <div
-                  className="absolute top-3 left-3 z-10 flex items-center gap-2 rounded-md border border-border/80 bg-background/90 px-2.5 py-1 text-xs text-foreground shadow-md backdrop-blur-xs"
-                  aria-live="polite"
-                >
-                  <Loader2 className="size-3.5 animate-spin text-primary" />
-                  <span>{t("preview.loading")}</span>
-                </div>
-              )}
-
-              {/* Restrained Overlay when a replacement or dialog error occurs */}
-              {status === "error" && error && (
-                <div
-                  className="absolute top-3 right-3 left-3 z-10 flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/90 px-3 py-1.5 text-xs text-destructive-foreground shadow-md backdrop-blur-xs"
-                  aria-live="polite"
-                >
-                  <div className="flex items-center gap-2 truncate">
-                    <AlertCircle className="size-4 shrink-0" />
-                    <span className="truncate font-medium">
-                      {t(`mediaError.${error.code}`, {
-                        defaultValue: t("mediaError.unknown"),
-                      })}
-                    </span>
+              {/* The notification area. The notices stack from the top, so a loading
+                  chip, an import error and a playback error never cover each other. The
+                  area lets the pointer through, and each notice takes it back. */}
+              <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex flex-col gap-2">
+                {status === "loading" && (
+                  <div
+                    className="pointer-events-auto flex items-center gap-2 self-start rounded-md border border-border/80 bg-background/90 px-2.5 py-1 text-xs text-foreground shadow-md backdrop-blur-xs"
+                    aria-live="polite"
+                  >
+                    <Loader2 className="size-3.5 animate-spin text-primary" />
+                    <span>{t("preview.loading")}</span>
                   </div>
-                </div>
-              )}
-
-              {/* Restrained Overlay when local playback start fails */}
-              {playbackError && !decodeFailed && (
-                <div
-                  className="absolute top-3 right-3 left-3 z-10 flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/90 px-3 py-1.5 text-xs text-destructive-foreground shadow-md backdrop-blur-xs"
-                  aria-live="polite"
-                >
-                  <div className="flex items-center gap-2 truncate">
-                    <AlertCircle className="size-4 shrink-0" />
-                    <span className="truncate font-medium">
-                      {t(`playbackError.${playbackError}`, {
-                        defaultValue: t("playbackError.playbackFailed"),
-                      })}
-                    </span>
-                  </div>
-                </div>
-              )}
+                )}
+                {status === "error" && error && (
+                  <ImportErrorBanner
+                    error={error}
+                    onDismiss={dismissImportError}
+                    onReturnFocus={returnFocusToPreview}
+                  />
+                )}
+                {playbackError && !decodeFailed && (
+                  <PlaybackErrorBanner
+                    key={playbackError}
+                    code={playbackError}
+                    onDismiss={dismissPlaybackError}
+                    onReturnFocus={returnFocusToPreview}
+                  />
+                )}
+              </div>
             </>
           ) : (
             /* Full Empty / Loading / Error State when no media is loaded */
@@ -829,24 +840,9 @@ export function PreviewPane() {
                 </div>
               )}
 
-              {status === "error" && error && (
-                <div
-                  className="flex max-w-md flex-col items-center justify-center gap-2 p-4 text-center"
-                  aria-live="polite"
-                >
-                  <AlertCircle className="size-6 shrink-0 text-destructive" />
-                  <p className="text-xs font-medium text-destructive-foreground">
-                    {t(`mediaError.${error.code}`, {
-                      defaultValue: t("mediaError.unknown"),
-                    })}
-                  </p>
-                  {error.detail && (
-                    <p className="max-h-24 w-full overflow-y-auto rounded border border-border bg-background/60 p-2 text-left font-mono text-[11px] break-all text-muted-foreground select-text">
-                      {error.detail}
-                    </p>
-                  )}
-                </div>
-              )}
+              {/* An import that failed with no video open: what failed, what to do, and
+                  the actions, in the layout of the empty state. */}
+              {status === "error" && error && <ImportErrorEmptyState error={error} />}
 
               {/* Empty state: it says what to do, offers the File menu's Open Media action,
                   and names the drop on the window as the other way to open a video. */}

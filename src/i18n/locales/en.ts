@@ -49,6 +49,9 @@ export const en = {
     },
     loading: "Loading media...",
     videoPlayerLabel: "Video preview for {{fileName}}",
+    // The accessible name of the preview area. The focus returns to it when a notice that
+    // held the focus leaves.
+    regionLabel: "Preview",
     // The panel that replaces the picture when the web view cannot play the source. The
     // `<mono>` tags wrap the technical values, which the panel shows in a monospace font.
     // {{codec}} is a codec display name such as "HEVC" or "H.264". {{profile}} is the codec
@@ -86,6 +89,31 @@ export const en = {
         convertMp4: "Convert the video to MP4 to preview it.",
       },
       openAnother: "Open Another File...",
+    },
+    // The notices over an open video. An import error stays until the user dismisses it or
+    // opens another file. A playback error leaves by itself after a few seconds. `dismiss`
+    // is the accessible name of the close button of a notice.
+    notice: {
+      dismiss: "Dismiss",
+    },
+    // An import that failed. With no video open, the error takes the place of the empty
+    // state: `title`, then the `mediaError` message, then `ffmpegHint` for an error that the
+    // FFmpeg settings can correct, then the actions. `ffmpegHint` names the Settings dialog
+    // and its FFmpeg tab (`settings.title`, `settings.tab.ffmpeg`), and the button
+    // `chooseAnother` with its exact label. `details.show` and `details.hide` label the
+    // disclosure of the diagnostic text from the operating system or ffprobe, which is never
+    // translated, while it is closed and while it is open. They match `export.details`. The
+    // Copy button and its feedback use `common.diagnostic`.
+    importError: {
+      title: "QuipClip could not open the video",
+      ffmpegHint:
+        "Install FFmpeg, or set its location in Settings > FFmpeg. Then choose the video again with Choose Another File...",
+      chooseAnother: "Choose Another File...",
+      openSettings: "Open Settings...",
+      details: {
+        show: "Show Details",
+        hide: "Hide Details",
+      },
     },
   },
   fileDrop: {

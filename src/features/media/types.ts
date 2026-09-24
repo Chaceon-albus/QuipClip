@@ -181,6 +181,16 @@ export type MediaActions = {
    */
   reportError: (error: unknown) => void;
   /**
+   * Clears the import error and keeps the loaded media. The status goes back to `ready` when
+   * media is loaded, and to `idle` when none is. Does nothing when no error is shown.
+   *
+   * With an error, it clears the error only while the store still holds that same object.
+   * Two imports can fail with the same code, so the guard compares the identity, not the
+   * code. A notice passes the error it shows, so it cannot clear a newer error that has not
+   * rendered.
+   */
+  dismissError: (error?: ImportMediaError) => void;
+  /**
    * Resets the store back to its initial idle state.
    */
   reset: () => void;

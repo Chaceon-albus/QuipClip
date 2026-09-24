@@ -244,6 +244,15 @@ export interface PlaybackActions {
   syncEnded: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
+   * Clears the playback or seek error, for the preview notice that shows it. Changes nothing
+   * else, and does nothing when no error is set.
+   *
+   * With a code, it clears the error only while the store still holds that code. A notice
+   * passes the code it shows, so its timer cannot clear a newer error that has not rendered.
+   */
+  dismissError: (code?: PlaybackErrorCode) => void;
+
+  /**
    * Resets playback state and detaches any active media source and element.
    */
   reset: () => void;

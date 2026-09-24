@@ -19,6 +19,7 @@ import type { Pts, Rational } from "@/types/project";
 import { scrubAudioController } from "./scrubAudio";
 import type {
   CalibrationStatus,
+  PlaybackErrorCode,
   PlaybackMediaElement,
   PlaybackSource,
   PlaybackState,
@@ -1205,6 +1206,16 @@ export function createPlaybackStore(
 
         playSessionId++;
         set({ isPlaying: false });
+      },
+
+      dismissError: (code?: PlaybackErrorCode) => {
+        const current = get().error;
+        // A notice passes the code it shows, so its timer cannot clear a newer error that
+        // has not rendered yet.
+        if (current === null || (code !== undefined && current !== code)) {
+          return;
+        }
+        set({ error: null });
       },
 
       reset: () => {

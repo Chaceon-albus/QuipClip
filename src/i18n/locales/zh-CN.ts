@@ -49,6 +49,7 @@ export const zhCN: TranslationCatalog = {
     },
     loading: "正在加载媒体...",
     videoPlayerLabel: "视频预览：{{fileName}}",
+    regionLabel: "预览",
     decodeFailure: {
       title: "无法预览此视频",
       unsupportedCodec: {
@@ -75,6 +76,20 @@ export const zhCN: TranslationCatalog = {
         convertMp4: "将视频转换为 MP4 格式后再预览。",
       },
       openAnother: "打开其他文件...",
+    },
+    notice: {
+      dismiss: "关闭提示",
+    },
+    importError: {
+      title: "无法打开此视频",
+      ffmpegHint:
+        "请安装 FFmpeg，或在“设置 > FFmpeg”中设置其位置，然后点击“选择其他文件...”重新选择该视频。",
+      chooseAnother: "选择其他文件...",
+      openSettings: "打开设置...",
+      details: {
+        show: "显示详细信息",
+        hide: "隐藏详细信息",
+      },
     },
   },
   fileDrop: {

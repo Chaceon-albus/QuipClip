@@ -705,6 +705,62 @@ describe("Playback Store & PTS Presentation Engine", () => {
     });
   });
 
+  describe("dismissError", () => {
+    it("clears a seek error and keeps the attachment and calibration", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      store.getState().seekToPts("invalid" as Pts);
+      expect(store.getState().error).toBe("seekFailed");
+      const before = store.getState();
+
+      store.getState().dismissError();
+
+      const after = store.getState();
+      expect(after.error).toBeNull();
+      expect(after.isAttached).toBe(true);
+      expect(after.isReady).toBe(true);
+      expect(after.attachedSourceRevisionKey).toBe(identityA);
+      expect(after.calibrationStatus).toBe(before.calibrationStatus);
+      expect(after.presentedFrame).toBe(before.presentedFrame);
+    });
+
+    it("clears the error only while the store still holds the code it names", () => {
+      const store = createPlaybackStore({ error: "seekFailed" });
+      const listener = vi.fn();
+      store.subscribe(listener);
+
+      // A timer of an older notice names a code that the store no longer holds.
+      store.getState().dismissError("playbackFailed");
+      expect(store.getState().error).toBe("seekFailed");
+      expect(listener).not.toHaveBeenCalled();
+
+      store.getState().dismissError("seekFailed");
+      expect(store.getState().error).toBeNull();
+    });
+
+    it("clears any error when no code is named", () => {
+      const store = createPlaybackStore({ error: "playbackFailed" });
+
+      store.getState().dismissError();
+
+      expect(store.getState().error).toBeNull();
+    });
+
+    it("does not notify subscribers when no error is set", () => {
+      const store = createPlaybackStore();
+      const listener = vi.fn();
+      store.subscribe(listener);
+
+      store.getState().dismissError();
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+  });
+
   describe("Nominal Seek Hints", () => {
     it("chooses avgFrameRate then rFrameRate and steps currentTime by nominal frame duration", () => {
       const store = createPlaybackStore();
