@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   canTakeFocus,
   isElementRendered,
+  isInOpenDialog,
+  OPEN_DIALOG_SELECTOR,
   toPromptFocusTarget,
   type PromptFocusTarget,
 } from "./focusTarget";
@@ -75,5 +77,38 @@ describe("toPromptFocusTarget", () => {
     expect(target?.isDisabled).toBe(false);
     target?.focus();
     expect(focused).toBe(1);
+  });
+});
+
+describe("isInOpenDialog", () => {
+  /** An element whose nearest dialog ancestor is `dialog`, or that has none. */
+  function inside(dialog: object | null) {
+    const selectors: string[] = [];
+    return {
+      selectors,
+      closest: (selector: string) => {
+        selectors.push(selector);
+        return dialog;
+      },
+    };
+  }
+
+  it("answers true inside an open dialog, and asks with the open-dialog selector", () => {
+    const element = inside({});
+    expect(isInOpenDialog(element)).toBe(true);
+    expect(element.selectors).toEqual([OPEN_DIALOG_SELECTOR]);
+  });
+
+  it("answers false outside every open dialog, and for no element", () => {
+    expect(isInOpenDialog(inside(null))).toBe(false);
+    expect(isInOpenDialog(null)).toBe(false);
+  });
+
+  // Radix keeps a closing dialog mounted during its exit animation, with that state.
+  it("names both roles and leaves out a dialog in its exit animation", () => {
+    expect(OPEN_DIALOG_SELECTOR).toBe(
+      '[role="dialog"]:not([data-state="closed"]),' +
+        '[role="alertdialog"]:not([data-state="closed"])',
+    );
   });
 });

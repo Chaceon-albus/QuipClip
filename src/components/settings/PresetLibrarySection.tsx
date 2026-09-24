@@ -68,6 +68,7 @@ import {
   findListFocusRow,
   findPresetRow,
   pickDefaultPresetId,
+  pickSessionSelection,
   pickSelectionAfterDelete,
   presentAddPresetAction,
   presentDeletePresetAction,
@@ -967,6 +968,24 @@ export interface PresetLibrarySectionProps {
    * are hidden, and a hidden list cannot scroll its selected row into view. Default true.
    */
   visible?: boolean;
+  /**
+   * True while the settings dialog is open. Each change to true begins a new session, also
+   * when the dialog opens again during its exit animation and the section stays mounted.
+   * Default true.
+   */
+  open?: boolean;
+  /**
+   * The preset that the tab selects when a session begins, or null for the default preset.
+   * The section reads it once in each session, when the library is ready
+   * (`pickSessionSelection`). A later value in the same session changes nothing, so it never
+   * discards an unsaved draft.
+   */
+  openingPresetId?: string | null;
+  /**
+   * Receives the selected preset, or null, each time the selection changes, and null when the
+   * section unmounts. Pass a stable function.
+   */
+  onSelectionChange?: (presetId: string | null) => void;
 }
 
 /**
@@ -980,6 +999,9 @@ export function PresetLibrarySection({
   closePromptOpen = false,
   onFocusClosePrompt,
   visible = true,
+  open = true,
+  openingPresetId = null,
+  onSelectionChange,
 }: PresetLibrarySectionProps) {
   const { t, i18n } = useTranslation();
   const translate = t as (
@@ -1072,32 +1094,46 @@ export function PresetLibrarySection({
     };
   }, [controller]);
 
-  // The tab opens on the default (active) preset, or on the first preset when no preset has the
-  // active id (see `pickDefaultPresetId`). This runs once for each open of the dialog, because
-  // the dialog mounts this section when it opens. It does not run again when a later change
-  // clears the selection: a delete selects the neighbour itself, and a restore of the built-in
-  // presets selects the default (active) preset itself (see `confirmDelete` and
-  // `restoreDefaults`).
-  const initialSelectionDoneRef = useRef(false);
+  // Each session of the dialog opens on the preset that the opener named, such as the preset
+  // of the export setup step, and otherwise on the default (active) preset, or on the first
+  // preset when no preset has the active id (see `pickSessionSelection`). This runs once for
+  // each session. The dialog mounts this section when it opens, and a dialog that opens again
+  // during its exit animation keeps it mounted, so a close ends the session here too. The rule
+  // of the unsaved draft applies, so the selection never discards an unsaved edit. It does not
+  // run again when a later change clears the selection: a delete selects the neighbour itself,
+  // and a restore of the built-in presets selects the default (active) preset itself (see
+  // `confirmDelete` and `restoreDefaults`).
+  const sessionSelectionDoneRef = useRef(false);
   useEffect(() => {
-    if (initialSelectionDoneRef.current || !view.ready) {
+    if (!open) {
+      sessionSelectionDoneRef.current = false;
       return;
     }
-    initialSelectionDoneRef.current = true;
-    if (view.selectedPresetId !== null) {
+    if (sessionSelectionDoneRef.current || !view.ready) {
       return;
     }
-    const id = pickDefaultPresetId(view.presets, view.activePresetId);
+    sessionSelectionDoneRef.current = true;
+    const id = pickSessionSelection(view, openingPresetId);
     if (id !== null) {
       controller.select(id);
     }
-  }, [
-    controller,
-    view.ready,
-    view.selectedPresetId,
-    view.presets,
-    view.activePresetId,
-  ]);
+  }, [open, controller, view, openingPresetId]);
+
+  // Report the selection upward. The export setup step reads the last selection when the
+  // dialog closes, and selects the same preset if the user changed the selection here
+  // (`exportSettingsReturn.ts`). The unmount comes after the close, so the null that it
+  // reports comes after that read.
+  useEffect(() => {
+    onSelectionChange?.(view.selectedPresetId);
+  }, [onSelectionChange, view.selectedPresetId]);
+  useEffect(() => {
+    if (onSelectionChange === undefined) {
+      return undefined;
+    }
+    return () => {
+      onSelectionChange(null);
+    };
+  }, [onSelectionChange]);
 
   // The row that takes the selection after the delete in flight, or null. See
   // `findListFocusRow`.

@@ -230,8 +230,10 @@ export interface ExportSetupProps {
   onSelect: (presetId: string) => void;
   /**
    * Opens the settings dialog at `section`: from Open Settings when no preset can be listed,
-   * and from Manage Presets under the preset select. The export dialog closes first, so two
-   * modal dialogs never show together.
+   * and from Manage Presets under the preset select. The export dialog closes first, so the two
+   * modal dialogs are never open together. It keeps the preset choice, and it opens again on
+   * this step when the settings dialog closes, with a new source check
+   * (`exportSettingsReturn.ts`). The two dialogs show together only while they cross-fade.
    */
   onOpenSettings: (section: SettingsSection) => void;
   /**
@@ -253,7 +255,8 @@ export interface ExportSetupProps {
  * - Shows each preset in the select as the preset list shows it: the name, the Default badge,
  *   and the summary line with its encoder mark. The closed select shows the name and the
  *   badge only.
- * - Offers Manage Presets under the select, which opens the Presets tab of Settings. The step
+ * - Offers Manage Presets under the select, which opens the Presets tab of Settings on the
+ *   selected preset. The step shows again, with the choice kept, when Settings closes. The step
  *   shows only while the export store is idle (`resolveExportDialogStep`), so the action never
  *   shows while an export runs. A test in `exportDialogFrame.test.ts` holds that rule.
  * - States the export in one sentence at the top: the segment count, the file name, and the

@@ -26,7 +26,8 @@ export type ExportErrorView = {
  * The action that the failed panel offers beside Close.
  *
  * - `openSettings`: the fix is in the settings. The export dialog closes first, and the
- *   settings dialog then opens at `section`, so two modal dialogs never show together.
+ *   settings dialog then opens at `section`, so the two modal dialogs are never open together.
+ *   They show together only while one fades out and the other fades in.
  * - `backToSetup`: another file name, another folder, another preset, or a second attempt
  *   can succeed. The export dialog goes back to the setup step of ADR 024.
  * - `null`: no action in the export dialog or in the settings can repair the cause, so the

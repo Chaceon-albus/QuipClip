@@ -842,6 +842,59 @@ describe("ExportFlowController", () => {
         expect(first.setModalOpen).not.toHaveBeenCalled();
       });
 
+      it("runs a replacing call for the same media path at once", async () => {
+        const first = startPendingStep();
+        first.finishLoad();
+        await vi.waitFor(() => {
+          expect(first.readSourceRevision).toHaveBeenCalled();
+        });
+
+        // The export dialog opens again after the settings dialog, while a stale step waits.
+        const second = secondStepOptions();
+        await expect(runExportFlow(second, { replace: true })).resolves.toBe(true);
+        expect(second.readSourceRevision).toHaveBeenCalledWith("/media/video.mp4");
+        expect(second.setModalOpen).toHaveBeenCalledWith(true);
+
+        // The replaced step then answers that the file changed. Only the new step reports.
+        first.answerCheck(true);
+        await expect(first.step).resolves.toBe(false);
+        expect(first.reportError).not.toHaveBeenCalled();
+        expect(first.setModalOpen).not.toHaveBeenCalled();
+      });
+
+      it("keeps the guard of a replacing step while it runs", async () => {
+        const first = startPendingStep();
+        first.finishLoad();
+        await vi.waitFor(() => {
+          expect(first.readSourceRevision).toHaveBeenCalled();
+        });
+        const media = createMedia("/media/video.mp4", "video.mp4");
+        let answer: () => void = () => {};
+        const replacing = runExportFlow(
+          {
+            ...secondStepOptions(),
+            readSourceRevision: () =>
+              new Promise<MediaSourceRevisionDescriptor>((resolve) => {
+                answer = () => {
+                  resolve({ path: media.path, size: media.size, mtime: media.mtime });
+                };
+              }),
+          },
+          { replace: true },
+        );
+        first.answerCheck();
+        await expect(first.step).resolves.toBe(false);
+
+        // A plain call for the same file waits for the replacing step, as for any step.
+        const third = secondStepOptions();
+        await expect(runExportFlow(third)).resolves.toBe(false);
+        expect(third.readSourceRevision).not.toHaveBeenCalled();
+
+        answer();
+        await expect(replacing).resolves.toBe(true);
+        await expect(runExportFlow(secondStepOptions())).resolves.toBe(true);
+      });
+
       it("keeps the guard of the new step when the step it replaced settles", async () => {
         const first = startPendingStep("/media/first.mp4");
         first.finishLoad();

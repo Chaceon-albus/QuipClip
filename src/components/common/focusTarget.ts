@@ -71,3 +71,28 @@ export function canTakeFocus<T extends PromptFocusTarget>(
     target !== null && target.isConnected && target.isRendered && !target.isDisabled
   );
 }
+
+/**
+ * Selector for a dialog or an alert dialog that is open. Radix keeps a closed dialog mounted
+ * while its exit animation runs, with `data-state="closed"`, and that dialog does not count.
+ */
+export const OPEN_DIALOG_SELECTOR =
+  '[role="dialog"]:not([data-state="closed"]),[role="alertdialog"]:not([data-state="closed"])';
+
+/** The member of a DOM element that `isInOpenDialog` reads. `Element` satisfies it. */
+export interface DialogAncestorProbe {
+  closest: (selector: string) => unknown;
+}
+
+/**
+ * True when `element` is inside a dialog that is open (`OPEN_DIALOG_SELECTOR`).
+ *
+ * A dialog that closes gives the focus back to its opener when its content unmounts. When
+ * another dialog opened meanwhile and took the focus, that dialog keeps it. The settings
+ * dialog and the export dialog read this rule, because the export dialog opens again as the
+ * settings dialog closes (`exportSettingsReturn.ts`). Without it, the closing dialog moves the
+ * focus out of the open dialog, and the focus trap of the open dialog pulls it back.
+ */
+export function isInOpenDialog(element: DialogAncestorProbe | null): boolean {
+  return element !== null && element.closest(OPEN_DIALOG_SELECTOR) !== null;
+}

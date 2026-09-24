@@ -8,8 +8,9 @@
  * It also holds the name of a preset draft with unsaved edits. The dialog writes it, and the
  * quit guard reads it, because a quit drops the draft (ADR 027).
  *
- * A caller can also name the element that takes the focus back when the dialog closes. See
- * `SettingsPanelState.returnFocus`.
+ * A caller can also name the element that takes the focus back when the dialog closes, the
+ * preset that the Presets tab selects when it opens, and the flow that the dialog returns to
+ * when it closes. See `SettingsShowOptions`.
  */
 
 import { useStore } from "zustand";
@@ -44,6 +45,25 @@ export interface SettingsFocusReturnTarget {
   focus: () => void;
 }
 
+/**
+ * The flow that opened the dialog and that continues when it closes.
+ *
+ * - `exportSetup`: the setup step of the export dialog. The export dialog closes when it opens
+ *   the settings dialog, and opens again on the setup step when the settings dialog closes
+ *   (`exportSettingsReturn.ts` in the export components).
+ */
+export type SettingsReturnTarget = "exportSetup";
+
+/** What a caller of `show` can name in addition to the section. */
+export interface SettingsShowOptions {
+  /** Sets `SettingsPanelState.returnFocus`. */
+  returnFocus?: SettingsFocusReturnTarget | null;
+  /** Sets `SettingsPanelState.openingPresetId`. */
+  selectPresetId?: string | null;
+  /** Sets `SettingsPanelState.returnTo`. */
+  returnTo?: SettingsReturnTarget | null;
+}
+
 export type SettingsPanelState = {
   open: boolean;
   section: SettingsSection;
@@ -57,6 +77,25 @@ export type SettingsPanelState = {
    */
   returnFocus: SettingsFocusReturnTarget | null;
   /**
+   * The preset that the Presets tab selects when the dialog opens, or null. When it is null,
+   * or when no preset has this id, the tab selects the default preset. The tab reads it only
+   * when it opens. A `show` on an open dialog changes the tab and not the selection, so it
+   * never discards an unsaved draft.
+   */
+  openingPresetId: string | null;
+  /**
+   * The flow that continues when the dialog closes, or null. Only the caller that opened the
+   * dialog for that flow sets it, and every other `show` clears it. The status bar, the menu
+   * and the key therefore open a dialog that returns to nothing.
+   */
+  returnTo: SettingsReturnTarget | null;
+  /**
+   * The preset that the Presets tab selects, or null while it selects none. The tab writes it
+   * while it is mounted, and it writes null when it unmounts. `hide` does not clear it, so a
+   * listener of the close reads the selection that the closed dialog showed.
+   */
+  selectedPresetId: string | null;
+  /**
    * The name that the prompts show for a preset draft with unsaved edits, or null when no
    * draft holds an unsaved edit. The name can be empty, for a new preset with no name yet.
    */
@@ -66,16 +105,16 @@ export type SettingsPanelState = {
 export type SettingsPanelActions = {
   /**
    * Opens the dialog. With a section, the dialog also switches to that section. Without one,
-   * it keeps the section it showed last. `returnFocus` sets `SettingsPanelState.returnFocus`,
-   * and every call without it clears that field.
+   * it keeps the section it showed last. Each field of `options` sets its state field, and
+   * every call clears the fields that it does not name.
    */
-  show: (
-    section?: SettingsSection,
-    returnFocus?: SettingsFocusReturnTarget | null,
-  ) => void;
+  show: (section?: SettingsSection, options?: SettingsShowOptions) => void;
+  /** Closes the dialog, and clears `returnFocus`, `openingPresetId` and `returnTo`. */
   hide: () => void;
   /** Changes the visible section and does not change the open state. */
   setSection: (section: SettingsSection) => void;
+  /** Records the selection of the Presets tab. Only the settings dialog calls it. */
+  setSelectedPresetId: (id: string | null) => void;
   /** Records the unsaved preset draft. Only the settings dialog calls it. */
   setUnsavedPresetName: (name: string | null) => void;
 };
@@ -90,14 +129,22 @@ export function createSettingsPanelStore(
     section: initialState?.section ?? DEFAULT_SETTINGS_SECTION,
     unsavedPresetName: initialState?.unsavedPresetName ?? null,
     returnFocus: initialState?.returnFocus ?? null,
-    show: (section?: SettingsSection, returnFocus?: SettingsFocusReturnTarget | null) =>
-      set(
-        section === undefined
-          ? { open: true, returnFocus: returnFocus ?? null }
-          : { open: true, section, returnFocus: returnFocus ?? null },
-      ),
-    hide: () => set({ open: false, returnFocus: null }),
+    openingPresetId: initialState?.openingPresetId ?? null,
+    returnTo: initialState?.returnTo ?? null,
+    selectedPresetId: initialState?.selectedPresetId ?? null,
+    show: (section?: SettingsSection, options?: SettingsShowOptions) => {
+      const session = {
+        open: true,
+        returnFocus: options?.returnFocus ?? null,
+        openingPresetId: options?.selectPresetId ?? null,
+        returnTo: options?.returnTo ?? null,
+      };
+      set(section === undefined ? session : { ...session, section });
+    },
+    hide: () =>
+      set({ open: false, returnFocus: null, openingPresetId: null, returnTo: null }),
     setSection: (section: SettingsSection) => set({ section }),
+    setSelectedPresetId: (id: string | null) => set({ selectedPresetId: id }),
     setUnsavedPresetName: (name: string | null) => set({ unsavedPresetName: name }),
   }));
 }

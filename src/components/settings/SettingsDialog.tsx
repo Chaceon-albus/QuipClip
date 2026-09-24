@@ -10,7 +10,7 @@ import { useTranslation } from "react-i18next";
 import { XIcon } from "lucide-react";
 import { Tabs as TabsPrimitive } from "radix-ui";
 import { DialogActions } from "@/components/common/DialogActions";
-import { toPromptFocusTarget } from "@/components/common/focusTarget";
+import { isInOpenDialog, toPromptFocusTarget } from "@/components/common/focusTarget";
 import { Notice } from "@/components/common/Notice";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,6 +47,11 @@ import { PresetLibrarySection } from "./PresetLibrarySection";
 
 const hideSettings = () => {
   settingsPanelStore.getState().hide();
+};
+
+// The export setup step reads the last selection of the Presets tab when this dialog closes.
+const reportPresetSelection = (presetId: string | null) => {
+  settingsPanelStore.getState().setSelectedPresetId(presetId);
 };
 
 const handleSectionChange = (value: string) => {
@@ -100,6 +105,7 @@ export function SettingsDialog() {
   ) => string;
   const open = useSettingsPanelStore((state) => state.open);
   const section = useSettingsPanelStore((state) => state.section);
+  const openingPresetId = useSettingsPanelStore((state) => state.openingPresetId);
   const error = useSettingsStore((state) => state.error);
   const status = useSettingsStore((state) => state.status);
   const settings = useSettingsStore((state) => state.settings);
@@ -296,7 +302,13 @@ export function SettingsDialog() {
           // Radix would focus its trigger, and this dialog has none. See dialogFocusReturn.ts
           // for why a pointer close leaves the focus on the body.
           event.preventDefault();
-          focusReturn.takeCloseTarget()?.focus();
+          const target = focusReturn.takeCloseTarget();
+          // The export dialog opens again as this dialog closes, when its setup step opened
+          // this dialog, and it has the focus by now (`exportSettingsReturn.ts`). It keeps it.
+          if (isInOpenDialog(document.activeElement)) {
+            return;
+          }
+          target?.focus();
         }}
       >
         <DialogHeader>
@@ -365,6 +377,9 @@ export function SettingsDialog() {
                   focusPrompt(promptCancelRef.current, promptMessageRef.current);
                 }}
                 visible={section === PRESETS_SECTION}
+                open={open}
+                openingPresetId={openingPresetId}
+                onSelectionChange={reportPresetSelection}
               />
             </SettingsPanel>
           </div>

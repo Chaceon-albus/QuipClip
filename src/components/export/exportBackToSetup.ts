@@ -19,6 +19,10 @@
  *    late would otherwise open the closed dialog again, or report a failure into the store
  *    that the close reset.
  *
+ * The return from the settings dialog runs the same open step (`runOpenStepAgain`), because
+ * the settings dialog can close a Back step before its check answered, and the file can
+ * change while the settings dialog is open.
+ *
  * The module has no React and no document, so the tests need neither.
  */
 
@@ -97,4 +101,40 @@ export function guardOpenStepEffects(
       }
     },
   };
+}
+
+/** What `runOpenStepAgain` needs from the dialog. */
+export interface OpenStepAgain {
+  /** The generation of the dialog. The step begins a new one, and a close invalidates it. */
+  readonly generation: OpenStepGeneration;
+  /** The effects of the step. They apply only while the step is current. */
+  readonly effects: OpenStepEffects;
+  /** Sets the flag that disables Export while the step runs. */
+  readonly setPending: (pending: boolean) => void;
+  /** Runs the open step with the guarded effects, through `runExportFlow`. */
+  readonly run: (effects: OpenStepEffects) => Promise<boolean>;
+}
+
+/**
+ * Runs the open step of ADR 024 again while the dialog shows the setup step: after Back, and
+ * when the dialog opens again after the settings dialog (`exportSettingsReturn.ts`).
+ *
+ * Export stays disabled until the step answers, so no export starts before the source check
+ * ends, and a check that fails shows its own panel. A step that another step or a close made
+ * stale changes nothing, and it does not enable Export: the step that replaced it owns the
+ * flag. Resolves as the step does.
+ */
+export function runOpenStepAgain({
+  generation,
+  effects,
+  setPending,
+  run,
+}: OpenStepAgain): Promise<boolean> {
+  const isCurrent = generation.begin();
+  setPending(true);
+  return run(guardOpenStepEffects(isCurrent, effects)).finally(() => {
+    if (isCurrent()) {
+      setPending(false);
+    }
+  });
 }

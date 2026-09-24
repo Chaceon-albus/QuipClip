@@ -479,6 +479,20 @@ interface OpenStep {
 /** The newest OPEN step of `runExportFlow` that has not settled, or null. */
 let openStep: OpenStep | null = null;
 
+/** How `runExportFlow` treats an OPEN step that has not settled. */
+export interface OpenStepGuardOptions {
+  /**
+   * Runs the step at once, also while a step for the same media path has not settled. The new
+   * step takes the place of that step, which then changes nothing when it settles.
+   *
+   * The export dialog sets it when it opens again on the setup step after the settings dialog
+   * (`exportSettingsReturn.ts`). The step that waits can then be a Back step that the dialog
+   * made stale when it closed, and a refusal would show the setup step with no source check
+   * of its own.
+   */
+  readonly replace?: boolean;
+}
+
 /**
  * Convenience helper to run the export flow OPEN step.
  *
@@ -497,16 +511,18 @@ let openStep: OpenStep | null = null;
  * not report an error, because its result is about the old file.
  *
  * The guard is for every caller, the dialog included. A Back step of the dialog that became
- * stale because the dialog closed therefore also holds it until its check answers.
+ * stale because the dialog closed therefore also holds it until its check answers. A caller
+ * that must have a check of its own passes `replace` (`OpenStepGuardOptions`).
  */
 export async function runExportFlow(
   options: ExportFlowControllerOptions,
+  guard: OpenStepGuardOptions = {},
 ): Promise<boolean> {
   // The default of the controller, read here because the guard compares the media path
   // before a controller exists.
   const getMedia = options.getMedia ?? (() => mediaStore.getState().media);
   const mediaPath = getMedia()?.path ?? null;
-  if (openStep !== null && openStep.mediaPath === mediaPath) {
+  if (guard.replace !== true && openStep !== null && openStep.mediaPath === mediaPath) {
     return false;
   }
   const step: OpenStep = { mediaPath };

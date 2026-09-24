@@ -12,7 +12,9 @@ import {
   findTabStopRow,
   pickDefaultPresetId,
   pickListTabStopId,
+  pickOpeningPresetId,
   pickSelectionAfterDelete,
+  pickSessionSelection,
   PRESET_ROW_ID_ATTRIBUTE,
   presentAddPresetAction,
   presentDeletePresetAction,
@@ -70,6 +72,69 @@ describe("pickDefaultPresetId", () => {
   it("returns null for an empty library", () => {
     expect(pickDefaultPresetId([], "a")).toBeNull();
     expect(pickDefaultPresetId([], null)).toBeNull();
+  });
+});
+
+describe("pickOpeningPresetId", () => {
+  const presets = [createPreset("a"), createPreset("b"), createPreset("c")];
+
+  it("selects the preset that the opener named", () => {
+    expect(pickOpeningPresetId(presets, "b", "c")).toBe("c");
+  });
+
+  it("selects the default preset when the opener named none", () => {
+    expect(pickOpeningPresetId(presets, "b", null)).toBe("b");
+    expect(pickOpeningPresetId(presets, null, null)).toBe("a");
+  });
+
+  it("selects the default preset when no preset has the named id", () => {
+    expect(pickOpeningPresetId(presets, "b", "gone")).toBe("b");
+    expect(pickOpeningPresetId(presets, "gone", "gone")).toBe("a");
+  });
+
+  it("returns null for an empty library", () => {
+    expect(pickOpeningPresetId([], "a", "a")).toBeNull();
+  });
+});
+
+describe("pickSessionSelection", () => {
+  const presets = [createPreset("a"), createPreset("b"), createPreset("c")];
+  const clean = {
+    presets,
+    activePresetId: "a",
+    selectedPresetId: null,
+    dirty: false,
+    pending: false,
+  };
+
+  it("selects the named preset, or the default, when the tab mounts", () => {
+    expect(pickSessionSelection(clean, "c")).toBe("c");
+    expect(pickSessionSelection(clean, null)).toBe("a");
+  });
+
+  // The dialog opened again during its exit animation, and the tab stayed mounted.
+  it("moves the selection of the last session to the named preset", () => {
+    expect(pickSessionSelection({ ...clean, selectedPresetId: "b" }, "c")).toBe("c");
+    expect(pickSessionSelection({ ...clean, selectedPresetId: "b" }, null)).toBe("a");
+  });
+
+  it("keeps a selection that is already the preset of the session", () => {
+    expect(pickSessionSelection({ ...clean, selectedPresetId: "c" }, "c")).toBeNull();
+  });
+
+  it("never discards an unsaved edit, and never selects under a write in flight", () => {
+    expect(
+      pickSessionSelection({ ...clean, selectedPresetId: "b", dirty: true }, "c"),
+    ).toBeNull();
+    expect(
+      pickSessionSelection({ ...clean, selectedPresetId: "b", pending: true }, "c"),
+    ).toBeNull();
+  });
+
+  it("selects nothing in an empty library", () => {
+    expect(
+      pickSessionSelection({ ...clean, presets: [], activePresetId: null }, "c"),
+    ).toBeNull();
   });
 });
 

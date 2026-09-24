@@ -22,6 +22,8 @@ import {
   canGoBackToSetup,
   createOpenStepGeneration,
   guardOpenStepEffects,
+  runOpenStepAgain,
+  type OpenStepEffects,
 } from "./exportBackToSetup";
 import { presentExportErrorRecovery } from "./exportErrorPresenter";
 
@@ -298,6 +300,111 @@ describe("guardOpenStepEffects", () => {
     guarded.setModalOpen(true);
 
     expect(setModalOpen).not.toHaveBeenCalled();
+  });
+});
+
+describe("runOpenStepAgain", () => {
+  /** A step that settles when the test answers it, with the effects that it received. */
+  function controlledStep() {
+    let settle: (opened: boolean) => void = () => {};
+    let received: OpenStepEffects | null = null;
+    const run = vi.fn(
+      (effects: OpenStepEffects) =>
+        new Promise<boolean>((resolve) => {
+          received = effects;
+          settle = resolve;
+        }),
+    );
+    return {
+      run,
+      settle: (opened: boolean) => {
+        settle(opened);
+      },
+      received: () => received,
+    };
+  }
+
+  it("disables Export until the step answers, and resolves as the step does", async () => {
+    const pending: boolean[] = [];
+    const step = controlledStep();
+    const running = runOpenStepAgain({
+      generation: createOpenStepGeneration(),
+      effects: { setModalOpen: vi.fn(), reportError: vi.fn() },
+      setPending: (value) => pending.push(value),
+      run: step.run,
+    });
+    expect(pending).toEqual([true]);
+    expect(step.run).toHaveBeenCalledTimes(1);
+
+    step.settle(true);
+    await expect(running).resolves.toBe(true);
+    expect(pending).toEqual([true, false]);
+  });
+
+  it("guards the effects of the step by its generation", async () => {
+    const generation = createOpenStepGeneration();
+    const effects = { setModalOpen: vi.fn(), reportError: vi.fn() };
+    const step = controlledStep();
+    const running = runOpenStepAgain({
+      generation,
+      effects,
+      setPending: () => {},
+      run: step.run,
+    });
+
+    step.received()?.setModalOpen(true);
+    expect(effects.setModalOpen).toHaveBeenCalledTimes(1);
+
+    generation.invalidate();
+    step.received()?.setModalOpen(true);
+    step.received()?.reportError(new Error("late"));
+    expect(effects.setModalOpen).toHaveBeenCalledTimes(1);
+    expect(effects.reportError).not.toHaveBeenCalled();
+
+    step.settle(false);
+    await running;
+  });
+
+  // The dialog closed, or a later step began: the flag belongs to that close or that step.
+  it("leaves the flag alone when a stale step answers", async () => {
+    const generation = createOpenStepGeneration();
+    const pending: boolean[] = [];
+    const first = controlledStep();
+    const firstRun = runOpenStepAgain({
+      generation,
+      effects: { setModalOpen: vi.fn(), reportError: vi.fn() },
+      setPending: (value) => pending.push(value),
+      run: first.run,
+    });
+    const second = controlledStep();
+    const secondRun = runOpenStepAgain({
+      generation,
+      effects: { setModalOpen: vi.fn(), reportError: vi.fn() },
+      setPending: (value) => pending.push(value),
+      run: second.run,
+    });
+    expect(pending).toEqual([true, true]);
+
+    first.settle(true);
+    await firstRun;
+    expect(pending).toEqual([true, true]);
+
+    second.settle(true);
+    await secondRun;
+    expect(pending).toEqual([true, true, false]);
+  });
+
+  it("clears the flag of a current step that rejects, and passes the rejection on", async () => {
+    const pending: boolean[] = [];
+    const running = runOpenStepAgain({
+      generation: createOpenStepGeneration(),
+      effects: { setModalOpen: vi.fn(), reportError: vi.fn() },
+      setPending: (value) => pending.push(value),
+      run: () => Promise.reject(new Error("load failed")),
+    });
+
+    await expect(running).rejects.toThrow("load failed");
+    expect(pending).toEqual([true, false]);
   });
 });
 

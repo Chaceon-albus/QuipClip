@@ -103,12 +103,12 @@ describe("Settings Panel Store", () => {
     const target = { isConnected: true, focus: () => {} };
     const store = createSettingsPanelStore();
 
-    store.getState().show("presets", target);
+    store.getState().show("presets", { returnFocus: target });
     expect(store.getState().returnFocus).toBe(target);
     expect(store.getState().section).toBe("presets");
 
     store.getState().hide();
-    store.getState().show(undefined, target);
+    store.getState().show(undefined, { returnFocus: target });
     expect(store.getState().returnFocus).toBe(target);
     expect(store.getState().section).toBe("presets");
   });
@@ -117,13 +117,92 @@ describe("Settings Panel Store", () => {
     const target = { isConnected: true, focus: () => {} };
     const store = createSettingsPanelStore();
 
-    store.getState().show("ffmpeg", target);
+    store.getState().show("ffmpeg", { returnFocus: target });
     store.getState().hide();
     expect(store.getState().returnFocus).toBeNull();
 
-    store.getState().show("ffmpeg", target);
+    store.getState().show("ffmpeg", { returnFocus: target });
     store.getState().show();
     expect(store.getState().returnFocus).toBeNull();
+  });
+
+  it("starts with no opening preset, no return flow and no selection", () => {
+    const state = createSettingsPanelStore().getState();
+    expect(state.openingPresetId).toBeNull();
+    expect(state.returnTo).toBeNull();
+    expect(state.selectedPresetId).toBeNull();
+  });
+
+  it("records the opening preset and the return flow that show names", () => {
+    const target = { isConnected: true, focus: () => {} };
+    const store = createSettingsPanelStore();
+
+    store.getState().show("presets", {
+      returnFocus: target,
+      selectPresetId: "p2",
+      returnTo: "exportSetup",
+    });
+    expect(store.getState()).toMatchObject({
+      open: true,
+      section: "presets",
+      returnFocus: target,
+      openingPresetId: "p2",
+      returnTo: "exportSetup",
+    });
+  });
+
+  it("clears the opening preset and the return flow on hide", () => {
+    const store = createSettingsPanelStore();
+    store.getState().show("presets", { selectPresetId: "p2", returnTo: "exportSetup" });
+
+    store.getState().hide();
+    expect(store.getState().openingPresetId).toBeNull();
+    expect(store.getState().returnTo).toBeNull();
+  });
+
+  it("gives a listener of the close the return flow of the dialog that closed", () => {
+    const store = createSettingsPanelStore();
+    const closed: unknown[] = [];
+    store.subscribe((state, previous) => {
+      if (previous.open && !state.open) {
+        closed.push(previous.returnTo);
+      }
+    });
+
+    store.getState().show("presets", { returnTo: "exportSetup" });
+    store.getState().hide();
+    store.getState().show("presets");
+    store.getState().hide();
+    expect(closed).toEqual(["exportSetup", null]);
+  });
+
+  // The status bar gear, the settings key and the menu item call `show` with no options, and
+  // the ffmpeg status line calls it with a section only.
+  it("clears the return flow on every show that does not name it", () => {
+    const store = createSettingsPanelStore();
+
+    store.getState().show("presets", { selectPresetId: "p2", returnTo: "exportSetup" });
+    store.getState().show();
+    expect(store.getState().openingPresetId).toBeNull();
+    expect(store.getState().returnTo).toBeNull();
+
+    store.getState().show("presets", { selectPresetId: "p2", returnTo: "exportSetup" });
+    store.getState().show("ffmpeg");
+    expect(store.getState().openingPresetId).toBeNull();
+    expect(store.getState().returnTo).toBeNull();
+  });
+
+  it("keeps the selection of the Presets tab after hide, for a listener of the close", () => {
+    const store = createSettingsPanelStore();
+    store.getState().show("presets");
+    store.getState().setSelectedPresetId("p3");
+    expect(store.getState().selectedPresetId).toBe("p3");
+
+    store.getState().hide();
+    expect(store.getState().selectedPresetId).toBe("p3");
+
+    store.getState().setSelectedPresetId(null);
+    expect(store.getState().selectedPresetId).toBeNull();
   });
 
   it("keeps separate store instances independent", () => {
