@@ -7,11 +7,19 @@ pub mod procutil;
 pub mod project;
 pub mod settings;
 pub mod time;
+#[cfg(target_os = "macos")]
+mod traffic_lights;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
+
+/// The label of the one window, as the configuration files and `capabilities/default.json`
+/// name it. On macOS, `traffic_lights` builds this window, and the command items of `menu`
+/// send their events to it.
+#[cfg(target_os = "macos")]
+const MAIN_WINDOW_LABEL: &str = "main";
 
 /// How long an application exit waits for a running export to stop.
 ///
@@ -79,11 +87,21 @@ pub fn run() {
         .manage(commands::quit::QuitGate::default());
 
     // The default macOS menu with a Quit item that raises `ExitRequested` (ADR 027). The
-    // default Quit item raises only `Exit`, which cannot be prevented. See `menu`.
+    // default Quit item raises only `Exit`, which cannot be prevented. The menu also holds the
+    // Settings, Open Media and Export items, which send their action to the frontend. See `menu`.
     #[cfg(target_os = "macos")]
     let builder = builder
         .menu(menu::build_app_menu)
         .on_menu_event(menu::handle_menu_event);
+
+    // The macOS configuration does not create the main window. This hook builds it with the
+    // position of the window buttons that centres them on this macOS version (ADR 020). See
+    // `traffic_lights`.
+    #[cfg(target_os = "macos")]
+    let builder = builder.setup(|app| {
+        traffic_lights::create_main_window(app)?;
+        Ok(())
+    });
 
     let application = builder
         .invoke_handler(tauri::generate_handler![
@@ -386,5 +404,38 @@ mod tests {
             Duration::from_secs(5)
         ));
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn every_configuration_names_the_main_window_with_one_label() {
+        // `traffic_lights` finds the configuration of the window by this label, and `menu`
+        // sends its events to the window with this label. The capability must grant its
+        // permissions to the same window.
+        let labels_of = |source: &str| -> Vec<String> {
+            let config: serde_json::Value =
+                serde_json::from_str(source).expect("the configuration is JSON");
+            config["app"]["windows"]
+                .as_array()
+                .expect("the configuration lists windows")
+                .iter()
+                .map(|window| window["label"].as_str().unwrap_or_default().to_owned())
+                .collect()
+        };
+        for labels in [
+            labels_of(include_str!("../tauri.conf.json")),
+            labels_of(include_str!("../tauri.macos.conf.json")),
+            labels_of(include_str!("../tauri.windows.conf.json")),
+        ] {
+            assert_eq!(labels, [MAIN_WINDOW_LABEL]);
+        }
+
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json"))
+                .expect("the capability is JSON");
+        assert_eq!(
+            capability["windows"],
+            serde_json::json!([MAIN_WINDOW_LABEL])
+        );
     }
 }

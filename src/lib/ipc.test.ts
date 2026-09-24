@@ -64,4 +64,17 @@ describe("Backend event parity", () => {
     expect(match).not.toBeNull();
     expect(match![1]).toBe(BACKEND_EVENTS.QUIT_REQUESTED);
   });
+
+  it("names the menu action event exactly as the Rust constant does", () => {
+    // A rename on one side only leaves every command item of the macOS menu with no listener,
+    // so Open Media, Export and Settings in the menu would do nothing.
+    const source = readFileSync(
+      fileURLToPath(new URL("../../src-tauri/src/menu.rs", import.meta.url)),
+      "utf8",
+    );
+    const match = /pub const MENU_ACTION_EVENT: &str = "([^"]+)";/.exec(source);
+
+    expect(match).not.toBeNull();
+    expect(match![1]).toBe(BACKEND_EVENTS.MENU_ACTION);
+  });
 });

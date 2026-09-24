@@ -43,6 +43,48 @@ export type MediaFlowDescriptor = MediaSourceRevisionDescriptor & {
 };
 
 /**
+ * How long the replacement check of the OPEN step waits for the revision of the source file,
+ * in milliseconds.
+ *
+ * A local disk answers in far less. A network share that stopped answering can hold the read
+ * for much longer, and the OPEN step, and with it the Export action (`runExportFlow`), would
+ * wait all that time. After this time the check counts the read as failed, which is not a
+ * mismatch, so the setup step opens. The backend preflight of the export itself still reports
+ * a file that it cannot read, with a code of its own.
+ */
+export const SOURCE_REVISION_CHECK_TIMEOUT_MS = 3000;
+
+/** The rejection of a source check that did not answer within its time. */
+class SourceRevisionCheckTimeout extends Error {
+  constructor() {
+    super("the source revision check did not answer in time");
+    this.name = "SourceRevisionCheckTimeout";
+  }
+}
+
+/**
+ * Settles like `promise`, or rejects with `SourceRevisionCheckTimeout` when `promise` has not
+ * settled after `timeoutMs`. The timer stops when `promise` settles first.
+ */
+function withinTime<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new SourceRevisionCheckTimeout());
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+/**
  * Dependency injection options for configuring export flow execution.
  */
 export interface ExportFlowControllerOptions {
@@ -77,6 +119,12 @@ export interface ExportFlowControllerOptions {
    * Defaults to the `read_source_revision` client.
    */
   readSourceRevision?: (path: string) => Promise<MediaSourceRevisionDescriptor>;
+
+  /**
+   * How long the replacement check waits for `readSourceRevision`, in milliseconds. Defaults
+   * to `SOURCE_REVISION_CHECK_TIMEOUT_MS`.
+   */
+  sourceRevisionTimeoutMs?: number;
 
   /**
    * Skips the replacement check for this run.
@@ -154,6 +202,7 @@ export class ExportFlowController {
   private readonly readSourceRevisionFn: (
     path: string,
   ) => Promise<MediaSourceRevisionDescriptor>;
+  private readonly sourceRevisionTimeoutMs: number;
   private readonly skipSourceRevisionCheck: boolean;
   private readonly getSegmentsFn: () => readonly Segment[];
   private readonly getSourceIdFn: () => string | null;
@@ -174,6 +223,8 @@ export class ExportFlowController {
     this.openSaveDialogFn = options.openSaveDialog ?? openExportSaveDialog;
     this.getMediaFn = options.getMedia ?? (() => mediaStore.getState().media);
     this.readSourceRevisionFn = options.readSourceRevision ?? readSourceRevision;
+    this.sourceRevisionTimeoutMs =
+      options.sourceRevisionTimeoutMs ?? SOURCE_REVISION_CHECK_TIMEOUT_MS;
     this.skipSourceRevisionCheck = options.skipSourceRevisionCheck ?? false;
     this.getSegmentsFn =
       options.getSegments ?? (() => timelineStore.getState().segments);
@@ -371,7 +422,9 @@ export class ExportFlowController {
    * nothing to compare, and a read that FAILS is not a mismatch: a deleted file, a path that
    * is no longer a regular file, and a share that stopped answering are all reported by the
    * backend preflight with a translated code of their own, and claiming "the file changed" for
-   * one of them would be a positive claim this check never made.
+   * one of them would be a positive claim this check never made. A read that does not answer
+   * within `sourceRevisionTimeoutMs` counts as a failed read, so a share that stopped answering
+   * cannot hold the OPEN step, and the guard of `runExportFlow` with it, for longer than that.
    *
    * It also answers true when no segment carries the active source id. The confirmation says
    * the marked segments may no longer name the same frames, and nothing marked against this
@@ -397,8 +450,12 @@ export class ExportFlowController {
     }
     let actual: MediaSourceRevisionDescriptor;
     try {
-      actual = await this.readSourceRevisionFn(media.path);
+      actual = await withinTime(
+        this.readSourceRevisionFn(media.path),
+        this.sourceRevisionTimeoutMs,
+      );
     } catch {
+      // A failed read and a read that did not answer in time: neither is a mismatch.
       return true;
     }
     return isSameSourceRevision(media, actual);
@@ -414,11 +471,74 @@ export function createExportFlowController(
   return new ExportFlowController(options);
 }
 
+/** One OPEN step of `runExportFlow` that has not settled, and the media path it started for. */
+interface OpenStep {
+  readonly mediaPath: string | null;
+}
+
+/** The newest OPEN step of `runExportFlow` that has not settled, or null. */
+let openStep: OpenStep | null = null;
+
 /**
  * Convenience helper to run the export flow OPEN step.
+ *
+ * One OPEN step runs at a time for one media path. The step awaits `loadSettings` and
+ * `readSourceRevision` before it opens the modal, and on a network share the second one can
+ * take seconds. A second call in that time, such as a second press of Export or of its key, or
+ * the Export item of the macOS menu, does nothing and resolves to false. Without this, both
+ * steps would run their checks, and each one would report its result and open the modal.
+ *
+ * The wait is bounded. The source check gives up after `sourceRevisionTimeoutMs`, so a share
+ * that stopped answering cannot lock Export.
+ *
+ * A call for another media path runs at once: the user opened another file, and the step that
+ * waits is about the file that is no longer open. That new step takes the place of the old
+ * one. The old step then changes nothing when it settles: it does not open the modal and does
+ * not report an error, because its result is about the old file.
+ *
+ * The guard is for every caller, the dialog included. A Back step of the dialog that became
+ * stale because the dialog closed therefore also holds it until its check answers.
  */
-export function runExportFlow(options: ExportFlowControllerOptions): Promise<boolean> {
-  return new ExportFlowController(options).run();
+export async function runExportFlow(
+  options: ExportFlowControllerOptions,
+): Promise<boolean> {
+  // The default of the controller, read here because the guard compares the media path
+  // before a controller exists.
+  const getMedia = options.getMedia ?? (() => mediaStore.getState().media);
+  const mediaPath = getMedia()?.path ?? null;
+  if (openStep !== null && openStep.mediaPath === mediaPath) {
+    return false;
+  }
+  const step: OpenStep = { mediaPath };
+  openStep = step;
+  const isCurrent = () => openStep === step;
+
+  const reportError =
+    options.reportError ??
+    ((error: unknown) => exportStore.getState().reportError(error));
+  const controller = new ExportFlowController({
+    ...options,
+    getMedia,
+    setModalOpen: (open) => {
+      if (isCurrent()) {
+        options.setModalOpen(open);
+      }
+    },
+    reportError: (error) => {
+      if (isCurrent()) {
+        reportError(error);
+      }
+    },
+  });
+  try {
+    const opened = await controller.run();
+    // A step that another step replaced changed nothing, so it did not open the setup step.
+    return isCurrent() && opened;
+  } finally {
+    if (isCurrent()) {
+      openStep = null;
+    }
+  }
 }
 
 /**

@@ -6,6 +6,7 @@ import { StatusBar } from "@/components/layout/StatusBar";
 import { TitleBar } from "@/components/layout/TitleBar";
 import { startTaskbarProgressSync } from "@/components/layout/taskbarProgressSync";
 import { useKeyboardShortcuts } from "@/components/layout/useKeyboardShortcuts";
+import { useNativeMenuActions } from "@/components/layout/useNativeMenuActions";
 import { useQuitGuard } from "@/components/layout/useQuitGuard";
 import { startWindowTitleSync } from "@/components/layout/windowTitleSync";
 import { PreviewPane } from "@/components/preview/PreviewPane";
@@ -17,6 +18,9 @@ import { usePlaybackStore } from "@/features/playback";
 
 export function AppShell() {
   useKeyboardShortcuts();
+  // The Settings, Open Media and Export items of the macOS menu run the commands of their
+  // keys, under the same conditions.
+  useNativeMenuActions();
   // Every close request and every held-back exit request runs the quit decision (ADR 027).
   useQuitGuard();
 

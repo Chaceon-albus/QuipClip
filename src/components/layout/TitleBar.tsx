@@ -34,6 +34,7 @@ import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { presentExportAction, type ExportActionLabel } from "./exportActionPresenter";
 import { runExportFlow } from "./exportFlowController";
+import { resolveTitleBarPadding } from "./titleBarLayout";
 import { useWindowState } from "./useWindowState";
 import { CloseGlyph, MaximizeGlyph, MinimizeGlyph, RestoreGlyph } from "./WindowGlyphs";
 import { resolveMaximizeControl } from "./windowStateSync";
@@ -149,7 +150,11 @@ export function TitleBar() {
   const handleOpenMedia = useOpenMediaAction();
 
   // macOS draws its own window buttons, so only the other platforms read the maximized state.
-  const { maximized, focused } = useWindowState(!isMac);
+  // macOS hides those buttons in full screen, so only macOS reads the full-screen state.
+  const { maximized, focused, fullscreen } = useWindowState({
+    trackMaximized: !isMac,
+    trackFullscreen: isMac,
+  });
   const maximizeControl = resolveMaximizeControl(maximized);
 
   const handleExport = () => {
@@ -179,10 +184,16 @@ export function TitleBar() {
       // The window buttons and the title text dim while the window does not have the focus.
       data-inactive={focused ? undefined : ""}
       className={cn(
+        // The position of the macOS window buttons depends on this height and this border.
+        // `src-tauri/src/traffic_lights.rs` computes it when the application starts, from
+        // `TITLE_BAR_CONTENT_HEIGHT` (39, this height less the border), and
+        // `titleBarLayout.ts` holds the same numbers and the fallback. A change to either one
+        // must change both files.
         "group/title-bar relative flex h-10 shrink-0 items-center justify-between border-b border-border bg-sidebar text-xs select-none",
-        // The reserved width for the native macOS traffic-light buttons, which
-        // titleBarStyle: "Overlay" draws over the top left of the web view.
-        isMac ? "pr-3 pl-[78px]" : "pr-0 pl-3",
+        // The reserved width for the native macOS window buttons, which
+        // titleBarStyle: "Overlay" draws over the top left of the web view. It is free again
+        // in full screen, where macOS hides them.
+        resolveTitleBarPadding({ isMac, fullscreen }),
       )}
     >
       {/* Left: File menu (constant), plus app icon, title, and separator on non-macOS platforms */}

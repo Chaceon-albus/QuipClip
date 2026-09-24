@@ -4,6 +4,7 @@ import {
   createExportFlowController,
   ExportFlowController,
   runExportFlow,
+  SOURCE_REVISION_CHECK_TIMEOUT_MS,
   type MediaFlowDescriptor,
 } from "./exportFlowController";
 import {
@@ -593,6 +594,277 @@ describe("ExportFlowController", () => {
         expect(reportError).toHaveBeenCalledWith(
           expect.objectContaining({ code: "noSegments" }),
         );
+      });
+    });
+
+    describe("one open step at a time", () => {
+      /**
+       * A step whose settings load and source check wait until the test answers them.
+       * `answerCheck` answers the revision of the media, or a changed size when `changed` is
+       * true.
+       */
+      function startPendingStep(
+        path = "/media/video.mp4",
+        extra: { sourceRevisionTimeoutMs?: number } = {},
+      ) {
+        const media = createMedia(path, "video.mp4");
+        let finishLoad: () => void = () => {};
+        let answerCheck: (changed: boolean) => void = () => {};
+        const setModalOpen = vi.fn();
+        const reportError = vi.fn();
+        const loadSettings = vi.fn(
+          () =>
+            new Promise<void>((resolve) => {
+              finishLoad = resolve;
+            }),
+        );
+        const readSourceRevision = vi.fn(
+          () =>
+            new Promise<MediaSourceRevisionDescriptor>((resolve) => {
+              answerCheck = (changed) => {
+                resolve({
+                  path: media.path,
+                  size: changed ? media.size + 1 : media.size,
+                  mtime: media.mtime,
+                });
+              };
+            }),
+        );
+        let settings: Settings | null = null;
+        const step = runExportFlow({
+          setModalOpen,
+          reportError,
+          filterName: "Video Files",
+          getExportState: () => ({ status: "idle", tracking: false }),
+          getMedia: () => media,
+          readSourceRevision,
+          getSourceId: () => "source-1",
+          getSegments: () => [createSegment("s1", "source-1", "0", "100")],
+          getSettings: () => settings,
+          loadSettings,
+          ...extra,
+        });
+        return {
+          step,
+          setModalOpen,
+          reportError,
+          loadSettings,
+          readSourceRevision,
+          finishLoad: () => {
+            settings = createSettings([createPreset()]);
+            finishLoad();
+          },
+          answerCheck: (changed = false) => {
+            answerCheck(changed);
+          },
+        };
+      }
+
+      /** A second step with its own spies, which must not run while the first one is open. */
+      function secondStepOptions(path = "/media/video.mp4") {
+        const media = createMedia(path, "video.mp4");
+        return {
+          setModalOpen: vi.fn(),
+          reportError: vi.fn(),
+          reset: vi.fn(),
+          loadSettings: vi.fn().mockResolvedValue(undefined),
+          readSourceRevision: createMatchingReader(media),
+          filterName: "Video Files",
+          getExportState: () => ({ status: "idle" as const, tracking: false }),
+          getMedia: () => media,
+          getSourceId: () => "source-1",
+          getSegments: () => [createSegment("s1", "source-1", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+        };
+      }
+
+      it("does nothing for a second call while the settings load", async () => {
+        const first = startPendingStep();
+        await vi.waitFor(() => {
+          expect(first.loadSettings).toHaveBeenCalled();
+        });
+
+        const second = secondStepOptions();
+        await expect(runExportFlow(second)).resolves.toBe(false);
+        expect(second.setModalOpen).not.toHaveBeenCalled();
+        expect(second.reportError).not.toHaveBeenCalled();
+        expect(second.reset).not.toHaveBeenCalled();
+        expect(second.readSourceRevision).not.toHaveBeenCalled();
+
+        first.finishLoad();
+        await vi.waitFor(() => {
+          expect(first.readSourceRevision).toHaveBeenCalled();
+        });
+        first.answerCheck();
+        await expect(first.step).resolves.toBe(true);
+        expect(first.setModalOpen).toHaveBeenCalledTimes(1);
+      });
+
+      it("does nothing for a second call while the source check runs", async () => {
+        const first = startPendingStep();
+        first.finishLoad();
+        await vi.waitFor(() => {
+          expect(first.readSourceRevision).toHaveBeenCalled();
+        });
+
+        const second = secondStepOptions();
+        await expect(runExportFlow(second)).resolves.toBe(false);
+        expect(second.setModalOpen).not.toHaveBeenCalled();
+        expect(second.readSourceRevision).not.toHaveBeenCalled();
+
+        first.answerCheck();
+        await expect(first.step).resolves.toBe(true);
+        expect(first.readSourceRevision).toHaveBeenCalledTimes(1);
+        expect(first.setModalOpen).toHaveBeenCalledTimes(1);
+      });
+
+      it("runs the next call after the step settles", async () => {
+        const first = startPendingStep();
+        first.finishLoad();
+        await vi.waitFor(() => {
+          expect(first.readSourceRevision).toHaveBeenCalled();
+        });
+        first.answerCheck();
+        await first.step;
+
+        const second = secondStepOptions();
+        await expect(runExportFlow(second)).resolves.toBe(true);
+        expect(second.setModalOpen).toHaveBeenCalledWith(true);
+      });
+
+      it("runs the next call after a step that failed", async () => {
+        const failing = secondStepOptions();
+        const step = runExportFlow({
+          ...failing,
+          getSettings: () => null,
+          loadSettings: vi.fn().mockRejectedValue(new Error("load failed")),
+        });
+        await expect(step).rejects.toThrow("load failed");
+
+        const next = secondStepOptions();
+        await expect(runExportFlow(next)).resolves.toBe(true);
+      });
+
+      it("opens the setup step when the source check does not answer in time", async () => {
+        // A share that stopped answering: the check never answers. The step counts that as a
+        // failed read, which is not a mismatch.
+        const first = startPendingStep("/media/video.mp4", {
+          sourceRevisionTimeoutMs: 20,
+        });
+        first.finishLoad();
+
+        await expect(first.step).resolves.toBe(true);
+        expect(first.readSourceRevision).toHaveBeenCalledTimes(1);
+        expect(first.reportError).not.toHaveBeenCalled();
+        expect(first.setModalOpen).toHaveBeenCalledWith(true);
+
+        // The guard is free again, so Export works after the timeout.
+        const next = secondStepOptions();
+        await expect(runExportFlow(next)).resolves.toBe(true);
+        expect(next.setModalOpen).toHaveBeenCalledWith(true);
+
+        // An answer that arrives after the timeout changes nothing.
+        first.answerCheck(true);
+        await Promise.resolve();
+        expect(first.reportError).not.toHaveBeenCalled();
+        expect(first.setModalOpen).toHaveBeenCalledTimes(1);
+      });
+
+      it("waits SOURCE_REVISION_CHECK_TIMEOUT_MS by default", async () => {
+        vi.useFakeTimers();
+        try {
+          const media = createMedia("/media/video.mp4", "video.mp4");
+          const setModalOpen = vi.fn();
+          let settled = false;
+          const step = runExportFlow({
+            setModalOpen,
+            reportError: vi.fn(),
+            filterName: "Video Files",
+            getExportState: () => ({ status: "idle", tracking: false }),
+            getMedia: () => media,
+            readSourceRevision: () =>
+              new Promise<MediaSourceRevisionDescriptor>(() => {}),
+            getSourceId: () => "source-1",
+            getSegments: () => [createSegment("s1", "source-1", "0", "100")],
+            getSettings: () => createSettings([createPreset()]),
+          }).then((opened) => {
+            settled = true;
+            return opened;
+          });
+
+          await vi.advanceTimersByTimeAsync(SOURCE_REVISION_CHECK_TIMEOUT_MS - 1);
+          expect(settled).toBe(false);
+          expect(setModalOpen).not.toHaveBeenCalled();
+
+          await vi.advanceTimersByTimeAsync(1);
+          expect(settled).toBe(true);
+          await expect(step).resolves.toBe(true);
+          expect(setModalOpen).toHaveBeenCalledWith(true);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("stops the timer when the source check answers first", async () => {
+        vi.useFakeTimers();
+        try {
+          const first = startPendingStep();
+          first.finishLoad();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(vi.getTimerCount()).toBe(1);
+
+          first.answerCheck();
+          await expect(first.step).resolves.toBe(true);
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("runs a call for another media path at once", async () => {
+        const first = startPendingStep("/media/first.mp4");
+        first.finishLoad();
+        await vi.waitFor(() => {
+          expect(first.readSourceRevision).toHaveBeenCalled();
+        });
+
+        // The user opened another file while the check of the first one waits.
+        const second = secondStepOptions("/media/second.mp4");
+        await expect(runExportFlow(second)).resolves.toBe(true);
+        expect(second.readSourceRevision).toHaveBeenCalledWith("/media/second.mp4");
+        expect(second.setModalOpen).toHaveBeenCalledWith(true);
+
+        // The old step then answers that its file changed. That result is about a file that
+        // is no longer open, so the step changes nothing.
+        first.answerCheck(true);
+        await expect(first.step).resolves.toBe(false);
+        expect(first.reportError).not.toHaveBeenCalled();
+        expect(first.setModalOpen).not.toHaveBeenCalled();
+      });
+
+      it("keeps the guard of the new step when the step it replaced settles", async () => {
+        const first = startPendingStep("/media/first.mp4");
+        first.finishLoad();
+        await vi.waitFor(() => {
+          expect(first.readSourceRevision).toHaveBeenCalled();
+        });
+        const second = startPendingStep("/media/second.mp4");
+        second.finishLoad();
+        await vi.waitFor(() => {
+          expect(second.readSourceRevision).toHaveBeenCalled();
+        });
+
+        first.answerCheck();
+        await expect(first.step).resolves.toBe(false);
+
+        // The step for the second file still runs, so another call for it does nothing.
+        const third = secondStepOptions("/media/second.mp4");
+        await expect(runExportFlow(third)).resolves.toBe(false);
+        expect(third.setModalOpen).not.toHaveBeenCalled();
+
+        second.answerCheck();
+        await expect(second.step).resolves.toBe(true);
+        expect(second.setModalOpen).toHaveBeenCalledTimes(1);
       });
     });
   });

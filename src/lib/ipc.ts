@@ -37,6 +37,11 @@ export const BACKEND_EVENTS = {
   EXPORT_PROGRESS: "export:progress",
   /** An application exit that Rust held back until the frontend decides (ADR 027). */
   QUIT_REQUESTED: "app:quit-requested",
+  /**
+   * A command item of the macOS application menu. The payload is the name of its action, such
+   * as `"openMedia"` (`src/components/layout/nativeMenuActions.ts`).
+   */
+  MENU_ACTION: "app:menu-action",
 } as const;
 
 export type BackendEvent = (typeof BACKEND_EVENTS)[keyof typeof BACKEND_EVENTS];

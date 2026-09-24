@@ -40,6 +40,7 @@ async function elapseThrottle(): Promise<void> {
  */
 function createSource() {
   const maximizedQueries: Deferred<boolean>[] = [];
+  const fullscreenQueries: Deferred<boolean>[] = [];
   const focusedQueries: Deferred<boolean>[] = [];
   const resizeRegistration = deferred<() => void>();
   const focusRegistration = deferred<() => void>();
@@ -52,6 +53,11 @@ function createSource() {
     isMaximized: vi.fn(() => {
       const query = deferred<boolean>();
       maximizedQueries.push(query);
+      return query.promise;
+    }),
+    isFullscreen: vi.fn(() => {
+      const query = deferred<boolean>();
+      fullscreenQueries.push(query);
       return query.promise;
     }),
     isFocused: vi.fn(() => {
@@ -72,6 +78,7 @@ function createSource() {
   return {
     source,
     maximizedQueries,
+    fullscreenQueries,
     focusedQueries,
     unlistenResize,
     unlistenFocus,
@@ -96,18 +103,26 @@ function createSource() {
   };
 }
 
-function setup(trackMaximized = true) {
+function setup(trackMaximized = true, trackFullscreen?: boolean) {
   const fake = createSource();
   const onMaximizedChange = vi.fn<(maximized: boolean) => void>();
   const onFocusedChange = vi.fn<(focused: boolean) => void>();
+  const onFullscreenChange = vi.fn<(fullscreen: boolean) => void>();
   const stop = startWindowStateSync({
     source: fake.source,
     enabled: true,
     trackMaximized,
+    trackFullscreen,
     onMaximizedChange,
     onFocusedChange,
+    onFullscreenChange,
   });
-  return { ...fake, onMaximizedChange, onFocusedChange, stop };
+  return { ...fake, onMaximizedChange, onFocusedChange, onFullscreenChange, stop };
+}
+
+/** The macOS title bar: the full-screen state and the focus state, and no maximized state. */
+function setupMac() {
+  return setup(false, true);
 }
 
 async function settle(query: Deferred<boolean> | undefined, value: boolean) {
@@ -133,8 +148,12 @@ describe("resolveMaximizeControl", () => {
 });
 
 describe("DEFAULT_WINDOW_STATE", () => {
-  it("is a window that is not maximized and has the focus", () => {
-    expect(DEFAULT_WINDOW_STATE).toEqual({ maximized: false, focused: true });
+  it("is a window that is not maximized, not in full screen, and has the focus", () => {
+    expect(DEFAULT_WINDOW_STATE).toEqual({
+      maximized: false,
+      focused: true,
+      fullscreen: false,
+    });
   });
 });
 
@@ -357,5 +376,123 @@ describe("startWindowStateSync", () => {
     sync.stop();
     expect(sync.unlistenResize).toHaveBeenCalledTimes(1);
     expect(sync.unlistenFocus).toHaveBeenCalledTimes(1);
+  });
+
+  describe("the full-screen state", () => {
+    it("is not read unless the caller tracks it", async () => {
+      const sync = setup(true);
+      await sync.registerResize();
+      sync.resize();
+      await elapseThrottle();
+      expect(sync.source.isFullscreen).not.toHaveBeenCalled();
+      expect(sync.onFullscreenChange).not.toHaveBeenCalled();
+      sync.stop();
+    });
+
+    it("is read once after the resize listener registers, with no maximized read", async () => {
+      const sync = setupMac();
+      expect(sync.source.isFullscreen).not.toHaveBeenCalled();
+      await sync.registerResize();
+      expect(sync.source.isFullscreen).toHaveBeenCalledTimes(1);
+      expect(sync.source.isMaximized).not.toHaveBeenCalled();
+      await settle(sync.fullscreenQueries[0], true);
+      expect(sync.onFullscreenChange).toHaveBeenLastCalledWith(true);
+      sync.stop();
+    });
+
+    it("is still read when the resize listener fails", async () => {
+      const sync = setupMac();
+      await sync.failResize();
+      expect(sync.source.isFullscreen).toHaveBeenCalledTimes(1);
+      await settle(sync.fullscreenQueries[0], false);
+      expect(sync.onFullscreenChange).toHaveBeenLastCalledWith(false);
+      sync.stop();
+    });
+
+    it("is read again after the resize that ends a change into or out of full screen", async () => {
+      const sync = setupMac();
+      await sync.registerResize();
+      await settle(sync.fullscreenQueries[0], false);
+
+      sync.resize();
+      await vi.advanceTimersByTimeAsync(MAXIMIZED_QUERY_DELAY_MS - 1);
+      expect(sync.source.isFullscreen).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sync.source.isFullscreen).toHaveBeenCalledTimes(2);
+      await settle(sync.fullscreenQueries[1], true);
+      expect(sync.onFullscreenChange).toHaveBeenLastCalledWith(true);
+
+      sync.resize();
+      await elapseThrottle();
+      await settle(sync.fullscreenQueries[2], false);
+      expect(sync.onFullscreenChange).toHaveBeenLastCalledWith(false);
+      sync.stop();
+    });
+
+    it("folds the resize events of the transition into one trailing query", async () => {
+      const sync = setupMac();
+      await sync.registerResize();
+      for (let i = 0; i < 20; i++) {
+        sync.resize();
+        await vi.advanceTimersByTimeAsync(4);
+      }
+      expect(sync.source.isFullscreen).toHaveBeenCalledTimes(1);
+      await elapseThrottle();
+      expect(sync.source.isFullscreen).toHaveBeenCalledTimes(2);
+      sync.stop();
+    });
+
+    it("reports only the newest query when the queries settle out of order", async () => {
+      const sync = setupMac();
+      await sync.registerResize();
+      sync.resize();
+      await elapseThrottle();
+      await settle(sync.fullscreenQueries[1], true);
+      await settle(sync.fullscreenQueries[0], false);
+      expect(sync.onFullscreenChange.mock.calls).toEqual([[true]]);
+      sync.stop();
+    });
+
+    it("shares one resize listener and one timer with the maximized state", async () => {
+      const sync = setup(true, true);
+      await sync.registerResize();
+      expect(sync.source.onResized).toHaveBeenCalledTimes(1);
+      expect(sync.source.isMaximized).toHaveBeenCalledTimes(1);
+      expect(sync.source.isFullscreen).toHaveBeenCalledTimes(1);
+
+      sync.resize();
+      sync.resize();
+      await elapseThrottle();
+      expect(sync.source.isMaximized).toHaveBeenCalledTimes(2);
+      expect(sync.source.isFullscreen).toHaveBeenCalledTimes(2);
+
+      // Each state reports its own answer.
+      await settle(sync.maximizedQueries[1], true);
+      await settle(sync.fullscreenQueries[1], false);
+      expect(sync.onMaximizedChange.mock.calls).toEqual([[true]]);
+      expect(sync.onFullscreenChange.mock.calls).toEqual([[false]]);
+      sync.stop();
+    });
+
+    it("ignores a failed query", async () => {
+      const sync = setupMac();
+      await sync.registerResize();
+      sync.fullscreenQueries[0]?.reject(new Error("command refused"));
+      await flushPromises();
+      expect(sync.onFullscreenChange).not.toHaveBeenCalled();
+      sync.stop();
+    });
+
+    it("reports nothing after the sync stops", async () => {
+      const sync = setupMac();
+      await sync.registerResize();
+      sync.resize();
+      sync.stop();
+      await settle(sync.fullscreenQueries[0], true);
+      await elapseThrottle();
+      expect(sync.source.isFullscreen).toHaveBeenCalledTimes(1);
+      expect(sync.onFullscreenChange).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 });

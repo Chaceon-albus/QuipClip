@@ -68,6 +68,21 @@ export interface OpenMediaFileDialogOptions {
   reportError?: (error: unknown) => void;
 }
 
+/** The number of native file dialogs that `openMediaFileDialog` has open now. */
+let openDialogCount = 0;
+
+/**
+ * True while a native file dialog of `openMediaFileDialog` is open.
+ *
+ * The page receives no key press and no click while that dialog is open, because the dialog
+ * is modal to the window. The macOS application menu still works then, so its command items
+ * read this value and do nothing while it is true. Without it, Open Media in the menu would
+ * queue a second dialog behind the first one.
+ */
+export function isMediaFileDialogOpen(): boolean {
+  return openDialogCount > 0;
+}
+
 /**
  * Opens a native file dialog to select a single video file and triggers media import.
  *
@@ -88,6 +103,7 @@ export async function openMediaFileDialog(
   const reportErrorFn = options.reportError ?? mediaStore.getState().reportError;
 
   let selected: unknown;
+  openDialogCount += 1;
   try {
     selected = await openDialogFn({
       multiple: false,
@@ -106,6 +122,8 @@ export async function openMediaFileDialog(
       }),
     );
     return null;
+  } finally {
+    openDialogCount -= 1;
   }
 
   // Cancel or empty selection is a strict no-op

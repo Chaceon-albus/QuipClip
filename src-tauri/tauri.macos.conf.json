@@ -3,6 +3,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "QuipClip",
         "width": 1440,
         "height": 900,
@@ -12,7 +13,8 @@
         "center": true,
         "dragDropEnabled": true,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 12, "y": 21 }
       }
     ]
   }

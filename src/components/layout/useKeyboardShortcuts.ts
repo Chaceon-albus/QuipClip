@@ -23,9 +23,25 @@ import {
 } from "./shortcutCommands";
 
 /**
- * Performs one planned store call. Each case is the call that the matching control makes.
+ * One read of each store, so the condition that a plan tests and the call that runs after it
+ * come from the same state. The command items of the macOS menu read it too
+ * (`useNativeMenuActions`).
  */
-function runShortcutCommand(command: ShortcutCommand): void {
+export function readShortcutSnapshot(): ShortcutSnapshot {
+  return {
+    probe: mediaStore.getState().media?.probe ?? null,
+    playback: playbackStore.getState(),
+    timeline: timelineStore.getState(),
+    viewport: timelineViewportStore.getState(),
+  };
+}
+
+/**
+ * Performs one planned store call. Each case is the call that the matching control makes.
+ * The command items of the macOS menu run their command here too (`useNativeMenuActions`), so
+ * an action does the same thing from a key and from a menu item.
+ */
+export function runShortcutCommand(command: ShortcutCommand): void {
   const playback = playbackStore.getState();
   const timeline = timelineStore.getState();
   switch (command.kind) {
@@ -140,12 +156,7 @@ export function useKeyboardShortcuts(): void {
 
       // One read of each store, so the condition the resolver tests and the call that runs
       // below come from the same state.
-      const snapshot: ShortcutSnapshot = {
-        probe: mediaStore.getState().media?.probe ?? null,
-        playback: playbackStore.getState(),
-        timeline: timelineStore.getState(),
-        viewport: timelineViewportStore.getState(),
-      };
+      const snapshot = readShortcutSnapshot();
 
       const resolution = resolveShortcut(shortcutEvent, {
         platform,
@@ -156,6 +167,10 @@ export function useKeyboardShortcuts(): void {
         return;
       }
 
+      // On macOS the cancel also keeps the key press from the application menu. WKWebView
+      // gives a key equivalent back to AppKit only when the page did not cancel it, so a key
+      // press that this layer owns never reaches the command items of the menu, and one key
+      // press never runs an action twice (see `src-tauri/src/menu.rs`).
       event.preventDefault();
       event.stopPropagation();
 
