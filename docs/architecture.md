@@ -60,7 +60,7 @@ document summarizes them and shows how the parts fit together.
 |  AppShell -> TitleBar | Preview | Transport | Timeline | Bar |
 |                  |          |                    |          |
 |  Zustand stores: media, timeline, playback, ffmpeg,         |
-|                  settings, export                           |
+|                  settings, export, timeline viewport        |
 |                  |                                          |
 |  lib/time.ts  (Rational, PTS, checked browser conversions) |
 +------------------|------------------------------------------+

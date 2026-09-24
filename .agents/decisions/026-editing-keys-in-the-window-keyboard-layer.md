@@ -51,10 +51,23 @@ action. `primary` is `Cmd` on macOS and `Ctrl` on Windows.
 | `E`                                   | `primary`         | export                                  | taken, no act |
 | `,`                                   | `primary`         | open Settings                           | taken, no act |
 | `=` / `-` (and the numpad `+` / `-`)  | none              | zoom the timeline in / out              | acts          |
+| `+`                                   | none              | zoom the timeline in                    | acts          |
+| `=` / `+`                             | `Shift`           | zoom the timeline in                    | acts          |
 | `\`                                   | none              | fit the whole source in the timeline    | taken, no act |
+| `Z`                                   | `Shift`           | fit the whole source in the timeline    | taken, no act |
 
 "Taken, no act" means that the layer owns a repeated key press and performs nothing, as
 ADR 021 does for a held `Space`.
+
+(Added on 2026-09-23.) The rows for `+`, and for `=` and `+` with `Shift`, serve keyboard
+layouts where `=` needs `Shift`, such as JIS and German, and layouts with a `+` key. On a US
+layout `Shift` with `=` types `+`, so these rows add no second meaning there. `Shift+Z` is the
+Final Cut Pro key for Zoom to Fit. It serves layouts where `\` needs `AltGr` or `Option`.
+
+A tooltip names the first row of an action. Fit is the one exception: its tooltip names `\`
+and `Shift+Z`, because on many layouts the first key needs `AltGr` or `Option`.
+`aria-keyshortcuts` lists every row of the action in table order, drops a repeated token, and
+leaves out the three layout rows: `+`, and `=` and `+` with `Shift`.
 
 ### The rule for modifiers
 
@@ -72,6 +85,13 @@ selected, so a Dvorak user presses the key that shows `I`. The second rule cover
 where `event.key` is not a plain letter: a Cyrillic or Greek layout, a dead key, and the
 character that `Option` makes on macOS. `Caps Lock` does not change a match. A named key
 such as `Home`, `Delete` or an arrow matches `event.key`.
+
+A punctuation key, such as `=`, `-`, `+` or `\`, matches `event.key` only. It has no
+fallback to `event.code`, because on another layout its position types another character:
+German `ß` sits where US has `-`, and Spanish `ç` sits where US has `\`. The one exception is
+`primary` with `,`, which also matches the `Comma` position when `event.key` is not one
+printable ASCII character, as the letters do. A numpad key matches `event.code` only, for
+example `NumpadAdd`, so it matches on every layout and in both Num Lock states.
 
 ### The condition for each action
 
@@ -122,7 +142,8 @@ Windows.
   export.
 - `Shift` with an arrow now steps ten frames. ADR 021 held `Shift` free for this.
 - `Ctrl`, `Cmd` and `Alt` stay with the system and the web view, except for the combinations
-  in the table.
+  in the table. `primary` with `=` or `-` is not claimed. Tauri turns off the zoom keys of the
+  web view by default, so these combinations do nothing.
 - On macOS the default application menu of Tauri binds `Cmd+Z` and `Shift+Cmd+Z` to its Edit
   menu. The implementation must confirm in the built application that the web view receives
   these key presses first. If the menu takes them, a later unit routes them from a custom
