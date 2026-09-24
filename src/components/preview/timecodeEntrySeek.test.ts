@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
+  EXTENT_END_SEEK_OPTIONS,
   type ShortcutProbe,
 } from "@/components/layout/shortcutCommands";
 import { resolveTimecodeDisplay } from "@/features/playback";
@@ -109,7 +110,11 @@ const millisecondStep = (value: number | bigint): TimecodeEntry => ({
   milliseconds: BigInt(value),
 });
 
-const END_SEEK = {
+/** Where End goes on the calibrated grid probe: the last of its 250 frames (ADR 026). */
+const END_SEEK = { kind: "seekToFrameIndex", frameIndex: 249 } as const;
+
+/** Where End goes without a calibration: the end of the ruler on the approximate clock. */
+const APPROXIMATE_END_SEEK = {
   kind: "seekApproximate",
   seconds: 10,
   options: APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
@@ -246,7 +251,7 @@ describe("planTimecodeEntrySeek", () => {
     });
 
     it("goes where End goes at or after the end of the source", () => {
-      // Frame 250 starts at 10 s, the end.
+      // Frame 250 starts at 10 s, the end. End goes to the last frame, 249.
       expect(planTimecodeEntrySeek(frame(250), snapshot(gridProbe))).toEqual({
         ok: true,
         command: END_SEEK,
@@ -260,18 +265,92 @@ describe("planTimecodeEntrySeek", () => {
         ok: true,
         command: { kind: "seekToFrameIndex", frameIndex: 249 },
       });
+      // While the calibration is open too, for the store to defer.
+      expect(
+        planTimecodeEntrySeek(
+          frame(250),
+          snapshot(gridProbe, { calibrationStatus: "calibrating" }),
+        ),
+      ).toEqual({ ok: true, command: END_SEEK });
     });
 
-    it("does nothing past the end when the element already stands at the end", () => {
+    it("goes past the end to the last tick of the extent off the grid, as End does", () => {
+      const ms = MILLISECONDS_TIMECODE_DISPLAY;
+      // 500 + 10000 - 1.
+      expect(
+        planTimecodeEntrySeek(millisecond(10_000), snapshot(vfrProbe, {}, ms)),
+      ).toEqual({
+        ok: true,
+        command: {
+          kind: "seekToPts",
+          pts: "10499",
+          options: EXTENT_END_SEEK_OPTIONS,
+        },
+      });
+      expect(planTimecodeEntrySeek(frame(240), snapshot(coarseProbe))).toEqual({
+        ok: true,
+        command: {
+          kind: "seekToPts",
+          pts: "239",
+          options: EXTENT_END_SEEK_OPTIONS,
+        },
+      });
+      // The frame that starts at the last tick is already on screen.
+      expect(
+        planTimecodeEntrySeek(
+          frame(240),
+          snapshot(coarseProbe, { presentedFrame: presentedAt(coarseProbe, 239) }),
+        ),
+      ).toEqual({ ok: true, command: null });
+    });
+
+    it("goes to a last frame shorter than an interval, typed or past the end", () => {
+      // 25 fps on 1/1000, 376 ticks: frame 9 covers 360 to 376.
+      const shortProbe: ShortcutProbe = {
+        ...gridProbe,
+        videoDurationTicks: "376" as TickCount,
+        approximateDurationSeconds: 0.376,
+      };
+      const frame9 = { kind: "seekToFrameIndex", frameIndex: 9 } as const;
+      expect(planTimecodeEntrySeek(frame(9), snapshot(shortProbe))).toEqual({
+        ok: true,
+        command: frame9,
+      });
+      expect(planTimecodeEntrySeek(frame(10), snapshot(shortProbe))).toEqual({
+        ok: true,
+        command: frame9,
+      });
+    });
+
+    it("goes past the end on the approximate clock without a calibration or without ticks", () => {
+      expect(
+        planTimecodeEntrySeek(
+          frame(250),
+          snapshot(gridProbe, { calibrationStatus: "unavailable" }),
+        ),
+      ).toEqual({ ok: true, command: APPROXIMATE_END_SEEK });
+      const noTicks: ShortcutProbe = { ...gridProbe, videoDurationTicks: null };
+      expect(planTimecodeEntrySeek(frame(250), snapshot(noTicks))).toEqual({
+        ok: true,
+        command: APPROXIMATE_END_SEEK,
+      });
+    });
+
+    it("does nothing past the end when the last frame is already on screen", () => {
+      // The last frame, 249, starts at 9.960 s.
       expect(
         planTimecodeEntrySeek(
           frame(300),
-          snapshot(gridProbe, {
-            presentedFrame: presentedAt(gridProbe, 9960),
-            approximateBrowserTimeSeconds: 10,
-          }),
+          snapshot(gridProbe, { presentedFrame: presentedAt(gridProbe, 9960) }),
         ),
       ).toEqual({ ok: true, command: null });
+      // The frame before it is not the last frame.
+      expect(
+        planTimecodeEntrySeek(
+          frame(300),
+          snapshot(gridProbe, { presentedFrame: presentedAt(gridProbe, 9920) }),
+        ),
+      ).toEqual({ ok: true, command: END_SEEK });
     });
 
     it("refuses a frame past the safe integers when the end is not known", () => {
@@ -570,11 +649,16 @@ describe("runTimecodeEntryCommand", () => {
     runTimecodeEntryCommand({ kind: "seekNominal", frames: -3 }, actions);
     runTimecodeEntryCommand({ kind: "seekToFrameIndex", frameIndex: 7 }, actions);
     runTimecodeEntryCommand({ kind: "seekToPts", pts: "42" as Pts }, actions);
-    runTimecodeEntryCommand(END_SEEK, actions);
+    runTimecodeEntryCommand(
+      { kind: "seekToPts", pts: "43" as Pts, options: EXTENT_END_SEEK_OPTIONS },
+      actions,
+    );
+    runTimecodeEntryCommand(APPROXIMATE_END_SEEK, actions);
     runTimecodeEntryCommand({ kind: "seekApproximate", seconds: 1.5 }, actions);
     expect(actions.seekNominal).toHaveBeenCalledExactlyOnceWith(-3);
     expect(actions.seekToFrameIndex).toHaveBeenCalledExactlyOnceWith(7);
-    expect(actions.seekToPts).toHaveBeenCalledExactlyOnceWith("42");
+    expect(actions.seekToPts).toHaveBeenNthCalledWith(1, "42", undefined);
+    expect(actions.seekToPts).toHaveBeenNthCalledWith(2, "43", EXTENT_END_SEEK_OPTIONS);
     expect(actions.seekApproximate).toHaveBeenNthCalledWith(
       1,
       10,

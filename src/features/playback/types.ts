@@ -48,10 +48,25 @@ export interface SeekOptions {
    * For `seekApproximate` only. A seek that the store defers during calibration runs on the
    * calibrated mapping once the calibration is ready, because the ruler of a calibrated source
    * seeks there (ADR 022). With this option it runs on the browser media timeline instead, as
-   * the same call runs after the anchor. End passes it (ADR 026), so End goes to the same place
+   * the same call runs after the anchor. End passes it when it seeks on the approximate clock,
+   * on a source whose probe gives no extent in ticks (ADR 026), so End goes to the same place
    * before and after the anchor, and a second End finds the element at the end.
    */
   readonly keepBrowserTimeline?: boolean;
+  /**
+   * For `seekToPts` only. The target is the last tick of the source extent, the seek of End off
+   * the frame grid (ADR 026). The seek then does nothing when the element already stands at or
+   * after the position that the seek can reach, the calibration is ready, a frame is on screen,
+   * no seek is pending and the element does not play: the frame on screen then holds the last
+   * tick, and a seek to it may bring no frame callback (ADR 022). The position that the seek can
+   * reach is the media time of the target, or the duration that the element reports when that
+   * is earlier, because the element stops a seek at its duration. Both compare within
+   * NOMINAL_STEP_EDGE_TOLERANCE_SECONDS. Off the grid no frame boundary tells the caller which
+   * frame holds that tick, so only the position of the element, which the store alone knows on
+   * the calibrated axis, can find it. A seek that the store defers during calibration runs
+   * without the option: at the anchor the element stands at the first frame.
+   */
+  readonly extentEnd?: boolean;
 }
 
 /**
@@ -185,6 +200,8 @@ export interface PlaybackActions {
    * While the calibration is "calibrating", the request is deferred and not refused: it runs
    * on the calibrated mapping when the calibration is ready, and at its elapsed seconds on the
    * approximate clock when the calibration is unavailable.
+   * With `extentEnd`, a seek from the end of the extent, where the frame on screen already holds
+   * the target, does nothing (see SeekOptions).
    */
   seekToPts: (targetPts: Pts, options?: SeekOptions) => void;
 

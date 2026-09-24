@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getSourceRevisionKey } from "@/features/media";
 import {
   createPlaybackStore,
+  getDisplayedElapsedSeconds,
   type PlaybackMediaElement,
   type PlaybackSource,
 } from "@/features/playback";
@@ -10,6 +11,7 @@ import type { Pts, Segment, TickCount } from "@/types/project";
 import { SHORTCUT_ACTIONS, type ShortcutAction } from "./shortcutBindings";
 import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
+  EXTENT_END_SEEK_OPTIONS,
   LARGE_FRAME_STEP,
   planShortcutCommand,
   TRIM_LOCKED_ACTIONS,
@@ -111,24 +113,27 @@ const MEDIA_ONLY_ACTIONS: readonly ShortcutAction[] = [
   "zoomToFit",
 ];
 
-/** A media element that records each seek and reports `seeking` until the test settles it. */
+/**
+ * A media element that records each seek and reports `seeking` until the test settles it. A seek
+ * past `duration` stops at it, as it does in a browser.
+ */
 interface FakeElement extends PlaybackMediaElement {
   seeking: boolean;
   readonly currentTimeSets: number;
 }
 
-function createFakeElement(): FakeElement {
+function createFakeElement(duration = 10): FakeElement {
   let time = 0;
   let sets = 0;
   const element: FakeElement = {
     seeking: false,
     readyState: 1,
-    duration: 10,
+    duration,
     get currentTime() {
       return time;
     },
     set currentTime(value: number) {
-      time = value;
+      time = Math.min(value, duration);
       sets++;
       element.seeking = true;
     },
@@ -147,20 +152,18 @@ function createFakeElement(): FakeElement {
  * planned call the way the keyboard hook does.
  *
  * With `anchored: false`, the metadata has loaded and the first frame has not arrived yet, so
- * the calibration is still open. `anchor` then presents the first frame.
+ * the calibration is still open. `anchor` then presents the first frame. `media` replaces probe
+ * facts of the source, in the probe and in the source of the playback store alike.
+ *
+ * The element reports `duration` seconds, 10 by default, and the store reads it as the preview
+ * does when metadata loads. With an audio lead the element ends later than the video extent, so
+ * a test with a lead passes the lead plus 10 s.
  */
-function createStoreHarness({ anchored = true }: { anchored?: boolean } = {}) {
-  const source: PlaybackSource = {
-    path: "/media/clip.mp4",
-    size: 1024,
-    mtime: 1_724_976_000,
-    videoTimeBase: { n: 1, d: 25 },
-    videoStartPts: pts("0"),
-    videoDurationTicks: ticks("250"),
-    approximateDurationSeconds: 10,
-    avgFrameRate: { n: 25, d: 1 },
-    rFrameRate: { n: 25, d: 1 },
-  };
+function createStoreHarness({
+  anchored = true,
+  media = {},
+  duration = 10,
+}: { anchored?: boolean; media?: Partial<ShortcutProbe>; duration?: number } = {}) {
   const probe: ShortcutProbe = {
     videoStartPts: pts("0"),
     videoTimeBase: { n: 1, d: 25 },
@@ -168,16 +171,24 @@ function createStoreHarness({ anchored = true }: { anchored?: boolean } = {}) {
     approximateDurationSeconds: 10,
     avgFrameRate: { n: 25, d: 1 },
     rFrameRate: { n: 25, d: 1 },
+    ...media,
+  };
+  const source: PlaybackSource = {
+    path: "/media/clip.mp4",
+    size: 1024,
+    mtime: 1_724_976_000,
+    ...probe,
   };
   const key = getSourceRevisionKey(source);
   const playback = createPlaybackStore();
   let nextId = 0;
   const timeline = createTimelineStore({ generateId: () => `segment-${++nextId}` });
-  const element = createFakeElement();
+  const element = createFakeElement(duration);
   let presentedFrames = 0;
 
   playback.getState().attach(source, element);
   playback.getState().syncReady(key, element);
+  playback.getState().syncBrowserDuration(key, element);
   timeline.getState().setSource(SOURCE_ID, key);
   // The first presented frame anchors the calibration on videoStartPts (ADR 003). A first frame
   // after 0 on the browser timeline models an audio track that starts before the video.
@@ -198,7 +209,10 @@ function createStoreHarness({ anchored = true }: { anchored?: boolean } = {}) {
   const run = (command: ShortcutCommand): void => {
     switch (command.kind) {
       case "seekToPts":
-        playback.getState().seekToPts(command.pts);
+        playback.getState().seekToPts(command.pts, command.options);
+        return;
+      case "seekToFrameIndex":
+        playback.getState().seekToFrameIndex(command.frameIndex);
         return;
       case "seekApproximate":
         playback
@@ -252,6 +266,19 @@ function createStoreHarness({ anchored = true }: { anchored?: boolean } = {}) {
   const shownPts = (): string | null =>
     playback.getState().presentedFrame?.inferredSourcePts ?? null;
 
+  /** The position that the playhead and the timecode show (ADR 022). */
+  const playheadSeconds = (): number =>
+    getDisplayedElapsedSeconds(
+      playback.getState(),
+      probe.videoStartPts,
+      probe.videoTimeBase,
+    );
+
+  /** The preview reports that frame callbacks are unavailable (ADR 003). */
+  const failCalibration = (): void => {
+    playback.getState().syncPresentationUnavailable(key, element);
+  };
+
   return {
     playback,
     timeline,
@@ -262,6 +289,8 @@ function createStoreHarness({ anchored = true }: { anchored?: boolean } = {}) {
     presentSeekedFrame,
     clickRulerAt,
     shownPts,
+    playheadSeconds,
+    failCalibration,
   };
 }
 
@@ -458,8 +487,8 @@ describe("planShortcutCommand", () => {
 
     it("plans Home and End while the calibration is open, for the store to defer", () => {
       // The store defers a seek until the anchor, so a seek in that window no longer refuses
-      // precise editing (ADR 022). Home goes to videoStartPts, as on a calibrated source, and
-      // End goes to the end of the ruler.
+      // precise editing (ADR 022). Home goes to videoStartPts, and End to the last frame, as on
+      // a calibrated source.
       const calibrating = createSnapshot({
         playback: { calibrationStatus: "calibrating", presentedFrame: null },
       });
@@ -468,8 +497,18 @@ describe("planShortcutCommand", () => {
         pts: "0",
       });
       expect(planShortcutCommand("goToEnd", calibrating)).toEqual({
-        kind: "seekApproximate",
-        seconds: 10,
+        kind: "seekToFrameIndex",
+        frameIndex: 299,
+      });
+      // Off the frame grid End goes to the last tick while the calibration is open too.
+      const vfrCalibrating = createSnapshot({
+        probe: createProbe({ avgFrameRate: { n: 2997, d: 100 } }),
+        playback: { calibrationStatus: "calibrating", presentedFrame: null },
+      });
+      expect(planShortcutCommand("goToEnd", vfrCalibrating)).toEqual({
+        kind: "seekToPts",
+        pts: "899999",
+        options: EXTENT_END_SEEK_OPTIONS,
       });
       // The frame step keeps the looser condition of the step buttons (ADR 021).
       expect(planShortcutCommand("stepForwardOneFrame", calibrating)).not.toBeNull();
@@ -504,12 +543,111 @@ describe("planShortcutCommand", () => {
       });
     });
 
-    it("goes to the end of the ruler on the approximate clock, calibrated or not", () => {
-      // The extent comes from videoDurationTicks first: 900000 ticks at 1/90000 is 10 s.
+    it("goes to the index of the last frame on the frame grid of a calibrated source", () => {
+      // 900000 ticks at 1/90000 is 10 s, 300 frames at 30 fps: the last one is frame 299.
       expect(planShortcutCommand("goToEnd", createSnapshot())).toEqual({
-        kind: "seekApproximate",
-        seconds: 10,
+        kind: "seekToFrameIndex",
+        frameIndex: 299,
       });
+      // The index counts from videoStartPts.
+      const offset = createSnapshot({
+        probe: createProbe({ videoStartPts: pts("-3003") }),
+        playback: { presentedFrame: { mediaTime: 1, inferredSourcePts: pts("87000") } },
+      });
+      expect(planShortcutCommand("goToEnd", offset)).toEqual({
+        kind: "seekToFrameIndex",
+        frameIndex: 299,
+      });
+    });
+
+    it("takes the index of the last frame that starts inside the extent by more than the margin", () => {
+      // On these time bases the ADR 028 margin is one tick. The frame that holds the last tick
+      // with that margin added is the frame after the last one, which End does not go to.
+      const cases: readonly [Partial<ShortcutProbe>, number][] = [
+        [
+          {
+            videoTimeBase: { n: 1, d: 1000 },
+            videoDurationTicks: ticks("10010"),
+            avgFrameRate: { n: 30000, d: 1001 },
+            rFrameRate: { n: 30000, d: 1001 },
+          },
+          299,
+        ],
+        [
+          {
+            videoTimeBase: { n: 1, d: 1000 },
+            videoDurationTicks: ticks("10000"),
+          },
+          299,
+        ],
+        [
+          {
+            videoTimeBase: { n: 1, d: 600 },
+            videoDurationTicks: ticks("25025"),
+            approximateDurationSeconds: 41.75,
+            avgFrameRate: { n: 24000, d: 1001 },
+            rFrameRate: { n: 24000, d: 1001 },
+          },
+          999,
+        ],
+      ];
+      for (const [probe, frameIndex] of cases) {
+        const snapshot = createSnapshot({
+          probe: createProbe(probe),
+          playback: { presentedFrame: null },
+        });
+        expect(planShortcutCommand("goToEnd", snapshot)).toEqual({
+          kind: "seekToFrameIndex",
+          frameIndex,
+        });
+      }
+    });
+
+    it("goes to the last tick of the extent off the frame grid", () => {
+      const lastTick: ShortcutCommand = {
+        kind: "seekToPts",
+        pts: pts("899999"),
+        options: EXTENT_END_SEEK_OPTIONS,
+      };
+      // A variable frame rate: the average and the real rate differ.
+      const vfr = createSnapshot({
+        probe: createProbe({ avgFrameRate: { n: 2997, d: 100 } }),
+      });
+      expect(planShortcutCommand("goToEnd", vfr)).toEqual(lastTick);
+      // No nominal rate, so no grid.
+      const noRate = createSnapshot({
+        probe: createProbe({ avgFrameRate: null, rFrameRate: null }),
+      });
+      expect(planShortcutCommand("goToEnd", noRate)).toEqual(lastTick);
+      // A coarse time base: 1/24 at 23.976 fps, where one tick is almost a whole frame.
+      const coarse = createSnapshot({
+        probe: createProbe({
+          videoTimeBase: { n: 1, d: 24 },
+          videoDurationTicks: ticks("240"),
+          avgFrameRate: { n: 24000, d: 1001 },
+          rFrameRate: { n: 24000, d: 1001 },
+        }),
+        playback: { presentedFrame: { mediaTime: 1, inferredSourcePts: pts("24") } },
+      });
+      expect(planShortcutCommand("goToEnd", coarse)).toEqual({
+        ...lastTick,
+        pts: "239",
+      });
+      // The last tick counts from videoStartPts.
+      const offset = createSnapshot({
+        probe: createProbe({
+          videoStartPts: pts("-3003"),
+          avgFrameRate: { n: 2997, d: 100 },
+        }),
+        playback: { presentedFrame: { mediaTime: 1, inferredSourcePts: pts("87000") } },
+      });
+      expect(planShortcutCommand("goToEnd", offset)).toEqual({
+        ...lastTick,
+        pts: "896996",
+      });
+    });
+
+    it("goes to the end of the ruler on the approximate clock without a calibration", () => {
       const uncalibrated = createSnapshot({
         playback: { calibrationStatus: "unavailable", presentedFrame: null },
       });
@@ -519,13 +657,30 @@ describe("planShortcutCommand", () => {
       });
     });
 
-    it("takes the end from the same extent rule as the ruler (ADR 007)", () => {
+    it("keeps the approximate clock without the extent in ticks, with the extent rule of the ruler (ADR 007)", () => {
       const noTicks = createSnapshot({
         probe: createProbe({ videoDurationTicks: null }),
       });
       expect(planShortcutCommand("goToEnd", noTicks)).toEqual({
         kind: "seekApproximate",
         seconds: 10.01,
+      });
+      // An empty extent names no last frame either.
+      const emptyExtent = createSnapshot({
+        probe: createProbe({ videoDurationTicks: ticks("0") }),
+      });
+      expect(planShortcutCommand("goToEnd", emptyExtent)).toEqual({
+        kind: "seekApproximate",
+        seconds: 10.01,
+      });
+      // Nor does a source without videoStartPts, which also cannot calibrate.
+      const noStart = createSnapshot({
+        probe: createProbe({ videoStartPts: null }),
+        playback: { calibrationStatus: "unavailable", presentedFrame: null },
+      });
+      expect(planShortcutCommand("goToEnd", noStart)).toEqual({
+        kind: "seekApproximate",
+        seconds: 10,
       });
 
       const browserOnly = createSnapshot({
@@ -551,13 +706,19 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("goToEnd", indeterminate)).toBeNull();
     });
 
-    // The end of the ruler is 10 s at 30 fps. The last frame (PTS 897000) starts one interval
-    // before it, so End compares the position of the element, not the presented frame.
+    // End on the approximate clock of a calibrated source whose probe gives no extent in
+    // ticks. The end of the ruler is the approximate duration, 10 s at 30 fps. The last frame
+    // (PTS 897000) starts one interval before it, so End compares the position of the element,
+    // not the presented frame.
+    const APPROXIMATE_PROBE = createProbe({
+      videoDurationTicks: null,
+      approximateDurationSeconds: 10,
+    });
     const LAST_FRAME = { mediaTime: 299 / 30, inferredSourcePts: pts("897000") };
     const END_SEEK: ShortcutCommand = { kind: "seekApproximate", seconds: 10 };
     const atEndSnapshot = (
       playback: Partial<ShortcutSnapshot["playback"]> = {},
-      probe: ShortcutProbe = createProbe(),
+      probe: ShortcutProbe = APPROXIMATE_PROBE,
     ): ShortcutSnapshot =>
       createSnapshot({
         probe,
@@ -610,7 +771,11 @@ describe("planShortcutCommand", () => {
     });
 
     it("does nothing on End at the end without a nominal rate, within one microsecond", () => {
-      const noRate = createProbe({ avgFrameRate: null, rFrameRate: null });
+      const noRate: ShortcutProbe = {
+        ...APPROXIMATE_PROBE,
+        avgFrameRate: null,
+        rFrameRate: null,
+      };
       expect(planShortcutCommand("goToEnd", atEndSnapshot({}, noRate))).toBeNull();
       expect(
         planShortcutCommand(
@@ -625,6 +790,99 @@ describe("planShortcutCommand", () => {
           atEndSnapshot({ approximateBrowserTimeSeconds: 10 - 1e-3 }, noRate),
         ),
       ).toEqual(END_SEEK);
+    });
+
+    describe("the last frame on screen (ADR 026)", () => {
+      const onScreen = (
+        inferredSourcePts: string,
+        playback: Partial<ShortcutSnapshot["playback"]> = {},
+        probe: ShortcutProbe = createProbe(),
+      ): ShortcutSnapshot =>
+        createSnapshot({
+          probe,
+          playback: {
+            presentedFrame: {
+              mediaTime: 9.9,
+              inferredSourcePts: pts(inferredSourcePts),
+            },
+            // The position of the element does not decide: the rule compares the frame.
+            approximateBrowserTimeSeconds: 3,
+            ...playback,
+          },
+        });
+      const LAST_INDEX: ShortcutCommand = { kind: "seekToFrameIndex", frameIndex: 299 };
+
+      it("does nothing on the grid when the frame on screen has the index of the last frame", () => {
+        expect(planShortcutCommand("goToEnd", onScreen("897000"))).toBeNull();
+        // A frame start that the container stored a tick late is the same frame (ADR 028).
+        expect(planShortcutCommand("goToEnd", onScreen("897001"))).toBeNull();
+        // The frame before it.
+        expect(planShortcutCommand("goToEnd", onScreen("894000"))).toEqual(LAST_INDEX);
+      });
+
+      it("does nothing on a grid with a one-tick margin at the last of the whole frames", () => {
+        // 29.97 fps on 1/1000: frame 299 starts at 9976.6 ms, stored as 9977.
+        const matroska = createProbe({
+          videoTimeBase: { n: 1, d: 1000 },
+          videoDurationTicks: ticks("10010"),
+          avgFrameRate: { n: 30000, d: 1001 },
+          rFrameRate: { n: 30000, d: 1001 },
+        });
+        expect(
+          planShortcutCommand("goToEnd", onScreen("9977", {}, matroska)),
+        ).toBeNull();
+        expect(planShortcutCommand("goToEnd", onScreen("9943", {}, matroska))).toEqual({
+          kind: "seekToFrameIndex",
+          frameIndex: 299,
+        });
+      });
+
+      it("never moves back from a frame past the last frame of the extent", () => {
+        // The source shows a frame that the reported extent leaves out: index 300 on the grid,
+        // and a frame after the last tick off the grid.
+        expect(planShortcutCommand("goToEnd", onScreen("900000"))).toBeNull();
+        expect(planShortcutCommand("goToEnd", onScreen("903000"))).toBeNull();
+        const vfr = createProbe({ avgFrameRate: { n: 2997, d: 100 } });
+        expect(planShortcutCommand("goToEnd", onScreen("900500", {}, vfr))).toBeNull();
+      });
+
+      it("seeks on the grid when a seek is pending or the source plays", () => {
+        expect(
+          planShortcutCommand("goToEnd", onScreen("897000", { seekTargetSeconds: 3 })),
+        ).toEqual(LAST_INDEX);
+        // The store then only pauses while the element is inside the last frame.
+        expect(
+          planShortcutCommand("goToEnd", onScreen("897000", { isPlaying: true })),
+        ).toEqual(LAST_INDEX);
+      });
+
+      it("does nothing off the grid when the frame on screen starts at the last tick", () => {
+        const coarse = createProbe({
+          videoTimeBase: { n: 1, d: 24 },
+          videoDurationTicks: ticks("240"),
+          avgFrameRate: { n: 24000, d: 1001 },
+          rFrameRate: { n: 24000, d: 1001 },
+        });
+        expect(planShortcutCommand("goToEnd", onScreen("239", {}, coarse))).toBeNull();
+        expect(
+          planShortcutCommand("goToEnd", onScreen("239", { isPlaying: true }, coarse)),
+        ).toEqual({
+          kind: "seekToPts",
+          pts: "239",
+          options: EXTENT_END_SEEK_OPTIONS,
+        });
+      });
+
+      it("leaves a last frame that starts before the last tick to the store off the grid", () => {
+        // A variable rate: the frame on screen can be the last frame, but no boundary says so.
+        // The store answers from the position of the element (extentEnd).
+        const vfr = createProbe({ avgFrameRate: { n: 2997, d: 100 } });
+        expect(planShortcutCommand("goToEnd", onScreen("897030", {}, vfr))).toEqual({
+          kind: "seekToPts",
+          pts: "899999",
+          options: EXTENT_END_SEEK_OPTIONS,
+        });
+      });
     });
   });
 
@@ -1034,13 +1292,15 @@ describe("planShortcutCommand", () => {
       h.clickRulerAt("25");
       expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "25" });
 
-      // The end of the ruler is 250 frames at 25 fps. The element stands at 10 s, and the
-      // browser presents the last frame, which starts one interval earlier.
-      expect(h.press("goToEnd")).toEqual({ kind: "seekApproximate", seconds: 10 });
+      // The extent is 250 frames at 25 fps. End goes to the middle of the last frame, 249, and
+      // the playhead shows its start at once.
+      expect(h.press("goToEnd")).toEqual({ kind: "seekToFrameIndex", frameIndex: 249 });
+      expect(h.element.currentTime).toBeCloseTo(249.5 / 25, 9);
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
       h.presentSeekedFrame(249 / 25);
       expect(h.shownPts()).toBe("249");
-      expect(h.playback.getState().approximateBrowserTimeSeconds).toBe(10);
       expect(h.playback.getState().seekTargetSeconds).toBeNull();
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
 
       const seeks = h.element.currentTimeSets;
       expect(h.press("goToEnd")).toBeNull();
@@ -1051,6 +1311,265 @@ describe("planShortcutCommand", () => {
       expect(h.timeline.getState().segments).toEqual([
         { id: "segment-1", sourceId: SOURCE_ID, inPts: "25", outPts: "249" },
       ]);
+    });
+
+    it("End with an audio lead of 0.5 s lands on the last frame, and the playhead does not jump", () => {
+      // The audio starts first, so the first video frame is at 0.5 s on the browser timeline.
+      const h = createStoreHarness({ anchored: false, duration: 10.5 });
+      h.anchor(0.5);
+      expect(h.playback.getState().calibrationStatus).toBe("ready");
+
+      expect(h.press("goToEnd")).toEqual({ kind: "seekToFrameIndex", frameIndex: 249 });
+      // The middle of frame 249, counted from the calibrated first frame.
+      expect(h.element.currentTime).toBeCloseTo(0.5 + 249.5 / 25, 9);
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
+      h.presentSeekedFrame(0.5 + 249 / 25);
+      expect(h.shownPts()).toBe("249");
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
+
+      const seeks = h.element.currentTimeSets;
+      expect(h.press("goToEnd")).toBeNull();
+      expect(h.element.currentTimeSets).toBe(seeks);
+      expect(h.press("markOut")).toBeNull();
+      h.timeline.getState().markIn(pts("25"));
+      expect(h.press("markOut")).toEqual({ kind: "markOut", pts: "249" });
+    });
+
+    it("End off the grid, on a variable rate with an audio lead: a second End does nothing", () => {
+      // 10 s on 1/90000. The rates differ, so End goes to the last tick of the extent, and the
+      // browser shows the frame that holds it, which starts before it.
+      const h = createStoreHarness({
+        anchored: false,
+        duration: 10.5,
+        media: {
+          videoTimeBase: { n: 1, d: 90_000 },
+          videoDurationTicks: ticks("900000"),
+          avgFrameRate: { n: 2997, d: 100 },
+          rFrameRate: { n: 30, d: 1 },
+        },
+      });
+      h.anchor(0.5);
+
+      expect(h.press("goToEnd")).toEqual({
+        kind: "seekToPts",
+        pts: "899999",
+        options: EXTENT_END_SEEK_OPTIONS,
+      });
+      expect(h.element.currentTime).toBeCloseTo(0.5 + 899_999 / 90_000, 9);
+      // The last frame starts at 9.967 s.
+      h.presentSeekedFrame(0.5 + 897_030 / 90_000);
+      expect(h.shownPts()).toBe("897030");
+      // The playhead moved back by less than one frame, and not by the lead.
+      expect(h.playheadSeconds()).toBeCloseTo(9.967, 9);
+
+      const seeks = h.element.currentTimeSets;
+      expect(h.press("goToEnd")).not.toBeNull();
+      expect(h.element.currentTimeSets).toBe(seeks);
+      expect(h.shownPts()).toBe("897030");
+      expect(h.playback.getState().seekTargetSeconds).toBeNull();
+
+      h.timeline.getState().markIn(pts("90000"));
+      expect(h.press("markOut")).toEqual({ kind: "markOut", pts: "897030" });
+    });
+
+    it("End off the grid, on a coarse time base: the frame at the last tick stays", () => {
+      // 1/24 at 23.976 fps: one tick is almost a whole frame, so the grid is not exact.
+      const h = createStoreHarness({
+        media: {
+          videoTimeBase: { n: 1, d: 24 },
+          videoDurationTicks: ticks("240"),
+          avgFrameRate: { n: 24000, d: 1001 },
+          rFrameRate: { n: 24000, d: 1001 },
+        },
+      });
+
+      expect(h.press("goToEnd")).toEqual({
+        kind: "seekToPts",
+        pts: "239",
+        options: EXTENT_END_SEEK_OPTIONS,
+      });
+      h.presentSeekedFrame(239 / 24);
+      expect(h.shownPts()).toBe("239");
+      expect(h.playheadSeconds()).toBeCloseTo(239 / 24, 9);
+
+      const seeks = h.element.currentTimeSets;
+      expect(h.press("goToEnd")).toBeNull();
+      expect(h.element.currentTimeSets).toBe(seeks);
+    });
+
+    it("End off the grid on an element that ends before the last tick: two Ends make one seek", () => {
+      // An MP4 with B-frames and no edit list: the calibrated mapping puts the last tick past
+      // the end of the element, and the element stops the seek at its duration.
+      const h = createStoreHarness({
+        anchored: false,
+        duration: 10.45,
+        media: {
+          videoTimeBase: { n: 1, d: 90_000 },
+          videoDurationTicks: ticks("900000"),
+          avgFrameRate: { n: 2997, d: 100 },
+          rFrameRate: { n: 30, d: 1 },
+        },
+      });
+      h.anchor(0.5);
+
+      expect(h.press("goToEnd")).not.toBeNull();
+      expect(h.element.currentTime).toBe(10.45);
+      h.presentSeekedFrame(0.5 + 893_700 / 90_000);
+      expect(h.shownPts()).toBe("893700");
+
+      const seeks = h.element.currentTimeSets;
+      h.press("goToEnd");
+      expect(h.element.currentTimeSets).toBe(seeks);
+      expect(h.shownPts()).toBe("893700");
+    });
+
+    it("End on the grid on an element that ends inside the last frame: two Ends make one seek", () => {
+      const h = createStoreHarness({ anchored: false, duration: 10.47 });
+      h.anchor(0.5);
+
+      expect(h.press("goToEnd")).toEqual({ kind: "seekToFrameIndex", frameIndex: 249 });
+      // The end of the element pulls the target back into the last frame.
+      expect(h.element.currentTime).toBe(10.47);
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
+      h.presentSeekedFrame(0.5 + 249 / 25);
+      expect(h.shownPts()).toBe("249");
+
+      const seeks = h.element.currentTimeSets;
+      expect(h.press("goToEnd")).toBeNull();
+      expect(h.element.currentTimeSets).toBe(seeks);
+    });
+
+    it("End then → on the grid: the step does nothing, and O marks the last frame", () => {
+      const h = createStoreHarness();
+      h.clickRulerAt("25");
+      h.press("markIn");
+      h.press("goToEnd");
+      h.presentSeekedFrame(249 / 25);
+      expect(h.shownPts()).toBe("249");
+
+      const seeks = h.element.currentTimeSets;
+      expect(h.press("stepForwardOneFrame")).toEqual({
+        kind: "seekNominal",
+        frames: 1,
+      });
+      expect(h.press("stepForwardTenFrames")).toEqual({
+        kind: "seekNominal",
+        frames: 10,
+      });
+      expect(h.element.currentTimeSets).toBe(seeks);
+      expect(h.shownPts()).toBe("249");
+      expect(h.press("markOut")).toEqual({ kind: "markOut", pts: "249" });
+    });
+
+    it("End then → off the grid, with an audio lead: the step does nothing", () => {
+      const h = createStoreHarness({
+        anchored: false,
+        duration: 10.5,
+        media: {
+          videoTimeBase: { n: 1, d: 90_000 },
+          videoDurationTicks: ticks("900000"),
+          avgFrameRate: { n: 2997, d: 100 },
+          rFrameRate: { n: 30, d: 1 },
+        },
+      });
+      h.anchor(0.5);
+      h.press("goToEnd");
+      h.presentSeekedFrame(0.5 + 897_030 / 90_000);
+      expect(h.shownPts()).toBe("897030");
+
+      const seeks = h.element.currentTimeSets;
+      h.press("stepForwardOneFrame");
+      expect(h.element.currentTimeSets).toBe(seeks);
+      expect(h.shownPts()).toBe("897030");
+    });
+
+    it("a last frame shorter than an interval: End goes to it, and → reaches it from the frame before", () => {
+      // 25 fps on 1/1000, an extent of 376 ticks: frames 0 to 9, and frame 9 covers only 360 to
+      // 376. The element ends with it.
+      const h = createStoreHarness({
+        duration: 0.376,
+        media: {
+          videoTimeBase: { n: 1, d: 1000 },
+          videoDurationTicks: ticks("376"),
+          approximateDurationSeconds: 0.376,
+        },
+      });
+
+      expect(h.press("goToEnd")).toEqual({ kind: "seekToFrameIndex", frameIndex: 9 });
+      expect(h.element.currentTime).toBe(0.376);
+      expect(h.playheadSeconds()).toBeCloseTo(0.36, 9);
+      h.presentSeekedFrame(0.36);
+      expect(h.shownPts()).toBe("360");
+      expect(h.press("goToEnd")).toBeNull();
+
+      // → from frame 8 reaches frame 9, and → from frame 9 does nothing.
+      h.clickRulerAt("320");
+      expect(h.shownPts()).toBe("320");
+      h.press("stepForwardOneFrame");
+      expect(h.element.currentTime).toBe(0.376);
+      expect(h.playheadSeconds()).toBeCloseTo(0.36, 9);
+      h.presentSeekedFrame(0.36);
+      expect(h.shownPts()).toBe("360");
+      const seeks = h.element.currentTimeSets;
+      h.press("stepForwardOneFrame");
+      expect(h.element.currentTimeSets).toBe(seeks);
+      expect(h.shownPts()).toBe("360");
+    });
+
+    it("End then → before the anchor stays on the last frame, as End then → after it", () => {
+      const h = createStoreHarness({ anchored: false });
+      h.press("goToEnd");
+      expect(h.press("stepForwardOneFrame")).toEqual({
+        kind: "seekNominal",
+        frames: 1,
+      });
+      // The step past the last frame changes nothing: the playhead stays on frame 249.
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
+
+      h.anchor();
+      expect(h.element.currentTimeSets).toBe(1);
+      expect(h.element.currentTime).toBeCloseTo(249.5 / 25, 9);
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
+      h.presentSeekedFrame(249 / 25);
+      expect(h.shownPts()).toBe("249");
+    });
+
+    it("known limit: off the grid, End from inside the last frame seeks onto the frame on screen", () => {
+      // The last frame starts at PTS 897030, before the last tick. No frame boundary tells the
+      // plan or the store that the element already shows the frame that holds the last tick, so
+      // End seeks to that tick. In a real element that seek can bring no frame callback
+      // (ADR 022), and Mark Out stays disabled until the next frame arrives. On the frame grid
+      // the index of the frame on screen finds the last frame, so this happens off the grid only.
+      const h = createStoreHarness({
+        media: {
+          videoTimeBase: { n: 1, d: 90_000 },
+          videoDurationTicks: ticks("900000"),
+          avgFrameRate: { n: 2997, d: 100 },
+          rFrameRate: { n: 30, d: 1 },
+        },
+      });
+      h.clickRulerAt("897030");
+      expect(h.shownPts()).toBe("897030");
+      h.timeline.getState().markIn(pts("90000"));
+      const seeks = h.element.currentTimeSets;
+
+      expect(h.press("goToEnd")).toEqual({
+        kind: "seekToPts",
+        pts: "899999",
+        options: EXTENT_END_SEEK_OPTIONS,
+      });
+      expect(h.element.currentTimeSets).toBe(seeks + 1);
+      expect(h.playback.getState().presentedFrame).toBeNull();
+      expect(h.press("markOut")).toBeNull();
+    });
+
+    it("End on a source that cannot calibrate goes to the end of the ruler", () => {
+      const h = createStoreHarness({ anchored: false });
+      h.failCalibration();
+      expect(h.playback.getState().calibrationStatus).toBe("unavailable");
+
+      expect(h.press("goToEnd")).toEqual({ kind: "seekApproximate", seconds: 10 });
+      expect(h.element.currentTime).toBe(10);
     });
 
     it("O then Shift+O: the return does nothing, and Escape then I marks a new In there", () => {
@@ -1135,19 +1654,75 @@ describe("planShortcutCommand", () => {
 
     it("End before the anchor goes to the last frame once the anchor arrives", () => {
       const h = createStoreHarness({ anchored: false });
-      expect(h.press("goToEnd")).toEqual({ kind: "seekApproximate", seconds: 10 });
+      expect(h.press("goToEnd")).toEqual({ kind: "seekToFrameIndex", frameIndex: 249 });
       expect(h.element.currentTimeSets).toBe(0);
-      expect(h.playback.getState().seekTargetSeconds).toBe(10);
+      // The store defers it as the first frame and 249 steps, and shows the last frame at once.
+      expect(h.playback.getState().hasDeferredNavigation).toBe(true);
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
 
       h.anchor();
       expect(h.element.currentTimeSets).toBe(1);
-      expect(h.element.currentTime).toBeCloseTo(10, 9);
+      expect(h.element.currentTime).toBeCloseTo(249.5 / 25, 9);
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
       h.presentSeekedFrame(249 / 25);
       expect(h.shownPts()).toBe("249");
     });
 
-    it("End before the anchor goes where End goes after it, so a second End does nothing", () => {
-      const h = createStoreHarness({ anchored: false });
+    it("End before the anchor with an audio lead: the same last frame, and a second End does nothing", () => {
+      const h = createStoreHarness({ anchored: false, duration: 10.5 });
+      expect(h.press("goToEnd")).toEqual({ kind: "seekToFrameIndex", frameIndex: 249 });
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
+
+      // The audio leads, so the first video frame is at 0.5 s on the browser timeline
+      h.anchor(0.5);
+      expect(h.playback.getState().calibrationStatus).toBe("ready");
+      // One seek, to the middle of frame 249 from the calibrated first frame. The playhead does
+      // not move when the request runs, nor when the frame arrives.
+      expect(h.element.currentTimeSets).toBe(1);
+      expect(h.element.currentTime).toBeCloseTo(0.5 + 249.5 / 25, 9);
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
+      h.presentSeekedFrame(0.5 + 249 / 25);
+      expect(h.shownPts()).toBe("249");
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
+
+      const seeks = h.element.currentTimeSets;
+      expect(h.press("goToEnd")).toBeNull();
+      expect(h.element.currentTimeSets).toBe(seeks);
+    });
+
+    it("End before the anchor off the grid goes to the last tick once the anchor arrives", () => {
+      const h = createStoreHarness({
+        anchored: false,
+        duration: 10.5,
+        media: { avgFrameRate: { n: 2497, d: 100 } },
+      });
+      expect(h.press("goToEnd")).toEqual({
+        kind: "seekToPts",
+        pts: "249",
+        options: EXTENT_END_SEEK_OPTIONS,
+      });
+      expect(h.element.currentTimeSets).toBe(0);
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
+
+      h.anchor(0.5);
+      expect(h.element.currentTimeSets).toBe(1);
+      expect(h.element.currentTime).toBeCloseTo(0.5 + 249 / 25, 9);
+      h.presentSeekedFrame();
+      expect(h.shownPts()).toBe("249");
+
+      const seeks = h.element.currentTimeSets;
+      expect(h.press("goToEnd")).toBeNull();
+      expect(h.element.currentTimeSets).toBe(seeks);
+    });
+
+    it("End before the anchor keeps the approximate clock without the extent in ticks", () => {
+      // The end of the ruler is then the approximate duration, and End seeks there on the
+      // browser timeline before and after the anchor (keepBrowserTimeline), so a second End
+      // finds the element at the end.
+      const h = createStoreHarness({
+        anchored: false,
+        media: { videoDurationTicks: null },
+      });
       expect(h.press("goToEnd")).toEqual({ kind: "seekApproximate", seconds: 10 });
 
       // The audio leads, so the first video frame is at 0.5 s on the browser timeline
@@ -1162,6 +1737,17 @@ describe("planShortcutCommand", () => {
       const seeks = h.element.currentTimeSets;
       expect(h.press("goToEnd")).toBeNull();
       expect(h.element.currentTimeSets).toBe(seeks);
+    });
+
+    it("End before the anchor runs on the approximate clock when the calibration fails", () => {
+      const h = createStoreHarness({ anchored: false });
+      expect(h.press("goToEnd")).toEqual({ kind: "seekToFrameIndex", frameIndex: 249 });
+
+      h.failCalibration();
+      // The first frame and 249 steps, from the start of the browser timeline.
+      expect(h.element.currentTimeSets).toBe(1);
+      expect(h.element.currentTime).toBeCloseTo(249 / 25, 9);
+      expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
     });
 
     it("Shift+I and Shift+O before the anchor go to the mark once the anchor arrives", () => {

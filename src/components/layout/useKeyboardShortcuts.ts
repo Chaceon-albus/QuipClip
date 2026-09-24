@@ -54,11 +54,16 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       playback.seekNominal(command.frames);
       return;
     case "seekToPts":
-      playback.seekToPts(command.pts);
+      playback.seekToPts(command.pts, command.options);
+      return;
+    case "seekToFrameIndex":
+      // End on the frame grid (ADR 026).
+      playback.seekToFrameIndex(command.frameIndex);
       return;
     case "seekApproximate":
-      // Home on a source that cannot calibrate, and End. Both seek on the approximate clock
-      // after the anchor, so a request deferred before the anchor keeps that clock (ADR 022).
+      // Home on a source that cannot calibrate, and End on the approximate clock (`planEndSeek`).
+      // Both seek on the approximate clock after the anchor, so a request deferred before the
+      // anchor keeps that clock (ADR 022).
       playback.seekApproximate(command.seconds, APPROXIMATE_SHORTCUT_SEEK_OPTIONS);
       return;
     case "markIn":

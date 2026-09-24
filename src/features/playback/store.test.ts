@@ -7,7 +7,10 @@ import {
   vi,
   type MockInstance,
 } from "vitest";
-import { APPROXIMATE_SHORTCUT_SEEK_OPTIONS } from "@/components/layout/shortcutCommands";
+import {
+  APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
+  EXTENT_END_SEEK_OPTIONS,
+} from "@/components/layout/shortcutCommands";
 import { getSourceRevisionKey } from "@/features/media";
 import { canMarkIn } from "@/features/timeline";
 import * as timeLib from "@/lib/time";
@@ -17,7 +20,7 @@ import {
   frameBoundaryMarginSeconds,
   isFrameGridExact,
 } from "@/lib/timecode";
-import type { Pts, Rational } from "@/types/project";
+import type { Pts, Rational, TickCount } from "@/types/project";
 import { getDisplayedElapsedSeconds } from "./presentation";
 import { scrubAudioController } from "./scrubAudio";
 import {
@@ -44,6 +47,8 @@ function createFakeVideo(options?: {
   autoSeeking?: boolean;
   fastSeek?: ((time: number) => void) | boolean;
   throwOnFastSeek?: boolean;
+  /** Stops a seek at `duration`, as a browser does with a time past the end of the media. */
+  clampToDuration?: boolean;
 }): PlaybackMediaElement & {
   playCalls: number;
   pauseCalls: number;
@@ -109,7 +114,10 @@ function createFakeVideo(options?: {
           "InvalidStateError",
         );
       }
-      currentTimeVal = val;
+      currentTimeVal =
+        options?.clampToDuration === true && Number.isFinite(fake.duration)
+          ? Math.min(val, fake.duration)
+          : val;
       if (options?.autoSeeking !== false) {
         seekingVal = true;
       }
@@ -727,6 +735,181 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
       store.getState().seekToPts("25" as Pts);
       expect(store.getState().error).toBe("seekFailed");
+    });
+  });
+
+  describe("seekToPts to the End of the Extent (ADR 026)", () => {
+    // End off the frame grid: 10 s on 1/90000 at a variable rate, with an audio lead of 0.5 s.
+    // The last tick is PTS 899999, and the last frame starts before it, at PTS 897030.
+    const vfrSource: PlaybackSource = {
+      path: "/media/phone.mp4",
+      size: 4096,
+      mtime: 1724977000,
+      videoTimeBase: { n: 1, d: 90000 },
+      videoStartPts: "0" as Pts,
+      videoDurationTicks: "900000" as TickCount,
+      approximateDurationSeconds: 10,
+      avgFrameRate: { n: 2997, d: 100 },
+      rFrameRate: { n: 30, d: 1 },
+    };
+    const vfrKey = getSourceRevisionKey(vfrSource);
+    const LEAD = 0.5;
+    const LAST_TICK = "899999" as Pts;
+    const LAST_TICK_TIME = LEAD + 899999 / 90000;
+    const LAST_FRAME_TIME = LEAD + 897030 / 90000;
+
+    /** A calibrated source whose element stands at the last tick, with the last frame on screen. */
+    function atExtentEnd() {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 10.6 });
+      store.getState().attach(vfrSource, video);
+      store.getState().syncReady(vfrKey, video);
+      store.getState().syncPresentedFrame(vfrKey, LEAD, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+
+      store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBeCloseTo(LAST_TICK_TIME, 9);
+      fireSeeked(store, vfrKey, video);
+      store.getState().syncPresentedFrame(vfrKey, LAST_FRAME_TIME, 2, video);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("897030");
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      return { store, video };
+    }
+
+    it("does nothing when the element already stands at the last tick with its frame on screen", () => {
+      const { store, video } = atExtentEnd();
+      const frame = store.getState().presentedFrame;
+
+      store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+      expect(video.currentTimeSets).toBe(1);
+      expect(store.getState().presentedFrame).toBe(frame);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().error).toBeNull();
+    });
+
+    it("does nothing when the element stands after the last tick, as at the end of playback", () => {
+      const { store, video } = atExtentEnd();
+      store.getState().play();
+      // The element plays on to the end of its audio, and the last video frame stays.
+      video.currentTime = 10.6;
+      video.seeking = false;
+      store.getState().syncEnded(vfrKey, video);
+      expect(store.getState().isPlaying).toBe(false);
+      const sets = video.currentTimeSets;
+
+      store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+      expect(video.currentTimeSets).toBe(sets);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("897030");
+    });
+
+    it("seeks from a position before the last tick", () => {
+      const { store, video } = atExtentEnd();
+      store.getState().seekToPts("450000" as Pts);
+      fireSeeked(store, vfrKey, video);
+      store.getState().syncPresentedFrame(vfrKey, LEAD + 5, 3, video);
+      const sets = video.currentTimeSets;
+
+      store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+      expect(video.currentTimeSets).toBe(sets + 1);
+      expect(video.currentTime).toBeCloseTo(LAST_TICK_TIME, 9);
+    });
+
+    it("seeks from the last tick while a seek is pending, the source plays, or without the option", () => {
+      // A pending seek: the element is moving away from the last tick.
+      const pending = atExtentEnd();
+      pending.store.getState().seekToPts("450000" as Pts);
+      pending.store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+      fireSeeked(pending.store, vfrKey, pending.video);
+      expect(pending.video.currentTimeSets).toBe(3);
+      expect(pending.video.currentTime).toBeCloseTo(LAST_TICK_TIME, 9);
+
+      // Playback: the frame on screen changes, and the seek also stops the playback.
+      const playing = atExtentEnd();
+      playing.store.getState().play();
+      playing.store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+      expect(playing.video.currentTimeSets).toBe(2);
+      expect(playing.store.getState().isPlaying).toBe(false);
+
+      // Without the option the store seeks onto the frame on screen, which clears it.
+      const plain = atExtentEnd();
+      plain.store.getState().seekToPts(LAST_TICK);
+      expect(plain.video.currentTimeSets).toBe(2);
+      expect(plain.store.getState().presentedFrame).toBeNull();
+    });
+
+    describe("an element whose duration ends before the last tick", () => {
+      // An MP4 with B-frames and no edit list reports the composition offset as its start PTS,
+      // so the calibrated mapping puts the last tick past the end of the element. The element
+      // stops the seek of End at its duration.
+      const DURATION = 10.45;
+
+      function attachShort() {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: DURATION, clampToDuration: true });
+        store.getState().attach(vfrSource, video);
+        store.getState().syncReady(vfrKey, video);
+        store.getState().syncBrowserDuration(vfrKey, video);
+        store.getState().syncPresentedFrame(vfrKey, LEAD, 1, video);
+        expect(store.getState().runtimeBrowserDurationSeconds).toBe(DURATION);
+        return { store, video };
+      }
+
+      it("two Ends make one seek", () => {
+        const { store, video } = attachShort();
+        store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBe(DURATION);
+        fireSeeked(store, vfrKey, video);
+        store.getState().syncPresentedFrame(vfrKey, LEAD + 893700 / 90000, 2, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("893700");
+
+        store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+        expect(video.currentTimeSets).toBe(1);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("893700");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+      });
+
+      it("End after the end of playback makes no seek", () => {
+        const { store, video } = attachShort();
+        store.getState().play();
+        video.currentTime = DURATION;
+        video.seeking = false;
+        store.getState().syncPresentedFrame(vfrKey, LEAD + 893700 / 90000, 2, video);
+        store.getState().syncEnded(vfrKey, video);
+        const sets = video.currentTimeSets;
+
+        store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+        expect(video.currentTimeSets).toBe(sets);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("893700");
+      });
+
+      it("seeks from a position before the duration", () => {
+        const { store, video } = attachShort();
+        store.getState().seekToPts("450000" as Pts);
+        fireSeeked(store, vfrKey, video);
+        store.getState().syncPresentedFrame(vfrKey, LEAD + 5, 2, video);
+
+        store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.currentTime).toBe(DURATION);
+      });
+    });
+
+    it("defers as any seek while the calibration is open", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 10.6 });
+      store.getState().attach(vfrSource, video);
+      store.getState().syncReady(vfrKey, video);
+
+      store.getState().seekToPts(LAST_TICK, EXTENT_END_SEEK_OPTIONS);
+      expect(video.currentTimeSets).toBe(0);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(899999 / 90000, 9);
+
+      store.getState().syncPresentedFrame(vfrKey, LEAD, 1, video);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBeCloseTo(LAST_TICK_TIME, 9);
     });
   });
 
@@ -3565,7 +3748,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(video.currentTime).toBe(sourceA.approximateDurationSeconds);
     });
 
-    it("known gap: a step forward from the real last frame still seeks once to the upper bound", () => {
+    it("known gap without the extent in ticks: a step forward from the real last frame still seeks once to the upper bound", () => {
       const store = createPlaybackStore();
       const video = createFakeVideo();
       attachCalibrated(store, video);
@@ -3579,9 +3762,10 @@ describe("Playback Store & PTS Presentation Engine", () => {
       // The upper bound is the duration (10.0 s), one frame interval after the start of the
       // last frame, so this step is not at the edge and it seeks. In a real element that seek
       // shows the same frame and can produce no RVFC callback (ADR 022), so presentedFrame
-      // stays null and the edit actions stay disabled. The store cannot find the last frame:
-      // ADR 003 lists final-frame boundary discovery as future work. This test pins the
-      // current behaviour until that work exists.
+      // stays null and the edit actions stay disabled. sourceA reports no videoDurationTicks,
+      // so the store cannot find the last frame: ADR 003 lists final-frame boundary discovery
+      // as future work. With the extent in ticks the step is at the edge (see "A Step Forward
+      // from the Last Frame of the Extent"). This test pins the behaviour without it.
       store.getState().seekNominal(1);
       expect(video.currentTimeSets).toBe(setsBefore + 1);
       expect(video.currentTime).toBe(sourceA.approximateDurationSeconds);
@@ -3600,6 +3784,205 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().seekNominal(1);
       expect(video.currentTimeSets).toBe(setsBefore + 1);
       expect(store.getState().presentedFrame).toBeNull();
+    });
+
+    describe("A Step Forward from the Last Frame of the Extent (ADR 026)", () => {
+      /** sourceA with its extent in ticks: 250 frames on 1/25, the last one is frame 249. */
+      const gridSource: PlaybackSource = {
+        ...sourceA,
+        videoDurationTicks: "250" as TickCount,
+      };
+      /** 10 s on 1/90000 at a variable rate, so off the grid. The last tick is PTS 899999. */
+      const vfrSource: PlaybackSource = {
+        ...sourceA,
+        path: "/media/vfr.mp4",
+        videoTimeBase: { n: 1, d: 90000 },
+        videoDurationTicks: "900000" as TickCount,
+        avgFrameRate: { n: 2997, d: 100 },
+        rFrameRate: { n: 30, d: 1 },
+      };
+
+      function attach(
+        source: PlaybackSource,
+        video: ReturnType<typeof createFakeVideo>,
+        anchor = 0,
+      ): { store: PlaybackStore; key: string } {
+        const store = createPlaybackStore();
+        const key = getSourceRevisionKey(source);
+        store.getState().attach(source, video);
+        video.readyState = 1;
+        store.getState().syncReady(key, video);
+        store.getState().syncPresentedFrame(key, anchor, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        return { store, key };
+      }
+
+      function settleOn(
+        store: PlaybackStore,
+        key: string,
+        video: ReturnType<typeof createFakeVideo>,
+        mediaTime: number,
+        presentedFrames: number,
+      ): void {
+        fireSeeked(store, key, video);
+        store.getState().syncPresentedFrame(key, mediaTime, presentedFrames, video);
+      }
+
+      it("the known gap is closed: a step forward from the last frame does nothing", () => {
+        const video = createFakeVideo();
+        const { store, key } = attach(gridSource, video);
+        store.getState().seekToPts("249" as Pts);
+        settleOn(store, key, video, 9.96, 2);
+        const presented = store.getState().presentedFrame;
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekNominal(1);
+        store.getState().seekNominal(10);
+        expect(video.currentTimeSets).toBe(setsBefore);
+        expect(store.getState().presentedFrame).toBe(presented);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(requestSpy).not.toHaveBeenCalled();
+
+        // A step back still moves.
+        store.getState().seekNominal(-1);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBeCloseTo(248.5 / 25, 9);
+      });
+
+      it("End then → on the grid, also with an audio lead: the step does nothing", () => {
+        for (const lead of [0, 0.5]) {
+          const video = createFakeVideo({ duration: lead + 10 });
+          const { store, key } = attach(gridSource, video, lead);
+          store.getState().syncBrowserDuration(key, video);
+
+          // End goes to the middle of the last frame.
+          store.getState().seekToFrameIndex(249);
+          expect(video.currentTime).toBeCloseTo(lead + 249.5 / 25, 9);
+          // While that seek is pending, a step forward is absorbed by it.
+          store.getState().seekNominal(1);
+          expect(video.currentTimeSets).toBe(1);
+
+          settleOn(store, key, video, lead + 249 / 25, 2);
+          expect(store.getState().presentedFrame?.inferredSourcePts).toBe("249");
+          const presented = store.getState().presentedFrame;
+
+          store.getState().seekNominal(1);
+          expect(video.currentTimeSets).toBe(1);
+          expect(store.getState().presentedFrame).toBe(presented);
+          expect(store.getState().seekTargetSeconds).toBeNull();
+        }
+      });
+
+      it("a step from before the last frame that the end clamps still seeks to the end", () => {
+        const video = createFakeVideo();
+        const { store, key } = attach(gridSource, video);
+        store.getState().seekToPts("245" as Pts);
+        settleOn(store, key, video, 9.8, 2);
+        const setsBefore = video.currentTimeSets;
+
+        store.getState().seekNominal(10);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(10);
+        // The display names the last frame, 249, the frame that arrives, and not frame 250,
+        // which holds the end position by the margin and does not exist.
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(249 / 25, 9);
+        settleOn(store, key, video, 249 / 25, 3);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("249");
+      });
+
+      describe("a last frame shorter than an interval", () => {
+        // 25 fps on 1/1000, an extent of 376 ticks: frames 0 to 9, and frame 9 covers only
+        // 360 to 376, less than half an interval.
+        const shortSource: PlaybackSource = {
+          ...sourceA,
+          path: "/media/short.mp4",
+          videoTimeBase: { n: 1, d: 1000 },
+          videoDurationTicks: "376" as TickCount,
+          approximateDurationSeconds: 0.376,
+        };
+
+        function attachShort() {
+          const video = createFakeVideo({ duration: 0.376, clampToDuration: true });
+          const attached = attach(shortSource, video);
+          attached.store.getState().syncBrowserDuration(attached.key, video);
+          return { ...attached, video };
+        }
+
+        it("End goes to frame 9, and a second step forward does nothing", () => {
+          const { store, key, video } = attachShort();
+          store.getState().seekToFrameIndex(9);
+          expect(video.currentTimeSets).toBe(1);
+          // The middle of frame 9 lies past the end, so the seek stops at the end.
+          expect(video.currentTime).toBe(0.376);
+          expect(store.getState().seekTargetSeconds).toBeCloseTo(0.36, 9);
+          settleOn(store, key, video, 0.36, 2);
+          expect(store.getState().presentedFrame?.inferredSourcePts).toBe("360");
+
+          store.getState().seekNominal(1);
+          expect(video.currentTimeSets).toBe(1);
+        });
+
+        it("a step forward from frame 8 reaches frame 9, and a step from frame 9 does nothing", () => {
+          const { store, key, video } = attachShort();
+          store.getState().seekToPts("320" as Pts);
+          settleOn(store, key, video, 0.32, 2);
+          expect(store.getState().presentedFrame?.inferredSourcePts).toBe("320");
+
+          store.getState().seekNominal(1);
+          expect(video.currentTimeSets).toBe(2);
+          expect(video.currentTime).toBe(0.376);
+          expect(store.getState().seekTargetSeconds).toBeCloseTo(0.36, 9);
+          settleOn(store, key, video, 0.36, 3);
+          expect(store.getState().presentedFrame?.inferredSourcePts).toBe("360");
+
+          store.getState().seekNominal(1);
+          expect(video.currentTimeSets).toBe(2);
+        });
+
+        it("a typed frame 9 from frame 8 goes to frame 9", () => {
+          const { store, key, video } = attachShort();
+          store.getState().seekToPts("320" as Pts);
+          settleOn(store, key, video, 0.32, 2);
+
+          store.getState().seekToFrameIndex(9);
+          expect(video.currentTimeSets).toBe(2);
+          expect(video.currentTime).toBe(0.376);
+        });
+      });
+
+      it("End then → off the grid, also with an audio lead: the step does nothing", () => {
+        for (const lead of [0, 0.5]) {
+          const video = createFakeVideo({ duration: lead + 10 });
+          const { store, key } = attach(vfrSource, video, lead);
+          store.getState().syncBrowserDuration(key, video);
+
+          store.getState().seekToPts("899999" as Pts, EXTENT_END_SEEK_OPTIONS);
+          expect(video.currentTime).toBeCloseTo(lead + 899999 / 90000, 9);
+          // The last frame starts before the last tick.
+          settleOn(store, key, video, lead + 897030 / 90000, 2);
+          expect(store.getState().presentedFrame?.inferredSourcePts).toBe("897030");
+          const presented = store.getState().presentedFrame;
+
+          store.getState().seekNominal(1);
+          store.getState().seekNominal(10);
+          expect(video.currentTimeSets).toBe(1);
+          expect(store.getState().presentedFrame).toBe(presented);
+          expect(store.getState().seekTargetSeconds).toBeNull();
+        }
+      });
+
+      it("off the grid, a step from before the last tick that the end clamps still seeks", () => {
+        const video = createFakeVideo();
+        const { store, key } = attach(vfrSource, video);
+        store.getState().seekToPts("898200" as Pts);
+        settleOn(store, key, video, 898200 / 90000, 2);
+        const setsBefore = video.currentTimeSets;
+
+        // 9.98 s plus one interval passes the end, 10 s, and 9.98 s is before the last tick.
+        store.getState().seekNominal(1);
+        expect(video.currentTimeSets).toBe(setsBefore + 1);
+        expect(video.currentTime).toBe(10);
+      });
     });
 
     it("an element past the upper bound does not step forward, and a step back seeks inside the bounds", () => {
@@ -6173,8 +6556,13 @@ describe("Playback Store & PTS Presentation Engine", () => {
         ],
         ["a seek to a PTS", (store) => store.getState().seekToPts("50" as Pts)],
         ["Home", (store) => store.getState().seekToPts("0" as Pts)],
+        ["End on the frame grid", (store) => store.getState().seekToFrameIndex(249)],
         [
-          "End",
+          "End off the frame grid",
+          (store) => store.getState().seekToPts("249" as Pts, EXTENT_END_SEEK_OPTIONS),
+        ],
+        [
+          "End without the extent in ticks",
           (store) =>
             store.getState().seekApproximate(10, APPROXIMATE_SHORTCUT_SEEK_OPTIONS),
         ],
@@ -6273,9 +6661,48 @@ describe("Playback Store & PTS Presentation Engine", () => {
       });
     });
 
+    describe("Deferred Steps at the Last Frame of the Extent (ADR 026)", () => {
+      // sourceA with its extent in ticks: 250 frames, and the last one is frame 249. The end
+      // position, 10 s, is the start of frame 250, which does not exist.
+      const gridSource: PlaybackSource = {
+        ...sourceA,
+        videoDurationTicks: "250" as TickCount,
+      };
+
+      it("End then → before the anchor stays on the last frame, as after the anchor", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachCalibrating(store, video, gridSource);
+
+        store.getState().seekToFrameIndex(249);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(249 / 25, 9);
+        store.getState().seekNominal(1);
+        store.getState().seekNominal(10);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(249 / 25, 9);
+        expect(store.getState().hasDeferredNavigation).toBe(true);
+
+        store.getState().syncPresentedFrame(identityA, 0, 1, video);
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBeCloseTo(249.5 / 25, 9);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(249 / 25, 9);
+      });
+
+      it("steps before the anchor stop at the last frame of the extent", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachCalibrating(store, video, gridSource);
+
+        store.getState().seekNominal(1000);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(249 / 25, 9);
+        store.getState().syncPresentedFrame(identityA, 0, 1, video);
+        expect(video.currentTime).toBeCloseTo(249.5 / 25, 9);
+      });
+    });
+
     describe("A Deferred Seek That Keeps the Browser Timeline", () => {
-      // End seeks on the approximate clock also after the anchor (ADR 026). Deferred, it keeps
-      // that clock, so it lands where the same End lands after the anchor.
+      // End seeks on the approximate clock also after the anchor when the probe gives no extent
+      // in ticks (ADR 026). Deferred, it keeps that clock, so it lands where the same End lands
+      // after the anchor.
       const LEAD = 0.5;
 
       it("lands where the same call lands after the anchor, also with an audio lead", () => {

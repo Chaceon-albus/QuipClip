@@ -349,42 +349,114 @@ export function frameIndexOfTicks(
 }
 
 /**
- * Returns the index of the last nominal frame of a source extent: the number of frames in the
- * extent, `round(extentTicks * timeBase * rate)` with a tie away from zero (ADR 002), minus one.
+ * Returns the index of the last nominal frame of a source extent: the last frame whose nominal
+ * start lies inside the extent by more than the frame boundary margin of ADR 028,
+ * `ceil((extentTicks * timeBase - margin) * rate) - 1`, with the margin of `rate` on `timeBase`.
  * All arithmetic is BigInt.
  *
  * The extent is the time from the first frame to the end of the last frame, so its end is the
- * start of the frame after the last one. On an exact frame grid (`isFrameGridExact`) the
- * rounding gives the frame count exactly, for one of two reasons:
+ * start of the frame after the last one. A container stores that end rounded to its time base,
+ * as it stores each PTS. The margin is the largest distance that such a rounding explains, so a
+ * nominal frame that starts no more than the margin before the end holds no picture, and a frame
+ * that starts earlier holds one, however short it is. On an exact frame grid
+ * (`isFrameGridExact`) the result is therefore the last real frame:
  *
  * - On a whole-tick grid, where the interval is a whole number of ticks, the frame boundaries
- *   lie on ticks, and the extent is a whole number of intervals. The quotient is then a whole
- *   number, and the rounding does not change it.
- * - On any other exact grid, a frame boundary lies within one tick of its nominal position, and
- *   one tick is less than half an interval. The quotient is then less than half a frame from the
- *   frame count, and the rounding reaches that count.
+ *   lie on ticks and the margin is one microsecond. The result is the frame that holds the last
+ *   tick of the extent, `floor((extentTicks - 1) * timeBase * rate)`. A last frame shorter than
+ *   an interval counts: at 25 fps on 1/1000, an extent of 376 ticks ends inside frame 9, which
+ *   starts at 360, and the result is 9.
+ * - On any other exact grid the margin is one tick, and the end of the extent lies within one
+ *   tick of its nominal position, the nominal start of the frame after the last one. That start
+ *   lies at most one tick before the end, so it does not count. The nominal start of the last
+ *   frame lies at least one interval minus one tick before the end, and one interval is more
+ *   than two ticks on an exact grid, so it counts. At 29.97 fps on 1/1000, frames 0 to 299 end
+ *   at 10010 ticks, or at 10011 when the container rounded the end up, where the last tick is
+ *   the nominal start of frame 300. Both give 299.
  *
- * `frameIndexOfTicks(extentTicks - 1)` does not give the last frame: when the interval is not a
- * whole number of ticks, the frame boundary margin is one tick, and the last tick of the extent
- * then counts as the frame after the last one. At 29.97 fps on a 1/1000 time base, an extent of
- * 10010 ticks holds frames 0 to 299, and this function gives 299.
+ * Neither `frameIndexOfTicks(extentTicks - 1)`, which adds the margin and gives 300 for 10010
+ * ticks, nor the extent rounded to whole frames, which gives 8 for the 376 ticks above, names
+ * the last frame in every case.
  *
- * Off the exact grid the result is only the nominal count. An extent from the container
- * duration, and not from the video stream, can also disagree with the video frames in either
- * direction. It can end after the last video frame, and the result then names a frame that the
- * source does not have. It can also end before the end of the last frame, as a Matroska Duration
- * written as the start of the last block does, and the result then names the frame before the
- * last one. A caller that knows a frame the browser showed, such as a stored Out, can raise the
- * result to that frame.
+ * Three limits remain. In the first two, a last frame is too short to tell from a rounding:
  *
- * Returns null for an extent shorter than half a frame, a negative extent, and an invalid time
- * base or rate.
+ * - On an exact grid whose interval is not a whole number of ticks, a last frame of one tick
+ *   whose extent is also a valid rounding, one tick up, of the end of the frame before it cannot
+ *   be told from that rounding. The result drops it and names the frame before it.
+ * - When one tick is one microsecond or less, the margin is one microsecond, and a last frame of
+ *   one microsecond or less is dropped in the same way.
+ * - A reported extent that ends more than the margin after the last frame names a frame that
+ *   does not exist, for example when the duration of the last sample is longer than one
+ *   interval. On a whole-tick grid the margin is one microsecond, so one extra tick is enough:
+ *   128001 ticks on 1/12800 at 25 fps give 250, where the extent rounded to whole frames gives
+ *   249. No rule can tell such an extent from a real last frame of one tick. The duration_ts of
+ *   MP4 and MOV rarely ends this way.
+ *
+ * Off the exact grid the result is only the nominal count.
+ *
+ * Use it for an extent that the video stream reports, `videoDurationTicks`. An approximate
+ * extent, such as a container duration, can end a few milliseconds after the last video frame,
+ * because the audio runs longer, and any end more than the margin after the last frame would
+ * then name a frame that does not exist. `lastFrameIndexOfApproximateExtent` is the rule for such
+ * an extent.
+ *
+ * Returns null for an extent no longer than the margin, which no frame starts inside, a negative
+ * extent, and an invalid time base or rate. Any longer extent holds frame 0.
  *
  * @param extentTicks The extent in ticks of the time base, such as `videoDurationTicks`.
  * @param timeBase Seconds per tick.
  * @param rate The nominal frame rate, in frames per second.
  */
 export function lastFrameIndexOfExtent(
+  extentTicks: bigint,
+  timeBase: Rational,
+  rate: Rational,
+): bigint | null {
+  if (
+    typeof extentTicks !== "bigint" ||
+    extentTicks < 0n ||
+    !isValidRate(timeBase) ||
+    !isValidRate(rate)
+  ) {
+    return null;
+  }
+  const margin = frameBoundaryMargin(rate, timeBase);
+  // (extentTicks * timeBase - margin) * rate = numerator / denominator. The numerator is not
+  // positive for an extent no longer than the margin: no frame starts inside it.
+  const numerator =
+    (extentTicks * BigInt(timeBase.n) * margin.den - margin.num * BigInt(timeBase.d)) *
+    BigInt(rate.n);
+  const denominator = BigInt(timeBase.d) * margin.den * BigInt(rate.d);
+  if (numerator <= 0n) {
+    return null;
+  }
+  // ceil(numerator / denominator) - 1 for a positive numerator.
+  return (numerator + denominator - 1n) / denominator - 1n;
+}
+
+/**
+ * Returns the index of the last nominal frame of an approximate extent: the extent in whole
+ * nominal frames, `round(extentTicks * timeBase * rate)` with a tie away from zero (ADR 002),
+ * minus one. All arithmetic is BigInt.
+ *
+ * An approximate extent does not come from the video stream. A container duration, which the
+ * ruler uses for Matroska and WebM without `videoDurationTicks` (ADR 007), usually ends a few
+ * milliseconds after the last video frame, because the audio runs longer. It can also end before
+ * the end of the last frame, as a Matroska Duration written as the start of the last block does.
+ * `lastFrameIndexOfExtent` would count a frame for any end more than the margin after the last
+ * frame, one tick or one microsecond, so a few milliseconds would name a frame that does not
+ * exist. The rounding tolerates an error of up to half a frame in either direction: 250 frames
+ * at 25 fps with a container duration of 10.01 s give 249, where `lastFrameIndexOfExtent` gives
+ * 250. The price is a real last frame shorter than half an interval, which the rounding drops.
+ *
+ * Returns null for an extent shorter than half a frame, a negative extent, and an invalid time
+ * base or rate.
+ *
+ * @param extentTicks The approximate extent in ticks of the time base.
+ * @param timeBase Seconds per tick.
+ * @param rate The nominal frame rate, in frames per second.
+ */
+export function lastFrameIndexOfApproximateExtent(
   extentTicks: bigint,
   timeBase: Rational,
   rate: Rational,

@@ -10,9 +10,10 @@
  * timeline feature for Mark In and Mark Out. The module has no React, DOM or store dependency.
  */
 
-import type { MediaProbe } from "@/features/media";
+import { isPositiveRational, type MediaProbe } from "@/features/media";
 import {
   getNominalFrameRate,
+  hasExactFrameGrid,
   hasNominalFrameRate,
   NOMINAL_STEP_EDGE_TOLERANCE_SECONDS,
   type PlaybackState,
@@ -28,7 +29,8 @@ import {
   type TimelineState,
   type TimelineViewportState,
 } from "@/features/timeline";
-import { isPtsString } from "@/lib/time";
+import { I64_MAX, isPtsString, isTickCountString } from "@/lib/time";
+import { frameIndexOfTicks, lastFrameIndexOfExtent } from "@/lib/timecode";
 import type { Pts } from "@/types/project";
 import {
   canDeleteSegment,
@@ -49,14 +51,24 @@ import type { ShortcutAction } from "./shortcutBindings";
 export const LARGE_FRAME_STEP = 10;
 
 /**
- * The options of a `seekApproximate` command: Home on a source that cannot calibrate, and End.
- * Both seek on the approximate clock also after the anchor, so a request that the store defers
- * before the anchor keeps that clock (ADR 022). End then goes to the same place before and
- * after the anchor, and a second End finds the element at the end.
+ * The options of a `seekApproximate` command: Home on a source that cannot calibrate, and End on
+ * a source whose probe gives no extent in ticks (`planEndSeek`). Both seek on the approximate
+ * clock also after the anchor, so a request that the store defers before the anchor keeps that
+ * clock (ADR 022). End then goes to the same place before and after the anchor, and a second End
+ * finds the element at the end.
  */
 export const APPROXIMATE_SHORTCUT_SEEK_OPTIONS: SeekOptions = {
   keepBrowserTimeline: true,
 };
+
+/**
+ * The options of the `seekToPts` command of End off the frame grid, whose target is the last
+ * tick of the extent. The store then does nothing when the element already stands at or after
+ * the position that the seek can reach, with its frame on screen (`extentEnd`, ADR 026). That
+ * position is the last tick, or the duration of the element when it is earlier, because the
+ * element stops a seek at its duration.
+ */
+export const EXTENT_END_SEEK_OPTIONS: SeekOptions = { extentEnd: true };
 
 /** The probe facts that the plans read. */
 export type ShortcutProbe = Pick<
@@ -116,7 +128,16 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
 export type ShortcutCommand =
   | { readonly kind: "togglePlayback" }
   | { readonly kind: "seekNominal"; readonly frames: number }
-  | { readonly kind: "seekToPts"; readonly pts: Pts }
+  | {
+      readonly kind: "seekToPts";
+      readonly pts: Pts;
+      /**
+       * Only End at the last tick passes options (EXTENT_END_SEEK_OPTIONS): off the frame grid,
+       * or on it when the grid gives no index.
+       */
+      readonly options?: SeekOptions;
+    }
+  | { readonly kind: "seekToFrameIndex"; readonly frameIndex: number }
   | { readonly kind: "seekApproximate"; readonly seconds: number }
   | { readonly kind: "markIn"; readonly pts: Pts }
   | { readonly kind: "markOut"; readonly pts: Pts }
@@ -177,11 +198,12 @@ export function isTargetOnScreen(playback: BoundarySeekPlayback, target: Pts): b
 }
 
 /**
- * True when the element already stands at the End target on a calibrated source, with a
- * frame on screen, no seek pending and no playback.
+ * True when the element already stands at the End target of the approximate clock on a
+ * calibrated source, with a frame on screen, no seek pending and no playback.
  *
- * This is the rule of `isTargetOnScreen` for End. End seeks on the approximate clock, so no
- * PTS names its target. The presented frame is also not the value to compare: the last frame
+ * This is the rule of `isTargetOnScreen` for End on a calibrated source whose probe gives no
+ * extent in ticks (`planEndSeek`). End then seeks on the approximate clock, so no PTS names its
+ * target. The presented frame is also not the value to compare: the last frame
  * starts one frame interval before the end, so its time never equals the target. The plan
  * therefore compares the position of the element, `approximateBrowserTimeSeconds`. It is on
  * the axis of the target, seconds from the start of the source, and the `seeked` handler of
@@ -273,15 +295,139 @@ export function sourceEndSeconds(
   });
 }
 
+/** The last video frame of the extent, the target of End on a calibrated source (ADR 026). */
+interface LastFrameTarget {
+  /** Ticks from videoStartPts to the last tick of the extent: videoDurationTicks - 1. */
+  readonly ticks: bigint;
+  /** The last tick of the extent, videoStartPts + videoDurationTicks - 1. */
+  readonly pts: Pts;
+  /**
+   * The ADR 028 index of the last nominal frame of the extent on the frame grid
+   * (`hasExactFrameGrid`, `lastFrameIndexOfExtent`). Null off the grid, for an extent no longer
+   * than the frame boundary margin, or for an index past the safe integers.
+   */
+  readonly frameIndex: bigint | null;
+}
+
+/**
+ * The last video frame of the source, or null when the probe does not name it: it needs a valid
+ * videoStartPts, a positive videoDurationTicks and a valid video time base.
+ *
+ * `videoDurationTicks` is the reported extent (ADR 002), so its last tick is the last position
+ * that the extent covers. The browser shows the frame that holds that tick, the frame with the
+ * latest start at or before it, which is the last frame of the extent. On the frame grid the
+ * frames are known: the last frame is the last nominal frame that starts inside the extent by
+ * more than the frame boundary margin (`lastFrameIndexOfExtent`), also when it is shorter than
+ * an interval. A seek to that index, the display target and the timecode of the frame that
+ * arrives then name one frame (ADR 022, ADR 028). The frame that holds the last tick by the frame
+ * boundary margin can be one frame too late: a container rounds the end of the extent as it
+ * rounds each PTS.
+ */
+function lastFrameTarget(probe: ShortcutProbe): LastFrameTarget | null {
+  const { videoStartPts, videoDurationTicks, videoTimeBase } = probe;
+  if (
+    !isPtsString(videoStartPts) ||
+    !isTickCountString(videoDurationTicks) ||
+    !isPositiveRational(videoTimeBase)
+  ) {
+    return null;
+  }
+  const duration = BigInt(videoDurationTicks);
+  const ticks = duration - 1n;
+  const pts = BigInt(videoStartPts) + ticks;
+  if (ticks < 0n || pts > I64_MAX) {
+    return null;
+  }
+  const rate = getNominalFrameRate(probe);
+  const index =
+    rate !== null && hasExactFrameGrid(probe)
+      ? lastFrameIndexOfExtent(duration, videoTimeBase, rate)
+      : null;
+  // An index past the safe integers cannot reach seekToFrameIndex, so the tick goes by PTS.
+  const frameIndex =
+    index !== null && index <= BigInt(Number.MAX_SAFE_INTEGER) ? index : null;
+  return { ticks, pts: pts.toString() as Pts, frameIndex };
+}
+
+/**
+ * True when the last frame is already on screen, with no seek pending and no playback: the
+ * no-op of End (ADR 026). It is the rule of `isTargetOnScreen`, and it compares exact values.
+ *
+ * - On the frame grid, the frame on screen is the last frame when its ADR 028 index is the index
+ *   of the last frame. The index of a real frame is exact on the grid (ADR 022).
+ * - Off the grid, no frame boundary is known. The frame on screen is the last frame when it
+ *   starts at the last tick. A last frame that starts earlier is found by the store instead, from
+ *   the position of the element (`extentEnd`), which this snapshot does not carry on the
+ *   calibrated axis.
+ *
+ * A frame after that index or that tick also counts. The source then has a frame that the
+ * reported extent leaves out, and End never moves back from it.
+ *
+ * During playback the rule does not apply: the frame on screen changes before the seek could
+ * run, and the seek of End also stops the playback. On the grid the store then only pauses while
+ * the element is still inside the last frame (`seekToFrameIndex`).
+ */
+function isLastFrameOnScreen(
+  playback: ShortcutSnapshot["playback"],
+  probe: ShortcutProbe,
+  last: LastFrameTarget,
+): boolean {
+  const frame = playback.presentedFrame;
+  if (
+    playback.calibrationStatus !== "ready" ||
+    frame === null ||
+    playback.seekTargetSeconds !== null ||
+    playback.isPlaying ||
+    !isPtsString(frame.inferredSourcePts) ||
+    !isPtsString(probe.videoStartPts)
+  ) {
+    return false;
+  }
+  const ticks = BigInt(frame.inferredSourcePts) - BigInt(probe.videoStartPts);
+  if (last.frameIndex === null) {
+    return ticks >= last.ticks;
+  }
+  const rate = getNominalFrameRate(probe);
+  const index =
+    rate === null
+      ? null
+      : frameIndexOfTicks(ticks, probe.videoTimeBase, rate, probe.videoTimeBase);
+  return index !== null && index >= last.frameIndex;
+}
+
+/** A command that End plans. */
+export type EndSeekCommand = Extract<
+  ShortcutCommand,
+  { readonly kind: "seekToFrameIndex" | "seekToPts" | "seekApproximate" }
+>;
+
 /**
  * The seek of End (ADR 026), or null when End must not seek.
  *
- * It goes to the end of the ruler (`sourceEndSeconds`). This is the seek that a press at the
+ * While the calibration holds or is still open, and the probe names the last video frame
+ * (`lastFrameTarget`), End goes to that frame exactly:
+ *
+ * - On the frame grid, `seekToFrameIndex` of its index. The element seeks to the middle of the
+ *   frame, and the playhead shows its nominal start, so the playhead does not move when the frame
+ *   arrives (ADR 022).
+ * - Off the grid, or on it when the grid gives no index (`LastFrameTarget.frameIndex`),
+ *   `seekToPts` of the last tick, which the browser shows as the frame that holds it, with
+ *   `extentEnd` for the no-op that only the store can test.
+ *
+ * Both count from the calibrated first frame, so an audio track that starts before the video
+ * does not move the target. While the calibration is open, the store defers the call until the
+ * anchor and then runs it on the calibrated mapping (ADR 022): `seekToFrameIndex` as a seek to
+ * the first frame followed by that many steps, and `seekToPts` as the same seek. When the
+ * calibration fails instead, the store runs the request on the approximate clock.
+ *
+ * Without a calibration, or when the probe does not name the last frame, End goes to the end of
+ * the ruler (`sourceEndSeconds`) on the approximate clock. This is the seek that a press at the
  * right end of the ruler makes on the approximate clock, and `seekApproximate` clamps it to the
  * duration of the element. An indeterminate extent has no end to go to, as it has no
- * click-to-seek. While the calibration is open, the store defers the seek until the anchor, and
- * then runs it on the approximate clock too (APPROXIMATE_SHORTCUT_SEEK_OPTIONS, ADR 022). A typed
- * time at or after the end uses the same seek (`planTimecodeEntrySeek`).
+ * click-to-seek. While the calibration is open, the store defers that seek until the anchor, and
+ * then runs it on the approximate clock too (APPROXIMATE_SHORTCUT_SEEK_OPTIONS, ADR 022).
+ *
+ * A typed time at or after the end uses the same seek (`planTimecodeEntrySeek`).
  *
  * @param playback The playback state of the snapshot.
  * @param hasActiveSource True while media is open and its element is attached and ready.
@@ -291,9 +437,20 @@ export function planEndSeek(
   playback: ShortcutSnapshot["playback"],
   hasActiveSource: boolean,
   probe: ShortcutProbe | null,
-): ShortcutCommand | null {
+): EndSeekCommand | null {
   if (!hasActiveSource || probe === null) {
     return null;
+  }
+  const last =
+    playback.calibrationStatus === "unavailable" ? null : lastFrameTarget(probe);
+  if (last !== null) {
+    // Already there: End, End moves nothing and keeps the frame for Mark Out.
+    if (isLastFrameOnScreen(playback, probe, last)) {
+      return null;
+    }
+    return last.frameIndex !== null
+      ? { kind: "seekToFrameIndex", frameIndex: Number(last.frameIndex) }
+      : { kind: "seekToPts", pts: last.pts, options: EXTENT_END_SEEK_OPTIONS };
   }
   const endSeconds = sourceEndSeconds(playback, probe);
   if (endSeconds === null) {

@@ -11,13 +11,19 @@ import { getSourceRevisionKey, isPositiveRational } from "@/features/media";
 import {
   assertPositiveTimeBase,
   elapsedSecondsToPts,
+  I64_MAX,
   isPtsString,
+  isTickCountString,
   mediaTimeToPts,
   ptsElapsedSeconds,
   ptsToMediaTime,
   rationalsEqual,
 } from "@/lib/time";
-import { frameBoundaryMarginSeconds, isFrameGridExact } from "@/lib/timecode";
+import {
+  frameBoundaryMarginSeconds,
+  isFrameGridExact,
+  lastFrameIndexOfExtent,
+} from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
 import { scrubAudioController } from "./scrubAudio";
 import type {
@@ -465,6 +471,31 @@ export function createPlaybackStore(
     };
 
     /**
+     * The index of the last nominal frame of the extent that the probe reports in ticks
+     * (`lastFrameIndexOfExtent`), the frame that End goes to on the frame grid (ADR 026), or null
+     * when the source reports no valid extent in ticks, or the index is not a safe integer.
+     *
+     * A frame step reads it so that the last frame a step reaches, and the frame that a step
+     * clamped at the end shows, are that frame, and not the nominal frame that holds the end
+     * position. The end position lies one interval after the start of the last frame, so the
+     * frame that holds it by the ADR 028 margin is the frame after the last one, which does not
+     * exist.
+     */
+    const extentLastFrameIndex = (
+      source: PlaybackSource,
+      fps: Rational,
+    ): number | null => {
+      const extent = source.videoDurationTicks;
+      if (!isTickCountString(extent)) {
+        return null;
+      }
+      const index = lastFrameIndexOfExtent(BigInt(extent), source.videoTimeBase, fps);
+      return index !== null && index <= BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number(index)
+        : null;
+    };
+
+    /**
      * The frames that the steps of a deferred navigation can reach, and where they are, or null
      * when the source gives no step.
      *
@@ -525,10 +556,18 @@ export function createPlaybackStore(
         Math.floor(((browserTime - lower + marginSeconds) * fps.n) / fps.d);
       const startFrame = frameIndexAt(stepStart);
       // The frame that contains the end position is the last frame a step reaches: a step past
-      // it clamps to the end, inside that same frame.
-      const lastFrame = Number.isFinite(upper)
-        ? Math.max(startFrame, frameIndexAt(upper))
+      // it clamps to the end, inside that same frame. With the extent in ticks, the last frame
+      // of the extent comes first, as it bounds a step after the anchor
+      // (startsAtLastFrameOfExtent): the frame that holds the end position by the margin is
+      // then the frame after it, which does not exist.
+      const endFrame = Number.isFinite(upper)
+        ? frameIndexAt(upper)
         : Number.POSITIVE_INFINITY;
+      const extentLast = extentLastFrameIndex(attachedSource, fps);
+      const lastFrame = Math.max(
+        startFrame,
+        extentLast === null ? endFrame : Math.min(endFrame, extentLast),
+      );
       if (!Number.isSafeInteger(startFrame)) {
         return null;
       }
@@ -662,9 +701,9 @@ export function createPlaybackStore(
      * null when it is dropped.
      *
      * Ready:
-     * - A seek with `keepBrowserTimeline`, such as End (ADR 026), stays on the browser media
-     *   timeline, as the same call runs after the anchor. A target at or before the anchor frame
-     *   is dropped for the reason below.
+     * - A seek with `keepBrowserTimeline`, End on the approximate clock (ADR 026), stays on the
+     *   browser media timeline, as the same call runs after the anchor. A target at or before
+     *   the anchor frame is dropped for the reason below.
      * - Any other ruler position becomes the PTS that the same position names on a calibrated
      *   source: videoStartPts plus its seconds in ticks, the conversion of a click on the ruler
      *   once the calibration holds (calculatePtsFromClientX). The deferred seconds count from the
@@ -812,6 +851,64 @@ export function createPlaybackStore(
         queuedSeek = null;
         runSeek(seek);
       }
+    };
+
+    /**
+     * True when a frame step starts at or after the last frame of the extent that
+     * `videoDurationTicks` reports, on a calibrated source (ADR 026). stepToFrame reads it for a
+     * forward step that the end position clamped, which then cannot show a later frame.
+     *
+     * - On the frame grid, the start frame is at or after the last nominal frame of the extent,
+     *   `lastFrameIndexOfExtent`, the frame that End goes to.
+     * - Off the grid, no frame boundary is known. The start position is at or after the media
+     *   time of the last tick of the extent, the target of End. The frame that holds that tick
+     *   holds every later position, so the step would show the same frame.
+     *
+     * False without a calibration or without a valid extent in ticks: the edge rule then keeps
+     * its other tests only.
+     *
+     * @param startFrame The frame the step starts from on the grid, or null off the grid.
+     * @param startPosition The position the step starts from on the browser media timeline.
+     */
+    const startsAtLastFrameOfExtent = (
+      source: PlaybackSource,
+      fps: Rational,
+      calibratedOrigin: number | null,
+      startFrame: number | null,
+      startPosition: number,
+    ): boolean => {
+      const extent = source.videoDurationTicks;
+      const startPts = source.videoStartPts;
+      if (
+        calibratedOrigin === null ||
+        !isTickCountString(extent) ||
+        startPts === null ||
+        !isPtsString(startPts)
+      ) {
+        return false;
+      }
+      if (startFrame !== null) {
+        const lastFrame = extentLastFrameIndex(source, fps);
+        return lastFrame !== null && startFrame >= lastFrame;
+      }
+      const extentTicks = BigInt(extent);
+      if (extentTicks < 1n) {
+        return false;
+      }
+      const lastTick = BigInt(startPts) + extentTicks - 1n;
+      if (lastTick > I64_MAX) {
+        return false;
+      }
+      const lastTickTime = ptsToMediaTime(
+        lastTick.toString() as Pts,
+        startPts,
+        calibratedOrigin,
+        source.videoTimeBase,
+      );
+      return (
+        lastTickTime !== null &&
+        startPosition >= lastTickTime - NOMINAL_STEP_EDGE_TOLERANCE_SECONDS
+      );
     };
 
     /**
@@ -1000,7 +1097,7 @@ export function createPlaybackStore(
       // ADR 021 makes each key press one step; at an edge there is no frame to step to, so a
       // press that does not move keeps that rule.
       //
-      // Two tests find that step:
+      // Three tests find that step:
       // - The target is the position the step starts from: the rules above return it at a
       //   bound, and the no-backward rule returns it outside the bounds. The comparison uses
       //   the real start position, currentBrowserTime, and not stepStart: the pending target
@@ -1012,6 +1109,11 @@ export function createPlaybackStore(
       //   is a different position and the same picture. The same holds for a step forward that
       //   the end position clamps inside the frame it starts from. Without a clamp, the target
       //   is the middle of another frame and never matches.
+      // - A forward step that the end position clamped starts from the last frame of the extent
+      //   (startsAtLastFrameOfExtent). The end position lies one interval after the start of the
+      //   last frame, so on the grid the clamp lands in the nominal frame after it, which does
+      //   not exist, and the second test misses it. The seek would show the same frame. End goes
+      //   to the last frame (ADR 026), so a step forward after End reaches this test.
       // A pending scrub target does not count: fastSeek lands on a keyframe and not on its
       // target, so an exact seek is still required (ADR 022).
       // An absolute target during playback does not count once the element has left the start
@@ -1025,12 +1127,21 @@ export function createPlaybackStore(
         state.isPlaying &&
         grid !== null &&
         grid.frameIndexAt(currentBrowserTime) !== grid.startFrame;
+      const clampedAtEnd = direction > 0 && unclampedTarget > upperBound;
       if (
         pending?.scrub !== true &&
         !leftStartFrameDuringPlayback &&
         (Math.abs(targetTime - currentBrowserTime) <
           NOMINAL_STEP_EDGE_TOLERANCE_SECONDS ||
-          (grid !== null && grid.frameIndexAt(targetTime) === grid.startFrame))
+          (grid !== null && grid.frameIndexAt(targetTime) === grid.startFrame) ||
+          (clampedAtEnd &&
+            startsAtLastFrameOfExtent(
+              source,
+              fps,
+              calibratedOrigin,
+              grid === null ? null : grid.startFrame,
+              currentBrowserTime,
+            )))
       ) {
         // A frame step means that the user stops to look at frames (ADR 019, ADR 022), so an
         // edge press during playback still pauses, as the seek path does. pause stops the cue
@@ -1062,7 +1173,8 @@ export function createPlaybackStore(
       // do not move back when the frame arrives, and a held key moves them one frame for each
       // press (ADR 022). The timecode names the target frame from its nominal start (ADR 028).
       // A target that the end position pulled back shows the nominal start of the frame that
-      // contains it, for the same reason. A target that the lower bound raised shows as it is.
+      // contains it, or of the last frame of the extent when that is earlier, for the same
+      // reason. A target that the lower bound raised shows as it is.
       //
       // Off the grid, the target shows as it is. It counts from the calibrated first frame
       // while a calibration holds, the origin of the elapsed seconds of the presented frame and
@@ -1072,10 +1184,16 @@ export function createPlaybackStore(
       if (grid !== null && targetTime === unclampedTarget) {
         seekTargetSeconds = Math.max(0, (grid.targetFrame * fps.d) / fps.n);
       } else if (grid !== null && targetTime < unclampedTarget) {
-        seekTargetSeconds = Math.max(
-          0,
-          (grid.frameIndexAt(targetTime) * fps.d) / fps.n,
-        );
+        // The end position lies one interval after the start of the last frame, so the frame
+        // that holds it by the margin is the frame after the last one. With the extent in ticks,
+        // the display names the last frame of the extent instead, the frame that arrives, and the
+        // playhead does not move back when it arrives.
+        const extentLast = extentLastFrameIndex(source, fps);
+        const shownFrame =
+          extentLast === null
+            ? grid.frameIndexAt(targetTime)
+            : Math.min(grid.frameIndexAt(targetTime), extentLast);
+        seekTargetSeconds = Math.max(0, (shownFrame * fps.d) / fps.n);
       } else {
         seekTargetSeconds = Math.max(
           0,
@@ -1517,6 +1635,41 @@ export function createPlaybackStore(
         if (targetMediaTime === null) {
           failSeek();
           return;
+        }
+
+        // End off the frame grid (ADR 026): the target is the last tick of the extent. The frame
+        // that holds every position from that tick to the end of the element is the last frame,
+        // so when the element already stands there with that frame confirmed, a seek would show
+        // the same frame and could bring no frame callback (ADR 022). The seek then does nothing,
+        // as a nominal step at an edge does off the grid: the test reads the position only.
+        //
+        // The element stops a seek at its own duration, which can lie before the last tick: an
+        // MP4 with B-frames and no edit list reports the composition offset as its start PTS, so
+        // the calibrated mapping puts the last tick past the end of the element. The seek of End
+        // then reaches the duration and not the tick, so the test compares the position with the
+        // earlier of the two. The tolerance covers the rounding of the position that the element
+        // reports back after the seek.
+        if (options?.extentEnd === true && !scrub) {
+          const pending =
+            queuedSeek ?? (lastAcceptedSeek?.scrub === true ? lastAcceptedSeek : null);
+          const position = attachedElement.currentTime;
+          const runtimeDuration = state.runtimeBrowserDurationSeconds;
+          const reachable =
+            runtimeDuration === null
+              ? targetMediaTime
+              : Math.min(targetMediaTime, runtimeDuration);
+          if (
+            !state.isPlaying &&
+            state.presentedFrame !== null &&
+            state.seekTargetSeconds === null &&
+            pending === null &&
+            attachedElement.seeking !== true &&
+            typeof position === "number" &&
+            Number.isFinite(position) &&
+            position >= reachable - NOMINAL_STEP_EDGE_TOLERANCE_SECONDS
+          ) {
+            return;
+          }
         }
 
         if (!dispatchSeek(attachedElement, targetMediaTime, scrub)) {

@@ -19,6 +19,7 @@ import {
   frameIndexOfTicks,
   isFrameGridExact,
   frameTimecodePlaceholder,
+  lastFrameIndexOfApproximateExtent,
   lastFrameIndexOfExtent,
   lastTickOfGridIndex,
   timecodePlaceholder,
@@ -1016,6 +1017,18 @@ describe("lastFrameIndexOfExtent", () => {
     ["29.97 fps on 1/60, 601 ticks", 601n, r(1, 60), r(30000, 1001), 299n],
     ["25 fps on 1/25, 250 ticks", 250n, r(1, 25), r(25, 1), 249n],
     ["30 fps on 1/60, 600 ticks", 600n, r(1, 60), r(30, 1), 299n],
+    // A last frame shorter than an interval still counts: frame 9 starts at 360 ticks.
+    ["25 fps on 1/1000, a short last frame, 376 ticks", 376n, r(1, 1000), r(25, 1), 9n],
+    ["25 fps on 1/1000, one tick of frame 9", 361n, r(1, 1000), r(25, 1), 9n],
+    [
+      "25 fps on 1/1000, an end on the start of frame 9",
+      360n,
+      r(1, 1000),
+      r(25, 1),
+      8n,
+    ],
+    ["25 fps on 1/1000, 419 ticks", 419n, r(1, 1000), r(25, 1), 10n],
+    ["25 fps on 1/50, 21 ticks", 21n, r(1, 50), r(25, 1), 10n],
   ];
 
   it.each(cases)("names the last frame: %s", (_label, extent, timeBase, rate, last) => {
@@ -1038,13 +1051,60 @@ describe("lastFrameIndexOfExtent", () => {
     expect(lastFrameIndexOfExtent(10011n, timeBase, rate)).toBe(299n);
   });
 
-  it("gives no frame for an extent shorter than half a frame or for invalid input", () => {
+  it("gives frame 0 for any extent longer than the margin, and no frame otherwise", () => {
+    // A whole-tick grid: the margin is 1 us, less than one tick of 1/90000.
     expect(lastFrameIndexOfExtent(0n, r(1, 90000), r(25, 1))).toBeNull();
-    expect(lastFrameIndexOfExtent(1799n, r(1, 90000), r(25, 1))).toBeNull();
+    expect(lastFrameIndexOfExtent(1n, r(1, 90000), r(25, 1))).toBe(0n);
+    expect(lastFrameIndexOfExtent(1799n, r(1, 90000), r(25, 1))).toBe(0n);
     expect(lastFrameIndexOfExtent(1800n, r(1, 90000), r(25, 1))).toBe(0n);
+    // A margin of one tick: an extent of one tick is a rounding, two ticks hold frame 0.
+    expect(lastFrameIndexOfExtent(1n, r(1, 1000), r(30000, 1001))).toBeNull();
+    expect(lastFrameIndexOfExtent(2n, r(1, 1000), r(30000, 1001))).toBe(0n);
+  });
+
+  it("gives no frame for invalid input", () => {
     expect(lastFrameIndexOfExtent(-1n, r(1, 90000), r(25, 1))).toBeNull();
     expect(lastFrameIndexOfExtent(900000n, r(0, 1), r(25, 1))).toBeNull();
     expect(lastFrameIndexOfExtent(900000n, r(1, 90000), r(25, 0))).toBeNull();
+  });
+});
+
+describe("lastFrameIndexOfApproximateExtent", () => {
+  const r = (n: number, d: number): Rational => ({ n, d });
+
+  // [label, extent ticks, time base, rate, last frame index]
+  const cases: readonly [string, bigint, Rational, Rational, bigint][] = [
+    // A container duration that ends a few milliseconds after the last video frame.
+    ["25 fps, 250 frames, 10.010 s", 10010n, r(1, 1000), r(25, 1), 249n],
+    ["25 fps, 250 frames, 10.017 s", 10017n, r(1, 1000), r(25, 1), 249n],
+    ["29.97 fps, 300 frames, 10.012 s", 10012n, r(1, 1000), r(30000, 1001), 299n],
+    ["29.97 fps, 300 frames, 10.010 s", 10010n, r(1, 1000), r(30000, 1001), 299n],
+    // A Matroska Duration written as the start of the last block names the frame before it.
+    ["25 fps, 250 frames, 9.960 s", 9960n, r(1, 1000), r(25, 1), 248n],
+    // Half a frame late or more is the next frame: 10.5 frames round to 11 (ADR 002).
+    ["25 fps, 250 frames, 10.020 s", 10020n, r(1, 1000), r(25, 1), 250n],
+    ["25 fps on 1/50, a tie", 21n, r(1, 50), r(25, 1), 10n],
+    // The price of the tolerance: a real last frame shorter than half an interval drops.
+    ["25 fps, a short last frame, 376 ticks", 376n, r(1, 1000), r(25, 1), 8n],
+  ];
+
+  it.each(cases)("names the last frame: %s", (_label, extent, timeBase, rate, last) => {
+    expect(lastFrameIndexOfApproximateExtent(extent, timeBase, rate)).toBe(last);
+  });
+
+  it("stays on the last frame where the rule of a reported extent names the frame after it", () => {
+    // The reported rule counts any end more than the margin late.
+    expect(lastFrameIndexOfExtent(10010n, r(1, 1000), r(25, 1))).toBe(250n);
+    expect(lastFrameIndexOfExtent(10012n, r(1, 1000), r(30000, 1001))).toBe(300n);
+  });
+
+  it("gives no frame for an extent shorter than half a frame or for invalid input", () => {
+    expect(lastFrameIndexOfApproximateExtent(0n, r(1, 1000), r(25, 1))).toBeNull();
+    expect(lastFrameIndexOfApproximateExtent(19n, r(1, 1000), r(25, 1))).toBeNull();
+    expect(lastFrameIndexOfApproximateExtent(20n, r(1, 1000), r(25, 1))).toBe(0n);
+    expect(lastFrameIndexOfApproximateExtent(-1n, r(1, 1000), r(25, 1))).toBeNull();
+    expect(lastFrameIndexOfApproximateExtent(10n, r(0, 1), r(25, 1))).toBeNull();
+    expect(lastFrameIndexOfApproximateExtent(10n, r(1, 1000), r(25, 0))).toBeNull();
   });
 });
 

@@ -295,6 +295,44 @@ describe("calculateTrimLastFrameIndex", () => {
     expect(calculateTrimLastFrameIndex(gridProbe, fps25, null)).toBeNull();
     expect(calculateTrimLastFrameIndex(gridProbe, fps25, 0)).toBeNull();
   });
+
+  describe("a WebM without videoDurationTicks, whose ruler ends a little after the video", () => {
+    // The ruler uses the container duration, and the audio runs a few milliseconds longer
+    // than the video.
+    const webm: SegmentTrimProbe = {
+      videoStartPts: pts("0"),
+      videoTimeBase: { n: 1, d: 1000 },
+      avgFrameRate: fps25,
+      rFrameRate: fps25,
+    };
+    const fps2997: Rational = { n: 30000, d: 1001 };
+    const webm2997: SegmentTrimProbe = {
+      ...webm,
+      avgFrameRate: fps2997,
+      rFrameRate: fps2997,
+    };
+
+    it("keeps the cap on the last frame: 25 fps with a total of 10.01 s", () => {
+      expect(calculateTrimLastFrameIndex(webm, fps25, 10.01)).toBe(249n);
+      expect(calculateTrimLastFrameIndex(webm, fps25, 10.017)).toBe(249n);
+    });
+
+    it("keeps the cap on the last frame: 29.97 fps, 2 ms after the video", () => {
+      // 300 frames end at 10.010 s.
+      expect(calculateTrimLastFrameIndex(webm2997, fps2997, 10.012)).toBe(299n);
+    });
+
+    it("takes the rule of the video stream when the probe reports the extent in ticks", () => {
+      // 376 ticks: frame 9 covers only 360 to 376, and it is still the last frame. The same
+      // extent from the ruler is approximate and names frame 8.
+      const reported: SegmentTrimProbe = {
+        ...webm,
+        videoDurationTicks: "376" as TickCount,
+      };
+      expect(calculateTrimLastFrameIndex(reported, fps25, 0.376)).toBe(9n);
+      expect(calculateTrimLastFrameIndex(webm, fps25, 0.376)).toBe(8n);
+    });
+  });
 });
 
 describe("planSegmentTrimStart", () => {
@@ -782,6 +820,13 @@ describe("an extent that ends before the last frame", () => {
   it("raises the last frame of an Out edge to the frame of the stored Out", () => {
     expect(calculateTrimLastFrameIndex(webmProbe, fps25, DURATION)).toBe(248n);
     const trim = startWebmTrim();
+    expect(trim.lastFrameIndex).toBe(249n);
+    expect(trim.maxPts).toBe("9960");
+  });
+
+  it("keeps the Out edge on the last frame when the ruler ends a little after the video", () => {
+    // A container duration of 10.01 s: the audio runs 10 ms longer than the 250 frames.
+    const trim = startWebmTrim({}, 10.01);
     expect(trim.lastFrameIndex).toBe(249n);
     expect(trim.maxPts).toBe("9960");
   });

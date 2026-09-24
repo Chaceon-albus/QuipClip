@@ -21,9 +21,11 @@
  * - A relative entry in the millisecond format, such as `-2` or `+1.5`, adds its time to the
  *   millisecond that the display shows, and the result goes the way of an absolute time. It needs
  *   no frame rate.
- * - A time at or after the end of the source goes where End goes (ADR 026): the editors move the
- *   playhead to the end, and do not refuse the entry. A relative step past either end stops at
- *   that end, as a held arrow key does.
+ * - A time at or after the end of the source goes where End goes (ADR 026): to the last video
+ *   frame while a calibration holds or is still open and the probe gives the extent in ticks, and
+ *   to the end of the ruler on the approximate clock otherwise. The editors move the playhead to
+ *   the end, and do not refuse the entry. A relative step past either end stops at that end, as a
+ *   held arrow key does.
  * - A seek to the frame on screen does nothing (ADR 022, ADR 026): a seek that lands on the frame
  *   already on screen may bring no frame callback, and Mark In would then stay disabled.
  */
@@ -80,7 +82,15 @@ export interface TimecodeEntrySnapshot {
 export type TimecodeEntryCommand =
   | { readonly kind: "seekNominal"; readonly frames: number }
   | { readonly kind: "seekToFrameIndex"; readonly frameIndex: number }
-  | { readonly kind: "seekToPts"; readonly pts: Pts }
+  | {
+      readonly kind: "seekToPts";
+      readonly pts: Pts;
+      /**
+       * Only the End seek to the last tick passes options (`planPastEnd`): off the frame grid,
+       * or on it when the grid gives no index.
+       */
+      readonly options?: SeekOptions;
+    }
   | {
       readonly kind: "seekApproximate";
       readonly seconds: number;
@@ -135,6 +145,10 @@ function screenTicks(
 /**
  * The End seek for a target at or after the end of the source, or undefined when the target lies
  * before the end or the end is not known.
+ *
+ * It is the call that End makes (`planEndSeek`, ADR 026), with the same no-op: the last video
+ * frame on a calibrated source, on the frame grid or off it, and the end of the ruler on the
+ * approximate clock otherwise.
  */
 function planPastEnd(
   targetSeconds: number,
@@ -146,14 +160,22 @@ function planPastEnd(
     return undefined;
   }
   const end = planEndSeek(snapshot.playback, true, probe);
-  // End keeps the approximate clock also when the store defers it (ADR 022, ADR 026).
-  return end?.kind === "seekApproximate"
-    ? command({
+  if (end === null) {
+    return NOTHING;
+  }
+  switch (end.kind) {
+    case "seekToFrameIndex":
+      return command({ kind: "seekToFrameIndex", frameIndex: end.frameIndex });
+    case "seekToPts":
+      return command({ kind: "seekToPts", pts: end.pts, options: end.options });
+    case "seekApproximate":
+      // End keeps the approximate clock also when the store defers it (ADR 022, ADR 026).
+      return command({
         kind: "seekApproximate",
         seconds: end.seconds,
         options: APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
-      })
-    : NOTHING;
+      });
+  }
 }
 
 /**
@@ -377,7 +399,7 @@ export function runTimecodeEntryCommand(
       actions.seekToFrameIndex(entryCommand.frameIndex);
       return;
     case "seekToPts":
-      actions.seekToPts(entryCommand.pts);
+      actions.seekToPts(entryCommand.pts, entryCommand.options);
       return;
     case "seekApproximate":
       actions.seekApproximate(entryCommand.seconds, entryCommand.options);

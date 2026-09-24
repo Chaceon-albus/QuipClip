@@ -44,7 +44,11 @@ import {
   ptsToBigInt,
   tickCountToBigInt,
 } from "@/lib/time";
-import { frameIndexOfTicks, lastFrameIndexOfExtent } from "@/lib/timecode";
+import {
+  frameIndexOfTicks,
+  lastFrameIndexOfApproximateExtent,
+  lastFrameIndexOfExtent,
+} from "@/lib/timecode";
 import type { Pts, Rational, Segment, TickCount } from "@/types/project";
 import type { ScrubSeekRequest } from "./scrubSeekPlan";
 import { buildSnapBoundaries, type SnapBoundary } from "./scrubSnap";
@@ -243,6 +247,16 @@ export function resolveTrimGridRate(probe: SegmentTrimProbe | null): Rational | 
   return rate;
 }
 
+/** The source extent in ticks, and whether the video stream reported it. */
+interface TrimExtent {
+  readonly ticks: bigint;
+  /**
+   * True for `videoDurationTicks`, false for the approximate extent of the ruler. The two take
+   * different last-frame rules (`calculateTrimLastFrameIndex`).
+   */
+  readonly reported: boolean;
+}
+
 /**
  * The source extent in ticks: `videoDurationTicks` when the probe reports it, and otherwise the
  * extent of the ruler in the nearest ticks, the conversion that a pointer at the end of the lane
@@ -252,10 +266,11 @@ export function resolveTrimGridRate(probe: SegmentTrimProbe | null): Rational | 
  * file, the extent of the ruler comes from the container duration or from the duration of the
  * element (ADR 007), and it can disagree with the video frames in either direction:
  *
- * - It can end after the last video frame. The cap of the Out edge then names a frame that the
- *   source does not have, the browser shows the frame before it, and an Out trim to the very end
- *   of such a source fails with the notice and writes nothing. The way to that Out is End and
- *   Mark Out (ADR 026).
+ * - It can end after the last video frame, usually by a few milliseconds, because the audio runs
+ *   longer. The rounding of `lastFrameIndexOfApproximateExtent` absorbs an end up to half a frame
+ *   late. A later end makes the cap of the Out edge name a frame that the source does not have,
+ *   the browser shows the frame before it, and an Out trim to the very end of such a source fails
+ *   with the notice and writes nothing. The way to that Out is End and Mark Out (ADR 026).
  * - It can end before the end of the last frame, as a Matroska Duration written as the start of
  *   the last block does. The cap then names the frame before the last one. A stored Out is a
  *   frame that the browser showed, so `planSegmentTrimStart` raises the cap of the Out edge to at
@@ -267,12 +282,12 @@ function extentTicks(
   probe: SegmentTrimProbe,
   timeBase: Rational,
   totalDurationSeconds: number | null,
-): bigint | null {
+): TrimExtent | null {
   const reported = probe.videoDurationTicks;
   if (reported && isTickCountString(reported)) {
     const ticks = tickCountToBigInt(reported);
     if (ticks > 0n) {
-      return ticks;
+      return { ticks, reported: true };
     }
   }
   if (
@@ -283,15 +298,23 @@ function extentTicks(
     return null;
   }
   const end = elapsedSecondsToPts(totalDurationSeconds, "0" as Pts, timeBase);
-  return end === null ? null : ptsToBigInt(end);
+  return end === null ? null : { ticks: ptsToBigInt(end), reported: false };
 }
 
 /**
- * The last nominal frame of the source extent (`lastFrameIndexOfExtent`): the frame count of the
- * extent minus one. When the extent agrees with the video frames, a frame of this index is the
- * last frame that the browser can present, so an Out edge at the end of the source waits for it,
- * and not for the frame after it, which does not exist. `extentTicks` names the cases where the
- * extent disagrees. Null when the extent is not known, or shorter than half a frame.
+ * The last nominal frame of the source extent. When the extent agrees with the video frames, a
+ * frame of this index is the last frame that the browser can present, so an Out edge at the end
+ * of the source waits for it, and not for the frame after it, which does not exist.
+ *
+ * - For `videoDurationTicks`, the extent of the video stream, it is `lastFrameIndexOfExtent`:
+ *   the last frame that starts inside the extent by more than the frame boundary margin, also a
+ *   last frame shorter than an interval. End goes to the same frame (ADR 026).
+ * - For the approximate extent of the ruler, it is `lastFrameIndexOfApproximateExtent`: the
+ *   extent in whole frames, rounded to the nearest, minus one. That extent usually ends a few
+ *   milliseconds after the video, and the rounding keeps such an end on the last frame.
+ *
+ * `extentTicks` names the cases where the extent disagrees with the video frames. Null when the
+ * extent is not known, or holds no frame.
  */
 export function calculateTrimLastFrameIndex(
   probe: SegmentTrimProbe,
@@ -302,8 +325,13 @@ export function calculateTrimLastFrameIndex(
   if (!timeBase) {
     return null;
   }
-  const ticks = extentTicks(probe, timeBase, totalDurationSeconds);
-  return ticks === null ? null : lastFrameIndexOfExtent(ticks, timeBase, gridRate);
+  const extent = extentTicks(probe, timeBase, totalDurationSeconds);
+  if (extent === null) {
+    return null;
+  }
+  return extent.reported
+    ? lastFrameIndexOfExtent(extent.ticks, timeBase, gridRate)
+    : lastFrameIndexOfApproximateExtent(extent.ticks, timeBase, gridRate);
 }
 
 /**
