@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, type ReactNode } from "react";
+import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import type { ShortcutLabel } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
@@ -6,14 +7,9 @@ import { Tooltip, TooltipTrigger } from "@/components/ui/tooltip";
 import { playbackStore } from "@/features/playback";
 import { createStepHold, isStepHoldPress, type StepHold } from "./stepHold";
 
-/**
- * Keeps a mouse click from moving the focus to the button, as every transport button does
- * (ADR 021). The window shortcut layer takes Space from a focused button, so a step button
- * that kept the focus would turn the next Space into nothing. The Tab order does not change.
- */
-const preventFocusOnMouseDown = (event: React.MouseEvent<HTMLButtonElement>) => {
-  event.preventDefault();
-};
+// A step button does not keep the focus after a mouse click (`preventFocusOnMouseDown`), as
+// every transport button does (ADR 021). The window shortcut layer takes Space from a focused
+// button, so a step button that kept the focus would turn the next Space into nothing.
 
 export interface FrameStepButtonProps {
   /** The frames of one step: -1 steps back, 1 steps forward. */

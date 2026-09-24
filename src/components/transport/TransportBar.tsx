@@ -13,6 +13,7 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
+import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
@@ -77,21 +78,11 @@ const selectRedo = (s: TimelineStoreState) => s.redo;
 // The preference action never changes, so it is read once.
 const { toggleMuted } = previewMutePreferenceStore.getState();
 
-/**
- * Keeps a mouse click from moving the focus to a transport button.
- *
- * The browser gives a button the focus on mouse down, so a cancelled mouse down
- * leaves the focus where it was. The click still happens, because the browser sends
- * a click on mouse up and does not test whether the mouse down was cancelled.
- *
- * The window shortcut layer takes Space from a focused button. Without this rule a
- * user who pressed an edit action with the mouse and then pressed Space repeated
- * that action instead of starting playback. The Tab order does not change: a button
- * reached with the Tab key still takes the focus, and Enter still operates it.
- */
-const preventFocusOnMouseDown = (event: React.MouseEvent<HTMLButtonElement>) => {
-  event.preventDefault();
-};
+// A transport button does not keep the focus after a mouse click (`preventFocusOnMouseDown`).
+// The window shortcut layer takes Space from a focused button. Without this rule a user who
+// pressed an edit action with the mouse and then pressed Space repeated that action instead of
+// starting playback. A button reached with the Tab key still takes the focus, and Enter still
+// operates it.
 
 /**
  * Returns the reason to show for an edit control, and keeps the last one while a pending seek

@@ -706,8 +706,27 @@
   * {
     @apply border-border outline-ring/50;
   }
+  /* A desktop window selects no text by a drag or a double click. The rule is on <body>, not
+   * on the application shell, because Radix renders every dialog, menu and tooltip in a
+   * portal under <body>. An element that shows text to copy, such as a diagnostic, a path or
+   * an install command, takes `select-text` or `select-all`, which replaces the value that it
+   * gets from <body>. */
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground select-none;
+  }
+  /* Text fields stay selectable. WebKit inherits `-webkit-user-select`, so without this rule
+   * a field would take the `none` of <body>. */
+  input,
+  textarea,
+  [contenteditable]:not([contenteditable="false"]) {
+    @apply select-text;
+  }
+  /* An image or an icon of the chrome cannot be dragged out of the window. A drag of one
+   * would also enter the window again as a drop with no file, and the drop overlay would
+   * show. */
+  img,
+  svg {
+    -webkit-user-drag: none;
   }
   html {
     @apply font-sans;
@@ -730,6 +749,18 @@
   ::-webkit-scrollbar-corner {
     background: transparent;
   }
+}
+
+/* The cursor of a playhead scrub (`scrubCursor.ts`, ADR 022). From the drag threshold to the
+ * end of the gesture, <html> carries `data-scrubbing`, and every element shows the resize
+ * cursor. The cursor therefore does not change when the pointer leaves the timeline during the
+ * drag.
+ *
+ * The rule is outside all cascade layers, so it wins over every cursor utility with no
+ * `!important`. */
+:root[data-scrubbing],
+:root[data-scrubbing] * {
+  cursor: ew-resize;
 }
 
 /* The two ends of the progress fill gradient. They are registered as colours, so a change

@@ -761,4 +761,141 @@ describe("timelineScrub", () => {
       expect(onSample).toHaveBeenLastCalledWith(100, "final");
     });
   });
+
+  describe("scrub cursor", () => {
+    /** A cursor that records each hold and each release in one log. */
+    function createCursorLog(): { log: string[]; holdCursor: () => () => void } {
+      const log: string[] = [];
+      let count = 0;
+      return {
+        log,
+        holdCursor: () => {
+          count += 1;
+          const id = count;
+          log.push(`hold ${id}`);
+          return () => {
+            log.push(`release ${id}`);
+          };
+        },
+      };
+    }
+
+    it("holds nothing for a click, also with a jitter under the threshold", () => {
+      const { log, holdCursor } = createCursorLog();
+      const gesture = createTimelineScrubGesture({
+        onSample: () => {},
+        scheduler: createFakeScheduler(),
+        holdCursor,
+      });
+
+      gesture.begin(1, 100);
+      gesture.move(1, 102);
+      gesture.end(1, 102);
+      gesture.begin(2, 100);
+      gesture.cancel(2);
+      expect(log).toEqual([]);
+    });
+
+    it("holds the cursor from the first move past the threshold to the end of the drag", () => {
+      const { log, holdCursor } = createCursorLog();
+      const gesture = createTimelineScrubGesture({
+        onSample: (_clientX, phase) => log.push(phase),
+        scheduler: createFakeScheduler(),
+        holdCursor,
+      });
+
+      gesture.begin(1, 100);
+      expect(log).toEqual(["final"]);
+      gesture.move(1, 110);
+      gesture.move(1, 120);
+      // One hold for the whole drag.
+      expect(log).toEqual(["final", "hold 1"]);
+
+      gesture.end(1, 130);
+      // The release comes after the final sample of the drag.
+      expect(log).toEqual(["final", "hold 1", "final", "release 1"]);
+    });
+
+    it("releases the cursor on cancel, on dispose and when the final sample throws", () => {
+      const { log, holdCursor } = createCursorLog();
+      let shouldThrow = false;
+      const gesture = createTimelineScrubGesture({
+        onSample: () => {
+          if (shouldThrow) {
+            throw new Error("sample failure");
+          }
+        },
+        scheduler: createFakeScheduler(),
+        holdCursor,
+      });
+
+      gesture.begin(1, 100);
+      gesture.move(1, 120);
+      gesture.cancel(1);
+      expect(log).toEqual(["hold 1", "release 1"]);
+
+      gesture.begin(2, 100);
+      gesture.move(2, 120);
+      gesture.dispose();
+      expect(log).toEqual(["hold 1", "release 1", "hold 2", "release 2"]);
+
+      gesture.begin(3, 100);
+      gesture.move(3, 120);
+      shouldThrow = true;
+      expect(() => gesture.end(3, 130)).toThrow("sample failure");
+      expect(log).toEqual([
+        "hold 1",
+        "release 1",
+        "hold 2",
+        "release 2",
+        "hold 3",
+        "release 3",
+      ]);
+    });
+
+    it("releases the cursor before onFinish runs", () => {
+      const { log, holdCursor } = createCursorLog();
+      const gesture = createTimelineScrubGesture({
+        onSample: () => {},
+        onFinish: () => log.push("finish"),
+        scheduler: createFakeScheduler(),
+        holdCursor,
+      });
+
+      gesture.begin(1, 100);
+      gesture.move(1, 120);
+      gesture.end(1, 120);
+      expect(log).toEqual(["hold 1", "release 1", "finish"]);
+    });
+
+    it("sets data-scrubbing on the document root with the default cursor", async () => {
+      const attributes = new Map<string, string>();
+      vi.stubGlobal("document", {
+        documentElement: {
+          setAttribute: (name: string, value: string) => attributes.set(name, value),
+          removeAttribute: (name: string) => attributes.delete(name),
+        },
+      });
+
+      try {
+        // A fresh copy of the modules, so the holds that other tests left open on the shared
+        // default cursor do not count here.
+        vi.resetModules();
+        const fresh = await import("./timelineScrub");
+        const gesture = fresh.createTimelineScrubGesture({
+          onSample: () => {},
+          scheduler: createFakeScheduler(),
+        });
+
+        gesture.begin(1, 100);
+        expect(attributes.has("data-scrubbing")).toBe(false);
+        gesture.move(1, 120);
+        expect(attributes.has("data-scrubbing")).toBe(true);
+        gesture.end(1, 120);
+        expect(attributes.has("data-scrubbing")).toBe(false);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  });
 });

@@ -5,6 +5,7 @@ import { QuitGuardDialog } from "@/components/layout/QuitGuardDialog";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { TitleBar } from "@/components/layout/TitleBar";
 import { startTaskbarProgressSync } from "@/components/layout/taskbarProgressSync";
+import { useContextMenuPolicy } from "@/components/layout/useContextMenuPolicy";
 import { useKeyboardShortcuts } from "@/components/layout/useKeyboardShortcuts";
 import { useNativeMenuActions } from "@/components/layout/useNativeMenuActions";
 import { useQuitGuard } from "@/components/layout/useQuitGuard";
@@ -18,6 +19,9 @@ import { usePlaybackStore } from "@/features/playback";
 
 export function AppShell() {
   useKeyboardShortcuts();
+  // The web view opens its context menu only in a text field. A development build keeps it
+  // everywhere except on the preview media.
+  useContextMenuPolicy();
   // The Settings, Open Media and Export items of the macOS menu run the commands of their
   // keys, under the same conditions.
   useNativeMenuActions();

@@ -1,4 +1,5 @@
 import type { DOMAttributes, ReactNode } from "react";
+import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import { calculatePlayheadLayout } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
@@ -186,8 +187,14 @@ export function TimelineSeekSlider({
       // `aria-valuenow`.
       aria-valuetext={timecode}
       tabIndex={canSeek ? 0 : undefined}
+      // A mouse press does not move the focus to the slider, as a press on a button of the
+      // transport bar does not (ADR 021). A click focuses an element with a `tabIndex`, and
+      // WebView2 then draws the focus ring around the whole track at the next key press,
+      // such as Space or an arrow key. The scrub runs on the pointer events, so the gesture
+      // does not change. The Tab key still focuses the slider.
+      onMouseDown={preventFocusOnMouseDown}
       {...scrubHandlers}
-      className={`absolute inset-x-0 inset-y-2 touch-none ${canSeek ? "cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
+      className={`absolute inset-x-0 inset-y-2 touch-none ${canSeek ? "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden" : ""}`}
     >
       {children}
     </div>

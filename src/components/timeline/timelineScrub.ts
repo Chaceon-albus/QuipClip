@@ -11,8 +11,15 @@
  * Scrub samples use fastSeek when available, so a drag must never end on a
  * keyframe.
  *
- * Pure logic without DOM or React dependencies.
+ * From the first move of a drag to the end of the gesture, the gesture holds the scrub
+ * cursor (`scrubCursor.ts`), so the resize cursor shows everywhere in the window. A click
+ * never moves, so it keeps the cursor of the element under the pointer.
+ *
+ * Pure logic without React dependencies. The DOM is reached only through the default
+ * scheduler and the default cursor, and a test replaces both.
  */
+
+import { holdScrubCursor, type HoldScrubCursor } from "./scrubCursor";
 
 export type TimelineScrubPhase = "scrub" | "final";
 
@@ -30,6 +37,11 @@ export interface CreateTimelineScrubGestureOptions {
    */
   onFinish?: () => void;
   scheduler?: TimelineScrubScheduler;
+  /**
+   * Shows the scrub cursor from the first move of a drag until the gesture ends. Defaults to
+   * `holdScrubCursor`, which writes the attribute on the document root.
+   */
+  holdCursor?: HoldScrubCursor;
 }
 
 export interface TimelineScrubGesture {
@@ -66,13 +78,19 @@ const defaultScheduler: TimelineScrubScheduler = {
 export function createTimelineScrubGesture(
   options: CreateTimelineScrubGestureOptions,
 ): TimelineScrubGesture {
-  const { onSample, onFinish, scheduler = defaultScheduler } = options;
+  const {
+    onSample,
+    onFinish,
+    scheduler = defaultScheduler,
+    holdCursor = holdScrubCursor,
+  } = options;
 
   let activePointerId: number | null = null;
   let downClientX = 0;
   let latestClientX = 0;
   let scheduledHandle: number | null = null;
   let hasMoved = false;
+  let releaseCursor: (() => void) | null = null;
 
   const cancelScheduled = (): void => {
     if (scheduledHandle !== null) {
@@ -85,6 +103,8 @@ export function createTimelineScrubGesture(
   const finish = (): void => {
     activePointerId = null;
     hasMoved = false;
+    releaseCursor?.();
+    releaseCursor = null;
     onFinish?.();
   };
 
@@ -114,6 +134,7 @@ export function createTimelineScrubGesture(
           return;
         }
         hasMoved = true;
+        releaseCursor = holdCursor();
       }
       latestClientX = clientX;
       if (scheduledHandle === null) {

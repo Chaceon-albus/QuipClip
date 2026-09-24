@@ -4,12 +4,12 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
-  type MouseEvent,
   type ReactNode,
   type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
 import { Ellipsis, Minus, Plus } from "lucide-react";
+import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import { Button } from "@/components/ui/button";
 import {
@@ -40,14 +40,10 @@ import {
 
 type Translate = (key: string, options?: Record<string, string | number>) => string;
 
-/**
- * A row does not take the focus from a pointer press. The section moves the focus when the
- * press selects the row. When the unsaved-draft prompt stops the selection, the focus must not
- * rest on a row that is not selected, or the next arrow key would start from that row.
- */
-const preventFocusOnMouseDown = (event: MouseEvent<HTMLElement>) => {
-  event.preventDefault();
-};
+// A row does not take the focus from a pointer press (`preventFocusOnMouseDown`). The section
+// moves the focus when the press selects the row. When the unsaved-draft prompt stops the
+// selection, the focus must not rest on a row that is not selected, or the next arrow key would
+// start from that row.
 
 export interface PresetListProps {
   view: PresetLibraryView;
@@ -170,8 +166,8 @@ export function PresetList({
             onKeyDown={(event) => handleKeyDown(event, preset.id)}
             className={cn(
               // The ring is inset, because the scrolling pane around the list would clip a
-              // ring drawn outside the row.
-              "flex cursor-pointer flex-col gap-0.5 rounded px-2 py-1.5 text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+              // ring drawn outside the row. A row keeps the arrow cursor of a native list.
+              "flex cursor-default flex-col gap-0.5 rounded px-2 py-1.5 text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
               selected
                 ? "bg-accent text-accent-foreground"
                 : "text-foreground hover:bg-muted/50",

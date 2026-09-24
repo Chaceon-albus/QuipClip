@@ -981,7 +981,7 @@ export function TimelinePanel({
               {...scrubHandlers}
               onPointerMove={handleRulerPointerMove}
               onPointerLeave={handleHoverLeave}
-              className={`relative flex-1 touch-none border-b border-timeline-divider bg-timeline-ruler ${canSeek ? "cursor-pointer" : ""}`}
+              className="relative flex-1 touch-none border-b border-timeline-divider bg-timeline-ruler"
             >
               {/* Timecode labels, major ticks and minor ticks (see TimelineRuler) */}
               <div className="relative h-full w-full font-mono text-[10px]">

@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { MoveHorizontal, ZoomIn, ZoomOut } from "lucide-react";
+import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import {
   useShortcutLabels,
@@ -23,14 +24,9 @@ const selectHasMedia = (state: MediaStoreState) => state.media !== null;
 const selectZoom = (state: TimelineViewportStoreState) => state.zoom;
 const selectMaxZoom = (state: TimelineViewportStoreState) => state.maxZoom;
 
-/**
- * Keeps a mouse click from moving the focus to a zoom button, as the transport bar does
- * (ADR 021). A zoom button that takes the focus and then reaches its limit becomes disabled,
- * and the focus would fall to the body. The Tab order does not change.
- */
-const preventFocusOnMouseDown = (event: React.MouseEvent<HTMLButtonElement>) => {
-  event.preventDefault();
-};
+// A zoom button does not keep the focus after a mouse click (`preventFocusOnMouseDown`), as a
+// button of the transport bar does (ADR 021). A zoom button that takes the focus and then
+// reaches its limit becomes disabled, and the focus would fall to the body.
 
 // Each click handler calls the action with no argument. A handler passed directly would give
 // the click event to the action as its anchor.

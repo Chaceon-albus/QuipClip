@@ -203,7 +203,12 @@ export function TitleBar() {
             center zone already shows the file name, so it carries that role. */}
         {!isMac && (
           <>
-            <img src={appIcon} alt="" className="size-[22px] shrink-0" />
+            <img
+              src={appIcon}
+              alt=""
+              draggable={false}
+              className="size-[22px] shrink-0"
+            />
             <span
               className={cn(
                 "text-sm font-medium text-sidebar-foreground",

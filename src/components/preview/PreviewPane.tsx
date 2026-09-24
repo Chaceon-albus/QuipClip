@@ -823,6 +823,16 @@ export function PreviewPane() {
                     playsInline
                     muted={isMuted}
                     preload="metadata"
+                    // The native player features stay off, so no control outside the playback
+                    // store plays, seeks or moves the picture (ADR 003). Each attribute only
+                    // removes a control, a menu item, or a way to show the picture in another
+                    // window or on another screen. None changes playback, seeking or the frame
+                    // callbacks, and an engine that does not know one ignores it: WebKit has
+                    // no `controlsList`. The context menu rule (`contextMenuPolicy.ts`) keeps
+                    // the native menu of the element closed, with its Loop and Show Controls.
+                    disablePictureInPicture
+                    disableRemotePlayback
+                    controlsList="nodownload noplaybackrate noremoteplayback nofullscreen"
                     src={videoSrc}
                     aria-label={t("preview.videoPlayerLabel", {
                       fileName: media.fileName,
@@ -894,7 +904,9 @@ export function PreviewPane() {
                        anchor is taken by the first requestVideoFrameCallback (ADR 003), preventing a
                        competing range request during that window. A source whose calibration resolves
                        straight to "unavailable" mounts at attach time, which is correct because such a
-                       source has no anchor to protect. */}
+                       source has no anchor to protect.
+                    The element is never drawn (`hidden`), so it has no control, no context menu and no
+                    picture, and it needs none of the native feature attributes of the video. */}
                 {media.probe.audio &&
                   !decodeFailed &&
                   attachedSourceRevisionKey === sourceRevisionKey &&

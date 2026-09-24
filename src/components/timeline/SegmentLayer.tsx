@@ -1,5 +1,6 @@
 import { memo, useEffect, useId, useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
+import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import { isSourceActive } from "@/components/layout/actionConditions";
 import { mediaStore } from "@/features/media";
 import { playbackStore } from "@/features/playback";
@@ -383,6 +384,12 @@ export const SegmentLayer = memo(function SegmentLayer({
               }
               onPointerLeave={() => tooltip.leave(seg.id)}
               onPointerDown={() => tooltip.press(seg.id)}
+              // A mouse press does not move the focus to the segment (ADR 021). WebView2
+              // focuses a button on a click, and a press on the seek slider does not take the
+              // focus away, so the next key press drew the dashed ring on the segment and Enter
+              // selected it again. The click and the pointer handlers still run, and the Tab
+              // key still focuses the segment.
+              onMouseDown={preventFocusOnMouseDown}
               onFocus={(event) =>
                 tooltip.focus(seg.id, hasFocusVisible(event.currentTarget))
               }
