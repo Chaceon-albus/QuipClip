@@ -24,18 +24,15 @@ import { useMediaStore } from "@/features/media";
 import { resolveTimecodeDisplay } from "@/features/playback";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import {
-  getActiveSourceSegmentEntries,
+  selectActiveSourceSegmentCount,
+  totalActiveSourceSegments,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
 import { splitFileName } from "@/lib/fileName";
 import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
-import {
-  presentExportAction,
-  totalActiveSourceSegments,
-  type ExportActionLabel,
-} from "./exportActionPresenter";
+import { presentExportAction, type ExportActionLabel } from "./exportActionPresenter";
 import { runExportFlow } from "./exportFlowController";
 import { useWindowState } from "./useWindowState";
 import { CloseGlyph, MaximizeGlyph, MinimizeGlyph, RestoreGlyph } from "./WindowGlyphs";
@@ -93,10 +90,6 @@ const CLOSE_BUTTON_FILL_CLASS =
  */
 const WINDOW_GLYPH_CLASS =
   "group-data-inactive/title-bar:opacity-60 group-data-inactive/title-bar:group-hover/window-button:opacity-100 group-data-inactive/title-bar:group-active/window-button:opacity-100";
-
-// A number, so the title bar renders again only when the count changes.
-const selectActiveSourceSegmentCount = (state: TimelineStoreState) =>
-  getActiveSourceSegmentEntries(state.segments, state.sourceId).length;
 
 export function TitleBar() {
   const { t } = useTranslation();

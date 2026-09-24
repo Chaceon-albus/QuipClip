@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  presentExportAction,
-  totalActiveSourceSegments,
-} from "@/components/layout/exportActionPresenter";
+import { presentExportAction } from "@/components/layout/exportActionPresenter";
 import { buildExportRequest } from "@/features/export";
+import { totalActiveSourceSegments } from "@/features/timeline";
 import { createI18nInstance } from "@/i18n";
 import {
   MILLISECONDS_TIMECODE_DISPLAY,

@@ -537,6 +537,12 @@ export const en = {
   export: {
     title: "Export Video",
     setup: {
+      // The first line of the setup step. {{fileName}} is the name of the open file with its
+      // extension, shortened in the middle when it is long. {{duration}} is the total duration
+      // of the segments, as the Export tooltip shows it: "00:01:23:04" or "00:01:23.160".
+      summary_one: "Export {{count}} segment from {{fileName}} · {{duration}} in total",
+      summary_other:
+        "Export {{count}} segments from {{fileName}} · {{duration}} in total",
       presetLabel: "Preset",
       qualityLabel: "Quality",
       value: "{{value}}",
@@ -546,6 +552,18 @@ export const en = {
       audioBitrateLossless: "Lossless",
       resolutionValue: "{{width}} × {{height}}",
       frameRateValue: "{{value}} fps",
+      // A "Same as Source" value with the value of the open file. {{value}} of the frame rate is
+      // a number such as "29.97", and {{value}} of the sample rate is a number of kHz such as
+      // "48" or "44.1".
+      sourceResolution: "Same as Source ({{width}} × {{height}})",
+      sourceFrameRate: "Same as Source ({{value}} fps)",
+      sourceSampleRate: "Same as Source ({{value}} kHz)",
+      sourceChannels_one: "Same as Source ({{count}} channel)",
+      sourceChannels_other: "Same as Source ({{count}} channels)",
+      noSourceAudio: "The source has no audio, so the exported file has no audio.",
+      // {{size}} is a number with its unit, such as "120 MB" or "1.2 GB".
+      estimatedSize: "Estimated size: about {{size}}",
+      estimatedSizeBelowOneKilobyte: "Estimated size: less than 1 kB",
       noPresets: "No export presets exist. Add one in Settings.",
       settingsErrorHint: "Open Settings to repair or reset the settings file.",
     },

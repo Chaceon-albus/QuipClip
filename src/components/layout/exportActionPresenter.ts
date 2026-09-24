@@ -15,15 +15,8 @@
 
 import { isExportRunActive } from "@/components/export/exportCancelState";
 import type { ExportStatus } from "@/features/export";
-import { getActiveSourceSegmentEntries } from "@/features/timeline";
-import { isPtsString, isValidSegmentRange } from "@/lib/time";
-import {
-  elapsedGridIndex,
-  formatGridCountTimecode,
-  timecodePlaceholder,
-  type TimecodeDisplay,
-} from "@/lib/timecode";
-import type { Pts, Rational, Segment } from "@/types/project";
+import { formatSegmentTotal } from "@/features/timeline";
+import type { TimecodeDisplay } from "@/lib/timecode";
 import { canExportMedia } from "./actionConditions";
 
 /** The second line of the tooltip: what the user must do before the export can run. */
@@ -51,14 +44,6 @@ export interface ExportActionView {
   readonly reason: ExportActionReasonKey | null;
 }
 
-/** The facts of the open source that the segment total reads. */
-export interface SegmentTotalSource {
-  /** The time base of every segment PTS of the source (ADR 002). */
-  readonly videoTimeBase: Rational;
-  /** The PTS at which the elapsed time of the source is zero, or null when unstated. */
-  readonly videoStartPts: Pts | null;
-}
-
 export interface ExportActionInput {
   readonly hasMedia: boolean;
   readonly exportStatus: ExportStatus;
@@ -72,63 +57,6 @@ export interface ExportActionInput {
   readonly segmentTotal: bigint | null;
   /** The timecode format of the open source (`resolveTimecodeDisplay`). */
   readonly display: TimecodeDisplay;
-}
-
-/**
- * Returns the exact total duration of the segments of the active source, as one bigint in
- * the unit that the display counts: whole frames in the frame format, whole milliseconds in
- * the millisecond format. A store selector can return it, because a bigint compares by value:
- * the selector then settles on a value that changes only with the total.
- *
- * Each segment counts `index(outPts - start) - index(inPts - start)`, where `index` is
- * `elapsedGridIndex`: the frame index `J` of the frame timecode (ADR 028), or the whole
- * milliseconds of the millisecond timecode, with the rule of the playhead (ADR 022). The total
- * is the sum of these lengths, in both formats. The segment tooltip computes the length of
- * each segment with the same rule (`formatElapsedTickSpan`). A segment with no width on the
- * timeline has no tooltip, and it still counts here, because the export includes it. So the
- * tooltip lengths add up to this total when every segment of the source has a width.
- * The total is not a sum of tick lengths rounded once. A container can store each PTS rounded
- * to its time base, so a tick length can be up to one tick more or less than a whole number of
- * frames or milliseconds, and a rounded tick length can disagree with the two ends.
- *
- * Only the segments of the active source count. They share one time base, so their values can
- * be added (ADR 002, ADR 007).
- *
- * Returns null when the total is not known: no source, no valid start PTS, a segment of the
- * active source with no valid range, or an end that has no index (see `elapsedGridIndex`).
- */
-export function totalActiveSourceSegments(
-  segments: readonly Segment[],
-  activeSourceId: string | null | undefined,
-  source: SegmentTotalSource | null,
-  display: TimecodeDisplay,
-): bigint | null {
-  if (source === null || !isPtsString(source.videoStartPts)) {
-    return null;
-  }
-  const startPts = BigInt(source.videoStartPts);
-  let total = 0n;
-  for (const { segment } of getActiveSourceSegmentEntries(segments, activeSourceId)) {
-    // A valid range means two canonical PTS values with inPts < outPts.
-    if (!isValidSegmentRange(segment.inPts, segment.outPts)) {
-      return null;
-    }
-    const inIndex = elapsedGridIndex(
-      BigInt(segment.inPts) - startPts,
-      source.videoTimeBase,
-      display,
-    );
-    const outIndex = elapsedGridIndex(
-      BigInt(segment.outPts) - startPts,
-      source.videoTimeBase,
-      display,
-    );
-    if (inIndex === null || outIndex === null) {
-      return null;
-    }
-    total += outIndex - inIndex;
-  }
-  return total;
 }
 
 /**
@@ -173,10 +101,9 @@ export function presentExportAction(input: ExportActionInput): ExportActionView 
     };
   }
 
-  const duration =
-    input.segmentTotal === null
-      ? timecodePlaceholder(input.display)
-      : formatGridCountTimecode(input.segmentTotal, input.display);
+  // The summary sentence of the export setup step formats the same total with the same
+  // function, so the two show one duration.
+  const duration = formatSegmentTotal(input.segmentTotal, input.display);
 
   return {
     disabled: false,

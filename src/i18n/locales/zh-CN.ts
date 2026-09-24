@@ -494,6 +494,8 @@ export const zhCN: TranslationCatalog = {
   export: {
     title: "导出视频",
     setup: {
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      summary_other: "从 {{fileName}} 导出 {{count}} 个片段 · 总时长 {{duration}}",
       presetLabel: "预设",
       qualityLabel: "质量",
       value: "{{value}}",
@@ -503,6 +505,14 @@ export const zhCN: TranslationCatalog = {
       audioBitrateLossless: "无损",
       resolutionValue: "{{width}} × {{height}}",
       frameRateValue: "{{value}} fps",
+      sourceResolution: "与源相同（{{width}} × {{height}}）",
+      sourceFrameRate: "与源相同（{{value}} fps）",
+      sourceSampleRate: "与源相同（{{value}} kHz）",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      sourceChannels_other: "与源相同（{{count}} 声道）",
+      noSourceAudio: "源文件没有音频，因此导出的文件也没有音频。",
+      estimatedSize: "预计大小：约 {{size}}",
+      estimatedSizeBelowOneKilobyte: "预计大小：小于 1 kB",
       noPresets: "暂无导出预设。请在设置中添加。",
       settingsErrorHint: "请打开“设置”修复或重置设置文件。",
     },
