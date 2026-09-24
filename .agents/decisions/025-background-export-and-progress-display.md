@@ -141,6 +141,16 @@ from one block to the next. The interface shows no estimate when `fps` is absent
 when `expectedFrames` is unknown. The conversion from `Rational` to a number is for display
 only (ADR 002).
 
+(Changed on 2026-09-24.) The dialog also shows the elapsed time of the run. One small store,
+`src/features/export/runTiming.ts`, records when a run starts and ends, from the same store
+update that changes the status, so the finished result shows its duration on its first
+frame. The progress bar stays on screen from the run into its result and takes the tone of
+the result: success when finished, destructive when failed, and neutral when the user
+stopped it. A `failed` status that the store still tracks keeps the running bar, because the
+backend still encodes. One rule, `isExportRunLive`, says when a run is still live: an active
+status, or `failed` while `tracking` is true. The dialog, the status bar and the attention
+request all use it.
+
 One pure presenter computes these values for the dialog, the status bar, and the task bar.
 
 ### The window shows progress on the Dock and the task bar
