@@ -103,10 +103,13 @@ it was hidden.
 The indicator is a leaf component. It reads the progress fields itself, so a progress event
 does not render the whole status bar again.
 
-(Changed on 2026-09-24.) The store exposes `tracking`: true while it holds the run
-identifier of a run, from the `start_export` answer until that run's `finished` or `failed`
-event, or a reset. A Stop request that fails sets `failed` while the backend still encodes,
-so `failed` alone does not mean that the run ended.
+(Changed on 2026-09-24.) The store exposes `tracking`. It is true while the store tracks a
+start or a run that the backend can still prepare or encode. It becomes true at
+`startExport`, so it is true in `preparing` before the run identifier is known. It becomes
+false when `start_export` refuses the start, when the `finished` or `failed` event of the run
+arrives, or at a reset. A Stop request that fails sets `failed` while the backend still
+encodes, so `failed` alone does not mean that the run ended. The store also exposes
+`encodeStarted`, which is true from the `started` event or the first `progress` event.
 
 - Back in the failed dialog, and the dismiss control of a failed result in the status bar,
   act only while `tracking` is false. Otherwise the reset would drop the only record of a
@@ -121,10 +124,35 @@ so `failed` alone does not mean that the run ended.
 - A polite live region in the status bar announces the result while the dialog is hidden.
   It announces no progress.
 
-One gap is known. A cancel by slot that the IPC layer rejects while the run is preparing
-drops the start, and the store then discards the `start_export` answer. The backend keeps
-encoding with no record in the interface, so the statement above that no orphan is possible
-does not hold in that case. A later change keeps the start when that cancel is rejected.
+A Stop request that the IPC layer rejects does not end the tracking, in both of its forms:
+
+- `cancel_export` rejects. The store keeps the run that it knows by its identifier.
+- `cancel_active_export` rejects while the start waits for its run identifier. The store
+  keeps the start. It takes the later `start_export` answer and tracks the run to its end.
+
+In both forms the store reports `failed` with `tracking` true. The error is the failure of
+the request, not a failure of the run, and each failure gets its own error object. A failure
+during `publishing` changes nothing, because Stop is off for the rename (ADR 016). The dialog
+shows "QuipClip could not stop the export. The export continues." under the bar of the run,
+with Stop Export and Run in Background. Stop can be tried again: by run identifier when the
+store has one, and by slot while the start still waits. The status bar shows the run as
+active, with the line "Stop failed · export continues", and announces the failure once
+while the dialog is hidden. The `started` and `publishing` events return the run to its
+phase and clear the error. No orphan is possible, so the statement above holds.
+
+### A live run is never reset
+
+`isExportRunLive` is the one rule for a live run: an active status, or `failed` while
+`tracking` is true. Four more places read it.
+
+1. **Close, the close control, Escape and the outside click of the dialog** hide the dialog
+   while the run is live, and they do not reset the store.
+2. **File > Export and the title-bar Export** open the dialog on a live run. They reset a
+   final store only when the run is not live.
+3. **The quit guard (ADR 027)** counts a live run as an export that a quit stops. A close or
+   a quit therefore asks for confirmation, and a confirmed quit lets ADR 017 cancel the run
+   that holds the export slot.
+4. **The task bar** shows a live `failed` in the state of its phase, not as an error.
 
 A hidden dialog is not in the document. The keyboard layer of ADR 021 therefore gives the
 window shortcuts back to the editor with no change.
@@ -164,7 +192,7 @@ The frontend calls `setProgressBar` on the main window. The capability file gran
 | `preparing`, or `running` with no frame goal | Indeterminate         |
 | `running`                                    | Normal, with percent  |
 | `publishing`                                 | Normal, 100 percent   |
-| `failed`                                     | Error, 100 percent    |
+| `failed` with `tracking` false               | Error, 100 percent    |
 
 The error state stays until the store resets, the same as the status bar result.
 

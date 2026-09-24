@@ -26,7 +26,8 @@ for a confirmation, and the frontend can ask before the window closes.
 A close or a quit asks for a confirmation when it would lose one of these:
 
 - one or more segments, or a pending In point, of the open source;
-- an export that is preparing, running or finishing;
+- an export that is preparing, running or finishing, or that failed to stop and still
+  encodes (ADR 025);
 - an unsaved preset draft in the Settings dialog.
 
 When nothing would be lost, the close or the quit continues at once, with no dialog.
