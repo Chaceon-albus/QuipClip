@@ -143,8 +143,9 @@ QuipClip does not persist a project timeline time base or segment timeline start
 
 The output frame rate is `renderSettings.frameRate`. It is a future render setting. It
 does not define edit positions. The UI shows source-relative elapsed time as
-`HH:MM:SS:FF` by default, with frames from the nominal rate for display only, and as
-`HH:MM:SS.mmm` when the user chooses it or the source has no single nominal rate (ADR 028).
+`HH:MM:SS:FF` by default, with frames from the nominal rate for display and for typed
+timecode navigation only, and as `HH:MM:SS.mmm` when the user chooses it or the source has no
+single nominal rate (ADR 028).
 
 ## Preview
 

@@ -59,7 +59,9 @@ into whole seconds and a fraction first was tested and refused: its frame bins d
 against the real frames, so it repeats and skips numbers at those rates.
 
 This is a display rule only. No edit, seek or export reads `FF`. A mark still stores the
-PTS of the frame on screen.
+PTS of the frame on screen. (Changed on 2026-09-24: a typed timecode now reads `FF` to find
+the frame to seek to. See "Typed timecode" below. No edit and no export reads it, and a mark
+still stores the PTS of the frame on screen.)
 
 For an integer rate such as 24, 25, 30 or 60, `FF` is the same as the non-drop-frame SMPTE
 count. For 23.976, 29.97 and 59.94, `FF` counts frames inside each real second, so the
@@ -75,6 +77,39 @@ its tick, and it leaves out the parts that the tick step does not need: for exam
 (`MM:SS`), `00:05:12` (`MM:SS:FF` at a frame step), or `0:05:12` (`H:MM:SS` for a source of
 one hour or longer). Below 1 fps a second can hold no frame start, so the ticks sit on frame
 starts, and each label names the second in which its frame starts.
+
+### Typed timecode
+
+(Added on 2026-09-24.) A click on the preview timecode, or `Enter` while it has the focus,
+turns it into a text field. `Enter` seeks, and `Escape`, an empty entry, a click outside the
+field and a blur inside the window cancel. The field accepts the format that the display
+uses.
+
+| Form | Frame format | Millisecond format |
+| --- | --- | --- |
+| Fields with `:` | 2 to 4 fields; missing leading fields are 0: `5:12` is `00:00:05:12` | 1 to 3 fields that end in seconds |
+| Digits only | Right-aligned, `FF` first: `1012` is `00:00:10:12` | Seconds: `90` is 90 seconds |
+| A decimal part | Not accepted | `.` and up to 3 digits |
+| `.` among digits | Fills the field it lands in with zeros: `3.` is 3 seconds, `3..` is 3 minutes | Not applicable |
+| A field that is too large | Carries into the next field | Carries into the next field |
+| `+` or `-` first | A relative step of the frames that the unsigned form names | A relative time added to the displayed time |
+| `;`, mixed separators, other characters | Refused | Refused |
+
+Above 100 fps, `FF` has three digits, and a `.` in `FF` adds three zeros. The frame index of
+an absolute entry is `ceil(S × rate) + FF`, where `S` is the whole seconds of its fields. A
+time at or after the end of the source goes where End goes. A negative absolute time cannot
+be typed, because a leading `-` always means a relative entry.
+
+The seek follows the rules of ADR 022:
+
+- A relative entry in the frame format is one `seekNominal` request with its frame count.
+- An absolute frame on the frame grid is a `seekToFrameIndex` request to the middle of that
+  frame, with no cue.
+- Any other absolute time seeks to the last tick whose timecode equals the typed value, so
+  the display then shows exactly the typed value. Without a calibration, it seeks on the
+  approximate clock.
+- An entry that names the frame on screen, with no seek pending and no playback, does
+  nothing. During playback it seeks only when the element has already left that frame.
 
 ## Consequences
 
