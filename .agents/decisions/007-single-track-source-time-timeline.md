@@ -117,6 +117,17 @@ The wheel zooms, and it holds the time under the pointer in place. A gesture tha
 clearly horizontal pans instead, and so does the shift key with the wheel. The panel gives
 those gestures to the web view, which already scrolls the container.
 
+### The edges of a segment
+
+(Added on 2026-09-24.) On a segment at least 24 px wide, the 6 px at each end is its own
+control area, the edge. A pointer click on the In edge selects the segment and seeks to its
+stored `inPts`. A pointer click on the Out edge selects the segment and seeks to its stored
+`outPts`, the first frame after the segment. The seek has the condition of Shift+I and
+Shift+O (ADR 026). A click on the body, and a click from the keyboard or from assistive
+technology, only selects. A press and a drag on an edge do nothing more than a click, until a
+later record adds drag trimming. The edge is not a Tab stop, and the hit area of the
+playhead stays above the edges. No edit value comes from the pixel position of an edge.
+
 ## Consequences
 
 - The user can see each segment in its original source context.
