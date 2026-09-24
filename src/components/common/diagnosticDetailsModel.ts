@@ -3,7 +3,8 @@
  * stays, and the hint that names the copy shortcut of the platform (⌘C on macOS, Ctrl+C
  * elsewhere).
  *
- * The module has no React and no document, so the tests need neither.
+ * The module has no React and no document, so the tests need neither. `useCopyFeedback` is
+ * the React wiring of these rules, which every Copy button with this behaviour uses.
  */
 
 import { COPIED_FEEDBACK_MS, type CopyOutcome } from "@/lib/clipboard";

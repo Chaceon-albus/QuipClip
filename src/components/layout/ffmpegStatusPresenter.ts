@@ -10,6 +10,7 @@ import {
   type FfmpegState,
   type FfmpegStoreState,
 } from "@/features/ffmpeg/types";
+import { stripVerbatimPrefix } from "@/lib/fileName";
 
 /**
  * Picks exactly the state this presenter reads out of the ffmpeg store.
@@ -75,6 +76,10 @@ export type FfmpegStatusView = {
    * status line. The complete diagnosis stays in `detail`, which Settings shows in full.
    */
   summary: FfmpegStatusDetailEntry[];
+  /**
+   * The diagnosis under the status line in Settings. It leaves out the program path and its
+   * origin, because the location block of Settings shows them.
+   */
   detail: FfmpegStatusDetailEntry[];
   tone: "neutral" | "ready" | "warning";
 };
@@ -193,24 +198,16 @@ export function presentFfmpegStatus(
       const workingCount = workingResults.length;
       const testedCount = state.results.length;
 
+      // The detail starts at the version. Settings shows the program path and where it came
+      // from in its own location block, so the detail does not repeat them.
       const detail: FfmpegStatusDetailEntry[] = [];
 
-      // 1. Origin
-      if (state.origin) {
-        pushDetail(detail, `ffmpeg.detail.origin.${state.origin}`);
-      }
-
-      // 2. Program path
-      if (state.paths?.ffmpeg) {
-        pushDetail(detail, "ffmpeg.detail.program", { path: state.paths.ffmpeg });
-      }
-
-      // 3. Version
+      // 1. Version
       if (state.version) {
         pushDetail(detail, "ffmpeg.detail.version", { version: state.version });
       }
 
-      // 4. Licence flags
+      // 2. Licence flags
       let hasLicenseFlag = false;
       if (state.license?.gpl) {
         pushDetail(detail, "ffmpeg.detail.license.gpl");
@@ -228,7 +225,7 @@ export function presentFfmpegStatus(
         pushDetail(detail, "ffmpeg.detail.license.none");
       }
 
-      // 5. Hardware acceleration methods
+      // 3. Hardware acceleration methods
       if (state.hwaccels && state.hwaccels.length > 0) {
         pushDetail(detail, "ffmpeg.detail.hardware", {
           methods: format.list.format(state.hwaccels),
@@ -237,7 +234,7 @@ export function presentFfmpegStatus(
         pushDetail(detail, "ffmpeg.detail.hardwareNone");
       }
 
-      // 6. Working encoders
+      // 4. Working encoders
       if (workingResults.length > 0) {
         const encoderNames = workingResults.map((r) => r.name);
         pushDetail(detail, "ffmpeg.detail.workingEncoders", {
@@ -254,10 +251,13 @@ export function presentFfmpegStatus(
       };
 
       // The tooltip gives the complete line, with the complete version and the encoder
-      // count, and the program path when it is known.
+      // count, and the program path when it is known. The path is canonical, so on Windows it
+      // carries the verbatim prefix `\\?\`, which the tooltip leaves out.
       const summary = startSummary("ffmpeg.status.ready", lineValues);
       if (state.paths?.ffmpeg) {
-        pushDetail(summary, "ffmpeg.detail.program", { path: state.paths.ffmpeg });
+        pushDetail(summary, "ffmpeg.detail.program", {
+          path: stripVerbatimPrefix(state.paths.ffmpeg),
+        });
       }
 
       return {

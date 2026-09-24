@@ -210,31 +210,20 @@ describe("presentFfmpegStatus", () => {
 
       expect(view.detail).toEqual([
         {
-          key: "ffmpeg.detail.origin.path",
-          id: "ffmpeg.detail.origin.path#0",
-          mono: false,
-        },
-        {
-          key: "ffmpeg.detail.program",
-          values: { path: "/opt/homebrew/bin/ffmpeg" },
-          id: "ffmpeg.detail.program#1",
-          mono: false,
-        },
-        {
           key: "ffmpeg.detail.version",
           values: { version: "7.1.1" },
-          id: "ffmpeg.detail.version#2",
+          id: "ffmpeg.detail.version#0",
           mono: false,
         },
         {
           key: "ffmpeg.detail.license.gpl",
-          id: "ffmpeg.detail.license.gpl#3",
+          id: "ffmpeg.detail.license.gpl#1",
           mono: false,
         },
         {
           key: "ffmpeg.detail.hardware",
           values: { methods: "videotoolbox" },
-          id: "ffmpeg.detail.hardware#4",
+          id: "ffmpeg.detail.hardware#2",
           mono: false,
         },
         {
@@ -242,7 +231,7 @@ describe("presentFfmpegStatus", () => {
           values: {
             encoders: "h264_videotoolbox, hevc_videotoolbox, libx264, libx265, aac",
           },
-          id: "ffmpeg.detail.workingEncoders#5",
+          id: "ffmpeg.detail.workingEncoders#3",
           mono: false,
         },
       ]);
@@ -273,47 +262,36 @@ describe("presentFfmpegStatus", () => {
 
       expect(view.detail).toEqual([
         {
-          key: "ffmpeg.detail.origin.configured",
-          id: "ffmpeg.detail.origin.configured#0",
-          mono: false,
-        },
-        {
-          key: "ffmpeg.detail.program",
-          values: { path: "/usr/local/bin/ffmpeg" },
-          id: "ffmpeg.detail.program#1",
-          mono: false,
-        },
-        {
           key: "ffmpeg.detail.version",
           values: { version: "6.1" },
-          id: "ffmpeg.detail.version#2",
+          id: "ffmpeg.detail.version#0",
           mono: false,
         },
         {
           key: "ffmpeg.detail.license.gpl",
-          id: "ffmpeg.detail.license.gpl#3",
+          id: "ffmpeg.detail.license.gpl#1",
           mono: false,
         },
         {
           key: "ffmpeg.detail.license.nonfree",
-          id: "ffmpeg.detail.license.nonfree#4",
+          id: "ffmpeg.detail.license.nonfree#2",
           mono: false,
         },
         {
           key: "ffmpeg.detail.license.version3",
-          id: "ffmpeg.detail.license.version3#5",
+          id: "ffmpeg.detail.license.version3#3",
           mono: false,
         },
         {
           key: "ffmpeg.detail.hardware",
           values: { methods: "cuda, vdpau" },
-          id: "ffmpeg.detail.hardware#6",
+          id: "ffmpeg.detail.hardware#4",
           mono: false,
         },
         {
           key: "ffmpeg.detail.workingEncoders",
           values: { encoders: "libx264" },
-          id: "ffmpeg.detail.workingEncoders#7",
+          id: "ffmpeg.detail.workingEncoders#5",
           mono: false,
         },
       ]);
@@ -349,23 +327,73 @@ describe("presentFfmpegStatus", () => {
       });
       expect(view.tone).toBe("warning");
       expect(view.detail).toContainEqual({
-        key: "ffmpeg.detail.origin.appData",
-        id: "ffmpeg.detail.origin.appData#0",
-        mono: false,
-      });
-      expect(view.detail).toContainEqual({
         key: "ffmpeg.detail.license.none",
-        id: "ffmpeg.detail.license.none#3",
+        id: "ffmpeg.detail.license.none#1",
         mono: false,
       });
       expect(view.detail).toContainEqual({
         key: "ffmpeg.detail.hardwareNone",
-        id: "ffmpeg.detail.hardwareNone#4",
+        id: "ffmpeg.detail.hardwareNone#2",
         mono: false,
       });
       expect(view.detail).toContainEqual({
         key: "ffmpeg.detail.noWorkingEncoders",
-        id: "ffmpeg.detail.noWorkingEncoders#5",
+        id: "ffmpeg.detail.noWorkingEncoders#3",
+        mono: false,
+      });
+    });
+
+    it.each(["configured", "path", "appData"] as const)(
+      "leaves the program path and the %s origin out of the detail, because Settings shows them in its location block",
+      (origin) => {
+        const state: FfmpegState = {
+          ...createBaseState(),
+          status: "ready",
+          origin,
+          paths: { ffmpeg: "/tools/ffmpeg", ffprobe: "/tools/ffprobe" },
+          version: "7.1",
+          results: [{ name: "libx264", kind: "video", listed: true, status: "works" }],
+          done: 1,
+          total: 1,
+        };
+
+        const view = presentFfmpegStatus(state, format);
+
+        const keys = view.detail.map((entry) => entry.key);
+        expect(keys).not.toContain("ffmpeg.detail.program");
+        expect(keys.some((key) => key.startsWith("ffmpeg.detail.origin"))).toBe(false);
+        expect(keys[0]).toBe("ffmpeg.detail.version");
+        // The status bar tooltip still names the program.
+        expect(view.summary).toContainEqual({
+          key: "ffmpeg.detail.program",
+          values: { path: "/tools/ffmpeg" },
+          id: "ffmpeg.detail.program#1",
+          mono: false,
+        });
+      },
+    );
+
+    it("names a Windows program in the tooltip without the verbatim prefix", () => {
+      const state: FfmpegState = {
+        ...createBaseState(),
+        status: "ready",
+        origin: "path",
+        paths: {
+          ffmpeg: "\\\\?\\C:\\tools\\ffmpeg.exe",
+          ffprobe: "\\\\?\\C:\\tools\\ffprobe.exe",
+        },
+        version: "8.0",
+        results: [{ name: "libx264", kind: "video", listed: true, status: "works" }],
+        done: 1,
+        total: 1,
+      };
+
+      const view = presentFfmpegStatus(state, format);
+
+      expect(view.summary[1]).toEqual({
+        key: "ffmpeg.detail.program",
+        values: { path: "C:\\tools\\ffmpeg.exe" },
+        id: "ffmpeg.detail.program#1",
         mono: false,
       });
     });
@@ -418,37 +446,26 @@ describe("presentFfmpegStatus", () => {
       expect(view.tone).toBe("ready");
       expect(view.detail).toEqual([
         {
-          key: "ffmpeg.detail.origin.path",
-          id: "ffmpeg.detail.origin.path#0",
-          mono: false,
-        },
-        {
-          key: "ffmpeg.detail.program",
-          values: { path: "/opt/homebrew/bin/ffmpeg" },
-          id: "ffmpeg.detail.program#1",
-          mono: false,
-        },
-        {
           key: "ffmpeg.detail.version",
           values: { version: "7.1" },
-          id: "ffmpeg.detail.version#2",
+          id: "ffmpeg.detail.version#0",
           mono: false,
         },
         {
           key: "ffmpeg.detail.license.nonfree",
-          id: "ffmpeg.detail.license.nonfree#3",
+          id: "ffmpeg.detail.license.nonfree#1",
           mono: false,
         },
         {
           key: "ffmpeg.detail.hardware",
           values: { methods: "videotoolbox" },
-          id: "ffmpeg.detail.hardware#4",
+          id: "ffmpeg.detail.hardware#2",
           mono: false,
         },
         {
           key: "ffmpeg.detail.workingEncoders",
           values: { encoders: "libx264" },
-          id: "ffmpeg.detail.workingEncoders#5",
+          id: "ffmpeg.detail.workingEncoders#3",
           mono: false,
         },
       ]);

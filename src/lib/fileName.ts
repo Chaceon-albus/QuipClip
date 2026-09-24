@@ -70,3 +70,56 @@ export function splitFilePath(path: string): FilePathParts | null {
   // A single segment. "/out.mp4" sits in the root. "out.mp4" names no folder.
   return { name, folderName: posix ? "/" : null };
 }
+
+/**
+ * Removes the Windows verbatim prefix from a path, for display.
+ *
+ * `std::fs::canonicalize` on Windows returns a verbatim path: `\\?\C:\tools\ffmpeg.exe` for
+ * a drive path and `\\?\UNC\server\share\ffmpeg.exe` for a network share. The prefix is
+ * correct, but it is not the form that the user types or sees in File Explorer. This function
+ * gives `C:\tools\ffmpeg.exe` and `\\server\share\ffmpeg.exe`.
+ *
+ * Only those two forms change. Any other verbatim path, such as a volume GUID path, has no
+ * drive letter to show, so it stays as it is. A path without the prefix, which includes every
+ * macOS path, also stays as it is.
+ */
+export function stripVerbatimPrefix(path: string): string {
+  if (/^\\\\\?\\[A-Za-z]:(\\|$)/.test(path)) {
+    return path.slice(4);
+  }
+  if (/^\\\\\?\\UNC\\/i.test(path)) {
+    return `\\\\${path.slice(8)}`;
+  }
+  return path;
+}
+
+/**
+ * Puts a Windows path in one form for a comparison: with `\` as the only separator, without
+ * the verbatim prefix, without one trailing separator, and in lower case.
+ *
+ * The separators are folded first, so a prefix written with `/` is also removed. A drive root
+ * such as `C:\` keeps its separator, because `C:` without it names the working folder of that
+ * drive.
+ */
+function comparableWindowsPath(path: string): string {
+  let result = stripVerbatimPrefix(path.replace(/\//g, "\\"));
+  if (result.endsWith("\\") && !/^[A-Za-z]:\\$/.test(result) && !/^\\+$/.test(result)) {
+    result = result.slice(0, -1);
+  }
+  return result.toLowerCase();
+}
+
+/**
+ * True when two paths name the same location for display: they are equal after
+ * `stripVerbatimPrefix`.
+ *
+ * With `windows`, the comparison also accepts the other forms of one Windows path: `/` for
+ * `\`, one trailing separator, and a different letter case, because Windows file names do
+ * not depend on letter case. Without it, as on macOS, the paths must be equal.
+ */
+export function isSameDisplayPath(a: string, b: string, windows: boolean): boolean {
+  if (windows) {
+    return comparableWindowsPath(a) === comparableWindowsPath(b);
+  }
+  return stripVerbatimPrefix(a) === stripVerbatimPrefix(b);
+}

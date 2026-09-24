@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { splitFilePath, splitFileName } from "./fileName";
+import {
+  isSameDisplayPath,
+  splitFilePath,
+  splitFileName,
+  stripVerbatimPrefix,
+} from "./fileName";
 
 describe("splitFileName", () => {
   it.each([
@@ -99,5 +104,116 @@ describe("splitFilePath", () => {
     expect(splitFilePath("")).toBeNull();
     expect(splitFilePath("/")).toBeNull();
     expect(splitFilePath("\\\\")).toBeNull();
+  });
+});
+
+describe("stripVerbatimPrefix", () => {
+  it.each([
+    ["\\\\?\\C:\\tools\\ffmpeg.exe", "C:\\tools\\ffmpeg.exe"],
+    ["\\\\?\\d:\\ffmpeg.exe", "d:\\ffmpeg.exe"],
+    ["\\\\?\\C:", "C:"],
+    ["\\\\?\\UNC\\server\\share\\ffmpeg.exe", "\\\\server\\share\\ffmpeg.exe"],
+    ["\\\\?\\unc\\server\\share\\ffmpeg.exe", "\\\\server\\share\\ffmpeg.exe"],
+  ])("removes the verbatim prefix from %j", (path, expected) => {
+    expect(stripVerbatimPrefix(path)).toBe(expected);
+  });
+
+  it.each([
+    ["a drive path", "C:\\tools\\ffmpeg.exe"],
+    ["a network path", "\\\\server\\share\\ffmpeg.exe"],
+    ["a macOS path", "/opt/homebrew/bin/ffmpeg"],
+    [
+      "a volume GUID path",
+      "\\\\?\\Volume{0a1b2c3d-0000-0000-0000-000000000000}\\ffmpeg.exe",
+    ],
+    ["a device path", "\\\\.\\C:\\ffmpeg.exe"],
+    ["a path with the prefix later in it", "C:\\x\\\\?\\C:\\y"],
+    ["an empty path", ""],
+  ])("keeps %s as it is", (_case, path) => {
+    expect(stripVerbatimPrefix(path)).toBe(path);
+  });
+});
+
+describe("isSameDisplayPath", () => {
+  it("matches a verbatim path with the same path without the prefix", () => {
+    expect(
+      isSameDisplayPath("\\\\?\\C:\\tools\\ffmpeg.exe", "C:\\tools\\ffmpeg.exe", true),
+    ).toBe(true);
+    expect(
+      isSameDisplayPath(
+        "\\\\?\\UNC\\server\\share\\ffmpeg.exe",
+        "\\\\server\\share\\ffmpeg.exe",
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores letter case only on Windows", () => {
+    expect(
+      isSameDisplayPath("\\\\?\\C:\\Tools\\FFMPEG.EXE", "c:\\tools\\ffmpeg.exe", true),
+    ).toBe(true);
+    expect(isSameDisplayPath("/Tools/ffmpeg", "/tools/ffmpeg", false)).toBe(false);
+    expect(isSameDisplayPath("/tools/ffmpeg", "/tools/ffmpeg", false)).toBe(true);
+  });
+
+  it("folds the separators before it removes the verbatim prefix on Windows", () => {
+    expect(
+      isSameDisplayPath("//?/C:/tools/ffmpeg.exe", "C:\\tools\\ffmpeg.exe", true),
+    ).toBe(true);
+    expect(
+      isSameDisplayPath(
+        "//?/UNC/server/share/ffmpeg.exe",
+        "\\\\server\\share\\ffmpeg.exe",
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it("reads a forward slash as a backslash on Windows", () => {
+    expect(
+      isSameDisplayPath("\\\\?\\C:\\tools\\ffmpeg.exe", "C:/tools/ffmpeg.exe", true),
+    ).toBe(true);
+    expect(
+      isSameDisplayPath("\\\\?\\C:\\tools\\ffmpeg.exe", "C:\\tools/ffmpeg.exe", true),
+    ).toBe(true);
+    expect(
+      isSameDisplayPath(
+        "\\\\?\\UNC\\server\\share\\ffmpeg.exe",
+        "//server/share/ffmpeg.exe",
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it("ignores one trailing separator on Windows", () => {
+    expect(isSameDisplayPath("\\\\?\\D:\\ffmpeg\\bin", "D:\\ffmpeg\\bin\\", true)).toBe(
+      true,
+    );
+    expect(isSameDisplayPath("\\\\?\\D:\\ffmpeg\\bin", "d:/ffmpeg/bin/", true)).toBe(
+      true,
+    );
+    expect(isSameDisplayPath("\\\\server\\share\\", "\\\\server\\share", true)).toBe(
+      true,
+    );
+  });
+
+  it("keeps the separator of a Windows drive root, which names another folder without it", () => {
+    expect(isSameDisplayPath("\\\\?\\C:\\", "C:/", true)).toBe(true);
+    expect(isSameDisplayPath("C:\\", "C:", true)).toBe(false);
+  });
+
+  it("treats a slash and a trailing separator as part of the name on macOS", () => {
+    expect(isSameDisplayPath("/opt/homebrew/bin", "/opt/homebrew/bin/", false)).toBe(
+      false,
+    );
+    expect(isSameDisplayPath("/tools/a\\b", "/tools/a/b", false)).toBe(false);
+  });
+
+  it("does not match different paths", () => {
+    expect(isSameDisplayPath("C:\\tools", "C:\\tools\\ffmpeg.exe", true)).toBe(false);
+    expect(isSameDisplayPath("C:\\tools\\", "C:\\tools\\\\", true)).toBe(false);
+    expect(
+      isSameDisplayPath("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", false),
+    ).toBe(false);
   });
 });

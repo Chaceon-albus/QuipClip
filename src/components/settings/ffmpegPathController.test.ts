@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFfmpegPathController,
   FfmpegPathController,
+  type FfmpegPathView,
 } from "./ffmpegPathController";
 import { settingsStore } from "@/features/settings/store";
 import type { Preset, Settings } from "@/features/settings/types";
@@ -74,10 +75,13 @@ describe("FfmpegPathController", () => {
     });
 
     it("createFfmpegPathController builds a working controller", async () => {
-      const settings = createSettings();
-      const saveSettings = vi
-        .fn()
-        .mockResolvedValue(createSettings({ ffmpegPath: "/opt/ffmpeg/bin" }));
+      // The settings getter returns what the save stored, as the real store does: the
+      // controller reads the path from the settings again when the choose ends.
+      let settings = createSettings();
+      const saveSettings = vi.fn().mockImplementation((next: Settings) => {
+        settings = next;
+        return Promise.resolve(next);
+      });
       const startProbe = vi.fn().mockResolvedValue(undefined);
       const controller = createFfmpegPathController({
         getSettings: () => settings,
@@ -249,6 +253,254 @@ describe("FfmpegPathController", () => {
 
       probe.resolve(undefined);
       await pending;
+    });
+  });
+
+  // The settings store publishes a document BEFORE its disk write, and the section forwards
+  // every published document to syncFromSettings. Without a guard, the view showed the new
+  // path next to the check result for the old one for the whole write.
+  describe("the shown path stays fixed until the probe of the new path starts", () => {
+    /**
+     * A fake settings store that publishes like the real one: the save publishes the new
+     * document through `syncFromSettings` at once, then the write resolves. A failed write
+     * publishes the last confirmed document again, as the store's rollback does.
+     */
+    function createPublishingStore(initial: Settings, outcome: "saved" | "failed") {
+      let current = initial;
+      const write = createDeferred<void>();
+      let controller: FfmpegPathController | null = null;
+      const saveSettings = vi.fn(async (next: Settings): Promise<Settings | null> => {
+        current = next;
+        controller?.syncFromSettings(next);
+        await write.promise;
+        if (outcome === "failed") {
+          current = initial;
+          controller?.syncFromSettings(initial);
+          return null;
+        }
+        return next;
+      });
+      return {
+        getSettings: () => current,
+        saveSettings,
+        finishWrite: () => {
+          write.resolve();
+        },
+        attach: (target: FfmpegPathController) => {
+          controller = target;
+        },
+      };
+    }
+
+    /** Records each emitted path and each probe start, in order. */
+    function createRecorder() {
+      const events: string[] = [];
+      return {
+        events,
+        onChange: (view: FfmpegPathView) => {
+          events.push(`path:${view.path ?? "none"}`);
+        },
+        startProbe: vi.fn(() => {
+          events.push("probe");
+          return Promise.resolve(null);
+        }),
+      };
+    }
+
+    async function flushUntil(condition: () => boolean): Promise<void> {
+      for (let i = 0; i < 50 && !condition(); i++) {
+        await Promise.resolve();
+      }
+    }
+
+    it("never emits the chosen path before the probe starts", async () => {
+      const store = createPublishingStore(
+        createSettings({ ffmpegPath: "/a" }),
+        "saved",
+      );
+      const recorder = createRecorder();
+      const controller = createFfmpegPathController({
+        getSettings: store.getSettings,
+        saveSettings: store.saveSettings,
+        startProbe: recorder.startProbe,
+        openDialog: vi.fn().mockResolvedValue("/b"),
+        onChange: recorder.onChange,
+      });
+      store.attach(controller);
+      controller.syncFromSettings(store.getSettings());
+
+      const choosing = controller.choose("directory");
+      await flushUntil(() => store.saveSettings.mock.calls.length > 0);
+
+      // The store already holds /b, and the disk write is still running.
+      expect(store.getSettings().ffmpegPath).toBe("/b");
+      expect(controller.getView().path).toBe("/a");
+      expect(recorder.events).not.toContain("path:/b");
+
+      store.finishWrite();
+      await choosing;
+
+      const firstNewPath = recorder.events.indexOf("path:/b");
+      expect(firstNewPath).toBeGreaterThan(recorder.events.indexOf("probe"));
+      expect(recorder.events.indexOf("probe")).toBeGreaterThanOrEqual(0);
+      expect(controller.getView().path).toBe("/b");
+    });
+
+    it("never emits the chosen path when the save fails, and ends on the rolled-back path", async () => {
+      const store = createPublishingStore(
+        createSettings({ ffmpegPath: "/a" }),
+        "failed",
+      );
+      const recorder = createRecorder();
+      const controller = createFfmpegPathController({
+        getSettings: store.getSettings,
+        saveSettings: store.saveSettings,
+        startProbe: recorder.startProbe,
+        openDialog: vi.fn().mockResolvedValue("/b"),
+        onChange: recorder.onChange,
+      });
+      store.attach(controller);
+      controller.syncFromSettings(store.getSettings());
+
+      const choosing = controller.choose("file");
+      await flushUntil(() => store.saveSettings.mock.calls.length > 0);
+      store.finishWrite();
+
+      expect(await choosing).toBe(false);
+      expect(recorder.events).not.toContain("path:/b");
+      expect(recorder.startProbe).not.toHaveBeenCalled();
+      expect(controller.getView().path).toBe("/a");
+    });
+
+    it("never emits the cleared path before the probe starts", async () => {
+      const store = createPublishingStore(
+        createSettings({ ffmpegPath: "/a" }),
+        "saved",
+      );
+      const recorder = createRecorder();
+      const controller = createFfmpegPathController({
+        getSettings: store.getSettings,
+        saveSettings: store.saveSettings,
+        startProbe: recorder.startProbe,
+        onChange: recorder.onChange,
+      });
+      store.attach(controller);
+      controller.syncFromSettings(store.getSettings());
+      recorder.events.length = 0;
+
+      const clearing = controller.clear();
+      await flushUntil(() => store.saveSettings.mock.calls.length > 0);
+      expect(recorder.events).not.toContain("path:none");
+
+      store.finishWrite();
+      await clearing;
+
+      expect(recorder.events.indexOf("path:none")).toBeGreaterThan(
+        recorder.events.indexOf("probe"),
+      );
+      expect(controller.getView().path).toBeNull();
+    });
+
+    it("never emits the cleared path when the save fails", async () => {
+      const store = createPublishingStore(
+        createSettings({ ffmpegPath: "/a" }),
+        "failed",
+      );
+      const recorder = createRecorder();
+      const controller = createFfmpegPathController({
+        getSettings: store.getSettings,
+        saveSettings: store.saveSettings,
+        startProbe: recorder.startProbe,
+        onChange: recorder.onChange,
+      });
+      store.attach(controller);
+      controller.syncFromSettings(store.getSettings());
+
+      const clearing = controller.clear();
+      await flushUntil(() => store.saveSettings.mock.calls.length > 0);
+      store.finishWrite();
+
+      expect(await clearing).toBe(false);
+      expect(recorder.events).not.toContain("path:none");
+      expect(controller.getView().path).toBe("/a");
+    });
+
+    it("reads the settings again when a check ends, so a document published meanwhile is not lost", async () => {
+      let settings = createSettings({ ffmpegPath: "/a" });
+      const probe = createDeferred<unknown>();
+      const onChange = vi.fn();
+      const controller = createFfmpegPathController({
+        getSettings: () => settings,
+        startProbe: vi.fn().mockReturnValue(probe.promise),
+        onChange,
+      });
+      controller.syncFromSettings(settings);
+
+      const checking = controller.reprobe();
+      // Another save published a new document while the check runs.
+      settings = createSettings({ ffmpegPath: "/other" });
+      controller.syncFromSettings(settings);
+      expect(controller.getView().path).toBe("/a");
+
+      probe.resolve(null);
+      await checking;
+
+      expect(controller.getView().path).toBe("/other");
+      expect(onChange).toHaveBeenLastCalledWith({
+        path: "/other",
+        pending: false,
+        ready: true,
+      });
+    });
+
+    it("reads the settings again when the file picker rejects after a save published a new document", async () => {
+      let settings = createSettings({ ffmpegPath: "/a" });
+      const dialog = createDeferred<string | null>();
+      const onChange = vi.fn();
+      const controller = createFfmpegPathController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+        startProbe: vi.fn(),
+        openDialog: vi.fn().mockReturnValue(dialog.promise),
+        onChange,
+      });
+      controller.syncFromSettings(settings);
+
+      const choosing = controller.choose("file");
+      // Another save published a new document while the file picker is open.
+      settings = createSettings({ ffmpegPath: "/published" });
+      controller.syncFromSettings(settings);
+      expect(controller.getView().path).toBe("/a");
+
+      dialog.reject(new Error("dialog failed"));
+      await expect(choosing).rejects.toThrow("dialog failed");
+
+      expect(controller.getView()).toEqual({
+        path: "/published",
+        pending: false,
+        ready: true,
+      });
+      expect(onChange).toHaveBeenLastCalledWith({
+        path: "/published",
+        pending: false,
+        ready: true,
+      });
+    });
+
+    it("still follows the settings while no operation runs", () => {
+      const onChange = vi.fn();
+      const controller = createFfmpegPathController({
+        getSettings: () => createSettings(),
+        onChange,
+      });
+
+      controller.syncFromSettings(createSettings({ ffmpegPath: "/x" }));
+
+      expect(onChange).toHaveBeenLastCalledWith({
+        path: "/x",
+        pending: false,
+        ready: true,
+      });
     });
   });
 

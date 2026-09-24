@@ -245,7 +245,10 @@ export function toPromptFocusTarget(
   };
 }
 
-function canTakeFocus<T extends PromptFocusTarget>(target: T | null): target is T {
+/** True when the target is in the document, rendered, and enabled. */
+export function canTakeFocus<T extends PromptFocusTarget>(
+  target: T | null,
+): target is T {
   return (
     target !== null && target.isConnected && target.isRendered && !target.isDisabled
   );

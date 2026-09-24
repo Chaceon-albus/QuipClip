@@ -297,13 +297,48 @@ export const en = {
     },
     ffmpeg: {
       section: "FFmpeg Location",
-      pathLabel: "Current Path",
+      pathLabel: "FFmpeg in Use",
       pathUnset: "No path set",
       chooseFolder: "Choose Folder...",
       chooseFile: "Choose File...",
-      clear: "Clear",
-      reprobe: "Re-check FFmpeg",
+      useAutomatic: "Use Automatic Detection",
+      reprobe: "Check Again",
+      // Spoken once when a check starts. The visible status line gives the steps.
+      checking: "Checking FFmpeg...",
       hint: "Choose a folder or a single file. A folder that holds both FFmpeg and FFprobe is preferred.",
+      source: {
+        user: "Chosen by you:",
+        automatic: "Detected automatically:",
+        notDetected: "QuipClip did not detect FFmpeg automatically.",
+        // The check stopped before QuipClip found a program. The status block names the cause.
+        unknown:
+          "QuipClip could not identify which FFmpeg to use. The status below gives the reason.",
+      },
+      origin: {
+        path: "Found in a folder in PATH.",
+        pathMac: "Found in a folder in PATH or in a standard Homebrew folder.",
+        appData: "Found in the bin folder in the QuipClip application data folder.",
+      },
+      fallback:
+        "QuipClip cannot use the path that you chose. It uses the FFmpeg that it detected automatically.",
+      unusable:
+        "QuipClip cannot use the path that you chose, and it did not detect FFmpeg in another location.",
+      // A label. The chosen path follows it on its own line.
+      chosenPath: "Chosen path:",
+      // The Copy button and its result use the `common.diagnostic` messages.
+      install: {
+        title: "Install FFmpeg",
+        macPrerequisite:
+          "Homebrew must be installed first. For the Homebrew install steps, go to <mono>{{url}}</mono>.",
+        macIntro: "To install FFmpeg with Homebrew, run this command in Terminal:",
+        // Names the Check Again button with its exact label (`settings.ffmpeg.reprobe`).
+        macAfter:
+          "After the install, click Check Again. QuipClip always searches the standard Homebrew folders, so you do not have to restart QuipClip.",
+        windowsIntro:
+          "To install FFmpeg with winget, run this command in PowerShell or Command Prompt:",
+        windowsAfter:
+          "After the install, quit QuipClip and open it again from the Start menu. QuipClip gets PATH when it starts, and a terminal that was open before the install still has the old PATH.",
+      },
     },
     preset: {
       section: "Export Presets",
@@ -447,11 +482,6 @@ export const en = {
           "Searched: {{path}} (ffprobe: {{probe}}, origin: Application data directory)",
       },
       raw: "{{detail}}",
-      origin: {
-        configured: "Origin: Configured path",
-        path: "Origin: System PATH",
-        appData: "Origin: Application data directory",
-      },
       license: {
         gpl: "License: GPL",
         nonfree: "License: Non-free",

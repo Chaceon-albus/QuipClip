@@ -1,17 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Check, ChevronRight, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { copyText } from "@/lib/clipboard";
-import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
-import {
-  ANNOUNCE_GAP_MS,
-  copyFeedbackDurationMs,
-  copyFeedbackOf,
-  selectedHintKey,
-  type CopyFeedback,
-} from "./diagnosticDetailsModel";
+import { useCopyFeedback } from "./useCopyFeedback";
 
 export interface DiagnosticDetailsProps {
   /** The label of the disclosure while it is closed. */
@@ -45,82 +37,8 @@ export function DiagnosticDetails({
 }: DiagnosticDetailsProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  // The result of the last Copy click, or null. It sets the icon and the visible hint. Each
-  // click stores a new object, so the timer below starts again, and the check mark stays
-  // for its full time after the last click.
-  const [feedback, setFeedback] = useState<{ kind: CopyFeedback } | null>(null);
-  // The result that the live region speaks, or null. It is apart from `feedback`, so the
-  // gap before an announcement never changes what shows. See `handleCopy`.
-  const [announced, setAnnounced] = useState<CopyFeedback | null>(null);
   const textRef = useRef<HTMLPreElement>(null);
-  const announceTimerRef = useRef<number | null>(null);
-  // False after the unmount. The copy answers after an await, and a timer must not start
-  // for a component that is gone.
-  const mountedRef = useRef(false);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      if (announceTimerRef.current !== null) {
-        window.clearTimeout(announceTimerRef.current);
-        announceTimerRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (feedback === null) {
-      return;
-    }
-    const durationMs = copyFeedbackDurationMs(feedback.kind);
-    if (durationMs === null) {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      setFeedback(null);
-      setAnnounced(null);
-    }, durationMs);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [feedback]);
-
-  // A screen reader speaks a live region only when its text changes. A result that repeats
-  // the last one, such as a second copy within the confirmation time or a second refused
-  // copy, would otherwise pass in silence. So the click empties the region, and the result
-  // goes into it `ANNOUNCE_GAP_MS` later, after the empty region reached the screen reader.
-  const handleCopy = async () => {
-    if (announceTimerRef.current !== null) {
-      window.clearTimeout(announceTimerRef.current);
-      announceTimerRef.current = null;
-    }
-    setAnnounced(null);
-    const kind = copyFeedbackOf(await copyText(text));
-    if (!mountedRef.current) {
-      return;
-    }
-    if (kind === "selected") {
-      const element = textRef.current;
-      const selection = window.getSelection();
-      if (element !== null && selection !== null) {
-        selection.selectAllChildren(element);
-      }
-    }
-    setFeedback({ kind });
-    announceTimerRef.current = window.setTimeout(() => {
-      announceTimerRef.current = null;
-      setAnnounced(kind);
-    }, ANNOUNCE_GAP_MS);
-  };
-
-  const hint = t(selectedHintKey(isMacOS()));
-  let announcement: string | null = null;
-  if (announced === "copied") {
-    announcement = t("common.diagnostic.copied");
-  } else if (announced === "selected") {
-    announcement = hint;
-  }
+  const { feedback, hint, announcement, copy } = useCopyFeedback(text, textRef);
 
   return (
     <details
@@ -148,7 +66,7 @@ export function DiagnosticDetails({
         <div className="flex items-center justify-end gap-2">
           {/* The hint shows, because the user must act on it. The live region below
               speaks it, so this copy is hidden from assistive technology. */}
-          {feedback?.kind === "selected" ? (
+          {feedback === "selected" ? (
             <p aria-hidden="true" className="mr-auto min-w-0 text-muted-foreground">
               {hint}
             </p>
@@ -157,10 +75,10 @@ export function DiagnosticDetails({
             variant="outline"
             size="xs"
             onClick={() => {
-              void handleCopy();
+              void copy();
             }}
           >
-            {feedback?.kind === "copied" ? (
+            {feedback === "copied" ? (
               <Check aria-hidden="true" />
             ) : (
               <Copy aria-hidden="true" />

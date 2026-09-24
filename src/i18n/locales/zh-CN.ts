@@ -266,13 +266,41 @@ export const zhCN: TranslationCatalog = {
     },
     ffmpeg: {
       section: "FFmpeg 位置",
-      pathLabel: "当前路径",
+      pathLabel: "当前使用的 FFmpeg",
       pathUnset: "未设置路径",
       chooseFolder: "选择文件夹...",
       chooseFile: "选择文件...",
-      clear: "清除",
-      reprobe: "重新探测 FFmpeg",
+      useAutomatic: "改用自动检测",
+      reprobe: "重新检测",
+      checking: "正在检测 FFmpeg...",
       hint: "可以选择文件夹，也可以选择单个文件；建议选择同时包含 FFmpeg 和 FFprobe 的文件夹。",
+      source: {
+        user: "由您选择：",
+        automatic: "自动检测到：",
+        notDetected: "QuipClip 未能自动检测到 FFmpeg。",
+        unknown: "QuipClip 无法确定要使用哪个 FFmpeg。原因见下方的状态。",
+      },
+      origin: {
+        path: "位于 PATH 中的某个文件夹。",
+        pathMac: "位于 PATH 中的某个文件夹，或位于 Homebrew 的标准文件夹。",
+        appData: "位于 QuipClip 应用程序数据文件夹的 bin 文件夹。",
+      },
+      fallback: "QuipClip 无法使用您选择的路径，因此改用自动检测到的 FFmpeg。",
+      unusable: "QuipClip 无法使用您选择的路径，也没有在其他位置检测到 FFmpeg。",
+      chosenPath: "所选路径：",
+      install: {
+        title: "安装 FFmpeg",
+        macPrerequisite:
+          "必须先安装 Homebrew。Homebrew 的安装步骤见 <mono>{{url}}</mono>。",
+        macIntro: "要使用 Homebrew 安装 FFmpeg，请在“终端”中运行以下命令：",
+        // Names the Check Again button with its exact label (`settings.ffmpeg.reprobe`).
+        macAfter:
+          "安装完成后，点击“重新检测”。QuipClip 始终会搜索 Homebrew 的标准文件夹，因此无需重新启动 QuipClip。",
+        windowsIntro:
+          "要使用 winget 安装 FFmpeg，请在 PowerShell 或“命令提示符”中运行以下命令：",
+        windowsAfter:
+          "安装完成后，请退出 QuipClip，然后从“开始”菜单重新打开。QuipClip 在启动时获取 PATH，而安装前已打开的终端仍使用旧的 PATH。",
+      },
     },
     preset: {
       section: "导出预设",
@@ -413,11 +441,6 @@ export const zhCN: TranslationCatalog = {
         appData: "已搜索：{{path}}（ffprobe：{{probe}}，来源：应用程序数据目录）",
       },
       raw: "{{detail}}",
-      origin: {
-        configured: "来源：已配置的路径",
-        path: "来源：系统 PATH",
-        appData: "来源：应用程序数据目录",
-      },
       license: {
         gpl: "许可证：GPL",
         nonfree: "许可证：非自由（nonfree）",

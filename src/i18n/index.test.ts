@@ -1425,11 +1425,12 @@ describe("application shell localization and status bar formatting", () => {
 
     // Settings: FFmpeg location
     expect(instance.t("settings.ffmpeg.section")).toBe("FFmpeg Location");
-    expect(instance.t("settings.ffmpeg.pathLabel")).toBe("Current Path");
+    expect(instance.t("settings.ffmpeg.pathLabel")).toBe("FFmpeg in Use");
     expect(instance.t("settings.ffmpeg.pathUnset")).toBe("No path set");
     expect(instance.t("settings.ffmpeg.chooseFolder")).toBe("Choose Folder...");
     expect(instance.t("settings.ffmpeg.chooseFile")).toBe("Choose File...");
-    expect(instance.t("settings.ffmpeg.clear")).toBe("Clear");
+    expect(instance.t("settings.ffmpeg.useAutomatic")).toBe("Use Automatic Detection");
+    expect(instance.t("settings.ffmpeg.reprobe")).toBe("Check Again");
     expect(instance.t("settings.ffmpeg.hint")).toBe(
       "Choose a folder or a single file. A folder that holds both FFmpeg and FFprobe is preferred.",
     );
@@ -1600,11 +1601,12 @@ describe("application shell localization and status bar formatting", () => {
 
     // Settings: FFmpeg location
     expect(instance.t("settings.ffmpeg.section")).toBe("FFmpeg 位置");
-    expect(instance.t("settings.ffmpeg.pathLabel")).toBe("当前路径");
+    expect(instance.t("settings.ffmpeg.pathLabel")).toBe("当前使用的 FFmpeg");
     expect(instance.t("settings.ffmpeg.pathUnset")).toBe("未设置路径");
     expect(instance.t("settings.ffmpeg.chooseFolder")).toBe("选择文件夹...");
     expect(instance.t("settings.ffmpeg.chooseFile")).toBe("选择文件...");
-    expect(instance.t("settings.ffmpeg.clear")).toBe("清除");
+    expect(instance.t("settings.ffmpeg.useAutomatic")).toBe("改用自动检测");
+    expect(instance.t("settings.ffmpeg.reprobe")).toBe("重新检测");
     expect(instance.t("settings.ffmpeg.hint")).toBe(
       "可以选择文件夹，也可以选择单个文件；建议选择同时包含 FFmpeg 和 FFprobe 的文件夹。",
     );

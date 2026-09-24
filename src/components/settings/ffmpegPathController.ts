@@ -26,7 +26,7 @@ import type { Settings } from "@/features/settings/types";
 export type FfmpegPathView = {
   /** The configured ffmpeg path, or null when the document has no configured path. */
   path: string | null;
-  /** True while a choose or clear operation is in flight. */
+  /** True while a choose, a clear, or a check is in flight. */
   pending: boolean;
   /**
    * True exactly when the controller currently has a settings document to work from
@@ -213,12 +213,11 @@ export class FfmpegPathController {
 
       // RULE 1: the capability report is cached. Without `force`, the application keeps
       // reporting the OLD ffmpeg's encoders and the path change looks ignored.
-      await this.startProbeFn(true);
+      await this.startProbeAndShowPath();
 
       return true;
     } finally {
-      this.pendingCount--;
-      this.notify();
+      this.finishOperation();
     }
   }
 
@@ -260,12 +259,11 @@ export class FfmpegPathController {
       this.path = saved.ffmpegPath ?? null;
 
       // RULE 1: re-probe with force, exactly as a successful choose() does.
-      await this.startProbeFn(true);
+      await this.startProbeAndShowPath();
 
       return true;
     } finally {
-      this.pendingCount--;
-      this.notify();
+      this.finishOperation();
     }
   }
 
@@ -296,8 +294,7 @@ export class FfmpegPathController {
       await this.startProbeFn(true);
       return true;
     } finally {
-      this.pendingCount--;
-      this.notify();
+      this.finishOperation();
     }
   }
 
@@ -307,8 +304,19 @@ export class FfmpegPathController {
    * Called by the view layer on mount and whenever the settings store's document changes, so
    * the displayed path stays current even when it changed through a different controller or
    * component.
+   *
+   * While a choose, a clear, or a check is in flight, the call changes nothing. The settings
+   * store publishes a document BEFORE its disk write, so during the save of a choose or a
+   * clear it already holds the new path while the ffmpeg store still holds the check result
+   * for the old one. The view would pair the two. The operation shows the new path itself,
+   * together with the probe that checks it (see `startProbeAndShowPath`), and it reads the
+   * settings again when it ends (see `finishOperation`), so no document that arrives in the
+   * meantime is lost.
    */
   syncFromSettings(settings: Settings | null): void {
+    if (this.pendingCount > 0) {
+      return;
+    }
     this.path = settings?.ffmpegPath ?? null;
     this.notify();
   }
@@ -353,6 +361,36 @@ export class FfmpegPathController {
       this.lastNotifiedPath = this.path;
       this.onChange?.(this.getView());
     }
+  }
+
+  /**
+   * Starts the forced probe, then emits the path that a choose or a clear just saved.
+   *
+   * The emit comes after the call, not before it: the store's `startProbe` sets its status to
+   * `locating` before its first await, so the new path and `locating` reach the view together,
+   * and the view never shows the new path next to the check result for the old one.
+   */
+  private async startProbeAndShowPath(): Promise<void> {
+    const probe = this.startProbeFn(true);
+    this.notify();
+    await probe;
+  }
+
+  /**
+   * Ends a choose, a clear, or a check: releases the pending gate, reads the displayed path
+   * from the settings again, and emits.
+   *
+   * `syncFromSettings` changes nothing while the operation runs, so the settings are read here.
+   * They hold the saved document after a successful write, and the last confirmed document
+   * after a failed one, which the store rolls back to. A document that another writer
+   * published in the meantime also arrives here.
+   */
+  private finishOperation(): void {
+    this.pendingCount--;
+    if (this.pendingCount === 0) {
+      this.path = this.getSettingsFn()?.ffmpegPath ?? null;
+    }
+    this.notify();
   }
 }
 
