@@ -13,6 +13,9 @@ import {
 } from "@/features/settings/audioCodecs";
 import {
   MAX_PRESETS,
+  MAX_RESOLUTION_DIMENSION,
+  MIN_RESOLUTION_DIMENSION,
+  QUALITY_RANGES,
   validatePresetFields,
   type PresetFieldIssue,
   type PresetFieldName,
@@ -29,6 +32,12 @@ import type {
   QualityKind,
 } from "@/features/settings/types";
 import { isPresetContainer } from "@/features/settings/validation";
+import {
+  FRAME_RATE_CHOICES,
+  OUTPUT_CUSTOM_VALUE,
+  OUTPUT_SOURCE_VALUE,
+  RESOLUTION_CHOICES,
+} from "@/features/settings/videoOutputChoices";
 import type { Rational, Resolution } from "@/types/project";
 import {
   buildEncoderOptions,
@@ -734,4 +743,123 @@ export function presentAudioChannelsSelect(): AudioChannelsSelectView {
       { value: "mono", labelKey: "settings.preset.audioChannelsMono" },
     ],
   };
+}
+
+/** View model for one entry in the resolution or the frame rate `<Select>`. */
+export type VideoOutputOptionView = {
+  value: string;
+  labelKey: string;
+  labelValues?: Record<string, string>;
+};
+
+/** View model for the resolution or the frame rate `<Select>`. */
+export type VideoOutputSelectView = {
+  options: VideoOutputOptionView[];
+};
+
+/**
+ * Builds the options for the frame rate `<Select>`: "Same as Source", each of the
+ * `FRAME_RATE_CHOICES`, and "Custom…" last.
+ *
+ * A choice shows its conventional name, such as 23.976 for 24000/1001, in the number format of
+ * the locale. The value of `PresetLibraryView.frameRateChoice` is always one of these values.
+ */
+export function presentFrameRateSelect(
+  formatter: Intl.NumberFormat,
+): VideoOutputSelectView {
+  return {
+    options: [
+      { value: OUTPUT_SOURCE_VALUE, labelKey: "settings.preset.sourceOption" },
+      ...FRAME_RATE_CHOICES.map((choice) => ({
+        value: choice.value,
+        labelKey: "settings.preset.frameRateValue",
+        labelValues: { value: formatter.format(choice.nominal) },
+      })),
+      { value: OUTPUT_CUSTOM_VALUE, labelKey: "settings.preset.customOption" },
+    ],
+  };
+}
+
+/**
+ * Builds the options for the resolution `<Select>`: "Same as Source", each of the
+ * `RESOLUTION_CHOICES`, and "Custom…" last.
+ *
+ * The width and the height are pixel counts, so they show as plain digits with no group
+ * separator. The value of `PresetLibraryView.resolutionChoice` is always one of these values.
+ */
+export function presentResolutionSelect(): VideoOutputSelectView {
+  return {
+    options: [
+      { value: OUTPUT_SOURCE_VALUE, labelKey: "settings.preset.sourceOption" },
+      ...RESOLUTION_CHOICES.map((choice) => ({
+        value: choice.value,
+        labelKey: "settings.preset.resolutionValue",
+        labelValues: { w: String(choice.size.w), h: String(choice.size.h) },
+      })),
+      { value: OUTPUT_CUSTOM_VALUE, labelKey: "settings.preset.customOption" },
+    ],
+  };
+}
+
+/**
+ * The native attributes and the unit of one number input in the preset editor.
+ *
+ * `min`, `max`, and `step` come from the limits of ADR 013. They set the range of the arrow
+ * keys and of the spin buttons. They do not replace `validatePresetFields`, because a user can
+ * still type any value.
+ */
+export type NumberInputView = {
+  min: number;
+  /** Absent when the only upper bound is the safe integer range. */
+  max?: number;
+  step: number;
+  /** The key of the unit inside the field, on the right. Absent when the value has no unit. */
+  unitKey?: string;
+};
+
+/** The quality value input: its number attributes and the one-line hint under it. */
+export type QualityValueInputView = NumberInputView & {
+  hintKey: string;
+};
+
+/**
+ * Presents the quality value input for a quality kind. The range is `QUALITY_RANGES` for the
+ * kind. Only `bitrate` has a unit, because it counts kilobits per second.
+ */
+export function presentQualityValueInput(kind: QualityKind): QualityValueInputView {
+  const { min, max } = QUALITY_RANGES[kind];
+  switch (kind) {
+    case "crf":
+      return { min, max, step: 1, hintKey: "settings.preset.qualityHintCrf" };
+    case "bitrate":
+      return {
+        min,
+        max,
+        step: 1,
+        unitKey: "settings.preset.unitKbps",
+        hintKey: "settings.preset.qualityHintBitrate",
+      };
+    case "qualityScale":
+      return { min, max, step: 1, hintKey: "settings.preset.qualityHintQualityScale" };
+  }
+}
+
+/** Presents the custom width input and the custom height input. */
+export function presentResolutionInput(): NumberInputView {
+  return {
+    min: MIN_RESOLUTION_DIMENSION,
+    max: MAX_RESOLUTION_DIMENSION,
+    step: 1,
+    unitKey: "settings.preset.unitPixels",
+  };
+}
+
+/**
+ * Presents the custom numerator input and the custom denominator input.
+ *
+ * `validatePresetFields` refuses a term below 1 (`positive`) and a term outside the safe
+ * integer range (`notInteger`). The first rule gives `min`. The second gives no useful `max`.
+ */
+export function presentFrameRateTermInput(): NumberInputView {
+  return { min: 1, step: 1 };
 }

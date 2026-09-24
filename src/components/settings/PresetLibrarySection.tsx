@@ -5,6 +5,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
+  type ReactNode,
   type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
@@ -34,6 +36,7 @@ import {
   type PresetContainer,
   type QualityKind,
 } from "@/features/settings/types";
+import { OUTPUT_CUSTOM_VALUE } from "@/features/settings/videoOutputChoices";
 import { getResolvedLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
 import {
@@ -74,17 +77,125 @@ import {
   presentDuplicatePresetAction,
   presentEncoderSelect,
   presentFrameRateInvalid,
+  presentFrameRateSelect,
+  presentFrameRateTermInput,
   presentNumericField,
   presentPresetEncoderMark,
   presentQualityKind,
+  presentQualityValueInput,
+  presentResolutionInput,
   presentResolutionInvalid,
+  presentResolutionSelect,
   presentSaveBlockedSummary,
   type MessageView,
+  type NumberInputView,
 } from "./presetPresenter";
 
 /**
+ * One group of the preset editor: a fieldset that its legend names, around a two-column form.
+ * Each row is a label in the first column and its control in the second. A message or a hint
+ * under a control starts in the second column (`col-start-2`), so it stays under the control.
+ *
+ * The grid is a child of the fieldset, not the fieldset itself. The rendered legend of a
+ * fieldset is never a grid item, and older web views do not lay out a fieldset as a grid.
+ *
+ * Two rules keep a long value inside the editor, such as a stored custom encoder name of 64
+ * characters:
+ * - The control column is `minmax(0,1fr)`, not `1fr`. A `1fr` track has the minimum `auto`, so
+ *   it never becomes narrower than its widest control, and a long Select label then pushes the
+ *   column past the editor border.
+ * - The fieldset has `min-w-0`. By default a fieldset is never narrower than its `min-content`
+ *   width. This rule limits the fieldset only. The column rule above limits the grid inside it.
+ *
+ * The legend has the style of the section headings of the settings dialog, so it reads as the
+ * heading of its group and not as one more row label.
+ */
+function FormGroup({ legend, children }: { legend: string; children: ReactNode }) {
+  return (
+    <fieldset className="min-w-0">
+      <legend className="font-heading text-sm font-medium text-foreground">
+        {legend}
+      </legend>
+      <div className="mt-2 grid grid-cols-[7.5rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2">
+        {children}
+      </div>
+    </fieldset>
+  );
+}
+
+/** The label of one form row. It is right-aligned against its control, as in a macOS form. */
+function FieldLabel({ htmlFor, children }: { htmlFor: string; children: ReactNode }) {
+  return (
+    <label
+      htmlFor={htmlFor}
+      className="text-right text-xs font-medium text-muted-foreground"
+    >
+      {children}
+    </label>
+  );
+}
+
+/**
+ * The label of one encoder option. An encoder name is free text of up to 64 characters, so the
+ * label must shorten with an ellipsis when the trigger is too narrow.
+ *
+ * Radix shows the children of the selected item inside the trigger's value span, and the
+ * trigger makes that span a flex container. This span is then a flex item, which is a block,
+ * so `truncate` can clip it and add the ellipsis.
+ *
+ * In the open list the span is a flex item too, because `SelectItem` makes the text span of
+ * each item a flex container. The list shows the full label only because it grows to the width
+ * of its widest item, and the minimum window width of 1024 px leaves room for that. In a window
+ * too narrow for the list, the label in the list gets an ellipsis as well.
+ */
+function EncoderOptionLabel({ children }: { children: ReactNode }) {
+  return <span className="truncate">{children}</span>;
+}
+
+/**
+ * A number input with the `min`, `max`, and `step` of `field`, and an optional unit inside
+ * the field on the right. The unit carries `unitId`, so the input can name it in
+ * `aria-describedby`. The right padding keeps the typed value and the spin buttons clear of
+ * the unit.
+ */
+function NumberInput({
+  field,
+  unit,
+  unitId,
+  className,
+  ...props
+}: {
+  field: NumberInputView;
+  unit?: string;
+  unitId?: string;
+} & Omit<ComponentProps<typeof Input>, "type" | "min" | "max" | "step">) {
+  return (
+    <div className="relative min-w-0">
+      <Input
+        {...props}
+        type="number"
+        min={field.min}
+        max={field.max}
+        step={field.step}
+        className={cn(unit !== undefined && "pr-12", className)}
+      />
+      {unit !== undefined ? (
+        <span
+          id={unitId}
+          className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2.5 text-xs text-muted-foreground"
+        >
+          {unit}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * The validation messages under one field. `id` is the target of the field's
- * `aria-describedby`. Renders nothing when the field has no message.
+ * `aria-describedby`. Renders nothing when the field has no message. It sits in the control
+ * column of the `FormGroup` grid. A message can hold a custom encoder name with no space in
+ * it, so a long word breaks instead of running past the column.
  */
 function FieldError({
   id,
@@ -99,7 +210,10 @@ function FieldError({
     return null;
   }
   return (
-    <div id={id} className="space-y-0.5 text-xs text-destructive-text">
+    <div
+      id={id}
+      className="col-start-2 min-w-0 space-y-0.5 text-xs wrap-break-word text-destructive-text"
+    >
       {messages.map((message, index) => (
         <p key={index}>{translate(message.key, message.values)}</p>
       ))}
@@ -160,6 +274,14 @@ function PresetEditor({
     numberFormatter,
   );
   const channelsSelect = presentAudioChannelsSelect();
+  const resolutionSelect = presentResolutionSelect();
+  const frameRateSelect = presentFrameRateSelect(numberFormatter);
+  const qualityInput = presentQualityValueInput(draft.quality.kind);
+  const resolutionInput = presentResolutionInput();
+  const frameRateTermInput = presentFrameRateTermInput();
+  const pixelUnit = resolutionInput.unitKey
+    ? translate(resolutionInput.unitKey)
+    : undefined;
 
   const issueGroups = groupIssuesByField(view.issues);
   const resolutionInvalid = presentResolutionInvalid(draft, view.issues);
@@ -213,10 +335,14 @@ function PresetEditor({
     audioChannels: `${idBase}-audio-channels`,
     qualityKind: `${idBase}-quality-kind`,
     qualityValue: `${idBase}-quality-value`,
+    qualityValueUnit: `${idBase}-quality-value-unit`,
+    qualityHint: `${idBase}-quality-hint`,
     qualityError: `${idBase}-quality-error`,
     resolution: `${idBase}-resolution`,
     resolutionW: `${idBase}-resolution-w`,
+    resolutionWUnit: `${idBase}-resolution-w-unit`,
     resolutionH: `${idBase}-resolution-h`,
+    resolutionHUnit: `${idBase}-resolution-h-unit`,
     resolutionError: `${idBase}-resolution-error`,
     frameRate: `${idBase}-frame-rate`,
     frameRateN: `${idBase}-frame-rate-n`,
@@ -243,11 +369,9 @@ function PresetEditor({
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-muted/20 p-3">
-      {/* Preset Name */}
-      <div className="space-y-1">
-        <label htmlFor={ids.name} className="text-xs font-medium text-muted-foreground">
-          {t("settings.preset.nameLabel")}
-        </label>
+      <FormGroup legend={t("settings.preset.groupGeneral")}>
+        {/* Preset Name */}
+        <FieldLabel htmlFor={ids.name}>{t("settings.preset.nameLabel")}</FieldLabel>
         <Input
           ref={nameInputRef}
           id={ids.name}
@@ -261,16 +385,11 @@ function PresetEditor({
           messages={issueGroups.name}
           translate={translate}
         />
-      </div>
 
-      {/* Container */}
-      <div className="space-y-1">
-        <label
-          htmlFor={ids.container}
-          className="text-xs font-medium text-muted-foreground"
-        >
+        {/* Container */}
+        <FieldLabel htmlFor={ids.container}>
           {t("settings.preset.containerLabel")}
-        </label>
+        </FieldLabel>
         <Select
           value={draft.container}
           onValueChange={(val) => controller.setContainer(val as PresetContainer)}
@@ -279,7 +398,7 @@ function PresetEditor({
             id={ids.container}
             aria-invalid={containerInvalid}
             aria-describedby={joinDescribedBy(containerInvalid && ids.containerError)}
-            className="w-full"
+            className="w-full min-w-0"
           >
             <SelectValue />
           </SelectTrigger>
@@ -296,16 +415,13 @@ function PresetEditor({
           messages={issueGroups.container}
           translate={translate}
         />
-      </div>
+      </FormGroup>
 
-      {/* Video Encoder */}
-      <div className="space-y-1">
-        <label
-          htmlFor={ids.videoEncoder}
-          className="text-xs font-medium text-muted-foreground"
-        >
+      <FormGroup legend={t("settings.preset.groupVideo")}>
+        {/* Video Encoder */}
+        <FieldLabel htmlFor={ids.videoEncoder}>
           {t("settings.preset.videoEncoderLabel")}
-        </label>
+        </FieldLabel>
         <Select
           value={view.videoEncoderIsCustom ? CUSTOM_ENCODER_VALUE : draft.videoEncoder}
           onValueChange={(val) => controller.chooseEncoder("video", val)}
@@ -317,14 +433,16 @@ function PresetEditor({
               videoListInvalid && ids.videoEncoderError,
               videoSelect.currentReasonKey !== undefined && ids.videoEncoderReason,
             )}
-            className="w-full"
+            className="w-full min-w-0"
           >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             {videoSelect.options.map((option) => (
               <SelectItem key={option.value} value={option.value}>
-                {translate(option.labelKey, option.labelValues)}
+                <EncoderOptionLabel>
+                  {translate(option.labelKey, option.labelValues)}
+                </EncoderOptionLabel>
               </SelectItem>
             ))}
           </SelectContent>
@@ -340,7 +458,7 @@ function PresetEditor({
           <p
             id={ids.videoEncoderReason}
             className={cn(
-              "text-xs",
+              "col-start-2 text-xs",
               videoSelect.currentReasonTone === "warning"
                 ? "text-warning-text"
                 : "text-muted-foreground",
@@ -350,13 +468,10 @@ function PresetEditor({
           </p>
         ) : null}
         {view.videoEncoderIsCustom ? (
-          <div className="space-y-1 pt-1">
-            <label
-              htmlFor={ids.videoEncoderCustom}
-              className="text-xs font-medium text-muted-foreground"
-            >
+          <>
+            <FieldLabel htmlFor={ids.videoEncoderCustom}>
               {t("settings.encoder.customLabel")}
-            </label>
+            </FieldLabel>
             <Input
               id={ids.videoEncoderCustom}
               aria-invalid={videoCustomInvalid}
@@ -376,22 +491,188 @@ function PresetEditor({
             ) : null}
             <p
               id={ids.videoEncoderCustomHint}
-              className="text-xs text-muted-foreground"
+              className="col-start-2 text-xs text-muted-foreground"
             >
               {t("settings.encoder.customHint")}
             </p>
-          </div>
+          </>
         ) : null}
-      </div>
 
-      {/* Audio Encoder */}
-      <div className="space-y-1">
-        <label
-          htmlFor={ids.audioEncoder}
-          className="text-xs font-medium text-muted-foreground"
+        {/* Quality Kind and Value */}
+        <FieldLabel htmlFor={ids.qualityKind}>
+          {t("settings.preset.qualityKindLabel")}
+        </FieldLabel>
+        <Select
+          value={draft.quality.kind}
+          onValueChange={(val) => controller.setQualityKind(val as QualityKind)}
         >
+          <SelectTrigger id={ids.qualityKind} className="w-full min-w-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {QUALITY_KINDS.map((kind) => (
+              <SelectItem key={kind} value={kind}>
+                {translate(presentQualityKind(kind))}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <FieldLabel htmlFor={ids.qualityValue}>
+          {t("settings.preset.qualityValueLabel")}
+        </FieldLabel>
+        <NumberInput
+          id={ids.qualityValue}
+          field={qualityInput}
+          unit={qualityInput.unitKey ? translate(qualityInput.unitKey) : undefined}
+          unitId={ids.qualityValueUnit}
+          aria-invalid={qualityInvalid}
+          aria-describedby={joinDescribedBy(
+            qualityInvalid && ids.qualityError,
+            qualityInput.unitKey !== undefined && ids.qualityValueUnit,
+            ids.qualityHint,
+          )}
+          value={presentNumericField(draft.quality.value)}
+          onChange={(e) => controller.updateQualityValue(e.target.value)}
+        />
+        <FieldError
+          id={ids.qualityError}
+          messages={issueGroups.quality}
+          translate={translate}
+        />
+        <p id={ids.qualityHint} className="col-start-2 text-xs text-muted-foreground">
+          {translate(qualityInput.hintKey)}
+        </p>
+
+        {/* Resolution */}
+        <FieldLabel htmlFor={ids.resolution}>
+          {t("settings.preset.resolutionLabel")}
+        </FieldLabel>
+        <Select
+          value={view.resolutionChoice}
+          onValueChange={(val) => controller.chooseResolution(val)}
+        >
+          <SelectTrigger id={ids.resolution} className="w-full min-w-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {resolutionSelect.options.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {translate(option.labelKey, option.labelValues)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {view.resolutionChoice === OUTPUT_CUSTOM_VALUE &&
+        draft.resolution !== "source" ? (
+          <>
+            <FieldLabel htmlFor={ids.resolutionW}>
+              {t("settings.preset.widthLabel")}
+            </FieldLabel>
+            <NumberInput
+              id={ids.resolutionW}
+              field={resolutionInput}
+              unit={pixelUnit}
+              unitId={ids.resolutionWUnit}
+              aria-invalid={resolutionInvalid.w}
+              aria-describedby={joinDescribedBy(
+                resolutionInvalid.w && ids.resolutionError,
+                ids.resolutionWUnit,
+              )}
+              value={presentNumericField(draft.resolution.w)}
+              onChange={(e) => controller.updateResolutionField("w", e.target.value)}
+            />
+            <FieldLabel htmlFor={ids.resolutionH}>
+              {t("settings.preset.heightLabel")}
+            </FieldLabel>
+            <NumberInput
+              id={ids.resolutionH}
+              field={resolutionInput}
+              unit={pixelUnit}
+              unitId={ids.resolutionHUnit}
+              aria-invalid={resolutionInvalid.h}
+              aria-describedby={joinDescribedBy(
+                resolutionInvalid.h && ids.resolutionError,
+                ids.resolutionHUnit,
+              )}
+              value={presentNumericField(draft.resolution.h)}
+              onChange={(e) => controller.updateResolutionField("h", e.target.value)}
+            />
+            {/* One message for the pair: `validatePresetFields` reports the width and the
+                height as one field. Only the input with the bad value is marked. */}
+            <FieldError
+              id={ids.resolutionError}
+              messages={issueGroups.resolution}
+              translate={translate}
+            />
+          </>
+        ) : null}
+
+        {/* Frame Rate */}
+        <FieldLabel htmlFor={ids.frameRate}>
+          {t("settings.preset.frameRateLabel")}
+        </FieldLabel>
+        <Select
+          value={view.frameRateChoice}
+          onValueChange={(val) => controller.chooseFrameRate(val)}
+        >
+          <SelectTrigger id={ids.frameRate} className="w-full min-w-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {frameRateSelect.options.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {translate(option.labelKey, option.labelValues)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {view.frameRateChoice === OUTPUT_CUSTOM_VALUE &&
+        draft.frameRate !== "source" ? (
+          <>
+            <FieldLabel htmlFor={ids.frameRateN}>
+              {t("settings.preset.frameRateNumeratorLabel")}
+            </FieldLabel>
+            <NumberInput
+              id={ids.frameRateN}
+              field={frameRateTermInput}
+              aria-invalid={frameRateInvalid.n}
+              aria-describedby={joinDescribedBy(
+                frameRateInvalid.n && ids.frameRateError,
+              )}
+              value={presentNumericField(draft.frameRate.n)}
+              onChange={(e) => controller.updateFrameRateField("n", e.target.value)}
+            />
+            <FieldLabel htmlFor={ids.frameRateD}>
+              {t("settings.preset.frameRateDenominatorLabel")}
+            </FieldLabel>
+            <NumberInput
+              id={ids.frameRateD}
+              field={frameRateTermInput}
+              aria-invalid={frameRateInvalid.d}
+              aria-describedby={joinDescribedBy(
+                frameRateInvalid.d && ids.frameRateError,
+              )}
+              value={presentNumericField(draft.frameRate.d)}
+              onChange={(e) => controller.updateFrameRateField("d", e.target.value)}
+            />
+            {/* One message for the pair, as for the resolution above. */}
+            <FieldError
+              id={ids.frameRateError}
+              messages={issueGroups.frameRate}
+              translate={translate}
+            />
+          </>
+        ) : null}
+      </FormGroup>
+
+      <FormGroup legend={t("settings.preset.groupAudio")}>
+        {/* Audio Encoder */}
+        <FieldLabel htmlFor={ids.audioEncoder}>
           {t("settings.preset.audioEncoderLabel")}
-        </label>
+        </FieldLabel>
         <Select
           value={view.audioEncoderIsCustom ? CUSTOM_ENCODER_VALUE : draft.audioEncoder}
           onValueChange={(val) => controller.chooseEncoder("audio", val)}
@@ -403,14 +684,16 @@ function PresetEditor({
               audioListInvalid && ids.audioEncoderError,
               audioSelect.currentReasonKey !== undefined && ids.audioEncoderReason,
             )}
-            className="w-full"
+            className="w-full min-w-0"
           >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             {audioSelect.options.map((option) => (
               <SelectItem key={option.value} value={option.value}>
-                {translate(option.labelKey, option.labelValues)}
+                <EncoderOptionLabel>
+                  {translate(option.labelKey, option.labelValues)}
+                </EncoderOptionLabel>
               </SelectItem>
             ))}
           </SelectContent>
@@ -426,7 +709,7 @@ function PresetEditor({
           <p
             id={ids.audioEncoderReason}
             className={cn(
-              "text-xs",
+              "col-start-2 text-xs",
               audioSelect.currentReasonTone === "warning"
                 ? "text-warning-text"
                 : "text-muted-foreground",
@@ -436,13 +719,10 @@ function PresetEditor({
           </p>
         ) : null}
         {view.audioEncoderIsCustom ? (
-          <div className="space-y-1 pt-1">
-            <label
-              htmlFor={ids.audioEncoderCustom}
-              className="text-xs font-medium text-muted-foreground"
-            >
+          <>
+            <FieldLabel htmlFor={ids.audioEncoderCustom}>
               {t("settings.encoder.customLabel")}
-            </label>
+            </FieldLabel>
             <Input
               id={ids.audioEncoderCustom}
               aria-invalid={audioCustomInvalid}
@@ -462,341 +742,113 @@ function PresetEditor({
             ) : null}
             <p
               id={ids.audioEncoderCustomHint}
-              className="text-xs text-muted-foreground"
+              className="col-start-2 text-xs text-muted-foreground"
             >
               {t("settings.encoder.customHint")}
             </p>
-          </div>
+          </>
         ) : null}
-      </div>
 
-      {/* Audio Bitrate, Sample Rate, Channels */}
-      <div className="space-y-1">
-        <div className="grid grid-cols-3 gap-2">
-          {/* Audio Bitrate */}
-          <div className="space-y-1">
-            <label
-              htmlFor={ids.audioBitrate}
-              className="text-xs font-medium text-muted-foreground"
-            >
-              {t("settings.preset.audioBitrateLabel")}
-            </label>
-            <Select
-              disabled={bitrateSelect.disabled}
-              value={presentAudioBitrateValue(draft.audioBitrate)}
-              onValueChange={(val) =>
-                controller.setAudioBitrate(parseAudioBitrateValue(val))
-              }
-            >
-              <SelectTrigger
-                id={ids.audioBitrate}
-                aria-invalid={audioBitrateInvalid}
-                aria-describedby={joinDescribedBy(
-                  audioBitrateInvalid && ids.audioBitrateError,
-                  bitrateSelect.hintKey !== undefined && ids.audioBitrateHint,
-                )}
-                className="w-full"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {bitrateSelect.options.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {translate(option.labelKey, option.labelValues)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <FieldError
-              id={ids.audioBitrateError}
-              messages={issueGroups.audioBitrate}
-              translate={translate}
-            />
-          </div>
-
-          {/* Audio Sample Rate */}
-          <div className="space-y-1">
-            <label
-              htmlFor={ids.audioSampleRate}
-              className="text-xs font-medium text-muted-foreground"
-            >
-              {t("settings.preset.audioSampleRateLabel")}
-            </label>
-            <Select
-              value={presentAudioSampleRateValue(draft.audioSampleRate)}
-              onValueChange={(val) =>
-                controller.setAudioSampleRate(parseAudioSampleRateValue(val))
-              }
-            >
-              <SelectTrigger
-                id={ids.audioSampleRate}
-                aria-invalid={audioSampleRateInvalid}
-                aria-describedby={joinDescribedBy(
-                  audioSampleRateInvalid && ids.audioSampleRateError,
-                )}
-                className="w-full"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {sampleRateSelect.options.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {translate(option.labelKey, option.labelValues)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <FieldError
-              id={ids.audioSampleRateError}
-              messages={issueGroups.audioSampleRate}
-              translate={translate}
-            />
-          </div>
-
-          {/* Audio Channels */}
-          <div className="space-y-1">
-            <label
-              htmlFor={ids.audioChannels}
-              className="text-xs font-medium text-muted-foreground"
-            >
-              {t("settings.preset.audioChannelsLabel")}
-            </label>
-            <Select
-              value={draft.audioChannels}
-              onValueChange={(val) =>
-                controller.setAudioChannels(val as PresetAudioChannels)
-              }
-            >
-              <SelectTrigger id={ids.audioChannels} className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {channelsSelect.options.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {translate(option.labelKey)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
+        {/* Audio Bitrate */}
+        <FieldLabel htmlFor={ids.audioBitrate}>
+          {t("settings.preset.audioBitrateLabel")}
+        </FieldLabel>
+        <Select
+          disabled={bitrateSelect.disabled}
+          value={presentAudioBitrateValue(draft.audioBitrate)}
+          onValueChange={(val) =>
+            controller.setAudioBitrate(parseAudioBitrateValue(val))
+          }
+        >
+          <SelectTrigger
+            id={ids.audioBitrate}
+            aria-invalid={audioBitrateInvalid}
+            aria-describedby={joinDescribedBy(
+              audioBitrateInvalid && ids.audioBitrateError,
+              bitrateSelect.hintKey !== undefined && ids.audioBitrateHint,
+            )}
+            className="w-full min-w-0"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {bitrateSelect.options.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {translate(option.labelKey, option.labelValues)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <FieldError
+          id={ids.audioBitrateError}
+          messages={issueGroups.audioBitrate}
+          translate={translate}
+        />
         {bitrateSelect.hintKey ? (
-          <p id={ids.audioBitrateHint} className="text-xs text-muted-foreground">
+          <p
+            id={ids.audioBitrateHint}
+            className="col-start-2 text-xs text-muted-foreground"
+          >
             {translate(bitrateSelect.hintKey)}
           </p>
         ) : null}
-      </div>
 
-      {/* Quality Kind and Value */}
-      <div className="grid grid-cols-2 gap-2">
-        <div className="space-y-1">
-          <label
-            htmlFor={ids.qualityKind}
-            className="text-xs font-medium text-muted-foreground"
+        {/* Audio Sample Rate */}
+        <FieldLabel htmlFor={ids.audioSampleRate}>
+          {t("settings.preset.audioSampleRateLabel")}
+        </FieldLabel>
+        <Select
+          value={presentAudioSampleRateValue(draft.audioSampleRate)}
+          onValueChange={(val) =>
+            controller.setAudioSampleRate(parseAudioSampleRateValue(val))
+          }
+        >
+          <SelectTrigger
+            id={ids.audioSampleRate}
+            aria-invalid={audioSampleRateInvalid}
+            aria-describedby={joinDescribedBy(
+              audioSampleRateInvalid && ids.audioSampleRateError,
+            )}
+            className="w-full min-w-0"
           >
-            {t("settings.preset.qualityKindLabel")}
-          </label>
-          <Select
-            value={draft.quality.kind}
-            onValueChange={(val) => controller.setQualityKind(val as QualityKind)}
-          >
-            <SelectTrigger id={ids.qualityKind} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {QUALITY_KINDS.map((kind) => (
-                <SelectItem key={kind} value={kind}>
-                  {translate(presentQualityKind(kind))}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1">
-          <label
-            htmlFor={ids.qualityValue}
-            className="text-xs font-medium text-muted-foreground"
-          >
-            {t("settings.preset.qualityValueLabel")}
-          </label>
-          <Input
-            id={ids.qualityValue}
-            type="number"
-            aria-invalid={qualityInvalid}
-            aria-describedby={joinDescribedBy(qualityInvalid && ids.qualityError)}
-            value={presentNumericField(draft.quality.value)}
-            onChange={(e) => controller.updateQualityValue(e.target.value)}
-          />
-          <FieldError
-            id={ids.qualityError}
-            messages={issueGroups.quality}
-            translate={translate}
-          />
-        </div>
-      </div>
-
-      {/* Resolution */}
-      <div className="space-y-2">
-        <div className="space-y-1">
-          <label
-            htmlFor={ids.resolution}
-            className="text-xs font-medium text-muted-foreground"
-          >
-            {t("settings.preset.resolutionLabel")}
-          </label>
-          <Select
-            value={view.resolutionMode}
-            onValueChange={(val) =>
-              controller.setResolutionMode(val as "source" | "custom")
-            }
-          >
-            <SelectTrigger id={ids.resolution} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="source">
-                {t("settings.preset.sourceOption")}
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {sampleRateSelect.options.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {translate(option.labelKey, option.labelValues)}
               </SelectItem>
-              <SelectItem value="custom">
-                {t("settings.preset.customOption")}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+            ))}
+          </SelectContent>
+        </Select>
+        <FieldError
+          id={ids.audioSampleRateError}
+          messages={issueGroups.audioSampleRate}
+          translate={translate}
+        />
 
-        {view.resolutionMode === "custom" && draft.resolution !== "source" ? (
-          <div className="space-y-1">
-            <div className="grid grid-cols-2 gap-2">
-              <div className="space-y-1">
-                <label
-                  htmlFor={ids.resolutionW}
-                  className="text-xs font-medium text-muted-foreground"
-                >
-                  {t("settings.preset.widthLabel")}
-                </label>
-                <Input
-                  id={ids.resolutionW}
-                  type="number"
-                  aria-invalid={resolutionInvalid.w}
-                  aria-describedby={joinDescribedBy(
-                    resolutionInvalid.w && ids.resolutionError,
-                  )}
-                  value={presentNumericField(draft.resolution.w)}
-                  onChange={(e) =>
-                    controller.updateResolutionField("w", e.target.value)
-                  }
-                />
-              </div>
-              <div className="space-y-1">
-                <label
-                  htmlFor={ids.resolutionH}
-                  className="text-xs font-medium text-muted-foreground"
-                >
-                  {t("settings.preset.heightLabel")}
-                </label>
-                <Input
-                  id={ids.resolutionH}
-                  type="number"
-                  aria-invalid={resolutionInvalid.h}
-                  aria-describedby={joinDescribedBy(
-                    resolutionInvalid.h && ids.resolutionError,
-                  )}
-                  value={presentNumericField(draft.resolution.h)}
-                  onChange={(e) =>
-                    controller.updateResolutionField("h", e.target.value)
-                  }
-                />
-              </div>
-            </div>
-            {/* One message for the pair: `validatePresetFields` reports the width and the
-                height as one field. Only the input with the bad value is marked. */}
-            <FieldError
-              id={ids.resolutionError}
-              messages={issueGroups.resolution}
-              translate={translate}
-            />
-          </div>
-        ) : null}
-      </div>
-
-      {/* Frame Rate */}
-      <div className="space-y-2">
-        <div className="space-y-1">
-          <label
-            htmlFor={ids.frameRate}
-            className="text-xs font-medium text-muted-foreground"
-          >
-            {t("settings.preset.frameRateLabel")}
-          </label>
-          <Select
-            value={view.frameRateMode}
-            onValueChange={(val) =>
-              controller.setFrameRateMode(val as "source" | "custom")
-            }
-          >
-            <SelectTrigger id={ids.frameRate} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="source">
-                {t("settings.preset.sourceOption")}
+        {/* Audio Channels */}
+        <FieldLabel htmlFor={ids.audioChannels}>
+          {t("settings.preset.audioChannelsLabel")}
+        </FieldLabel>
+        <Select
+          value={draft.audioChannels}
+          onValueChange={(val) =>
+            controller.setAudioChannels(val as PresetAudioChannels)
+          }
+        >
+          <SelectTrigger id={ids.audioChannels} className="w-full min-w-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {channelsSelect.options.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {translate(option.labelKey)}
               </SelectItem>
-              <SelectItem value="custom">
-                {t("settings.preset.customOption")}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        {view.frameRateMode === "custom" && draft.frameRate !== "source" ? (
-          <div className="space-y-1">
-            <div className="grid grid-cols-2 gap-2">
-              <div className="space-y-1">
-                <label
-                  htmlFor={ids.frameRateN}
-                  className="text-xs font-medium text-muted-foreground"
-                >
-                  {t("settings.preset.frameRateNumeratorLabel")}
-                </label>
-                <Input
-                  id={ids.frameRateN}
-                  type="number"
-                  aria-invalid={frameRateInvalid.n}
-                  aria-describedby={joinDescribedBy(
-                    frameRateInvalid.n && ids.frameRateError,
-                  )}
-                  value={presentNumericField(draft.frameRate.n)}
-                  onChange={(e) => controller.updateFrameRateField("n", e.target.value)}
-                />
-              </div>
-              <div className="space-y-1">
-                <label
-                  htmlFor={ids.frameRateD}
-                  className="text-xs font-medium text-muted-foreground"
-                >
-                  {t("settings.preset.frameRateDenominatorLabel")}
-                </label>
-                <Input
-                  id={ids.frameRateD}
-                  type="number"
-                  aria-invalid={frameRateInvalid.d}
-                  aria-describedby={joinDescribedBy(
-                    frameRateInvalid.d && ids.frameRateError,
-                  )}
-                  value={presentNumericField(draft.frameRate.d)}
-                  onChange={(e) => controller.updateFrameRateField("d", e.target.value)}
-                />
-              </div>
-            </div>
-            {/* One message for the pair, as for the resolution above. */}
-            <FieldError
-              id={ids.frameRateError}
-              messages={issueGroups.frameRate}
-              translate={translate}
-            />
-          </div>
-        ) : null}
-      </div>
+            ))}
+          </SelectContent>
+        </Select>
+      </FormGroup>
 
       {/* An issue that names no field of this editor. Each other issue shows at its field. */}
       {issueGroups.other.length > 0 ? (

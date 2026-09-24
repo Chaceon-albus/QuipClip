@@ -17,6 +17,10 @@ import {
 } from "@/features/settings/presetNaming";
 import type { Preset, Settings } from "@/features/settings/types";
 import {
+  OUTPUT_CUSTOM_VALUE,
+  OUTPUT_SOURCE_VALUE,
+} from "@/features/settings/videoOutputChoices";
+import {
   CUSTOM_ENCODER_VALUE,
   createPresetLibraryController,
   PresetLibraryController,
@@ -1464,7 +1468,7 @@ describe("PresetLibraryController", () => {
     });
   });
 
-  describe("resolutionMode and frameRateMode", () => {
+  describe("resolutionChoice and frameRateChoice", () => {
     it("report 'source' when the draft holds the literal string 'source'", () => {
       const settings = createSettings({
         presets: [createPreset("p1", { resolution: "source", frameRate: "source" })],
@@ -1477,16 +1481,16 @@ describe("PresetLibraryController", () => {
       controller.select("p1");
 
       const view = controller.getView();
-      expect(view.resolutionMode).toBe("source");
-      expect(view.frameRateMode).toBe("source");
+      expect(view.resolutionChoice).toBe(OUTPUT_SOURCE_VALUE);
+      expect(view.frameRateChoice).toBe(OUTPUT_SOURCE_VALUE);
     });
 
-    it("report 'custom' when the draft holds an explicit resolution or frame rate", () => {
+    it("select the matching choice when the stored values match one", () => {
       const settings = createSettings({
         presets: [
           createPreset("p1", {
             resolution: { w: 1280, h: 720 },
-            frameRate: { n: 24, d: 1 },
+            frameRate: { n: 30000, d: 1001 },
           }),
         ],
       });
@@ -1498,8 +1502,46 @@ describe("PresetLibraryController", () => {
       controller.select("p1");
 
       const view = controller.getView();
-      expect(view.resolutionMode).toBe("custom");
-      expect(view.frameRateMode).toBe("custom");
+      expect(view.resolutionChoice).toBe("1280x720");
+      expect(view.frameRateChoice).toBe("30000/1001");
+    });
+
+    it("select the choice that equals a stored rate as a fraction", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { frameRate: { n: 48, d: 2 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+
+      expect(controller.getView().frameRateChoice).toBe("24/1");
+      // The match changes only the display. The stored terms stay as they were.
+      expect(controller.getView().draft?.frameRate).toEqual({ n: 48, d: 2 });
+      expect(controller.getView().dirty).toBe(false);
+    });
+
+    it("report 'custom' when the stored values match no choice", () => {
+      const settings = createSettings({
+        presets: [
+          createPreset("p1", {
+            resolution: { w: 1080, h: 1920 },
+            frameRate: { n: 15, d: 1 },
+          }),
+        ],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+
+      const view = controller.getView();
+      expect(view.resolutionChoice).toBe(OUTPUT_CUSTOM_VALUE);
+      expect(view.frameRateChoice).toBe(OUTPUT_CUSTOM_VALUE);
     });
 
     it("default to 'source' when there is no draft", () => {
@@ -1509,8 +1551,66 @@ describe("PresetLibraryController", () => {
       });
 
       const view = controller.getView();
-      expect(view.resolutionMode).toBe("source");
-      expect(view.frameRateMode).toBe("source");
+      expect(view.resolutionChoice).toBe(OUTPUT_SOURCE_VALUE);
+      expect(view.frameRateChoice).toBe(OUTPUT_SOURCE_VALUE);
+    });
+
+    it("stay on 'custom' while the user types a value that matches a choice", () => {
+      const settings = createSettings({
+        presets: [
+          createPreset("p1", {
+            resolution: { w: 1280, h: 721 },
+            frameRate: { n: 31, d: 1 },
+          }),
+        ],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.updateResolutionField("h", "720");
+      controller.updateFrameRateField("n", "30");
+
+      const view = controller.getView();
+      expect(view.draft?.resolution).toEqual({ w: 1280, h: 720 });
+      expect(view.draft?.frameRate).toEqual({ n: 30, d: 1 });
+      expect(view.resolutionChoice).toBe(OUTPUT_CUSTOM_VALUE);
+      expect(view.frameRateChoice).toBe(OUTPUT_CUSTOM_VALUE);
+    });
+
+    it("select the matching choice again when a draft loads", () => {
+      const settings = createSettings({
+        presets: [
+          createPreset("p1", {
+            resolution: { w: 1280, h: 720 },
+            frameRate: { n: 24, d: 1 },
+          }),
+          createPreset("p2"),
+        ],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseResolution(OUTPUT_CUSTOM_VALUE);
+      controller.chooseFrameRate(OUTPUT_CUSTOM_VALUE);
+      expect(controller.getView().resolutionChoice).toBe(OUTPUT_CUSTOM_VALUE);
+      expect(controller.getView().frameRateChoice).toBe(OUTPUT_CUSTOM_VALUE);
+
+      controller.cancelDraft();
+      expect(controller.getView().resolutionChoice).toBe("1280x720");
+      expect(controller.getView().frameRateChoice).toBe("24/1");
+
+      controller.chooseResolution(OUTPUT_CUSTOM_VALUE);
+      controller.chooseFrameRate(OUTPUT_CUSTOM_VALUE);
+      controller.select("p2");
+      controller.select("p1");
+      expect(controller.getView().resolutionChoice).toBe("1280x720");
+      expect(controller.getView().frameRateChoice).toBe("24/1");
     });
   });
 
@@ -2087,8 +2187,8 @@ describe("PresetLibraryController", () => {
     });
   });
 
-  describe("setResolutionMode", () => {
-    it("switches to DEFAULT_CUSTOM_RESOLUTION", () => {
+  describe("chooseResolution", () => {
+    it("writes DEFAULT_CUSTOM_RESOLUTION for 'custom' over 'source'", () => {
       const settings = createSettings({
         presets: [createPreset("p1", { resolution: "source" })],
       });
@@ -2098,11 +2198,56 @@ describe("PresetLibraryController", () => {
       });
 
       controller.select("p1");
-      controller.setResolutionMode("custom");
+      controller.chooseResolution(OUTPUT_CUSTOM_VALUE);
 
       const view = controller.getView();
       expect(view.draft?.resolution).toEqual(DEFAULT_CUSTOM_RESOLUTION);
-      expect(view.resolutionMode).toBe("custom");
+      expect(view.draft?.resolution).not.toBe(DEFAULT_CUSTOM_RESOLUTION);
+      // DEFAULT_CUSTOM_RESOLUTION is also a choice, but the inputs stay open.
+      expect(view.resolutionChoice).toBe(OUTPUT_CUSTOM_VALUE);
+      expect(view.dirty).toBe(true);
+    });
+
+    it("keeps the stored size for 'custom' over a choice, so the inputs start from it", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { resolution: { w: 2560, h: 1440 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseResolution(OUTPUT_CUSTOM_VALUE);
+
+      const view = controller.getView();
+      expect(view.draft?.resolution).toEqual({ w: 2560, h: 1440 });
+      expect(view.resolutionChoice).toBe(OUTPUT_CUSTOM_VALUE);
+      expect(view.dirty).toBe(true);
+    });
+
+    it.each([
+      ["3840x2160", { w: 3840, h: 2160 }],
+      ["2560x1440", { w: 2560, h: 1440 }],
+      ["1920x1080", { w: 1920, h: 1080 }],
+      ["1280x720", { w: 1280, h: 720 }],
+    ])("writes the exact size of the choice %s and selects it", (value, size) => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { resolution: { w: 640, h: 360 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseResolution(OUTPUT_CUSTOM_VALUE);
+      controller.chooseResolution(value);
+
+      const view = controller.getView();
+      expect(view.draft?.resolution).toEqual(size);
+      expect(view.resolutionChoice).toBe(value);
+      expect(view.issues).toEqual([]);
       expect(view.dirty).toBe(true);
     });
 
@@ -2116,11 +2261,30 @@ describe("PresetLibraryController", () => {
       });
 
       controller.select("p1");
-      controller.setResolutionMode("source");
+      controller.chooseResolution(OUTPUT_CUSTOM_VALUE);
+      controller.chooseResolution(OUTPUT_SOURCE_VALUE);
 
       const view = controller.getView();
       expect(view.draft?.resolution).toBe("source");
-      expect(view.resolutionMode).toBe("source");
+      expect(view.resolutionChoice).toBe(OUTPUT_SOURCE_VALUE);
+    });
+
+    it("changes nothing for an unknown value", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { resolution: { w: 1280, h: 720 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseResolution("1024x768");
+
+      const view = controller.getView();
+      expect(view.draft?.resolution).toEqual({ w: 1280, h: 720 });
+      expect(view.resolutionChoice).toBe("1280x720");
+      expect(view.dirty).toBe(false);
     });
 
     it("is a no-op when there is no draft", () => {
@@ -2129,10 +2293,12 @@ describe("PresetLibraryController", () => {
         saveSettings: vi.fn(),
       });
 
-      controller.setResolutionMode("custom");
+      controller.chooseResolution(OUTPUT_CUSTOM_VALUE);
+      controller.chooseResolution("1920x1080");
 
       expect(controller.getView().draft).toBeNull();
       expect(controller.getView().dirty).toBe(false);
+      expect(controller.getView().resolutionChoice).toBe(OUTPUT_SOURCE_VALUE);
     });
   });
 
@@ -2212,8 +2378,8 @@ describe("PresetLibraryController", () => {
     });
   });
 
-  describe("setFrameRateMode", () => {
-    it("switches to DEFAULT_CUSTOM_FRAME_RATE", () => {
+  describe("chooseFrameRate", () => {
+    it("writes DEFAULT_CUSTOM_FRAME_RATE for 'custom' over 'source'", () => {
       const settings = createSettings({
         presets: [createPreset("p1", { frameRate: "source" })],
       });
@@ -2223,11 +2389,60 @@ describe("PresetLibraryController", () => {
       });
 
       controller.select("p1");
-      controller.setFrameRateMode("custom");
+      controller.chooseFrameRate(OUTPUT_CUSTOM_VALUE);
 
       const view = controller.getView();
       expect(view.draft?.frameRate).toEqual(DEFAULT_CUSTOM_FRAME_RATE);
-      expect(view.frameRateMode).toBe("custom");
+      expect(view.draft?.frameRate).not.toBe(DEFAULT_CUSTOM_FRAME_RATE);
+      // DEFAULT_CUSTOM_FRAME_RATE is also a choice, but the inputs stay open.
+      expect(view.frameRateChoice).toBe(OUTPUT_CUSTOM_VALUE);
+      expect(view.dirty).toBe(true);
+    });
+
+    it("keeps the exact stored rate for 'custom' over a choice, so the inputs show it", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { frameRate: { n: 30000, d: 1001 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseFrameRate(OUTPUT_CUSTOM_VALUE);
+
+      const view = controller.getView();
+      expect(view.draft?.frameRate).toEqual({ n: 30000, d: 1001 });
+      expect(view.frameRateChoice).toBe(OUTPUT_CUSTOM_VALUE);
+      expect(view.dirty).toBe(true);
+    });
+
+    it.each([
+      ["24000/1001", { n: 24000, d: 1001 }],
+      ["24/1", { n: 24, d: 1 }],
+      ["25/1", { n: 25, d: 1 }],
+      ["30000/1001", { n: 30000, d: 1001 }],
+      ["30/1", { n: 30, d: 1 }],
+      ["50/1", { n: 50, d: 1 }],
+      ["60000/1001", { n: 60000, d: 1001 }],
+      ["60/1", { n: 60, d: 1 }],
+    ])("writes the exact rational of the choice %s and selects it", (value, rate) => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { frameRate: { n: 15, d: 1 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseFrameRate(OUTPUT_CUSTOM_VALUE);
+      controller.chooseFrameRate(value);
+
+      const view = controller.getView();
+      expect(view.draft?.frameRate).toEqual(rate);
+      expect(view.frameRateChoice).toBe(value);
+      expect(view.issues).toEqual([]);
       expect(view.dirty).toBe(true);
     });
 
@@ -2241,11 +2456,30 @@ describe("PresetLibraryController", () => {
       });
 
       controller.select("p1");
-      controller.setFrameRateMode("source");
+      controller.chooseFrameRate(OUTPUT_CUSTOM_VALUE);
+      controller.chooseFrameRate(OUTPUT_SOURCE_VALUE);
 
       const view = controller.getView();
       expect(view.draft?.frameRate).toBe("source");
-      expect(view.frameRateMode).toBe("source");
+      expect(view.frameRateChoice).toBe(OUTPUT_SOURCE_VALUE);
+    });
+
+    it("changes nothing for an unknown value", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { frameRate: { n: 24, d: 1 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.chooseFrameRate("48/2");
+
+      const view = controller.getView();
+      expect(view.draft?.frameRate).toEqual({ n: 24, d: 1 });
+      expect(view.frameRateChoice).toBe("24/1");
+      expect(view.dirty).toBe(false);
     });
 
     it("is a no-op when there is no draft", () => {
@@ -2254,10 +2488,12 @@ describe("PresetLibraryController", () => {
         saveSettings: vi.fn(),
       });
 
-      controller.setFrameRateMode("custom");
+      controller.chooseFrameRate(OUTPUT_CUSTOM_VALUE);
+      controller.chooseFrameRate("24/1");
 
       expect(controller.getView().draft).toBeNull();
       expect(controller.getView().dirty).toBe(false);
+      expect(controller.getView().frameRateChoice).toBe(OUTPUT_SOURCE_VALUE);
     });
   });
 

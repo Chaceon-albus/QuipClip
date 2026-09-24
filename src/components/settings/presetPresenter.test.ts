@@ -37,8 +37,23 @@ import {
   presentQualityKind,
   presentResolutionInvalid,
   presentDuplicatePresetAction,
+  presentFrameRateSelect,
+  presentFrameRateTermInput,
+  presentQualityValueInput,
+  presentResolutionInput,
+  presentResolutionSelect,
   presentSaveBlockedSummary,
 } from "./presetPresenter";
+import {
+  FRAME_RATE_CHOICES,
+  frameRateChoiceValue,
+  OUTPUT_CUSTOM_VALUE,
+  OUTPUT_SOURCE_VALUE,
+  RESOLUTION_CHOICES,
+  resolutionChoiceValue,
+} from "@/features/settings/videoOutputChoices";
+import { createPresetDraft } from "@/features/settings/presetDocument";
+import { QUALITY_KINDS } from "@/features/settings/types";
 
 /**
  * Resolves a dotted translation key path (e.g. "settings.field.tooLong") against a nested
@@ -1198,6 +1213,222 @@ describe("presetPresenter", () => {
     });
   });
 
+  describe("presentFrameRateSelect", () => {
+    it("lists source, each fixed rate by its conventional name, and custom last", () => {
+      const result = presentFrameRateSelect(new Intl.NumberFormat("en-US"));
+      expect(result.options).toEqual([
+        { value: "source", labelKey: "settings.preset.sourceOption" },
+        {
+          value: "24000/1001",
+          labelKey: "settings.preset.frameRateValue",
+          labelValues: { value: "23.976" },
+        },
+        {
+          value: "24/1",
+          labelKey: "settings.preset.frameRateValue",
+          labelValues: { value: "24" },
+        },
+        {
+          value: "25/1",
+          labelKey: "settings.preset.frameRateValue",
+          labelValues: { value: "25" },
+        },
+        {
+          value: "30000/1001",
+          labelKey: "settings.preset.frameRateValue",
+          labelValues: { value: "29.97" },
+        },
+        {
+          value: "30/1",
+          labelKey: "settings.preset.frameRateValue",
+          labelValues: { value: "30" },
+        },
+        {
+          value: "50/1",
+          labelKey: "settings.preset.frameRateValue",
+          labelValues: { value: "50" },
+        },
+        {
+          value: "60000/1001",
+          labelKey: "settings.preset.frameRateValue",
+          labelValues: { value: "59.94" },
+        },
+        {
+          value: "60/1",
+          labelKey: "settings.preset.frameRateValue",
+          labelValues: { value: "60" },
+        },
+        { value: "custom", labelKey: "settings.preset.customOption" },
+      ]);
+    });
+
+    it("formats the names in the number format of the locale", () => {
+      const result = presentFrameRateSelect(new Intl.NumberFormat("de-DE"));
+      expect(result.options[1]?.labelValues).toEqual({ value: "23,976" });
+      expect(result.options[4]?.labelValues).toEqual({ value: "29,97" });
+    });
+
+    it("holds an option for every value that a stored frame rate maps to", () => {
+      const values = presentFrameRateSelect(new Intl.NumberFormat("en-US")).options.map(
+        (option) => option.value,
+      );
+      for (const frameRate of [
+        "source" as const,
+        { n: 48, d: 2 },
+        { n: 60000, d: 1001 },
+        { n: 15, d: 1 },
+        { n: Number.NaN, d: 1 },
+      ]) {
+        expect(values).toContain(frameRateChoiceValue(frameRate));
+      }
+      expect(values).toContain(OUTPUT_CUSTOM_VALUE);
+    });
+  });
+
+  describe("presentResolutionSelect", () => {
+    it("lists source, each fixed size, and custom last", () => {
+      expect(presentResolutionSelect().options).toEqual([
+        { value: "source", labelKey: "settings.preset.sourceOption" },
+        {
+          value: "3840x2160",
+          labelKey: "settings.preset.resolutionValue",
+          labelValues: { w: "3840", h: "2160" },
+        },
+        {
+          value: "2560x1440",
+          labelKey: "settings.preset.resolutionValue",
+          labelValues: { w: "2560", h: "1440" },
+        },
+        {
+          value: "1920x1080",
+          labelKey: "settings.preset.resolutionValue",
+          labelValues: { w: "1920", h: "1080" },
+        },
+        {
+          value: "1280x720",
+          labelKey: "settings.preset.resolutionValue",
+          labelValues: { w: "1280", h: "720" },
+        },
+        { value: "custom", labelKey: "settings.preset.customOption" },
+      ]);
+    });
+
+    it("holds an option for every value that a stored resolution maps to", () => {
+      const values = presentResolutionSelect().options.map((option) => option.value);
+      for (const resolution of [
+        "source" as const,
+        { w: 1920, h: 1080 },
+        { w: 1080, h: 1920 },
+        { w: Number.NaN, h: 1080 },
+      ]) {
+        expect(values).toContain(resolutionChoiceValue(resolution));
+      }
+    });
+
+    it("lists each choice once, with the sentinels at the two ends", () => {
+      const values = presentResolutionSelect().options.map((option) => option.value);
+      expect(values).toEqual([
+        OUTPUT_SOURCE_VALUE,
+        ...RESOLUTION_CHOICES.map((choice) => choice.value),
+        OUTPUT_CUSTOM_VALUE,
+      ]);
+      const rates = presentFrameRateSelect(new Intl.NumberFormat("en-US")).options.map(
+        (option) => option.value,
+      );
+      expect(rates).toEqual([
+        OUTPUT_SOURCE_VALUE,
+        ...FRAME_RATE_CHOICES.map((choice) => choice.value),
+        OUTPUT_CUSTOM_VALUE,
+      ]);
+    });
+  });
+
+  describe("presentQualityValueInput", () => {
+    it("gives the CRF range, no unit, and the CRF hint", () => {
+      expect(presentQualityValueInput("crf")).toEqual({
+        min: 0,
+        max: 63,
+        step: 1,
+        hintKey: "settings.preset.qualityHintCrf",
+      });
+    });
+
+    it("gives the bitrate range, the kbps unit, and the bitrate hint", () => {
+      expect(presentQualityValueInput("bitrate")).toEqual({
+        min: 1,
+        max: 200_000,
+        step: 1,
+        unitKey: "settings.preset.unitKbps",
+        hintKey: "settings.preset.qualityHintBitrate",
+      });
+    });
+
+    it("gives the quality scale range, no unit, and the quality scale hint", () => {
+      expect(presentQualityValueInput("qualityScale")).toEqual({
+        min: 1,
+        max: 100,
+        step: 1,
+        hintKey: "settings.preset.qualityHintQualityScale",
+      });
+    });
+
+    it.each(QUALITY_KINDS)(
+      "agrees with validatePresetFields at both ends of the %s range",
+      (kind) => {
+        const { min, max } = presentQualityValueInput(kind);
+        const issuesAt = (value: number) =>
+          validatePresetFields({
+            ...createPresetDraft("p", "P"),
+            quality: { kind, value },
+          });
+        expect(issuesAt(min)).toEqual([]);
+        expect(max).toBeDefined();
+        expect(issuesAt(max ?? Number.NaN)).toEqual([]);
+        expect(issuesAt(min - 1)).toHaveLength(1);
+        expect(issuesAt((max ?? Number.NaN) + 1)).toHaveLength(1);
+      },
+    );
+  });
+
+  describe("presentResolutionInput", () => {
+    it("gives the dimension range of ADR 013 and the pixel unit", () => {
+      expect(presentResolutionInput()).toEqual({
+        min: 1,
+        max: 16_384,
+        step: 1,
+        unitKey: "settings.preset.unitPixels",
+      });
+    });
+
+    it("agrees with validatePresetFields at both ends of the range", () => {
+      const { min, max } = presentResolutionInput();
+      const issuesAt = (w: number) =>
+        validatePresetFields({
+          ...createPresetDraft("p", "P"),
+          resolution: { w, h: 720 },
+        });
+      expect(issuesAt(min)).toEqual([]);
+      expect(issuesAt(max ?? Number.NaN)).toEqual([]);
+      expect(issuesAt(min - 1)).toHaveLength(1);
+      expect(issuesAt((max ?? Number.NaN) + 1)).toHaveLength(1);
+    });
+  });
+
+  describe("presentFrameRateTermInput", () => {
+    it("gives a minimum of 1, no maximum, and no unit", () => {
+      expect(presentFrameRateTermInput()).toEqual({ min: 1, step: 1 });
+    });
+
+    it("agrees with the positive rule of validatePresetFields", () => {
+      const { min } = presentFrameRateTermInput();
+      const issuesAt = (n: number, d: number) =>
+        validatePresetFields({ ...createPresetDraft("p", "P"), frameRate: { n, d } });
+      expect(issuesAt(min, min)).toEqual([]);
+      expect(issuesAt(min - 1, 1)).toEqual([{ field: "frameRate", code: "positive" }]);
+      expect(issuesAt(1, min - 1)).toEqual([{ field: "frameRate", code: "positive" }]);
+    });
+  });
+
   // Every key this presenter can emit must resolve to a non-empty string in the English
   // catalog, so a renamed or deleted message fails here instead of rendering a raw key on
   // screen. Follows the same convention as `settingsErrorPresenter.test.ts`.
@@ -1243,6 +1474,16 @@ describe("presetPresenter", () => {
       "settings.encoder.optionLabelAvailable",
       "settings.encoder.optionLabelUnavailable",
       "settings.encoder.optionLabelUnknown",
+      // the resolution and frame rate choices
+      "settings.preset.customOption",
+      "settings.preset.frameRateValue",
+      "settings.preset.resolutionValue",
+      // the number inputs: units and the quality value hints
+      "settings.preset.unitKbps",
+      "settings.preset.unitPixels",
+      "settings.preset.qualityHintCrf",
+      "settings.preset.qualityHintBitrate",
+      "settings.preset.qualityHintQualityScale",
     ];
 
     it.each(emittedKeys)(

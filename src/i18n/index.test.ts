@@ -1441,7 +1441,27 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.preset.frameRateNumeratorLabel")).toBe("Numerator");
     expect(instance.t("settings.preset.frameRateDenominatorLabel")).toBe("Denominator");
     expect(instance.t("settings.preset.sourceOption")).toBe("Same as Source");
-    expect(instance.t("settings.preset.customOption")).toBe("Custom");
+    expect(instance.t("settings.preset.customOption")).toBe("Custom…");
+    expect(instance.t("settings.preset.groupGeneral")).toBe("General");
+    expect(instance.t("settings.preset.groupVideo")).toBe("Video");
+    expect(instance.t("settings.preset.groupAudio")).toBe("Audio");
+    expect(instance.t("settings.preset.frameRateValue", { value: "23.976" })).toBe(
+      "23.976 fps",
+    );
+    expect(
+      instance.t("settings.preset.resolutionValue", { w: "1920", h: "1080" }),
+    ).toBe("1920 × 1080");
+    expect(instance.t("settings.preset.qualityHintCrf")).toBe(
+      "Lower is higher quality. The scale depends on the encoder.",
+    );
+    expect(instance.t("settings.preset.qualityHintBitrate")).toBe(
+      "Target video bitrate.",
+    );
+    expect(instance.t("settings.preset.qualityHintQualityScale")).toBe(
+      "Passed to the encoder as -q:v. The scale depends on the encoder.",
+    );
+    expect(instance.t("settings.preset.unitKbps")).toBe("kbps");
+    expect(instance.t("settings.preset.unitPixels")).toBe("px");
 
     // Settings: quality kinds
     expect(instance.t("settings.quality.crf")).toBe("Constant Quality (CRF)");
@@ -1577,7 +1597,25 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.preset.frameRateNumeratorLabel")).toBe("分子");
     expect(instance.t("settings.preset.frameRateDenominatorLabel")).toBe("分母");
     expect(instance.t("settings.preset.sourceOption")).toBe("与源相同");
-    expect(instance.t("settings.preset.customOption")).toBe("自定义");
+    expect(instance.t("settings.preset.customOption")).toBe("自定义…");
+    expect(instance.t("settings.preset.groupGeneral")).toBe("常规");
+    expect(instance.t("settings.preset.groupVideo")).toBe("视频");
+    expect(instance.t("settings.preset.groupAudio")).toBe("音频");
+    expect(instance.t("settings.preset.frameRateValue", { value: "29.97" })).toBe(
+      "29.97 fps",
+    );
+    expect(
+      instance.t("settings.preset.resolutionValue", { w: "3840", h: "2160" }),
+    ).toBe("3840 × 2160");
+    expect(instance.t("settings.preset.qualityHintCrf")).toBe(
+      "数值越小画质越高，范围因编码器而异。",
+    );
+    expect(instance.t("settings.preset.qualityHintBitrate")).toBe("目标视频比特率。");
+    expect(instance.t("settings.preset.qualityHintQualityScale")).toBe(
+      "以 -q:v 传给编码器，数值含义因编码器而异。",
+    );
+    expect(instance.t("settings.preset.unitKbps")).toBe("kbps");
+    expect(instance.t("settings.preset.unitPixels")).toBe("px");
 
     // Settings: quality kinds
     expect(instance.t("settings.quality.crf")).toBe("恒定质量（CRF）");

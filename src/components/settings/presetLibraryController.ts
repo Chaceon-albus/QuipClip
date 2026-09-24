@@ -52,6 +52,14 @@ import type {
   QualityKind,
   Settings,
 } from "@/features/settings/types";
+import {
+  frameRateChoiceValue,
+  frameRateFromChoice,
+  OUTPUT_CUSTOM_VALUE,
+  OUTPUT_SOURCE_VALUE,
+  resolutionChoiceValue,
+  resolutionFromChoice,
+} from "@/features/settings/videoOutputChoices";
 
 /**
  * Sentinel value for the "custom encoder" choice in an encoder `<Select>`.
@@ -139,11 +147,25 @@ export type PresetLibraryView = {
   /** Same as `videoEncoderIsCustom`, for the audio encoder. */
   audioEncoderIsCustom: boolean;
 
-  /** "source" when the draft's resolution is the literal string "source", else "custom". */
-  resolutionMode: "source" | "custom";
+  /**
+   * The value of the resolution `<Select>`: `OUTPUT_SOURCE_VALUE`, the value of one of the
+   * `RESOLUTION_CHOICES`, or `OUTPUT_CUSTOM_VALUE`. The view shows the width and height inputs
+   * only for `OUTPUT_CUSTOM_VALUE`.
+   *
+   * A loaded draft maps its stored resolution through `resolutionChoiceValue`, so a size that
+   * matches a choice selects that choice. After the user chooses "custom" or types in an input,
+   * the value stays `OUTPUT_CUSTOM_VALUE` until the user chooses another option or a different
+   * draft loads, even when the typed size matches a choice. Otherwise the inputs would close
+   * while the user types in them.
+   */
+  resolutionChoice: string;
 
-  /** "source" when the draft's frame rate is the literal string "source", else "custom". */
-  frameRateMode: "source" | "custom";
+  /**
+   * The value of the frame rate `<Select>`: `OUTPUT_SOURCE_VALUE`, the value of one of the
+   * `FRAME_RATE_CHOICES`, or `OUTPUT_CUSTOM_VALUE`. It follows the rules of
+   * `resolutionChoice`, with `frameRateChoiceValue` for the mapping.
+   */
+  frameRateChoice: string;
 };
 
 /**
@@ -215,6 +237,11 @@ export class PresetLibraryController {
   private videoEncoderIsCustom = false;
   private audioEncoderIsCustom = false;
 
+  // True after the user chose "custom" or typed in a custom input. See
+  // `PresetLibraryView.resolutionChoice`.
+  private resolutionIsCustom = false;
+  private frameRateIsCustom = false;
+
   constructor(options: PresetLibraryControllerOptions = {}) {
     this.getSettingsFn =
       options.getSettings ?? (() => settingsStore.getState().settings);
@@ -246,10 +273,16 @@ export class PresetLibraryController {
       ready: settings !== null,
       videoEncoderIsCustom: this.videoEncoderIsCustom,
       audioEncoderIsCustom: this.audioEncoderIsCustom,
-      resolutionMode:
-        this.draft && this.draft.resolution !== "source" ? "custom" : "source",
-      frameRateMode:
-        this.draft && this.draft.frameRate !== "source" ? "custom" : "source",
+      resolutionChoice: !this.draft
+        ? OUTPUT_SOURCE_VALUE
+        : this.resolutionIsCustom
+          ? OUTPUT_CUSTOM_VALUE
+          : resolutionChoiceValue(this.draft.resolution),
+      frameRateChoice: !this.draft
+        ? OUTPUT_SOURCE_VALUE
+        : this.frameRateIsCustom
+          ? OUTPUT_CUSTOM_VALUE
+          : frameRateChoiceValue(this.draft.frameRate),
     };
   }
 
@@ -449,23 +482,45 @@ export class PresetLibraryController {
   }
 
   /**
-   * Switches the draft's resolution between "same as source" and a custom value.
+   * Handles a selection from the resolution `<Select>`.
    *
-   * Switching to "custom" writes `DEFAULT_CUSTOM_RESOLUTION`. Switching to "source" writes the
-   * literal string "source".
+   * - `OUTPUT_SOURCE_VALUE` writes the literal string "source".
+   * - A value of `RESOLUTION_CHOICES` writes the exact size of that choice.
+   * - `OUTPUT_CUSTOM_VALUE` opens the width and height inputs. It writes
+   *   `DEFAULT_CUSTOM_RESOLUTION` when the draft holds "source". Otherwise it keeps the stored
+   *   size, so the inputs start from the size that was selected.
    *
-   * No-op when there is no draft.
+   * An unknown value changes nothing. No-op when there is no draft.
    */
-  setResolutionMode(mode: "source" | "custom"): void {
-    this.updateDraft({
-      resolution: mode === "source" ? "source" : { ...DEFAULT_CUSTOM_RESOLUTION },
-    });
+  chooseResolution(value: string): void {
+    if (!this.draft) {
+      return;
+    }
+    if (value === OUTPUT_CUSTOM_VALUE) {
+      this.resolutionIsCustom = true;
+      // As in `chooseEncoder`, the method marks the draft dirty even when the size stays.
+      this.updateDraft(
+        this.draft.resolution === "source"
+          ? { resolution: { ...DEFAULT_CUSTOM_RESOLUTION } }
+          : {},
+      );
+      return;
+    }
+    const resolution = resolutionFromChoice(value);
+    if (resolution === null) {
+      return;
+    }
+    this.resolutionIsCustom = false;
+    this.updateDraft({ resolution });
   }
 
   /**
    * Parses `raw` from a custom resolution field (width or height) and stores the result,
    * carrying the other dimension through unchanged. Falls back to `DEFAULT_CUSTOM_RESOLUTION`
    * for the dimension it carries through when the draft's resolution is still "source".
+   *
+   * Keeps the `<Select>` on "custom", so the inputs stay open when the typed size matches one
+   * of the choices (see `PresetLibraryView.resolutionChoice`).
    *
    * A blank or unparseable `raw` stores `NaN` (see `parseNumericField`), never 0.
    *
@@ -479,21 +534,38 @@ export class PresetLibraryController {
       this.draft.resolution === "source"
         ? DEFAULT_CUSTOM_RESOLUTION
         : this.draft.resolution;
+    this.resolutionIsCustom = true;
     this.updateDraft({ resolution: { ...base, [field]: parseNumericField(raw) } });
   }
 
   /**
-   * Switches the draft's frame rate between "same as source" and a custom value.
+   * Handles a selection from the frame rate `<Select>`. It follows the rules of
+   * `chooseResolution`: a value of `FRAME_RATE_CHOICES` writes the exact rational of that
+   * choice, and `OUTPUT_CUSTOM_VALUE` writes `DEFAULT_CUSTOM_FRAME_RATE` only over "source".
+   * "Custom" after 29.97 thus shows 30000 and 1001 in the inputs.
    *
-   * Switching to "custom" writes `DEFAULT_CUSTOM_FRAME_RATE`. Switching to "source" writes the
-   * literal string "source".
-   *
-   * No-op when there is no draft.
+   * An unknown value changes nothing. No-op when there is no draft.
    */
-  setFrameRateMode(mode: "source" | "custom"): void {
-    this.updateDraft({
-      frameRate: mode === "source" ? "source" : { ...DEFAULT_CUSTOM_FRAME_RATE },
-    });
+  chooseFrameRate(value: string): void {
+    if (!this.draft) {
+      return;
+    }
+    if (value === OUTPUT_CUSTOM_VALUE) {
+      this.frameRateIsCustom = true;
+      // As in `chooseEncoder`, the method marks the draft dirty even when the rate stays.
+      this.updateDraft(
+        this.draft.frameRate === "source"
+          ? { frameRate: { ...DEFAULT_CUSTOM_FRAME_RATE } }
+          : {},
+      );
+      return;
+    }
+    const frameRate = frameRateFromChoice(value);
+    if (frameRate === null) {
+      return;
+    }
+    this.frameRateIsCustom = false;
+    this.updateDraft({ frameRate });
   }
 
   /**
@@ -501,6 +573,8 @@ export class PresetLibraryController {
    * result, carrying the other component through unchanged. Falls back to
    * `DEFAULT_CUSTOM_FRAME_RATE` for the component it carries through when the draft's frame
    * rate is still "source".
+   *
+   * Keeps the `<Select>` on "custom", as `updateResolutionField` does.
    *
    * A blank or unparseable `raw` stores `NaN` (see `parseNumericField`), never 0.
    *
@@ -514,6 +588,7 @@ export class PresetLibraryController {
       this.draft.frameRate === "source"
         ? DEFAULT_CUSTOM_FRAME_RATE
         : this.draft.frameRate;
+    this.frameRateIsCustom = true;
     this.updateDraft({ frameRate: { ...base, [field]: parseNumericField(raw) } });
   }
 
@@ -855,9 +930,12 @@ export class PresetLibraryController {
     this.issues = preset ? validatePresetFields(preset) : [];
     this.dirty = false;
     // A newly loaded draft never inherits an in-progress "choose a custom encoder" edit from
-    // whatever was loaded before it.
+    // whatever was loaded before it. The same holds for the custom resolution and frame rate:
+    // the loaded values then select their choice, if one matches.
     this.videoEncoderIsCustom = false;
     this.audioEncoderIsCustom = false;
+    this.resolutionIsCustom = false;
+    this.frameRateIsCustom = false;
   }
 
   /**
