@@ -66,7 +66,7 @@ export function presentDeletePresetConfirm(
     presetId: id,
     title,
     description: {
-      key: "settings.preset.deleteDialog.descriptionActive",
+      key: "settings.preset.deleteDialog.descriptionDefault",
       values: { next: nextActive.name },
     },
   };

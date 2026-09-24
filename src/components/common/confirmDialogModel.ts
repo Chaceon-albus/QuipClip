@@ -44,20 +44,36 @@ export interface FocusCandidate {
   readonly isConnected: boolean;
   /** True while the element cannot take the focus, such as a disabled button. */
   readonly isDisabled: boolean;
+  /**
+   * True for the document body. The focus rests on the body when no control holds it, so a
+   * dialog that opens then has no opener to return to. Absent means false.
+   */
+  readonly isDocumentBody?: boolean;
   focus: () => void;
 }
 
 export interface ConfirmFocusReturn {
   /**
-   * Records the element that opened the dialog, and a fallback for a close that leaves the
-   * opener unable to take the focus. Call it from `onOpenAutoFocus`: Radix dispatches that
-   * event before it moves the focus into the dialog, so the active element is the opener.
+   * Records the element that opened the dialog, and the fallbacks, in order, for a close that
+   * leaves the opener unable to take the focus. Call it from `onOpenAutoFocus`: Radix
+   * dispatches that event before it moves the focus into the dialog, so the active element is
+   * the opener. The document body counts as no opener, so the fallbacks apply.
    */
-  noteOpened: (opener: FocusCandidate | null, fallback: FocusCandidate | null) => void;
+  noteOpened: (
+    opener: FocusCandidate | null,
+    ...fallbacks: readonly (FocusCandidate | null)[]
+  ) => void;
+  /**
+   * Records that the user confirmed, and the element that takes the focus after the confirm in
+   * place of the opener. Pass null to keep the opener first. Call it from the confirm button,
+   * before the dialog closes.
+   */
+  noteConfirmed: (target: FocusCandidate | null) => void;
   /**
    * Returns the element that must take the focus now that the dialog closed, or null when no
-   * recorded element can take it. It also forgets both elements, so a stale element never
-   * takes the focus after a later open.
+   * recorded element can take it. After a confirm, the target of `noteConfirmed` comes first.
+   * It also forgets every element, so a stale element never takes the focus after a later
+   * open.
    */
   takeCloseTarget: () => FocusCandidate | null;
 }
@@ -72,16 +88,22 @@ export interface ConfirmFocusReturn {
  *
  * The opener is a poor target after a confirm. The confirmed action usually starts a write,
  * and the preset library disables its buttons while a write is in flight. A delete also
- * removes the editor that holds the Delete button. So the rule falls back to the enclosing
- * dialog, which takes the focus and keeps it inside that dialog's focus trap.
+ * removes the list row that opened the dialog. Two rules cover this:
+ * - The caller can name the element that takes the focus after a confirm, whatever the
+ *   opener, such as the row that takes the selection after a delete (`noteConfirmed`).
+ * - When the opener cannot take the focus, the first fallback that can takes it. The caller
+ *   can name one, and the last fallback is the enclosing dialog, which takes the focus and
+ *   keeps it inside that dialog's focus trap.
  *
  * Unlike the settings dialog (see `dialogFocusReturn.ts`), this rule returns the focus after a
- * pointer close as well. That exception exists for an opener with a tooltip, and the
- * confirm dialogs of this application open from buttons without one.
+ * pointer close as well. That exception exists for an opener whose tooltip opens on every
+ * focus. The toolbar buttons of the preset list have a tooltip, but it opens on a focus only
+ * while the focus ring shows, so a focus return after a pointer close does not open it.
  */
 export function createConfirmFocusReturn(): ConfirmFocusReturn {
-  let opener: FocusCandidate | null = null;
-  let fallback: FocusCandidate | null = null;
+  let candidates: readonly (FocusCandidate | null)[] = [];
+  let confirmed = false;
+  let confirmTarget: FocusCandidate | null = null;
 
   const canTakeFocus = (
     candidate: FocusCandidate | null,
@@ -89,15 +111,21 @@ export function createConfirmFocusReturn(): ConfirmFocusReturn {
     candidate !== null && candidate.isConnected && !candidate.isDisabled;
 
   return {
-    noteOpened: (nextOpener, nextFallback) => {
-      opener = nextOpener;
-      fallback = nextFallback;
+    noteOpened: (opener, ...fallbacks) => {
+      candidates = [opener?.isDocumentBody === true ? null : opener, ...fallbacks];
+      confirmed = false;
+      confirmTarget = null;
+    },
+    noteConfirmed: (target) => {
+      confirmed = true;
+      confirmTarget = target;
     },
     takeCloseTarget: () => {
-      const candidates = [opener, fallback];
-      opener = null;
-      fallback = null;
-      return candidates.find(canTakeFocus) ?? null;
+      const recorded = confirmed ? [confirmTarget, ...candidates] : candidates;
+      candidates = [];
+      confirmed = false;
+      confirmTarget = null;
+      return recorded.find(canTakeFocus) ?? null;
     },
   };
 }

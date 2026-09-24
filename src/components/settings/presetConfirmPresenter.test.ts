@@ -80,7 +80,7 @@ describe("presentDeletePresetConfirm", () => {
       "default-hevc-mp4",
     );
     expect(view?.description).toStrictEqual({
-      key: "settings.preset.deleteDialog.descriptionActive",
+      key: "settings.preset.deleteDialog.descriptionDefault",
       values: { next: "My Preset" },
     });
   });
@@ -88,7 +88,7 @@ describe("presentDeletePresetConfirm", () => {
   it("names the new last preset when the deleted active preset was last", () => {
     const view = presentDeletePresetConfirm([h264, hevc, mine], "mine", "mine");
     expect(view?.description).toStrictEqual({
-      key: "settings.preset.deleteDialog.descriptionActive",
+      key: "settings.preset.deleteDialog.descriptionDefault",
       values: { next: "HEVC MP4" },
     });
   });

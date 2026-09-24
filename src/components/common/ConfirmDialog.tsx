@@ -23,6 +23,20 @@ export interface ConfirmDialogProps {
   confirmDisabled?: boolean;
   /** Runs on the confirm button, before the dialog closes. */
   onConfirm: () => void;
+  /**
+   * Names the element that takes the focus when the dialog closes after a confirm, in place of
+   * the element that opened it, such as the list row that takes the selection after a delete.
+   * The dialog calls it when it closes, not when it opens. When it is absent or returns an
+   * element that cannot take the focus, the rules of a cancel apply.
+   */
+  confirmFocus?: () => HTMLElement | null;
+  /**
+   * Names the element that takes the focus when the dialog closes and the element that opened
+   * it cannot, or when nothing held the focus when it opened. The dialog calls it when it
+   * closes. When it is absent or returns an element that cannot take the focus, the enclosing
+   * dialog takes the focus.
+   */
+  fallbackFocus?: () => HTMLElement | null;
 }
 
 // The modal layers that can hold an opener. The fallback focus target is the one around it.
@@ -40,8 +54,29 @@ function toFocusCandidate(element: Element | null): FocusCandidate | null {
     get isDisabled() {
       return element.matches(":disabled");
     },
+    get isDocumentBody() {
+      return element === element.ownerDocument.body;
+    },
     focus: () => {
       element.focus();
+    },
+  };
+}
+
+/**
+ * Wraps a function that names an element, so that the focus rule reads the element when the
+ * dialog closes. The element can change while the dialog is open.
+ */
+function toDeferredFocusCandidate(resolve: () => HTMLElement | null): FocusCandidate {
+  return {
+    get isConnected() {
+      return toFocusCandidate(resolve())?.isConnected ?? false;
+    },
+    get isDisabled() {
+      return toFocusCandidate(resolve())?.isDisabled ?? true;
+    },
+    focus: () => {
+      resolve()?.focus();
     },
   };
 }
@@ -66,6 +101,8 @@ export function ConfirmDialog({
   destructive = false,
   confirmDisabled = false,
   onConfirm,
+  confirmFocus,
+  fallbackFocus,
 }: ConfirmDialogProps) {
   const [focusReturn] = useState(createConfirmFocusReturn);
 
@@ -83,6 +120,9 @@ export function ConfirmDialog({
             const opener = document.activeElement;
             focusReturn.noteOpened(
               toFocusCandidate(opener),
+              fallbackFocus === undefined
+                ? null
+                : toDeferredFocusCandidate(fallbackFocus),
               toFocusCandidate(opener?.closest(ENCLOSING_DIALOG_SELECTOR) ?? null),
             );
           }}
@@ -108,7 +148,14 @@ export function ConfirmDialog({
               <Button
                 className={destructive ? DESTRUCTIVE_CONFIRM_CLASS : undefined}
                 disabled={confirmDisabled}
-                onClick={onConfirm}
+                onClick={() => {
+                  focusReturn.noteConfirmed(
+                    confirmFocus === undefined
+                      ? null
+                      : toDeferredFocusCandidate(confirmFocus),
+                  );
+                  onConfirm();
+                }}
               >
                 {confirmLabel}
               </Button>

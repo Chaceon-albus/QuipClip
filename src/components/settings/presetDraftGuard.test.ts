@@ -6,13 +6,18 @@ import { zhCN } from "@/i18n/locales/zh-CN";
 import {
   CLEAN_PRESET_DRAFT_GUARD,
   decideCloseRequest,
+  decideLeavePromptKey,
+  decideLeaveRequest,
   decidePromptSaveOutcome,
   isElementRendered,
   isFocusLost,
+  isInsideLeavePrompt,
   isUnsavedPresetRow,
   pickCreateFailureFocus,
   pickPromptCancelFocus,
   pickPromptOpenFocus,
+  pickPromptReturnFocus,
+  PRESET_LEAVE_PROMPT_ATTRIBUTE,
   presentPresetDraftStatus,
   presentSaveAndLeaveLabel,
   presentUnsavedDraftPrompt,
@@ -200,6 +205,79 @@ describe("decideCloseRequest", () => {
   it("holds the open prompt while a save is in flight", () => {
     expect(decideCloseRequest(status({ pending: true }), true)).toBe("hold");
   });
+
+  // Only one prompt at a time: Escape from a row, the header close button, and the footer
+  // Close button all go to the prompt of the preset library while it is open.
+  it("defers to the prompt of the preset library while it is open", () => {
+    expect(decideCloseRequest(status(), false, true)).toBe("defer");
+    expect(decideCloseRequest(status({ canSave: false }), false, true)).toBe("defer");
+    expect(decideCloseRequest(status({ pending: true }), false, true)).toBe("defer");
+  });
+
+  it("still closes a clean draft, because the prompt of the library closes with the edit", () => {
+    expect(decideCloseRequest(status({ dirty: false }), false, true)).toBe("close");
+  });
+
+  it("treats a missing third argument as a closed library prompt", () => {
+    expect(decideCloseRequest(status(), false)).toBe("raise");
+  });
+});
+
+describe("decideLeaveRequest", () => {
+  it("ignores a request while a write is in flight", () => {
+    expect(decideLeaveRequest({ dirty: true, pending: true }, false)).toBe("ignore");
+    expect(decideLeaveRequest({ dirty: false, pending: true }, false)).toBe("ignore");
+    expect(decideLeaveRequest({ dirty: true, pending: true }, true)).toBe("ignore");
+  });
+
+  it("leaves a clean draft at once", () => {
+    expect(decideLeaveRequest({ dirty: false, pending: false }, false)).toBe("leave");
+  });
+
+  it("raises the prompt of the preset library for an unsaved edit", () => {
+    expect(decideLeaveRequest({ dirty: true, pending: false }, false)).toBe("raise");
+  });
+
+  // Only one prompt at a time: the footer prompt already asks about this draft.
+  it("defers to the prompt of the settings dialog while it is open", () => {
+    expect(decideLeaveRequest({ dirty: true, pending: false }, true)).toBe("defer");
+  });
+});
+
+describe("decideLeavePromptKey", () => {
+  it("answers Escape with Keep Editing", () => {
+    expect(decideLeavePromptKey("Escape", { choicesDisabled: false })).toBe(
+      "keepEditing",
+    );
+  });
+
+  // Keep Editing is disabled while a save that the prompt started is in flight.
+  it("holds the prompt on Escape while a save is in flight", () => {
+    expect(decideLeavePromptKey("Escape", { choicesDisabled: true })).toBe("hold");
+  });
+
+  it.each(["Enter", " ", "Tab", "ArrowDown"])("ignores %s", (key) => {
+    expect(decideLeavePromptKey(key, { choicesDisabled: false })).toBe("ignore");
+  });
+});
+
+describe("isInsideLeavePrompt", () => {
+  it("asks the target for an ancestor with the prompt attribute", () => {
+    const selectors: string[] = [];
+    const inside = {
+      closest: (selector: string) => {
+        selectors.push(selector);
+        return {};
+      },
+    };
+    expect(isInsideLeavePrompt(inside)).toBe(true);
+    expect(selectors).toStrictEqual([`[${PRESET_LEAVE_PROMPT_ATTRIBUTE}]`]);
+  });
+
+  it("is false for a target outside the prompt, or for no target", () => {
+    expect(isInsideLeavePrompt({ closest: () => null })).toBe(false);
+    expect(isInsideLeavePrompt(null)).toBe(false);
+  });
 });
 
 describe("decidePromptSaveOutcome", () => {
@@ -221,6 +299,11 @@ describe("CLEAN_PRESET_DRAFT_GUARD", () => {
   it("reports that nothing unsaved remains, so a stray save call never blocks a close", async () => {
     await expect(CLEAN_PRESET_DRAFT_GUARD.save()).resolves.toBe(true);
     expect(() => CLEAN_PRESET_DRAFT_GUARD.discard()).not.toThrow();
+  });
+
+  it("reports no prompt of the preset library", () => {
+    expect(CLEAN_PRESET_DRAFT_GUARD.leavePromptOpen).toBe(false);
+    expect(() => CLEAN_PRESET_DRAFT_GUARD.focusLeavePrompt()).not.toThrow();
   });
 });
 
@@ -396,6 +479,46 @@ describe("pickPromptCancelFocus", () => {
     expect(pickPromptCancelFocus(fakeTarget({ isConnected: false }), null)).toBeNull();
     expect(pickPromptCancelFocus(null, fakeTarget({ isRendered: false }))).toBeNull();
     expect(pickPromptCancelFocus(null, null)).toBeNull();
+  });
+
+  // Keep Editing in the prompt of the preset library. An arrow key on a row raised the
+  // prompt, so the row the user was on takes the focus back, and it is still the selected row.
+  describe("for Keep Editing in the preset library", () => {
+    it("returns the focus to the row that raised the prompt", () => {
+      const oldRow = fakeTarget();
+      const selectedRow = fakeTarget();
+      expect(pickPromptCancelFocus(oldRow, selectedRow)).toBe(oldRow);
+    });
+
+    // A pointer press on a row does not move the focus, so the field the user was editing
+    // takes it back.
+    it("returns the focus to the field the user was editing", () => {
+      const field = fakeTarget();
+      expect(pickPromptCancelFocus(field, fakeTarget())).toBe(field);
+    });
+
+    it("falls back to the selected row when nothing held the focus", () => {
+      const selectedRow = fakeTarget();
+      expect(pickPromptCancelFocus(null, selectedRow)).toBe(selectedRow);
+      expect(
+        pickPromptCancelFocus(fakeTarget({ isConnected: false }), selectedRow),
+      ).toBe(selectedRow);
+    });
+  });
+});
+
+describe("pickPromptReturnFocus", () => {
+  const body = { id: "body" };
+
+  it("records the element that holds the focus when a prompt opens", () => {
+    const row = { id: "row" };
+    expect(pickPromptReturnFocus(row, body)).toBe(row);
+  });
+
+  // The focus rests on the body when no control holds it, and the body is no place to return to.
+  it("records nothing for the document body or for no element", () => {
+    expect(pickPromptReturnFocus(body, body)).toBeNull();
+    expect(pickPromptReturnFocus(null, body)).toBeNull();
   });
 });
 

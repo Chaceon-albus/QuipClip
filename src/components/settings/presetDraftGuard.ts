@@ -30,7 +30,8 @@ export type PresetDraftStatus = {
 
 /**
  * The draft state together with the two actions that settle the draft, so the settings
- * dialog can save or discard the draft from its own prompt.
+ * dialog can save or discard the draft from its own prompt, and the state of the preset
+ * library's own prompt, so that only one of the two prompts is open at a time.
  */
 export type PresetDraftGuard = PresetDraftStatus & {
   /**
@@ -40,6 +41,13 @@ export type PresetDraftGuard = PresetDraftStatus & {
   readonly save: () => Promise<boolean>;
   /** Discards the unsaved edit and loads the stored preset again. */
   readonly discard: () => void;
+  /**
+   * True while the preset library shows its own unsaved-changes prompt, for a switch to
+   * another preset or for Add. See `decideCloseRequest`.
+   */
+  readonly leavePromptOpen: boolean;
+  /** Moves the focus to the prompt of the preset library. Does nothing when it is closed. */
+  readonly focusLeavePrompt: () => void;
 };
 
 /**
@@ -53,6 +61,8 @@ export const CLEAN_PRESET_DRAFT_GUARD: PresetDraftGuard = {
   pending: false,
   save: () => Promise.resolve(true),
   discard: () => undefined,
+  leavePromptOpen: false,
+  focusLeavePrompt: () => undefined,
 };
 
 /**
@@ -121,6 +131,76 @@ export function isUnsavedPresetRow(view: PresetLibraryView, presetId: string): b
 }
 
 /**
+ * The attribute that marks the unsaved-changes prompt of the preset library. Escape inside
+ * that prompt means "Keep Editing", as Escape means Cancel on a macOS sheet, so the settings
+ * dialog does not take it as a request to close. See `isInsideLeavePrompt`.
+ */
+export const PRESET_LEAVE_PROMPT_ATTRIBUTE = "data-preset-leave-prompt";
+
+/** The narrow view of a key event target that `isInsideLeavePrompt` reads. */
+export interface LeavePromptProbe {
+  closest: (selector: string) => unknown;
+}
+
+/**
+ * True when `target` is inside the unsaved-changes prompt of the preset library. The settings
+ * dialog then leaves Escape to that prompt.
+ */
+export function isInsideLeavePrompt(target: LeavePromptProbe | null): boolean {
+  return (
+    target !== null && target.closest(`[${PRESET_LEAVE_PROMPT_ATTRIBUTE}]`) !== null
+  );
+}
+
+/**
+ * What a key press inside the unsaved-changes prompt of the preset library does.
+ *
+ * - `keepEditing`: Escape. The prompt closes as "Keep Editing" closes it.
+ * - `hold`: Escape while a save is in flight. "Keep Editing" is disabled, so the key does
+ *   nothing, and the prompt stays.
+ * - `ignore`: any other key. The buttons of the prompt keep their own keys.
+ */
+export type LeavePromptKeyDecision = "keepEditing" | "hold" | "ignore";
+
+export function decideLeavePromptKey(
+  key: string,
+  prompt: Pick<UnsavedDraftPromptView, "choicesDisabled">,
+): LeavePromptKeyDecision {
+  if (key !== "Escape") {
+    return "ignore";
+  }
+  return prompt.choicesDisabled ? "hold" : "keepEditing";
+}
+
+/**
+ * What the preset library does when the user asks to leave the draft: a switch to another
+ * preset from the list, or Add.
+ *
+ * - `ignore`: a write is in flight. A Save and Switch that is running holds its target, and a
+ *   request now would either move the prompt to a target that the running save then ignores,
+ *   or select a preset under that save.
+ * - `leave`: the draft holds no unsaved edit, so the request runs at once.
+ * - `defer`: the settings dialog already shows its unsaved-changes prompt about this draft.
+ *   The request opens no second prompt. The focus goes to the prompt that is open.
+ * - `raise`: the preset library shows its own prompt, or changes the target of the prompt
+ *   that is open.
+ */
+export type LeaveRequestDecision = "ignore" | "leave" | "defer" | "raise";
+
+export function decideLeaveRequest(
+  draft: Pick<PresetDraftStatus, "dirty" | "pending">,
+  closePromptOpen: boolean,
+): LeaveRequestDecision {
+  if (draft.pending) {
+    return "ignore";
+  }
+  if (!draft.dirty) {
+    return "leave";
+  }
+  return closePromptOpen ? "defer" : "raise";
+}
+
+/**
  * What the user asked for in the preset library while the draft held an unsaved edit: a
  * switch to another preset in the list, or a new preset from Add. Both select another preset,
  * and a selection discards the draft, so both wait for the answer to the unsaved-changes
@@ -149,16 +229,23 @@ export function presentSaveAndLeaveLabel(request: PendingLeave): string {
  *   does. A second Escape backs out of the prompt, as it does on a macOS save sheet.
  * - `hold`: the prompt is already open and a save is in flight, so Cancel is disabled. The
  *   prompt stays, and the dialog keeps the focus inside it.
+ * - `defer`: the preset library shows its own unsaved-changes prompt (`leavePromptOpen`). The
+ *   dialog opens no second prompt about the same draft. The focus goes to the prompt that is
+ *   open, and the dialog stays open.
  */
-export type CloseRequestDecision = "close" | "raise" | "cancel" | "hold";
+export type CloseRequestDecision = "close" | "raise" | "cancel" | "hold" | "defer";
 
 export function decideCloseRequest(
   draft: PresetDraftStatus,
   promptOpen: boolean,
+  leavePromptOpen = false,
 ): CloseRequestDecision {
   const prompt = presentUnsavedDraftPrompt(draft);
   if (prompt === null) {
     return "close";
+  }
+  if (leavePromptOpen) {
+    return "defer";
   }
   if (!promptOpen) {
     return "raise";
@@ -261,6 +348,8 @@ export function canTakeFocus<T extends PromptFocusTarget>(
  * That is Cancel, as in `ConfirmDialog`, so Enter picks the choice that changes nothing.
  * While a save is in flight Cancel is disabled, and the prompt message takes the focus, so
  * the focus stays inside the prompt instead of falling to the document body.
+ *
+ * The prompt of the preset library applies the same rule. Its Cancel is "Keep Editing".
  */
 export function pickPromptOpenFocus<T extends PromptFocusTarget>(
   cancel: T | null,
@@ -284,6 +373,10 @@ export function pickPromptOpenFocus<T extends PromptFocusTarget>(
  *   a detached element.
  * - A close request from the General or the FFmpeg tab switches to the preset tab, and the
  *   element then sits in a panel that is not rendered.
+ *
+ * The prompt of the preset library applies the same rule to "Keep Editing". The element that
+ * held the focus is the row the user was on, for a switch from the list, or the field the
+ * user was editing. The fallback is the selected row of the preset list.
  */
 export function pickPromptCancelFocus<T extends PromptFocusTarget>(
   returnFocus: T | null,
@@ -293,6 +386,16 @@ export function pickPromptCancelFocus<T extends PromptFocusTarget>(
     return returnFocus;
   }
   return canTakeFocus(fallback) ? fallback : null;
+}
+
+/**
+ * Returns the element that a prompt gives the focus back to when the user cancels it (see
+ * `pickPromptCancelFocus`): the element that holds the focus when the prompt opens, or null
+ * when that is the document body or no element. The caller passes `document.activeElement` and
+ * `document.body`.
+ */
+export function pickPromptReturnFocus<T>(active: T | null, body: T | null): T | null {
+  return active === null || active === body ? null : active;
 }
 
 /**

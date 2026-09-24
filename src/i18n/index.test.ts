@@ -1440,10 +1440,27 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.preset.newName")).toBe("New Preset");
     expect(instance.t("settings.preset.add")).toBe("Add Preset");
     expect(instance.t("settings.preset.delete")).toBe("Delete Preset");
-    expect(instance.t("settings.preset.restoreDefaults")).toBe("Restore Defaults");
-    expect(instance.t("settings.preset.setActive")).toBe("Set Active");
-    expect(instance.t("settings.preset.activeBadge")).toBe("Active");
+    expect(instance.t("settings.preset.restoreBuiltIn")).toBe(
+      "Restore Built-in Presets",
+    );
+    expect(instance.t("settings.preset.moreActions")).toBe("More Actions");
+    expect(instance.t("settings.preset.setDefault")).toBe("Set as Default");
+    expect(instance.t("settings.preset.defaultBadge")).toBe("Default");
+    expect(
+      instance.t("settings.preset.deleteDialog.descriptionDefault", {
+        next: "HEVC MP4",
+      }),
+    ).toBe(
+      "You cannot undo this action. This preset is the default preset, so “HEVC MP4” will become the default preset.",
+    );
+    expect(instance.t("settings.preset.deleteDialog.descriptionLast")).toBe(
+      "You cannot undo this action. This is the only preset, so no preset will be the default preset.",
+    );
+    expect(instance.t("settings.preset.restoreDialog.title")).toBe(
+      "Restore the built-in presets?",
+    );
     expect(instance.t("settings.preset.empty")).toBe("No presets yet.");
+    expect(instance.t("settings.preset.noSelection")).toBe("No preset selected.");
     expect(instance.t("settings.preset.limitReached", { max: 100 })).toBe(
       "Limit of 100 presets reached.",
     );
@@ -1616,10 +1633,21 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("settings.preset.newName")).toBe("新预设");
     expect(instance.t("settings.preset.add")).toBe("添加预设");
     expect(instance.t("settings.preset.delete")).toBe("删除预设");
-    expect(instance.t("settings.preset.restoreDefaults")).toBe("恢复默认预设");
-    expect(instance.t("settings.preset.setActive")).toBe("设为当前预设");
-    expect(instance.t("settings.preset.activeBadge")).toBe("当前");
+    expect(instance.t("settings.preset.restoreBuiltIn")).toBe("恢复内置预设");
+    expect(instance.t("settings.preset.moreActions")).toBe("更多操作");
+    expect(instance.t("settings.preset.setDefault")).toBe("设为默认");
+    expect(instance.t("settings.preset.defaultBadge")).toBe("默认");
+    expect(
+      instance.t("settings.preset.deleteDialog.descriptionDefault", {
+        next: "HEVC MP4",
+      }),
+    ).toBe("此操作无法撤销。此预设是默认预设，删除后“HEVC MP4”将成为默认预设。");
+    expect(instance.t("settings.preset.deleteDialog.descriptionLast")).toBe(
+      "此操作无法撤销。这是唯一的预设，删除后将没有默认预设。",
+    );
+    expect(instance.t("settings.preset.restoreDialog.title")).toBe("恢复内置预设？");
     expect(instance.t("settings.preset.empty")).toBe("暂无预设。");
+    expect(instance.t("settings.preset.noSelection")).toBe("未选择预设。");
     expect(instance.t("settings.preset.limitReached", { max: 100 })).toBe(
       "已达到 100 个预设的上限。",
     );

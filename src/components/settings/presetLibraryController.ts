@@ -189,7 +189,7 @@ export interface PresetLibraryControllerOptions {
   saveSettings?: (settings: Settings) => Promise<Settings | null>;
 
   /**
-   * Restores the default preset seeds. Defaults to
+   * Restores the built-in presets (the seeds of ADR 013). Defaults to
    * `settingsStore.getState().restoreDefaultPresets`. Resolves `null` on failure; never
    * rejects.
    */
@@ -798,11 +798,12 @@ export class PresetLibraryController {
   }
 
   /**
-   * Restores the default preset seeds.
+   * Restores the built-in presets (the seeds of ADR 013). The interface calls this "Restore
+   * Built-in Presets", and keeps "default" for the default (active) preset.
    *
    * RULE 1: this calls ONLY the injected `restoreDefaultPresets`. It NEVER builds a settings
    * document here and NEVER calls `saveSettings`. Rust already preserves `ffmpegPath` and
-   * merges the default seeds into the existing library by id; rebuilding the document in this
+   * merges the built-in seeds into the existing library by id; rebuilding the document in this
    * controller and writing it would be exactly how a user's ffmpeg path gets silently erased.
    */
   async restoreDefaults(): Promise<boolean> {

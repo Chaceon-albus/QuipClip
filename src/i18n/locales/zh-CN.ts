@@ -321,11 +321,16 @@ export const zhCN: TranslationCatalog = {
       copyNameNumbered: "{{name}} 副本 {{n}}",
       duplicateBlockedUnsaved: "保存或取消更改后即可复制此预设。",
       delete: "删除预设",
-      restoreDefaults: "恢复默认预设",
-      setActive: "设为当前预设",
-      activeBadge: "当前",
+      restoreBuiltIn: "恢复内置预设",
+      moreActions: "更多操作",
+      setDefault: "设为默认",
+      defaultBadge: "默认",
       encoderMarkTitle: "编码器：{{name}}",
       empty: "暂无预设。",
+      noSelection: "未选择预设。",
+      rowSummaryCrf: "{{container}} · {{encoder}} · CRF {{value}}",
+      rowSummaryBitrate: "{{container}} · {{encoder}} · {{value}} kbps",
+      rowSummaryQualityScale: "{{container}} · {{encoder}} · 质量系数 {{value}}",
       limitReached: "已达到 {{max}} 个预设的上限。",
       unsaved: "有未保存的更改",
       // Chinese selects the `other` plural category for every count, so it has no `_one` form.
@@ -339,13 +344,13 @@ export const zhCN: TranslationCatalog = {
       deleteDialog: {
         title: "删除预设“{{name}}”？",
         description: "此操作无法撤销。",
-        descriptionActive:
-          "此操作无法撤销。此预设是当前预设，删除后“{{next}}”将成为当前预设。",
-        descriptionLast: "此操作无法撤销。这是唯一的预设，删除后将没有当前预设。",
+        descriptionDefault:
+          "此操作无法撤销。此预设是默认预设，删除后“{{next}}”将成为默认预设。",
+        descriptionLast: "此操作无法撤销。这是唯一的预设，删除后将没有默认预设。",
         confirm: "删除",
       },
       restoreDialog: {
-        title: "恢复默认预设？",
+        title: "恢复内置预设？",
         description:
           "此操作会将内置预设恢复为原始设置，并重新添加已删除的内置预设。您对内置预设所做的更改将被覆盖。您自己的预设和 FFmpeg 位置保持不变。",
       },

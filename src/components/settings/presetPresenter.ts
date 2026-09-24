@@ -217,25 +217,26 @@ export function presentSaveBlockedSummary(
   return { key: "settings.preset.saveBlocked", values: { count: issues.length } };
 }
 
-/** The state of the Duplicate button of the preset editor. */
+/** The state of the Duplicate action of the preset library. */
 export type DuplicatePresetActionView = {
   disabled: boolean;
   /**
    * Why Duplicate is off, or `null` when there is nothing to say. A write in flight disables
-   * the button for a moment only, so it gives no reason.
+   * the action for a moment only, so it gives no reason.
    */
   reason: MessageView | null;
 };
 
 /**
- * Presents the Duplicate button of the preset editor. It follows the rules of
+ * Presents the Duplicate action of the preset library, an item of the menu under the preset
+ * list (see `presentDuplicateSelectedAction`). It follows the rules of
  * `PresetLibraryController.duplicatePreset`, which refuses in the same states.
  *
  * - The library is full: the reason is the limit message that Add shows.
  * - The draft holds an unsaved edit: the reason asks the user to save or cancel it. The copy
  *   is made from the stored preset, so a copy made now would not contain the edit on screen,
  *   and the selection of the copy would discard the edit.
- * - A write is in flight: the button is off with no reason.
+ * - A write is in flight: the action is off with no reason.
  */
 export function presentDuplicatePresetAction(
   view: Pick<PresetLibraryView, "canAdd" | "dirty" | "pending">,
@@ -564,14 +565,6 @@ export function presentContainer(container: PresetContainer): string {
  */
 export function presentNumericField(value: number): string {
   return Number.isNaN(value) ? "" : String(value);
-}
-
-/**
- * Answers whether a keyboard event on a list row (e.g. a preset row acting as `role="button"`)
- * should activate that row, matching the native `<button>` activation keys.
- */
-export function isActivationKey(key: string): boolean {
-  return key === "Enter" || key === " ";
 }
 
 /** View model for one entry in an audio bitrate `<Select>`. */

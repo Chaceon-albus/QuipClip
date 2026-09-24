@@ -17,7 +17,6 @@ import { CUSTOM_ENCODER_VALUE as CONTROLLER_CUSTOM_ENCODER_VALUE } from "./prese
 import {
   AUDIO_BITRATE_DEFAULT_VALUE,
   CUSTOM_ENCODER_VALUE,
-  isActivationKey,
   parseAudioBitrateValue,
   parseAudioSampleRateValue,
   presentAudioBitrateSelect,
@@ -954,22 +953,6 @@ describe("presetPresenter", () => {
 
     it("renders a negative integer as text", () => {
       expect(presentNumericField(-5)).toBe("-5");
-    });
-  });
-
-  describe("isActivationKey", () => {
-    it("activates on Enter", () => {
-      expect(isActivationKey("Enter")).toBe(true);
-    });
-
-    it("activates on Space", () => {
-      expect(isActivationKey(" ")).toBe(true);
-    });
-
-    it("does not activate on other keys", () => {
-      expect(isActivationKey("Tab")).toBe(false);
-      expect(isActivationKey("a")).toBe(false);
-      expect(isActivationKey("Spacebar")).toBe(false);
     });
   });
 

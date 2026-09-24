@@ -26,6 +26,7 @@ import {
   type SettingsSection,
 } from "@/features/settings/panelStore";
 import { settingsStore, useSettingsStore } from "@/features/settings/store";
+import { cn } from "@/lib/utils";
 import { createDialogFocusReturn } from "./dialogFocusReturn";
 import {
   CLEAN_PRESET_DRAFT_GUARD,
@@ -33,6 +34,7 @@ import {
   decidePromptSaveOutcome,
   pickPromptCancelFocus,
   pickPromptOpenFocus,
+  isInsideLeavePrompt,
   presentUnsavedDraftPrompt,
   toPromptFocusTarget,
   type PresetDraftGuard,
@@ -81,6 +83,10 @@ function focusPrompt(cancel: HTMLElement | null, message: HTMLElement | null): v
  * button, and the dialog switches to the preset tab. A second close request dismisses the
  * prompt. See `decideCloseRequest`. A press outside the dialog never closes it, because the
  * dialog is a form.
+ *
+ * Only one unsaved-changes prompt is open at a time. While the preset library shows its own
+ * prompt, for a switch to another preset or for Add, a close request goes to that prompt. While
+ * the footer shows its prompt, a switch or an Add in the preset library goes to the footer.
  *
  * The panel store's `hide` stays an unconditional close. The dialog calls it only after the
  * guard allows the close or the user answered the prompt.
@@ -152,7 +158,9 @@ export function SettingsDialog() {
   };
 
   const requestClose = () => {
-    switch (decideCloseRequest(presetDraft, closePrompt !== null)) {
+    switch (
+      decideCloseRequest(presetDraft, closePrompt !== null, presetDraft.leavePromptOpen)
+    ) {
       case "close":
         hideSettings();
         return;
@@ -174,6 +182,14 @@ export function SettingsDialog() {
         return;
       case "hold":
         focusPrompt(promptCancelRef.current, promptMessageRef.current);
+        return;
+      case "defer":
+        // The preset library already asks about the draft. The request goes to that prompt,
+        // and the footer shows no second one. The prompt is on the preset tab.
+        presetDraft.focusLeavePrompt();
+        if (section !== PRESETS_SECTION) {
+          settingsPanelStore.getState().setSection(PRESETS_SECTION);
+        }
         return;
     }
   };
@@ -256,8 +272,15 @@ export function SettingsDialog() {
         onKeyDownCapture={() => {
           focusReturn.noteInteraction("keyboard");
         }}
-        onEscapeKeyDown={() => {
+        onEscapeKeyDown={(event) => {
           focusReturn.noteInteraction("keyboard");
+          // Escape inside the unsaved-changes prompt of the preset library answers that
+          // prompt with "Keep Editing" (`decideLeavePromptKey`). It is not a close request.
+          if (
+            isInsideLeavePrompt(event.target instanceof Element ? event.target : null)
+          ) {
+            event.preventDefault();
+          }
         }}
         onPointerDownCapture={() => {
           focusReturn.noteInteraction("pointer");
@@ -300,10 +323,12 @@ export function SettingsDialog() {
             <SettingsTab value="presets">{t("settings.tab.presets")}</SettingsTab>
           </TabsPrimitive.List>
 
-          {/* Scrollable body keeps header, close button, tabs, and footer pinned */}
+          {/* Scrollable body keeps header, close button, tabs, and footer pinned. It is a flex
+              column, so the preset panel can take the free height and scroll inside its own
+              panes. A hidden panel is `display: none` and takes no gap. */}
           <div
             ref={bodyRef}
-            className="-mx-4 min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-1"
+            className="-mx-4 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-1"
           >
             {errorView ? (
               <Notice tone="destructive" role="alert">
@@ -334,8 +359,19 @@ export function SettingsDialog() {
             <SettingsPanel value="ffmpeg">
               <FfmpegPathSection />
             </SettingsPanel>
-            <SettingsPanel value="presets">
-              <PresetLibrarySection onDraftChange={setPresetDraft} />
+            {/* The preset tab fills the free height of the body, so its list and its editor
+                scroll inside their panes and the dialog keeps its height when the selection
+                changes. The minimum keeps both panes usable when an error notice above takes
+                part of the body. The body then scrolls. */}
+            <SettingsPanel value="presets" className="flex min-h-72 flex-1 flex-col">
+              <PresetLibrarySection
+                onDraftChange={setPresetDraft}
+                closePromptOpen={unsavedPrompt !== null}
+                onFocusClosePrompt={() => {
+                  focusPrompt(promptCancelRef.current, promptMessageRef.current);
+                }}
+                visible={section === PRESETS_SECTION}
+              />
             </SettingsPanel>
           </div>
         </TabsPrimitive.Root>
@@ -416,16 +452,21 @@ function SettingsTab({
  */
 function SettingsPanel({
   value,
+  className,
   children,
 }: {
   value: SettingsSection;
+  className?: string;
   children: ReactNode;
 }) {
   return (
     <TabsPrimitive.Content
       value={value}
       forceMount
-      className="rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 data-[state=inactive]:hidden"
+      className={cn(
+        "rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 data-[state=inactive]:hidden",
+        className,
+      )}
     >
       {children}
     </TabsPrimitive.Content>

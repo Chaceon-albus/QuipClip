@@ -360,11 +360,16 @@ export const en = {
       copyNameNumbered: "{{name}} Copy {{n}}",
       duplicateBlockedUnsaved: "Save or cancel your changes to duplicate this preset.",
       delete: "Delete Preset",
-      restoreDefaults: "Restore Defaults",
-      setActive: "Set Active",
-      activeBadge: "Active",
+      restoreBuiltIn: "Restore Built-in Presets",
+      moreActions: "More Actions",
+      setDefault: "Set as Default",
+      defaultBadge: "Default",
       encoderMarkTitle: "Encoder: {{name}}",
       empty: "No presets yet.",
+      noSelection: "No preset selected.",
+      rowSummaryCrf: "{{container}} · {{encoder}} · CRF {{value}}",
+      rowSummaryBitrate: "{{container}} · {{encoder}} · {{value}} kbps",
+      rowSummaryQualityScale: "{{container}} · {{encoder}} · Quality scale {{value}}",
       limitReached: "Limit of {{max}} presets reached.",
       unsaved: "Unsaved changes",
       saveBlocked_one: "Fix {{count}} problem to save.",
@@ -378,14 +383,14 @@ export const en = {
       deleteDialog: {
         title: "Delete preset “{{name}}”?",
         description: "You cannot undo this action.",
-        descriptionActive:
-          "You cannot undo this action. This preset is the active preset, so “{{next}}” will become the active preset.",
+        descriptionDefault:
+          "You cannot undo this action. This preset is the default preset, so “{{next}}” will become the default preset.",
         descriptionLast:
-          "You cannot undo this action. This is the only preset, so no preset will be active.",
+          "You cannot undo this action. This is the only preset, so no preset will be the default preset.",
         confirm: "Delete",
       },
       restoreDialog: {
-        title: "Restore the default presets?",
+        title: "Restore the built-in presets?",
         description:
           "This restores the built-in presets to their original settings and adds back any you deleted. It replaces the changes you made to them. Your own presets and the FFmpeg location stay as they are.",
       },

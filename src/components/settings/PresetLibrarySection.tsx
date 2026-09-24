@@ -7,13 +7,11 @@ import {
   useState,
   type ComponentProps,
   type ReactNode,
-  type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { Notice } from "@/components/common/Notice";
-import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -23,7 +21,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useFfmpegStore } from "@/features/ffmpeg";
 import type { FfmpegState } from "@/features/ffmpeg/types";
 import { PRESET_NAME_SLOT } from "@/features/settings/presetNaming";
@@ -46,8 +43,13 @@ import {
 } from "./presetConfirmPresenter";
 import {
   CLEAN_PRESET_DRAFT_GUARD,
-  isUnsavedPresetRow,
+  decideLeavePromptKey,
+  decideLeaveRequest,
   pickCreateFailureFocus,
+  pickPromptCancelFocus,
+  pickPromptOpenFocus,
+  pickPromptReturnFocus,
+  PRESET_LEAVE_PROMPT_ATTRIBUTE,
   presentPresetDraftStatus,
   presentSaveAndLeaveLabel,
   presentUnsavedDraftPrompt,
@@ -60,11 +62,21 @@ import {
   type PresetLibraryController,
   type PresetLibraryView,
 } from "./presetLibraryController";
+import { PresetList, PresetListToolbar } from "./PresetList";
+import {
+  findListFocusRow,
+  findPresetRow,
+  pickDefaultPresetId,
+  pickSelectionAfterDelete,
+  presentAddPresetAction,
+  presentDeletePresetAction,
+  presentDuplicateSelectedAction,
+  presentRestoreBuiltInAction,
+} from "./presetListPresenter";
 import {
   CUSTOM_ENCODER_VALUE,
   MAX_PRESETS,
   groupIssuesByField,
-  isActivationKey,
   joinDescribedBy,
   parseAudioBitrateValue,
   parseAudioSampleRateValue,
@@ -74,13 +86,11 @@ import {
   presentAudioSampleRateSelect,
   presentAudioSampleRateValue,
   presentContainer,
-  presentDuplicatePresetAction,
   presentEncoderSelect,
   presentFrameRateInvalid,
   presentFrameRateSelect,
   presentFrameRateTermInput,
   presentNumericField,
-  presentPresetEncoderMark,
   presentQualityKind,
   presentQualityValueInput,
   presentResolutionInput,
@@ -221,46 +231,38 @@ function FieldError({
   );
 }
 
+/**
+ * The fields of the selected preset: the scrolling body of the editor pane on the right of the
+ * tab. `PresetEditorFooter` sits under it.
+ */
 function PresetEditor({
   draft,
   view,
   controller,
   ffmpegState,
+  numberFormatter,
   focusName,
   onNameFocused,
-  duplicateButtonRef,
-  onRequestDuplicate,
-  onRequestDelete,
 }: {
   draft: Preset;
   view: PresetLibraryView;
   controller: PresetLibraryController;
   ffmpegState: Pick<FfmpegState, "status" | "results">;
+  numberFormatter: Intl.NumberFormat;
   /**
-   * True when Add or Duplicate just created this preset. The name field then takes the focus
-   * once, with its text selected, and the editor calls `onNameFocused`.
+   * True when Add or Duplicate just created this preset, or when Enter or F2 on its list row
+   * asked for the name. The name field then takes the focus once, with its text selected, and
+   * the editor calls `onNameFocused`.
    */
   focusName: boolean;
   /** Reports that the name field took the focus, so the section clears `focusName`. */
   onNameFocused: () => void;
-  /** The Duplicate button, which takes the focus back after a Duplicate that failed. */
-  duplicateButtonRef: RefObject<HTMLButtonElement | null>;
-  /** Duplicates the preset. The section owns the name forms and the focus. */
-  onRequestDuplicate: (id: string) => void;
-  /** Asks the user to confirm the delete. The section owns the confirmation. */
-  onRequestDelete: (id: string) => void;
 }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const translate = t as (
     key: string,
     options?: Record<string, string | number>,
   ) => string;
-
-  const resolvedLanguage = getResolvedLanguage(i18n);
-  const numberFormatter = useMemo(
-    () => new Intl.NumberFormat(resolvedLanguage),
-    [resolvedLanguage],
-  );
 
   const videoSelect = presentEncoderSelect(ffmpegState, "video", draft.videoEncoder);
   const audioSelect = presentEncoderSelect(ffmpegState, "audio", draft.audioEncoder);
@@ -286,11 +288,6 @@ function PresetEditor({
   const issueGroups = groupIssuesByField(view.issues);
   const resolutionInvalid = presentResolutionInvalid(draft, view.issues);
   const frameRateInvalid = presentFrameRateInvalid(draft, view.issues);
-  const saveBlocked = presentSaveBlockedSummary(view.issues);
-  const duplicateAction = presentDuplicatePresetAction(view);
-  const duplicateReason = duplicateAction.reason
-    ? translate(duplicateAction.reason.key, duplicateAction.reason.values)
-    : null;
 
   // The section keys this editor by the preset id, so the editor mounts again for each
   // selected preset. A row press also mounts it, with `focusName` false, and the focus stays
@@ -348,8 +345,6 @@ function PresetEditor({
     frameRateN: `${idBase}-frame-rate-n`,
     frameRateD: `${idBase}-frame-rate-d`,
     frameRateError: `${idBase}-frame-rate-error`,
-    saveBlocked: `${idBase}-save-blocked`,
-    duplicateReason: `${idBase}-duplicate-reason`,
   };
 
   const nameInvalid = issueGroups.name.length > 0;
@@ -368,7 +363,7 @@ function PresetEditor({
   const audioCustomInvalid = audioEncoderInvalid && view.audioEncoderIsCustom;
 
   return (
-    <div className="space-y-4 rounded-lg border border-border bg-muted/20 p-3">
+    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
       <FormGroup legend={t("settings.preset.groupGeneral")}>
         {/* Preset Name */}
         <FieldLabel htmlFor={ids.name}>{t("settings.preset.nameLabel")}</FieldLabel>
@@ -860,113 +855,96 @@ function PresetEditor({
           </div>
         </Notice>
       ) : null}
-
-      {/* Actions */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="default"
-            size="sm"
-            disabled={!view.canSave || view.pending}
-            aria-describedby={joinDescribedBy(saveBlocked !== null && ids.saveBlocked)}
-            onClick={() => {
-              void controller.saveDraft();
-            }}
-          >
-            {t("common.save")}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={view.pending}
-            onClick={() => {
-              controller.cancelDraft();
-            }}
-          >
-            {t("common.cancel")}
-          </Button>
-          {view.dirty ? (
-            <span className="text-xs text-muted-foreground">
-              {t("settings.preset.unsaved")}
-            </span>
-          ) : null}
-          {/* Says why Save is off. Save names this line through `aria-describedby`. */}
-          {saveBlocked ? (
-            <span id={ids.saveBlocked} className="text-xs text-destructive-text">
-              {translate(saveBlocked.key, saveBlocked.values)}
-            </span>
-          ) : null}
-        </div>
-
-        <div className="flex items-center gap-2">
-          {/* A disabled button takes no pointer events, so the span around it is the tooltip
-              trigger, as in the transport bar. The span has no tabIndex, so the Tab order
-              does not change. The tooltip has content only while there is a reason, so an
-              enabled button shows no tooltip that repeats its label. The button names the
-              reason in `aria-describedby` for a screen reader. */}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="inline-flex">
-                <Button
-                  ref={duplicateButtonRef}
-                  variant="outline"
-                  size="sm"
-                  disabled={duplicateAction.disabled}
-                  aria-describedby={joinDescribedBy(
-                    duplicateReason !== null && ids.duplicateReason,
-                  )}
-                  onClick={() => {
-                    onRequestDuplicate(draft.id);
-                  }}
-                >
-                  {t("settings.preset.duplicate")}
-                </Button>
-                {duplicateReason !== null ? (
-                  <span id={ids.duplicateReason} className="sr-only">
-                    {duplicateReason}
-                  </span>
-                ) : null}
-              </span>
-            </TooltipTrigger>
-            {duplicateReason !== null ? (
-              <ShortcutTooltipContent
-                label={t("settings.preset.duplicate")}
-                reason={duplicateReason}
-              />
-            ) : null}
-          </Tooltip>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={view.pending || draft.id === view.activePresetId}
-            onClick={() => {
-              void controller.setActive(draft.id);
-            }}
-          >
-            {t("settings.preset.setActive")}
-          </Button>
-          {/* The red label keeps 4.5:1 only up to the /10 fill: in the dark theme a /12 fill
-              already gives 4.46:1. Thus the press keeps the hover fill, which also replaces
-              the teal press fill of the outline variant, and turns the border red. */}
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-destructive-text hover:bg-destructive/10 hover:text-destructive-text active:border-destructive/50 active:bg-destructive/10"
-            disabled={view.pending}
-            onClick={() => {
-              onRequestDelete(draft.id);
-            }}
-          >
-            {t("settings.preset.delete")}
-          </Button>
-        </div>
-      </div>
     </div>
   );
 }
 
-/** The two buttons that create a preset. See `pickCreateFailureFocus`. */
-type CreateButton = "add" | "duplicate";
+/**
+ * The footer of the editor pane: Save and Cancel, the lines that say the draft is unsaved or
+ * why Save is off, and Set as Default. The section puts it under `PresetEditor`, outside the
+ * scrolling fields, so it stays at the bottom of the pane at every scroll position. Duplicate
+ * and Delete are in the toolbar under the list.
+ */
+function PresetEditorFooter({
+  draft,
+  view,
+  controller,
+}: {
+  draft: Preset;
+  view: PresetLibraryView;
+  controller: PresetLibraryController;
+}) {
+  const { t } = useTranslation();
+  const translate = t as (
+    key: string,
+    options?: Record<string, string | number>,
+  ) => string;
+  const saveBlocked = presentSaveBlockedSummary(view.issues);
+  const idBase = useId();
+  const saveBlockedId = `${idBase}-save-blocked`;
+
+  return (
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="default"
+          size="sm"
+          disabled={!view.canSave || view.pending}
+          aria-describedby={joinDescribedBy(saveBlocked !== null && saveBlockedId)}
+          onClick={() => {
+            void controller.saveDraft();
+          }}
+        >
+          {t("common.save")}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={view.pending}
+          onClick={() => {
+            controller.cancelDraft();
+          }}
+        >
+          {t("common.cancel")}
+        </Button>
+        {view.dirty ? (
+          <span className="text-xs text-muted-foreground">
+            {t("settings.preset.unsaved")}
+          </span>
+        ) : null}
+        {/* Says why Save is off. Save names this line through `aria-describedby`. */}
+        {saveBlocked ? (
+          <span id={saveBlockedId} className="text-xs text-destructive-text">
+            {translate(saveBlocked.key, saveBlocked.values)}
+          </span>
+        ) : null}
+      </div>
+
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={view.pending || draft.id === view.activePresetId}
+        onClick={() => {
+          void controller.setActive(draft.id);
+        }}
+      >
+        {t("settings.preset.setDefault")}
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * The control that takes the focus after a write:
+ * - `add`: the Add button, after an Add that did not select a new preset, when the write
+ *   dropped the focus (see `pickCreateFailureFocus`).
+ * - `more`: the menu button of the toolbar, after a Duplicate that did not select a copy, on
+ *   the same condition.
+ * - `list`: the Tab stop of the preset list, or Add when the list is empty, after every delete
+ *   that succeeded. One rule, whatever opened the confirmation: a list row or the Delete
+ *   button, and whatever the speed of the write.
+ */
+type FocusReturnTarget = "add" | "more" | "list";
 
 export interface PresetLibrarySectionProps {
   /**
@@ -976,14 +954,43 @@ export interface PresetLibrarySectionProps {
    * such as a state setter.
    */
   onDraftChange?: (guard: PresetDraftGuard) => void;
+  /**
+   * True while the settings dialog shows its own unsaved-changes prompt. A switch to another
+   * preset, or Add, then opens no second prompt, and calls `onFocusClosePrompt` instead.
+   */
+  closePromptOpen?: boolean;
+  /** Moves the focus to the unsaved-changes prompt of the settings dialog. */
+  onFocusClosePrompt?: () => void;
+  /**
+   * True while the Export Presets tab is the visible tab. The panels stay mounted when they
+   * are hidden, and a hidden list cannot scroll its selected row into view. Default true.
+   */
+  visible?: boolean;
 }
 
-export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProps) {
-  const { t } = useTranslation();
+/**
+ * The Export Presets tab. It has two panes: the preset list with its toolbar on the left, and
+ * the editor of the selected preset on the right. The section fills the height that the
+ * settings dialog gives the tab, and each pane scrolls on its own, so the dialog keeps its
+ * height when the selection changes.
+ */
+export function PresetLibrarySection({
+  onDraftChange,
+  closePromptOpen = false,
+  onFocusClosePrompt,
+  visible = true,
+}: PresetLibrarySectionProps) {
+  const { t, i18n } = useTranslation();
   const translate = t as (
     key: string,
     options?: Record<string, string | number>,
   ) => string;
+
+  const resolvedLanguage = getResolvedLanguage(i18n);
+  const numberFormatter = useMemo(
+    () => new Intl.NumberFormat(resolvedLanguage),
+    [resolvedLanguage],
+  );
 
   // Only `status` and `results` reach `presentEncoderSelect` and `presentPresetEncoderMark`.
   // Selecting the two fields with a shallow comparison keeps a capability-probe write that
@@ -997,21 +1004,30 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
   // discards a dirty draft without warning, and `addPreset` refuses to add over one, so both
   // leave the confirmation to the view; this holds the pending request until the user answers.
   const [pendingLeave, setPendingLeave] = useState<PendingLeave | null>(null);
+  // The element that held the focus when the prompt opened. "Keep Editing" gives it back: the
+  // row the user was on for a request from the list, or the field the user was editing.
+  const promptReturnFocusRef = useRef<HTMLElement | null>(null);
+  const promptCancelRef = useRef<HTMLButtonElement>(null);
+  const promptMessageRef = useRef<HTMLSpanElement>(null);
+  // Counts the requests of the settings dialog to move the focus to the prompt. See
+  // `PresetDraftGuard.focusLeavePrompt`.
+  const [leavePromptFocusRequests, setLeavePromptFocusRequests] = useState(0);
 
-  // The preset whose name field takes the focus once, after Add or Duplicate created it. The
-  // editor of that preset clears it when the field has the focus.
+  // The preset whose name field takes the focus once: after Add or Duplicate created it, or
+  // after Enter or F2 on its row. The editor of that preset clears it when the field has the
+  // focus.
   const [focusNameId, setFocusNameId] = useState<string | null>(null);
   const handleNameFocused = useCallback(() => {
     setFocusNameId(null);
   }, []);
 
-  // The button that takes the focus back after an Add or a Duplicate that did not select a
-  // new preset. Each such result is a new request object, and the effect below handles each
-  // object once, when the write is over.
+  // The control that takes the focus back after a write that dropped it. Each request is a new
+  // object, and the effect below handles each object once, when the write is over.
+  const listRef = useRef<HTMLDivElement>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
-  const duplicateButtonRef = useRef<HTMLButtonElement>(null);
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
   const [focusReturn, setFocusReturn] = useState<{
-    readonly button: CreateButton;
+    readonly target: FocusReturnTarget;
   } | null>(null);
   const handledFocusReturnRef = useRef<typeof focusReturn>(null);
 
@@ -1055,9 +1071,52 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
     };
   }, [controller]);
 
-  // The button is disabled while the write is in flight, so the effect waits until `pending`
-  // is false and the button can take the focus. See `pickCreateFailureFocus` for when the
-  // focus moves.
+  // The tab opens on the default (active) preset, or on the first preset when no preset has the
+  // active id (see `pickDefaultPresetId`). This runs once for each open of the dialog, because
+  // the dialog mounts this section when it opens. It does not run again when a later change
+  // clears the selection: a delete selects the neighbour itself, and a restore of the built-in
+  // presets selects the default (active) preset itself (see `confirmDelete` and
+  // `restoreDefaults`).
+  const initialSelectionDoneRef = useRef(false);
+  useEffect(() => {
+    if (initialSelectionDoneRef.current || !view.ready) {
+      return;
+    }
+    initialSelectionDoneRef.current = true;
+    if (view.selectedPresetId !== null) {
+      return;
+    }
+    const id = pickDefaultPresetId(view.presets, view.activePresetId);
+    if (id !== null) {
+      controller.select(id);
+    }
+  }, [
+    controller,
+    view.ready,
+    view.selectedPresetId,
+    view.presets,
+    view.activePresetId,
+  ]);
+
+  // The row that takes the selection after the delete in flight, or null. See
+  // `findListFocusRow`.
+  const deleteNeighbourIdRef = useRef<string | null>(null);
+
+  // The element that the list gives the focus to: the neighbour of a delete in flight while it
+  // is on screen, else the row that holds the Tab stop, else the Add button when the list is
+  // empty. It reads the rendered rows, not the controller. The store publishes a write before
+  // it reaches the disk, so while a delete is in flight the controller already reads a library
+  // without the deleted row, and the rows on screen still show it.
+  const findListFocusTarget = useCallback(
+    (): HTMLElement | null =>
+      findListFocusRow(listRef.current, deleteNeighbourIdRef.current) ??
+      addButtonRef.current,
+    [],
+  );
+
+  // Each button is disabled while the write is in flight, so the effect waits until `pending`
+  // is false and the target can take the focus. See `FocusReturnTarget` for which control
+  // takes it.
   useEffect(() => {
     if (
       focusReturn === null ||
@@ -1067,17 +1126,32 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
       return;
     }
     handledFocusReturnRef.current = focusReturn;
-    const button =
-      focusReturn.button === "add" ? addButtonRef.current : duplicateButtonRef.current;
-    pickCreateFailureFocus(
-      toPromptFocusTarget(button),
-      document.activeElement,
-    )?.focus();
-  }, [focusReturn, view.pending]);
+    switch (focusReturn.target) {
+      case "add":
+      case "more":
+        pickCreateFailureFocus(
+          toPromptFocusTarget(
+            focusReturn.target === "add" ? addButtonRef.current : moreButtonRef.current,
+          ),
+          document.activeElement,
+        )?.focus();
+        return;
+      case "list":
+        // The confirmation gives the focus to the same element when it closes after the
+        // write (`confirmFocus`). This call covers a write that ends after the confirmation
+        // closed, when the deleted row that held the focus leaves the list.
+        findListFocusTarget()?.focus();
+        deleteNeighbourIdRef.current = null;
+        return;
+    }
+  }, [findListFocusTarget, focusReturn, view.pending]);
 
   // Report the draft upward. The guard is rebuilt only when one of its values changes, so the
   // dialog renders again only then. The actions call the controller, which owns the draft.
   const { dirty, presetName, canSave, pending } = presentPresetDraftStatus(view);
+  // The prompt shows while a request waits and the draft holds an unsaved edit, which is when
+  // `presentUnsavedDraftPrompt` presents one.
+  const leavePromptShown = pendingLeave !== null && dirty;
   const draftGuard = useMemo<PresetDraftGuard>(
     () => ({
       dirty,
@@ -1088,10 +1162,29 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
       discard: () => {
         controller.cancelDraft();
       },
+      leavePromptOpen: leavePromptShown,
+      focusLeavePrompt: () => {
+        setLeavePromptFocusRequests((count) => count + 1);
+      },
     }),
-    [controller, dirty, presetName, canSave, pending],
+    [controller, dirty, presetName, canSave, pending, leavePromptShown],
   );
   const unsavedPrompt = presentUnsavedDraftPrompt(draftGuard);
+
+  // The prompt takes the focus when it opens, as the prompt of the settings dialog does: "Keep
+  // Editing", so Enter picks the choice that changes nothing. A request from the list thus
+  // takes a keyboard user from the row to the prompt. A new request while the prompt is open
+  // only changes its target, and the focus stays where it is. A close request of the settings
+  // dialog while the prompt is open brings the focus back to it (`focusLeavePrompt`). That
+  // request can also switch to this tab, and the effect runs after the tab is visible.
+  useEffect(() => {
+    if (leavePromptShown) {
+      pickPromptOpenFocus(
+        toPromptFocusTarget(promptCancelRef.current),
+        toPromptFocusTarget(promptMessageRef.current),
+      )?.focus();
+    }
+  }, [leavePromptShown, leavePromptFocusRequests]);
 
   useEffect(() => {
     onDraftChange?.(draftGuard);
@@ -1123,18 +1216,57 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
     });
   }, [controller]);
 
-  const handleActivateRow = (id: string) => {
-    // No selection change while a write is in flight. A Save and Switch that is running holds
-    // its target, and a row pressed now would either move the prompt to a target that the
-    // running save then ignores, or select a row under that save.
-    if (view.pending) {
+  const focusRow = (id: string) => {
+    findPresetRow(listRef.current, id)?.focus();
+  };
+
+  // Opens the prompt for `request`, or changes the target of the prompt that is open.
+  const raiseLeavePrompt = (request: PendingLeave) => {
+    if (pendingLeave === null) {
+      const active = document.activeElement;
+      promptReturnFocusRef.current = pickPromptReturnFocus(
+        active instanceof HTMLElement ? active : null,
+        document.body,
+      );
+    }
+    setPendingLeave(request);
+  };
+
+  // Selects the row `id` from the list, through the unsaved-draft guard, and moves the focus to
+  // it. The selection follows the focus, so the focus moves only with the selection: while a
+  // prompt asks about the draft, the selection and the focus stay on the old row. See
+  // `decideLeaveRequest`.
+  const handleSelectRow = (id: string) => {
+    if (id === view.selectedPresetId) {
+      focusRow(id);
       return;
     }
-    if (view.dirty && id !== view.selectedPresetId) {
-      setPendingLeave({ kind: "select", id });
-      return;
+    switch (decideLeaveRequest(view, closePromptOpen)) {
+      case "ignore":
+        return;
+      case "defer":
+        onFocusClosePrompt?.();
+        return;
+      case "raise":
+        raiseLeavePrompt({ kind: "select", id });
+        return;
+      case "leave":
+        controller.select(id);
+        focusRow(id);
+        return;
     }
-    controller.select(id);
+  };
+
+  // Enter or F2 on a row. A row that holds the focus is the selected row, except the first row
+  // while no preset is selected, and then there is no draft to guard.
+  const handleEditName = (id: string) => {
+    if (id !== view.selectedPresetId) {
+      if (decideLeaveRequest(view, closePromptOpen) !== "leave") {
+        return;
+      }
+      controller.select(id);
+    }
+    setFocusNameId(id);
   };
 
   // The controller picks the first free name from these forms, in the document it writes.
@@ -1147,19 +1279,24 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
     if (id !== null) {
       setFocusNameId(id);
     } else {
-      setFocusReturn({ button: "add" });
+      setFocusReturn({ target: "add" });
     }
   };
 
   const handleRequestAdd = () => {
-    if (view.pending) {
-      return;
+    switch (decideLeaveRequest(view, closePromptOpen)) {
+      case "ignore":
+        return;
+      case "defer":
+        onFocusClosePrompt?.();
+        return;
+      case "raise":
+        raiseLeavePrompt({ kind: "add" });
+        return;
+      case "leave":
+        void addNewPreset();
+        return;
     }
-    if (view.dirty) {
-      setPendingLeave({ kind: "add" });
-      return;
-    }
-    void addNewPreset();
   };
 
   // Duplicate is off while the draft is dirty, so this never runs over an unsaved edit. See
@@ -1174,14 +1311,17 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
     if (copyId !== null) {
       setFocusNameId(copyId);
     } else {
-      setFocusReturn({ button: "duplicate" });
+      setFocusReturn({ target: "more" });
     }
   };
 
-  // Carries out a pending request. The caller first makes the draft clean.
+  // Carries out a pending request. The caller first makes the draft clean. The prompt that held
+  // the focus closes, so a switch gives the focus to the row it selects, and the list stays
+  // where the keyboard user left it.
   const leave = (request: PendingLeave) => {
     if (request.kind === "select") {
       controller.select(request.id);
+      focusRow(request.id);
     } else {
       void addNewPreset();
     }
@@ -1190,9 +1330,23 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
   // The request is a parameter and is not read from state after the save: a save that leaves
   // the draft clean also clears `pendingLeave`, as described above.
   const handleSaveAndLeave = async (request: PendingLeave) => {
+    // The save disables every choice while it runs, and a disabled button drops the focus to
+    // the document body. The message keeps the focus inside the prompt, as in the prompt of the
+    // settings dialog.
+    promptMessageRef.current?.focus();
     if (await controller.saveDraftBeforeLeaving()) {
       leave(request);
     }
+  };
+
+  const handleKeepEditing = () => {
+    const returnFocus = promptReturnFocusRef.current;
+    promptReturnFocusRef.current = null;
+    setPendingLeave(null);
+    pickPromptCancelFocus(
+      toPromptFocusTarget(returnFocus),
+      toPromptFocusTarget(findPresetRow(listRef.current, view.selectedPresetId)),
+    )?.focus();
   };
 
   const handleRequestDelete = (id: string) => {
@@ -1202,38 +1356,55 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
     }
   };
 
-  return (
-    <section className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h3 className="font-heading text-sm font-medium">
-          {t("settings.preset.section")}
-        </h3>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={view.ready ? !view.canAdd || view.pending : true}
-            ref={addButtonRef}
-            onClick={handleRequestAdd}
-          >
-            {t("settings.preset.add")}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            // Gated on `ready` as well as `pending`: `restore_default_presets` begins by
-            // reading the settings file, so it fails the same way the load did and must not
-            // be the one enabled control in a state where it cannot work.
-            disabled={view.ready ? view.pending : true}
-            onClick={() => {
-              setRestoreConfirmOpen(true);
-            }}
-          >
-            {t("settings.preset.restoreDefaults")}
-          </Button>
-        </div>
-      </div>
+  // The selection moves to the row that takes the place of the deleted row, so the editor pane
+  // is empty only when the library is. The controller clears the selection when it deletes the
+  // selected preset, and it cannot know the neighbour after the write, because the deleted row
+  // is gone by then.
+  const confirmDelete = async (id: string) => {
+    const next = pickSelectionAfterDelete(
+      view.presets.map((preset) => preset.id),
+      id,
+    );
+    // The confirmation calls `findListFocusTarget` when it closes, which can be while the
+    // write is in flight. The neighbour then takes the focus at once, and keeps it.
+    deleteNeighbourIdRef.current = next;
+    if (!(await controller.deletePreset(id))) {
+      // The preset stays, and so does the selection. The focus goes back to the selected row,
+      // away from the neighbour that the confirmation may have focused.
+      deleteNeighbourIdRef.current = null;
+      setFocusReturn({ target: "list" });
+      return;
+    }
+    if (controller.getView().selectedPresetId === null && next !== null) {
+      controller.select(next);
+    }
+    setFocusReturn({ target: "list" });
+  };
 
+  // A restore keeps every preset and the selection, so it selects a preset only when none was
+  // selected, such as after a delete of the last preset. The editor pane then shows the
+  // default preset, as when the tab opens.
+  const restoreDefaults = async () => {
+    if (!(await controller.restoreDefaults())) {
+      return;
+    }
+    const current = controller.getView();
+    if (current.selectedPresetId !== null) {
+      return;
+    }
+    const id = pickDefaultPresetId(current.presets, current.activePresetId);
+    if (id !== null) {
+      controller.select(id);
+    }
+  };
+
+  const addAction = presentAddPresetAction(view);
+  const deleteAction = presentDeletePresetAction(view);
+  const duplicateAction = presentDuplicateSelectedAction(view);
+  const restoreAction = presentRestoreBuiltInAction(view);
+
+  return (
+    <section className="flex min-h-0 flex-1 flex-col gap-3">
       {!view.canAdd ? (
         <p className="text-xs text-muted-foreground">
           {translate("settings.preset.limitReached", { max: MAX_PRESETS })}
@@ -1243,9 +1414,34 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
       {/* The request above is cleared once the draft is clean, so a Save or a Cancel elsewhere
           in the editor leaves no stale prompt behind. */}
       {pendingLeave !== null && unsavedPrompt !== null ? (
-        <Notice tone="warning" role="alert">
+        <Notice
+          tone="warning"
+          role="alert"
+          {...{ [PRESET_LEAVE_PROMPT_ATTRIBUTE]: "" }}
+          onKeyDown={(event) => {
+            // The settings dialog leaves Escape inside this prompt to it. See
+            // `decideLeavePromptKey`.
+            switch (decideLeavePromptKey(event.key, unsavedPrompt)) {
+              case "keepEditing":
+                event.preventDefault();
+                handleKeepEditing();
+                return;
+              case "hold":
+                event.preventDefault();
+                return;
+              case "ignore":
+                return;
+            }
+          }}
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="min-w-0 wrap-break-word">
+            {/* `tabIndex={-1}` lets the message take the focus while a save disables every
+                button, without adding a stop to the Tab order. */}
+            <span
+              ref={promptMessageRef}
+              tabIndex={-1}
+              className="min-w-0 wrap-break-word outline-none"
+            >
               {translate(unsavedPrompt.message.key, unsavedPrompt.message.values)}
             </span>
             {/* Outline and ghost buttons inherit the text color. Reset it here so the
@@ -1266,10 +1462,11 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
                 {t("settings.preset.discardConfirm")}
               </Button>
               <Button
+                ref={promptCancelRef}
                 variant="outline"
                 size="sm"
                 disabled={unsavedPrompt.choicesDisabled}
-                onClick={() => setPendingLeave(null)}
+                onClick={handleKeepEditing}
               >
                 {t("settings.preset.discardCancel")}
               </Button>
@@ -1288,107 +1485,73 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
         </Notice>
       ) : null}
 
-      {!view.ready ? (
-        <p className="text-xs text-muted-foreground">{t("common.loading")}</p>
-      ) : view.presets.length === 0 ? (
-        <p className="text-xs text-muted-foreground">{t("settings.preset.empty")}</p>
-      ) : (
-        <div className="max-h-36 space-y-1 overflow-y-auto rounded-md border border-border p-1">
-          {view.presets.map((preset) => {
-            const encoderMark = presentPresetEncoderMark(ffmpegState, preset);
-            return (
-              <div
-                key={preset.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => handleActivateRow(preset.id)}
-                onKeyDown={(e) => {
-                  if (isActivationKey(e.key)) {
-                    handleActivateRow(preset.id);
-                  }
-                }}
-                className={cn(
-                  "flex cursor-pointer items-center justify-between rounded px-2.5 py-1.5 text-xs transition-colors",
-                  preset.id === view.selectedPresetId
-                    ? "bg-accent font-medium text-accent-foreground"
-                    : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
-                )}
-              >
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <span className="truncate">{preset.name}</span>
-                  {isUnsavedPresetRow(view, preset.id) ? (
-                    <>
-                      {/* The dot is decorative. The `sr-only` span carries its meaning into
-                          the row's accessible name, as the encoder badge does. */}
-                      <span
-                        aria-hidden="true"
-                        className="size-1.5 shrink-0 rounded-full bg-primary"
-                      />
-                      <span className="sr-only">{` ${t("settings.preset.unsaved")}`}</span>
-                    </>
-                  ) : null}
-                </span>
-                <div className="flex shrink-0 items-center gap-1.5">
-                  {encoderMark ? (
-                    <Tooltip>
-                      {/* The badge stays out of the tab order: the row around it is already
-                          `role="button"` with `tabIndex={0}`, and a focusable child would nest
-                          one interactive control inside another. The tooltip opens on a pointer
-                          or on focus, so it reaches a mouse only; the `sr-only` span carries the
-                          same encoder name and reason into the row's accessible name, where a
-                          keyboard or screen-reader user reads them. */}
-                      <TooltipTrigger asChild>
-                        <span
-                          tabIndex={-1}
-                          className={cn(
-                            "rounded px-1.5 py-0.5 text-2xs leading-none font-semibold",
-                            encoderMark.tone === "warning"
-                              ? "bg-warning/10 text-warning-text"
-                              : "bg-muted text-muted-foreground",
-                          )}
-                        >
-                          {translate(encoderMark.badgeKey)}
-                          <span className="sr-only">
-                            {` ${translate(encoderMark.titleKey, encoderMark.titleValues)} ${translate(encoderMark.reasonKey)}`}
-                          </span>
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent className="flex-col items-start gap-1">
-                        <p className="font-semibold">
-                          {translate(encoderMark.titleKey, encoderMark.titleValues)}
-                        </p>
-                        <p>{translate(encoderMark.reasonKey)}</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  ) : null}
-                  {preset.id === view.activePresetId ? (
-                    <span className="rounded bg-primary/10 px-1.5 py-0.5 text-2xs leading-none font-semibold text-primary">
-                      {t("settings.preset.activeBadge")}
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-            );
-          })}
+      {/* One row that is exactly the free height (`minmax(0,1fr)`), so a long list or a long
+          editor scrolls inside its pane and never makes the grid taller than the tab. */}
+      <div className="grid min-h-0 flex-1 grid-cols-[13rem_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] gap-3">
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <PresetList
+              view={view}
+              ffmpegState={ffmpegState}
+              numberFormatter={numberFormatter}
+              listRef={listRef}
+              visible={visible}
+              onSelectRow={handleSelectRow}
+              onEditName={handleEditName}
+              onDeleteRow={handleRequestDelete}
+            />
+          </div>
+          <PresetListToolbar
+            add={addAction}
+            remove={deleteAction}
+            duplicate={duplicateAction}
+            restore={restoreAction}
+            menuDisabled={!view.ready}
+            addButtonRef={addButtonRef}
+            moreButtonRef={moreButtonRef}
+            onAdd={handleRequestAdd}
+            onDelete={() => {
+              if (view.selectedPresetId !== null) {
+                handleRequestDelete(view.selectedPresetId);
+              }
+            }}
+            onDuplicate={() => {
+              if (view.selectedPresetId !== null) {
+                void handleDuplicate(view.selectedPresetId);
+              }
+            }}
+            onRestore={() => {
+              setRestoreConfirmOpen(true);
+            }}
+          />
         </div>
-      )}
 
-      {view.draft ? (
-        <PresetEditor
-          key={view.draft.id}
-          draft={view.draft}
-          view={view}
-          controller={controller}
-          ffmpegState={ffmpegState}
-          focusName={focusNameId === view.draft.id}
-          onNameFocused={handleNameFocused}
-          duplicateButtonRef={duplicateButtonRef}
-          onRequestDuplicate={(id) => {
-            void handleDuplicate(id);
-          }}
-          onRequestDelete={handleRequestDelete}
-        />
-      ) : null}
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-muted/20">
+          {view.draft ? (
+            <>
+              <PresetEditor
+                key={view.draft.id}
+                draft={view.draft}
+                view={view}
+                controller={controller}
+                ffmpegState={ffmpegState}
+                numberFormatter={numberFormatter}
+                focusName={focusNameId === view.draft.id}
+                onNameFocused={handleNameFocused}
+              />
+              <PresetEditorFooter
+                draft={view.draft}
+                view={view}
+                controller={controller}
+              />
+            </>
+          ) : view.ready ? (
+            <p className="m-auto p-3 text-xs text-muted-foreground">
+              {t("settings.preset.noSelection")}
+            </p>
+          ) : null}
+        </div>
+      </div>
 
       {/* Each confirm button keeps the gate of the button that opened its dialog: the
           controller requires every write to wait while `view.pending` is true. */}
@@ -1417,21 +1580,26 @@ export function PresetLibrarySection({ onDraftChange }: PresetLibrarySectionProp
         confirmDisabled={view.pending}
         onConfirm={() => {
           if (deleteConfirm.prompt) {
-            void controller.deletePreset(deleteConfirm.prompt.presetId);
+            void confirmDelete(deleteConfirm.prompt.presetId);
           }
         }}
+        // After a confirm, the list takes the focus, on the row that takes the selection, or
+        // Add when the list is empty, whatever opened the dialog. A cancel gives the focus back
+        // to the opener, or to the list when nothing held the focus when the dialog opened.
+        confirmFocus={findListFocusTarget}
+        fallbackFocus={findListFocusTarget}
       />
       <ConfirmDialog
         open={restoreConfirmOpen}
         onOpenChange={setRestoreConfirmOpen}
         title={translate(restorePrompt.title.key)}
         description={translate(restorePrompt.description.key)}
-        confirmLabel={t("settings.preset.restoreDefaults")}
+        confirmLabel={t("settings.preset.restoreBuiltIn")}
         cancelLabel={t("common.cancel")}
         destructive
         confirmDisabled={view.ready ? view.pending : true}
         onConfirm={() => {
-          void controller.restoreDefaults();
+          void restoreDefaults();
         }}
       />
     </section>
