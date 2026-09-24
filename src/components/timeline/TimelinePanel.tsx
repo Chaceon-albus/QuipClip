@@ -31,12 +31,12 @@ import {
   calculateContentWidthPx,
   calculateMaxZoom,
   calculatePlayheadLayout,
-  calculatePtsFromClientX,
   calculateTimelineSecondsFromClientX,
   calculateWheelZoomFactor,
   clampScrollLeftToFollowWindow,
   getTimelineDurationSeconds,
   resolvePlayheadOrCentreAnchor,
+  timelineStore,
   timelineViewportStore,
   useTimelineStore,
   useTimelineViewportStore,
@@ -45,6 +45,14 @@ import {
   type TimelineViewportStoreState,
   type TimelineZoomAnchorPoint,
 } from "@/features/timeline";
+import { formatElapsedTimecode } from "@/lib/timecode";
+import {
+  calculateVisibleLane,
+  createEdgeAutoScroll,
+  type ClientRange,
+  type EdgeAutoScroll,
+  type EdgeAutoScrollGeometry,
+} from "./edgeAutoScroll";
 import { PendingInFlag, PendingInTrackMarks } from "./PendingInLayer";
 import { PlayheadFollow } from "./PlayheadFollow";
 import {
@@ -54,7 +62,27 @@ import {
   type ScrubSurfaceHandlers,
 } from "./PlayheadLayer";
 import { countRulerEdgeAnchors } from "./rulerLabel";
+import { planScrubSeek, resolveSnapIndicatorRatio } from "./scrubSeekPlan";
+import { createSnapBoundaryCache, type SnapBoundary } from "./scrubSnap";
 import { SegmentLayer } from "./SegmentLayer";
+import {
+  RulerHoverLine,
+  RulerSnapIndicator,
+  TrackHoverLine,
+  TrackSnapIndicator,
+} from "./TimelineDragAids";
+import {
+  calculateHoverLineOffset,
+  createTimelineHoverLine,
+  hideHoverLine,
+  hideSnapIndicator,
+  resolveHoverLabelSide,
+  showSnapIndicator,
+  writeHoverLine,
+  type HoverLineElements,
+  type SnapIndicatorElements,
+  type TimelineHoverLine,
+} from "./timelineHover";
 import { calculateRulerScale, generateRulerTicks } from "./timelineMarkers";
 import { TimelineRuler } from "./TimelineRuler";
 import { TimelineZoomControls } from "./TimelineZoomControls";
@@ -82,6 +110,19 @@ const selectTimecodeFormat = (state: TimecodePreferenceState) => state.format;
 
 const selectZoom = (state: TimelineViewportStoreState) => state.zoom;
 
+/** The empty boundary list of a sample that cannot snap. */
+const NO_SNAP_BOUNDARIES: readonly SnapBoundary[] = [];
+
+/**
+ * The visible part of the lane, in client pixels (`calculateVisibleLane`). The right edge is
+ * the fractional right of the rectangle and not `clientWidth`, which is rounded. The scroll
+ * container below has no border, no padding and no vertical scrollbar, so its rectangle is
+ * its visible area.
+ */
+function readVisibleLane(scrollEl: HTMLElement): ClientRange {
+  return calculateVisibleLane(scrollEl.getBoundingClientRect());
+}
+
 /**
  * The timeline panel shell: the layout, the scroll container, the zoom and the viewport
  * state, the pointer gesture, and the empty and loading states.
@@ -97,6 +138,16 @@ const selectZoom = (state: TimelineViewportStoreState) => state.zoom;
  * ticks do not subscribe to it. So a presented frame renders only those small layers again.
  * A layer that renders per frame takes its label as a prop, and a layer that does not
  * reads the catalog itself.
+ *
+ * The panel also runs three aids of the playhead drag. None of them renders the panel: they
+ * write to the DOM, or they seek through the store.
+ *
+ * - The snap (`scrubSnap.ts`): a drag sample within 6px of a segment boundary or the pending
+ *   In seeks to the stored PTS of that boundary, and the snap indicator shows it.
+ * - The edge auto-scroll (`edgeAutoScroll.ts`): a drag near an edge of the visible lane, or
+ *   past it, scrolls the view, and the playhead stays at that edge.
+ * - The hover line (`timelineHover.ts`): with no drag running, a line and an approximate
+ *   timecode show the time under the pointer.
  */
 export function TimelinePanel({
   activeSourceId,
@@ -174,6 +225,26 @@ export function TimelinePanel({
   // through calculatePendingNavigation.
   const gestureSeekTargetRef = useRef<number | null>(null);
 
+  // The elements of the drag aids (TimelineDragAids). The panel writes to them directly.
+  const hoverRulerRef = useRef<HTMLDivElement | null>(null);
+  const hoverLabelRef = useRef<HTMLSpanElement | null>(null);
+  const hoverTrackRef = useRef<HTMLDivElement | null>(null);
+  const snapRulerRef = useRef<HTMLDivElement | null>(null);
+  const snapTrackRef = useRef<HTMLDivElement | null>(null);
+
+  // True while Alt (Option on macOS) is held, which turns the snap off. Pointer events and
+  // the key events of the modifier both write it.
+  const isSnapSuppressedRef = useRef<boolean>(false);
+  // The lane position of the last sample of the gesture, and the direction of the drag on
+  // the time axis, for the tie rule of the snap (resolveDragDirection).
+  const dragLaneXRef = useRef<number | null>(null);
+  const dragDirectionRef = useRef<number>(0);
+  // The snap boundaries, built again only when the segments or the time axis change.
+  const [readSnapBoundaries] = useState(createSnapBoundaryCache);
+
+  const hoverRef = useRef<TimelineHoverLine | null>(null);
+  const autoScrollRef = useRef<EdgeAutoScroll | null>(null);
+
   const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
     const nextScrollLeft = event.currentTarget.scrollLeft;
     // A scroll this component caused has already written the mirror, so a value that
@@ -185,6 +256,8 @@ export function TimelinePanel({
       userScrolledRef.current = true;
     }
     scrollLeftRef.current = nextScrollLeft;
+    // The lane moved under a pointer that did not move, so the time under it changed.
+    hoverRef.current?.refresh();
   };
 
   useLayoutEffect(() => {
@@ -411,14 +484,53 @@ export function TimelinePanel({
     [rulerTicks, laneWidthPx],
   );
 
+  const gestureRef = useRef<TimelineScrubGesture | null>(null);
+
+  const videoStartPts = media?.probe.videoStartPts;
+  const videoTimeBase = media?.probe.videoTimeBase;
+
+  // The element sets of the two aids. The refs are read at the time of the write, so an
+  // element that mounts again is found.
+  const hoverElements = (): HoverLineElements => ({
+    ruler: hoverRulerRef.current,
+    label: hoverLabelRef.current,
+    track: hoverTrackRef.current,
+  });
+  const snapElements = (): SnapIndicatorElements => ({
+    ruler: snapRulerRef.current,
+    track: snapTrackRef.current,
+  });
+
   /**
    * Seeks to the timeline position under a client X coordinate (ADR 022).
+   *
+   * The DOM and the store reads are here, and every rule is in `planScrubSeek`:
+   *
+   * - The coordinate is clamped to the visible lane, where an end of the lane less than a
+   *   pixel outside the view counts as its edge (`calculateScrubClampRange`). A drag past an
+   *   edge then seeks to the time at that edge while the edge auto-scroll moves the view, and
+   *   at the end of the scroll range it reaches the exact end of the lane. A press lands on a
+   *   surface that the user sees, so the clamp moves the seek of a click only by that snap, at
+   *   an end of the lane.
+   * - A sample of a drag, its release included, snaps to a segment boundary or to the pending
+   *   In within 6px inside the visible lane, while a precise seek is possible and Alt is not
+   *   held. It then seeks to the stored PTS of that boundary, and not to a PTS from the pixel.
+   *   The seek at pointer down is the seek of a click, and it never snaps (scrubSnap.ts gives
+   *   the reasons).
+   * - The calibration gate, `canUsePreciseSeek`, applies here, in the one path that seeks from a
+   *   pointer position.
    *
    * Reads the rectangle from `laneRef.current` on every call, because the ruler lane and the
    * track lane share one left edge and one width by construction.
    *
    * Passes `{ scrub: phase === "scrub" }` so playhead drag moves use fastSeek and audio bursts,
-   * while pointer down, pointer release, and a cancelled drag perform exact seeks.
+   * while pointer down, pointer release, and a cancelled drag perform exact seeks. A snapped
+   * sample follows the same rule, and the store drops a scrub sample that repeats the time of
+   * the last request, so a pointer that rests on a snap sends no new seek.
+   *
+   * The snap indicator shows while the playhead is drawn on the snapped boundary after the
+   * seek (`resolveSnapIndicatorRatio`), so a refused seek hides it and a dropped repeat keeps
+   * it.
    *
    * Records the seek target that each request leaves in the store, so the paused follow does
    * not treat a position that the gesture requested as a navigation. The render of the exact
@@ -427,35 +539,70 @@ export function TimelinePanel({
    */
   const seekFromClientX = (clientX: number, phase: "scrub" | "final") => {
     const laneEl = laneRef.current;
-    if (!laneEl || !canSeek || totalDurationSeconds === null) {
+    if (!laneEl) {
+      hideSnapIndicator(snapElements());
       return;
     }
-    const rect = laneEl.getBoundingClientRect();
-    const options: SeekOptions = { scrub: phase === "scrub" };
-    if (canUsePreciseSeek && media?.probe.videoStartPts && media.probe.videoTimeBase) {
-      const targetPts = calculatePtsFromClientX(
-        clientX,
-        rect.left,
-        rect.width,
+    const laneRect = laneEl.getBoundingClientRect();
+    const scrollEl = scrollRef.current;
+    const isDragSample = gestureRef.current?.isDragging() === true;
+    // The boundary list comes from the store and not from a subscription, so an edit does not
+    // render the panel. A sample that cannot snap does not build it.
+    let boundaries = NO_SNAP_BOUNDARIES;
+    if (isDragSample && canUsePreciseSeek) {
+      const { segments, pendingInPts } = timelineStore.getState();
+      boundaries = readSnapBoundaries({
+        segments,
+        sourceId,
+        pendingInPts,
+        videoStartPts,
+        videoTimeBase,
         totalDurationSeconds,
-        media.probe.videoStartPts,
-        media.probe.videoTimeBase,
-      );
-      if (targetPts !== null) {
-        seekToPts(targetPts, options);
-        gestureSeekTargetRef.current = playbackStore.getState().seekTargetSeconds;
-      }
+      });
+    }
+
+    const plan = planScrubSeek({
+      pointerX: clientX,
+      phase,
+      isDragSample,
+      canSeek,
+      canSeekExactly: canUsePreciseSeek,
+      canSeekApproximately: onApproximateSeek !== undefined,
+      lane: { left: laneRect.left, width: laneRect.width },
+      container: scrollEl ? scrollEl.getBoundingClientRect() : null,
+      totalDurationSeconds,
+      videoStartPts,
+      videoTimeBase,
+      boundaries,
+      isSnapSuppressed: isSnapSuppressedRef.current,
+      previousLaneX: dragLaneXRef.current,
+      previousDirection: dragDirectionRef.current,
+    });
+    dragLaneXRef.current = plan.laneX;
+    dragDirectionRef.current = plan.direction;
+
+    const request = plan.request;
+    if (request === null) {
+      hideSnapIndicator(snapElements());
       return;
     }
-    const targetSeconds = calculateTimelineSecondsFromClientX(
-      clientX,
-      rect.left,
-      rect.width,
-      totalDurationSeconds,
+    const options: SeekOptions = { scrub: plan.scrub };
+    if (request.kind === "pts") {
+      seekToPts(request.pts, options);
+    } else {
+      onApproximateSeek?.(request.seconds, options);
+    }
+
+    const state = playbackStore.getState();
+    gestureSeekTargetRef.current = state.seekTargetSeconds;
+    const snapRatio = resolveSnapIndicatorRatio(
+      plan.snap,
+      getDisplayedElapsedSeconds(state, videoStartPts, videoTimeBase),
     );
-    if (targetSeconds !== null && onApproximateSeek) {
-      onApproximateSeek(targetSeconds, options);
-      gestureSeekTargetRef.current = playbackStore.getState().seekTargetSeconds;
+    if (snapRatio === null) {
+      hideSnapIndicator(snapElements());
+    } else {
+      showSnapIndicator(snapElements(), snapRatio);
     }
   };
 
@@ -464,21 +611,202 @@ export function TimelinePanel({
     seekRef.current = seekFromClientX;
   });
 
-  const gestureRef = useRef<TimelineScrubGesture | null>(null);
   const getGesture = useCallback(() => {
     gestureRef.current ??= createTimelineScrubGesture({
       onSample: (clientX, phase) => {
         seekRef.current(clientX, phase);
       },
+      // The end of a gesture, by any path, ends its aids: the release, a cancel, a lost
+      // capture, the cancel of PlayheadFollow when seeking stops being possible, and unmount.
+      onFinish: () => {
+        autoScrollRef.current?.stop();
+        hideSnapIndicator({ ruler: snapRulerRef.current, track: snapTrackRef.current });
+        dragLaneXRef.current = null;
+        dragDirectionRef.current = 0;
+      },
     });
     return gestureRef.current;
   }, []);
 
+  /**
+   * The edge auto-scroll of a drag. Each step writes scrollLeft and reads the kept value back
+   * into the mirror, as the zoom anchor does, so handleScroll does not take the step for a pan
+   * by the user. The step then samples the drag at once, so the playhead stays at the edge in
+   * the same frame as the scroll.
+   */
+  const getAutoScroll = useCallback(() => {
+    autoScrollRef.current ??= createEdgeAutoScroll({
+      readGeometry: (): EdgeAutoScrollGeometry | null => {
+        const scrollEl = scrollRef.current;
+        if (!scrollEl) {
+          return null;
+        }
+        const visibleLane = readVisibleLane(scrollEl);
+        return {
+          visibleLeftPx: visibleLane.left,
+          visibleRightPx: visibleLane.right,
+          scrollLeftPx: scrollLeftRef.current,
+          maxScrollLeftPx: Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth),
+        };
+      },
+      writeScrollLeft: (nextScrollLeft) => {
+        const scrollEl = scrollRef.current;
+        if (!scrollEl) {
+          return nextScrollLeft;
+        }
+        scrollEl.scrollLeft = nextScrollLeft;
+        scrollLeftRef.current = scrollEl.scrollLeft;
+        return scrollLeftRef.current;
+      },
+      onScrolled: () => {
+        gestureRef.current?.sampleNow();
+      },
+      isDragging: () => gestureRef.current?.isDragging() === true,
+    });
+    return autoScrollRef.current;
+  }, []);
+
+  /**
+   * Draws the hover line at a client X coordinate, in the frame that the hover controller
+   * schedules. Returns false when it cannot, and the controller hides the line.
+   *
+   * The time is a pixel position, so the label marks it as approximate and the conversion is
+   * the approximate one. It is never a seek target or an edit position.
+   */
+  const drawHoverLine = (clientX: number): boolean => {
+    const laneEl = laneRef.current;
+    const scrollEl = scrollRef.current;
+    if (
+      !media ||
+      isIndeterminate ||
+      totalDurationSeconds === null ||
+      !laneEl ||
+      !scrollEl
+    ) {
+      return false;
+    }
+    const laneRect = laneEl.getBoundingClientRect();
+    const visibleLane = readVisibleLane(scrollEl);
+    if (clientX < visibleLane.left || clientX > visibleLane.right) {
+      return false;
+    }
+    const seconds = calculateTimelineSecondsFromClientX(
+      clientX,
+      laneRect.left,
+      laneRect.width,
+      totalDurationSeconds,
+    );
+    if (seconds === null) {
+      return false;
+    }
+    // The position in the window is rounded to the device pixel grid, and not the offset from a
+    // lane edge that can lie between two device pixels.
+    const offsetPx = calculateHoverLineOffset(
+      clientX,
+      laneRect.left,
+      window.devicePixelRatio,
+    );
+    const lineX = laneRect.left + offsetPx;
+    writeHoverLine(hoverElements(), {
+      offsetPx,
+      text: t("timeline.hoverTime", {
+        time: formatElapsedTimecode(seconds, timecodeDisplay),
+      }),
+      resolveSide: (labelWidthPx) =>
+        resolveHoverLabelSide(lineX, labelWidthPx, visibleLane.left, visibleLane.right),
+    });
+    return true;
+  };
+
+  const drawHoverLineRef = useRef(drawHoverLine);
+  useLayoutEffect(() => {
+    drawHoverLineRef.current = drawHoverLine;
+  });
+
+  const getHover = useCallback(() => {
+    hoverRef.current ??= createTimelineHoverLine({
+      isSuppressed: () => gestureRef.current?.isActive() === true,
+      draw: (clientX) => drawHoverLineRef.current(clientX),
+      hide: () =>
+        hideHoverLine({
+          ruler: hoverRulerRef.current,
+          label: hoverLabelRef.current,
+          track: hoverTrackRef.current,
+        }),
+    });
+    return hoverRef.current;
+  }, []);
+
+  // A render of the panel can change the time under a pointer that did not move: a zoom, a
+  // resize, a new extent or a new timecode format. The controller draws again only while the
+  // line shows.
+  useEffect(() => {
+    hoverRef.current?.refresh();
+  });
+
   useEffect(() => {
     return () => {
       gestureRef.current?.dispose();
+      autoScrollRef.current?.stop();
+      hoverRef.current?.dispose();
     };
   }, []);
+
+  // The snap modifier can change while the pointer rests. A key event of Alt (Option on
+  // macOS) records the new state and samples the drag again, so the snap turns off or on at
+  // once. The listener only reads the event: the window keyboard layer does not own a
+  // modifier, and nothing here cancels or stops it.
+  useEffect(() => {
+    const onModifierKey = (event: KeyboardEvent) => {
+      if (event.key !== "Alt") {
+        return;
+      }
+      const isHeld = event.type === "keydown";
+      if (isSnapSuppressedRef.current === isHeld) {
+        return;
+      }
+      isSnapSuppressedRef.current = isHeld;
+      gestureRef.current?.sampleNow();
+    };
+    // A window blur ends the drag, as it ends the hold of a step button: the release then goes
+    // to another application, and the drag would stay active with its auto-scroll running. The
+    // cancel sends one exact seek at the last position (ADR 022), and onFinish stops the aids.
+    // The cancel comes first, so that seek uses the snap state of the last sample that the
+    // user saw. A key release in another application never arrives, so the modifier state is
+    // cleared after the cancel and starts again from the next pointer event.
+    const onBlur = () => {
+      gestureRef.current?.cancel();
+      isSnapSuppressedRef.current = false;
+    };
+    window.addEventListener("keydown", onModifierKey, true);
+    window.addEventListener("keyup", onModifierKey, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onModifierKey, true);
+      window.removeEventListener("keyup", onModifierKey, true);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+
+  // The snap of a sample depends on the boundaries and on the calibration gate. Either can
+  // change while the pointer rests: an edit from a key, an undo, or a calibration that stops
+  // holding. The drag then samples again at once, so the seek and the indicator do not stay on
+  // a boundary that no longer applies. A sample that repeats the last request sends no seek.
+  useEffect(() => {
+    return timelineStore.subscribe((state, previous) => {
+      if (
+        state.segments !== previous.segments ||
+        state.pendingInPts !== previous.pendingInPts
+      ) {
+        gestureRef.current?.sampleNow();
+      }
+    });
+  }, []);
+  // A layout effect of this component runs before its passive effects, so the sample uses the
+  // seek path of this render, with the new gate.
+  useEffect(() => {
+    gestureRef.current?.sampleNow();
+  }, [canUsePreciseSeek]);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!canSeek || event.button !== 0 || !event.isPrimary) {
@@ -489,11 +817,25 @@ export function TimelinePanel({
     } catch {
       // setPointerCapture can throw for an inactive pointer.
     }
-    getGesture().begin(event.pointerId, event.clientX);
+    isSnapSuppressedRef.current = event.altKey;
+    getHover().hide();
+    const gesture = getGesture();
+    // A press during an active gesture does not start another one, so it keeps the arming.
+    if (!gesture.isActive()) {
+      getAutoScroll().begin(event.clientX);
+    }
+    gesture.begin(event.pointerId, event.clientX);
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    getGesture().move(event.pointerId, event.clientX);
+    const gesture = getGesture();
+    if (gesture.isActive()) {
+      isSnapSuppressedRef.current = event.altKey;
+    }
+    gesture.move(event.pointerId, event.clientX);
+    if (gesture.isDragging()) {
+      getAutoScroll().update(event.clientX);
+    }
   };
 
   const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -504,11 +846,31 @@ export function TimelinePanel({
     } catch {
       // Ignore release pointer capture failures.
     }
-    getGesture().end(event.pointerId, event.clientX);
+    const gesture = getGesture();
+    if (gesture.isActive()) {
+      isSnapSuppressedRef.current = event.altKey;
+    }
+    gesture.end(event.pointerId, event.clientX);
   };
 
   const handlePointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
     getGesture().cancel(event.pointerId);
+  };
+
+  // The hover handlers of the two lanes. A pointer event from a scrub surface or a segment
+  // in the track lane bubbles to the lane, and the controller hides the line while a drag
+  // runs or a button is held.
+  const handleHoverMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    getHover().move(event);
+  };
+  const handleHoverLeave = () => {
+    getHover().leave();
+  };
+
+  // The ruler lane is a scrub surface and a hover surface, so its move handler does both.
+  const handleRulerPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    handlePointerMove(event);
+    handleHoverMove(event);
   };
 
   // The pointer handlers of the three scrub surfaces: the ruler lane, the seek slider and
@@ -520,9 +882,6 @@ export function TimelinePanel({
     onPointerCancel: handlePointerCancel,
     onLostPointerCapture: handlePointerCancel,
   };
-
-  const videoStartPts = media?.probe.videoStartPts;
-  const videoTimeBase = media?.probe.videoTimeBase;
 
   return (
     <section className="flex h-[180px] shrink-0 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
@@ -568,9 +927,12 @@ export function TimelinePanel({
          * At 100%, the clip cuts off the right half of the playhead head. The tip and the
          * visible half of the line stay on the end of the lane. This is the mirror of 0%,
          * where the sticky gutter covers the left half.
+         *
+         * `group/timeline` lets the hover line read the state of the segment tooltip in the
+         * track row from the ruler row (see TimelineDragAids).
          */}
         <div
-          className="flex min-w-[900px] flex-1 flex-col overflow-x-clip"
+          className="group/timeline flex min-w-[900px] flex-1 flex-col overflow-x-clip"
           style={{
             width: `calc(${TIMELINE_GUTTER_WIDTH_PX}px + (100% - ${TIMELINE_GUTTER_WIDTH_PX}px) * ${zoom})`,
           }}
@@ -611,10 +973,14 @@ export function TimelinePanel({
              * and Right wherever the focus is, so a focused slider still steps and
              * `aria-valuenow` still updates; Up, Down, Home and End are deliberately
              * unbound, so the element does not implement the full ARIA slider key set.
+             *
+             * The lane is also a hover surface for the hover line.
              */}
             <div
               ref={laneRef}
               {...scrubHandlers}
+              onPointerMove={handleRulerPointerMove}
+              onPointerLeave={handleHoverLeave}
               className={`relative flex-1 touch-none border-b border-timeline-divider bg-timeline-ruler ${canSeek ? "cursor-pointer" : ""}`}
             >
               {/* Timecode labels, major ticks and minor ticks (see TimelineRuler) */}
@@ -654,6 +1020,14 @@ export function TimelinePanel({
                   ariaLabel={t("timeline.playhead")}
                 />
               )}
+
+              {/* The hover line and the snap indicator in the ruler (see TimelineDragAids) */}
+              {media && !isIndeterminate && (
+                <>
+                  <RulerHoverLine lineRef={hoverRulerRef} labelRef={hoverLabelRef} />
+                  <RulerSnapIndicator indicatorRef={snapRulerRef} />
+                </>
+              )}
             </div>
           </div>
 
@@ -670,8 +1044,17 @@ export function TimelinePanel({
              * Track lane container. It has no vertical padding, so the geometry box and the
              * track playhead span the full track height. The seek slider and the segment
              * layer carry the 8px vertical inset instead.
+             *
+             * It is the hover surface of the track. The pointer events of the scrub surfaces
+             * and the segments in it bubble here. `data-timeline-track` names it for the rule
+             * that hides the hover line while the segment tooltip is open.
              */}
-            <div className="relative flex flex-1 items-center bg-timeline-track">
+            <div
+              data-timeline-track=""
+              onPointerMove={handleHoverMove}
+              onPointerLeave={handleHoverLeave}
+              className="relative flex flex-1 items-center bg-timeline-track"
+            >
               {media ? (
                 /*
                  * Shared geometry box. The seek slider and the segment layer are siblings
@@ -744,6 +1127,14 @@ export function TimelinePanel({
                       canSeek={canSeek}
                       scrubHandlers={scrubHandlers}
                     />
+                  )}
+
+                  {/* The hover line and the snap indicator in the track (see TimelineDragAids) */}
+                  {!isIndeterminate && (
+                    <>
+                      <TrackHoverLine lineRef={hoverTrackRef} />
+                      <TrackSnapIndicator indicatorRef={snapTrackRef} />
+                    </>
                   )}
                 </div>
               ) : mediaStatus === "loading" ? (

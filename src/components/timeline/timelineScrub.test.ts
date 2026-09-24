@@ -473,6 +473,190 @@ describe("timelineScrub", () => {
     expect(gesture.isActive()).toBe(false);
   });
 
+  describe("isDragging", () => {
+    it("is false for a click and true after the pointer crosses the threshold", () => {
+      const scheduler = createFakeScheduler();
+      const dragging: boolean[] = [];
+      const gesture = createTimelineScrubGesture({
+        onSample: () => dragging.push(gesture.isDragging()),
+        scheduler,
+      });
+
+      expect(gesture.isDragging()).toBe(false);
+      gesture.begin(1, 100);
+      // The sample of pointer down is the seek of a click.
+      expect(dragging).toEqual([false]);
+      gesture.move(1, 102);
+      expect(gesture.isDragging()).toBe(false);
+      gesture.move(1, 110);
+      expect(gesture.isDragging()).toBe(true);
+      scheduler.flush();
+      expect(dragging).toEqual([false, true]);
+    });
+
+    it("stays true during the final sample of a drag, and is false after it", () => {
+      const scheduler = createFakeScheduler();
+      const dragging: boolean[] = [];
+      const gesture = createTimelineScrubGesture({
+        onSample: (_clientX, phase) => {
+          if (phase === "final") {
+            dragging.push(gesture.isDragging());
+          }
+        },
+        scheduler,
+      });
+
+      gesture.begin(1, 100);
+      gesture.move(1, 120);
+      gesture.end(1, 130);
+      expect(dragging).toEqual([false, true]);
+      expect(gesture.isDragging()).toBe(false);
+
+      gesture.begin(2, 100);
+      gesture.move(2, 120);
+      gesture.cancel(2);
+      expect(dragging).toEqual([false, true, false, true]);
+      expect(gesture.isDragging()).toBe(false);
+    });
+
+    it("is false after dispose", () => {
+      const gesture = createTimelineScrubGesture({
+        onSample: () => {},
+        scheduler: createFakeScheduler(),
+      });
+      gesture.begin(1, 100);
+      gesture.move(1, 120);
+      gesture.dispose();
+      expect(gesture.isDragging()).toBe(false);
+      expect(gesture.isActive()).toBe(false);
+    });
+  });
+
+  describe("sampleNow", () => {
+    it("emits a scrub sample at once at the latest position and drops the scheduled one", () => {
+      const scheduler = createFakeScheduler();
+      const onSample = vi.fn();
+      const gesture = createTimelineScrubGesture({ onSample, scheduler });
+
+      gesture.begin(1, 100);
+      gesture.move(1, 120);
+      expect(scheduler.hasPending()).toBe(true);
+      onSample.mockClear();
+
+      gesture.sampleNow();
+      expect(onSample).toHaveBeenCalledTimes(1);
+      expect(onSample).toHaveBeenCalledWith(120, "scrub");
+      expect(scheduler.hasPending()).toBe(false);
+
+      // A pointer that rests can be sampled again, for example after each scroll step.
+      gesture.sampleNow();
+      expect(onSample).toHaveBeenCalledTimes(2);
+      expect(onSample).toHaveBeenLastCalledWith(120, "scrub");
+    });
+
+    it("does nothing before the threshold, and with no active gesture", () => {
+      const scheduler = createFakeScheduler();
+      const onSample = vi.fn();
+      const gesture = createTimelineScrubGesture({ onSample, scheduler });
+
+      gesture.sampleNow();
+      expect(onSample).not.toHaveBeenCalled();
+
+      gesture.begin(1, 100);
+      onSample.mockClear();
+      gesture.move(1, 101);
+      gesture.sampleNow();
+      expect(onSample).not.toHaveBeenCalled();
+
+      gesture.move(1, 120);
+      gesture.end(1, 120);
+      onSample.mockClear();
+      gesture.sampleNow();
+      expect(onSample).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("onFinish", () => {
+    it("is called once after the final sample of end and of cancel", () => {
+      const scheduler = createFakeScheduler();
+      const calls: string[] = [];
+      const gesture = createTimelineScrubGesture({
+        onSample: (_clientX, phase) => calls.push(phase),
+        onFinish: () => calls.push(`finish:${String(gesture.isActive())}`),
+        scheduler,
+      });
+
+      gesture.begin(1, 100);
+      gesture.move(1, 120);
+      gesture.end(1, 130);
+      expect(calls).toEqual(["final", "final", "finish:false"]);
+
+      calls.length = 0;
+      gesture.begin(2, 100);
+      gesture.cancel(2);
+      expect(calls).toEqual(["final", "finish:false"]);
+
+      calls.length = 0;
+      gesture.begin(3, 100);
+      gesture.end(3, 100);
+      expect(calls).toEqual(["final", "finish:false"]);
+    });
+
+    it("is called on dispose of an active gesture only", () => {
+      const onFinish = vi.fn();
+      const gesture = createTimelineScrubGesture({
+        onSample: () => {},
+        onFinish,
+        scheduler: createFakeScheduler(),
+      });
+      gesture.dispose();
+      expect(onFinish).not.toHaveBeenCalled();
+      gesture.begin(1, 100);
+      gesture.dispose();
+      expect(onFinish).toHaveBeenCalledTimes(1);
+    });
+
+    it("is not called for an event that the gesture ignores", () => {
+      const onFinish = vi.fn();
+      const gesture = createTimelineScrubGesture({
+        onSample: () => {},
+        onFinish,
+        scheduler: createFakeScheduler(),
+      });
+      gesture.end(1, 100);
+      gesture.cancel();
+      gesture.begin(1, 100);
+      gesture.end(2, 100);
+      gesture.cancel(2);
+      expect(onFinish).not.toHaveBeenCalled();
+    });
+
+    it("is called when a sample throws", () => {
+      let shouldThrow = true;
+      const onFinish = vi.fn();
+      const gesture = createTimelineScrubGesture({
+        onSample: () => {
+          if (shouldThrow) {
+            throw new Error("sample failure");
+          }
+        },
+        onFinish,
+        scheduler: createFakeScheduler(),
+      });
+
+      expect(() => gesture.begin(1, 100)).toThrow("sample failure");
+      expect(onFinish).toHaveBeenCalledTimes(1);
+
+      shouldThrow = false;
+      gesture.begin(1, 100);
+      gesture.move(1, 120);
+      shouldThrow = true;
+      expect(() => gesture.end(1, 130)).toThrow("sample failure");
+      expect(onFinish).toHaveBeenCalledTimes(2);
+      expect(gesture.isActive()).toBe(false);
+    });
+  });
+
   describe("movement threshold (SCRUB_MOVE_THRESHOLD_PX)", () => {
     it("exports SCRUB_MOVE_THRESHOLD_PX as 3", () => {
       expect(SCRUB_MOVE_THRESHOLD_PX).toBe(3);

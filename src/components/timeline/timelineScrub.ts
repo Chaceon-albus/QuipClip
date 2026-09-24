@@ -23,6 +23,12 @@ export interface TimelineScrubScheduler {
 
 export interface CreateTimelineScrubGestureOptions {
   onSample: (clientX: number, phase: TimelineScrubPhase) => void;
+  /**
+   * Called once each time an active gesture stops being active: after the final sample of
+   * `end` or `cancel`, on `dispose`, and when the sample of `begin` throws. The panel uses it
+   * to remove the aids of a drag, such as the snap indicator and the edge auto-scroll.
+   */
+  onFinish?: () => void;
   scheduler?: TimelineScrubScheduler;
 }
 
@@ -33,6 +39,20 @@ export interface TimelineScrubGesture {
   cancel(pointerId?: number): void;
   dispose(): void;
   isActive(): boolean;
+  /**
+   * True while a gesture is active and its pointer moved `SCRUB_MOVE_THRESHOLD_PX` or more.
+   * It stays true during the final sample of `end` and `cancel` after such a move, so that
+   * sample can tell the release of a drag from the pointer down of a click.
+   */
+  isDragging(): boolean;
+  /**
+   * Emits one scrub sample at once at the latest pointer position while a drag is running,
+   * and drops a scheduled sample. The panel calls it when the time under a pointer that does
+   * not move changes: after an auto-scroll step, or when the snap modifier changes. A
+   * scheduled sample would come one frame after the scroll, and for that frame the playhead
+   * would lag behind the edge of the view.
+   */
+  sampleNow(): void;
 }
 
 /** Movement threshold in CSS pixels before pointer movement counts as a drag (ADR 022). */
@@ -46,13 +66,27 @@ const defaultScheduler: TimelineScrubScheduler = {
 export function createTimelineScrubGesture(
   options: CreateTimelineScrubGestureOptions,
 ): TimelineScrubGesture {
-  const { onSample, scheduler = defaultScheduler } = options;
+  const { onSample, onFinish, scheduler = defaultScheduler } = options;
 
   let activePointerId: number | null = null;
   let downClientX = 0;
   let latestClientX = 0;
   let scheduledHandle: number | null = null;
   let hasMoved = false;
+
+  const cancelScheduled = (): void => {
+    if (scheduledHandle !== null) {
+      scheduler.cancel(scheduledHandle);
+      scheduledHandle = null;
+    }
+  };
+
+  /** Ends the active gesture. The caller has already cancelled a scheduled sample. */
+  const finish = (): void => {
+    activePointerId = null;
+    hasMoved = false;
+    onFinish?.();
+  };
 
   return {
     begin(pointerId: number, clientX: number): void {
@@ -66,8 +100,7 @@ export function createTimelineScrubGesture(
       try {
         onSample(clientX, "final");
       } catch (err) {
-        activePointerId = null;
-        hasMoved = false;
+        finish();
         throw err;
       }
     },
@@ -98,18 +131,13 @@ export function createTimelineScrubGesture(
       if (activePointerId === null || pointerId !== activePointerId) {
         return;
       }
-      if (scheduledHandle !== null) {
-        scheduler.cancel(scheduledHandle);
-        scheduledHandle = null;
-      }
-      const moved = hasMoved;
-      hasMoved = false;
+      cancelScheduled();
       try {
-        if (moved) {
+        if (hasMoved) {
           onSample(clientX, "final");
         }
       } finally {
-        activePointerId = null;
+        finish();
       }
     },
 
@@ -120,32 +148,37 @@ export function createTimelineScrubGesture(
       if (pointerId !== undefined && pointerId !== activePointerId) {
         return;
       }
-      if (scheduledHandle !== null) {
-        scheduler.cancel(scheduledHandle);
-        scheduledHandle = null;
-      }
-      const moved = hasMoved;
-      hasMoved = false;
+      cancelScheduled();
       try {
-        if (moved) {
+        if (hasMoved) {
           onSample(latestClientX, "final");
         }
       } finally {
-        activePointerId = null;
+        finish();
       }
     },
 
     dispose(): void {
-      if (scheduledHandle !== null) {
-        scheduler.cancel(scheduledHandle);
-        scheduledHandle = null;
+      cancelScheduled();
+      if (activePointerId !== null) {
+        finish();
       }
-      activePointerId = null;
-      hasMoved = false;
     },
 
     isActive(): boolean {
       return activePointerId !== null;
+    },
+
+    isDragging(): boolean {
+      return activePointerId !== null && hasMoved;
+    },
+
+    sampleNow(): void {
+      if (activePointerId === null || !hasMoved) {
+        return;
+      }
+      cancelScheduled();
+      onSample(latestClientX, "scrub");
     },
   };
 }

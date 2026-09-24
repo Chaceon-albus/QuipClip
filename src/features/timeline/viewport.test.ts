@@ -7,6 +7,7 @@ import {
   calculateMaxZoom,
   calculatePausedFollow,
   calculatePendingNavigation,
+  calculatePlaybackFollow,
   calculateWheelZoomFactor,
   clampScrollLeftToFollowWindow,
   clampTimelineZoom,
@@ -26,6 +27,7 @@ import {
   TIMELINE_WHEEL_ZOOM_BASE,
   TIMELINE_ZOOM_STEP_FACTOR,
   type PausedFollowInput,
+  type PlaybackFollowInput,
   type PlayheadOrCentreAnchor,
   type TimelineZoomAnchorPoint,
 } from "./viewport";
@@ -929,6 +931,65 @@ describe("timeline viewport module", () => {
       expect(calculatePendingNavigation(12.6, null)).toEqual({
         isNavigationPending: true,
         nextRecordedTarget: null,
+      });
+    });
+  });
+
+  describe("calculatePlaybackFollow", () => {
+    // The lane of calculatePausedFollow: 10,000 px for a 100 s source behind a 1,000 px
+    // viewport and the 96 px gutter. At scrollLeft 0 the visible content range is [96, 1000].
+    const base: PlaybackFollowInput = {
+      isPlaying: true,
+      isGestureActive: false,
+      isUserScrolled: false,
+      playheadPercent: 20,
+      laneWidthPx: 10_000,
+      laneLeftOffsetPx: 96,
+      scrollLeftPx: 0,
+      viewportWidthPx: 1000,
+      leadFraction: 0.1,
+    };
+
+    it("pages when playback moves the playhead out of view", () => {
+      expect(calculatePlaybackFollow(base)).toEqual({
+        kind: "page",
+        scrollLeftPx: 96 + 2000 - 100,
+      });
+    });
+
+    it("does not page during a drag, which owns the view", () => {
+      expect(calculatePlaybackFollow({ ...base, isGestureActive: true })).toEqual({
+        kind: "idle",
+      });
+      // Not even to end a pan suspension for a playhead in view.
+      expect(
+        calculatePlaybackFollow({ ...base, isGestureActive: true, playheadPercent: 5 }),
+      ).toEqual({ kind: "idle" });
+    });
+
+    it("does nothing while playback is stopped or the view has no width", () => {
+      expect(calculatePlaybackFollow({ ...base, isPlaying: false })).toEqual({
+        kind: "idle",
+      });
+      expect(calculatePlaybackFollow({ ...base, viewportWidthPx: 0 })).toEqual({
+        kind: "idle",
+      });
+      expect(calculatePlaybackFollow({ ...base, viewportWidthPx: Number.NaN })).toEqual(
+        {
+          kind: "idle",
+        },
+      );
+    });
+
+    it("reports a playhead in view, which ends a pan suspension", () => {
+      expect(
+        calculatePlaybackFollow({ ...base, playheadPercent: 5, isUserScrolled: true }),
+      ).toEqual({ kind: "visible" });
+    });
+
+    it("leaves a view that the user panned", () => {
+      expect(calculatePlaybackFollow({ ...base, isUserScrolled: true })).toEqual({
+        kind: "suspended",
       });
     });
   });

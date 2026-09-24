@@ -2,9 +2,9 @@ import { useEffect, useRef, type RefObject } from "react";
 import type { ImportMediaResult } from "@/features/media";
 import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
 import {
-  calculateFollowScrollLeft,
   calculatePausedFollow,
   calculatePendingNavigation,
+  calculatePlaybackFollow,
   calculatePlayheadLayout,
   shouldWriteFollowScrollLeft,
   PLAYHEAD_FOLLOW_LEAD_FRACTION,
@@ -121,39 +121,33 @@ export function PlayheadFollow({
     wasPlayingRef.current = isPlaying;
   }, [isPlaying, userScrolledRef]);
 
-  // Follow the playhead during playback when it leaves the visible window.
+  // Follow the playhead during playback when it leaves the visible window. The rules are in
+  // calculatePlaybackFollow. A drag owns the view, so the follow does not page during one.
   useEffect(() => {
-    if (!isPlaying) {
-      return;
-    }
-
     const scrollEl = scrollRef.current;
-    if (!scrollEl || viewportWidthPx <= 0) {
+    if (!scrollEl) {
       return;
     }
 
-    const targetScrollLeft = calculateFollowScrollLeft(
-      playhead.percent,
+    const decision = calculatePlaybackFollow({
+      isPlaying,
+      isGestureActive: gestureRef.current?.isActive() === true,
+      isUserScrolled: userScrolledRef.current,
+      playheadPercent: playhead.percent,
       laneWidthPx,
-      TIMELINE_GUTTER_WIDTH_PX,
-      scrollLeftRef.current,
+      laneLeftOffsetPx: TIMELINE_GUTTER_WIDTH_PX,
+      scrollLeftPx: scrollLeftRef.current,
       viewportWidthPx,
-      PLAYHEAD_FOLLOW_LEAD_FRACTION,
-    );
+      leadFraction: PLAYHEAD_FOLLOW_LEAD_FRACTION,
+    });
 
-    if (targetScrollLeft === null) {
-      // Visible. Nothing to do, and the user's view has caught up with playback, so a
-      // suspension from an earlier pan is over.
+    if (decision.kind === "visible") {
+      // The user's view has caught up with playback, so a suspension from an earlier pan is
+      // over.
       userScrolledRef.current = false;
-      return;
+    } else if (decision.kind === "page") {
+      applyFollowScrollLeft(scrollEl, scrollLeftRef, decision.scrollLeftPx);
     }
-
-    if (userScrolledRef.current) {
-      // Outside the window, but the user put the view where it is. Leave it alone.
-      return;
-    }
-
-    applyFollowScrollLeft(scrollEl, scrollLeftRef, targetScrollLeft);
   }, [
     isPlaying,
     laneWidthPx,
@@ -162,6 +156,7 @@ export function PlayheadFollow({
     scrollRef,
     scrollLeftRef,
     userScrolledRef,
+    gestureRef,
   ]);
 
   // The displayed playhead position, in seconds, at the last run of the paused follow below.

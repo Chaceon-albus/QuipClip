@@ -187,6 +187,7 @@ export const zhCN: TranslationCatalog = {
       duration: "时长",
     },
     pendingInFlag: "入点",
+    hoverTime: "≈ {{time}}",
     zoom: {
       group: "时间轴缩放",
       zoomIn: "放大",

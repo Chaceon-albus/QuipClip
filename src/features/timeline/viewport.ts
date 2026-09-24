@@ -616,3 +616,63 @@ export function calculatePausedFollow(input: PausedFollowInput): PausedFollowDec
     ),
   };
 }
+
+/** Inputs of `calculatePlaybackFollow`. */
+export interface PlaybackFollowInput {
+  readonly isPlaying: boolean;
+  /** True while a pointer gesture on the timeline is active. */
+  readonly isGestureActive: boolean;
+  /** True while a pan by the user suspends the follow. */
+  readonly isUserScrolled: boolean;
+  /** The displayed playhead position, in percent of the source extent. */
+  readonly playheadPercent: number;
+  readonly laneWidthPx: number;
+  readonly laneLeftOffsetPx: number;
+  readonly scrollLeftPx: number;
+  readonly viewportWidthPx: number;
+  readonly leadFraction: number;
+}
+
+/** The result of `calculatePlaybackFollow`. */
+export type PlaybackFollowDecision =
+  /** No follow: playback is stopped, a drag owns the view, or the view has no width. */
+  | { readonly kind: "idle" }
+  /** The playhead is in view. A suspension from an earlier pan ends. */
+  | { readonly kind: "visible" }
+  /** The playhead is outside the view, but the user put the view where it is. */
+  | { readonly kind: "suspended" }
+  /** The view pages to this scrollLeft. */
+  | { readonly kind: "page"; readonly scrollLeftPx: number };
+
+/**
+ * Decides the follow of the playhead during playback.
+ *
+ * - With playback stopped, the paused follow owns the view (`calculatePausedFollow`).
+ * - While a pointer gesture is active, the drag owns the view: its edge auto-scroll moves it,
+ *   and a page would move the lane under the pointer. A drag pauses playback at its first
+ *   seek, but a play key can start playback again before the next sample pauses it.
+ * - A playhead in view ends a suspension from an earlier pan.
+ * - A playhead outside the view pages it, unless a pan by the user suspends the follow.
+ */
+export function calculatePlaybackFollow(
+  input: PlaybackFollowInput,
+): PlaybackFollowDecision {
+  if (!input.isPlaying || input.isGestureActive || !(input.viewportWidthPx > 0)) {
+    return { kind: "idle" };
+  }
+  const scrollLeftPx = calculateFollowScrollLeft(
+    input.playheadPercent,
+    input.laneWidthPx,
+    input.laneLeftOffsetPx,
+    input.scrollLeftPx,
+    input.viewportWidthPx,
+    input.leadFraction,
+  );
+  if (scrollLeftPx === null) {
+    return { kind: "visible" };
+  }
+  if (input.isUserScrolled) {
+    return { kind: "suspended" };
+  }
+  return { kind: "page", scrollLeftPx };
+}
