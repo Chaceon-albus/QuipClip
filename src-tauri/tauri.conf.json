@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "QuipClip",
-  "version": "0.1.0",
   "identifier": "io.github.capric98.quipclip",
   "build": {
     "beforeDevCommand": "pnpm dev",

@@ -1,7 +1,6 @@
 {
   "name": "quipclip",
   "private": true,
-  "version": "0.1.0",
   "type": "module",
   "description": "Mark in and out points on a video, then export the segments joined in order.",
   "license": "MIT",
@@ -20,7 +19,9 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "version:check": "node scripts/version.mjs check",
+    "version:bump": "node scripts/version.mjs bump"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
