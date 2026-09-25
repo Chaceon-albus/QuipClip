@@ -301,3 +301,9 @@ where the indicator showed.
   the region followed `presentedFrame`. Each seek sets `presentedFrame` to null until
   the next frame callback, so the region disappeared on every click and frame step, and
   it flickered while an arrow key was held.)
+- (Added on 2026-09-24.) Two more displays read the pending-seek state. The In and Out
+  badges of the preview show only while `seekTargetSeconds` is null, a frame is on screen,
+  playback is paused and the calibration is ready, and they compare the exact PTS of
+  `presentedFrame` with the stored boundaries. The segment duration of the transport bar
+  reads `presentedFrame` for a pending In, as Mark Out does. Neither display reads the
+  target itself, so neither can name a frame that is not on screen.
