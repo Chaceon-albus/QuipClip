@@ -7,22 +7,56 @@
  * Amends ADR 019 via ADR 022: playhead dragging serves as a second caller for audio bursts.
  * The store, not the controller, tracks the drag direction and skips zero-distance moves.
  *
+ * A burst ends on the media clock of the element, not on a wall-clock timer: the element stops
+ * when its `currentTime` reaches the latest requested target plus `SCRUB_BURST_SECONDS`. The
+ * clock advances only while the element really plays, so a slow start does not shorten the
+ * burst. A burst therefore plays 50 milliseconds of media time, and a held key extends it.
+ *
  * The controller never reads or writes `muted`. The mute toggle of the transport bar sets it
  * on the element, so a muted cue still seeks, plays and keeps its timers and its continuation
  * rule, and only its sound is silent.
  */
 
-/** Burst duration in seconds (50 ms), approximating one frame duration to provide an audible cue. */
+/** Burst duration in seconds (50 ms) of media time, approximating one frame duration to provide an audible cue. */
 export const SCRUB_BURST_SECONDS = 0.05;
 
-/** Maximum distance in seconds (100 ms) between target and current position to extend an ongoing forward scrub rather than re-seeking. */
+/**
+ * The largest forward distance in seconds (100 ms) from the last requested target for a request
+ * to count as the next step of an ongoing forward burst. The element may also be ahead of the
+ * new target by no more than this distance. It is ahead only by the part of a burst that it
+ * played past the last target, so that bound only guards against a position that jumps.
+ */
 export const SCRUB_CONTINUATION_TOLERANCE_SECONDS = 0.1;
 
-/** Extra safety margin in seconds (500 ms) added to the burst duration for the watchdog timer if the 'playing' or the 'seeked' event does not fire. */
-export const SCRUB_WATCHDOG_EXTRA_SECONDS = 0.5;
+/** The largest distance in seconds (750 ms) that the element may be behind the target of a frame step that continues the burst. A step farther ahead seeks. */
+export const SCRUB_CONTINUATION_MAX_LAG_SECONDS = 0.75;
+
+/** The largest distance in seconds (100 ms) that the element may be behind the target of a drag request that continues the burst, so the sound stays near the pointer (ADR 022). */
+export const SCRUB_DRAG_MAX_LAG_SECONDS = 0.1;
+
+/** Extra safety margin in seconds (1 s) that the watchdog adds to the media time the burst still has to play, if the element does not start or its clock does not reach the stop position. */
+export const SCRUB_WATCHDOG_EXTRA_SECONDS = 1;
+
+/** The shortest wait in milliseconds between two reads of the media clock while a burst sounds. */
+export const SCRUB_CLOCK_CHECK_MIN_MS = 4;
+
+/** The longest wait in milliseconds between two reads of the media clock while a burst sounds. */
+export const SCRUB_CLOCK_CHECK_MAX_MS = 16;
+
+/**
+ * The rounding margin in seconds of the step and lag comparisons, so a step of exactly the
+ * tolerance, such as 1.1 after 1.0, still counts as one.
+ */
+const TIME_EPSILON_SECONDS = 1e-9;
 
 /** The events of the element that the controller listens to. */
 export type ScrubAudioEventType = "playing" | "seeked" | "error";
+
+/**
+ * What a request comes from. A frame step (`seekNominal`) may play far behind its target, so a
+ * held key stays continuous. A drag of the playhead keeps the sound near the pointer.
+ */
+export type ScrubAudioRequestKind = "step" | "drag";
 
 /** The narrow media surface the controller needs, so a test can pass a fake. */
 export interface ScrubAudioElement {
@@ -30,6 +64,7 @@ export interface ScrubAudioElement {
   pause: () => void;
   currentTime: number;
   readonly seeking: boolean;
+  readonly ended: boolean;
   addEventListener: (type: ScrubAudioEventType, listener: () => void) => void;
   removeEventListener: (type: ScrubAudioEventType, listener: () => void) => void;
 }
@@ -43,7 +78,11 @@ export interface ScrubAudioTimers {
 export interface ScrubAudioController {
   attach: (element: ScrubAudioElement) => void;
   detach: (element: ScrubAudioElement) => void;
-  request: (targetSeconds: number, direction: 1 | -1) => void;
+  request: (
+    targetSeconds: number,
+    direction: 1 | -1,
+    kind?: ScrubAudioRequestKind,
+  ) => void;
   stop: () => void;
 }
 
@@ -76,6 +115,37 @@ function isSeeking(element: ScrubAudioElement): boolean {
   }
 }
 
+/** Reads `ended`. A read that throws counts as not ended. */
+function hasEnded(element: ScrubAudioElement): boolean {
+  try {
+    return element.ended === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Reads `currentTime`, or null when the read throws or gives no finite number. */
+function readPosition(element: ScrubAudioElement): number | null {
+  try {
+    const position = element.currentTime;
+    return typeof position === "number" && Number.isFinite(position) ? position : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The wait before the next read of the media clock: the media time that remains, clamped to
+ * the check limits. While the clock runs at the normal rate, the read after this wait finds the
+ * stop position, so the burst does not run long by a whole check interval.
+ */
+function clockCheckDelayMs(remainingSeconds: number): number {
+  return Math.min(
+    Math.max(remainingSeconds * 1000, SCRUB_CLOCK_CHECK_MIN_MS),
+    SCRUB_CLOCK_CHECK_MAX_MS,
+  );
+}
+
 export function createScrubAudioController(
   timers: ScrubAudioTimers = defaultTimers,
 ): ScrubAudioController {
@@ -83,17 +153,20 @@ export function createScrubAudioController(
   let disabled = false;
   let burstId = 0;
   let active = false;
-  // The two conditions of the stop timer of the burst: its seek has finished, and the element
+  // The two conditions of the clock check of the burst: its seek has finished, and the element
   // plays. A seek of a new burst clears both.
   let seekDone = false;
   let playingSeen = false;
-  let stopHandle: number | null = null;
+  // The latest target that the burst plays toward, and the media time at which it stops.
+  let lastTargetSeconds = 0;
+  let stopAtSeconds = 0;
+  let clockHandle: number | null = null;
   let watchdogHandle: number | null = null;
 
   const clearTimers = (): void => {
-    if (stopHandle !== null) {
-      timers.clearTimer(stopHandle);
-      stopHandle = null;
+    if (clockHandle !== null) {
+      timers.clearTimer(clockHandle);
+      clockHandle = null;
     }
     if (watchdogHandle !== null) {
       timers.clearTimer(watchdogHandle);
@@ -114,30 +187,80 @@ export function createScrubAudioController(
     }
   };
 
-  const armStopTimer = (): void => {
-    if (!active || !seekDone || !playingSeen) {
+  /**
+   * Starts, or restarts, the watchdog of the burst. It waits for the media time that the burst
+   * still has to play, at least one burst, and the margin. The element is behind the stop
+   * position by at most one burst and the lag limit, so the wait stays short. The margin is
+   * longer than the start of the audio output in Chrome on macOS, where the clock stood almost
+   * still for 300 to 455 milliseconds after a seek.
+   *
+   * @param position The position of the element.
+   */
+  const armWatchdog = (position: number): void => {
+    if (watchdogHandle !== null) {
+      timers.clearTimer(watchdogHandle);
+    }
+    const remainingSeconds = Math.max(stopAtSeconds - position, SCRUB_BURST_SECONDS);
+    const id = burstId;
+    watchdogHandle = timers.setTimer(
+      () => {
+        if (id !== burstId) {
+          return;
+        }
+        stop();
+      },
+      (remainingSeconds + SCRUB_WATCHDOG_EXTRA_SECONDS) * 1000,
+    );
+  };
+
+  /**
+   * Reads the media clock. The element stops when its position reaches the stop position, and
+   * otherwise the next read waits for the media time that remains. A clock that does not move,
+   * as while the element waits for data, keeps the reads going until the watchdog stops it. An
+   * element that reached the end of its media stops the burst, because its clock does not move
+   * again.
+   */
+  const checkClock = (): void => {
+    clockHandle = null;
+    if (!active || !attached) {
       return;
     }
-    if (stopHandle !== null) {
-      timers.clearTimer(stopHandle);
-      stopHandle = null;
+    const position = readPosition(attached);
+    if (position === null || hasEnded(attached)) {
+      stop();
+      return;
     }
-    // The stop timer MUST wait for both the end of the seek and the 'playing' event, and not
-    // start when request calls play(). A media element needs as long to seek and to start as
-    // the burst lasts, and a seek in WebKit took 40 to 150 milliseconds in a measurement, so a
-    // timer armed earlier cuts the burst to almost nothing. The order of the two events
-    // differs between the web views. Chromium sends 'playing' after 'seeked'. WebKit keeps the
-    // ready state through the assignment of currentTime, so it sends 'playing' at once, while
-    // the seek still runs, and a timer armed on 'playing' alone stopped the element before it
-    // made any sound.
+    const remainingSeconds = stopAtSeconds - position;
+    if (remainingSeconds <= 0) {
+      stop();
+      return;
+    }
     const id = burstId;
-    stopHandle = timers.setTimer(() => {
+    clockHandle = timers.setTimer(() => {
       // Defends against a timer implementation that does not honour clearTimer.
       if (id !== burstId) {
         return;
       }
-      stop();
-    }, SCRUB_BURST_SECONDS * 1000);
+      checkClock();
+    }, clockCheckDelayMs(remainingSeconds));
+  };
+
+  const startClockCheck = (): void => {
+    if (!active || !attached || !seekDone || !playingSeen || clockHandle !== null) {
+      return;
+    }
+    // The clock check waits for both the end of the seek and the 'playing' event, so it reads
+    // the clock only once the element plays. The stop reads the position of the element, and a
+    // read during the seek gives the target of the seek, so an earlier read could not end the
+    // burst early. The wait is kept as a precaution, and the watchdog restarts here, so a slow
+    // seek does not use up its margin. The order of the two events differs between the web
+    // views. Chromium sends 'playing' after 'seeked'. WebKit keeps the ready state through the
+    // assignment of currentTime, so it sends 'playing' at once, while the seek still runs.
+    const position = readPosition(attached);
+    if (position !== null) {
+      armWatchdog(position);
+    }
+    checkClock();
   };
 
   const onPlaying = (): void => {
@@ -151,7 +274,7 @@ export function createScrubAudioController(
     if (!isSeeking(attached)) {
       seekDone = true;
     }
-    armStopTimer();
+    startClockCheck();
   };
 
   const onSeeked = (): void => {
@@ -164,7 +287,7 @@ export function createScrubAudioController(
       return;
     }
     seekDone = true;
-    armStopTimer();
+    startClockCheck();
   };
 
   const onError = (): void => {
@@ -207,7 +330,53 @@ export function createScrubAudioController(
     attached = null;
   };
 
-  const request = (targetSeconds: number, direction: 1 | -1): void => {
+  /**
+   * True when a forward request continues the active burst instead of a seek. The request must
+   * be the next step from the last target: forward, by no more than
+   * `SCRUB_CONTINUATION_TOLERANCE_SECONDS`. The element must also be behind the new target by
+   * no more than the lag limit of the request kind, and ahead of it by no more than the
+   * tolerance. While a seek runs, the position of the element is the target of that seek.
+   *
+   * A held arrow key repeats about 30 times each second. At 24 to 30 frames each second, that
+   * is 1 to 1.26 times real time. The element starts late, so it plays behind the target by
+   * the step rate times the time of its seek and its start. A seek in WebKit took 40 to 150
+   * milliseconds in a measurement. In Chrome on macOS, the clock stood almost still for 300 to
+   * 455 milliseconds after the seek, so the lag can reach 0.57 seconds at 1.26 times real time.
+   * A new seek would only start that wait again, so the lag limit of a frame step must be
+   * longer. The limit still stops a key that steps faster than real time from falling behind
+   * without end. A drag keeps the tight limit, so the sound stays near the pointer.
+   * A backward request can never continue, because audio does not play backwards.
+   */
+  const continuesBurst = (
+    targetSeconds: number,
+    direction: 1 | -1,
+    kind: ScrubAudioRequestKind,
+    position: number,
+  ): boolean => {
+    if (!active || direction !== 1) {
+      return false;
+    }
+    const maxLagSeconds =
+      kind === "drag" ? SCRUB_DRAG_MAX_LAG_SECONDS : SCRUB_CONTINUATION_MAX_LAG_SECONDS;
+    const step = targetSeconds - lastTargetSeconds;
+    if (
+      step < -TIME_EPSILON_SECONDS ||
+      step > SCRUB_CONTINUATION_TOLERANCE_SECONDS + TIME_EPSILON_SECONDS
+    ) {
+      return false;
+    }
+    const lag = targetSeconds - position;
+    return (
+      lag >= -SCRUB_CONTINUATION_TOLERANCE_SECONDS - TIME_EPSILON_SECONDS &&
+      lag <= maxLagSeconds + TIME_EPSILON_SECONDS
+    );
+  };
+
+  const request = (
+    targetSeconds: number,
+    direction: 1 | -1,
+    kind: ScrubAudioRequestKind = "step",
+  ): void => {
     if (!attached || disabled) {
       return;
     }
@@ -222,47 +391,13 @@ export function createScrubAudioController(
       return;
     }
 
-    // A held arrow key repeats about 30 times each second, which is near to real
-    // time at 25 to 30 frames each second. The element is already at the right
-    // position, so a re-seek would restart it continuously and the result is a
-    // stutter. A backward request can never continue, because audio does not play backwards.
-    let currentSeconds: number | null = null;
-    if (active && direction === 1) {
-      try {
-        currentSeconds = attached.currentTime;
-      } catch {
-        // Fall through to the seek path if reading currentTime throws
-        currentSeconds = null;
-      }
-    }
-
-    if (
-      currentSeconds !== null &&
-      Math.abs(targetSeconds - currentSeconds) <= SCRUB_CONTINUATION_TOLERANCE_SECONDS
-    ) {
-      const id = burstId;
-      if (watchdogHandle !== null) {
-        timers.clearTimer(watchdogHandle);
-      }
-      watchdogHandle = timers.setTimer(
-        () => {
-          if (id !== burstId) {
-            return;
-          }
-          stop();
-        },
-        (SCRUB_BURST_SECONDS + SCRUB_WATCHDOG_EXTRA_SECONDS) * 1000,
-      );
-
-      if (stopHandle !== null) {
-        timers.clearTimer(stopHandle);
-        stopHandle = timers.setTimer(() => {
-          if (id !== burstId) {
-            return;
-          }
-          stop();
-        }, SCRUB_BURST_SECONDS * 1000);
-      }
+    const position = active ? readPosition(attached) : null;
+    if (position !== null && continuesBurst(targetSeconds, direction, kind, position)) {
+      // The element keeps playing, and the stop position moves to the new target. The clock
+      // check reads the stop position on each read, so it needs no restart.
+      lastTargetSeconds = targetSeconds;
+      stopAtSeconds = targetSeconds + SCRUB_BURST_SECONDS;
+      armWatchdog(position);
       return;
     }
 
@@ -272,6 +407,8 @@ export function createScrubAudioController(
     active = true;
     seekDone = false;
     playingSeen = false;
+    lastTargetSeconds = targetSeconds;
+    stopAtSeconds = targetSeconds + SCRUB_BURST_SECONDS;
 
     try {
       attached.pause();
@@ -318,15 +455,7 @@ export function createScrubAudioController(
       return;
     }
 
-    watchdogHandle = timers.setTimer(
-      () => {
-        if (id !== burstId) {
-          return;
-        }
-        stop();
-      },
-      (SCRUB_BURST_SECONDS + SCRUB_WATCHDOG_EXTRA_SECONDS) * 1000,
-    );
+    armWatchdog(targetSeconds);
   };
 
   return {

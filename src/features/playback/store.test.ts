@@ -3543,19 +3543,19 @@ describe("Playback Store & PTS Presentation Engine", () => {
       // 2. Audio request happens when flushed (issued) on seeked. Initial move has direction 1.
       fireSeeked(store, identityA, video);
       expect(requestSpy).toHaveBeenCalledTimes(1);
-      expect(requestSpy).toHaveBeenCalledWith(2.0, 1);
+      expect(requestSpy).toHaveBeenCalledWith(2.0, 1, "drag");
 
       // 3. Forward move to 3.0 (issued directly since not seeking) -> direction 1
       video.seeking = false;
       store.getState().seekApproximate(3.0, { scrub: true });
       expect(requestSpy).toHaveBeenCalledTimes(2);
-      expect(requestSpy).toHaveBeenLastCalledWith(3.0, 1);
+      expect(requestSpy).toHaveBeenLastCalledWith(3.0, 1, "drag");
 
       // 4. Backward move to 1.5 -> direction -1
       video.seeking = false;
       store.getState().seekApproximate(1.5, { scrub: true });
       expect(requestSpy).toHaveBeenCalledTimes(3);
-      expect(requestSpy).toHaveBeenLastCalledWith(1.5, -1);
+      expect(requestSpy).toHaveBeenLastCalledWith(1.5, -1, "drag");
 
       // 5. Zero move: duplicate scrub request with same time is dropped, so no audio request
       video.seeking = false;
@@ -3575,7 +3575,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       video.seeking = false;
       store.getState().seekApproximate(2.0, { scrub: true });
       expect(requestSpy).toHaveBeenCalledTimes(1);
-      expect(requestSpy).toHaveBeenCalledWith(2.0, 1);
+      expect(requestSpy).toHaveBeenCalledWith(2.0, 1, "drag");
       expect(video.seeking).toBe(true);
 
       // 2. Queue scrub U (3.0): queued while seeking, no audio request yet
@@ -3608,7 +3608,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       video.seeking = false;
       store.getState().seekApproximate(1.5, { scrub: true });
       expect(requestSpy).toHaveBeenCalledTimes(1);
-      expect(requestSpy).toHaveBeenCalledWith(1.5, -1);
+      expect(requestSpy).toHaveBeenCalledWith(1.5, -1, "drag");
 
       // Pointer down exact seek to 3.0
       video.seeking = false;
@@ -3618,7 +3618,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       video.seeking = false;
       store.getState().seekApproximate(3.5, { scrub: true });
       expect(requestSpy).toHaveBeenCalledTimes(2);
-      expect(requestSpy).toHaveBeenLastCalledWith(3.5, 1);
+      expect(requestSpy).toHaveBeenLastCalledWith(3.5, 1, "drag");
 
       // Pointer down exact seek to 4.0
       video.seeking = false;

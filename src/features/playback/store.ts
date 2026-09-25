@@ -517,7 +517,9 @@ export function createPlaybackStore(
         return;
       }
       lastScrubAudioTarget = mediaTime;
-      scrubAudioController.request(mediaTime, direction);
+      // A drag keeps the sound near the pointer, so the controller applies the tight lag limit
+      // of a drag (ADR 019).
+      scrubAudioController.request(mediaTime, direction, "drag");
     };
 
     /**
@@ -1358,6 +1360,8 @@ export function createPlaybackStore(
       // is a jump, as a click on the ruler is, and it requests none: seekToFrameIndex stopped
       // the cue as seekToPts does.
       if (request.kind === "relative") {
+        // A frame step: the default kind of the request, whose long lag limit keeps a held key
+        // continuous (ADR 019).
         scrubAudioController.request(targetTime, direction > 0 ? 1 : -1);
       }
 
