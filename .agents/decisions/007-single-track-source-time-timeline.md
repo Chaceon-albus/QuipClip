@@ -102,6 +102,11 @@ Two bounds apply. The lane is never narrower than the panel, so the minimum is 1
 maximum is the smaller of a ceiling on lane pixels and a ceiling on pixels for each second
 of source. An indeterminate source extent gives a maximum of 1, so a lane with no time axis
 cannot zoom, and the panel does not take the wheel gesture away from the page.
+(Changed on 2026-09-24.) The ceiling for each second is 200 px, or 8 px times the nominal
+frame rate when the probe gives one, whichever is larger. The rate that feeds it is capped at
+240 frames per second. At the maximum, one frame can then be 8 px wide, which the frame band
+of ADR 028 needs. The ceiling on lane pixels still applies, so a long source can stop before
+that width.
 
 Zoom changes the CSS width of the lane. It does not change the time axis. Every layout
 value stays a percentage of the source extent, so the layout helpers do not change, and the
@@ -135,6 +140,26 @@ Shift+O (ADR 026). A click on the body, and a click from the keyboard or from as
 technology, only selects. A press and a drag on an edge do nothing more than a click, until a
 later record adds drag trimming. The edge is not a Tab stop, and the hit area of the
 playhead stays above the edges. No edit value comes from the pixel position of an edge.
+
+### Motion and display aids
+
+(Added on 2026-09-24.) A segment, the playhead and the pending In never animate their
+position or size. They follow the time model with no delay. Only colour changes transition,
+at the fast motion step of the design tokens. A segment that appears in the list of the
+active source fades in, by opacity only: Mark Out, the right half of a Split, and an Undo or
+Redo that brings a segment back. The first list after a source loads is the baseline, and a
+zoom, a scroll, a selection, a trim or a Mark on the current segment does not replay the
+fade. After a Split, the cut point flashes once. With reduced motion, neither the fade nor
+the flash runs.
+
+The gutter of the track row shows the number of segments and the total export duration. They
+come from the same selectors and the same formatter as the Export button (ADR 024), so the two
+totals always agree.
+
+On the exact frame grid, while one frame is at least 8 px wide, a dashed box one frame wide
+follows the Out edge of the current segment. It shows that the Out frame is not in the
+segment (ADR 002). It is hidden while a drag trims that segment. It is display only and takes
+no pointer events.
 
 ## Consequences
 

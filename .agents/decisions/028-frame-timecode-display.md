@@ -78,6 +78,18 @@ its tick, and it leaves out the parts that the tick step does not need: for exam
 one hour or longer). Below 1 fps a second can hold no frame start, so the ticks sit on frame
 starts, and each label names the second in which its frame starts.
 
+### The frame band
+
+(Added on 2026-09-24.) On the frame grid of ADR 022, with a ready calibration, and while one
+frame is at least 8 px wide, the timeline shows the frame on screen as a band. The band runs
+from the nominal start of that frame to the nominal start of the next frame, and it stops at
+the end of the extent. Its frame is the frame that the preview timecode names: while a seek
+is pending, the index of the display target by the rule of this record; otherwise the index
+of the ticks of the presented frame. The band has thin edge lines, so it shows on the track
+and on every segment fill. Off the grid, or when one frame is narrower than 8 px, it does not
+show. The band is display only. No edit value, snap or seek reads it. It extends the display
+use of the nominal rate that this record allows for the timecode.
+
 ### Typed timecode
 
 (Added on 2026-09-24.) A click on the preview timecode, or `Enter` while it has the focus,
