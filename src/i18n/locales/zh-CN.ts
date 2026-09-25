@@ -223,6 +223,11 @@ export const zhCN: TranslationCatalog = {
     pendingInFlag: "入点",
     hoverTime: "≈ {{time}}",
     trimNotApplied: "未应用此次修剪。",
+    // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+    segmentSummary: {
+      count_other: "{{count}} 个片段",
+      label_other: "{{count}} 个片段，总时长 {{duration}}",
+    },
     zoom: {
       group: "时间轴缩放",
       zoomIn: "放大",

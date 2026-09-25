@@ -11,12 +11,14 @@ import {
 import { useTranslation } from "react-i18next";
 import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import {
+  calculatePercentFromPts,
   calculateSegmentLayout,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
+import { calculateOutFrameBand } from "./frameBand";
 import { seekToSegmentEdge } from "./segmentEdgeClick";
 import {
   SEGMENT_EDGE_ATTRIBUTE,
@@ -35,6 +37,7 @@ import {
   numberSegmentsInExportOrder,
   resolveSegmentLabelTier,
 } from "./segmentLabels";
+import { advanceSegmentMotion, createSegmentMotionState } from "./segmentMotion";
 import { SegmentTooltip, type SegmentTooltipEntry } from "./SegmentTooltip";
 import { createSegmentTooltipController } from "./segmentTooltipController";
 import { segmentTrimSession } from "./segmentTrimSession";
@@ -88,6 +91,12 @@ export interface SegmentLayerProps {
    * any other source the edge press is the click of ADR 007.
    */
   canTrimEdges: boolean;
+  /**
+   * The nominal frame rate of the exact frame grid while one frame is at least
+   * `FRAME_BAND_MIN_WIDTH_PX` wide (`resolveFrameBandRate`), or null. The Out frame of the
+   * current segment shows only while this rate exists.
+   */
+  outFrameRate: Rational | null;
 }
 
 /**
@@ -141,6 +150,11 @@ function findSegmentEdge(target: EventTarget | null): SegmentEdge | null {
  *
  * The layer also reads the segment that a trim moves (`segmentTrimSession`). That value changes
  * at the start and at the end of a trim, and not per sample, so a drag renders the layer twice.
+ *
+ * The layer keeps the motion state of its segment list (`segmentMotion.ts`): the segments that
+ * the user just made fade in, and the cut point of a split flashes once. The state advances only
+ * when the segment list or the source changes, so a render for a zoom, a resize or a selection
+ * does not start a motion again.
  */
 export const SegmentLayer = memo(function SegmentLayer({
   sourceId,
@@ -152,6 +166,7 @@ export const SegmentLayer = memo(function SegmentLayer({
   viewportRef,
   edgePointerHandlers,
   canTrimEdges,
+  outFrameRate,
 }: SegmentLayerProps) {
   const { t } = useTranslation();
   const segments = useTimelineStore(selectSegments);
@@ -161,6 +176,16 @@ export const SegmentLayer = memo(function SegmentLayer({
     segmentTrimSession.subscribe,
     readTrimmedSegmentId,
   );
+  // The motion state is derived from the list of the previous render. The setter runs during the
+  // render only when the list or the source changed, which is the React pattern for state
+  // derived from the previous render. The first list is the baseline, in which nothing moves.
+  const [motion, setMotion] = useState(() =>
+    createSegmentMotionState(sourceId, segments),
+  );
+  const nextMotion = advanceSegmentMotion(motion, sourceId, segments);
+  if (nextMotion !== motion) {
+    setMotion(nextMotion);
+  }
   const [tooltip] = useState(createSegmentTooltipController);
   const descriptionIdPrefix = useId();
   // A pending open must not fire after the layer unmounts.
@@ -263,6 +288,40 @@ export const SegmentLayer = memo(function SegmentLayer({
   );
   const segmentListLabel = useMemo(() => t("timeline.segmentList"), [t]);
 
+  // The position of each cut point that flashes, in percent of the extent.
+  const cutFlashes = useMemo(
+    () =>
+      videoStartPts && videoTimeBase && totalDurationSeconds
+        ? nextMotion.cutFlashes.map((cut) => ({
+            key: cut.key,
+            percent: calculatePercentFromPts(
+              cut.pts,
+              videoStartPts,
+              videoTimeBase,
+              totalDurationSeconds,
+            ),
+          }))
+        : [],
+    [nextMotion.cutFlashes, videoStartPts, videoTimeBase, totalDurationSeconds],
+  );
+
+  // The Out frame of the current segment, at a high zoom on the exact frame grid. A trim of that
+  // segment hides it, because the stored Out does not follow the drag.
+  const currentLayout =
+    outFrameRate === null || currentSegmentId === trimmedSegmentId
+      ? undefined
+      : segmentLayouts.find(({ segment }) => segment.id === currentSegmentId);
+  const outFrameBand =
+    currentLayout === undefined || outFrameRate === null
+      ? null
+      : calculateOutFrameBand(
+          currentLayout.segment,
+          videoStartPts,
+          videoTimeBase,
+          outFrameRate,
+          totalDurationSeconds,
+        );
+
   /*
    * The layer draws each segment in two passes, and the `z-10` of the layer makes it one
    * stacking context. So the z values below order the passes inside the layer only, and the
@@ -343,7 +402,9 @@ export const SegmentLayer = memo(function SegmentLayer({
    *   usable time axis and an exact frame grid), it also shows the resize cursor (ADR 030).
    *   Without that condition the drag does nothing, and the cursor stays the default one, so it
    *   promises no drag.
-   * - The handle is a short bar, so it does not read as the playhead. It lies on the body side
+   * - The handle is a short bar, so it does not read as the playhead: half the height of the
+   *   segment, and at most 24px, so a tall timeline does not stretch it. It is centred on the
+   *   height of the segment. It lies on the body side
    *   of the hit area, 4px from the boundary, so a gap keeps it apart from the border and the
    *   inset line of both states. It is in the selection colour on an unselected segment. The
    *   selected fill is that colour, so there the handle is in the brand foreground. While the
@@ -369,8 +430,30 @@ export const SegmentLayer = memo(function SegmentLayer({
    * - An edge whose boundary is outside the source extent has no handle
    *   (`buildSegmentEdgeEntries`), because the layout clamps that end of the box.
    *
-   * Only the hover animates. The transition is in the unselected state and only while the
-   * pointer is over the segment, so a selection and a deselection both show at once.
+   * The motion of a segment changes its colours and its opacity, and nothing else:
+   *
+   * - The fill, the text and the outline change colour at --motion-fast with the standard
+   *   easing, for the hover and for a selection and a deselection. The body drops its hover
+   *   fill at once while the pointer is on an edge, as above.
+   * - A segment that the user just made (`enteringIds`) fades in at --motion-base with the enter
+   *   easing, its button and its outline together.
+   * - The cut point of a split flashes once (`cutFlashes`): a soft band in the foreground
+   *   colour, 24px wide and centred on the shared edge, which fades out at --motion-slow. The
+   *   playhead stands on that edge after the split and covers its middle 4px, so the band is
+   *   wider than the playhead. The foreground colour keeps contrast with both fills in both
+   *   themes.
+   * - Under `prefers-reduced-motion`, a new segment shows at once and the cut does not flash.
+   *
+   * No transition or animation ever applies to `left`, `width`, `transform`, `top` or `height`.
+   * A segment, its edges and its Out frame follow the time model at once, so a Mark, a Split, an
+   * Undo, a trim and a zoom never show a segment where the model has no segment. The
+   * transitions therefore name the colour properties, and never `all`.
+   *
+   * At a high zoom on the exact frame grid (`outFrameRate`), the Out frame of the current
+   * segment shows as a dashed box of one frame after its right edge (`frameBand.ts`). The
+   * Out is the first frame after the segment (ADR 002), so the box shows the frame that the Out
+   * names and that the export leaves out. It is a decoration: it takes no pointer event, so the
+   * edge of a neighbour under it keeps its press.
    */
   return (
     <div
@@ -398,6 +481,7 @@ export const SegmentLayer = memo(function SegmentLayer({
           const showsHandles = showsSegmentEdgeHandles(widthPx);
           const focusRing = resolveSegmentFocusRing(widthPx, isCurrent);
           const isTrimmed = seg.id === trimmedSegmentId;
+          const isEntering = nextMotion.enteringIds.has(seg.id);
           return (
             <button
               key={seg.id}
@@ -439,19 +523,26 @@ export const SegmentLayer = memo(function SegmentLayer({
               // The `has-` selectors name the attribute of the edge hit areas
               // (`SEGMENT_EDGE_ATTRIBUTE`): the body drops its hover fill at once while the
               // pointer is on an edge.
-              className={`pointer-events-auto absolute inset-y-1 flex items-start justify-start rounded-md pt-1 focus-visible:z-50 focus-visible:outline-2 focus-visible:outline-dashed ${
+              // `transition-colors` names the colour properties only, so `left` and `width`
+              // follow the time model at once (see above). It also animates `outline-color`,
+              // so the colour of the focus ring applies at rest and `:focus-visible` sets only
+              // its style, as the `focus-ring` utility does: a ring that the keyboard shows does
+              // not fade in from the text colour.
+              className={`pointer-events-auto absolute inset-y-1 flex items-start justify-start rounded-md pt-1 transition-colors duration-(--motion-fast) ease-standard focus-visible:z-50 focus-visible:outline-2 focus-visible:outline-dashed ${
                 focusRing.placement === "inset"
                   ? "focus-visible:-outline-offset-4"
                   : "focus-visible:outline-offset-0"
               } ${
                 focusRing.tone === "primaryForeground"
-                  ? "focus-visible:outline-primary-foreground"
-                  : "focus-visible:outline-foreground"
+                  ? "outline-primary-foreground"
+                  : "outline-foreground"
               } ${
                 isCurrent
                   ? "z-20 bg-clip-video-selected text-primary-foreground focus-visible:inset-ring-2 focus-visible:inset-ring-clip-video-selected-border"
-                  : "bg-clip-video text-clip-foreground before:absolute before:inset-y-0 before:left-1/2 before:-z-10 before:w-full before:min-w-3 before:-translate-x-1/2 hover:transition-colors hover:not-has-[[data-segment-edge]:hover]:bg-clip-video-hover focus-visible:inset-ring focus-visible:inset-ring-clip-video-border focus-visible:before:hidden has-[[data-segment-edge]:hover]:transition-none"
-              } ${isTrimmed ? "opacity-40" : ""}`}
+                  : "bg-clip-video text-clip-foreground before:absolute before:inset-y-0 before:left-1/2 before:-z-10 before:w-full before:min-w-3 before:-translate-x-1/2 hover:not-has-[[data-segment-edge]:hover]:bg-clip-video-hover focus-visible:inset-ring focus-visible:inset-ring-clip-video-border focus-visible:before:hidden has-[[data-segment-edge]:hover]:transition-none"
+              } ${isTrimmed ? "opacity-40" : ""} ${
+                isEntering ? "animate-segment-enter motion-reduce:animate-none" : ""
+              }`}
               style={{
                 left: layout.left,
                 width: layout.width,
@@ -485,7 +576,7 @@ export const SegmentLayer = memo(function SegmentLayer({
                       style={{ width: SEGMENT_EDGE_HIT_WIDTH_PX }}
                     >
                       <span
-                        className={`hidden h-1/2 w-0.5 rounded-full group-hover/edge:block ${isCurrent ? "bg-primary-foreground" : "bg-timeline-selection"}`}
+                        className={`hidden h-1/2 max-h-6 w-0.5 rounded-full group-hover/edge:block ${isCurrent ? "bg-primary-foreground" : "bg-timeline-selection"}`}
                       />
                     </span>
                   ),
@@ -500,15 +591,21 @@ export const SegmentLayer = memo(function SegmentLayer({
       )}
       {segmentLayouts.map(({ segment: seg, layout }) => {
         const isCurrent = seg.id === currentSegmentId;
+        // The inset line is a box shadow, so the transition names it with the border colour.
+        // The border width changes at once.
         return (
           <div
             key={seg.id}
             aria-hidden="true"
-            className={`pointer-events-none absolute inset-y-1 rounded-md inset-ring ${
+            className={`pointer-events-none absolute inset-y-1 rounded-md inset-ring transition-[border-color,box-shadow] duration-(--motion-fast) ease-standard ${
               isCurrent
                 ? "z-40 border-2 border-clip-video-selected-border inset-ring-primary-foreground"
                 : "z-30 border border-clip-video-border inset-ring-clip-video"
-            } ${seg.id === trimmedSegmentId ? "opacity-40" : ""}`}
+            } ${seg.id === trimmedSegmentId ? "opacity-40" : ""} ${
+              nextMotion.enteringIds.has(seg.id)
+                ? "animate-segment-enter motion-reduce:animate-none"
+                : ""
+            }`}
             style={{
               left: layout.left,
               width: layout.width,
@@ -516,6 +613,39 @@ export const SegmentLayer = memo(function SegmentLayer({
           />
         );
       })}
+      {/*
+       * The Out frame of the current segment, over the outlines of its neighbours. The segment
+       * draws its own right border, so the box has none on its left side.
+       *
+       * The dashes are in the selected border colour, as the outline of the current segment is.
+       * They are drawn over the fill of a neighbour after a Split, and there they keep 6.6:1 in
+       * the light theme and 6.4:1 in the dark theme (5.8:1 and 4.9:1 on the hover fill, and
+       * 10.1:1 and 13.5:1 on the track). The box is 4px shorter than the segment at the top and
+       * at the bottom (`inset-y-2`, where a segment is `inset-y-1`), so its dashes do not lie
+       * on the border and the inset line of that neighbour.
+       */}
+      {outFrameBand !== null && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-2 z-40 rounded-r-sm border border-l-0 border-dashed border-clip-video-selected-border"
+          style={{ left: outFrameBand.left, width: outFrameBand.width }}
+        />
+      )}
+      {/*
+       * The flash of each cut point. The element rests at opacity 0, and the animation starts at
+       * full opacity, so the flash shows once when the element mounts and never again. The key
+       * names the split, so a later render keeps the element and a Redo of the split mounts a
+       * new one. Under reduced motion the animation does not run, and the cut shows no flash.
+       * The centring translation never animates.
+       */}
+      {cutFlashes.map(({ key, percent }) => (
+        <div
+          key={key}
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-1 z-40 w-6 -translate-x-1/2 animate-segment-cut-flash bg-linear-to-r from-transparent via-foreground/80 to-transparent opacity-0 motion-reduce:animate-none"
+          style={{ left: `${percent}%` }}
+        />
+      ))}
       <SegmentTooltip
         controller={tooltip}
         entries={tooltipEntries}

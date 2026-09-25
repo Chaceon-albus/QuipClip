@@ -1,10 +1,16 @@
 import type { DOMAttributes, ReactNode } from "react";
 import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
+import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
 import { calculatePlayheadLayout } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
+import { calculatePlayheadFrameBand } from "./frameBand";
 import { usePlayheadTimecode } from "./playheadTimecode";
 import { useDisplayedPlaybackPosition } from "./useDisplayedPlaybackPosition";
+
+const selectSeekTargetSeconds = (state: PlaybackStoreState) => state.seekTargetSeconds;
+const selectPresentedFrame = (state: PlaybackStoreState) => state.presentedFrame;
+const selectCalibrationStatus = (state: PlaybackStoreState) => state.calibrationStatus;
 
 /*
  * The layers in this file draw the displayed playback position. Each one subscribes to it,
@@ -127,6 +133,71 @@ export function TrackPlayhead({
         </div>
       </div>
     </div>
+  );
+}
+
+export interface TrackFrameBandProps extends PositionLayerProps {
+  /**
+   * The nominal frame rate of the exact frame grid while one frame is wide enough on screen
+   * (`resolveFrameBandRate`). The panel mounts the band only while this rate exists.
+   */
+  rate: Rational;
+}
+
+/**
+ * The band of the frame on screen at the playhead, in the track: from the nominal start of the
+ * frame that the timecode names to the nominal start of the next frame (`frameBand.ts`), as
+ * Premiere Pro and DaVinci Resolve show it at a high zoom.
+ *
+ * The panel mounts the band only on the exact frame grid and only while one frame is at least
+ * `FRAME_BAND_MIN_WIDTH_PX` wide, so the band renders per frame only then. It reads the three
+ * fields of the displayed position that the playhead also reads, and a presented frame renders
+ * it once.
+ *
+ * The fill is faint on purpose: the foreground colour at 10%, 1.07:1 to 1.27:1 against the
+ * track and the segment fills. The two edges carry the band, so it shows on every fill:
+ *
+ * - Each edge is a 1px line in the foreground colour at 70%. Against the track, the unselected
+ *   fill and the hover fill it keeps 6.0:1, 4.8:1 and 4.5:1 in the light theme and 7.8:1,
+ *   4.5:1 and 3.6:1 in the dark theme.
+ * - On the selected fill that line keeps only 2.4:1 and 1.6:1, so each edge also has a 1px
+ *   ring outside it in the timeline background colour, 4.3:1 and 8.5:1 there. The playhead
+ *   line has the same ring for the same reason.
+ *
+ * The playhead usually stands on the left edge, at the start of the frame, and covers it. The
+ * right edge, at the start of the next frame, shows the width of the frame.
+ *
+ * It is z-30 and comes before the track playhead in the document, so the playhead line lies over
+ * it, and it lies over the segments and the pending In region. It takes no pointer event, so the
+ * segments, their edges, the playhead hit area and the seek slider under it keep every press,
+ * and the snap and the trim of a drag do not change. It is aria-hidden: the seek slider already
+ * gives the timecode.
+ */
+export function TrackFrameBand({
+  videoStartPts,
+  videoTimeBase,
+  totalDurationSeconds,
+  rate,
+}: TrackFrameBandProps) {
+  const seekTargetSeconds = usePlaybackStore(selectSeekTargetSeconds);
+  const presentedFrame = usePlaybackStore(selectPresentedFrame);
+  const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
+  const band = calculatePlayheadFrameBand(
+    { seekTargetSeconds, presentedFrame, calibrationStatus },
+    videoStartPts,
+    videoTimeBase,
+    rate,
+    totalDurationSeconds,
+  );
+  if (band === null) {
+    return null;
+  }
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-y-0 z-30 border-x border-foreground/70 bg-foreground/10 shadow-[-1px_0_0_var(--timeline-background),1px_0_0_var(--timeline-background)]"
+      style={{ left: band.left, width: band.width }}
+    />
   );
 }
 

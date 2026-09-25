@@ -5,6 +5,7 @@ import {
   MILLISECONDS_TIMECODE_DISPLAY,
   type TimecodeDisplay,
 } from "@/lib/timecode";
+import { calculateMaxPixelsPerSecond } from "@/features/timeline";
 import type { Rational } from "@/types/project";
 import {
   countRulerEdgeAnchors,
@@ -230,6 +231,43 @@ describe("Quantized Ruler Scale", () => {
       // 10 frames give 66.7 px, and the shortest interval, 9 frames, gives 60 px.
       expect(calculateRulerScale(40, 12000, FPS_29_97)?.major).toEqual(frameStep(10));
     });
+
+    it.each([
+      // 200 px/s: 12 frames give 100 px, and 8 frames give 66.7 px.
+      { display: FPS_24, major: 12 },
+      // 239.76 px/s: 10 frames have a shortest interval of 9 frames, 72 px.
+      { display: FPS_29_97, major: 15 },
+      // 480 px/s: 10 frames give 80 px, the spacing of MM:SS:FF.
+      { display: FPS_60, major: 10 },
+      // 479.52 px/s: 10 frames have a shortest interval of 72 px, and 12 frames of 88 px.
+      { display: FPS_59_94, major: 12 },
+      // 960 px/s: FF has three digits, so the label needs 89 px, and 10 frames give 80 px.
+      { display: FPS_120, major: 12 },
+    ])(
+      "picks a labelled frame step at the zoom ceiling of $display.rate.n/$display.rate.d fps",
+      ({ display, major }) => {
+        if (display.format !== "frames") {
+          throw new Error("frame display expected");
+        }
+        // A 30 s source at the ceiling of its rate: one frame is at least 8 px wide.
+        const laneWidthPx = calculateMaxPixelsPerSecond(display.rate) * 30;
+        const scale = calculateRulerScale(30, laneWidthPx, display);
+        expect(scale?.major).toEqual(frameStep(major));
+        expect(scale?.minorSeconds).not.toBeNull();
+        const ticks = ticksFor(30, laneWidthPx, display);
+        expect(ticks.length).toBeLessThanOrEqual(MAX_QUANTIZED_RULER_TICK_COUNT);
+        // No two labels overlap, and each label names the frame at its tick.
+        const boxes = labelBoxes(ticks, laneWidthPx);
+        for (let index = 1; index < boxes.length; index++) {
+          expect(boxes[index].left).toBeGreaterThanOrEqual(boxes[index - 1].right);
+        }
+        for (const tick of ticks) {
+          expect(formatFrameTimecode(tick.seconds, display.rate)).toMatch(
+            new RegExp(`${tick.label}$`),
+          );
+        }
+      },
+    );
 
     it("uses the whole-second steps of the millisecond format for a long source", () => {
       expect(calculateRulerScale(10800, 1344, FPS_25)?.major).toEqual(ms(600_000));
@@ -649,22 +687,30 @@ describe("generateRulerTicks", () => {
       FPS_24,
       FPS_25,
       FPS_29_97,
+      FPS_59_94,
+      FPS_60,
       FPS_120,
     ];
     const durations = [0.5, 3, 20, 59.9, 100, 300, 3599, 3600, 10800, 36000];
 
     /**
-     * Lane widths from zoom 1 in a 900 px panel (804 px) to the maximum zoom: 200 px/s, at
-     * most 99,904 px, and never narrower than the lane at zoom 1.
+     * Lane widths from zoom 1 in a 900 px panel (804 px) to the maximum zoom: the
+     * pixels-per-second ceiling of the rate (`calculateMaxPixelsPerSecond`, 200 px/s with no
+     * rate), at most 99,904 px, and never narrower than the lane at zoom 1.
      */
-    function laneWidthsFor(duration: number): number[] {
-      const maxLane = Math.max(804, Math.min(200 * duration, 99904));
+    function laneWidthsFor(duration: number, display: TimecodeDisplay): number[] {
+      const pxPerSecond = calculateMaxPixelsPerSecond(
+        display.format === "frames" ? display.rate : null,
+      );
+      const maxLane = Math.max(804, Math.min(pxPerSecond * duration, 99904));
       return [804, 1344, 5000, 20000, maxLane].filter((width) => width <= maxLane);
     }
 
     it("covers every duration with at least one lane width", () => {
-      for (const duration of durations) {
-        expect(laneWidthsFor(duration).length).toBeGreaterThan(0);
+      for (const display of displays) {
+        for (const duration of durations) {
+          expect(laneWidthsFor(duration, display).length).toBeGreaterThan(0);
+        }
       }
     });
 
@@ -683,7 +729,7 @@ describe("generateRulerTicks", () => {
     it("keeps ticks inside the source, strictly increasing, and within the cap", () => {
       for (const display of displays) {
         for (const duration of durations) {
-          for (const width of laneWidthsFor(duration)) {
+          for (const width of laneWidthsFor(duration, display)) {
             const ticks = ticksFor(duration, width, display);
             expect(ticks.length).toBeGreaterThan(0);
             expect(ticks.length).toBeLessThanOrEqual(MAX_QUANTIZED_RULER_TICK_COUNT);
@@ -710,7 +756,7 @@ describe("generateRulerTicks", () => {
     it("keeps every label whole inside the lane with the gap between neighbours", () => {
       for (const display of displays) {
         for (const duration of durations) {
-          for (const width of laneWidthsFor(duration)) {
+          for (const width of laneWidthsFor(duration, display)) {
             const boxes = labelBoxes(ticksFor(duration, width, display), width);
             for (let i = 0; i < boxes.length; i++) {
               expect(boxes[i].left).toBeGreaterThanOrEqual(0);

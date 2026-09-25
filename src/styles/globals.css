@@ -193,6 +193,31 @@
       color: var(--muted-foreground);
     }
   }
+
+  /* The fade of a segment that the user just made on the timeline (`segmentMotion.ts`). The
+   * curve is the value of --ease-enter, written out. The keyframes have no end value, so the
+   * fade ends at the opacity that the element has without the animation. Only the opacity
+   * changes: a timeline object never moves or changes its size with an animation. */
+  --animate-segment-enter: segment-enter var(--motion-base) cubic-bezier(0, 0, 0, 1);
+
+  @keyframes segment-enter {
+    from {
+      opacity: 0;
+    }
+  }
+
+  /* One flash of the cut point of a split on the timeline. It holds for the first fifth and
+   * then fades out to the opacity of the element, which is 0. The curve is the value of
+   * --ease-standard, written out. */
+  --animate-segment-cut-flash: segment-cut-flash var(--motion-slow)
+    cubic-bezier(0.2, 0, 0, 1);
+
+  @keyframes segment-cut-flash {
+    0%,
+    20% {
+      opacity: 1;
+    }
+  }
 }
 
 :root {
@@ -490,14 +515,17 @@
 /* Durations. Both themes use the same values, so these are root variables and not theme
  * variables. A utility reads one with the `duration-(--motion-base)` syntax.
  *
- * Timeline objects, the playhead and the selection do not animate: they follow the pointer
- * and the media clock directly. */
+ * Timeline objects and the playhead never move or change their size with a transition or an
+ * animation: they follow the pointer, the media clock and the time model directly. A segment
+ * changes only its colours and its opacity with motion: the colours of its hover and its
+ * selection, the fade of a new segment and the flash of a cut point. */
 :root {
-  /* A hover or press colour change, a focus ring, and the exit of an overlay. */
+  /* A hover, press or selection colour change, a focus ring, and the exit of an overlay. */
   --motion-fast: 100ms;
-  /* The entry of a tooltip, a menu or a select list. */
+  /* The entry of a tooltip, a menu, a select list or a new timeline segment. */
   --motion-base: 150ms;
-  /* The width of the progress bar and other size changes. */
+  /* The width of the progress bar and other size changes, and the flash of a cut point on the
+   * timeline. */
   --motion-slow: 300ms;
   /* A highlight that shows once and fades out, such as the status bar result of an export
    * that finished while its dialog was hidden. */

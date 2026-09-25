@@ -291,6 +291,17 @@ export const en = {
     // The notice of a drag trim of a segment edge that ended with no change, because the frame
     // of the target did not arrive in time or another action replaced the trim.
     trimNotApplied: "The trim was not applied.",
+    // The summary in the gutter of the track row: the number of segments that the export
+    // joins, and their total duration. The Export tooltip of the title bar shows the same
+    // values. {{duration}} is a timecode such as "00:01:23:04". `label` is the accessible text
+    // of the summary. The visible lines are short, so that they fit in the gutter. The label
+    // also says what the duration is.
+    segmentSummary: {
+      count_one: "{{count}} segment",
+      count_other: "{{count}} segments",
+      label_one: "{{count}} segment, {{duration}} in total",
+      label_other: "{{count}} segments, {{duration}} in total",
+    },
     zoom: {
       group: "Timeline zoom",
       zoomIn: "Zoom In",

@@ -4,6 +4,7 @@ import {
   calculateAnchoredScrollLeft,
   calculateContentWidthPx,
   calculateFollowScrollLeft,
+  calculateMaxPixelsPerSecond,
   calculateMaxZoom,
   calculatePausedFollow,
   calculatePendingNavigation,
@@ -17,9 +18,11 @@ import {
   stepTimelineZoom,
   FOLLOW_WINDOW_MARGIN_PX,
   FOLLOW_WRITE_TOLERANCE_PX,
+  FRAME_BAND_MIN_WIDTH_PX,
   MAX_TIMELINE_CONTENT_WIDTH_PX,
   MAX_TIMELINE_PIXELS_PER_SECOND,
   MAX_WHEEL_DELTA_PER_EVENT_PX,
+  MAX_ZOOM_CEILING_FRAME_RATE_FPS,
   MIN_TIMELINE_ZOOM,
   PLAYHEAD_FOLLOW_LEAD_FRACTION,
   TIMELINE_GUTTER_WIDTH_PX,
@@ -364,6 +367,77 @@ describe("timeline viewport module", () => {
       expect(calculateMaxZoom(0.01, 100)).toBe(1);
       expect(calculateMaxZoom(10, 50)).toBeGreaterThanOrEqual(1);
       expect(calculateMaxZoom(100, 0)).toBeGreaterThanOrEqual(1);
+    });
+
+    /** The pixels per second of the lane at a zoom factor, at a viewport of 1440 px. */
+    const lanePxPerSecondAt = (zoom: number, totalDurationSeconds: number) =>
+      (zoom * (1440 - TIMELINE_GUTTER_WIDTH_PX)) / totalDurationSeconds;
+
+    it.each([
+      { name: "24 fps", rate: { n: 24, d: 1 }, pxPerSecond: 200 },
+      { name: "25 fps", rate: { n: 25, d: 1 }, pxPerSecond: 200 },
+      { name: "29.97 fps", rate: { n: 30000, d: 1001 }, pxPerSecond: 240000 / 1001 },
+      { name: "60 fps", rate: { n: 60, d: 1 }, pxPerSecond: 480 },
+      { name: "120 fps", rate: { n: 120, d: 1 }, pxPerSecond: 960 },
+    ])("lets one frame reach the band width at $name", ({ rate, pxPerSecond }) => {
+      expect(calculateMaxPixelsPerSecond(rate)).toBeCloseTo(pxPerSecond, 10);
+      // A 30-second source at 1440 stays below the width ceiling at every one of these rates.
+      const zoom = calculateMaxZoom(30, 1440, rate);
+      expect(lanePxPerSecondAt(zoom, 30)).toBeCloseTo(pxPerSecond, 10);
+      // One frame is at least FRAME_BAND_MIN_WIDTH_PX wide at the ceiling.
+      const framePx = (lanePxPerSecondAt(zoom, 30) * rate.d) / rate.n;
+      expect(framePx).toBeGreaterThanOrEqual(FRAME_BAND_MIN_WIDTH_PX - 1e-9);
+    });
+
+    it("counts at most MAX_ZOOM_CEILING_FRAME_RATE_FPS in the ceiling", () => {
+      expect(MAX_ZOOM_CEILING_FRAME_RATE_FPS).toBe(240);
+      expect(calculateMaxPixelsPerSecond({ n: 240, d: 1 })).toBe(1920);
+      expect(calculateMaxPixelsPerSecond({ n: 480, d: 1 })).toBe(1920);
+      // A real frame rate of 1000/1, as a probe can report for a millisecond time base.
+      expect(calculateMaxPixelsPerSecond({ n: 1000, d: 1 })).toBe(1920);
+      expect(
+        lanePxPerSecondAt(calculateMaxZoom(30, 1440, { n: 1000, d: 1 }), 30),
+      ).toBeCloseTo(1920, 10);
+    });
+
+    it("keeps 200 px/s for a source with no nominal frame rate", () => {
+      expect(FRAME_BAND_MIN_WIDTH_PX).toBe(8);
+      expect(calculateMaxPixelsPerSecond(null)).toBe(MAX_TIMELINE_PIXELS_PER_SECOND);
+      expect(calculateMaxPixelsPerSecond(undefined)).toBe(
+        MAX_TIMELINE_PIXELS_PER_SECOND,
+      );
+      expect(calculateMaxPixelsPerSecond({ n: 0, d: 1 })).toBe(
+        MAX_TIMELINE_PIXELS_PER_SECOND,
+      );
+      expect(calculateMaxPixelsPerSecond({ n: 1.5, d: 1 })).toBe(
+        MAX_TIMELINE_PIXELS_PER_SECOND,
+      );
+      // The default argument and an explicit null give the ceiling of 200 px/s.
+      expect(calculateMaxZoom(30, 1440)).toBe(calculateMaxZoom(30, 1440, null));
+      expect(lanePxPerSecondAt(calculateMaxZoom(30, 1440, null), 30)).toBeCloseTo(
+        200,
+        10,
+      );
+    });
+
+    it("keeps the width ceiling for a long source, whatever its rate", () => {
+      // 10 minutes at 120 fps: 960 px/s would be 576,000 px, and the width ceiling wins.
+      const widthCeiling =
+        (MAX_TIMELINE_CONTENT_WIDTH_PX - TIMELINE_GUTTER_WIDTH_PX) / 1344;
+      expect(calculateMaxZoom(600, 1440, { n: 120, d: 1 })).toBeCloseTo(
+        widthCeiling,
+        10,
+      );
+      expect(calculateMaxZoom(600, 1440, null)).toBeCloseTo(widthCeiling, 10);
+      // 2 minutes at 60 fps: 480 px/s would be 57,600 px, below the width ceiling.
+      expect(
+        lanePxPerSecondAt(calculateMaxZoom(120, 1440, { n: 60, d: 1 }), 120),
+      ).toBeCloseTo(480, 10);
+      // 4 minutes at 60 fps: 115,200 px, so the width ceiling wins.
+      expect(calculateMaxZoom(240, 1440, { n: 60, d: 1 })).toBeCloseTo(
+        widthCeiling,
+        10,
+      );
     });
   });
 

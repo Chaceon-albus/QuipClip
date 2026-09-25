@@ -6,6 +6,8 @@
  * and wheel delta normalization.
  */
 
+import type { Rational } from "@/types/project";
+
 /**
  * Width of the sticky timeline gutter in pixels.
  * Must stay equal to the sticky gutter element widths in TimelinePanel.tsx (w-[96px]).
@@ -22,10 +24,60 @@ export const MIN_TIMELINE_ZOOM = 1;
 export const MAX_TIMELINE_CONTENT_WIDTH_PX = 100_000;
 
 /**
- * 200 px/s makes one 24fps frame 8.33 px (200 / 24), a comfortable target, and past that
- * the frame-step keys are the better tool.
+ * The pixels-per-second ceiling of a source with no nominal frame rate, and the lowest ceiling
+ * of any source. 200 px/s makes one 24fps frame 8.33 px (200 / 24) and one 25fps frame 8 px.
+ * A source with a nominal frame rate can zoom further, until one frame is
+ * `FRAME_BAND_MIN_WIDTH_PX` wide (`calculateMaxPixelsPerSecond`).
  */
 export const MAX_TIMELINE_PIXELS_PER_SECOND = 200;
+
+/**
+ * The narrowest frame on screen, in CSS pixels, that shows the frame bands of the timeline: the
+ * band of the frame at the playhead and the Out frame of the current segment. A narrower band
+ * would be hidden by the playhead line and its outline, which are 4px wide together. The zoom
+ * ceiling of a source with a nominal frame rate lets one frame reach this width, so the bands
+ * can show at every common rate, as they do in Premiere Pro and DaVinci Resolve.
+ */
+export const FRAME_BAND_MIN_WIDTH_PX = 8;
+
+function isValidFrameRate(rate: Rational | null | undefined): rate is Rational {
+  return (
+    rate !== null &&
+    rate !== undefined &&
+    Number.isSafeInteger(rate.n) &&
+    Number.isSafeInteger(rate.d) &&
+    rate.n > 0 &&
+    rate.d > 0
+  );
+}
+
+/**
+ * The highest frame rate that raises the zoom ceiling, in frames per second. A probe can report
+ * a real frame rate far above the frames of the file, such as 1000/1 for a Matroska time base,
+ * and 8 px per frame of such a rate would be 8000 px/s. The cap keeps the ceiling at 1920 px/s
+ * or below. A source above it zooms as far as a 240 fps source.
+ */
+export const MAX_ZOOM_CEILING_FRAME_RATE_FPS = 240;
+
+/**
+ * The pixels-per-second ceiling of the lane: `MAX_TIMELINE_PIXELS_PER_SECOND`, or more for a
+ * source with a nominal frame rate, so that one nominal frame can be `FRAME_BAND_MIN_WIDTH_PX`
+ * wide: `max(200, 8 × min(fps, 240))`. 24 and 25 fps keep 200 px/s, 29.97 fps gives 239.76,
+ * 60 fps 480, 120 fps 960, and 240 fps or more 1920. The width ceiling of `calculateMaxZoom`
+ * still applies on top.
+ *
+ * @param frameRate The nominal frame rate of the source (`getNominalFrameRate`), or null when
+ *   the source reports none.
+ */
+export function calculateMaxPixelsPerSecond(
+  frameRate: Rational | null | undefined,
+): number {
+  if (!isValidFrameRate(frameRate)) {
+    return MAX_TIMELINE_PIXELS_PER_SECOND;
+  }
+  const fps = Math.min(MAX_ZOOM_CEILING_FRAME_RATE_FPS, frameRate.n / frameRate.d);
+  return Math.max(MAX_TIMELINE_PIXELS_PER_SECOND, FRAME_BAND_MIN_WIDTH_PX * fps);
+}
 
 export const TIMELINE_WHEEL_ZOOM_BASE = 1.25;
 export const MAX_WHEEL_DELTA_PER_EVENT_PX = 400;
@@ -111,13 +163,25 @@ export function calculateContentWidthPx(zoom: number, viewportWidthPx: number): 
 /**
  * min(pixels-per-second ceiling, engine-safe width ceiling); 1 when the extent is indeterminate.
  *
+ * The pixels-per-second ceiling depends on the nominal frame rate
+ * (`calculateMaxPixelsPerSecond`): 200 px/s with no rate, and enough for one frame of
+ * `FRAME_BAND_MIN_WIDTH_PX` with a rate, such as 480 px/s at 60 fps. The width ceiling of
+ * MAX_TIMELINE_CONTENT_WIDTH_PX (100,000 px) applies on top, so a long source stops at that
+ * width, whatever its rate.
+ *
  * Divides by the lane width (base - TIMELINE_GUTTER_WIDTH_PX) rather than content width
- * so that the lane reaches exactly MAX_TIMELINE_PIXELS_PER_SECOND (200 px/s, or 8.33 px
- * per 24fps frame) and MAX_TIMELINE_CONTENT_WIDTH_PX (100,000 px).
+ * so that the lane reaches exactly the pixels-per-second ceiling and
+ * MAX_TIMELINE_CONTENT_WIDTH_PX.
+ *
+ * @param totalDurationSeconds The source extent of the ruler (ADR 007).
+ * @param viewportWidthPx The width of the scroll container.
+ * @param frameRate The nominal frame rate of the source (`getNominalFrameRate`), or null when
+ *   the source reports none.
  */
 export function calculateMaxZoom(
   totalDurationSeconds: number | null | undefined,
   viewportWidthPx: number,
+  frameRate: Rational | null = null,
 ): number {
   if (
     totalDurationSeconds === null ||
@@ -132,7 +196,7 @@ export function calculateMaxZoom(
   return Math.max(
     1,
     Math.min(
-      (MAX_TIMELINE_PIXELS_PER_SECOND * totalDurationSeconds) / lane,
+      (calculateMaxPixelsPerSecond(frameRate) * totalDurationSeconds) / lane,
       (MAX_TIMELINE_CONTENT_WIDTH_PX - TIMELINE_GUTTER_WIDTH_PX) / lane,
     ),
   );

@@ -16,6 +16,7 @@ import {
 } from "@/features/media";
 import {
   getDisplayedElapsedSeconds,
+  getNominalFrameRate,
   playbackStore,
   resolveTimecodeDisplay,
   usePlaybackStore,
@@ -54,11 +55,13 @@ import {
   type EdgeAutoScroll,
   type EdgeAutoScrollGeometry,
 } from "./edgeAutoScroll";
+import { resolveFrameBandRate } from "./frameBand";
 import { PendingInFlag, PendingInTrackMarks } from "./PendingInLayer";
 import { PlayheadFollow } from "./PlayheadFollow";
 import {
   RulerPlayhead,
   TimelineSeekSlider,
+  TrackFrameBand,
   TrackPlayhead,
   type ScrubSurfaceHandlers,
 } from "./PlayheadLayer";
@@ -68,6 +71,7 @@ import { createSnapBoundaryCache, type SnapBoundary } from "./scrubSnap";
 import { clickSegmentEdge } from "./segmentEdgeClick";
 import type { SegmentEdge } from "./segmentEdges";
 import { SegmentLayer, type SegmentEdgePointerHandlers } from "./SegmentLayer";
+import { SegmentSummary } from "./SegmentSummary";
 import {
   createTrimSnapBoundaryCache,
   isTrimCurrent,
@@ -154,9 +158,10 @@ function readVisibleLane(scrollEl: HTMLElement): ClientRange {
  *
  * The shell subscribes to no value that changes per presented frame. The layers that draw
  * the displayed position subscribe to it themselves: RulerPlayhead, TrackPlayhead, the
- * `aria-valuenow` of TimelineSeekSlider, the pending In region, and PlayheadFollow, which
- * holds the follow effects. SegmentLayer, the pending In flag and bracket, and the ruler
- * ticks do not subscribe to it. So a presented frame renders only those small layers again.
+ * `aria-valuenow` of TimelineSeekSlider, the pending In region, the frame band at a high zoom
+ * (TrackFrameBand), and PlayheadFollow, which holds the follow effects. SegmentLayer, the
+ * segment summary in the gutter, the pending In flag and bracket, and the ruler ticks do not
+ * subscribe to it. So a presented frame renders only those small layers again.
  * A layer that renders per frame takes its label as a prop, and a layer that does not
  * reads the catalog itself.
  *
@@ -230,12 +235,15 @@ export function TimelinePanel({
     !isIndeterminate &&
     onApproximateSeek !== undefined;
   const canSeek = canUsePreciseSeek || canUseApproximateSeek;
+  // The nominal frame rate of the exact frame grid while a precise seek is possible, or null
+  // (ADR 022). The drag trim and the frame bands read it.
+  const exactGridRate =
+    canUsePreciseSeek && media !== null ? resolveTrimGridRate(media.probe) : null;
   // A drag on a segment edge trims it only on the exact frame grid (ADR 030), where the frame of
   // the release target can be recognized when it arrives. On any other source the edge press is
   // the click of ADR 007. The press, the resize cursor of the edges and the trim start all read
   // this one condition.
-  const canTrimEdges =
-    canUsePreciseSeek && media !== null && resolveTrimGridRate(media.probe) !== null;
+  const canTrimEdges = exactGridRate !== null;
 
   const zoom = useTimelineViewportStore(selectZoom);
   // The zoom factor of the last commit. The layout effect that applies an anchor reads it as
@@ -342,10 +350,21 @@ export function TimelinePanel({
     };
   }, []);
 
-  const maxZoom = calculateMaxZoom(totalDurationSeconds, viewportWidthPx);
+  // The ceiling depends on the nominal frame rate, so one frame can reach the width of the
+  // frame bands at every common rate (`calculateMaxPixelsPerSecond`). The rate is the one of
+  // the timecode and the frame step: the average frame rate, else the real frame rate. The
+  // ceiling counts at most 240 fps (`MAX_ZOOM_CEILING_FRAME_RATE_FPS`), so a real frame rate
+  // that a probe reports far above the frames of the file cannot give a huge ceiling.
+  const maxZoom = calculateMaxZoom(
+    totalDurationSeconds,
+    viewportWidthPx,
+    media ? getNominalFrameRate(media.probe) : null,
+  );
 
-  // Reports the ceiling to the viewport store, which clamps the zoom to it, as a resize or a
-  // new extent requires. A layout effect, so a clamped zoom renders before the paint.
+  // Reports the ceiling to the viewport store, which clamps the zoom to it, as a resize, a new
+  // extent or a new source rate requires. Every zoom path reads the ceiling from the store: the
+  // wheel (`zoomBy`), the zoom keys and buttons (`zoomIn`, `zoomOut`) and Fit. A layout effect,
+  // so a clamped zoom renders before the paint.
   useLayoutEffect(() => {
     timelineViewportStore.getState().setMaxZoom(maxZoom);
   }, [maxZoom]);
@@ -496,6 +515,16 @@ export function TimelinePanel({
   const laneWidthPx = Math.max(
     0,
     calculateContentWidthPx(zoom, viewportWidthPx) - TIMELINE_GUTTER_WIDTH_PX,
+  );
+
+  // The rate of the frame bands (`frameBand.ts`): the band of the frame at the playhead and the
+  // band of the Out frame of the current segment. They show only on the exact frame grid, while
+  // one frame is at least FRAME_BAND_MIN_WIDTH_PX wide, and null hides both. The value changes
+  // with the zoom and the source, and not per presented frame.
+  const frameBandRate = resolveFrameBandRate(
+    exactGridRate,
+    totalDurationSeconds,
+    laneWidthPx,
   );
 
   // The ruler labels follow the timecode format of the source, as the preview does
@@ -1356,11 +1385,17 @@ export function TimelinePanel({
 
           {/* Single-Source Overview Track Row */}
           <div className="flex min-h-0 flex-1">
-            {/* Left gutter (~96px wide) displaying Source Media lane header */}
-            <div className="sticky left-0 z-40 flex w-[96px] shrink-0 items-center border-r border-timeline-divider bg-chrome px-3">
+            {/*
+             * Left gutter (~96px wide): the lane label, and under it the number of segments
+             * and their total duration (see SegmentSummary). The right padding is 8px and not
+             * 12px, so that a millisecond timecode fits (see SegmentSummary). The column
+             * clips, so a short track row cuts the summary and does not spill into the ruler.
+             */}
+            <div className="sticky left-0 z-40 flex w-[96px] shrink-0 flex-col justify-center gap-0.5 overflow-hidden border-r border-timeline-divider bg-chrome pr-2 pl-3">
               <span className="truncate text-xs font-semibold text-chrome-foreground">
                 {t("timeline.sourceLane")}
               </span>
+              <SegmentSummary probe={probe ?? null} timecodeDisplay={timecodeDisplay} />
             </div>
 
             {/*
@@ -1441,6 +1476,7 @@ export function TimelinePanel({
                     viewportRef={scrollRef}
                     edgePointerHandlers={segmentEdgeHandlers}
                     canTrimEdges={canTrimEdges}
+                    outFrameRate={frameBandRate}
                   />
 
                   {/* The new extent of a segment that a trim moves (see SegmentTrimPreview) */}
@@ -1449,6 +1485,20 @@ export function TimelinePanel({
                     videoTimeBase={videoTimeBase}
                     totalDurationSeconds={totalDurationSeconds}
                   />
+
+                  {/*
+                   * The band of the frame at the playhead, under the track playhead (see
+                   * TrackFrameBand). It mounts only at a high zoom on the exact frame grid, so
+                   * at other times it adds no render per presented frame.
+                   */}
+                  {frameBandRate !== null && (
+                    <TrackFrameBand
+                      videoStartPts={videoStartPts}
+                      videoTimeBase={videoTimeBase}
+                      totalDurationSeconds={totalDurationSeconds}
+                      rate={frameBandRate}
+                    />
+                  )}
 
                   {/* Track playhead, after the segment group (see TrackPlayhead) */}
                   {!isIndeterminate && (

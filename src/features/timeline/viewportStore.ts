@@ -6,9 +6,10 @@
  * redo stacks, or the project file. The store holds three values:
  *
  * - `zoom`: the factor. 1 fits the whole source extent in the panel.
- * - `maxZoom`: the ceiling that the panel calculates from the source extent and its own width
- *   (`calculateMaxZoom`). The panel reports it, because only the panel knows its width. The
- *   store clamps the zoom to it.
+ * - `maxZoom`: the ceiling that the panel calculates from the source extent, the nominal frame
+ *   rate of the source and its own width (`calculateMaxZoom`). The panel reports it, because
+ *   only the panel knows its width. The store clamps the zoom to it, and every zoom action
+ *   reads it.
  * - `anchor`: what the panel must hold in place when it commits the next zoom, or null.
  *
  * The scroll position stays in the panel. A zoom action records an anchor, and the panel takes
