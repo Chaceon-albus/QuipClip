@@ -1,8 +1,8 @@
 /**
  * Media store managing imported video state, loading status, and async import actions.
  *
- * Implements latest-selection-wins concurrency semantics (ADR 008, ADR 009)
- * and preserves currently loaded media during in-flight replacements or failed attempts.
+ * Implements latest-selection-wins concurrency semantics and preserves currently loaded
+ * media during in-flight replacements or failed attempts.
  */
 
 import { useStore } from "zustand";

@@ -4,7 +4,7 @@
  *
  * Implements:
  * - Serialized write queue to prevent out-of-order write races (ADR 013).
- * - Monotonic counter for latest-request-wins semantics (ADR 008).
+ * - Monotonic counter for latest-request-wins semantics.
  * - Optimistic save with rollback to last confirmed document on failure.
  * - Compare-and-swap revision re-based onto the last confirmed document at send time, and one
  *   re-read after a `settingsConflict` so the session is not left on a spent revision.
