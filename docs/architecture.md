@@ -28,7 +28,7 @@ document summarizes them and shows how the parts fit together.
 | [`005-ffmpeg-acquisition.md`](../.agents/decisions/005-ffmpeg-acquisition.md)                                                               | PATH, then app data, then a download the user agreed to         |
 | [`006-encoder-capability-probing.md`](../.agents/decisions/006-encoder-capability-probing.md)                                               | List the encoders, then smoke-test them, then cache             |
 | [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md)                                 | One source-PTS timeline with ordered half-open segments         |
-| [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)                                   | Delegated writing, independent review                           |
+| [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)                                   | Superseded by ADR 033                                           |
 | [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                                                 | One reviewed unit, one commit, no push                          |
 | [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                                                             | Version 1 JSON with exact source-PTS boundaries                 |
 | [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                                                             | English and Simplified Chinese interface with a saved setting   |
@@ -53,6 +53,7 @@ document summarizes them and shows how the parts fit together.
 | [`030-trim-a-segment-edge-by-dragging.md`](../.agents/decisions/030-trim-a-segment-edge-by-dragging.md)                                     | Trim a segment edge by dragging it                              |
 | [`031-order-dialog-buttons-by-platform.md`](../.agents/decisions/031-order-dialog-buttons-by-platform.md)                                   | Order dialog buttons by platform                                |
 | [`032-one-frontend-chunk-and-its-size-limit.md`](../.agents/decisions/032-one-frontend-chunk-and-its-size-limit.md)                         | One frontend chunk, with a size warning above 1200 kB           |
+| [`033-main-agent-writes-the-code.md`](../.agents/decisions/033-main-agent-writes-the-code.md)                                               | The main agent writes, and another tool runs only on request    |
 
 ## Shape
 
@@ -111,9 +112,8 @@ Number, date, and list formatting must use `Intl` with the resolved locale. Medi
 time, file paths, technical identifiers, and raw `ffmpeg` output keep their defined format.
 
 English must be the source and fallback language. New messages must use named placeholders.
-Components must not assemble sentences from translated fragments. When `agy` is available,
-Gemini must check and polish new or changed English and Simplified Chinese text. This
-language review is additional to the independent review that ADR 008 requires.
+Components must not assemble sentences from translated fragments. The independent review
+that ADR 033 requires must also check new or changed English and Simplified Chinese text.
 
 ## Time
 

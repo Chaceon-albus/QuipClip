@@ -1,8 +1,11 @@
 # 008. Delegate code writing, and review it with a different agent
 
-- Status: Accepted
+- Status: Superseded by ADR 033
 - Date: 2026-09-03
 - Deciders: capric98
+
+ADR 033 replaces this record. The routing below no longer applies. The review rule, the
+model tier, the gate rule, and the `cargo test` rule continue in ADR 033.
 
 ## Context
 

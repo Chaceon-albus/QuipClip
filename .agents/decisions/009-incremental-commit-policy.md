@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-29
 - Deciders: capric98
+- Amended by: ADR 033
 
 ## Context
 
@@ -22,7 +23,7 @@ batch many changes into one commit.
 2. The review passed. An independent agent read the diff and raised no blocking finding.
 3. The gate passed. Section 5 of the `dev-workflow` skill states it, and it is the only
    normative copy. `cargo test` is part of it when the unit changed any file under
-   `src-tauri/`; ADR 008 records why the main agent may skip it otherwise. This condition
+   `src-tauri/`. ADR 033 records why the main agent may skip it otherwise. This condition
    once read "at the strictest level available at that moment", which was written before
    the scaffold existed and gave no way to tell whether a commit had met it.
 4. `git status --porcelain` lists only the files of this unit. If it lists more, stage by
@@ -63,11 +64,12 @@ Refs: ADR-003
 - `BREAKING CHANGE:` in the footer for a change to the project file schema (ADR 010) or to
   the Tauri command surface.
 
-**Attribution trailers.** Record who wrote the code, because it is frequently not the
-agent that ran the commit.
+**Attribution trailers.** Record who wrote the code and who reviewed it. `Assisted-By`
+names a subagent or another agent tool that wrote the diff. Omit it when the main agent
+wrote the diff.
 
 ```
-Assisted-By: agy/<model-id>
+Assisted-By: <tool>/<model-id>
 Reviewed-By: subagent/<model-id>
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 ```

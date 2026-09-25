@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-29
 - Deciders: capric98
+- Amended by: ADR 033
 
 ## Context
 
@@ -81,18 +82,16 @@ Translators must receive the complete source message, named placeholders such as
 positional placeholders such as `%s` or `{0}`. Components must not assemble sentences
 from translated fragments.
 
-Before a catalog commit, check whether the `agy` command exists. If it exists, Gemini must
-check and polish new or changed English and Simplified Chinese interface text. For each
-changed key, give Gemini the English message, the Simplified Chinese message, placeholder
-definitions, and interface context. Use the project's controlled-language skills when the
-text is technical. The main agent must check Gemini's proposed changes before accepting
-them.
+ADR 033 requires an independent reviewer before each commit. Before a catalog commit, that
+reviewer must also check new or changed English and Simplified Chinese interface text. It
+proposes corrections. For each changed key, give the reviewer the English message, the
+Simplified Chinese message, placeholder definitions, and interface context. The reviewer
+uses the project's controlled-language skills when the text is technical. The main agent
+must check each proposed correction before it accepts it.
 
-Gemini language review is additional to the independent review that ADR 008 requires. It
-never replaces that review. If Gemini makes no accepted edit, add
-`Reviewed-By: agy/<model-id>`. If the catalog accepts a Gemini edit, add
-`Assisted-By: agy/<model-id>` instead. If `agy` does not exist or its review
-fails, the independent review still applies without a Gemini trailer.
+An earlier version of this record also required a Gemini language review through `agy`.
+ADR 033 removed that requirement. Run another agent tool for this check only when the user
+asks for it.
 
 ## Consequences
 
