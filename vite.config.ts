@@ -47,6 +47,15 @@ export default defineConfig(async () => ({
     },
   },
 
+  build: {
+    // Tauri loads the bundle from the application, not over a network, so the 500 kB
+    // web default does not apply and code splitting saves no download time. The limit
+    // stays as an alarm for an unexpected size increase, set about 40 percent above the
+    // current entry chunk. When the warning fires, find what grew before you raise the
+    // limit again.
+    chunkSizeWarningLimit: 1200,
+  },
+
   test: {
     // Agent worktrees under `.claude` are full copies of the repository. Keep their
     // test files out of this run, and keep the default excludes.
