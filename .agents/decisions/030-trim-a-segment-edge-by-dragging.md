@@ -103,6 +103,8 @@ release commits the frame that the browser presents at the end of the drag.
   playhead is the frame on screen only when no seek was pending; it then writes its PTS. When
   a seek was pending, it is only a seek target, and the trim commits its frame `J` as above.
 - **Escape** returns through `seekToFrameIndex` to the frame of the start playhead.
+- (Added on 2026-09-24.) **A secondary press** on an edge, and a Control press on macOS,
+  opens the context menu of the segment (ADR 007) and never starts a trim.
 - **A trim that cannot finish.** If no frame `J` arrives within 3 seconds of visible time
   after the release, counted as the anchor wait of ADR 003 counts it, or if the calibration,
   the source or the segment changes before it arrives, the trim is dropped, and a short

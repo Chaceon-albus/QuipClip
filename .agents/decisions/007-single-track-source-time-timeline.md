@@ -141,6 +141,25 @@ technology, only selects. A press and a drag on an edge do nothing more than a c
 later record adds drag trimming. The edge is not a Tab stop, and the hit area of the
 playhead stays above the edges. No edit value comes from the pixel position of an edge.
 
+### The context menu of a segment
+
+(Added on 2026-09-24.) A segment has a context menu. A right-click on the body or on an edge
+opens it. A Control click on macOS, and the Menu key or Shift+F10 on a focused segment, also
+open it. The request selects the segment, as a click does, and it does not seek. A secondary
+press on an edge does not trim the edge and does not seek to its boundary. On macOS the click
+that follows a Control press does nothing. On Windows a Control click stays a plain click.
+
+The menu opens at the pointer. A request from the keyboard opens the menu at the bottom left
+of the visible part of the segment. The menu does not open while a press, a scrub or a trim
+of the timeline runs, while a dialog or a menu is open, or for a segment of another source.
+A request that does not open the menu does not select the segment. While the menu is
+prepared or open, a press on the timeline starts no scrub and no trim.
+
+The menu is a native menu of the operating system. The segment cancels the `contextmenu`
+event before the context menu rule of the window runs, so the menu of the web view never
+opens on a segment. The rule of the window does not change for other elements. Escape and a
+click outside the menu close it and change nothing else. ADR 026 gives the items.
+
 ### Motion and display aids
 
 (Added on 2026-09-24.) A segment, the playhead and the pending In never animate their

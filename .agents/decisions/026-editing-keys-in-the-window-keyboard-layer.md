@@ -197,8 +197,8 @@ The actions behave as follows:
   - The action needs an active source, a ready calibration, and a segment that holds a
     frame. ADR 022 lists the cases that cannot play. While the calibration is `calibrating` or `unavailable`, the key does
     nothing. The stop reads the exact PTS of each presented frame, and `play` drops a seek
-    that the store defers before the anchor. No control shows the action yet, so no disabled
-    reason is shown.
+    that the store defers before the anchor. (Changed on 2026-09-24: the context menu of a
+    segment now shows the action. A native menu shows no disabled reason.)
   - The action seeks to `inPts` with `seekToPts` and plays. The sound and the mute state are
     those of normal playback. No cue sounds (ADR 019).
   - A second `/` while the segment plays pauses, as `Space` does.
@@ -209,6 +209,34 @@ The actions behave as follows:
     ends it only after the stop: while the segment plays, the stop stays, and a frame past
     the last frame is pulled back. A playback that starts later has no stop point.
   - ADR 022 gives the stop rule.
+
+### The context menu of a segment
+
+(Added on 2026-09-24.) The context menu of a segment (ADR 007) holds these items, in this
+order: Go to In (`Shift+I`), Go to Out (`Shift+O`), Play Segment (`/`), a separator, and Delete
+Segment (`Delete`, `⌫` on macOS). Each item names the action of its row in the key table.
+An item is enabled when the plan of its key acts (`planShortcutCommand`), and it runs that
+plan through the runner of the key. The item plans again when it runs, so a condition that
+changed while the menu was open applies, and it runs nothing when another segment became
+current. An item runs only the kind of command that it showed when the menu opened. An item
+of an earlier menu never runs after a later menu opened. An item whose condition is false
+is disabled, not hidden. While a segment plays, `/` pauses, so the Play Segment item shows
+the label Pause and pauses; after the segment stopped, an item that showed Pause runs
+nothing.
+
+The key of each item comes from the key table. On macOS the item carries the accelerator of
+its row, and the system draws it in the form of the tooltips, such as `⇧I`. On Windows the
+item text carries the tooltip form after a tab, such as `Shift+I`, and the menu shows it in
+its accelerator column. The labels come from the catalog.
+
+The menu holds only actions whose operand is the segment. Mark In, Mark Out and Split act at
+the playhead, which a right-click does not move. Finish Segment clears the selection that the
+right-click made, and its key, Escape, closes the menu.
+
+While the menu is prepared or open, the window keyboard layer and the command items of the
+macOS menu do nothing, as for any open menu (ADR 021). A native menu has no element in the
+document, so the page keeps its own flag, `nativeContextMenuState`, from the decision to open
+until the popup closes.
 
 ### The tooltips
 

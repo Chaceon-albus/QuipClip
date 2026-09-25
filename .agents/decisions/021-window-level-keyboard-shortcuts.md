@@ -131,6 +131,12 @@ The layer does not act when any of these is true:
   This test repeats the one above on purpose. It covers the state where a dialog is
   open and the focus rests on the body, which a test on the target alone cannot
   see.
+- (Added on 2026-09-24.) A native context menu of the page is open, or the page prepares
+  one (`nativeContextMenuState`, ADR 026). Such a menu has no element in the document, so
+  the tests above cannot see it. The page prepares a menu for 2 s at most. A native menu
+  takes all input while it shows, so the first trusted press or key press that reaches the
+  window 1 s or more after the popup call proves that the menu closed, and the flag clears
+  even if the popup never reports its close. That event keeps its normal meaning.
 
 ### The condition for a frame step
 
