@@ -52,6 +52,7 @@ document summarizes them and shows how the parts fit together.
 | [`029-show-and-open-the-export-output.md`](../.agents/decisions/029-show-and-open-the-export-output.md)                                     | Show and open the export output through its run                 |
 | [`030-trim-a-segment-edge-by-dragging.md`](../.agents/decisions/030-trim-a-segment-edge-by-dragging.md)                                     | Trim a segment edge by dragging it                              |
 | [`031-order-dialog-buttons-by-platform.md`](../.agents/decisions/031-order-dialog-buttons-by-platform.md)                                   | Order dialog buttons by platform                                |
+| [`032-one-frontend-chunk-and-its-size-limit.md`](../.agents/decisions/032-one-frontend-chunk-and-its-size-limit.md)                         | One frontend chunk, with a size warning above 1200 kB           |
 
 ## Shape
 
