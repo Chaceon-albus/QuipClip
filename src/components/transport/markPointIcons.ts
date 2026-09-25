@@ -1,5 +1,6 @@
 /**
- * The Mark In and Mark Out glyphs of the transport bar.
+ * The Mark In and Mark Out glyphs of the transport bar. The In and Out badges of the preview
+ * frame use them too (`PreviewBoundaryBadges`), so the three places show one shape.
  *
  * Each glyph is the shape of its marker on the timeline: a bracket whose open side faces the
  * segment, and a faint block for the segment itself. The In bracket `[` is the pending In

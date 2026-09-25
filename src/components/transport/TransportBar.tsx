@@ -50,6 +50,7 @@ import {
 import { cn } from "@/lib/utils";
 import { FrameStepButton } from "./FrameStepButton";
 import { MarkInIcon, MarkOutIcon } from "./markPointIcons";
+import { SegmentDurationReadout } from "./SegmentDurationReadout";
 import {
   presentEditDisabledReason,
   presentStepDisabledReason,
@@ -77,6 +78,14 @@ const selectRedo = (s: TimelineStoreState) => s.redo;
 
 // The preference action never changes, so it is read once.
 const { toggleMuted } = previewMutePreferenceStore.getState();
+
+/** Each glyph of the Play button: one grid cell, and the cross-fade of the two states. */
+const PLAY_GLYPH_CLASS =
+  "col-start-1 row-start-1 size-5 fill-current transition-[opacity,scale] duration-(--motion-fast) ease-standard motion-reduce:scale-100";
+/** The glyph of the current state. */
+const PLAY_GLYPH_SHOWN_CLASS = "scale-100 opacity-100";
+/** The glyph of the other state. */
+const PLAY_GLYPH_HIDDEN_CLASS = "scale-80 opacity-0";
 
 // A transport button does not keep the focus after a mouse click (`preventFocusOnMouseDown`).
 // The window shortcut layer takes Space from a focused button. Without this rule a user who
@@ -231,11 +240,15 @@ export function TransportBar() {
    * The bar is three columns. The play group sits in the centre column, so Play is in the
    * middle of the window at every width. The left column holds the history and the mark
    * groups, packed against the play group, and the right column holds the segment group and
-   * the mute toggle, packed the same way. The two outer columns are one fraction each, so they
-   * are always of equal width, which is what keeps the centre column centred. At the minimum
-   * window width of 1024 px, each outer column is 410 px wide, and the left one holds 375 px
-   * of controls in English and 388 px in Chinese. A column never shrinks below its content, so
-   * a longer label moves the play group off the centre and does not make the controls overlap.
+   * the mute toggle, packed the same way, and the segment duration at its right end. The
+   * duration takes the free space of that column, so it moves no other control when it shows
+   * or hides. The two outer columns are one fraction each, so they are always of equal width,
+   * which is what keeps the centre column centred. At the minimum window width of 1024 px,
+   * each outer column is 410 px wide. The left one holds 375 px of controls in English and
+   * 388 px in Chinese. The right one holds 190 px of controls, and 320 px with the widest
+   * duration label, "New segment duration", in English, and 292 px in Chinese. A column never
+   * shrinks below its content, so a longer label moves the play group off the centre and does
+   * not make the controls overlap.
    *
    * Every button is 40 px high, and Play is 44 px. A button with its label under the icon
    * takes the 40 px row size, with the flex direction and the padding changed for the stack,
@@ -457,6 +470,13 @@ export function TransportBar() {
           <ChevronLeft className="size-4" />
         </FrameStepButton>
 
+        {/* The two glyphs share one grid cell, and the one of the other state is transparent
+            and a little smaller. A change of state cross-fades them, so the glyph does not
+            jump, and the name changes at once. Reduced motion keeps the fade and drops the
+            scale: a change of opacity is not motion (stepFadeModel). The button is the one
+            transport control that shows its press with a movement as well as a colour, a 4%
+            scale while it is enabled, because it is the main control of the bar. Reduced
+            motion drops that scale too. A scale moves nothing around the button. */}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -464,17 +484,26 @@ export function TransportBar() {
               disabled={isPlayDisabled}
               onMouseDown={preventFocusOnMouseDown}
               onClick={togglePlayback}
-              className="shadow-xs"
+              className="shadow-xs transition-[color,background-color,border-color,box-shadow,opacity,scale] motion-safe:enabled:active:scale-[0.96]"
               aria-label={
                 isPlaying ? t("transport.action.pause") : t("transport.action.play")
               }
               aria-keyshortcuts={playShortcut?.aria}
             >
-              {isPlaying ? (
-                <Pause className="size-5 fill-current" />
-              ) : (
-                <Play className="size-5 fill-current" />
-              )}
+              <span className="grid place-items-center">
+                <Play
+                  className={cn(
+                    PLAY_GLYPH_CLASS,
+                    isPlaying ? PLAY_GLYPH_HIDDEN_CLASS : PLAY_GLYPH_SHOWN_CLASS,
+                  )}
+                />
+                <Pause
+                  className={cn(
+                    PLAY_GLYPH_CLASS,
+                    isPlaying ? PLAY_GLYPH_SHOWN_CLASS : PLAY_GLYPH_HIDDEN_CLASS,
+                  )}
+                />
+              </span>
             </Button>
           </TooltipTrigger>
           <ShortcutTooltipContent
@@ -578,6 +607,10 @@ export function TransportBar() {
           </TooltipTrigger>
           <ShortcutTooltipContent label={t("transport.action.mute")} />
         </Tooltip>
+
+        {/* Group 6: The duration of the segment that is being edited, at the right end of
+            the bar (SegmentDurationReadout). */}
+        <SegmentDurationReadout hasActiveSource={hasActiveSource} />
       </div>
     </section>
   );

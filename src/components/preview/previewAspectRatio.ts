@@ -145,3 +145,64 @@ export type PreviewFrameStyle = CSSProperties & { "--preview-ar": string };
 export function previewFrameStyle(aspectRatio: number): PreviewFrameStyle {
   return { "--preview-ar": String(aspectRatio) };
 }
+
+/**
+ * The box of the picture inside the frame, as percentages of the content box of the frame:
+ * the frame less its border, where the video element lies. The picture fills the frame when
+ * its ratio is inside the limits. A picture wider or taller than the limits keeps its ratio,
+ * and `object-fit: contain` centres it with bars on two sides, so the box is smaller on one
+ * axis. An overlay that must stay on the picture, such as the In and Out badges, takes this
+ * box, centred in the frame.
+ */
+export interface PreviewPictureBox {
+  readonly widthPercent: number;
+  readonly heightPercent: number;
+}
+
+/** The box of a picture that fills the frame. */
+const FULL_PREVIEW_PICTURE_BOX: PreviewPictureBox = {
+  widthPercent: 100,
+  heightPercent: 100,
+};
+
+/**
+ * Returns the box of the picture inside the frame (`PreviewPictureBox`).
+ *
+ * - No picture ratio, or a frame ratio that is not a positive finite number: the whole frame.
+ * - A picture wider than the frame: the full width, and the height that the picture ratio
+ *   gives at that width.
+ * - A picture taller than the frame: the full height, and the width that the picture ratio
+ *   gives at that height.
+ *
+ * @param state The frame ratio state of the pane, the source of `previewFrameAspectRatio`.
+ * @param frameRatio The ratio of the frame, from `previewFrameAspectRatio`.
+ */
+export function previewPictureBox(
+  state: PreviewFrameRatioState,
+  frameRatio: number,
+): PreviewPictureBox {
+  const { pictureRatio } = state;
+  if (
+    pictureRatio === null ||
+    !Number.isFinite(pictureRatio) ||
+    pictureRatio <= 0 ||
+    !Number.isFinite(frameRatio) ||
+    frameRatio <= 0 ||
+    pictureRatio === frameRatio
+  ) {
+    return FULL_PREVIEW_PICTURE_BOX;
+  }
+  return pictureRatio > frameRatio
+    ? { widthPercent: 100, heightPercent: (100 * frameRatio) / pictureRatio }
+    : { widthPercent: (100 * pictureRatio) / frameRatio, heightPercent: 100 };
+}
+
+/**
+ * Returns the inline size of an overlay that takes the picture box. The caller centres it in
+ * the content box of the frame with `inset-0` and `m-auto`.
+ *
+ * @param box The box from `previewPictureBox`.
+ */
+export function previewPictureBoxStyle(box: PreviewPictureBox): CSSProperties {
+  return { width: `${box.widthPercent}%`, height: `${box.heightPercent}%` };
+}

@@ -71,6 +71,13 @@ export const zhCN: TranslationCatalog = {
         tooLarge: "此时间过大。",
       },
     },
+    boundaryBadge: {
+      in: "入点",
+      out: "出点",
+      inOfSegment: "此帧是片段 {{index}} 的入点，即片段的第一帧。",
+      inPending: "此帧是待定的入点。请标记出点以生成片段。",
+      outOfSegment: "此帧是片段 {{index}} 的出点，即片段后的第一帧。此帧不在片段内。",
+    },
     regionLabel: "预览",
     decodeFailure: {
       title: "无法预览此视频",
@@ -162,6 +169,10 @@ export const zhCN: TranslationCatalog = {
     },
     state: {
       inPending: "已有待定的入点。请标记出点以生成片段。",
+    },
+    segmentDuration: {
+      segment: "片段 {{index}} 时长",
+      pending: "新片段时长",
     },
     disabledReason: {
       preciseMarkingUnavailable: "此视频无法精确标记。",

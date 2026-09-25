@@ -56,9 +56,12 @@ import {
   INITIAL_PREVIEW_FRAME_RATIO_STATE,
   previewFrameAspectRatio,
   previewFrameStyle,
+  previewPictureBox,
+  previewPictureBoxStyle,
   stepPreviewFrameRatio,
 } from "./previewAspectRatio";
 import { formatSupportedVideoFormats } from "./previewEmptyState";
+import { PreviewBoundaryBadges } from "./PreviewBoundaryBadges";
 import { PreviewBufferingIndicator } from "./PreviewBufferingIndicator";
 import {
   ImportErrorBanner,
@@ -351,8 +354,16 @@ export function PreviewPane() {
 
   // The frame takes the ratio of the picture while it holds the video element, and 16:9 for
   // the empty state, the loading state, the import-error view and the decode-failure panel.
-  const frameStyle = previewFrameStyle(
-    previewFrameAspectRatio(frameRatio, { hasMedia: media !== null, decodeFailed }),
+  const frameAspectRatio = previewFrameAspectRatio(frameRatio, {
+    hasMedia: media !== null,
+    decodeFailed,
+  });
+  const frameStyle = previewFrameStyle(frameAspectRatio);
+  // The box of the picture inside the frame. It is smaller than the frame on one axis when the
+  // picture is wider or taller than the limits of the frame ratio, and the element then adds
+  // bars. The In and Out badges take this box, so they stay on the picture.
+  const pictureBoxStyle = previewPictureBoxStyle(
+    previewPictureBox(frameRatio, frameAspectRatio),
   );
 
   // The picture check of the mounted video element. The ref callback clears it when the
@@ -659,6 +670,13 @@ export function PreviewPane() {
       ? FRAME_TIMECODE_PLACEHOLDER
       : MILLISECONDS_TIMECODE_PLACEHOLDER;
 
+  // The conditions of the notices, named once. The import error shows as the empty-state view
+  // with no media and as a banner with media. The notification area shows the loading chip and
+  // the two banners, and the In and Out badges hide while it shows one.
+  const hasImportError = status === "error" && error !== null;
+  const showsPlaybackErrorBanner = playbackError !== null && !decodeFailed;
+  const hasNotice = showLoading || hasImportError || showsPlaybackErrorBanner;
+
   const totalTimeDisplay = media
     ? formatPreviewTotalDuration(
         media.probe.approximateDurationSeconds,
@@ -857,7 +875,7 @@ export function PreviewPane() {
 
                 {/* An import that failed with no video open: what failed, what to do, and
                     the actions, in the layout of the empty state. */}
-                {status === "error" && error && <ImportErrorEmptyState error={error} />}
+                {hasImportError && <ImportErrorEmptyState error={error} />}
 
                 {/* Empty state: it says what to do, offers the File menu's Open Media action,
                     and names the drop on the window as the other way to open a video. */}
@@ -887,6 +905,18 @@ export function PreviewPane() {
 
           {media && (
             <>
+              {/* The In and Out badges, in the top-left corner of the picture box. They hide
+                  while a notice shows, because the notices stack from the same corner. They
+                  come first, so the spinner and the notices are drawn over them. Keyed on the
+                  source, so a source change starts them again with no badge. */}
+              {!decodeFailed && (
+                <PreviewBoundaryBadges
+                  key={`boundary-${sourceRevisionKey}`}
+                  suppressed={hasNotice}
+                  pictureBoxStyle={pictureBoxStyle}
+                />
+              )}
+
               {/* The buffering spinner, in the bottom-right corner, clear of the notices.
                   Keyed on the source, so a source change starts it again. */}
               {!decodeFailed && (
@@ -916,14 +946,14 @@ export function PreviewPane() {
                       <span>{t("preview.loading")}</span>
                     </div>
                   )}
-                  {status === "error" && error && (
+                  {hasImportError && (
                     <ImportErrorBanner
                       error={error}
                       onDismiss={dismissImportError}
                       onReturnFocus={returnFocusToPreview}
                     />
                   )}
-                  {playbackError && !decodeFailed && (
+                  {showsPlaybackErrorBanner && (
                     <PlaybackErrorBanner
                       key={playbackError}
                       code={playbackError}

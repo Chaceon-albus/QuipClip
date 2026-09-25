@@ -6,6 +6,8 @@ import {
   MIN_PREVIEW_ASPECT_RATIO,
   previewFrameAspectRatio,
   previewFrameStyle,
+  previewPictureBox,
+  previewPictureBoxStyle,
   readPictureAspectRatio,
   stepPreviewFrameRatio,
   type PreviewFrameRatioState,
@@ -231,6 +233,65 @@ describe("previewFrameStyle", () => {
     expect(previewFrameStyle(0.5625)).toEqual({ "--preview-ar": "0.5625" });
     expect(previewFrameStyle(DEFAULT_PREVIEW_ASPECT_RATIO)).toEqual({
       "--preview-ar": String(16 / 9),
+    });
+  });
+});
+
+describe("previewPictureBox", () => {
+  /** The box of a picture in the frame that the pane gives it. */
+  const boxOf = (ratio: number | null) =>
+    previewPictureBox(
+      withRatio(ratio),
+      previewFrameAspectRatio(withRatio(ratio), picture),
+    );
+
+  it("is the whole frame while the picture ratio is inside the limits", () => {
+    for (const ratio of [9 / 16, 1, 16 / 9, 2.39, MIN_PREVIEW_ASPECT_RATIO, 4]) {
+      expect(boxOf(ratio)).toStrictEqual({ widthPercent: 100, heightPercent: 100 });
+    }
+  });
+
+  it("is the whole frame until the element reports a picture size", () => {
+    expect(boxOf(null)).toStrictEqual({ widthPercent: 100, heightPercent: 100 });
+  });
+
+  it("is the full width and part of the height for a picture wider than 4:1", () => {
+    // An 8:1 picture in a 4:1 frame fills the width and half the height.
+    expect(boxOf(8)).toStrictEqual({ widthPercent: 100, heightPercent: 50 });
+    expect(boxOf(10)).toStrictEqual({ widthPercent: 100, heightPercent: 40 });
+  });
+
+  it("is the full height and part of the width for a picture taller than 1:4", () => {
+    // A 1:8 picture in a 1:4 frame fills the height and half the width.
+    expect(boxOf(1 / 8)).toStrictEqual({ widthPercent: 50, heightPercent: 100 });
+    expect(boxOf(1 / 10)).toStrictEqual({ widthPercent: 40, heightPercent: 100 });
+  });
+
+  it("follows the frame ratio that it is given", () => {
+    // The box compares the picture ratio with the frame ratio that the caller passes, and it
+    // does not derive the frame ratio itself. In the pane the two differ only when the frame
+    // ratio is clamped, or on the 16:9 fallback, where no badge shows.
+    expect(previewPictureBox(withRatio(16 / 9), 9 / 16)).toStrictEqual({
+      widthPercent: 100,
+      heightPercent: (100 * (9 / 16)) / (16 / 9),
+    });
+  });
+
+  it("is the whole frame for a frame ratio that is not a positive finite number", () => {
+    for (const frameRatio of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(previewPictureBox(withRatio(8), frameRatio)).toStrictEqual({
+        widthPercent: 100,
+        heightPercent: 100,
+      });
+    }
+  });
+});
+
+describe("previewPictureBoxStyle", () => {
+  it("sets the size as percentages of the frame", () => {
+    expect(previewPictureBoxStyle({ widthPercent: 100, heightPercent: 50 })).toEqual({
+      width: "100%",
+      height: "50%",
     });
   });
 });

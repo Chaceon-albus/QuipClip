@@ -81,6 +81,21 @@ export const en = {
         tooLarge: "This time is too large.",
       },
     },
+    // The badges in the corner of the picture while the frame on screen is a segment
+    // boundary. `in` and `out` are the badge text, which shows in capital letters. Each other
+    // message is one line of the tooltip of a badge, and a polite live region reads the lines
+    // once when the badge shows. {{index}} is the segment number, as in `timeline.segment`. The
+    // Out point is the first frame after the segment, so that frame is not in the segment.
+    boundaryBadge: {
+      in: "In",
+      out: "Out",
+      inOfSegment:
+        "This frame is the In point of segment {{index}}. It is the first frame of the segment.",
+      inPending:
+        "This frame is the pending In point. Mark an Out point to make a segment.",
+      outOfSegment:
+        "This frame is the Out point of segment {{index}}. It is the first frame after the segment. It is not in the segment.",
+    },
     // The accessible name of the preview area. The focus returns to it when a notice that
     // held the focus leaves.
     regionLabel: "Preview",
@@ -211,6 +226,13 @@ export const en = {
     // line of the tooltip, and assistive technology reads it on the button.
     state: {
       inPending: "An In point is pending. Mark an Out point to make a segment.",
+    },
+    // The label above the duration at the right end of the transport bar. `segment` names the
+    // current segment. {{index}} is its number, as in `timeline.segment`. `pending` names the
+    // segment from the pending In point to the frame on screen, before Mark Out makes it.
+    segmentDuration: {
+      segment: "Segment {{index}} duration",
+      pending: "New segment duration",
     },
     disabledReason: {
       preciseMarkingUnavailable: "Precise marking is unavailable for this video.",
