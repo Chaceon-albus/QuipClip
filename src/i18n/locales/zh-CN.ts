@@ -218,6 +218,10 @@ export const zhCN: TranslationCatalog = {
       zoomOut: "缩小",
       fit: "缩放至适合",
     },
+    splitter: {
+      label: "时间轴高度",
+      value: "{{height}} 像素",
+    },
   },
   mediaError: {
     invalidPath: "所选文件路径无效。",

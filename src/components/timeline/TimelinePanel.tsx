@@ -1200,17 +1200,24 @@ export function TimelinePanel({
   };
 
   return (
-    <section className="relative flex h-[180px] shrink-0 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
+    // The section fills the timeline area of the shell, which holds the height that the user
+    // sets with the splitter (`TimelineArea`). The ruler row keeps its height, and the track
+    // row takes the rest, so a taller timeline gives the segments more height.
+    <section className="relative flex min-h-0 flex-1 flex-col border-t border-timeline-divider bg-timeline-background text-foreground select-none">
       {/*
        * overflow-x: scroll shows the horizontal scrollbar at every zoom factor, also when
-       * nothing overflows. The `::-webkit-scrollbar` rules in globals.css make it a classic
-       * scrollbar that takes layout height in WebView2 and in WKWebView. With `auto`, the
-       * scrollbar appeared at the first zoom and the track row became shorter by its height.
-       * With `scroll`, the panel always gives that height to the scrollbar, so the rows keep
-       * one height at every zoom factor.
+       * nothing overflows. With `auto`, a scrollbar that takes layout height appeared at the
+       * first zoom and the track row became shorter by its height. With `scroll`, the panel
+       * always gives that height to the scrollbar, so the rows keep one height at every zoom
+       * factor. The height depends on the platform:
        *
-       * When nothing overflows, the scrollbar has no thumb. Its track is transparent, so the
-       * strip shows the timeline background of the section.
+       * - Windows: the `::-webkit-scrollbar` rules in globals.css make it a classic
+       *   scrollbar of 8px in WebView2. When nothing overflows, it has no thumb. Its track is
+       *   transparent, so the strip shows the timeline background of the section.
+       * - macOS: WKWebView draws the system scrollbar and follows the system setting. An
+       *   overlay scrollbar takes no height and shows over the bottom of the track row while
+       *   the view scrolls. A legacy scrollbar (Show scroll bars: Always) takes 15px and draws
+       *   its own track, also when nothing overflows.
        *
        * scrollbar-gutter cannot do this: it reserves space only at the inline-start and
        * inline-end edges, which hold the vertical scrollbar in a horizontal writing mode.

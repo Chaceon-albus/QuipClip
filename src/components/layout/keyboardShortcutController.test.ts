@@ -4,7 +4,12 @@ import {
   KEYBOARD_OWNER_SELECTOR,
   MODAL_LAYER_SELECTOR,
   OPEN_TOOLTIP_SELECTOR,
+  ESCAPE_OWNER_SELECTOR,
+  SPLITTER_KEYS,
+  SPLITTER_SELECTOR,
+  isGestureEscape,
   isShortcutSuppressed,
+  isSplitterKey,
   resolveShortcut,
   type ShortcutContext,
   type ShortcutEventTarget,
@@ -17,6 +22,7 @@ import {
   type ShortcutBinding,
   type ShortcutPlatform,
 } from "./shortcutBindings";
+import { RESIZING_TIMELINE_ATTRIBUTE } from "./timelineResizeCursor";
 
 const PLATFORMS: readonly ShortcutPlatform[] = ["macos", "windows"];
 
@@ -1166,6 +1172,191 @@ describe("keyboardShortcutController", () => {
       const event = escape({ isTooltipOpen: true, isOverlayOpen: true });
       expect(isShortcutSuppressed(event)).toBe(true);
       expect(resolveShortcut(event, allAvailable)).toEqual(NOT_CLAIMED);
+    });
+  });
+
+  describe("a focused splitter", () => {
+    // The target answers the splitter selector only, as the focused timeline splitter does:
+    // it carries the splitter marker, inside no dialog, menu or list box.
+    const splitterTarget = createTarget({
+      tagName: "DIV",
+      hasAncestorMatching: (selector) => selector === SPLITTER_SELECTOR,
+    });
+
+    it("names the splitter marker, and not every separator", () => {
+      expect(SPLITTER_SELECTOR).toBe("[data-splitter]");
+      expect(SPLITTER_SELECTOR).not.toContain("separator");
+      expect(SPLITTER_KEYS).toEqual(["ArrowUp", "ArrowDown", "Home", "End"]);
+      expect(splitterTarget.hasAncestorMatching(KEYBOARD_OWNER_SELECTOR)).toBe(false);
+    });
+
+    it("keeps Home and End for the splitter, so they do not go to the first or last frame", () => {
+      for (const key of ["Home", "End"]) {
+        const onBody = createKeyEvent({ key });
+        expect(resolveShortcut(onBody, allAvailable).claimed).toBe(true);
+
+        const onSplitter = createKeyEvent({ key, target: splitterTarget });
+        expect(isSplitterKey(onSplitter)).toBe(true);
+        expect(resolveShortcut(onSplitter, allAvailable)).toEqual(NOT_CLAIMED);
+        expect(resolveShortcut({ ...onSplitter, repeat: true }, allAvailable)).toEqual(
+          NOT_CLAIMED,
+        );
+      }
+    });
+
+    it("keeps ArrowUp and ArrowDown for the splitter, with and without Shift", () => {
+      for (const key of ["ArrowUp", "ArrowDown"]) {
+        for (const shiftKey of [false, true]) {
+          const event = createKeyEvent({ key, shiftKey, target: splitterTarget });
+          expect(isSplitterKey(event)).toBe(true);
+          expect(resolveShortcut(event, allAvailable)).toEqual(NOT_CLAIMED);
+        }
+      }
+    });
+
+    it("keeps every other key of the table while the splitter has the focus", () => {
+      for (const platform of PLATFORMS) {
+        for (const binding of SHORTCUT_BINDINGS) {
+          if (!bindingAppliesToPlatform(binding, platform)) {
+            continue;
+          }
+          const event = eventForBinding(binding, platform, { target: splitterTarget });
+          if (SPLITTER_KEYS.includes(event.key)) {
+            continue;
+          }
+          expect(resolveShortcut(event, contextWith("all", platform))).toEqual({
+            claimed: true,
+            action: binding.action,
+          });
+        }
+      }
+    });
+
+    it("still plays with Space and steps with the arrows that do not move it", () => {
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: " ", target: splitterTarget }),
+          allAvailable,
+        ),
+      ).toEqual({ claimed: true, action: "togglePlayback" });
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: "ArrowLeft", target: splitterTarget }),
+          allAvailable,
+        ),
+      ).toEqual({ claimed: true, action: "stepBackOneFrame" });
+    });
+
+    it("does not own a splitter key with Ctrl, Cmd or Alt", () => {
+      for (const modifier of ["ctrlKey", "metaKey", "altKey"] as const) {
+        const event = createKeyEvent({
+          key: "Home",
+          target: splitterTarget,
+          [modifier]: true,
+        });
+        expect(isSplitterKey(event)).toBe(false);
+      }
+    });
+
+    it("does not own a splitter key when the target is not a splitter", () => {
+      expect(isSplitterKey(createKeyEvent({ key: "Home" }))).toBe(false);
+      expect(isSplitterKey(createKeyEvent({ key: "Home", target: null }))).toBe(false);
+    });
+  });
+
+  describe("Escape during a drag of the timeline splitter", () => {
+    // During the drag the document root carries the attribute of the resize cursor, so every
+    // target answers the selector through `closest`.
+    const inDrag = (overrides: Partial<ShortcutKeyEvent> = {}) =>
+      createKeyEvent({
+        key: "Escape",
+        target: createTarget({
+          hasAncestorMatching: (selector) => selector === ESCAPE_OWNER_SELECTOR,
+        }),
+        ...overrides,
+      });
+
+    it("reads the attribute of the resize cursor on the document root", () => {
+      expect(ESCAPE_OWNER_SELECTOR).toBe(`[${RESIZING_TIMELINE_ATTRIBUTE}]`);
+      expect(ESCAPE_OWNER_SELECTOR).toBe("[data-resizing-timeline]");
+    });
+
+    it("leaves Escape to the drag, so it does not finish the segment", () => {
+      expect(resolveShortcut(createKeyEvent({ key: "Escape" }), allAvailable)).toEqual({
+        claimed: true,
+        action: "finishSegment",
+      });
+      expect(isGestureEscape(inDrag())).toBe(true);
+      expect(resolveShortcut(inDrag(), allAvailable)).toEqual(NOT_CLAIMED);
+      expect(resolveShortcut(inDrag({ repeat: true }), allAvailable)).toEqual(
+        NOT_CLAIMED,
+      );
+      expect(resolveShortcut(inDrag({ shiftKey: true }), allAvailable)).toEqual(
+        NOT_CLAIMED,
+      );
+    });
+
+    it("keeps every other key of the table during the drag", () => {
+      const dragTarget = createTarget({
+        hasAncestorMatching: (selector) => selector === ESCAPE_OWNER_SELECTOR,
+      });
+      for (const platform of PLATFORMS) {
+        for (const binding of SHORTCUT_BINDINGS) {
+          if (!bindingAppliesToPlatform(binding, platform)) {
+            continue;
+          }
+          const event = eventForBinding(binding, platform, { target: dragTarget });
+          if (event.key === "Escape") {
+            continue;
+          }
+          expect(resolveShortcut(event, contextWith("all", platform))).toEqual({
+            claimed: true,
+            action: binding.action,
+          });
+        }
+      }
+    });
+
+    it("does not own Escape when no drag runs", () => {
+      const idleRoot = () => ({ hasAttribute: () => false });
+      expect(isGestureEscape(createKeyEvent({ key: "Escape" }), idleRoot)).toBe(false);
+      expect(
+        isGestureEscape(createKeyEvent({ key: "Escape", target: null }), idleRoot),
+      ).toBe(false);
+      expect(isGestureEscape(inDrag({ key: "Home" }))).toBe(false);
+    });
+
+    it("reads the document root for a key press with no element target", () => {
+      const dragRoot = () => ({
+        hasAttribute: (name: string) => name === RESIZING_TIMELINE_ATTRIBUTE,
+      });
+      const noTarget = createKeyEvent({ key: "Escape", target: null });
+      expect(isGestureEscape(noTarget, dragRoot)).toBe(true);
+      expect(isGestureEscape({ ...noTarget, key: "Home" }, dragRoot)).toBe(false);
+      // Outside a document there is no root, so no drag owns the key.
+      expect(isGestureEscape(noTarget, () => null)).toBe(false);
+      expect(isGestureEscape(noTarget)).toBe(false);
+    });
+
+    it("leaves Escape with no element target to the drag in the resolver", () => {
+      vi.stubGlobal("document", {
+        documentElement: {
+          hasAttribute: (name: string) => name === RESIZING_TIMELINE_ATTRIBUTE,
+        },
+      });
+      try {
+        expect(
+          resolveShortcut(
+            createKeyEvent({ key: "Escape", target: null }),
+            allAvailable,
+          ),
+        ).toEqual(NOT_CLAIMED);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+      expect(
+        resolveShortcut(createKeyEvent({ key: "Escape", target: null }), allAvailable),
+      ).toEqual({ claimed: true, action: "finishSegment" });
     });
   });
 });

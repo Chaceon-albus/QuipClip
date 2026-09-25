@@ -16,24 +16,31 @@ import { cva, type VariantProps } from "class-variance-authority";
  * The ring is inset (`focus-ring-inset`): the left group clips its overflow, and it would cut
  * an outer ring.
  *
+ * - `tone: "neutral"` takes the muted text colour. While the window does not have the focus,
+ *   the text goes one step quieter, as the rest of the status bar does
+ *   (`--muted-foreground-inactive`, 4.55:1 on the light chrome). The hover colour still wins.
  * - `tone: "warning"` draws a chip. The fill comes from the base token and the text from the
  *   `-text` token, like the warning Notice, because the base token does not reach 4.5:1 as
  *   text in the light theme. A caller also adds an icon, so colour is not the only cue. The
  *   icon also takes the `-text` token: the light base token reaches only about 2.4:1 on the
- *   chip, below the 3:1 that an icon needs, and a collapsed chip shows only its icon.
+ *   chip, below the 3:1 that an icon needs, and a collapsed chip shows only its icon. A
+ *   warning keeps its colours while the window does not have the focus.
  * - `interactive: true` adds the hover feedback of a control that has an action. The hover of
  *   a warning chip stays in the warning colours.
+ *
+ * Every item fades its colours at the speed of a hover, also the change to the inactive
+ * colour, so no item of the bar changes before the others.
  */
 export const statusBarItem = cva(
-  "inline-flex h-6 min-w-0 items-center gap-1.5 rounded-md px-1.5 focus-ring-inset outline-none",
+  "inline-flex h-6 min-w-0 items-center gap-1.5 rounded-md px-1.5 focus-ring-inset transition-colors outline-none",
   {
     variants: {
       tone: {
-        neutral: "text-muted-foreground",
+        neutral: "text-muted-foreground window-inactive:text-muted-foreground-inactive",
         warning: "bg-warning/10 text-warning-text",
       },
       interactive: {
-        true: "transition-colors",
+        true: "",
         false: "cursor-default",
       },
     },

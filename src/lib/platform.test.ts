@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  PLATFORM_ATTRIBUTE,
+  applyPlatformAttribute,
+  interfacePlatformOf,
   isMacOS,
   isMacOSUserAgent,
   isWindows,
   isWindowsUserAgent,
+  type PlatformRoot,
 } from "@/lib/platform";
 
 describe("platform detection", () => {
@@ -101,6 +105,66 @@ describe("platform detection", () => {
         userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
       });
       expect(isWindows()).toBe(true);
+    });
+  });
+
+  describe("interfacePlatformOf", () => {
+    it("maps macOS to the macOS branch and every other platform to Windows", () => {
+      expect(
+        interfacePlatformOf("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"),
+      ).toBe("macos");
+      expect(interfacePlatformOf("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe(
+        "windows",
+      );
+      expect(interfacePlatformOf("Mozilla/5.0 (X11; Linux x86_64)")).toBe("windows");
+      expect(interfacePlatformOf("")).toBe("windows");
+    });
+  });
+
+  describe("applyPlatformAttribute", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    function fakeRoot(): PlatformRoot & { attributes: Map<string, string> } {
+      const attributes = new Map<string, string>();
+      return {
+        attributes,
+        setAttribute: (name, value) => {
+          attributes.set(name, value);
+        },
+      };
+    }
+
+    it("writes the branch of the given user agent on the root", () => {
+      const root = fakeRoot();
+      applyPlatformAttribute(root, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+      expect(PLATFORM_ATTRIBUTE).toBe("data-platform");
+      expect(root.attributes.get(PLATFORM_ATTRIBUTE)).toBe("macos");
+
+      applyPlatformAttribute(root, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+      expect(root.attributes.get(PLATFORM_ATTRIBUTE)).toBe("windows");
+    });
+
+    it("reads the navigator when no user agent is given", () => {
+      vi.stubGlobal("navigator", {
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+      });
+      const root = fakeRoot();
+      applyPlatformAttribute(root);
+      expect(root.attributes.get(PLATFORM_ATTRIBUTE)).toBe("macos");
+    });
+
+    it("takes the Windows branch with no navigator", () => {
+      vi.stubGlobal("navigator", undefined);
+      const root = fakeRoot();
+      applyPlatformAttribute(root);
+      expect(root.attributes.get(PLATFORM_ATTRIBUTE)).toBe("windows");
+    });
+
+    it("does nothing with a null root or outside a document", () => {
+      expect(() => applyPlatformAttribute(null, "Macintosh")).not.toThrow();
+      expect(() => applyPlatformAttribute(undefined, "Macintosh")).not.toThrow();
     });
   });
 });

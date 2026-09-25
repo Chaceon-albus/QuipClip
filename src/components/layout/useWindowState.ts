@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { applyWindowFocus, getWindowFocusRoot } from "./windowFocusAttribute";
 import {
   DEFAULT_WINDOW_STATE,
   startWindowStateSync,
@@ -19,6 +20,10 @@ export interface WindowStateTracking {
  *
  * A state that is not tracked keeps its default value. A change of either flag restarts the
  * sync.
+ *
+ * The hook also writes the focus state on <html> (`windowFocusAttribute.ts`), so every part of
+ * the window can dim while the window does not have the focus. The title bar is the one
+ * caller of the hook, so the window has one focus listener and one writer of the attribute.
  */
 export function useWindowState({
   trackMaximized,
@@ -39,6 +44,13 @@ export function useWindowState({
       }),
     [trackMaximized, trackFullscreen],
   );
+
+  useEffect(() => {
+    applyWindowFocus(getWindowFocusRoot(), focused);
+  }, [focused]);
+
+  // An unmount leaves the window in the active state, so no stale attribute dims the chrome.
+  useEffect(() => () => applyWindowFocus(getWindowFocusRoot(), true), []);
 
   return { maximized, focused, fullscreen };
 }

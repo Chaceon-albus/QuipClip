@@ -50,10 +50,16 @@ const PATH_TOOLTIP_OFFSET = 6;
 
 /**
  * The title text while the window does not have the focus. The system dims the title of an
- * inactive window, on Windows and on macOS, and this class mirrors that. The dim is 75 %,
- * because at 60 % the muted title text is too faint on the light chrome (about 2.4:1).
+ * inactive window, on Windows and on macOS, and these classes mirror that: each text colour
+ * goes one step quieter (`--chrome-foreground-inactive` and `--muted-foreground-inactive` in
+ * globals.css), and still keeps 4.5:1 on the chrome. An opacity cannot do this: at 75 % the
+ * muted title text keeps only 3.23:1 on the light chrome. The colour fades at the speed of a
+ * hover.
  */
-const INACTIVE_TITLE_CLASS = "group-data-inactive/title-bar:opacity-75";
+const INACTIVE_TITLE_TEXT_CLASS =
+  "transition-colors window-inactive:text-chrome-foreground-inactive";
+const INACTIVE_MUTED_TEXT_CLASS =
+  "transition-colors window-inactive:text-muted-foreground-inactive";
 
 /**
  * A Windows window button. The size is the Windows 11 caption button: 46 pixels wide, and the
@@ -86,15 +92,15 @@ const CLOSE_BUTTON_FILL_CLASS =
 
 /**
  * The glyph of a window button. While the window does not have the focus, the glyph dims, as
- * the system glyphs do. Hover and press show it at full strength again, so the white glyph on
- * the close colour does not dim. The dim is on the glyph only, so the fills keep their colour.
+ * the system glyphs do: at 60 % it keeps 3.89:1 (light) and 5.40:1 (dark) on the chrome, above
+ * the 3:1 of an icon. Hover and press show it at full strength again, so the white glyph on the
+ * close colour does not dim. The dim is on the glyph only, so the fills keep their colour.
  *
- * The full-strength rules repeat the inactive variant. A plain `group-hover` rule has the same
- * specificity as the dim rule, and Tailwind writes the dim rule later, so the dim would win.
- * The stacked variant adds one selector, so its rule wins in any order.
+ * The `window-inactive:` variant adds no specificity, so the plain `group-hover` and
+ * `group-active` rules win over the dim in any order.
  */
 const WINDOW_GLYPH_CLASS =
-  "group-data-inactive/title-bar:opacity-60 group-data-inactive/title-bar:group-hover/window-button:opacity-100 group-data-inactive/title-bar:group-active/window-button:opacity-100";
+  "transition-opacity window-inactive:opacity-60 group-hover/window-button:opacity-100 group-active/window-button:opacity-100";
 
 export function TitleBar() {
   const { t } = useTranslation();
@@ -154,8 +160,9 @@ export function TitleBar() {
   const handleOpenMedia = useOpenMediaAction();
 
   // macOS draws its own window buttons, so only the other platforms read the maximized state.
-  // macOS hides those buttons in full screen, so only macOS reads the full-screen state.
-  const { maximized, focused, fullscreen } = useWindowState({
+  // macOS hides those buttons in full screen, so only macOS reads the full-screen state. The
+  // focus state goes to <html> for the whole window, so this component does not read it.
+  const { maximized, fullscreen } = useWindowState({
     trackMaximized: !isMac,
     trackFullscreen: isMac,
   });
@@ -183,17 +190,17 @@ export function TitleBar() {
   };
 
   return (
+    // The window buttons and the title text dim while the window does not have the focus.
+    // `useWindowState` writes that state on <html>, and the `window-inactive:` classes read it.
     <header
       data-tauri-drag-region="deep"
-      // The window buttons and the title text dim while the window does not have the focus.
-      data-inactive={focused ? undefined : ""}
       className={cn(
         // The position of the macOS window buttons depends on this height and this border.
         // `src-tauri/src/traffic_lights.rs` computes it when the application starts, from
         // `TITLE_BAR_CONTENT_HEIGHT` (39, this height less the border), and
         // `titleBarLayout.ts` holds the same numbers and the fallback. A change to either one
         // must change both files.
-        "group/title-bar relative flex h-10 shrink-0 items-center justify-between border-b border-border bg-chrome text-xs select-none",
+        "relative flex h-10 shrink-0 items-center justify-between border-b border-border bg-chrome text-xs select-none",
         // The reserved width for the native macOS window buttons, which
         // titleBarStyle: "Overlay" draws over the top left of the web view. It is free again
         // in full screen, where macOS hides them.
@@ -216,7 +223,7 @@ export function TitleBar() {
             <span
               className={cn(
                 "text-sm font-medium text-chrome-foreground",
-                INACTIVE_TITLE_CLASS,
+                INACTIVE_TITLE_TEXT_CLASS,
               )}
             >
               {t("app.name")}
@@ -226,7 +233,13 @@ export function TitleBar() {
         )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="chrome" size="xs" className="px-1.5">
+            {/* The label and the chevron dim with the title while the window is inactive.
+                Hover and the open menu keep the accent colours of the chrome variant. */}
+            <Button
+              variant="chrome"
+              size="xs"
+              className="px-1.5 window-inactive:text-muted-foreground-inactive"
+            >
               {t("titleBar.menu.file")}
               <ChevronDown className="size-3" />
             </Button>
@@ -271,7 +284,7 @@ export function TitleBar() {
       <div
         className={cn(
           "absolute left-1/2 flex max-w-[min(42vw,560px)] -translate-x-1/2 items-center text-xs text-muted-foreground",
-          INACTIVE_TITLE_CLASS,
+          INACTIVE_MUTED_TEXT_CLASS,
         )}
       >
         {media ? (
@@ -433,9 +446,21 @@ function TitleBarFile({ fileName, path, segmentCount }: TitleBarFileProps) {
         onPointerLeave={handlePointerLeave}
       >
         <div className="flex min-w-0 items-center gap-1.5">
-          <span className="flex min-w-0 font-medium text-chrome-foreground">
+          <span
+            className={cn(
+              "flex min-w-0 font-medium text-chrome-foreground",
+              INACTIVE_TITLE_TEXT_CLASS,
+            )}
+          >
             <span className="truncate">{stem}</span>
-            <span className="shrink-0 text-muted-foreground">{extension}</span>
+            <span
+              className={cn(
+                "shrink-0 text-muted-foreground",
+                INACTIVE_MUTED_TEXT_CLASS,
+              )}
+            >
+              {extension}
+            </span>
           </span>
           {segmentCount > 0 && (
             <>

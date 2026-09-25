@@ -275,6 +275,13 @@ export const en = {
       zoomOut: "Zoom Out",
       fit: "Zoom to Fit",
     },
+    // The splitter between the preview and the timeline. `label` is its accessible name.
+    // `value` is the text that assistive technology reads for its value. {{height}} is the
+    // height of the timeline in CSS pixels, such as "180".
+    splitter: {
+      label: "Timeline height",
+      value: "{{height}} pixels",
+    },
   },
   mediaError: {
     invalidPath: "The selected file path is invalid.",

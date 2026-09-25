@@ -1,8 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { DropOverlay } from "@/components/layout/DropOverlay";
 import { startExportAttentionSync } from "@/components/layout/exportAttentionSync";
 import { QuitGuardDialog } from "@/components/layout/QuitGuardDialog";
 import { StatusBar } from "@/components/layout/StatusBar";
+import { TimelineArea } from "@/components/layout/TimelineArea";
 import { TitleBar } from "@/components/layout/TitleBar";
 import { startTaskbarProgressSync } from "@/components/layout/taskbarProgressSync";
 import { useContextMenuPolicy } from "@/components/layout/useContextMenuPolicy";
@@ -39,17 +40,27 @@ export function AppShell() {
     (state) => state.runtimeBrowserDurationSeconds,
   );
   const seekApproximate = usePlaybackStore((state) => state.seekApproximate);
+  const previewSlotRef = useRef<HTMLDivElement | null>(null);
 
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground select-none">
         <TitleBar />
-        <PreviewPane />
+        {/*
+         * The slot of the preview. It takes the height that the timeline area leaves, and the
+         * timeline area measures it to find the largest timeline height. The slot has no
+         * minimum of its own, so the minimum of the preview applies.
+         */}
+        <div ref={previewSlotRef} className="flex flex-1 flex-col">
+          <PreviewPane />
+        </div>
         <TransportBar />
-        <TimelinePanel
-          runtimeBrowserDurationSeconds={runtimeBrowserDurationSeconds}
-          onApproximateSeek={seekApproximate}
-        />
+        <TimelineArea previewRef={previewSlotRef}>
+          <TimelinePanel
+            runtimeBrowserDurationSeconds={runtimeBrowserDurationSeconds}
+            onApproximateSeek={seekApproximate}
+          />
+        </TimelineArea>
         <StatusBar />
         {/*
          * The one mount of the settings dialog. The settings panel store opens it, so any

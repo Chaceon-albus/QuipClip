@@ -12,6 +12,7 @@ import {
   type ShortcutKeyPress,
   type ShortcutPlatform,
 } from "./shortcutBindings";
+import { RESIZING_TIMELINE_ATTRIBUTE } from "./timelineResizeCursor";
 
 /** Tag names whose elements own every key press. Uppercase: Element.tagName is uppercase. */
 export const EDITABLE_TAG_NAMES: readonly string[] = ["INPUT", "TEXTAREA", "SELECT"];
@@ -45,6 +46,26 @@ export const KEYBOARD_OWNER_SELECTOR: string =
   '[role="dialog"],[role="alertdialog"],[role="menu"],[role="menubar"],' +
   '[role="menuitem"],[role="listbox"],[role="combobox"],[role="option"],' +
   '[contenteditable=""],[contenteditable="true"]';
+
+/**
+ * Selector for a splitter that can take the focus, such as the one above the timeline
+ * (`TimelineArea`). The splitter carries this marker. A `role="separator"` alone does not match,
+ * so a decorative separator, or one that is out of the Tab order, keeps every key of the layer.
+ */
+export const SPLITTER_SELECTOR = "[data-splitter]";
+
+/**
+ * Selector for a drag that owns `Escape`: the drag of the timeline splitter. While it runs, the
+ * document root carries the attribute of its resize cursor (`timelineResizeCursor.ts`), and every
+ * key press target is inside the root, so the target test finds it.
+ */
+export const ESCAPE_OWNER_SELECTOR = `[${RESIZING_TIMELINE_ATTRIBUTE}]`;
+
+/**
+ * The keys that a focused splitter owns: the keys of the ARIA window splitter pattern for a
+ * splitter that moves up and down (`resolveTimelineSplitterKey`).
+ */
+export const SPLITTER_KEYS: readonly string[] = ["ArrowUp", "ArrowDown", "Home", "End"];
 
 /** The narrow view of the event target the rules read, so a test can pass a fake. */
 export interface ShortcutEventTarget {
@@ -136,6 +157,68 @@ export function isShortcutSuppressed(event: ShortcutKeyEvent): boolean {
 }
 
 /**
+ * Determines whether a focused splitter owns this key press (`SPLITTER_KEYS`), with no `Ctrl`,
+ * `Cmd` or `Alt` held.
+ *
+ * Unlike the owners of `KEYBOARD_OWNER_SELECTOR`, a splitter owns only the keys that move it.
+ * `Home` and `End` are also in the key table (ADR 026), so without this rule a press on the
+ * splitter would go to the first or the last frame. Every other key keeps its meaning: `Space`
+ * still plays and `ArrowLeft` still steps while the splitter has the focus.
+ */
+export function isSplitterKey(event: ShortcutKeyEvent): boolean {
+  return (
+    SPLITTER_KEYS.includes(event.key) &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    event.target !== null &&
+    event.target.hasAncestorMatching(SPLITTER_SELECTOR)
+  );
+}
+
+/** The part of the document root that `isGestureEscape` reads. */
+export interface GestureEscapeRoot {
+  hasAttribute(name: string): boolean;
+}
+
+/** Returns `document.documentElement`, or null outside a document. */
+function getDocumentRoot(): GestureEscapeRoot | null {
+  if (typeof document !== "undefined" && document.documentElement) {
+    return document.documentElement;
+  }
+  return null;
+}
+
+/**
+ * Determines whether a running drag owns this `Escape` (`ESCAPE_OWNER_SELECTOR`), whatever the
+ * modifiers.
+ *
+ * `Escape` finishes the named segment (ADR 026). During a drag of the timeline splitter it
+ * cancels the drag instead, so the layer leaves it to the listener of the drag, which runs after
+ * the layer on the window and cancels the key press. Every other key keeps its meaning during
+ * the drag.
+ *
+ * The test reads the target. A key press with no element target reads the attribute on the
+ * document root directly, so the drag still owns its `Escape`. This is the one rule of the
+ * resolver that can read the document, and only for that case.
+ *
+ * @param getRoot Returns the document root. Defaults to `document.documentElement`; the tests
+ *   pass a fake.
+ */
+export function isGestureEscape(
+  event: ShortcutKeyEvent,
+  getRoot: () => GestureEscapeRoot | null = getDocumentRoot,
+): boolean {
+  if (event.key !== "Escape") {
+    return false;
+  }
+  if (event.target !== null) {
+    return event.target.hasAncestorMatching(ESCAPE_OWNER_SELECTOR);
+  }
+  return getRoot()?.hasAttribute(RESIZING_TIMELINE_ATTRIBUTE) ?? false;
+}
+
+/**
  * Resolves a keyboard shortcut event to its corresponding action and claim state.
  *
  * Why `claimed` and `action` are separate:
@@ -155,7 +238,7 @@ export function resolveShortcut(
   event: ShortcutKeyEvent,
   context: ShortcutContext,
 ): ShortcutResolution {
-  if (isShortcutSuppressed(event)) {
+  if (isShortcutSuppressed(event) || isSplitterKey(event) || isGestureEscape(event)) {
     return NOT_CLAIMED;
   }
 

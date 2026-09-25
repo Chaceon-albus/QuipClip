@@ -8,6 +8,16 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* The chrome of a window that does not have the focus. <html> carries `data-window-inactive`
+ * while the native window is inactive (`windowFocusAttribute.ts`). The variant adds no
+ * specificity (`:where`), so every state variant, such as a hover, an open menu or a press,
+ * still wins over the inactive colour of the rest state.
+ *
+ * Only the title bar and the status bar use it. The current segment keeps its brand fill:
+ * it names the target of every edit (ADR 007), and a file dialog of the application makes
+ * the window inactive while the user still works on that segment. */
+@custom-variant window-inactive (&:where(:root[data-window-inactive] *));
+
 @theme inline {
   --font-heading: var(--font-sans);
   /* Geist has no Han glyphs. It comes first, so Latin letters and digits stay Geist, and
@@ -49,6 +59,7 @@
 
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-muted-foreground-inactive: var(--muted-foreground-inactive);
 
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
@@ -75,6 +86,7 @@
 
   --color-chrome: var(--chrome);
   --color-chrome-foreground: var(--chrome-foreground);
+  --color-chrome-foreground-inactive: var(--chrome-foreground-inactive);
   --color-chrome-accent: var(--chrome-accent);
   --color-chrome-accent-foreground: var(--chrome-accent-foreground);
   --color-chrome-border: var(--chrome-border);
@@ -161,6 +173,24 @@
     0%,
     25% {
       background-color: color-mix(in oklab, var(--success) 12%, transparent);
+    }
+  }
+
+  /* The label on the success flash (ExportStatusIndicator). It runs on the label with the same
+   * duration and curve as the flash on the group around it, so the two stay in step. The label
+   * holds --muted-foreground while the tint holds, and fades to its own colour while the tint
+   * fades. While the window is active, that colour is also --muted-foreground, so nothing
+   * changes. While it is inactive, the label ends at --muted-foreground-inactive: during the
+   * fade it keeps at least 4.55:1 (light) and 5.15:1 (dark) on the tint, where the inactive
+   * colour on the full tint would keep only 3.98:1 (light). For these 800ms the animation also
+   * holds the colour of a hover. */
+  --animate-success-flash-text: success-flash-text var(--motion-flash)
+    cubic-bezier(0.2, 0, 0, 1);
+
+  @keyframes success-flash-text {
+    0%,
+    25% {
+      color: var(--muted-foreground);
     }
   }
 }
@@ -267,8 +297,8 @@
   /* ---------------------------------------------------------
    * Border / Input / Focus
    *
-   * --border-strong is the border of a text field and a select, and the thumb of a
-   * scroll bar. It keeps 1.96:1 against the dialog surface, where --border keeps 1.50:1.
+   * --border-strong is the border of a text field and a select. It keeps 1.96:1 against
+   * the dialog surface, where --border keeps 1.50:1.
    *
    * --ring is the colour of the focus ring (`focus-ring`). It keeps at least 3:1 against
    * every rest and hover fill that a ring can touch. The lowest is 3.51:1, on a hovered
@@ -349,6 +379,33 @@
   --chrome-accent-foreground: oklch(0.34 0.05 190);
 
   --chrome-border: oklch(0.86 0.012 200);
+
+  /* The text of the title bar and the status bar while the window does not have the focus
+   * (the `window-inactive:` variant). Each one is one step quieter than its active colour:
+   *
+   * - --chrome-foreground-inactive replaces --chrome-foreground: 6.41:1 on --chrome, where
+   *   the active colour keeps 13.12:1.
+   * - --muted-foreground-inactive replaces --muted-foreground: 4.55:1 on --chrome, where the
+   *   active colour keeps 5.39:1. The light theme has no more room above the 4.5:1 of text.
+   *
+   * On the full success flash of a finished export (12% --success over --chrome), the
+   * inactive muted colour keeps only 3.98:1, so the label of that result holds its active
+   * colour for as long as the flash lasts (`success-flash-text`). An icon needs 3:1, so the
+   * icons still dim. */
+  --chrome-foreground-inactive: oklch(0.46 0.018 205);
+  --muted-foreground-inactive: oklch(0.54 0.015 205);
+
+  /* ---------------------------------------------------------
+   * Scroll bar
+   *
+   * The thumb of the Windows scroll bar (the `::-webkit-scrollbar` rules below). macOS draws
+   * the system scroll bar. At rest the thumb keeps 3.09:1 against the timeline background,
+   * the lowest surface under a scroll bar, and 3.57:1 against a dialog. Hover and a drag use
+   * --muted-foreground, 5.08:1 against the timeline background.
+   * --------------------------------------------------------- */
+
+  --scrollbar-thumb: oklch(0.62 0.012 205);
+  --scrollbar-thumb-hover: var(--muted-foreground);
 
   /* ---------------------------------------------------------
    * Preview
@@ -637,6 +694,24 @@
 
   --chrome-border: oklch(0.27 0.012 205);
 
+  /* On --chrome: the inactive chrome text keeps 8.19:1 (active 14.13:1), and the inactive
+   * muted text 5.15:1 (active 7.05:1). On the full success flash of a finished export, the
+   * inactive muted text keeps 4.47:1, so that label holds its active colour during the flash
+   * here too (`success-flash-text`). */
+  --chrome-foreground-inactive: oklch(0.72 0.012 200);
+  --muted-foreground-inactive: oklch(0.6 0.015 200);
+
+  /* ---------------------------------------------------------
+   * Scroll bar
+   *
+   * At rest the thumb keeps 3.12:1 against a menu, the lightest surface under a scroll bar,
+   * and 3.38:1 against the timeline background. Hover and a drag use --muted-foreground,
+   * 6.49:1 against a menu. The dark scope of the preview takes these values too.
+   * --------------------------------------------------------- */
+
+  --scrollbar-thumb: oklch(0.5 0.012 205);
+  --scrollbar-thumb-hover: var(--muted-foreground);
+
   /* ---------------------------------------------------------
    * Preview
    * --------------------------------------------------------- */
@@ -713,22 +788,44 @@
     @apply font-sans;
   }
 
-  ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-  }
+  /* The scroll bars of Windows. Without these rules, WebView2 draws the classic scroll bar,
+   * which is wide, has arrow buttons and does not take the palette. These rules draw a thin
+   * one in the palette instead: an 8px lane with a transparent track, and a round thumb that
+   * is 6px wide at rest and fills the lane on hover and during a drag. The lane is the hit
+   * area of the thumb.
+   *
+   * macOS takes none of these rules. WKWebView then draws the system scroll bar, which
+   * follows the system setting (overlay or always visible) and the `color-scheme` of the
+   * element. Linux takes the Windows branch (`data-platform`, `src/lib/platform.ts`).
+   *
+   * A change of the lane changes the height of the track row of the timeline, which always
+   * shows its horizontal scroll bar (TimelinePanel). */
+  :is(:root[data-platform="windows"], :root[data-platform="windows"] *) {
+    &::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
 
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
 
-  ::-webkit-scrollbar-thumb {
-    background: var(--border-strong);
-    border-radius: 9999px;
-  }
+    &::-webkit-scrollbar-thumb {
+      border: 1px solid transparent;
+      border-radius: 9999px;
+      background-color: var(--scrollbar-thumb);
+      background-clip: padding-box;
+    }
 
-  ::-webkit-scrollbar-corner {
-    background: transparent;
+    &::-webkit-scrollbar-thumb:hover,
+    &::-webkit-scrollbar-thumb:active {
+      border-width: 0;
+      background-color: var(--scrollbar-thumb-hover);
+    }
+
+    &::-webkit-scrollbar-corner {
+      background: transparent;
+    }
   }
 }
 
@@ -794,6 +891,15 @@
 :root[data-scrubbing],
 :root[data-scrubbing] * {
   cursor: ew-resize;
+}
+
+/* The cursor of a drag of the timeline splitter (`timelineResizeCursor.ts`). While the drag
+ * runs, <html> carries `data-resizing-timeline`, and every element shows the row resize
+ * cursor, so the cursor stays when the pointer leaves the thin splitter. Outside all cascade
+ * layers, as the rule above. */
+:root[data-resizing-timeline],
+:root[data-resizing-timeline] * {
+  cursor: ns-resize;
 }
 
 /* The two ends of the progress fill gradient. They are registered as colours, so a change

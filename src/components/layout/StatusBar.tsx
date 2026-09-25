@@ -142,8 +142,11 @@ export function StatusBar() {
   // adds a 4px inset, so the glyph sits 12px from the edge. The left group moves 6px to the
   // left, into the 12px left padding, so the text of its first item, inside its own 6px
   // padding, also sits 12px from the edge.
+  //
+  // While the window does not have the focus, the text and the icons of the bar go one step
+  // quieter (`window-inactive:`), as the title bar does. The warning chips keep their colours.
   return (
-    <footer className="@container flex h-7 shrink-0 items-center gap-3 border-t border-border bg-chrome pr-2 pl-3 text-xs text-muted-foreground select-none">
+    <footer className="@container flex h-7 shrink-0 items-center gap-3 border-t border-border bg-chrome pr-2 pl-3 text-xs text-muted-foreground transition-colors select-none window-inactive:text-muted-foreground-inactive">
       {/* Left: the open source and its playback-position state */}
       <div className="-ml-1.5 flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
         {sourceInfo && (
@@ -290,6 +293,7 @@ export function StatusBar() {
             <Button
               variant="chrome"
               size="icon-xs"
+              className="window-inactive:text-muted-foreground-inactive"
               aria-label={t("statusBar.settings")}
               aria-haspopup="dialog"
               aria-expanded={settingsOpen}

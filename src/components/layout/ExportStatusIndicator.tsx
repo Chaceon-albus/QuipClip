@@ -340,9 +340,19 @@ const RESULT_ICON: Record<ExportResultKind, ReactElement> = {
   finished: <CircleCheck aria-hidden="true" className="size-3.5 text-success" />,
   failed: <CircleAlert aria-hidden="true" className="size-3.5 text-destructive" />,
   canceled: (
-    <CircleSlash aria-hidden="true" className="size-3.5 text-muted-foreground" />
+    <CircleSlash
+      aria-hidden="true"
+      className="size-3.5 text-muted-foreground transition-colors window-inactive:text-muted-foreground-inactive"
+    />
   ),
 };
+
+/**
+ * The quieter colour of a chrome icon button of the result while the window does not have the
+ * focus, as every other icon of the status bar takes it. An icon needs 3:1, and the inactive
+ * colour keeps 3.98:1 also on the success flash.
+ */
+const INACTIVE_ICON_BUTTON_CLASS = "window-inactive:text-muted-foreground-inactive";
 
 /** The result of a run that ended behind the editor, with Show and Dismiss (ADR 029). */
 function ExportResultItem({
@@ -394,10 +404,19 @@ function ExportResultItem({
     >
       <Tooltip>
         <TooltipTrigger asChild>
+          {/* While the window does not have the focus, a status bar label goes one step
+              quieter. On the success flash the quieter colour keeps only 3.98:1, so the label
+              of a finished export runs a text animation with the flash: it holds the active
+              colour while the tint holds, and fades to its own colour while the tint fades
+              (globals.css). After the flash the label takes the quieter colour. */}
           <button
             type="button"
             onClick={onShow}
-            className={statusBarItem({ interactive: true })}
+            className={cn(
+              statusBarItem({ interactive: true }),
+              kind === "finished" &&
+                "animate-success-flash-text motion-reduce:animate-none",
+            )}
           >
             {RESULT_ICON[kind]}
             <span className="whitespace-nowrap">{t(resultLabelKey(kind))}</span>
@@ -418,6 +437,7 @@ function ExportResultItem({
             <Button
               variant="chrome"
               size="icon-xs"
+              className={INACTIVE_ICON_BUTTON_CLASS}
               aria-label={revealLabel}
               aria-busy={revealBusy || undefined}
               onClick={() => void handleReveal()}
@@ -443,6 +463,7 @@ function ExportResultItem({
             <Button
               variant="chrome"
               size="icon-xs"
+              className={INACTIVE_ICON_BUTTON_CLASS}
               aria-label={t("statusBar.export.dismiss")}
               onClick={onDismiss}
             >
