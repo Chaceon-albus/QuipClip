@@ -10,6 +10,9 @@ import {
 import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
   EXTENT_END_SEEK_OPTIONS,
+  planBoundarySeek,
+  planEndSeek,
+  type ShortcutProbe,
 } from "@/components/layout/shortcutCommands";
 import { getSourceRevisionKey } from "@/features/media";
 import { canMarkIn } from "@/features/timeline";
@@ -34,6 +37,15 @@ import {
 import { resolveTimecodeDisplay } from "./timecodeDisplay";
 import type { PlaybackMediaElement, PlaybackSource } from "./types";
 
+/** How a web view turns a time into whole microseconds. */
+type MicrosecondClock = "round" | "truncate";
+
+/** A time in seconds on a clock of whole microseconds. */
+function toMicrosecondClock(seconds: number, clock: MicrosecondClock): number {
+  const micros = seconds * 1e6;
+  return (clock === "round" ? Math.round(micros) : Math.floor(micros)) / 1e6;
+}
+
 /**
  * Creates a minimal fake video element for isolated unit testing.
  */
@@ -50,6 +62,8 @@ function createFakeVideo(options?: {
   throwOnFastSeek?: boolean;
   /** Stops a seek at `duration`, as a browser does with a time past the end of the media. */
   clampToDuration?: boolean;
+  /** Reads a seek back rounded, or truncated, to the whole microsecond, as a web view can. */
+  microsecondClock?: MicrosecondClock;
 }): PlaybackMediaElement & {
   playCalls: number;
   pauseCalls: number;
@@ -120,10 +134,14 @@ function createFakeVideo(options?: {
           "InvalidStateError",
         );
       }
-      currentTimeVal =
+      const reached =
         options?.clampToDuration === true && Number.isFinite(fake.duration)
           ? Math.min(val, fake.duration)
           : val;
+      currentTimeVal =
+        options?.microsecondClock === undefined
+          ? reached
+          : toMicrosecondClock(reached, options.microsecondClock);
       if (options?.autoSeeking !== false) {
         seekingVal = true;
       }
@@ -2662,6 +2680,539 @@ describe("Playback Store & PTS Presentation Engine", () => {
     });
   });
 
+  describe("A Frame Callback That Runs Before seeked (ADR 022)", () => {
+    // The HTML specification does not order the frame callback of a seek against the end of the
+    // seek. In the ready state, a callback that runs while the element still reports `seeking`
+    // sets presentedFrame and keeps the display target, and a paused element may present no
+    // later frame. `seeked` then clears the target when that frame holds the element position.
+
+    /** The probe facts that the keyboard layer reads (ADR 026). */
+    function probeOf(source: PlaybackSource): ShortcutProbe {
+      return {
+        videoStartPts: source.videoStartPts,
+        videoTimeBase: source.videoTimeBase,
+        videoDurationTicks: source.videoDurationTicks ?? null,
+        approximateDurationSeconds: source.approximateDurationSeconds ?? null,
+        avgFrameRate: source.avgFrameRate ?? null,
+        rFrameRate: source.rFrameRate ?? null,
+      };
+    }
+
+    /** sourceA with its extent in ticks: 250 frames at 25 fps on 1/25, 10 s. */
+    const gridExtentSource: PlaybackSource = {
+      ...sourceA,
+      path: "/media/clipA-extent.mp4",
+      videoDurationTicks: "250" as TickCount,
+    };
+
+    /**
+     * Off the frame grid: a variable rate on 1/90000. The nominal interval is 100 / 2997 s, 3003
+     * ticks. The frames follow the real rate of 30: they start 3000 ticks apart, so each frame is
+     * shorter than the nominal interval, and the last frame of the extent starts at PTS 897000.
+     */
+    const offGridSource: PlaybackSource = {
+      path: "/media/phone-vfr.mp4",
+      size: 4096,
+      mtime: 1724977500,
+      videoTimeBase: { n: 1, d: 90000 },
+      videoStartPts: "0" as Pts,
+      videoDurationTicks: "900000" as TickCount,
+      approximateDurationSeconds: 10,
+      avgFrameRate: { n: 2997, d: 100 },
+      rFrameRate: { n: 30, d: 1 },
+    };
+
+    /**
+     * Off the frame grid: a constant 23.976 fps on the coarse time base 1/24. One tick is almost
+     * one interval, so frame k starts at tick k for most k, and two frames start one tick apart.
+     */
+    const coarseSource: PlaybackSource = {
+      path: "/media/coarse.mkv",
+      size: 4096,
+      mtime: 1724977600,
+      videoTimeBase: { n: 1, d: 24 },
+      videoStartPts: "0" as Pts,
+      videoDurationTicks: "240" as TickCount,
+      approximateDurationSeconds: 10,
+      avgFrameRate: { n: 24000, d: 1001 },
+      rFrameRate: { n: 24000, d: 1001 },
+    };
+
+    /**
+     * A source calibrated at 0 whose element stands at `pts`, with the frame at `pts` on screen and
+     * no seek pending. `frame(mediaTime)` reports a presented frame, as RVFC does.
+     */
+    function settledOn(source: PlaybackSource, pts: string) {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      const key = getSourceRevisionKey(source);
+      let presented = 0;
+      const frame = (mediaTime: number): void => {
+        store.getState().syncPresentedFrame(key, mediaTime, ++presented, video);
+      };
+      store.getState().attach(source, video);
+      video.readyState = 1;
+      store.getState().syncReady(key, video);
+      frame(0);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      store.getState().seekToPts(pts as Pts);
+      fireSeeked(store, key, video);
+      frame(video.currentTime);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe(pts);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      return { store, video, key, frame };
+    }
+
+    it("clears the target at seeked when the only callback of a paused seek ran during the seek, and a boundary key on that frame does nothing", () => {
+      const { store, video, key, frame } = settledOn(sourceA, "25");
+
+      store.getState().seekToPts("50" as Pts);
+      expect(video.seeking).toBe(true);
+      frame(2.0);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+      // While the target stays, Go to In would seek onto the frame on screen, which can bring no
+      // frame callback and leave presentedFrame null (ADR 026).
+      expect(planBoundarySeek(store.getState(), true, "50" as Pts)).toEqual({
+        kind: "seekToPts",
+        pts: "50",
+      });
+
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+      expect(
+        getDisplayedElapsedSeconds(
+          store.getState(),
+          sourceA.videoStartPts,
+          sourceA.videoTimeBase,
+        ),
+      ).toBe(2.0);
+      expect(planBoundarySeek(store.getState(), true, "50" as Pts)).toBeNull();
+      expect(canMarkIn("ready", store.getState().presentedFrame, true)).toBe(true);
+    });
+
+    it("a play after that clear plays from the element position with no seek", () => {
+      const { store, video, key, frame } = settledOn(sourceA, "25");
+      store.getState().seekToPts("50" as Pts);
+      frame(2.0);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      const sets = video.currentTimeSets;
+
+      store.getState().play();
+      expect(video.playCalls).toBe(1);
+      expect(video.currentTimeSets).toBe(sets);
+      expect(store.getState().isPlaying).toBe(true);
+      frame(2.04);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("51");
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("on the frame grid, clears the target of a step at seeked, and the next step starts from the frame on screen", () => {
+      const { store, video, key, frame } = settledOn(sourceA, "50");
+
+      store.getState().seekNominal(1);
+      // The element seeks to the middle of frame 51, and the playhead shows its start.
+      expect(video.currentTime).toBeCloseTo(2.06, 9);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(2.04, 9);
+      frame(2.04);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("51");
+
+      store.getState().seekNominal(1);
+      expect(video.currentTime).toBeCloseTo(2.1, 9);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(2.08, 9);
+    });
+
+    it("on the frame grid, keeps the target when the callback during the seek reports the frame before the target or the frame a step started from", () => {
+      // Go to In from the frame before it: the late callback of that frame runs during the seek.
+      const goToIn = settledOn(sourceA, "49");
+      goToIn.store.getState().seekToPts("50" as Pts);
+      goToIn.frame(1.96);
+      expect(goToIn.store.getState().presentedFrame?.inferredSourcePts).toBe("49");
+      fireSeeked(goToIn.store, identityA, goToIn.video);
+      expect(goToIn.store.getState().seekTargetSeconds).toBe(2.0);
+      // The frame of the seek arrives after seeked and clears the target.
+      goToIn.frame(2.0);
+      expect(goToIn.store.getState().seekTargetSeconds).toBeNull();
+
+      // A step: the late callback of the frame it started from runs during the seek.
+      const step = settledOn(sourceA, "50");
+      step.store.getState().seekNominal(1);
+      step.frame(2.0);
+      fireSeeked(step.store, identityA, step.video);
+      expect(step.store.getState().seekTargetSeconds).toBeCloseTo(2.04, 9);
+      step.frame(2.04);
+      expect(step.store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("on the frame grid, a step that the end clamped clears the target on the last frame of the extent, and End and a step then do nothing", () => {
+      const { store, video, key, frame } = settledOn(gridExtentSource, "245");
+
+      store.getState().seekNominal(10);
+      // The end position clamps the target, and the display shows the last frame of the extent.
+      expect(video.currentTime).toBe(10);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(249 / 25, 9);
+      frame(249 / 25);
+      fireSeeked(store, key, video);
+      // The element stands one interval after the start of frame 249, where the index of the
+      // position names frame 250, which does not exist. Frame 249 holds that position.
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("249");
+
+      expect(planEndSeek(store.getState(), true, probeOf(gridExtentSource))).toBeNull();
+      const sets = video.currentTimeSets;
+      store.getState().seekNominal(1);
+      expect(video.currentTimeSets).toBe(sets);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("249");
+    });
+
+    it("on the frame grid without the extent in ticks, a step that the end clamped keeps the target until the next frame", () => {
+      // No rule names the last frame without the extent, so the target stays, as before.
+      const { store, video, key, frame } = settledOn(sourceA, "245");
+      store.getState().seekNominal(10);
+      expect(video.currentTime).toBe(10);
+      frame(249 / 25);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBe(10);
+    });
+
+    it("on the frame grid, the late callback of the last frame of the extent keeps the target after a seek past the frame after it", () => {
+      // The extent can leave out frames of the source, and a click past it can show one of them.
+      const { store, video, key, frame } = settledOn(gridExtentSource, "249");
+      store.getState().seekToPts("260" as Pts);
+      expect(video.currentTime).toBe(10.4);
+      frame(249 / 25);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBe(10.4);
+      // The frame of the seek arrives after seeked and clears the target.
+      frame(10.4);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("260");
+    });
+
+    it("on the frame grid, a seek to the end of the extent shows its last frame, and that callback during the seek clears the target", () => {
+      // Go to Out on an Out at the end of the extent, or a click at the right end of the ruler.
+      const { store, video, key, frame } = settledOn(gridExtentSource, "245");
+      store.getState().seekToPts("250" as Pts);
+      expect(video.currentTime).toBe(10);
+      frame(249 / 25);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("249");
+    });
+
+    it("on the frame grid of a 1 µs time base, keeps the target on the late callback of the frame one tick after the position", () => {
+      // 25 fps on 1/1000000. The position one tick before frame 50 has the index of frame 50 by
+      // the margin, and frame 50 starts within the rounding after it, so only the tick threshold
+      // keeps the target.
+      const fineGridSource: PlaybackSource = {
+        ...sourceA,
+        path: "/media/clipA-fine.mkv",
+        videoTimeBase: { n: 1, d: 1000000 },
+      };
+      const { store, video, key, frame } = settledOn(fineGridSource, "2000000");
+
+      store.getState().seekToPts("1999999" as Pts);
+      expect(video.currentTime).toBeCloseTo(1.999999, 9);
+      frame(2.0);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(1.999999, 9);
+      // The frame that holds the position arrives and clears the target.
+      frame(1.96);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1960000");
+    });
+
+    it("on a time base of 1 µs, keeps the target on the late callback of a frame one or two ticks after the position", () => {
+      // The seek back of a segment playback aims at `outPts - 1`, the last tick before a frame
+      // (ADR 026). On a tick this fine, the rounding of a web view cannot tell that frame from
+      // the frame that holds the position.
+      const fineSource: PlaybackSource = {
+        ...offGridSource,
+        path: "/media/phone-vfr-fine.mkv",
+        videoTimeBase: { n: 1, d: 1000000 },
+        videoDurationTicks: "10000000" as TickCount,
+      };
+      for (const ticksBefore of [1, 2]) {
+        const { store, video, key, frame } = settledOn(fineSource, "1234567");
+
+        const position = (1234567 - ticksBefore) / 1e6;
+        store.getState().seekToPts(String(1234567 - ticksBefore) as Pts);
+        expect(video.currentTime).toBeCloseTo(position, 9);
+        frame(1.234567);
+        fireSeeked(store, key, video);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(position, 9);
+        // The frame that holds the position arrives and clears the target.
+        frame(1.201234);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1201234");
+      }
+    });
+
+    // A web view can round each time to the whole microsecond: the mediaTime of a frame, the
+    // calibrated first frame, which is such a mediaTime, and the position that it reads back
+    // after a seek. Here the first frame starts away from 0, at its PTS, so no time lies on a
+    // whole microsecond.
+    const microsecondCases = [
+      {
+        label: "29.97 fps on the frame grid of 1/90000",
+        videoTimeBase: { n: 1, d: 90000 },
+        avgFrameRate: { n: 30000, d: 1001 },
+        rFrameRate: { n: 30000, d: 1001 },
+        startTicks: 77777,
+        frameTicks: 3003,
+      },
+      {
+        label: "a variable rate on 1/90000",
+        videoTimeBase: { n: 1, d: 90000 },
+        avgFrameRate: { n: 2997, d: 100 },
+        rFrameRate: { n: 30, d: 1 },
+        startTicks: 77777,
+        frameTicks: 3000,
+      },
+      {
+        label: "29.97 fps on the coarse time base 1/30",
+        videoTimeBase: { n: 1, d: 30 },
+        avgFrameRate: { n: 30000, d: 1001 },
+        rFrameRate: { n: 30000, d: 1001 },
+        startTicks: 7,
+        frameTicks: 1,
+      },
+    ].flatMap((sourceCase) =>
+      (["round", "truncate"] as const).map((clock) => ({ ...sourceCase, clock })),
+    );
+
+    it.each(microsecondCases)(
+      "$label, with a $clock microsecond clock: the frame of each seek clears the target at seeked, and the late callback of the frame before keeps it",
+      ({
+        label,
+        videoTimeBase,
+        avgFrameRate,
+        rFrameRate,
+        startTicks,
+        frameTicks,
+        clock,
+      }) => {
+        const frameCount = 300;
+        const source: PlaybackSource = {
+          path: `/media/microseconds-${label}.mp4`,
+          size: 4096,
+          mtime: 1724977700,
+          videoTimeBase,
+          videoStartPts: String(startTicks) as Pts,
+          videoDurationTicks: String(frameCount * frameTicks) as TickCount,
+          approximateDurationSeconds:
+            (frameCount * frameTicks * videoTimeBase.n) / videoTimeBase.d,
+          avgFrameRate,
+          rFrameRate,
+        };
+        const key = getSourceRevisionKey(source);
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ microsecondClock: clock });
+        const ptsOf = (k: number): Pts => String(startTicks + k * frameTicks) as Pts;
+        // The browser time of frame k, from its PTS, on the clock of the web view.
+        const timeOf = (k: number): number =>
+          toMicrosecondClock(
+            ((startTicks + k * frameTicks) * videoTimeBase.n) / videoTimeBase.d,
+            clock,
+          );
+        let presented = 0;
+        const frame = (k: number): void => {
+          store.getState().syncPresentedFrame(key, timeOf(k), ++presented, video);
+          expect(store.getState().presentedFrame?.inferredSourcePts).toBe(ptsOf(k));
+        };
+        const settleOn = (k: number): void => {
+          store.getState().seekToPts(ptsOf(k));
+          fireSeeked(store, key, video);
+          frame(k);
+          expect(store.getState().seekTargetSeconds).toBeNull();
+        };
+        store.getState().attach(source, video);
+        video.readyState = 1;
+        store.getState().syncReady(key, video);
+        frame(0);
+        expect(store.getState().calibrationStatus).toBe("ready");
+
+        for (let k = 1; k < frameCount; k++) {
+          // The callback of frame k runs during the seek to it.
+          settleOn(k - 1);
+          store.getState().seekToPts(ptsOf(k));
+          frame(k);
+          fireSeeked(store, key, video);
+          expect(store.getState().seekTargetSeconds).toBeNull();
+
+          // The late callback of frame k - 1 runs during the seek to frame k.
+          settleOn(k - 1);
+          store.getState().seekToPts(ptsOf(k));
+          frame(k - 1);
+          fireSeeked(store, key, video);
+          expect(store.getState().seekTargetSeconds).not.toBeNull();
+          frame(k);
+          expect(store.getState().seekTargetSeconds).toBeNull();
+        }
+      },
+    );
+
+    it("off the frame grid, a seek to the PTS of a frame clears the target at seeked when its callback ran during the seek", () => {
+      const { store, video, key, frame } = settledOn(offGridSource, "90000");
+
+      store.getState().seekToPts("93000" as Pts);
+      frame(93000 / 90000);
+      expect(store.getState().seekTargetSeconds).not.toBeNull();
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("93000");
+      expect(planBoundarySeek(store.getState(), true, "93000" as Pts)).toBeNull();
+    });
+
+    it("off the frame grid, the late callback of the frame before a seek to the PTS of a frame keeps the target", () => {
+      const { store, video, key, frame } = settledOn(offGridSource, "90000");
+
+      store.getState().seekToPts("93000" as Pts);
+      // The frame before starts 3000 ticks earlier, less than one nominal interval before the
+      // position, and it does not hold the position.
+      expect(93000 / 90000 - 1).toBeLessThan(100 / 2997);
+      frame(1);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(93000 / 90000, 9);
+      expect(planBoundarySeek(store.getState(), true, "90000" as Pts)).toEqual({
+        kind: "seekToPts",
+        pts: "90000",
+      });
+      // The frame of the seek arrives after seeked and clears the target.
+      frame(93000 / 90000);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("93000");
+    });
+
+    it("on a coarse time base, frames one tick apart: the late callback of the frame before keeps the target, and the callback of the frame of the seek clears it at seeked", () => {
+      const { store, video, key, frame } = settledOn(coarseSource, "24");
+
+      // Frame 24 starts one tick, less than one nominal interval, before PTS 25.
+      store.getState().seekToPts("25" as Pts);
+      frame(1.0);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(25 / 24, 9);
+      frame(25 / 24);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      store.getState().seekToPts("26" as Pts);
+      frame(26 / 24);
+      expect(store.getState().seekTargetSeconds).not.toBeNull();
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("26");
+    });
+
+    it("off the frame grid, a step and End land later in their frame and keep the target until the next frame", () => {
+      // No frame boundary is known off the grid, so a position more than one tick after the
+      // start of the frame on screen keeps the target, as before.
+      const { store, video, key, frame } = settledOn(offGridSource, "90000");
+
+      store.getState().seekNominal(1);
+      expect(video.currentTime).toBe(1 + 100 / 2997);
+      frame(93000 / 90000);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(1 + 100 / 2997, 9);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("93000");
+
+      // End: the last frame starts 2999 ticks before the last tick.
+      store.getState().seekToPts("899999" as Pts, EXTENT_END_SEEK_OPTIONS);
+      expect(video.currentTime).toBeCloseTo(899999 / 90000, 9);
+      frame(897000 / 90000);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(899999 / 90000, 9);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("897000");
+    });
+
+    it("keeps the target at seeked after a scrub seek, also on the frame that holds its position, and the exact seek of the release clears it", () => {
+      // WebView2 has no fastSeek, so a scrub seek assigns currentTime (ADR 022).
+      const { store, video, key, frame } = settledOn(sourceA, "25");
+
+      store.getState().seekToPts("50" as Pts, { scrub: true });
+      expect(video.currentTime).toBe(2.0);
+      frame(2.0);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+
+      // The release seeks exactly to the same time, and its frame arrives during the seek.
+      store.getState().seekToPts("50" as Pts);
+      expect(video.seeking).toBe(true);
+      frame(2.0);
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("keeps a deferred target at seeked, and clears the target of the seek that the anchor runs when its frame arrived during that seek", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+
+      store.getState().seekToPts("50" as Pts);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+      expect(video.currentTimeSets).toBe(0);
+      // The request has not reached the element, so no seeked event answers it.
+      fireSeeked(store, identityA, video);
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+
+      // The anchor runs the seek, and its frame arrives before seeked.
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(video.currentTime).toBe(2.0);
+      expect(video.seeking).toBe(true);
+      store.getState().syncPresentedFrame(identityA, 2.0, 2, video);
+      expect(store.getState().seekTargetSeconds).toBe(2.0);
+      fireSeeked(store, identityA, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+    });
+
+    it("keeps the target while a queued seek runs, and clears it at the seeked of the last seek", () => {
+      const { store, video, key, frame } = settledOn(sourceA, "25");
+
+      store.getState().seekToPts("50" as Pts);
+      store.getState().seekToPts("75" as Pts);
+      expect(video.currentTime).toBe(2.0);
+      // The frame of the first seek arrives while it runs.
+      frame(2.0);
+      fireSeeked(store, key, video);
+      expect(video.currentTime).toBe(3.0);
+      expect(store.getState().seekTargetSeconds).toBe(3.0);
+
+      // The frame of the queued seek arrives while it runs.
+      frame(3.0);
+      expect(store.getState().seekTargetSeconds).toBe(3.0);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("75");
+    });
+
+    it("clears the target when a queued seek lands on the frame that the first seek presented, which brings no later callback", () => {
+      const { store, video, key, frame } = settledOn(sourceA, "25");
+
+      store.getState().seekToPts("50" as Pts);
+      // A position inside frame 50, which spans 2.00 s to 2.04 s.
+      store.getState().seekApproximate(2.01);
+      frame(2.0);
+      fireSeeked(store, key, video);
+      expect(video.currentTime).toBe(2.01);
+      expect(store.getState().seekTargetSeconds).toBe(2.01);
+
+      // The frame on screen does not change, so no frame callback comes.
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+    });
+  });
+
   describe("Scrub Mode: Keyframe Preview & Audio (ADR 022)", () => {
     let requestSpy: MockInstance<typeof scrubAudioController.request>;
     let stopSpy: MockInstance<typeof scrubAudioController.stop>;
@@ -4721,11 +5272,13 @@ describe("Playback Store & PTS Presentation Engine", () => {
       },
     );
 
-    // RVFC can report the new frame before the element fires `seeked`. The display target then
-    // stays (ADR 022), so the next press has no settled frame on screen, and it starts from the
-    // middle target of the step before, which the element reports as currentTime.
+    // RVFC can report the new frame before the element fires `seeked`. That callback keeps the
+    // display target, and a paused element may present no later frame. The frame holds the
+    // middle target that the element reports as currentTime, so `seeked` clears the target
+    // (ADR 022), and the next press starts from the frame on screen. The frame starts can lie
+    // one tick away from their nominal starts, and the frame of each target is still found.
     it.each(matroskaCases)(
-      "$label: repeated steps from a reached middle target whose frame arrived before seeked advance one real frame each",
+      "$label: repeated steps whose frame arrived before seeked clear the target at seeked and advance one real frame each",
       ({ fps, firstFrame }) => {
         const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
         const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
@@ -4736,8 +5289,10 @@ describe("Playback Store & PTS Presentation Engine", () => {
         const settleCallbackFirst = (): number => {
           expect(video.seeking).toBe(true);
           const index = presentFrameAtPosition(store, sim, video);
-          fireSeeked(store, sim.identity, video);
           expect(store.getState().seekTargetSeconds).not.toBeNull();
+          fireSeeked(store, sim.identity, video);
+          expect(store.getState().seekTargetSeconds).toBeNull();
+          expect(displayedLabel(store, sim)).toBe(frameLabel(fps, index));
           return index;
         };
 
@@ -4755,6 +5310,52 @@ describe("Playback Store & PTS Presentation Engine", () => {
           expect(displayedLabel(store, sim)).toBe(frameLabel(fps, k));
           expect(settleCallbackFirst()).toBe(k);
         }
+      },
+    );
+
+    // A seek to a stored PTS, such as Go to In, lands on the real start of its frame. Its callback
+    // can run before `seeked`, and so can a late callback of the frame before it. Measured from a
+    // rounded first PTS, a real start can lie one tick away from its nominal start, so the next
+    // real start can lie less than one interval after a frame start. A test on seconds alone
+    // would then take the late callback for the frame on screen. The index of the frame tells
+    // the two apart.
+    it.each(matroskaCases)(
+      "$label: a seek to each real frame start clears the target at seeked on its own frame, and a late callback of the frame before keeps it",
+      ({ fps, firstFrame }) => {
+        const frameCount = Math.floor((SIMULATED_SECONDS * fps.n) / fps.d);
+        const sim = simulateSource(fps, tbMs, frameCount, firstFrame);
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachSimulated(store, sim, video);
+
+        let shortGaps = 0;
+        for (let k = 1; k < frameCount; k++) {
+          const pts = String(sim.ptsTicks[k]) as Pts;
+          if (sim.startSeconds[k] - sim.startSeconds[k - 1] < fps.d / fps.n) {
+            shortGaps++;
+          }
+
+          // The late callback of frame k - 1 runs during the seek to frame k.
+          goToFrameStart(store, sim, video, k - 1);
+          store.getState().seekToPts(pts);
+          store
+            .getState()
+            .syncPresentedFrame(sim.identity, sim.startSeconds[k - 1], k + 1, video);
+          fireSeeked(store, sim.identity, video);
+          expect(store.getState().seekTargetSeconds).not.toBeNull();
+          expect(presentFrameAtPosition(store, sim, video)).toBe(k);
+          expect(store.getState().seekTargetSeconds).toBeNull();
+
+          // The callback of frame k runs during the seek to it.
+          goToFrameStart(store, sim, video, k - 1);
+          store.getState().seekToPts(pts);
+          expect(presentFrameAtPosition(store, sim, video)).toBe(k);
+          fireSeeked(store, sim.identity, video);
+          expect(store.getState().seekTargetSeconds).toBeNull();
+          expect(planBoundarySeek(store.getState(), true, pts)).toBeNull();
+        }
+        // Control: for many frames the next real start lies less than one interval later.
+        expect(shortGaps).toBeGreaterThan(frameCount / 4);
       },
     );
 
@@ -6951,6 +7552,30 @@ describe("Play Segment (ADR 026)", () => {
       // The pause event of the stop keeps the stopped phase.
       h.store.getState().syncPause(h.key, h.video);
       expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+    });
+
+    it("keeps the stop when the In frame arrives while its seek runs, clears the target at seeked, and still stops on the last frame", () => {
+      const h = attachPlaying(gridSource);
+      h.store.getState().playSegment("50" as Pts, "100" as Pts);
+      expect(h.video.seeking).toBe(true);
+      // A frame that arrives while a seek runs is not tested against the stop.
+      h.present("50");
+      expect(h.store.getState().seekTargetSeconds).toBe(2);
+      h.video.seeking = false;
+      h.store.getState().syncSeeked(h.key, h.video);
+      expect(h.store.getState().seekTargetSeconds).toBeNull();
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+      expect(h.store.getState().isPlaying).toBe(true);
+
+      playFrames(h, 51, 98);
+      expect(h.store.getState().isPlaying).toBe(true);
+      h.frame("99");
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.video.seeks).toBe(1);
+      expect(h.store.getState().playbackStop).toMatchObject({
+        phase: "stopped",
+        restPts: "99",
+      });
     });
 
     it("seeks back to the last frame when its callback was skipped and the Out frame came", () => {

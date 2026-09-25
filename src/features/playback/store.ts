@@ -325,6 +325,19 @@ export const ANCHOR_TOLERANCE_SECONDS = 1.0;
 export const NOMINAL_STEP_EDGE_TOLERANCE_SECONDS = 1e-6;
 
 /**
+ * The tolerance in seconds of the test that `seeked` makes on the frame that RVFC reported last
+ * (presentedFrameHoldsPosition, ADR 022). It compares three times that a web view can round to
+ * the microsecond: the mediaTime of the frame, the calibrated first frame, which is itself such a
+ * mediaTime, and the position that the element reads back after the seek. Each can be 0.5 µs
+ * off, 1.5 µs in sum, and a web view that truncates can read the position 1 µs low. A test at
+ * 1 µs would then miss the own frame of a seek in a few percent of seeks and keep the target.
+ *
+ * The test needs a tick of the video time base longer than twice this value. A frame one tick
+ * before or after the position then lies outside the tolerance.
+ */
+const SEEKED_FRAME_TOLERANCE_SECONDS = 2e-6;
+
+/**
  * Seconds from the start of nominal frame 0 to the middle of nominal frame `frameIndex`:
  * (frameIndex + 1/2) * frameRate.d / frameRate.n, written as
  * ((2 * frameIndex + 1) * frameRate.d) / (2 * frameRate.n).
@@ -1871,6 +1884,103 @@ export function createPlaybackStore(
       seekToStopFrame(target, null);
     };
 
+    /**
+     * True when the frame that RVFC reported last holds the position of the element, on a
+     * calibrated source (ADR 022). syncSeeked reads it in the "ready" state. The HTML
+     * specification does not order the frame callback of a seek against the end of the seek, so
+     * the only callback of a paused seek can run while the element still reports `seeking`. That
+     * callback sets presentedFrame and keeps the display target, and a paused element may present
+     * no later frame to clear it.
+     *
+     * The test reads the position, not the order of the callbacks. After the seek the browser
+     * shows the frame that holds the position, so a frame that holds it is the frame on screen,
+     * whether its callback came from this seek or from an earlier one. A late callback of a frame
+     * from before the seek therefore counts only when the seek landed on that same frame, and
+     * then no later callback may come.
+     *
+     * The times carry the rounding of the web view (SEEKED_FRAME_TOLERANCE_SECONDS). The result
+     * is false when one tick of the video time base is not longer than twice the tolerance: a
+     * frame one tick before or after the position is then within the rounding, and a seek to the
+     * last tick before a frame, as the seek back of a segment playback to `outPts - 1` makes
+     * (ADR 026), would take the late callback of that frame. Otherwise the frame must not start
+     * after the position by more than the tolerance, so a frame one tick or more after the
+     * position does not count. Then:
+     *
+     * - On the frame grid, the ADR 028 index of the frame is the index of the position, by the
+     *   rule of the frame step (stepToFrame), with the tolerance added to the position for its
+     *   rounding. A real frame start lies less than one tick from its nominal start, and less
+     *   than the margin before it, so the index of the position is never below the index of the
+     *   frame that holds it, and an earlier frame has a lower index. The middle target of a step
+     *   and the stored PTS of a boundary both have the index of their frame. Seconds alone cannot
+     *   tell this: a container that rounds each PTS can start the next frame less than one
+     *   interval after a frame start, so the late callback of the frame before a stored PTS would
+     *   count.
+     *
+     *   The last frame of the extent in ticks also holds the positions of the next index, the
+     *   index of the end of the extent. Three seeks land on that index or on the next one and show
+     *   that frame: a step that the end position clamped, Go to Out on an Out at the end of the
+     *   extent, and a click at the right end of the ruler. When the last frame is shorter than an
+     *   interval, the end position has the index of the last frame itself, and the equality above
+     *   holds. A position of a later index does not count: the extent can
+     *   leave out frames of the source (isLastFrameOnScreen), and a seek past the extent can show
+     *   one of them. Such a frame in the index after the extent is the one case left where the
+     *   late callback of the last frame of the extent clears the target on a frame that is not
+     *   on screen. The callback of the frame that the seek shows then comes, because it is
+     *   another frame, and it corrects presentedFrame.
+     * - Off the grid no frame boundary is known, and a frame can be shorter than the nominal
+     *   interval: at a variable rate, and on a coarse time base, where two frames can start one
+     *   tick apart. Every frame starts on a tick of the video time base, and no two frames start
+     *   less than one tick apart, so the frame holds the position when it starts less than one
+     *   tick minus the tolerance before it. A seek to the PTS of a frame lands on its start, and
+     *   the late callback of the frame before it lies one tick or more before that position. A
+     *   step and End off the grid land later in their frame, so their target stays until the
+     *   next frame, as before.
+     *
+     * Without a nominal rate the result is false, as before.
+     */
+    const presentedFrameHoldsPosition = (
+      state: PlaybackState,
+      source: PlaybackSource,
+      position: number,
+    ): boolean => {
+      const frame = state.presentedFrame;
+      const origin = calibratedMediaTime;
+      const fps = getNominalFrameRate(source);
+      const tolerance = SEEKED_FRAME_TOLERANCE_SECONDS;
+      const tickSeconds = source.videoTimeBase.n / source.videoTimeBase.d;
+      if (
+        frame === null ||
+        origin === null ||
+        fps === null ||
+        state.calibrationStatus !== "ready" ||
+        typeof position !== "number" ||
+        !Number.isFinite(position) ||
+        !(tickSeconds > 2 * tolerance) ||
+        frame.mediaTime > position + tolerance
+      ) {
+        return false;
+      }
+      if (!hasExactFrameGrid(source)) {
+        return position - frame.mediaTime < tickSeconds - tolerance;
+      }
+      const frameIndex = stopFrameIndexOfPts(source, fps, frame.inferredSourcePts);
+      if (frameIndex < 0) {
+        return false;
+      }
+      const marginSeconds = frameBoundaryMarginSeconds(fps, source.videoTimeBase);
+      const positionIndex = Math.floor(
+        ((position - origin + marginSeconds + tolerance) * fps.n) / fps.d,
+      );
+      if (positionIndex === frameIndex) {
+        return true;
+      }
+      // The last frame of the extent, and a position of the index after it only.
+      return (
+        positionIndex === frameIndex + 1 &&
+        frameIndex === extentLastFrameIndex(source, fps)
+      );
+    };
+
     return {
       presentedFrame: initialState?.presentedFrame ?? null,
       calibrationStatus: initialState?.calibrationStatus ?? "unavailable",
@@ -2876,14 +2986,27 @@ export function createPlaybackStore(
         } else if (
           lastAcceptedSeek?.scrub !== true &&
           deferredNavigation === null &&
-          get().calibrationStatus !== "ready" &&
           get().seekTargetSeconds !== null
         ) {
-          // In non-ready calibration states, seeked clears the display target once settled,
-          // but a scrub seek must not clear it because fastSeek lands on a keyframe (ADR 022).
-          // A deferred navigation has not reached the element, so no seeked event answers it,
-          // and its target stays until it runs.
-          set({ seekTargetSeconds: null });
+          // The seek settled. A scrub seek keeps the display target because fastSeek lands on a
+          // keyframe (ADR 022). A deferred navigation has not reached the element, so no seeked
+          // event answers it, and its target stays until it runs.
+          //
+          // In non-ready calibration states, seeked clears the target. In the ready state the
+          // frame callback clears it, because a callback for an intermediate frame of a queued
+          // seek can still arrive, and a cleared target would move the playhead back. When the
+          // callback of the seek ran while the element still reported seeking, it kept the
+          // target, and a paused element may present no later frame. seeked then clears the
+          // target when the frame that the callback reported holds the position that the seek
+          // reached (presentedFrameHoldsPosition). A frame from before the seek that lies
+          // elsewhere keeps it, and the callback of the frame of the seek clears it later.
+          const state = get();
+          if (
+            state.calibrationStatus !== "ready" ||
+            presentedFrameHoldsPosition(state, attachedSource, element.currentTime)
+          ) {
+            set({ seekTargetSeconds: null });
+          }
         }
       },
 

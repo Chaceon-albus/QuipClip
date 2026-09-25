@@ -402,8 +402,10 @@ export interface PlaybackActions {
 
   /**
    * Synchronizes state when the matching video element finishes a seek (onSeeked event).
-   * Dispatches the next queued seek if one is pending, or clears the display target when
-   * not in the ready state (ADR 022).
+   * Dispatches the next queued seek if one is pending. Otherwise, unless the last seek was a
+   * scrub or a navigation is deferred, it clears the display target: when not in the ready
+   * state, and in the ready state when the presented frame holds the position of the element,
+   * because the frame callback of the seek can run before the seek ends (ADR 022).
    */
   syncSeeked: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
