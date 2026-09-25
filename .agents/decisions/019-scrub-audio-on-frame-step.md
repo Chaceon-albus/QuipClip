@@ -89,6 +89,30 @@ the timer on `playing` alone, the timer stopped the element before the seek ende
 bursts. Seven of eight single steps played no audio, and the eighth played 13 milliseconds.
 With the new rule, each single step played 41 to 75 milliseconds of audio.
 
+(Changed on 2026-09-25.) The burst ends on the media clock of the element, not on a timer.
+After the `seeked` and `playing` events of the burst, the controller reads `currentTime`
+again and again. It pauses the element when the position reaches the latest target plus
+`SCRUB_BURST_SECONDS`. Each read waits for the media time that remains, from 4 to 16
+milliseconds. The clock of the element moves only while the element plays, so a slow start
+does not shorten the burst.
+
+A timer on the wall clock was not correct in Chrome on macOS. After a seek, the clock of
+the element moved approximately 20 milliseconds and then stood almost still for 300 to 455
+milliseconds before it moved at the normal rate. A timer of 50 milliseconds therefore ended
+the burst while the clock stood still.
+
+The controller also stops the burst when the element reports `ended`, because the clock of
+an ended element does not move again.
+
+The watchdog stays. It waits for the media time that the burst still has to play, at least
+one burst, plus `SCRUB_WATCHDOG_EXTRA_SECONDS`, which is now 1 second. It restarts when the
+clock check starts and on each continued request. A slow seek therefore does not use up its
+margin. The margin is longer than the start delay of the audio output in Chrome, so the
+watchdog does not end a burst that is about to sound.
+
+The wait for `seeked` and `playing` is now a precaution. A read of the clock during the
+seek gives the target of the seek, so an early read could not end the burst.
+
 A forward request that arrives while a burst sounds, and whose target is within
 `SCRUB_CONTINUATION_TOLERANCE_SECONDS` of the position of the element, does not seek. It
 only moves the stop time later. A held arrow key repeats approximately 30 times each
@@ -96,6 +120,30 @@ second. That rate is near to real time at 25 to 30 frames each second, so the el
 already at the correct position. Without this rule a held key restarts the element
 continuously and the result is a stutter. A backward request always seeks, because audio
 does not play backwards.
+
+(Changed on 2026-09-25.) A forward request continues the burst when three conditions are
+true. Its target is at most `SCRUB_CONTINUATION_TOLERANCE_SECONDS` after the last target.
+The element is behind the new target by no more than a lag limit. The element is ahead of
+the new target by no more than the tolerance. While a seek runs, the position of the
+element is the target of that seek. A continued request moves the stop position to its
+target plus one burst.
+
+The lag limit depends on the kind of the request. A frame step uses
+`SCRUB_CONTINUATION_MAX_LAG_SECONDS`, which is 0.75 seconds. A drag of the playhead (ADR
+022) uses `SCRUB_DRAG_MAX_LAG_SECONDS`, which is 0.1 seconds, so the sound of a drag stays
+near the pointer as before. The playback store sends the kind `drag` with each scrub burst.
+
+The earlier rule compared the target with the position of the element. The element starts
+late, so during a held key it plays behind the target by the time of its seek and its
+start. That lag was longer than the tolerance, so each step started a new seek, and each
+seek started the wait again.
+
+A held key repeats approximately 30 times each second. At 24 to 30 frames each second, the
+target therefore moves at 1 to 1.26 times real time. When the clock starts, the lag is that
+rate times the time of the start: up to 0.57 seconds in Chrome. The lag limit of a frame
+step is longer, so the first seek of a hold is not repeated before the clock starts. A key
+that steps faster than real time still seeks again when the lag passes the limit. The sound
+therefore does not fall behind without end.
 
 The element is mounted only when the probe reports an audio stream, only while the
 playback store reports that it is attached to that same source revision, and only after
@@ -127,6 +175,32 @@ cue helps the user find a frame. It is not an edit action, and a message about i
 report a fault that the user cannot correct.
 
 ## Consequences
+
+- (Added on 2026-09-25.) The stop on the media clock and the new continuation rule remove
+  the two limits of the entry below. A measurement with `played` ranges, in WKWebView and
+  in Chrome on macOS, found these results. A single step played 50 to 55 milliseconds in
+  both. In Chrome, the first step after the load also played a full burst, and the element
+  paused 410 to 420 milliseconds after the step.
+
+- (Added on 2026-09-25.) The measurement also held a forward key for 90 steps, 33
+  milliseconds apart. At 30 frames each second, the sound was continuous with one seek in
+  both web views. At 24 and 25 frames each second, the lag passed its limit once, after 1.7
+  to 2.6 seconds, so the sound came in two pieces. In a longer hold, that gap comes back
+  each time the lag passes the limit again.
+
+- (Added on 2026-09-25.) At 60 frames each second, a held key steps slower than real time.
+  The element reached the stop position between the steps, paused, and the next step
+  started a new seek. That happened 5 to 10 times in 3 seconds. A resume without a seek,
+  when the new target is just behind the paused position, is a possible later step.
+
+- (Added on 2026-09-25.) During a held key, the sound follows the picture by the lag, up to
+  0.75 seconds. After the release, the sound continues until the element reaches one burst
+  past the last target. That took 89 to 694 milliseconds in the measurement. The lag limit
+  keeps it at 0.8 seconds or less, unless the element stalls after the release.
+
+- (Added on 2026-09-25.) In Chrome, the clock of a single step moves at the normal rate
+  only 300 to 455 milliseconds after the step, so its sound starts late. The Chrome figures
+  come from Chrome on macOS. WebView2 on Windows was not measured.
 
 - (Added on 2026-09-24.) A burst in Chromium plays approximately 15 milliseconds of its 50.
   A measurement in a Chromium browser found that the audio output starts approximately 35

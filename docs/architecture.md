@@ -211,21 +211,25 @@ Exact adjacent frame stepping needs future frame-boundary discovery or another d
 A frame step also plays a short piece of the sound at the new position, because the picture
 alone frequently does not identify the correct frame. A second, hidden `<audio>` element
 carries the same asset URL as the preview element. One controller in
-`src/features/playback/scrubAudio.ts` seeks that element and plays it for 50 milliseconds.
-`seekNominal` starts a burst, and so does a scrub seek during a drag of the playhead (ADR
-022). Every other playback action stops one, so a cue and the real playback never sound
-together.
+`src/features/playback/scrubAudio.ts` seeks that element and plays 50 milliseconds of its
+media. `seekNominal` starts a burst, and so does a scrub seek during a drag of the playhead
+(ADR 022). Every other playback action stops one, so a cue and the real playback never
+sound together.
 
-The controller starts its stop timer after the `seeked` event of the burst and the `playing`
-event, in either order, because the element needs as long to seek and to start as the burst
-lasts. WebKit sends `playing` before the seek ends. A held key that steps forward extends the
-current burst instead of a restart, so the sound stays continuous. The element is mounted
-only for a source that has an audio stream, only while the playback store reports that it
-is attached to that same source revision, and only after the calibration status leaves
-`calibrating`. The identity test is what makes the gate correct: the render that first
-carries a new source still holds the store state of the previous one, so a boolean is
-stale exactly when it decides. The element therefore cannot delay the calibration anchor.
-See ADR 019.
+The controller stops the element when its media clock reaches one burst past the latest
+target. A timer is not correct, because the clock of Chrome can stand almost still for 300
+to 455 milliseconds after a seek. The controller reads the clock only after the `seeked`
+event of the burst and the `playing` event, in either order. A held key that steps forward
+extends the current burst instead of a restart, while the element plays no more than 0.75
+seconds behind the target, so a hold near real time sounds continuous. A drag keeps the
+sound within 0.1 seconds of the pointer.
+
+The element is mounted only for a source that has an audio stream, only while the playback
+store reports that it is attached to that same source revision, and only after the
+calibration status leaves `calibrating`. The identity test is what makes the gate correct:
+the render that first carries a new source still holds the store state of the previous one,
+so a boolean is stale exactly when it decides. The element therefore cannot delay the
+calibration anchor. See ADR 019.
 
 The playhead draws the target of the last seek request at once, before the video presents
 the frame. That target is for display only. The edit actions still wait for RVFC, so a mark

@@ -413,6 +413,13 @@ zero move. It also drops a scrub request that repeats the time of the last accep
 request. The continuation rule of ADR 019 makes a slow
 forward drag sound continuous.
 
+(Changed on 2026-09-25.) The store sends each scrub burst with the kind `drag`. The
+controller of ADR 019 then continues a drag burst only while the element is at most 0.1
+seconds behind the target, so the sound of a drag stays near the pointer. A frame step has
+a longer lag limit, so a held key near real time stays continuous. A drag in Chrome was not
+measured. After a seek, the clock of Chrome stands still longer than the drag limit allows,
+so a drag there starts a new seek on most requests, as it did before this change.
+
 This amends ADR 019. ADR 019 makes `seekNominal` the only action that requests a burst,
 and it makes `seekToPts` and `seekApproximate` stop a burst. After this decision, both
 actions request a burst in scrub mode. An exact seek, from a click or from the end of a
