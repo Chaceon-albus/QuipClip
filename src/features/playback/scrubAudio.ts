@@ -18,16 +18,20 @@ export const SCRUB_BURST_SECONDS = 0.05;
 /** Maximum distance in seconds (100 ms) between target and current position to extend an ongoing forward scrub rather than re-seeking. */
 export const SCRUB_CONTINUATION_TOLERANCE_SECONDS = 0.1;
 
-/** Extra safety margin in seconds (500 ms) added to the burst duration for the watchdog timer if the 'playing' event does not fire. */
+/** Extra safety margin in seconds (500 ms) added to the burst duration for the watchdog timer if the 'playing' or the 'seeked' event does not fire. */
 export const SCRUB_WATCHDOG_EXTRA_SECONDS = 0.5;
+
+/** The events of the element that the controller listens to. */
+export type ScrubAudioEventType = "playing" | "seeked" | "error";
 
 /** The narrow media surface the controller needs, so a test can pass a fake. */
 export interface ScrubAudioElement {
   play: () => Promise<void> | void;
   pause: () => void;
   currentTime: number;
-  addEventListener: (type: "playing" | "error", listener: () => void) => void;
-  removeEventListener: (type: "playing" | "error", listener: () => void) => void;
+  readonly seeking: boolean;
+  addEventListener: (type: ScrubAudioEventType, listener: () => void) => void;
+  removeEventListener: (type: ScrubAudioEventType, listener: () => void) => void;
 }
 
 /** Injected timers, so a test drives the schedule without a real clock. */
@@ -63,6 +67,15 @@ function isAbortError(reason: unknown): boolean {
   return false;
 }
 
+/** Reads `seeking`. A read that throws counts as no seek. */
+function isSeeking(element: ScrubAudioElement): boolean {
+  try {
+    return element.seeking === true;
+  } catch {
+    return false;
+  }
+}
+
 export function createScrubAudioController(
   timers: ScrubAudioTimers = defaultTimers,
 ): ScrubAudioController {
@@ -70,6 +83,10 @@ export function createScrubAudioController(
   let disabled = false;
   let burstId = 0;
   let active = false;
+  // The two conditions of the stop timer of the burst: its seek has finished, and the element
+  // plays. A seek of a new burst clears both.
+  let seekDone = false;
+  let playingSeen = false;
   let stopHandle: number | null = null;
   let watchdogHandle: number | null = null;
 
@@ -97,18 +114,22 @@ export function createScrubAudioController(
     }
   };
 
-  const onPlaying = (): void => {
-    if (!active) {
+  const armStopTimer = (): void => {
+    if (!active || !seekDone || !playingSeen) {
       return;
     }
     if (stopHandle !== null) {
       timers.clearTimer(stopHandle);
       stopHandle = null;
     }
-    // The stop timer MUST be armed here on the 'playing' event and not when request
-    // calls play(). A media element needs roughly 10 to 50 milliseconds to seek and
-    // to start, which is as long as the burst itself, so a timer armed earlier would
-    // cut the burst to almost nothing.
+    // The stop timer MUST wait for both the end of the seek and the 'playing' event, and not
+    // start when request calls play(). A media element needs as long to seek and to start as
+    // the burst lasts, and a seek in WebKit took 40 to 150 milliseconds in a measurement, so a
+    // timer armed earlier cuts the burst to almost nothing. The order of the two events
+    // differs between the web views. Chromium sends 'playing' after 'seeked'. WebKit keeps the
+    // ready state through the assignment of currentTime, so it sends 'playing' at once, while
+    // the seek still runs, and a timer armed on 'playing' alone stopped the element before it
+    // made any sound.
     const id = burstId;
     stopHandle = timers.setTimer(() => {
       // Defends against a timer implementation that does not honour clearTimer.
@@ -117,6 +138,33 @@ export function createScrubAudioController(
       }
       stop();
     }, SCRUB_BURST_SECONDS * 1000);
+  };
+
+  const onPlaying = (): void => {
+    if (!active || !attached) {
+      return;
+    }
+    playingSeen = true;
+    // An assignment of currentTime before the metadata loads starts no seek, so no 'seeked'
+    // event comes. An element that plays and does not report `seeking` has no seek to wait
+    // for. The early 'playing' of WebKit arrives while `seeking` is still true.
+    if (!isSeeking(attached)) {
+      seekDone = true;
+    }
+    armStopTimer();
+  };
+
+  const onSeeked = (): void => {
+    if (!active || !attached) {
+      return;
+    }
+    // A later seek is still running, so this 'seeked' ends an earlier one. The burst waits
+    // for the end of its own seek.
+    if (isSeeking(attached)) {
+      return;
+    }
+    seekDone = true;
+    armStopTimer();
   };
 
   const onError = (): void => {
@@ -135,12 +183,14 @@ export function createScrubAudioController(
     if (attached && attached !== element) {
       stop();
       attached.removeEventListener("playing", onPlaying);
+      attached.removeEventListener("seeked", onSeeked);
       attached.removeEventListener("error", onError);
       attached = null;
     }
     if (attached !== element) {
       attached = element;
       attached.addEventListener("playing", onPlaying);
+      attached.addEventListener("seeked", onSeeked);
       attached.addEventListener("error", onError);
     }
     disabled = false;
@@ -152,6 +202,7 @@ export function createScrubAudioController(
     }
     stop();
     attached.removeEventListener("playing", onPlaying);
+    attached.removeEventListener("seeked", onSeeked);
     attached.removeEventListener("error", onError);
     attached = null;
   };
@@ -219,6 +270,8 @@ export function createScrubAudioController(
     const id = burstId;
     clearTimers();
     active = true;
+    seekDone = false;
+    playingSeen = false;
 
     try {
       attached.pause();

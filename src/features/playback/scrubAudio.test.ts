@@ -6,6 +6,7 @@ import {
   SCRUB_WATCHDOG_EXTRA_SECONDS,
   scrubAudioController,
   type ScrubAudioElement,
+  type ScrubAudioEventType,
   type ScrubAudioTimers,
 } from "./scrubAudio";
 
@@ -65,12 +66,14 @@ interface FakeAudioElement extends ScrubAudioElement {
   playCalls: number;
   pauseCalls: number;
   currentTimeAssignments: number[];
-  listeners: {
-    playing: Set<() => void>;
-    error: Set<() => void>;
-  };
+  listeners: Record<ScrubAudioEventType, Set<() => void>>;
+  seeking: boolean;
   setCurrentTimeInternal: (value: number) => void;
   firePlaying: () => void;
+  /** Ends the running seek: `seeking` turns false, then 'seeked' fires. */
+  fireSeeked: () => void;
+  /** The end of the seek and the start of the playback, in the order of Chromium. */
+  fireSeekedAndPlaying: () => void;
   fireError: () => void;
 }
 
@@ -81,8 +84,9 @@ function createFakeAudioElement(options?: {
 }): FakeAudioElement {
   let currentTime = options?.currentTime ?? 0;
   const currentTimeAssignments: number[] = [];
-  const listeners = {
+  const listeners: Record<ScrubAudioEventType, Set<() => void>> = {
     playing: new Set<() => void>(),
+    seeked: new Set<() => void>(),
     error: new Set<() => void>(),
   };
 
@@ -91,12 +95,15 @@ function createFakeAudioElement(options?: {
     pauseCalls: 0,
     currentTimeAssignments,
     listeners,
+    seeking: false,
     get currentTime() {
       return currentTime;
     },
+    // An assignment starts a seek, as it does on a media element.
     set currentTime(value: number) {
       currentTime = value;
       currentTimeAssignments.push(value);
+      fake.seeking = true;
     },
     setCurrentTimeInternal: (value: number) => {
       currentTime = value;
@@ -114,14 +121,22 @@ function createFakeAudioElement(options?: {
         options.pause();
       }
     }),
-    addEventListener: vi.fn((type: "playing" | "error", listener: () => void) => {
+    addEventListener: vi.fn((type: ScrubAudioEventType, listener: () => void) => {
       listeners[type].add(listener);
     }),
-    removeEventListener: vi.fn((type: "playing" | "error", listener: () => void) => {
+    removeEventListener: vi.fn((type: ScrubAudioEventType, listener: () => void) => {
       listeners[type].delete(listener);
     }),
     firePlaying: () => {
       Array.from(listeners.playing).forEach((cb) => cb());
+    },
+    fireSeeked: () => {
+      fake.seeking = false;
+      Array.from(listeners.seeked).forEach((cb) => cb());
+    },
+    fireSeekedAndPlaying: () => {
+      fake.fireSeeked();
+      fake.firePlaying();
     },
     fireError: () => {
       Array.from(listeners.error).forEach((cb) => cb());
@@ -142,7 +157,7 @@ describe("Scrub Audio Controller", () => {
     controller = createScrubAudioController(timers);
   });
 
-  it("1. assigns currentTime and calls play, and does not pause until one burst after playing event fires", () => {
+  it("1. assigns currentTime and calls play, and does not pause until one burst after the seek ends and playing fires", () => {
     controller.attach(element);
     controller.request(1.5, 1);
 
@@ -159,7 +174,13 @@ describe("Scrub Audio Controller", () => {
         .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
     ).toBe(false);
 
-    // Fire playing event
+    // The seek ends, and then the element plays, as in Chromium
+    element.fireSeeked();
+    expect(
+      timers
+        .getArmedTimers()
+        .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
+    ).toBe(false);
     element.firePlaying();
 
     // Element is still NOT paused immediately after playing event
@@ -175,18 +196,21 @@ describe("Scrub Audio Controller", () => {
     expect(element.pauseCalls).toBe(2);
   });
 
-  it("2. does not shorten burst on slow start: arms stop timer for SCRUB_BURST_SECONDS * 1000 when playing event arrives", () => {
+  it("2. does not shorten burst on slow seek: playing before the end of the seek, as in WebKit, arms nothing until seeked", () => {
     controller.attach(element);
     controller.request(1.0, 1);
 
-    // Simulate delay before playing event arrives; no stop timer armed yet
+    // WebKit keeps the ready state through the assignment of currentTime, so playing fires
+    // at once, while the seek still runs. The burst has not started to sound.
+    element.firePlaying();
+    expect(element.seeking).toBe(true);
     expect(
       timers
         .getArmedTimers()
         .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
     ).toBe(false);
 
-    element.firePlaying();
+    element.fireSeeked();
 
     const stopTimer = timers
       .getArmedTimers()
@@ -201,7 +225,7 @@ describe("Scrub Audio Controller", () => {
   it("3. extends ongoing forward burst inside tolerance without reassigning currentTime or calling play, pushing stop time later", () => {
     controller.attach(element);
     controller.request(1.0, 1);
-    element.firePlaying();
+    element.fireSeekedAndPlaying();
 
     const initialStopTimer = timers
       .getArmedTimers()
@@ -246,7 +270,7 @@ describe("Scrub Audio Controller", () => {
   it("4. reassigns currentTime and seeks on a forward request outside tolerance", () => {
     controller.attach(element);
     controller.request(1.0, 1);
-    element.firePlaying();
+    element.fireSeekedAndPlaying();
 
     element.setCurrentTimeInternal(1.0);
     // Distance > SCRUB_CONTINUATION_TOLERANCE_SECONDS
@@ -272,7 +296,7 @@ describe("Scrub Audio Controller", () => {
   it("5. always reassigns currentTime and seeks on a backward request even inside tolerance", () => {
     controller.attach(element);
     controller.request(1.0, 1);
-    element.firePlaying();
+    element.fireSeekedAndPlaying();
 
     element.setCurrentTimeInternal(1.0);
     // Distance <= SCRUB_CONTINUATION_TOLERANCE_SECONDS, but direction is -1
@@ -298,7 +322,7 @@ describe("Scrub Audio Controller", () => {
   it("7. pauses the element and clears both timers when stop() is called", () => {
     controller.attach(element);
     controller.request(1.0, 1);
-    element.firePlaying();
+    element.fireSeekedAndPlaying();
 
     expect(timers.count).toBe(2); // watchdog and stop timers
     const pauseBefore = element.pauseCalls;
@@ -312,7 +336,7 @@ describe("Scrub Audio Controller", () => {
   it("8. does not pause newer burst from a leftover stop timer of a superseded burst", () => {
     controller.attach(element);
     controller.request(1.0, 1);
-    element.firePlaying();
+    element.fireSeekedAndPlaying();
 
     const oldStopTimer = timers
       .getArmedTimers()
@@ -490,12 +514,14 @@ describe("Scrub Audio Controller", () => {
 
     expect(element1.pauseCalls).toBe(pause1Before + 1);
     expect(element1.listeners.playing.size).toBe(0);
+    expect(element1.listeners.seeked.size).toBe(0);
     expect(element1.listeners.error.size).toBe(0);
     expect(element2.listeners.playing.size).toBe(1);
+    expect(element2.listeners.seeked.size).toBe(1);
     expect(element2.listeners.error.size).toBe(1);
   });
 
-  it("handles continuation before playing event arrives by re-arming watchdog and keeping stopHandle null", () => {
+  it("handles continuation before the burst starts by re-arming watchdog and keeping stopHandle null", () => {
     controller.attach(element);
     controller.request(1.0, 1);
 
@@ -523,15 +549,15 @@ describe("Scrub Audio Controller", () => {
     expect(rearmedWatchdog).toBeDefined();
     expect(rearmedWatchdog.id).not.toBe(initialWatchdog.id);
 
-    // Stop timer remains un-armed because playing event has not arrived
+    // Stop timer remains un-armed because the seek has not ended and playing has not arrived
     expect(
       timers
         .getArmedTimers()
         .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
     ).toBe(false);
 
-    // Later when playing arrives, it arms the stop timer
-    element.firePlaying();
+    // Later when the seek ends and playing arrives, the stop timer arms
+    element.fireSeekedAndPlaying();
     const stopTimer = timers
       .getArmedTimers()
       .find((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000);
@@ -607,7 +633,7 @@ describe("Scrub Audio Controller", () => {
   it("does not pause element again when a stale stop timer fires after controller.stop()", () => {
     controller.attach(element);
     controller.request(1.0, 1);
-    element.firePlaying();
+    element.fireSeekedAndPlaying();
 
     const stopTimer = timers
       .getArmedTimers()
@@ -645,7 +671,7 @@ describe("Scrub Audio Controller", () => {
     rejectPriorBurst({ name: "AbortError" });
     await Promise.resolve();
 
-    heldKeyElement.firePlaying();
+    heldKeyElement.fireSeekedAndPlaying();
 
     expect(heldKeyElement.playCalls).toBe(2);
     expect(heldKeyElement.currentTimeAssignments).toEqual([0.5, 1.0]);
@@ -667,16 +693,16 @@ describe("Scrub Audio Controller", () => {
     expect(pendingStopTimer).toBeDefined();
   });
 
-  it("does not arm a stop timer when playing event fires with no active burst", () => {
+  it("does not arm a stop timer when seeked and playing fire with no active burst", () => {
     controller.attach(element);
-    element.firePlaying();
+    element.fireSeekedAndPlaying();
     expect(timers.count).toBe(0);
 
     controller.request(1.0, 1);
     controller.stop();
     expect(timers.count).toBe(0);
 
-    element.firePlaying();
+    element.fireSeekedAndPlaying();
     expect(timers.count).toBe(0);
   });
 
@@ -762,7 +788,7 @@ describe("Scrub Audio Controller", () => {
 
     // 2. Request burst 1. Fire playing.
     controller.request(1.0, 1);
-    controlledElement.firePlaying();
+    controlledElement.fireSeekedAndPlaying();
     expect(controlledElement.playCalls).toBe(1);
     expect(controlledElement.currentTimeAssignments).toEqual([1.0]);
 
@@ -776,7 +802,7 @@ describe("Scrub Audio Controller", () => {
     await Promise.resolve();
 
     // 5. Fire playing for burst 2, then issue an IN-TOLERANCE forward request.
-    controlledElement.firePlaying();
+    controlledElement.fireSeekedAndPlaying();
     controller.request(2.05, 1);
 
     // 6. Assert the continuation path was taken: play() call count unchanged, and no new currentTime assignment.
@@ -799,7 +825,7 @@ describe("Scrub Audio Controller", () => {
     // Request burst 2, superseding burst 1 (burstId becomes 2)
     elementWithRejection.play = vi.fn(() => Promise.resolve());
     controller.request(2.0, 1);
-    elementWithRejection.firePlaying();
+    elementWithRejection.fireSeekedAndPlaying();
 
     const pauseCallsBeforeRejection = elementWithRejection.pauseCalls;
     const armedTimersCountBefore = timers.count;
@@ -880,13 +906,13 @@ describe("Scrub Audio Controller", () => {
 
       runController.attach(runElement);
       runController.request(1.0, 1);
-      runElement.firePlaying();
+      runElement.fireSeekedAndPlaying();
       // A held key: a forward request inside the tolerance continues the burst.
       runElement.setCurrentTimeInternal(1.03);
       runController.request(1.04, 1);
       // A backward request always seeks.
       runController.request(0.9, -1);
-      runElement.firePlaying();
+      runElement.fireSeekedAndPlaying();
       const stopTimer = runTimers
         .getArmedTimers()
         .find((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000);
@@ -911,5 +937,147 @@ describe("Scrub Audio Controller", () => {
     expect(silent.playCalls).toBe(audible.playCalls);
     expect(silent.pauseCalls).toBe(audible.pauseCalls);
     expect(silent.armed).toEqual(audible.armed);
+  });
+
+  it("does not arm a stop timer on seeked alone", () => {
+    controller.attach(element);
+    controller.request(1.0, 1);
+    element.fireSeeked();
+
+    expect(
+      timers
+        .getArmedTimers()
+        .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
+    ).toBe(false);
+    expect(element.pauseCalls).toBe(1);
+  });
+
+  it("ignores the seeked of a superseded burst that arrives while the seek of the new burst runs", () => {
+    controller.attach(element);
+    // Burst A seeks. Burst B supersedes it with a backward request, which always seeks.
+    controller.request(1.0, 1);
+    controller.request(0.9, -1);
+    expect(element.currentTimeAssignments).toEqual([1.0, 0.9]);
+
+    // WebKit sends the playing of burst B at once, while its seek runs.
+    element.firePlaying();
+    // The seeked of burst A arrives. The seek of burst B still runs, so the element still
+    // reports seeking.
+    expect(element.seeking).toBe(true);
+    Array.from(element.listeners.seeked).forEach((cb) => cb());
+    expect(
+      timers
+        .getArmedTimers()
+        .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
+    ).toBe(false);
+
+    // The seek of burst B ends.
+    element.fireSeeked();
+    expect(
+      timers
+        .getArmedTimers()
+        .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
+    ).toBe(true);
+  });
+
+  it("clears both conditions of the stop timer when a new burst seeks", () => {
+    controller.attach(element);
+    controller.request(1.0, 1);
+    element.fireSeekedAndPlaying();
+    expect(
+      timers
+        .getArmedTimers()
+        .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
+    ).toBe(true);
+
+    // A backward request always seeks. It pauses and plays again, so WebKit sends playing at
+    // once, and the stop timer still waits for the end of the new seek.
+    controller.request(0.9, -1);
+    expect(timers.count).toBe(1);
+    element.firePlaying();
+    expect(
+      timers
+        .getArmedTimers()
+        .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
+    ).toBe(false);
+
+    element.fireSeeked();
+    const stopTimer = timers
+      .getArmedTimers()
+      .find((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000);
+    expect(stopTimer).toBeDefined();
+    const pauseBefore = element.pauseCalls;
+    timers.fire(stopTimer!.id);
+    expect(element.pauseCalls).toBe(pauseBefore + 1);
+  });
+
+  it("listens to seeked on the attached element and stops listening on detach", () => {
+    controller.attach(element);
+    expect(element.listeners.seeked.size).toBe(1);
+    controller.detach(element);
+    expect(element.listeners.seeked.size).toBe(0);
+  });
+
+  it("clears both conditions for a new seek in the Chromium order too: seeked alone arms nothing", () => {
+    controller.attach(element);
+    controller.request(1.0, 1);
+    element.fireSeekedAndPlaying();
+
+    controller.request(0.9, -1);
+    element.fireSeeked();
+    expect(
+      timers
+        .getArmedTimers()
+        .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
+    ).toBe(false);
+
+    element.firePlaying();
+    expect(
+      timers
+        .getArmedTimers()
+        .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
+    ).toBe(true);
+  });
+
+  it("arms the stop timer on playing when the assignment started no seek, as before the metadata loads", () => {
+    controller.attach(element);
+    controller.request(0, -1);
+    // Before the metadata loads, an assignment of currentTime only stores the start position.
+    // No seek starts, so the element never reports seeking and never sends seeked.
+    element.seeking = false;
+
+    element.firePlaying();
+    const stopTimer = timers
+      .getArmedTimers()
+      .find((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000);
+    expect(stopTimer).toBeDefined();
+    timers.fire(stopTimer!.id);
+    expect(element.pauseCalls).toBe(2);
+  });
+
+  it("keeps the WebKit order through the continuation path: the stop timer arms at the end of the seek", () => {
+    controller.attach(element);
+    controller.request(1.0, 1);
+    // WebKit: playing at once, while the seek runs.
+    element.firePlaying();
+
+    // A held key: a forward request inside the tolerance continues the burst. The element
+    // reports the target of its seek as its position.
+    controller.request(1.03, 1);
+    expect(element.currentTimeAssignments).toEqual([1.0]);
+    expect(element.playCalls).toBe(1);
+    expect(
+      timers
+        .getArmedTimers()
+        .some((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000),
+    ).toBe(false);
+
+    element.fireSeeked();
+    const stopTimer = timers
+      .getArmedTimers()
+      .find((t) => t.milliseconds === SCRUB_BURST_SECONDS * 1000);
+    expect(stopTimer).toBeDefined();
+    timers.fire(stopTimer!.id);
+    expect(element.pauseCalls).toBe(2);
   });
 });
