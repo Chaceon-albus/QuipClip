@@ -202,7 +202,11 @@ export const en = {
       markIn: "In",
       markInAria: "Mark In Point",
       markOut: "Out",
-      markOutAria: "Mark Out Point (First Frame After the Segment)",
+      // The accessible name of the Mark Out button and the first line of its tooltip. The Out
+      // point is the frame on screen. It is the first frame after the segment, so it is not
+      // in the segment. The text does not say "not exported": after a split, the same frame
+      // is the In point of the next segment.
+      markOutAria: "Mark Out Point (Not in Segment)",
       split: "Split",
       splitAria: "Split Segment at Playhead",
       // Ends the segment that is being built: the current segment, or a pending In point.

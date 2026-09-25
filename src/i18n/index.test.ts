@@ -1395,7 +1395,7 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.markInAria")).toBe("Mark In Point");
     expect(instance.t("transport.action.markOut")).toBe("Out");
     expect(instance.t("transport.action.markOutAria")).toBe(
-      "Mark Out Point (First Frame After the Segment)",
+      "Mark Out Point (Not in Segment)",
     );
     expect(instance.t("transport.action.split")).toBe("Split");
     expect(instance.t("transport.action.splitAria")).toBe("Split Segment at Playhead");
@@ -1597,9 +1597,7 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("transport.action.markIn")).toBe("入点");
     expect(instance.t("transport.action.markInAria")).toBe("标记入点");
     expect(instance.t("transport.action.markOut")).toBe("出点");
-    expect(instance.t("transport.action.markOutAria")).toBe(
-      "标记出点（片段后的第一帧）",
-    );
+    expect(instance.t("transport.action.markOutAria")).toBe("标记出点（不在片段内）");
     expect(instance.t("transport.action.split")).toBe("分割");
     expect(instance.t("transport.action.splitAria")).toBe("在播放头处分割片段");
     expect(instance.t("transport.action.finishSegment")).toBe("结束");

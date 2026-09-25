@@ -154,7 +154,7 @@ export const zhCN: TranslationCatalog = {
       markIn: "入点",
       markInAria: "标记入点",
       markOut: "出点",
-      markOutAria: "标记出点（片段后的第一帧）",
+      markOutAria: "标记出点（不在片段内）",
       split: "分割",
       splitAria: "在播放头处分割片段",
       finishSegment: "结束",
