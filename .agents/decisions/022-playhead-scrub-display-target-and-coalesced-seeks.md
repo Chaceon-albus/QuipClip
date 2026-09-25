@@ -197,6 +197,165 @@ the seek can reach. The test reads the position only, as the edge no-op off the 
 The option changes no other seek. A request that the store defers during the calibration
 runs without the option, because at the anchor the element stands on the first frame.
 
+### The stop point of a segment playback
+
+(Added on 2026-09-24.) The playback store has one more public field, `playbackStop`. It holds
+`inPts`, `outPts` and a phase, `playing` or `stopped`, or it is null. In the `stopped` phase
+it also holds `restPts`, the PTS of the frame that the stop rested on, and
+`windowEndSeconds`, the end of the seek-back window. `playSegment` sets it after it seeks to
+`inPts` and plays (ADR 026). It is not a display target. The playhead and the timecode never
+read it, and the other rules of this record do not change.
+
+**The last frame.** On the frame grid, the last frame is the last nominal frame whose start
+lies before `outPts` by more than the margin of ADR 028. This is `lastFrameIndexOfExtent` of
+the ticks from `videoStartPts` to `outPts`, the rule of End (ADR 026). For an Out that a
+frame presented, it is the ADR 028 index of the Out minus one. For an Out at the end of the
+extent, it is the frame that End goes to, also when that frame is shorter than an interval.
+An Out after the extent stops on the last frame of the extent. Off the grid, the last frame
+is the frame that holds `outPts − 1`.
+
+A segment cannot play in these cases:
+
+- Its In lies at or after its Out, or its Out lies at or before `videoStartPts`.
+- On the grid, its last frame lies before the ADR 028 frame of its In. Examples are a
+  segment after the end of the extent, and a segment of one tick on a grid whose margin is
+  one tick.
+- When the probe gives the extent in ticks, its In lies at or after
+  `videoStartPts + videoDurationTicks`, on the grid or off it.
+
+**When the stop is reached.** The store tests each frame callback that arrives while no seek
+runs or waits. This is the condition that clears the display target, so a frame from before
+the seek to `inPts` is never tested. The stop is reached at the first frame that meets one
+of these conditions:
+
+- On the grid, its ADR 028 index is the index of the last frame, or a later index.
+- Off the grid, it starts at or after the last tick before the Out, `outPts − 1`, or
+  `outPts` lies less than 1.5 nominal intervals after it. Without a nominal rate, only the
+  first test applies.
+
+**What the stop does.** The store pauses the element. When the frame is the last frame, the
+pause is the whole stop, and the phase becomes `stopped`, with that frame and the end of the
+seek-back window. On the grid, the last frame has the index of the last frame. Off the grid,
+it is any frame that starts before `outPts`: the frame at `outPts − 1`, which proves the
+last frame, or a frame that the prediction names. That frame can start before `inPts` when
+it is the frame that holds `inPts`. When the prediction is right, which is the usual case,
+the frame already holds `outPts − 1`, so a seek to that tick would land on the frame on
+screen.
+
+The position of the element does not decide whether the frame is the last frame. A frame
+callback runs after the browser presented the frame, and the pause runs later still, so the
+paused position can lie some frames past the last frame while the picture still shows it.
+At 50 or 60 fps the delay is close to one frame. When the frame lies past the last frame,
+because a callback came late or was skipped, the store clears the field and seeks back from
+it: on the grid with the absolute frame step that `seekToFrameIndex` uses, off the grid with
+`seekToPts(outPts − 1)`. That seek starts from another frame than the last frame, so it
+brings a frame callback. Neither seek requests a cue.
+
+**After the pause.** In the `stopped` phase, the element is paused. The seek-back window
+ends 0.1 s after `outPts`, or one nominal interval after it when that is longer. When the
+element paused after `outPts`, as after a stall of the page or with a decoder that lags, the
+window ends at least one such distance after the position where the element paused, on the
+calibrated mapping, so the frame at that position lies in it. The store reads that position
+right after the pause; the margin covers an engine that reports it early. On the grid, the
+window holds the indices after the last frame up to the index of the frame that holds its
+end. Off the grid, it holds the frames that start at or after `outPts` and at or before its
+end.
+
+A frame in the window is a frame that the browser presented from a position that the element
+reached before the pause took effect. It gets one seek back to the last frame, and the field
+goes. That seek starts from a frame after the last frame, so it does not land on the frame on
+screen. A frame of the stop keeps the field: on the grid, the last frame shown again; off the
+grid, a frame that starts at or after `restPts` and before `outPts`. After an early
+prediction, such a later frame lies in the segment at or before the real last frame, and it
+can still lie before it. Any other frame, before the frame of the stop or past the window,
+clears the field with no seek.
+
+Every seek of the store clears the field before it starts. A `seeking` event in the `stopped`
+phase therefore comes from a seek that the store did not make, such as one from the media
+controls of the system, and it clears the field. In the `playing` phase a `seeking` event
+does not clear it, because the late event of the seek to `inPts` arrives there. A seek from
+the system while the segment plays therefore keeps the stop, and a frame past the last frame
+is pulled back. So does a frame callback that finds the
+element playing before its `play` event arrived.
+
+**A window that presents no frames.** A hidden or minimized window presents no frames, so no
+frame callback stops the playback. Each `timeupdate` in the `playing` phase, while no seek
+runs or waits, therefore compares the position with `outPts` on the calibrated mapping. When
+the position lies 0.1 s or more past `outPts`, and also one nominal interval or more past it,
+the store pauses. When the last frame of the segment is the last frame of the video, the
+pause ends the segment playback and the field goes, with no seek. On the grid, that is the
+last frame of the extent by the rule of End. Off the grid, `outPts` lies at or after
+`videoStartPts + videoDurationTicks`. Otherwise the store seeks to the last frame, counted
+from the position.
+
+On a visible window, the frame callbacks stop the playback first, because at the usual rates
+two or more of them come between the Out and that distance. While the decoder keeps up, the
+picture follows the element clock, so a backstop that still acts seeks to another frame than
+the one on screen. A decoder that lags, as with a heavy file that a web view decodes in
+software, can leave the last frame on screen, and the seek can then land on it. The backstop
+acts at the next `timeupdate`, which can come up to 250 ms later, and later still in a
+hidden window, where the engine can slow its timers.
+
+**The end of the media.** When the element reaches its end, it sends `pause` and then
+`ended`. In the `playing` phase, the first of the two ends the segment playback, and only
+while the element reports `ended`. A late `ended` event of an earlier end therefore does not
+end a segment playback that started after it. The field goes. The store does not seek in two
+cases: when the last frame of the segment is the last frame of the video, by the rule of the
+previous paragraph, because the element ends with the audio, which can last longer than the
+video, and the picture keeps the last frame of the video; and when `outPts` lies at or after
+the position where the element ended, within 1 µs. In every other case the playback passed the Out with
+no frame callback, and the store seeks back to the last frame.
+
+**What clears it.**
+
+- `play`, `pause`, `seekToPts`, `seekApproximate`, `seekNominal` and `seekToFrameIndex`. So a
+  click, a scrub, a trim, a step, Home, End, Go to In, Go to Out and a typed timecode all
+  clear it when they call the store, also when the store then moves nothing.
+- A `playSegment` that passes its checks, also when its seek or its play then fails. A
+  refused call changes nothing.
+- A detach, a reset, `syncUnready`, and an attach of another element or source.
+- A failed play, and a loss of the calibration.
+- A `pause` event in the `playing` phase, while the element reports `paused` and not
+  `ended`. This is a pause from the system. A `pause` event that finds the element playing
+  again is the late event of the seek to `inPts`, and it does not clear the field.
+- A `play` event in the `stopped` phase, or a frame callback in that phase that finds the
+  element playing.
+- A `seeking` event in the `stopped` phase. In the `playing` phase it keeps the field.
+- The end of the media in the `playing` phase.
+- The seek back of the stop itself, and the pause of the backstop.
+- A frame callback that finds that the segment no longer holds a frame.
+- In the `stopped` phase, a settled frame that is neither a frame of the stop nor in the
+  seek-back window.
+
+An edit of the timeline does not clear it. Mark Out, Delete, Undo and Redo change a segment
+with no seek, so a segment playback keeps the Out that it started with when one of them moves
+or removes that Out while the segment plays. A trim seeks, so it ends the playback.
+
+**What the user sees.**
+
+- On the grid, the playback normally stops on the last frame with no seek. When a frame
+  callback comes late or is skipped, or when the browser presents a frame in the window after
+  the pause, the browser shows that frame briefly, and the store then seeks back. The
+  playhead does not draw a frame that the store seeks back from, because the display target
+  of the seek is set in the same call.
+- Off the grid, the playback also stops with no seek on a proven or predicted last frame. A
+  late prediction lets the Out frame show briefly, and the store seeks back from it. An early
+  prediction pauses one frame or more before the last frame. When the element had moved on,
+  the browser presents a later frame, which lies in the segment when it lies before the Out
+  and is pulled back when it lies in the window. When the element had not moved on, the
+  playback rests one frame or more early. The seek to `outPts − 1` after a frame at or after
+  the Out starts from another frame, so it brings a frame callback. End keeps its own limit
+  off the grid (ADR 026).
+- On a hidden window, the sound can play past the Out by 0.1 s, or by one nominal interval
+  when that is longer, and up to one `timeupdate` interval more.
+- If the calibration becomes unavailable while the segment plays, the field goes, and the
+  playback continues as a normal playback.
+- Three rules need a check in the built application, in WKWebView and in WebView2: that a
+  paused element whose picture moves past the last frame always brings a later frame
+  callback, that the position read right after the pause is within the margin of the real
+  paused position, and that the engine never sends a `seeking` event of its own on a paused
+  element.
+
 ### Scrub mode: keyframes and sound during a drag
 
 `seekToPts` and `seekApproximate` take the option `{ scrub: true }`. The timeline sets it

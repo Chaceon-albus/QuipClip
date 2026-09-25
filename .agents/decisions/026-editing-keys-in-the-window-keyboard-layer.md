@@ -37,6 +37,7 @@ action. `primary` is `Cmd` on macOS and `Ctrl` on Windows.
 | Key                                   | Modifiers         | Action                                  | Repeat        |
 | ------------------------------------- | ----------------- | --------------------------------------- | ------------- |
 | `Space`                               | none              | start or stop playback                  | taken, no act |
+| `/`                                   | none              | play the segment to its last frame      | taken, no act |
 | `ArrowLeft` / `ArrowRight`            | none              | step one frame back / forward           | acts          |
 | `ArrowLeft` / `ArrowRight`            | `Shift`           | step ten frames back / forward          | acts          |
 | `Home` / `End`                        | none              | go to the first / last frame            | taken, no act |
@@ -54,6 +55,7 @@ action. `primary` is `Cmd` on macOS and `Ctrl` on Windows.
 | `+`                                   | none              | zoom the timeline in                    | acts          |
 | `=` / `+`                             | `Shift`           | zoom the timeline in                    | acts          |
 | `\`                                   | none              | fit the whole source in the timeline    | taken, no act |
+| `/`                                   | `Shift`           | play the segment to its last frame      | taken, no act |
 | `Z`                                   | `Shift`           | fit the whole source in the timeline    | taken, no act |
 
 "Taken, no act" means that the layer owns a repeated key press and performs nothing, as
@@ -67,7 +69,9 @@ Final Cut Pro key for Zoom to Fit. It serves layouts where `\` needs `AltGr` or 
 A tooltip names the first row of an action. Fit is the one exception: its tooltip names `\`
 and `Shift+Z`, because on many layouts the first key needs `AltGr` or `Option`.
 `aria-keyshortcuts` lists every row of the action in table order, drops a repeated token, and
-leaves out the three layout rows: `+`, and `=` and `+` with `Shift`.
+leaves out the three layout rows: `+`, and `=` and `+` with `Shift`. (Changed on
+2026-09-24: it leaves out four layout rows: `+`, `=` and `+` with `Shift`, and `/` with
+`Shift`.)
 
 ### The rule for modifiers
 
@@ -90,8 +94,19 @@ A punctuation key, such as `=`, `-`, `+` or `\`, matches `event.key` only. It ha
 fallback to `event.code`, because on another layout its position types another character:
 German `ß` sits where US has `-`, and Spanish `ç` sits where US has `\`. The one exception is
 `primary` with `,`, which also matches the `Comma` position when `event.key` is not one
-printable ASCII character, as the letters do. A numpad key matches `event.code` only, for
+printable ASCII character, as the letters do. (Changed on 2026-09-24: the `/` of Play
+Segment is a second exception, below.) A numpad key matches `event.code` only, for
 example `NumpadAdd`, so it matches on every layout and in both Num Lock states.
+
+(Added on 2026-09-24.) The `/` of Play Segment is a second exception. It matches `event.key`
+first, and it falls back to the `Slash` position only when `event.key` is not one printable
+ASCII character, as the comma of `primary` with `,` does. On German, Spanish, Italian and
+Nordic layouts the `Slash` position types `-`, so that key still zooms out. The numpad `/`
+types `/`, so it matches too. A second row serves layouts that type `/` with `Shift`, such as
+German, Spanish and Nordic `Shift+7` and French AZERTY `Shift` with the `:` key. That row
+holds `Shift` and matches `event.key` only, with no fallback to a position. On a US layout
+`Shift` with the `Slash` key types `?`, which matches no row, so the second row adds no second
+meaning there. No other row holds `Shift` with `/`.
 
 ### The condition for each action
 
@@ -172,6 +187,28 @@ The actions behave as follows:
   pauses.
 - Undo and redo act on the edit history. They do nothing inside a text field, because the
   layer does nothing there, and the field keeps its own undo.
+- (Added on 2026-09-24.) Play Segment (`/`, the Play Selection of Final Cut Pro) plays one
+  segment and stops on its last frame, the frame before `outPts`.
+  - The segment is the current segment. With no current segment, it is the segment of the
+    active source that holds the PTS of the frame on screen, half open (ADR 002). The key
+    does nothing when no segment holds that PTS, when more than one segment holds it (ADR 007
+    refuses a guess between overlapping segments), or when no frame is on screen because a
+    seek is pending.
+  - The action needs an active source, a ready calibration, and a segment that holds a
+    frame. ADR 022 lists the cases that cannot play. While the calibration is `calibrating` or `unavailable`, the key does
+    nothing. The stop reads the exact PTS of each presented frame, and `play` drops a seek
+    that the store defers before the anchor. No control shows the action yet, so no disabled
+    reason is shown.
+  - The action seeks to `inPts` with `seekToPts` and plays. The sound and the mute state are
+    those of normal playback. No cue sounds (ADR 019).
+  - A second `/` while the segment plays pauses, as `Space` does.
+  - `Space`, a click, a frame step, a scrub, a trim, a new source, a pause from the system
+    and a loss of the calibration end the segment playback. Home, End, Go to In, Go to Out
+    and a typed timecode end it when their plan calls the store. On the first frame of the
+    playback, Go to In finds its frame on screen and does nothing. A seek from the system
+    ends it only after the stop: while the segment plays, the stop stays, and a frame past
+    the last frame is pulled back. A playback that starts later has no stop point.
+  - ADR 022 gives the stop rule.
 
 ### The tooltips
 
