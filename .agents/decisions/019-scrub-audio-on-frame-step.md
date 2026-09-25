@@ -70,6 +70,25 @@ the burst to almost nothing. A second timer starts when the request arrives. It 
 element 500 milliseconds after the end of the burst. That timer covers the condition where
 the `playing` event never occurs.
 
+(Changed on 2026-09-24.) The stop timer waits for two events of the burst. The first is the
+`seeked` event that ends the seek of the burst. The second is the `playing` event. The
+timer starts when the second of the two arrives, in either order. A `seeked` event that
+arrives while the element still reports `seeking` ends an earlier seek, and the controller
+ignores it. A new seek clears both conditions.
+
+An assignment of `currentTime` before the metadata loads starts no seek, and no `seeked`
+event follows. A `playing` event that arrives while the element does not report `seeking`
+therefore also ends the wait for the seek. The second timer now covers the condition where
+one of the two events never occurs.
+
+Chromium sends `playing` after `seeked`, so the rule changes nothing there. WebKit, the web
+view of macOS, keeps the ready state through the assignment of `currentTime`. It therefore
+sends `playing` as soon as the controller calls `play`, while the seek still runs. QuipClip
+measured this in a WKWebView with an `asset:` scheme handler that serves byte ranges. With
+the timer on `playing` alone, the timer stopped the element before the seek ended in most
+bursts. Seven of eight single steps played no audio, and the eighth played 13 milliseconds.
+With the new rule, each single step played 41 to 75 milliseconds of audio.
+
 A forward request that arrives while a burst sounds, and whose target is within
 `SCRUB_CONTINUATION_TOLERANCE_SECONDS` of the position of the element, does not seek. It
 only moves the stop time later. A held arrow key repeats approximately 30 times each
@@ -108,6 +127,14 @@ cue helps the user find a frame. It is not an edit action, and a message about i
 report a fault that the user cannot correct.
 
 ## Consequences
+
+- (Added on 2026-09-24.) A burst in Chromium plays approximately 15 milliseconds of its 50.
+  A measurement in a Chromium browser found that the audio output starts approximately 35
+  milliseconds after the `playing` event. A held forward key in WebKit makes sound for
+  approximately one eighth of the time. A seek there took 40 to 150 milliseconds in the
+  measurement. The element therefore falls behind the steps by more than the continuation
+  tolerance, and it seeks again. A stop that reads the media clock of the element, and not
+  a timer, is a possible later step.
 
 - (Added on 2026-09-24.) A frame step that the playback store deferred while the
   calibration was open (ADR 022) runs at the anchor, and it requests its one cue there. The

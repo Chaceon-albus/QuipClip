@@ -216,8 +216,9 @@ carries the same asset URL as the preview element. One controller in
 022). Every other playback action stops one, so a cue and the real playback never sound
 together.
 
-The controller starts its stop timer on the `playing` event, because the element needs as
-long to seek and to start as the burst lasts. A held key that steps forward extends the
+The controller starts its stop timer after the `seeked` event of the burst and the `playing`
+event, in either order, because the element needs as long to seek and to start as the burst
+lasts. WebKit sends `playing` before the seek ends. A held key that steps forward extends the
 current burst instead of a restart, so the sound stays continuous. The element is mounted
 only for a source that has an audio stream, only while the playback store reports that it
 is attached to that same source revision, and only after the calibration status leaves
