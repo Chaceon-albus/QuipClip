@@ -117,6 +117,14 @@ The wheel zooms, and it holds the time under the pointer in place. A gesture tha
 clearly horizontal pans instead, and so does the shift key with the wheel. The panel gives
 those gestures to the web view, which already scrolls the container.
 
+(Added on 2026-09-24.) The height of the timeline is view state too. A splitter above the
+timeline sets it, and the web view storage keeps it as an application preference. It is not
+in the project file, the undo stack or the settings file. The default is 180 px. The minimum
+is 108 px, which still holds the ruler, one track row and the thickest scroll bar. The
+maximum leaves the preview at least 256 px, and the height is clamped again when the window
+changes size. The stored value is the height that the user chose, so a window that grows
+again gets it back. Only the track row grows, and the ruler keeps its height.
+
 ### The edges of a segment
 
 (Added on 2026-09-24.) On a segment at least 24 px wide, the 6 px at each end is its own

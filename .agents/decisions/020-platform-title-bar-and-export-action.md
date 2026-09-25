@@ -104,3 +104,13 @@ decision, as a private function, and no unit test covered it.
   platform draws that title in the window. This needs the `core:window:allow-set-title`
   permission. The full path is in a hover tooltip only, because a focusable title would
   stop the window drag.
+- (Added on 2026-09-24.) While the window does not have the focus, `<html>` carries
+  `data-window-inactive`, which the one focus listener of the window state sets. The title
+  bar and the status bar then use quieter text colours, as native windows do, and the
+  Windows window glyphs dim to 60 %. Every dimmed text keeps 4.5:1 and every glyph 3:1. The
+  selected segment keeps its colour, because an open or save panel also takes the focus
+  while the user still works on that segment.
+- (Added on 2026-09-24.) `<html>` carries `data-platform`, `macos` or `windows`, from the
+  platform test, before the first render. On Windows only, the scroll bars are thin and
+  follow the theme, because WebView2 draws classic scroll bars that ignore it. macOS keeps
+  the system scroll bars, which follow the system setting.

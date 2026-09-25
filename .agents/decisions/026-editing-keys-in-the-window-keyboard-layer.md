@@ -131,6 +131,12 @@ or change nothing:
 One case does not own the key press: `Escape` while a tooltip is open. Radix then closes
 the tooltip. A second `Escape` finishes the segment.
 
+(Added on 2026-09-24.) The timeline splitter (ADR 007) is a focusable separator. While it has
+the focus, it owns `ArrowUp`, `ArrowDown`, `Home` and `End` with no modifier, as a list box
+owns its arrow keys under ADR 021, and the layer does nothing with them. `Home` and `End`
+then move the splitter and not the playhead. Every other key keeps its meaning. While a
+drag of the splitter runs, the layer also leaves `Escape` alone, and the drag cancels on it.
+
 (Changed on 2026-09-24.) While a drag trims a segment edge (ADR 030), `Escape` cancels the
 trim and does not finish the segment, and Mark In, Mark Out, Delete, Undo and Redo own the
 key press and do nothing.
