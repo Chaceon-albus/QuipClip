@@ -54,6 +54,7 @@ document summarizes them and shows how the parts fit together.
 | [`031-order-dialog-buttons-by-platform.md`](../.agents/decisions/031-order-dialog-buttons-by-platform.md)                                   | Order dialog buttons by platform                                |
 | [`032-one-frontend-chunk-and-its-size-limit.md`](../.agents/decisions/032-one-frontend-chunk-and-its-size-limit.md)                         | One frontend chunk, with a size warning above 1200 kB           |
 | [`033-main-agent-writes-the-code.md`](../.agents/decisions/033-main-agent-writes-the-code.md)                                               | The main agent writes, and another tool runs only on request    |
+| [`034-one-application-version-and-its-release-tag.md`](../.agents/decisions/034-one-application-version-and-its-release-tag.md)             | One version in `Cargo.toml`, and one `v` tag for each release   |
 
 ## Shape
 
@@ -499,9 +500,11 @@ shape detector for them.
 AGENTS.md              rules an agent follows here
 CLAUDE.md              imports AGENTS.md
 docs/architecture.md   this file
+docs/releasing.md      the steps of a release
 .agents/decisions/     one record per decision
 .agents/skills/        dev-workflow, and two skills as git submodules
 .claude/skills/        symlinks into .agents/skills, so Claude Code finds them
+scripts/               the version script and the release asset list
 src/                   React frontend
 src-tauri/             Rust backend
 ```
@@ -535,6 +538,25 @@ cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings &
 The `dev-workflow` skill states the commit gate, in section 5, and it is the only
 normative copy. `cargo test` is part of that gate when a unit changed any file under
 `src-tauri/`. Continuous integration runs every command above on `windows-latest` and
-`macos-latest`, for every push to `main` and every pull request.
+`macos-latest`, for every push to `main` and every pull request. The release workflow runs
+the same checks on each release tag.
 
 TypeScript is held at 5.9, because `typescript-eslint` caps its peer range below 6.1.
+
+## Version and release
+
+See ADR 034.
+
+`src-tauri/Cargo.toml` holds the only copy of the application version. `tauri.conf.json`
+and `package.json` have no `version` field, so Tauri reads the version from `Cargo.toml`.
+`scripts/version.mjs` shows, checks, and bumps the version, and a Vitest test runs its check
+on the repository. The release tag is `v` and the version.
+
+The push of a release tag starts `.github/workflows/release.yml`. It checks the tag, runs
+`ci.yml` on the tagged commit, and builds the macOS and Windows bundles with a token that
+can only read. A second job attaches the bundles to a draft release. It checks the asset
+names and their SHA-256 digests against `scripts/release-assets.mjs`. The last job runs
+in the `release` environment. It checks the draft and the tag again, and publishes the
+draft as an immutable release. `tauri.macos.conf.json` gives the macOS bundle an ad-hoc
+signature. `docs/releasing.md` gives the setup, the steps of a release, and what to do
+when a job fails.

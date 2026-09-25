@@ -55,6 +55,7 @@ pnpm tauri build    # package
 
 - [`docs/architecture.md`](docs/architecture.md) — the architecture, and the index of
   decision records.
+- [`docs/releasing.md`](docs/releasing.md) — the steps of a release.
 - [`.agents/decisions/`](.agents/decisions) — one record per decision.
 - [`AGENTS.md`](AGENTS.md) — the rules an agent follows in this repository.
 

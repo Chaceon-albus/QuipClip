@@ -40,7 +40,8 @@ src-tauri/      Rust backend
   src/procutil.rs   child processes without a Windows console window
   src/project/      the project file
   src/time.rs       the Rational type
-docs/           architecture.md
+docs/           architecture.md, releasing.md
+scripts/        the application version, and the assets of a release
 .agents/        decisions, skills, private
 ```
 
@@ -56,6 +57,8 @@ pnpm test                 # vitest
 pnpm format:check         # verify Prettier formatting
 pnpm format               # apply Prettier formatting
 pnpm icons                # regenerate src-tauri/icons from the brand SVG
+pnpm version:check        # verify the one application version
+pnpm version:bump patch   # raise the version: major, minor, patch, or X.Y.Z
 
 cd src-tauri
 cargo fmt --check

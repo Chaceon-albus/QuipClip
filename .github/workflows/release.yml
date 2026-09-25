@@ -1,6 +1,7 @@
 name: Release
 
-# Publishes one immutable release for each pushed tag v<version>.
+# Publishes one immutable release for each pushed tag v<version>. Details:
+# docs/releasing.md (steps, and what to do when a job fails) and ADR 034 (rules).
 #
 # Setup, one time: Settings > General > Releases > Enable release immutability.
 # Optional: add required reviewers to the "release" environment.
