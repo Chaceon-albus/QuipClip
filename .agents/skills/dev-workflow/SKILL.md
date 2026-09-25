@@ -1,54 +1,48 @@
 ---
 name: dev-workflow
-description: "Use when you write, change, or review code in the QuipClip repository. It gives the routing rules that decide which agent writes the code, the review loop, the verification gate, and the commit rules. Triggers: implement a feature, fix a bug, refactor, add a component, add a Tauri command, review a diff, commit finished work."
+description: "Use when you write, change, or review code in the QuipClip repository. It gives the review loop, the verification gate, and the commit rules, and it says when another agent tool may run. Triggers: implement a feature, fix a bug, refactor, add a component, add a Tauri command, review a diff, commit finished work."
 ---
 
 # QuipClip development workflow
 
-The main agent orchestrates. Other agents write the code. A third agent reviews it. This
-skill states who does what, and in which order.
+The main agent writes the code. A second agent reviews it. The main agent runs the gate
+and commits. This skill states who does what, and in which order.
 
-The decision behind this workflow is in `.agents/decisions/008-multi-agent-development-workflow.md`.
+The decision behind this workflow is in `.agents/decisions/033-main-agent-writes-the-code.md`.
 The commit rules are in `.agents/decisions/009-incremental-commit-policy.md`.
 
-## 1. Route the work
+## 1. Write the code
 
-| Work | First choice | Fallback |
-|---|---|---|
-| Frontend: `.ts`, `.tsx`, `.css` | `agy` with the newest Gemini Flash at high reasoning | a subagent with the newest Claude Opus at medium reasoning |
-| Rust and backend: `.rs`, `Cargo.toml`, `tauri.conf.json` | a subagent with the newest Claude Opus at medium reasoning | — |
-| A command the user named | that command | a subagent with the newest Claude Opus at medium reasoning |
+The main agent is the agent that the user talks to. It writes the frontend and the Rust
+backend in the same way.
 
-The user can name a command-line agent for a task. Obey that instruction. If the named
-command fails, fall back to a subagent and tell the user which fallback ran.
+The main agent can give a unit to a subagent of its own tool. One example is two units
+that touch different files: two subagents can write them at the same time, each in its own
+worktree. Give each subagent the brief in section 3. A Claude subagent that writes code
+runs the newest Claude Opus at medium reasoning.
 
-The main agent never writes feature code. The main agent writes only these:
+Do not run a different agent tool, such as `agy` or `codex`, unless the user asks for it.
+Section 2 applies only then.
 
-- `.agents/decisions/*.md`
-- `docs/architecture.md`
-- `AGENTS.md` and `CLAUDE.md`
-- this skill
+A document names a model family and a reasoning level. It never names a version. The
+commit trailer is the one exception, because it records what ran.
 
-## 2. Start the writing agent
+## 2. Run another agent tool when the user asks
 
-Every command runs the newest model its vendor offers: `agy` runs the newest Gemini,
-`claude` runs the newest Claude, `codex` runs the newest OpenAI model. Resolve the version
-at run time. Never pin one in this file.
+Use this section only when the user names an agent tool for a task. The request has the
+scope that the user gives it. When the user gives no scope, the request covers one task.
 
-```bash
-agy models          # lists every model the tool offers
-```
-
-Take the highest version of the named family at the named reasoning level. Then run:
+Run the model that the user names. When the user names no model, run the newest model that
+the tool offers. When the tool offers more than one model family, ask the user which
+family to run. `agy models` lists the models of `agy`.
 
 ```bash
-agy -p "<brief>" --model <resolved-model-id> --mode accept-edits
+agy -p "<brief>" --model <model-id> --mode accept-edits
 codex exec "<brief>"
 claude -p "<brief>" --permission-mode acceptEdits
 ```
 
-ADR 008 states the rule. A document names a family and a level. A run resolves the
-version.
+Give the tool the brief in section 3.
 
 A run **failed** when any of these is true:
 
@@ -58,9 +52,11 @@ A run **failed** when any of these is true:
 
 Check condition 3 every time. A command-line agent can exit zero and write nothing.
 
+When a run fails, tell the user. Then the main agent writes the unit.
+
 ## 3. Write the brief
 
-Give the writing agent all of this:
+Give a subagent or another agent tool all of this:
 
 - The exact file paths to create or change.
 - The ADR numbers that constrain the work, and what those ADRs require.
@@ -74,10 +70,10 @@ Give the writing agent all of this:
 
 ## 4. Review
 
-The reviewing agent is **never** the writing agent. The reviewing agent runs the newest
-Claude Opus. Start the reviewer at high reasoning. High reasoning is one level above the
-medium reasoning of a writing subagent. A reviewing agent at medium reasoning does not
-satisfy this rule.
+The reviewing agent is **never** the writing agent. A subagent that did not write the diff
+reviews it. This applies when the main agent, a subagent, or another agent tool wrote the
+diff. A Claude reviewer runs the newest Claude Opus. Start the reviewer at high reasoning.
+A reviewing agent at medium reasoning does not satisfy this rule.
 
 The main agent can raise the reviewer to `xhigh` reasoning. Raise it when the change
 carries more risk than a usual change. The time model, the export pipeline, the preview,
@@ -85,14 +81,15 @@ the ffmpeg lifecycle, and a wire contract are examples. Raise the level only whe
 needs it, because a higher level costs more.
 
 Give the reviewer the diff, the ADR numbers, and the acceptance criteria. Ask it to find
-faults, not to approve. Ask it to mark each finding BLOCKING or NON-BLOCKING.
+faults, not to approve. Ask it to mark each finding BLOCKING or NON-BLOCKING. For a
+catalog change, also give it the text that ADR 011 lists for the language check.
 
 Apply the blocking findings. Review again only when the fix is large enough to carry new
 risk.
 
 ## 5. Verify
 
-This section is the gate. `AGENTS.md`, `docs/architecture.md` and ADR 008 point here
+This section is the gate. `AGENTS.md`, `docs/architecture.md` and ADR 033 point here
 rather than restating it, because four copies drifted into four different gates once
 already.
 
@@ -132,7 +129,7 @@ Message format:
 <why the change exists, wrapped at 72 columns>
 
 Refs: ADR-003
-Assisted-By: agy/<model-id>
+Assisted-By: <tool>/<model-id>
 Reviewed-By: subagent/<model-id>
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 ```
@@ -141,9 +138,10 @@ Types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`
 Scopes: `timeline`, `preview`, `export`, `ffmpeg`, `project`, `settings`, `time`, `ui`,
 `theme`, `icons`, `tauri`, `agents`, `adr`, `deps`.
 
-Add `Assisted-By` when another agent wrote the diff. Add `Reviewed-By` for the reviewer.
-Write the model you actually ran, with its version. The trailer is a record of one run,
-so it is the one place that names a version.
+Add `Assisted-By` when a subagent or another agent tool wrote the diff. Omit it when the
+main agent wrote the diff. Add `Reviewed-By` for the reviewer. Write the model you
+actually ran, with its version. The trailer is a record of one run, so it is the one place
+that names a version.
 
 **Hard limits.**
 

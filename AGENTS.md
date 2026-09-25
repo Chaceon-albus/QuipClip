@@ -94,15 +94,13 @@ ffmpeg lifecycle. Those four parts carry the accuracy requirement of the product
 
 ### Writing code
 
-Read the `dev-workflow` skill. It gives the routing rules, the review loop, the gate, and
-the commit rules.
+Read the `dev-workflow` skill. It gives the review loop, the gate, and the commit rules.
 
-Short form: the main agent orchestrates, runs the gate, and commits. `agy` writes the
-frontend. A subagent with the newest Claude Opus at medium reasoning writes the Rust. A
-separate agent, never the writing agent, reviews at high reasoning.
+Short form: the main agent writes the code, runs the gate, and commits. A separate agent,
+never the writing agent, reviews at high reasoning.
 
-Every delegated command runs the newest model its vendor offers. Never pin a model version
-in a document. ADR 008 states the rule.
+Do not run a different agent tool, such as `agy` or `codex`, unless the user asks for it.
+Never pin a model version in a document. ADR 033 states the rules.
 
 ### Commits
 
