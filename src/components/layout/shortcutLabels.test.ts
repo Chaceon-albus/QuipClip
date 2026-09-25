@@ -13,6 +13,7 @@ import {
   ariaKeyShortcutsFor,
   chipShortcutsFor,
   formatAriaKeyShortcut,
+  formatMenuAccelerator,
   formatShortcut,
   resolveShortcutKeyNames,
   shortcutFor,
@@ -545,6 +546,81 @@ describe("shortcutLabels", () => {
       expect(ariaKeyShortcutsFor("stepBackOneFrame", "windows")).toBe("ArrowLeft");
       expect(ariaKeyShortcutsFor("openSettings", "macos")).toBe("Meta+,");
       expect(ariaKeyShortcutsFor("export", "windows")).toBe("Control+E");
+    });
+  });
+
+  describe("formatMenuAccelerator", () => {
+    const binding = (action: string, modifiers: string, key: string) => {
+      const found = SHORTCUT_BINDINGS.find(
+        (candidate) =>
+          idOf(candidate) ===
+          [action, ...modifiers.split(",").filter(Boolean), key].join(":"),
+      );
+      if (found === undefined) {
+        throw new Error(`no binding ${action} ${modifiers} ${key}`);
+      }
+      return found;
+    };
+
+    it("names a letter by its key position and Shift by name", () => {
+      expect(formatMenuAccelerator(binding("goToSegmentIn", "shift", "I"))).toBe(
+        "Shift+KeyI",
+      );
+      expect(formatMenuAccelerator(binding("goToSegmentOut", "shift", "O"))).toBe(
+        "Shift+KeyO",
+      );
+      expect(formatMenuAccelerator(binding("markIn", "", "I"))).toBe("KeyI");
+    });
+
+    it("names primary as CmdOrCtrl, before Shift", () => {
+      expect(formatMenuAccelerator(binding("undo", "primary", "Z"))).toBe(
+        "CmdOrCtrl+KeyZ",
+      );
+      expect(formatMenuAccelerator(binding("redo", "primary,shift", "Z"))).toBe(
+        "CmdOrCtrl+Shift+KeyZ",
+      );
+      // The accelerators of the macOS application menu (`src-tauri/src/menu.rs`) name the same
+      // keys, with the comma as its position.
+      expect(formatMenuAccelerator(binding("openSettings", "primary", ","))).toBe(
+        "CmdOrCtrl+Comma",
+      );
+    });
+
+    it("names a named key by its KeyboardEvent name, and the space bar as Space", () => {
+      expect(formatMenuAccelerator(binding("deleteSegment", "", "Backspace"))).toBe(
+        "Backspace",
+      );
+      expect(formatMenuAccelerator(binding("deleteSegment", "", "Delete"))).toBe(
+        "Delete",
+      );
+      expect(formatMenuAccelerator(binding("togglePlayback", "", "Space"))).toBe(
+        "Space",
+      );
+      expect(
+        formatMenuAccelerator(binding("stepBackTenFrames", "shift", "ArrowLeft")),
+      ).toBe("Shift+ArrowLeft");
+      expect(formatMenuAccelerator(binding("finishSegment", "", "Escape"))).toBe(
+        "Escape",
+      );
+    });
+
+    it("names a punctuation key by its US position and a numpad key by its code", () => {
+      expect(formatMenuAccelerator(binding("zoomIn", "", "="))).toBe("Equal");
+      expect(formatMenuAccelerator(binding("zoomOut", "", "-"))).toBe("Minus");
+      expect(formatMenuAccelerator(binding("zoomToFit", "", "\\"))).toBe("Backslash");
+      expect(formatMenuAccelerator(binding("zoomIn", "", "NumpadAdd"))).toBe(
+        "NumpadAdd",
+      );
+    });
+
+    it("gives no accelerator for a symbol with no key position of its own", () => {
+      // `+` is Shift+Equal on a US layout, so no position names it alone.
+      expect(formatMenuAccelerator(binding("zoomIn", "", "+"))).toBeNull();
+      expect(formatMenuAccelerator(binding("zoomIn", "shift", "+"))).toBeNull();
+      for (const each of SHORTCUT_BINDINGS) {
+        const isPlus = each.key.kind === "character" && each.key.character === "+";
+        expect(formatMenuAccelerator(each) === null).toBe(isPlus);
+      }
     });
   });
 

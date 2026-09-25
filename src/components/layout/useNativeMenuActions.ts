@@ -1,21 +1,9 @@
 import { useEffect } from "react";
 import { isMediaFileDialogOpen } from "@/features/media";
 import { BACKEND_EVENTS, listenEvent, type UnlistenFn } from "@/lib/ipc";
-import { MODAL_LAYER_SELECTOR } from "./keyboardShortcutController";
+import { isPageOverlayOpen } from "./nativeContextMenuState";
 import { planNativeMenuCommand } from "./nativeMenuActions";
 import { readShortcutSnapshot, runShortcutCommand } from "./useKeyboardShortcuts";
-
-/**
- * True while a modal layer of the page is open: a dialog, an alert dialog, a menu or a list
- * box. It is the test of the window keyboard layer (`MODAL_LAYER_SELECTOR`). False outside a
- * document.
- */
-function isModalLayerOpen(): boolean {
-  return (
-    typeof document !== "undefined" &&
-    document.querySelector(MODAL_LAYER_SELECTOR) !== null
-  );
-}
 
 /** Subscribes a handler to the menu events. A test passes a fake. */
 export type NativeMenuSubscribe = (
@@ -80,7 +68,9 @@ export function runNativeMenuAction(payload: unknown): void {
   const command = planNativeMenuCommand(
     payload,
     {
-      isOverlayOpen: isModalLayerOpen(),
+      // The test of the window keyboard layer. A native context menu, such as the menu of a
+      // timeline segment, counts as an open menu.
+      isOverlayOpen: isPageOverlayOpen(),
       isFileDialogOpen: isMediaFileDialogOpen(),
     },
     readShortcutSnapshot(),

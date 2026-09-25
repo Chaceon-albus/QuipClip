@@ -238,6 +238,12 @@ export const zhCN: TranslationCatalog = {
       label: "时间轴高度",
       value: "{{height}} 像素",
     },
+    segmentMenu: {
+      goToIn: "跳转到入点",
+      goToOut: "跳转到出点",
+      playSegment: "播放片段",
+      deleteSegment: "删除片段",
+    },
   },
   mediaError: {
     invalidPath: "所选文件路径无效。",

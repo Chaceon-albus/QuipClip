@@ -8,6 +8,8 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { isSourceActive } from "@/components/layout/actionConditions";
+import { nativeContextMenuState } from "@/components/layout/nativeContextMenuState";
+import { getShortcutPlatform } from "@/components/layout/shortcutBindings";
 import {
   getGeneratedSourceId,
   getSourceRevisionKey,
@@ -68,9 +70,15 @@ import {
 import { countRulerEdgeAnchors } from "./rulerLabel";
 import { planScrubSeek, resolveSnapIndicatorRatio } from "./scrubSeekPlan";
 import { createSnapBoundaryCache, type SnapBoundary } from "./scrubSnap";
+import { segmentContextMenu } from "./segmentContextMenu";
 import { clickSegmentEdge } from "./segmentEdgeClick";
 import type { SegmentEdge } from "./segmentEdges";
-import { SegmentLayer, type SegmentEdgePointerHandlers } from "./SegmentLayer";
+import {
+  SegmentLayer,
+  type SegmentContextMenuHandler,
+  type SegmentEdgePointerHandlers,
+} from "./SegmentLayer";
+import { isContextMenuPress } from "./segmentMenuModel";
 import { SegmentSummary } from "./SegmentSummary";
 import {
   createTrimSnapBoundaryCache,
@@ -986,8 +994,17 @@ export function TimelinePanel({
     gestureRef.current?.sampleNow();
   }, [canUsePreciseSeek]);
 
+  // A press does not start a gesture while a native context menu is open or on its way
+  // (`nativeContextMenuState`). The page builds the menu of a segment before it shows it, and a
+  // press in that interval would hold the pointer. The menu then takes the release, and the
+  // gesture would stay active after the menu closes.
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!canSeek || event.button !== 0 || !event.isPrimary) {
+    if (
+      !canSeek ||
+      event.button !== 0 ||
+      !event.isPrimary ||
+      nativeContextMenuState.isOpen()
+    ) {
       return;
     }
     try {
@@ -1021,6 +1038,10 @@ export function TimelinePanel({
    * capture fails, the press is left to the segment button, and its click is the click of the
    * edge (ADR 007). A source that is not on the exact grid therefore never starts a trim.
    *
+   * A press that opens the context menu of the segment (`isContextMenuPress`) never starts a
+   * trim: the secondary button, and on macOS the primary button with Control held. No press
+   * starts a trim while a native context menu is open or on its way, as for `handlePointerDown`.
+   *
    * The trim runs on the gesture of the scrub, so it gets the scrub cursor of that gesture
    * (`scrubCursor.ts`): past the drag threshold the resize cursor shows everywhere in the window
    * until the gesture ends, by every path. A release before the threshold keeps the cursor of
@@ -1036,6 +1057,8 @@ export function TimelinePanel({
     if (
       event.button !== 0 ||
       !event.isPrimary ||
+      isContextMenuPress(event, getShortcutPlatform()) ||
+      nativeContextMenuState.isOpen() ||
       !laneEl ||
       !canTrimEdges ||
       gesture.isActive()
@@ -1164,6 +1187,21 @@ export function TimelinePanel({
     },
     shouldIgnoreClick: (detail) => segmentClickGuard.consume(detail),
   }));
+
+  // The context menu of a segment does not open while the pointer gesture runs: a press, a
+  // scrub or a trim holds the pointer, and the menu would take the release that ends the
+  // gesture. The segment layer is memoized, so the handler is created once and reads the
+  // gesture when it runs.
+  const [segmentContextMenuHandler] = useState(() => {
+    const handler: SegmentContextMenuHandler = (segmentId, position) => {
+      void segmentContextMenu.open({
+        segmentId,
+        position,
+        isPointerGestureActive: gestureRef.current?.isActive() === true,
+      });
+    };
+    return handler;
+  });
 
   // Every pointer down in the window ends a click guard that no click consumed, so the guard
   // never takes the click of a later press anywhere. The listener is in the capture phase, so
@@ -1475,6 +1513,7 @@ export function TimelinePanel({
                     timecodeDisplay={timecodeDisplay}
                     viewportRef={scrollRef}
                     edgePointerHandlers={segmentEdgeHandlers}
+                    onSegmentContextMenu={segmentContextMenuHandler}
                     canTrimEdges={canTrimEdges}
                     outFrameRate={frameBandRate}
                   />

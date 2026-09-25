@@ -58,7 +58,7 @@ export type NativeMenuAction = (typeof NATIVE_MENU_ACTIONS)[number];
 export interface NativeMenuContext {
   /**
    * True while a dialog, an alert dialog, a menu or a list box of the page is open
-   * (`MODAL_LAYER_SELECTOR`).
+   * (`MODAL_LAYER_SELECTOR`), or a native context menu of the page (`nativeContextMenuState`).
    */
   readonly isOverlayOpen: boolean;
   /** True while the native Open Media dialog is open (`isMediaFileDialogOpen`). */

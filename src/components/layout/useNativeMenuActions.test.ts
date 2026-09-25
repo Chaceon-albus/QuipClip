@@ -3,6 +3,7 @@ import { exportPanelStore } from "@/features/export";
 import { openMediaFileDialog } from "@/features/media";
 import { settingsPanelStore } from "@/features/settings/panelStore";
 import type { UnlistenFn } from "@/lib/ipc";
+import { nativeContextMenuState } from "./nativeContextMenuState";
 import {
   runNativeMenuAction,
   startNativeMenuActionListener,
@@ -117,6 +118,19 @@ describe("runNativeMenuAction", () => {
     runNativeMenuAction("markIn");
     runNativeMenuAction(undefined);
     expect(settingsPanelStore.getState().open).toBe(false);
+  });
+
+  it("does nothing while a native context menu of the page is open", () => {
+    // The menu of a timeline segment marks itself open from the right-click until it closes.
+    const mark = nativeContextMenuState.open();
+    try {
+      runNativeMenuAction("openSettings");
+      expect(settingsPanelStore.getState().open).toBe(false);
+    } finally {
+      mark.close();
+    }
+    runNativeMenuAction("openSettings");
+    expect(settingsPanelStore.getState().open).toBe(true);
   });
 
   it("does nothing while the native Open Media dialog is open", async () => {

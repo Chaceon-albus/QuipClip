@@ -17,6 +17,7 @@ import {
   DEFAULT_TIMELINE_HEIGHT_PX,
   useTimelineHeightPreference,
 } from "@/features/settings/timelineHeightPreference";
+import { nativeContextMenuState } from "./nativeContextMenuState";
 import {
   clampTimelineHeight,
   resolveTimelineHeightBounds,
@@ -248,8 +249,14 @@ function TimelineSplitter({
     };
   }, [dragging]);
 
+  // A press does not start a drag while a native context menu is open or on its way, such as
+  // the menu of a timeline segment (ADR 021). The menu would take the release of the drag.
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || gesture.activePointerId() !== null) {
+    if (
+      event.button !== 0 ||
+      gesture.activePointerId() !== null ||
+      nativeContextMenuState.isOpen()
+    ) {
       return;
     }
     // The capture comes first: it throws for a pointer that is no longer active, and a drag

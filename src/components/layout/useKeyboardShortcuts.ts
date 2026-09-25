@@ -7,8 +7,8 @@ import { settingsPanelStore } from "@/features/settings/panelStore";
 import { timelineStore, timelineViewportStore } from "@/features/timeline";
 import { i18n } from "@/i18n";
 import { runExportFlow } from "./exportFlowController";
+import { isPageOverlayOpen } from "./nativeContextMenuState";
 import {
-  MODAL_LAYER_SELECTOR,
   OPEN_TOOLTIP_SELECTOR,
   resolveShortcut,
   type ShortcutEventTarget,
@@ -148,9 +148,10 @@ export function useKeyboardShortcuts(): void {
         };
       }
 
-      const isOverlayOpen =
-        typeof document !== "undefined" &&
-        document.querySelector(MODAL_LAYER_SELECTOR) !== null;
+      // A modal layer in the document, or a native context menu such as the menu of a timeline
+      // segment, which has no element in the document (`isPageOverlayOpen`). Nothing happens
+      // while a menu is open (ADR 021).
+      const isOverlayOpen = isPageOverlayOpen();
       // A tooltip is not a modal layer, so it does not suppress the layer. It only takes
       // Escape first, so that Radix can close it.
       const isTooltipOpen =

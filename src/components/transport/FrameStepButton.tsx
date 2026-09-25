@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, type ReactNode } from "react";
 import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import type { ShortcutLabel } from "@/components/common/useShortcutLabels";
+import { nativeContextMenuState } from "@/components/layout/nativeContextMenuState";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger } from "@/components/ui/tooltip";
 import { playbackStore } from "@/features/playback";
@@ -104,8 +105,11 @@ export function FrameStepButton({
             size="tool-icon"
             disabled={disabled}
             onMouseDown={preventFocusOnMouseDown}
+            // Nothing happens while a native context menu is open or on its way, such as the
+            // menu of a timeline segment (ADR 021). The menu takes the release of a press that
+            // it interrupts, so a hold that started then would repeat until another release.
             onPointerDown={(event) => {
-              if (isStepHoldPress(event)) {
+              if (!nativeContextMenuState.isOpen() && isStepHoldPress(event)) {
                 holdRef.current?.press();
               }
             }}
@@ -113,7 +117,9 @@ export function FrameStepButton({
               holdRef.current?.stop();
             }}
             onClick={(event) => {
-              holdRef.current?.click(event.detail);
+              if (!nativeContextMenuState.isOpen()) {
+                holdRef.current?.click(event.detail);
+              }
             }}
             aria-label={label}
             aria-describedby={reasonId}

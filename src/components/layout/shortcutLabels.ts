@@ -218,6 +218,62 @@ export function formatAriaKeyShortcut(
 }
 
 /**
+ * The key position that a native menu accelerator names for a punctuation key. The accelerator
+ * of a native menu item names a US key position (`KeyboardEvent.code`), and not a typed symbol.
+ * A symbol that has no position of its own on a US layout, such as `+`, has no entry.
+ */
+const MENU_ACCELERATOR_CODE: { readonly [character: string]: string } = {
+  "/": "Slash",
+  ",": "Comma",
+  ".": "Period",
+  "=": "Equal",
+  "-": "Minus",
+  "\\": "Backslash",
+  ";": "Semicolon",
+  "'": "Quote",
+  "`": "Backquote",
+  "[": "BracketLeft",
+  "]": "BracketRight",
+};
+
+function menuAcceleratorKey(key: ShortcutKey): string | null {
+  switch (key.kind) {
+    case "named":
+      return key.key === " " ? "Space" : key.key;
+    case "letter":
+      return `Key${key.letter}`;
+    case "character":
+      return MENU_ACCELERATOR_CODE[key.character] ?? null;
+    case "numpad":
+      return key.code;
+  }
+}
+
+/**
+ * Formats a binding as the accelerator of a native menu item, such as `Shift+KeyI`,
+ * `Backspace` or `CmdOrCtrl+Shift+KeyZ`, or returns null when the key has no accelerator form.
+ *
+ * The native menu of Tauri (muda) reads this form. macOS draws the accelerator of an item in the
+ * glyphs of the Apple Human Interface Guidelines, the same form as `formatShortcut`: `⇧I`, `⌫`.
+ * `primary` is `CmdOrCtrl`, which is `Cmd` on macOS and `Ctrl` on Windows.
+ */
+export function formatMenuAccelerator(binding: ShortcutBinding): string | null {
+  const key = menuAcceleratorKey(binding.key);
+  if (key === null) {
+    return null;
+  }
+  const parts: string[] = [];
+  if (binding.modifiers.includes("primary")) {
+    parts.push("CmdOrCtrl");
+  }
+  if (binding.modifiers.includes("shift")) {
+    parts.push("Shift");
+  }
+  parts.push(key);
+  return parts.join("+");
+}
+
+/**
  * The named key that a label shows for an action with more than one binding, when the first
  * binding of the table is not the right one for the platform.
  *

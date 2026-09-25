@@ -315,6 +315,18 @@ export const en = {
       label: "Timeline height",
       value: "{{height}} pixels",
     },
+    // The items of the context menu of a segment on the timeline. The user opens the menu with
+    // a right-click on a segment. Each item acts on that segment. `goToIn` and `goToOut` move
+    // the playhead to the In point and to the Out point of the segment. The Out point is the
+    // first frame after the segment. `playSegment` plays the segment and stops on its last
+    // frame. While a segment plays, that item shows `transport.action.pause` instead. The
+    // operating system shows the key of each item beside its label, so a label names no key.
+    segmentMenu: {
+      goToIn: "Go to In",
+      goToOut: "Go to Out",
+      playSegment: "Play Segment",
+      deleteSegment: "Delete Segment",
+    },
   },
   mediaError: {
     invalidPath: "The selected file path is invalid.",

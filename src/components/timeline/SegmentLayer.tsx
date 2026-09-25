@@ -10,6 +10,8 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
+import { nativeContextMenuState } from "@/components/layout/nativeContextMenuState";
+import { getShortcutPlatform } from "@/components/layout/shortcutBindings";
 import {
   calculatePercentFromPts,
   calculateSegmentLayout,
@@ -18,6 +20,7 @@ import {
 } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
+import { calculateVisibleLane } from "./edgeAutoScroll";
 import { calculateOutFrameBand } from "./frameBand";
 import { seekToSegmentEdge } from "./segmentEdgeClick";
 import {
@@ -37,6 +40,13 @@ import {
   numberSegmentsInExportOrder,
   resolveSegmentLabelTier,
 } from "./segmentLabels";
+import {
+  createSegmentMenuSourceTracker,
+  isContextMenuPress,
+  listenForSegmentMenuSourceReset,
+  takeSegmentContextMenuEvent,
+  type SegmentMenuPosition,
+} from "./segmentMenuModel";
 import { advanceSegmentMotion, createSegmentMotionState } from "./segmentMotion";
 import { SegmentTooltip, type SegmentTooltipEntry } from "./SegmentTooltip";
 import { createSegmentTooltipController } from "./segmentTooltipController";
@@ -69,6 +79,20 @@ export interface SegmentEdgePointerHandlers {
   readonly shouldIgnoreClick: (detail: number) => boolean;
 }
 
+/**
+ * Opens the context menu of a segment (`segmentContextMenu`). The timeline panel gives it,
+ * because the panel knows whether its pointer gesture runs. The value must be stable, because
+ * the layer is memoized.
+ *
+ * @param segmentId The segment that the request names.
+ * @param position The position of the menu in client CSS pixels, or null to open it at the
+ *   pointer (`resolveSegmentMenuPosition`).
+ */
+export type SegmentContextMenuHandler = (
+  segmentId: string,
+  position: SegmentMenuPosition | null,
+) => void;
+
 export interface SegmentLayerProps {
   sourceId: string | null;
   videoStartPts: Pts | null | undefined;
@@ -85,6 +109,8 @@ export interface SegmentLayerProps {
   viewportRef: RefObject<HTMLElement | null>;
   /** The pointer handlers of the edges, for the drag trim. The value must be stable. */
   edgePointerHandlers: SegmentEdgePointerHandlers;
+  /** Opens the context menu of a segment. The value must be stable. */
+  onSegmentContextMenu: SegmentContextMenuHandler;
   /**
    * True while a drag on an edge can trim it: the condition of Mark In and Mark Out, a usable
    * time axis and an exact frame grid (ADR 030). The edges show the resize cursor only then. On
@@ -165,6 +191,7 @@ export const SegmentLayer = memo(function SegmentLayer({
   timecodeDisplay,
   viewportRef,
   edgePointerHandlers,
+  onSegmentContextMenu,
   canTrimEdges,
   outFrameRate,
 }: SegmentLayerProps) {
@@ -187,9 +214,13 @@ export const SegmentLayer = memo(function SegmentLayer({
     setMotion(nextMotion);
   }
   const [tooltip] = useState(createSegmentTooltipController);
+  const [menuSource] = useState(createSegmentMenuSourceTracker);
   const descriptionIdPrefix = useId();
   // A pending open must not fire after the layer unmounts.
   useEffect(() => () => tooltip.dispose(), [tooltip]);
+  // A context-menu press that ends outside a segment must not make a later request from the
+  // keyboard open at the pointer (`listenForSegmentMenuSourceReset`).
+  useEffect(() => listenForSegmentMenuSourceReset(window, menuSource), [menuSource]);
   // A scroll of the timeline cancels a pending open and closes or moves the tooltip
   // (`SegmentTooltipController.scroll`). Radix watches scrolls only while its content is
   // mounted, so it cannot cancel an open that is still in its delay.
@@ -415,6 +446,13 @@ export const SegmentLayer = memo(function SegmentLayer({
    *   on a boundary, it covers most of that edge, and a press there scrubs.
    * - A click on an edge selects the segment and seeks to the stored boundary PTS
    *   (`planSegmentEdgeSeek`). A click on the body, and a click from the keyboard, only select.
+   * - A right-click on the body or on an edge, a Control click on macOS, and the Menu key or
+   *   Shift+F10 on a focused segment open the context menu of the segment
+   *   (`segmentContextMenu`). The request selects the segment, as a click does, and does not
+   *   seek. It never starts a trim or a scrub: a segment is not a scrub surface, and a trim
+   *   starts only from a primary press, with no Control held on macOS (`isContextMenuPress`).
+   *   The menu opens at the pointer, or at the bottom left of the visible part of the segment
+   *   for a request from the keyboard (`SegmentMenuSourceTracker`).
    * - A press on an edge goes to the timeline panel (`edgePointerHandlers`). With the condition
    *   of a trim (`planSegmentTrimStart`), the panel holds the pointer: a release before the drag
    *   threshold is the click above, and a drag past it trims the edge (ADR 030). The browser
@@ -491,9 +529,18 @@ export const SegmentLayer = memo(function SegmentLayer({
               aria-describedby={descriptionId}
               // A click on the body only selects: the playhead is the operand of Mark In, Mark
               // Out and Split, so a selection click must not move it. A click on an edge also
-              // seeks to the boundary that the edge names.
+              // seeks to the boundary that the edge names. On macOS a Control click with the
+              // pointer opens the context menu, and the click that the release sends does
+              // nothing more. A click from the keyboard (`detail` 0) with Control held still
+              // selects. While a native context menu is open or on its way, a click does nothing,
+              // as a key press does (ADR 021).
               onClick={(event) => {
-                if (edgePointerHandlers.shouldIgnoreClick(event.detail)) {
+                if (
+                  edgePointerHandlers.shouldIgnoreClick(event.detail) ||
+                  (event.detail > 0 &&
+                    isContextMenuPress(event, getShortcutPlatform())) ||
+                  nativeContextMenuState.isOpen()
+                ) {
                   return;
                 }
                 selectSegment(seg.id);
@@ -509,16 +556,39 @@ export const SegmentLayer = memo(function SegmentLayer({
                 tooltip.hover(seg.id, event, findSegmentEdge(event.target) ?? "body")
               }
               onPointerLeave={() => tooltip.leave(seg.id)}
-              onPointerDown={() => tooltip.press(seg.id)}
+              onPointerDown={(event) => {
+                tooltip.press(seg.id);
+                menuSource.press(isContextMenuPress(event, getShortcutPlatform()));
+              }}
+              onKeyDown={() => menuSource.reset()}
+              // The segment takes the event before the context menu policy of the window, which
+              // listens in the bubble phase, so the menu of the web view never opens on a
+              // segment. The request selects the segment and opens its own menu, at the pointer
+              // or, from the keyboard, at the segment.
+              onContextMenu={(event) => {
+                const viewport = viewportRef.current;
+                const position = takeSegmentContextMenuEvent(
+                  event,
+                  menuSource.take(),
+                  viewport === null
+                    ? null
+                    : calculateVisibleLane(viewport.getBoundingClientRect()),
+                );
+                tooltip.press(seg.id);
+                onSegmentContextMenu(seg.id, position);
+              }}
               // A mouse press does not move the focus to the segment (ADR 021). WebView2
               // focuses a button on a click, and a press on the seek slider does not take the
               // focus away, so the next key press drew the dashed ring on the segment and Enter
               // selected it again. The click and the pointer handlers still run, and the Tab
               // key still focuses the segment.
               onMouseDown={preventFocusOnMouseDown}
-              onFocus={(event) =>
-                tooltip.focus(seg.id, hasFocusVisible(event.currentTarget))
-              }
+              onFocus={(event) => {
+                // The focus came from the keyboard or from assistive technology, because a press
+                // does not move the focus to a segment. A request after it is not a pointer one.
+                menuSource.reset();
+                tooltip.focus(seg.id, hasFocusVisible(event.currentTarget));
+              }}
               onBlur={() => tooltip.blur(seg.id)}
               // The `has-` selectors name the attribute of the edge hit areas
               // (`SEGMENT_EDGE_ATTRIBUTE`): the body drops its hover fill at once while the
