@@ -59,6 +59,15 @@ const FIELD_MAX_LENGTH = 32;
 /** The widest that the field grows, in character widths of the monospace font. */
 const FIELD_MAX_WIDTH_CH = 18;
 
+/**
+ * The classes of each hidden copy of a text that sizes the field. It takes the padding of the
+ * button, so the field is exactly as wide as the button (`-mx-1 px-1`) until the typed text is
+ * longer than the value. `min-w-0` and `overflow-hidden` let the width stop at
+ * `FIELD_MAX_WIDTH_CH`.
+ */
+const FIELD_SIZER_CLASS =
+  "invisible col-start-1 row-start-1 min-w-0 overflow-hidden px-1 whitespace-pre";
+
 /** The open field: its text, its error, and the source it was opened for. */
 interface TimecodeDraft {
   readonly text: string;
@@ -255,8 +264,9 @@ export function PreviewTimecode({
       {showsApproximateBadge(calibrationStatus, decodeFailed) && <ApproximateBadge />}
       {draft === null ? (
         <>
-          {/* The same horizontal padding as the field, so the value does not move when the
-              field opens. */}
+          {/* The same left padding as the field, so the value does not move when the field
+              opens. The hidden copies in the field take the padding of this button, so the
+              field is as wide as the button (FIELD_SIZER_CLASS). */}
           <button
             ref={buttonRef}
             type="button"
@@ -273,7 +283,25 @@ export function PreviewTimecode({
           </span>
         </>
       ) : (
-        <span ref={fieldContainerRef} className="inline-flex">
+        <span
+          ref={fieldContainerRef}
+          className="-mx-1 inline-grid"
+          style={{ maxWidth: `${FIELD_MAX_WIDTH_CH}ch` }}
+        >
+          {/* The field and two hidden copies of text share one grid cell. The copies of the
+              typed text and of the value set the width, so the field is as wide as the longer
+              of the two. A width in `ch` cannot do this: `ch` ignores the tight letter spacing
+              of the row, so the field was wider than the button, and the total after it moved
+              to the right when the field opened. `size={1}` keeps the default width of an
+              input out of the cell. The right padding of the field is 2px less than that of
+              the copies, so the caret at the end of the text has room and the text does not
+              scroll. */}
+          <span aria-hidden="true" className={FIELD_SIZER_CLASS}>
+            {draft.text}
+          </span>
+          <span aria-hidden="true" className={FIELD_SIZER_CLASS}>
+            {currentTimeDisplay}
+          </span>
           {/* `select-text` restores text selection, which the preview section turns off. A web
               view that inherits `user-select: none` into a field can refuse to edit it. The
               1px ring is the edge of the field, as the border of an Input: --border-strong,
@@ -298,17 +326,12 @@ export function PreviewTimecode({
               draft.error === null ? fieldHintId : `${errorId} ${fieldHintId}`
             }
             maxLength={FIELD_MAX_LENGTH}
+            size={1}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
             spellCheck={false}
-            style={{
-              width: `${Math.min(
-                Math.max(draft.text.length, currentTimeDisplay.length) + 1,
-                FIELD_MAX_WIDTH_CH,
-              )}ch`,
-            }}
-            className="-mx-1 h-6 rounded-sm bg-preview-surface px-1 text-preview-foreground ring-1 ring-border-strong focus-ring outline-none select-text aria-invalid:ring-destructive aria-invalid:focus-visible:outline-destructive"
+            className="col-start-1 row-start-1 h-6 w-full min-w-0 rounded-sm bg-preview-surface pr-0.5 pl-1 text-preview-foreground ring-1 ring-border-strong focus-ring outline-none select-text aria-invalid:ring-destructive aria-invalid:focus-visible:outline-destructive"
           />
           <span id={fieldHintId} className="sr-only">
             {format === "frames"
