@@ -424,6 +424,7 @@ describe("keyboardShortcutController", () => {
     it("takes a repeated press of every key that ADR 026 marks 'taken, no act'", () => {
       const taken = [
         createKeyEvent({ key: " " }),
+        createKeyEvent({ key: "/", code: "Slash" }),
         createKeyEvent({ key: "Home" }),
         createKeyEvent({ key: "End" }),
         createKeyEvent({ key: "i", code: "KeyI" }),

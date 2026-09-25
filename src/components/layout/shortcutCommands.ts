@@ -12,6 +12,7 @@
 
 import { isPositiveRational, type MediaProbe } from "@/features/media";
 import {
+  canPlaySegment,
   getNominalFrameRate,
   hasExactFrameGrid,
   hasNominalFrameRate,
@@ -23,6 +24,7 @@ import {
   canMarkIn,
   canMarkOut,
   findCurrentSegment,
+  findSegmentAtPts,
   getCurrentSegmentTarget,
   getTimelineDurationSeconds,
   type CurrentSegmentRef,
@@ -31,7 +33,7 @@ import {
 } from "@/features/timeline";
 import { I64_MAX, isPtsString, isTickCountString } from "@/lib/time";
 import { frameIndexOfTicks, lastFrameIndexOfExtent } from "@/lib/timecode";
-import type { Pts } from "@/types/project";
+import type { Pts, Segment } from "@/types/project";
 import {
   canDeleteSegment,
   canExportMedia,
@@ -95,7 +97,10 @@ export interface ShortcutSnapshot {
     | "runtimeBrowserDurationSeconds"
     | "approximateBrowserTimeSeconds"
     | "isPlaying"
-  >;
+  > & {
+    /** The stop point of a segment playback (ADR 026). Absent means none. */
+    readonly playbackStop?: PlaybackState["playbackStop"];
+  };
   readonly timeline: Pick<
     TimelineState,
     | "sourceId"
@@ -127,6 +132,8 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
 /** The store call that one shortcut action makes. */
 export type ShortcutCommand =
   | { readonly kind: "togglePlayback" }
+  | { readonly kind: "pause" }
+  | { readonly kind: "playSegment"; readonly inPts: Pts; readonly outPts: Pts }
   | { readonly kind: "seekNominal"; readonly frames: number }
   | {
       readonly kind: "seekToPts";
@@ -486,6 +493,73 @@ function planSegmentBoundarySeek(
 }
 
 /**
+ * The segment that Play Segment plays (ADR 026), or null when there is none.
+ *
+ * - The current segment, the one the user selected (ADR 007). The segment under the frame on
+ *   screen does not replace a current segment that cannot play.
+ * - With no current segment, the segment that holds the frame on screen, half open (ADR 002):
+ *   the PTS of `presentedFrame`, the frame the browser confirmed (ADR 003). A pending seek
+ *   clears that frame, so no segment is found until the frame arrives. Where segments overlap,
+ *   no segment is found (`findSegmentAtPts`).
+ *
+ * The segment must hold a frame of the source (`canPlaySegment`), the rule of the store.
+ */
+function segmentToPlay(
+  snapshot: ShortcutSnapshot,
+  probe: ShortcutProbe,
+): Segment | null {
+  const { timeline, playback } = snapshot;
+  const current = currentSegmentOf(timeline);
+  let segment: Segment | null;
+  if (current !== null) {
+    segment = current.segment;
+  } else if (playback.presentedFrame !== null) {
+    segment =
+      findSegmentAtPts(
+        timeline.segments,
+        timeline.sourceId,
+        playback.presentedFrame.inferredSourcePts,
+      )?.segment ?? null;
+  } else {
+    segment = null;
+  }
+  return segment !== null && canPlaySegment(probe, segment.inPts, segment.outPts)
+    ? segment
+    : null;
+}
+
+/**
+ * The call of Play Segment (ADR 026), or null when it must not act.
+ *
+ * A second press while a segment plays toward its stop pauses, as Space does, and the pause
+ * clears the stop point. Otherwise the action needs an active source and a ready calibration:
+ * the stop reads the exact PTS of each presented frame, which only a ready calibration gives
+ * (ADR 003). While the calibration is open, the store defers every seek until the anchor
+ * (ADR 022), and play drops a deferred seek, so a segment playback cannot start then. With an
+ * unavailable calibration no presented frame has a PTS. The action is not available in either
+ * state. No control shows the action yet, so no disabled reason is shown for it.
+ */
+function planPlaySegment(
+  snapshot: ShortcutSnapshot,
+  hasActiveSource: boolean,
+): ShortcutCommand | null {
+  const { probe, playback } = snapshot;
+  if (!hasActiveSource || probe === null) {
+    return null;
+  }
+  if (playback.playbackStop?.phase === "playing") {
+    return { kind: "pause" };
+  }
+  if (playback.calibrationStatus !== "ready") {
+    return null;
+  }
+  const segment = segmentToPlay(snapshot, probe);
+  return segment === null
+    ? null
+    : { kind: "playSegment", inPts: segment.inPts, outPts: segment.outPts };
+}
+
+/**
  * Returns the store call that the action makes now, or null when its condition is false.
  */
 export function planShortcutCommand(
@@ -507,6 +581,9 @@ export function planShortcutCommand(
   switch (action) {
     case "togglePlayback":
       return canTogglePlayback(hasActiveSource) ? { kind: "togglePlayback" } : null;
+
+    case "playSegment":
+      return planPlaySegment(snapshot, hasActiveSource);
 
     case "stepBackOneFrame":
     case "stepForwardOneFrame":

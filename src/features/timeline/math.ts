@@ -52,6 +52,46 @@ export function findCurrentSegment(
 }
 
 /**
+ * Finds the one segment of the active source whose half-open interval `[inPts, outPts)` holds
+ * the PTS (ADR 002). Play Segment reads it for the frame on screen when no segment is current
+ * (ADR 026). The comparison is exact, with `BigInt`, and a segment whose stored PTS does not
+ * parse holds nothing.
+ *
+ * Returns null when no segment holds the PTS, and also when more than one does. Segments can
+ * overlap, and ADR 007 refuses a rule that picks one of them from the playhead: the first match
+ * and the last match are both guesses, and the user cannot tell which one a guess picks. The
+ * user names one of them by selecting it.
+ */
+export function findSegmentAtPts(
+  segments: readonly Segment[],
+  activeSourceId: string | null | undefined,
+  pts: Pts,
+): CurrentSegmentRef | null {
+  if (!activeSourceId || !isPtsString(pts)) {
+    return null;
+  }
+  const value = BigInt(pts);
+  let found: CurrentSegmentRef | null = null;
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index];
+    if (
+      segment.sourceId !== activeSourceId ||
+      !isPtsString(segment.inPts) ||
+      !isPtsString(segment.outPts) ||
+      value < BigInt(segment.inPts) ||
+      value >= BigInt(segment.outPts)
+    ) {
+      continue;
+    }
+    if (found !== null) {
+      return null;
+    }
+    found = { index, segment };
+  }
+  return found;
+}
+
+/**
  * Splits a segment at an interior PTS, retaining the left ID and assigning a new right ID (ADR 002, ADR 007).
  * Produces adjacent half-open intervals [inPts, pts) and [pts, outPts).
  */

@@ -24,6 +24,7 @@ import type { Pts, Rational, TickCount } from "@/types/project";
 import { getDisplayedElapsedSeconds } from "./presentation";
 import { scrubAudioController } from "./scrubAudio";
 import {
+  canPlaySegment,
   createPlaybackStore,
   getNominalFrameRate,
   hasNominalFrameRate,
@@ -54,6 +55,9 @@ function createFakeVideo(options?: {
   pauseCalls: number;
   readyState: number;
   seeking: boolean;
+  /** Follows play and pause, as `HTMLMediaElement.paused` does. */
+  paused: boolean;
+  ended: boolean;
   throwOnCurrentTimeSet: boolean;
   currentTimeSets: number;
   fastSeek?: ReturnType<typeof vi.fn>;
@@ -86,6 +90,8 @@ function createFakeVideo(options?: {
   const fake = {
     playCalls: 0,
     pauseCalls: 0,
+    paused: true,
+    ended: false,
     throwOnCurrentTimeSet: options?.throwOnCurrentTimeSet ?? false,
     get currentTimeSets() {
       return currentTimeSets;
@@ -125,6 +131,7 @@ function createFakeVideo(options?: {
     ...(fastSeekSpy ? { fastSeek: fastSeekSpy } : {}),
     play: vi.fn(() => {
       fake.playCalls++;
+      fake.paused = false;
       if (options?.playImpl) {
         return options.playImpl();
       }
@@ -132,6 +139,7 @@ function createFakeVideo(options?: {
     }),
     pause: vi.fn(() => {
       fake.pauseCalls++;
+      fake.paused = true;
       if (options?.pauseImpl) {
         options.pauseImpl();
       }
@@ -6748,6 +6756,1344 @@ describe("Playback Store & PTS Presentation Engine", () => {
         expect(video.currentTimeSets).toBe(1);
         expect(video.currentTime).toBe(3);
       });
+    });
+  });
+});
+
+describe("Play Segment (ADR 026)", () => {
+  /**
+   * A media element that plays: `advanceTo` moves the position as playback does, with no seek,
+   * and only an assignment of `currentTime` counts as a seek. A seek past `duration` stops there.
+   */
+  interface PlayingVideo extends PlaybackMediaElement {
+    seeking: boolean;
+    paused: boolean;
+    ended: boolean;
+    readonly seeks: number;
+    readonly playCalls: number;
+    readonly pauseCalls: number;
+    advanceTo: (time: number) => void;
+  }
+
+  function createPlayingVideo(duration: number): PlayingVideo {
+    let time = 0;
+    let seeks = 0;
+    let playCalls = 0;
+    let pauseCalls = 0;
+    const video: PlayingVideo = {
+      seeking: false,
+      paused: true,
+      ended: false,
+      readyState: 1,
+      duration,
+      get currentTime() {
+        return time;
+      },
+      set currentTime(value: number) {
+        time = Math.min(value, duration);
+        seeks++;
+        video.seeking = true;
+      },
+      get seeks() {
+        return seeks;
+      },
+      get playCalls() {
+        return playCalls;
+      },
+      get pauseCalls() {
+        return pauseCalls;
+      },
+      advanceTo: (value: number) => {
+        time = value;
+      },
+      play: () => {
+        playCalls++;
+        video.paused = false;
+        return Promise.resolve();
+      },
+      pause: () => {
+        pauseCalls++;
+        video.paused = true;
+      },
+    };
+    return video;
+  }
+
+  /** 25 fps on 1/25: PTS k is frame k. 250 frames, 10 s. An exact grid. */
+  const gridSource: PlaybackSource = {
+    path: "/media/grid.mp4",
+    size: 4096,
+    mtime: 1724978000,
+    videoTimeBase: { n: 1, d: 25 },
+    videoStartPts: "0" as Pts,
+    videoDurationTicks: "250" as TickCount,
+    approximateDurationSeconds: 10,
+    avgFrameRate: { n: 25, d: 1 },
+    rFrameRate: { n: 25, d: 1 },
+  };
+
+  /** A second source, for a source change. */
+  const otherSource: PlaybackSource = { ...gridSource, path: "/media/other.mp4" };
+
+  /**
+   * A calibrated source with its first frame at `lead` on the browser timeline. `frame(pts)` plays
+   * to the frame at that PTS and presents it, with the position `offset` seconds into the frame.
+   * `seeked(pts)` finishes the running seek and presents the frame at that PTS.
+   */
+  function attachPlaying(
+    source: PlaybackSource,
+    { lead = 0, duration = 10 }: { lead?: number; duration?: number } = {},
+  ) {
+    const store = createPlaybackStore();
+    const video = createPlayingVideo(lead + duration);
+    const key = getSourceRevisionKey(source);
+    let presented = 0;
+    store.getState().attach(source, video);
+    store.getState().syncReady(key, video);
+    store.getState().syncBrowserDuration(key, video);
+    store.getState().syncPresentedFrame(key, lead, ++presented, video);
+    expect(store.getState().calibrationStatus).toBe("ready");
+
+    const tb = source.videoTimeBase;
+    const start = BigInt(source.videoStartPts ?? "0");
+    const timeOf = (pts: string): number =>
+      lead + (Number(BigInt(pts) - start) * tb.n) / tb.d;
+    const present = (pts: string): void => {
+      store.getState().syncPresentedFrame(key, timeOf(pts), ++presented, video);
+    };
+    const frame = (pts: string, offset = 0.001): void => {
+      video.advanceTo(timeOf(pts) + offset);
+      present(pts);
+    };
+    const seeked = (pts: string): void => {
+      video.seeking = false;
+      store.getState().syncSeeked(key, video);
+      present(pts);
+    };
+    const shown = (): string | null =>
+      store.getState().presentedFrame?.inferredSourcePts ?? null;
+    const playhead = (): number =>
+      getDisplayedElapsedSeconds(
+        store.getState(),
+        source.videoStartPts,
+        source.videoTimeBase,
+      );
+    return { store, video, key, timeOf, present, frame, seeked, shown, playhead };
+  }
+
+  type Harness = ReturnType<typeof attachPlaying>;
+
+  /** Starts Play Segment and lets the seek to the In finish on the In frame. */
+  function startSegment(h: Harness, inPts: string, outPts: string): void {
+    h.store.getState().playSegment(inPts as Pts, outPts as Pts);
+    expect(h.store.getState().playbackStop).toEqual({
+      inPts,
+      outPts,
+      phase: "playing",
+    });
+    expect(h.store.getState().isPlaying).toBe(true);
+    h.seeked(inPts);
+  }
+
+  /** Plays the frames from `from` to `to` on a source whose PTS counts frames. */
+  function playFrames(h: Harness, from: number, to: number): void {
+    for (let k = from; k <= to; k++) {
+      h.frame(String(k));
+    }
+  }
+
+  describe("on the frame grid", () => {
+    it("seeks to the In exactly and plays, with no cue", () => {
+      const requestSpy = vi.spyOn(scrubAudioController, "request");
+      try {
+        const h = attachPlaying(gridSource);
+        h.store.getState().playSegment("50" as Pts, "100" as Pts);
+        expect(h.video.seeks).toBe(1);
+        expect(h.video.currentTime).toBe(2);
+        expect(h.video.playCalls).toBe(1);
+        expect(h.store.getState().seekTargetSeconds).toBe(2);
+        h.seeked("50");
+        playFrames(h, 51, 99);
+        expect(requestSpy).not.toHaveBeenCalled();
+      } finally {
+        requestSpy.mockRestore();
+      }
+    });
+
+    it("pauses on the last frame of a segment in the middle, with no seek", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 98);
+      expect(h.store.getState().isPlaying).toBe(true);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+      const pauses = h.video.pauseCalls;
+
+      h.frame("99");
+      expect(h.video.pauseCalls).toBe(pauses + 1);
+      expect(h.video.paused).toBe(true);
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.video.seeks).toBe(1);
+      expect(h.shown()).toBe("99");
+      expect(h.store.getState().seekTargetSeconds).toBeNull();
+      expect(h.playhead()).toBeCloseTo(99 / 25, 9);
+      expect(h.store.getState().playbackStop).toMatchObject({
+        inPts: "50",
+        outPts: "100",
+        phase: "stopped",
+        restPts: "99",
+      });
+      // The element paused inside frame 99, so the window reaches 0.1 s past the Out.
+      const stop = h.store.getState().playbackStop;
+      expect(stop?.phase === "stopped" ? stop.windowEndSeconds : null).toBeCloseTo(
+        4.1,
+        9,
+      );
+      // The pause event of the stop keeps the stopped phase.
+      h.store.getState().syncPause(h.key, h.video);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+    });
+
+    it("seeks back to the last frame when its callback was skipped and the Out frame came", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 98);
+
+      h.frame("100");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.store.getState().playbackStop).toBeNull();
+      // The display target of the seek is set in the same call as the frame, so the playhead
+      // never draws the Out frame: it shows the start of the last frame.
+      expect(h.store.getState().seekTargetSeconds).toBeCloseTo(99 / 25, 9);
+      expect(h.playhead()).toBeLessThan(100 / 25);
+
+      h.seeked("99");
+      expect(h.shown()).toBe("99");
+      expect(h.store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("pauses with no seek when the callback of the last frame came after the element left it", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 98);
+
+      // The callback reports frame 99, but the element stands in frame 100 when it pauses. The
+      // picture can still show frame 99, so a seek to it could land on the frame on screen.
+      h.video.advanceTo(h.timeOf("100") + 0.004);
+      h.present("99");
+      expect(h.video.seeks).toBe(1);
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.shown()).toBe("99");
+
+      // When the browser shows frame 100 after all, its callback seeks back once, to another
+      // frame than the one on screen.
+      h.present("100");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+      expect(h.store.getState().seekTargetSeconds).toBeCloseTo(99 / 25, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+    });
+
+    it("pauses with no seek after a stall, and seeks back from each frame in the window", () => {
+      // The window ends at the frame that holds the Out plus 0.1 s: frame 102 at 25 fps.
+      for (const late of ["100", "101", "102"]) {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        // The element stands 0.09 s past the Out when the late callback of frame 99 runs. The
+        // picture can still show frame 99, so the store does not seek yet.
+        h.video.advanceTo(h.timeOf("100") + 0.09);
+        h.present("99");
+        expect(h.video.seeks).toBe(1);
+        expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+
+        h.present(late);
+        expect(h.video.seeks).toBe(2);
+        expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+        expect(h.store.getState().seekTargetSeconds).toBeCloseTo(99 / 25, 9);
+        expect(h.store.getState().playbackStop).toBeNull();
+      }
+    });
+
+    it.each([0, 0.5])(
+      "seeks back after a long stall from the frame where the element paused, audio lead %s s",
+      (lead) => {
+        const h = attachPlaying(gridSource, { lead });
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        // The late callback of frame 99 runs 0.2 s past the Out, and the element pauses there, in
+        // frame 105. The window reaches that position plus 0.1 s, counted from the calibrated first
+        // frame.
+        h.video.advanceTo(h.timeOf("100") + 0.2);
+        h.present("99");
+        expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+        const stop = h.store.getState().playbackStop;
+        expect(stop?.phase === "stopped" ? stop.windowEndSeconds : null).toBeCloseTo(
+          4.3,
+          9,
+        );
+        expect(h.video.seeks).toBe(1);
+
+        h.present("105");
+        expect(h.video.seeks).toBe(2);
+        expect(h.video.currentTime).toBeCloseTo(lead + 99.5 / 25, 9);
+        expect(h.store.getState().playbackStop).toBeNull();
+      },
+    );
+
+    it("seeks back when a decoder that lags presents the frame where the element paused", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 98);
+      // The decoder trails the clock by 0.5 s: frame 99 is on screen, and the element pauses in
+      // frame 112. No seek lands on frame 99.
+      h.video.advanceTo(h.timeOf("112") + 0.01);
+      h.present("99");
+      expect(h.video.seeks).toBe(1);
+      expect(h.shown()).toBe("99");
+
+      // The decoder catches up and presents frame 112.
+      h.present("112");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+    });
+
+    it("clears the stop with no seek for a frame past the window where the element paused", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 98);
+      h.video.advanceTo(h.timeOf("100") + 0.2);
+      h.present("99");
+      // The window ends 0.1 s after the position where the element paused, in frame 107. Frame
+      // 108 lies past it, as a frame of an outside seek does.
+      h.present("108");
+      expect(h.video.seeks).toBe(1);
+      expect(h.store.getState().playbackStop).toBeNull();
+    });
+
+    it("seeks back from a frame a little past the reported position, as WKWebView may report it", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 98);
+      // The web view reports the paused position in frame 105, and the element stops in frame
+      // 106, a little later.
+      h.video.advanceTo(h.timeOf("105") + 0.01);
+      h.present("99");
+      h.present("106");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+    });
+
+    it("clears the stop when a seek from outside starts, so its frame is not pulled back", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 98);
+      // A long stall makes a large window, up to frame 107.
+      h.video.advanceTo(h.timeOf("100") + 0.2);
+      h.present("99");
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+
+      // The media controls of the system seek to frame 103, inside the window.
+      h.video.currentTime = h.timeOf("103");
+      h.store.getState().syncSeeking(h.key, h.video);
+      expect(h.store.getState().playbackStop).toBeNull();
+      h.seeked("103");
+      expect(h.video.seeks).toBe(2);
+      expect(h.shown()).toBe("103");
+    });
+
+    it("keeps the stop through the seeking events of the store itself", () => {
+      const h = attachPlaying(gridSource);
+      h.store.getState().playSegment("50" as Pts, "100" as Pts);
+      // The `seeking` event of the seek to the In runs after playSegment set the stop point.
+      h.store.getState().syncSeeking(h.key, h.video);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+      h.seeked("50");
+      playFrames(h, 51, 99);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+
+      // The seek back of the stop clears the stop point before it seeks, so its `seeking`
+      // event finds none.
+      h.present("100");
+      expect(h.store.getState().playbackStop).toBeNull();
+      h.store.getState().syncSeeking(h.key, h.video);
+      expect(h.store.getState().playbackStop).toBeNull();
+
+      // Every seek action clears it before it moves the element.
+      const other = attachPlaying(gridSource);
+      startSegment(other, "50", "100");
+      playFrames(other, 51, 99);
+      other.store.getState().seekToPts("20" as Pts);
+      expect(other.store.getState().playbackStop).toBeNull();
+    });
+
+    it("clears the stop with no seek when a frame arrives before the play event of a system play", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 99);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      // The system starts the element, and a frame callback for frame 100 runs before `play`.
+      h.video.paused = false;
+      h.present("100");
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.video.seeks).toBe(1);
+      expect(h.video.paused).toBe(false);
+      h.store.getState().syncPlay(h.key, h.video);
+      expect(h.store.getState().isPlaying).toBe(true);
+    });
+
+    describe("at 60 fps", () => {
+      // 60 fps on 1/60: PTS k is frame k. The window ends at the frame that holds the Out plus
+      // 0.1 s, six frames after the Out.
+      const source60: PlaybackSource = {
+        ...gridSource,
+        path: "/media/sixty.mp4",
+        videoTimeBase: { n: 1, d: 60 },
+        videoDurationTicks: "600" as TickCount,
+        avgFrameRate: { n: 60, d: 1 },
+        rFrameRate: { n: 60, d: 1 },
+      };
+
+      it("seeks back from the second frame after the last frame", () => {
+        const h = attachPlaying(source60);
+        startSegment(h, "100", "200");
+        playFrames(h, 101, 198);
+        // The callback of frame 199 comes about one frame late, and the browser then presents
+        // frame 201.
+        h.video.advanceTo(h.timeOf("201") + 0.005);
+        h.present("199");
+        expect(h.video.seeks).toBe(1);
+        h.present("201");
+        expect(h.video.seeks).toBe(2);
+        expect(h.video.currentTime).toBeCloseTo(199.5 / 60, 9);
+        expect(h.store.getState().playbackStop).toBeNull();
+      });
+
+      it("seeks back up to the frame that holds the Out plus 0.1 s, and not after it", () => {
+        const inside = attachPlaying(source60);
+        startSegment(inside, "100", "200");
+        playFrames(inside, 101, 199);
+        inside.present("206");
+        expect(inside.video.seeks).toBe(2);
+        expect(inside.video.currentTime).toBeCloseTo(199.5 / 60, 9);
+
+        const outside = attachPlaying(source60);
+        startSegment(outside, "100", "200");
+        playFrames(outside, 101, 199);
+        outside.present("207");
+        expect(outside.video.seeks).toBe(1);
+        expect(outside.store.getState().playbackStop).toBeNull();
+      });
+    });
+
+    it("clears the stop with no seek when a seek from outside moves the element after the stop", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 99);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+
+      // The media controls of the system seek to frame 150.
+      h.video.currentTime = h.timeOf("150");
+      expect(h.video.seeks).toBe(2);
+      h.present("150");
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      h.seeked("150");
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.video.seeks).toBe(2);
+      expect(h.shown()).toBe("150");
+
+      // A frame before the last frame does not seek back either.
+      const other = attachPlaying(gridSource);
+      startSegment(other, "50", "100");
+      playFrames(other, 51, 99);
+      other.present("60");
+      expect(other.store.getState().playbackStop).toBeNull();
+      expect(other.video.seeks).toBe(1);
+    });
+
+    it("requests no cue on any seek back", () => {
+      const requestSpy = vi.spyOn(scrubAudioController, "request");
+      try {
+        // A skipped callback.
+        const skipped = attachPlaying(gridSource);
+        startSegment(skipped, "50", "100");
+        playFrames(skipped, 51, 98);
+        skipped.frame("100");
+        // A late frame after the pause.
+        const late = attachPlaying(gridSource);
+        startSegment(late, "50", "100");
+        playFrames(late, 51, 99);
+        late.present("100");
+        // The backstop of a hidden window.
+        const hidden = attachPlaying(gridSource);
+        startSegment(hidden, "50", "100");
+        hidden.video.advanceTo(hidden.timeOf("104"));
+        hidden.store.getState().syncBrowserTime(hidden.key, hidden.video);
+        // The end of the media.
+        const ended = attachPlaying(gridSource);
+        startSegment(ended, "50", "100");
+        ended.video.advanceTo(10);
+        ended.video.ended = true;
+        ended.store.getState().syncEnded(ended.key, ended.video);
+
+        for (const h of [skipped, late, hidden, ended]) {
+          expect(h.video.seeks).toBe(2);
+          expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+        }
+        expect(requestSpy).not.toHaveBeenCalled();
+      } finally {
+        requestSpy.mockRestore();
+      }
+    });
+
+    it("stops a segment of one frame whose In callback came while the element still seeked", () => {
+      const h = attachPlaying(gridSource);
+      h.store.getState().playSegment("50" as Pts, "51" as Pts);
+      // The callback of frame 50 runs before `seeking` turns false, so it is not tested.
+      h.present("50");
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+      h.video.seeking = false;
+      h.store.getState().syncSeeked(h.key, h.video);
+
+      // The next callback is frame 51, the Out frame: the store seeks back to frame 50.
+      h.frame("51");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(50.5 / 25, 9);
+      expect(h.store.getState().seekTargetSeconds).toBeCloseTo(50 / 25, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+      h.seeked("50");
+      expect(h.shown()).toBe("50");
+      expect(h.video.seeks).toBe(2);
+    });
+
+    it("seeks back once for a frame past the last one that arrives after the pause", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 99);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+
+      // The browser had already picked frame 100 when the pause took effect.
+      h.present("100");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+
+      h.seeked("99");
+      h.present("100");
+      expect(h.video.seeks).toBe(2);
+    });
+
+    it("stops a segment of one frame on its first frame", () => {
+      const h = attachPlaying(gridSource);
+      h.store.getState().playSegment("50" as Pts, "51" as Pts);
+      h.seeked("50");
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.shown()).toBe("50");
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("ignores a frame that arrives while the seek to the In runs", () => {
+      const h = attachPlaying(gridSource);
+      // The frame on screen lies after the segment when the user plays it.
+      h.store.getState().seekToPts("200" as Pts);
+      h.seeked("200");
+      h.store.getState().playSegment("50" as Pts, "100" as Pts);
+      // A late callback of frame 200 comes while the element still seeks.
+      h.present("200");
+      expect(h.store.getState().isPlaying).toBe(true);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+      expect(h.video.seeks).toBe(2);
+    });
+
+    it("keeps the stop through the late pause event of the seek to the In", () => {
+      const h = attachPlaying(gridSource);
+      h.store.getState().play();
+      h.frame("10");
+      h.store.getState().playSegment("50" as Pts, "100" as Pts);
+      // The seek paused the element and play started it again, so the element plays when the
+      // `pause` event of the seek arrives.
+      expect(h.video.paused).toBe(false);
+      h.store.getState().syncPause(h.key, h.video);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+      h.store.getState().syncPlay(h.key, h.video);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+
+      h.seeked("50");
+      playFrames(h, 51, 99);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.shown()).toBe("99");
+    });
+
+    it("counts the grid from the calibrated first frame when the audio leads", () => {
+      const h = attachPlaying(gridSource, { lead: 0.5 });
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 98);
+      h.frame("100");
+      expect(h.video.currentTime).toBeCloseTo(0.5 + 99.5 / 25, 9);
+      expect(h.store.getState().seekTargetSeconds).toBeCloseTo(99 / 25, 9);
+    });
+  });
+
+  describe("an Out at the end of the extent (the rule of End)", () => {
+    // 25 fps on 1/1000: 40 ticks for each frame, a whole-tick grid.
+    const msSource = (extent: string): PlaybackSource => ({
+      path: `/media/end-${extent}.mp4`,
+      size: 4096,
+      mtime: 1724978100,
+      videoTimeBase: { n: 1, d: 1000 },
+      videoStartPts: "0" as Pts,
+      videoDurationTicks: extent as TickCount,
+      approximateDurationSeconds: Number(extent) / 1000,
+      avgFrameRate: { n: 25, d: 1 },
+      rFrameRate: { n: 25, d: 1 },
+    });
+    const framePts = (k: number): string => String(k * 40);
+    const playMsFrames = (h: Harness, from: number, to: number): void => {
+      for (let k = from; k <= to; k++) {
+        h.frame(framePts(k));
+      }
+    };
+
+    it("stops on the last frame of the extent", () => {
+      const h = attachPlaying(msSource("10000"));
+      startSegment(h, framePts(240), "10000");
+      playMsFrames(h, 241, 248);
+      expect(h.store.getState().isPlaying).toBe(true);
+      h.frame(framePts(249));
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.video.seeks).toBe(1);
+      expect(h.shown()).toBe(framePts(249));
+    });
+
+    it("stops on a last frame shorter than an interval, which End also reaches", () => {
+      // Frame 249 starts at 9960, and the extent ends at 9976. The index of the Out minus one
+      // would be 248, and End goes to 249 (ADR 026).
+      const h = attachPlaying(msSource("9976"));
+      startSegment(h, framePts(240), "9976");
+      playMsFrames(h, 241, 248);
+      expect(h.store.getState().isPlaying).toBe(true);
+      h.frame(framePts(249), 0.004);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("stops on the last frame of the extent for an Out past the extent", () => {
+      const h = attachPlaying(msSource("10000"));
+      startSegment(h, framePts(240), "12000");
+      playMsFrames(h, 241, 249);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("ends at the end of the media with no seek when the extent names a frame that does not exist", () => {
+      // The extent claims a frame 250, which the file does not have, so no presented frame
+      // reaches the index of the last frame, and the element plays to its end.
+      const h = attachPlaying(msSource("10040"), { duration: 10 });
+      startSegment(h, framePts(240), "10040");
+      playMsFrames(h, 241, 249);
+      expect(h.store.getState().isPlaying).toBe(true);
+
+      // The element reaches its end: it sends `pause`, then `ended`.
+      h.video.advanceTo(10);
+      h.video.paused = true;
+      h.video.ended = true;
+      h.store.getState().syncPause(h.key, h.video);
+      expect(h.store.getState().playbackStop).toBeNull();
+      h.store.getState().syncEnded(h.key, h.video);
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.video.seeks).toBe(1);
+      expect(h.shown()).toBe(framePts(249));
+    });
+
+    it("stops on the frame before the Out when the Out is the last frame, as End then O marks it", () => {
+      const h = attachPlaying(msSource("10000"));
+      startSegment(h, framePts(240), framePts(249));
+      playMsFrames(h, 241, 248);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.shown()).toBe(framePts(248));
+    });
+
+    it("does not seek at the end when the segment ends with the video and the audio lasts longer", () => {
+      // The element ends at 10.5 s, and the video at 10 s. The callback of frame 249 was skipped.
+      const h = attachPlaying(msSource("10000"), { duration: 10.5 });
+      startSegment(h, framePts(240), "10000");
+      playMsFrames(h, 241, 248);
+      h.video.advanceTo(10.5);
+      h.video.paused = true;
+      h.video.ended = true;
+      h.store.getState().syncPause(h.key, h.video);
+      h.store.getState().syncEnded(h.key, h.video);
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("pauses with no seek on the backstop when the segment ends with the video", () => {
+      // A hidden window: the audio plays on after the last frame of the video, which stays.
+      const h = attachPlaying(msSource("10000"), { duration: 10.5 });
+      startSegment(h, framePts(240), "10000");
+      h.video.advanceTo(10.1);
+      h.store.getState().syncBrowserTime(h.key, h.video);
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.video.paused).toBe(true);
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("seeks back from the end when the playback passed the Out with no frame callback", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 98);
+      h.video.advanceTo(10);
+      h.video.paused = true;
+      h.video.ended = true;
+      h.store.getState().syncEnded(h.key, h.video);
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+      expect(h.store.getState().seekTargetSeconds).toBeCloseTo(99 / 25, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+    });
+  });
+
+  describe("off the frame grid", () => {
+    // A variable rate on 1/90000 (the average and the real rate differ). The frames lie 3000
+    // ticks apart, and the nominal interval is 3003 ticks.
+    const vfrSource: PlaybackSource = {
+      path: "/media/phone-play.mp4",
+      size: 4096,
+      mtime: 1724978200,
+      videoTimeBase: { n: 1, d: 90000 },
+      videoStartPts: "0" as Pts,
+      videoDurationTicks: "900000" as TickCount,
+      approximateDurationSeconds: 10,
+      avgFrameRate: { n: 2997, d: 100 },
+      rFrameRate: { n: 30, d: 1 },
+    };
+    const playVfr = (h: Harness, from: number, to: number): void => {
+      for (let p = from; p <= to; p += 3000) {
+        h.frame(String(p));
+      }
+    };
+
+    it("pauses on the predicted last frame with no seek, and seeks back from the Out frame", () => {
+      const h = attachPlaying(vfrSource);
+      startSegment(h, "90000", "180000");
+      // 174000 lies 6000 ticks before the Out, more than one and a half intervals.
+      playVfr(h, 93000, 174000);
+      expect(h.store.getState().isPlaying).toBe(true);
+
+      // The prediction is right: 177000 holds the last tick before the Out, and a seek to that
+      // tick would land on the frame on screen.
+      h.frame("177000");
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.video.seeks).toBe(1);
+      expect(h.shown()).toBe("177000");
+      expect(h.store.getState().seekTargetSeconds).toBeNull();
+      expect(h.playhead()).toBeCloseTo(177000 / 90000, 9);
+
+      // The element had moved on to the Out when the pause took effect, and the browser shows
+      // the Out frame: the store seeks back from it to the last tick before the Out.
+      h.present("180000");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(179999 / 90000, 9);
+      expect(h.store.getState().seekTargetSeconds).toBeCloseTo(179999 / 90000, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+      h.seeked("177000");
+      expect(h.shown()).toBe("177000");
+    });
+
+    it("keeps the stop for the real last frame after an early prediction", () => {
+      const h = attachPlaying(vfrSource);
+      startSegment(h, "90000", "180000");
+      playVfr(h, 93000, 174000);
+      // A short interval: 176000 lies 4000 ticks before the Out, so the prediction names it,
+      // and the real last frame starts at 178500.
+      h.frame("176000");
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.video.seeks).toBe(1);
+
+      // The browser presents the real last frame after the pause. It lies in the segment.
+      h.present("178500");
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.video.seeks).toBe(1);
+      // The Out frame after it is still pulled back.
+      h.present("180000");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(179999 / 90000, 9);
+    });
+
+    it("clears the stop with no seek for a frame before the In after the stop", () => {
+      const h = attachPlaying(vfrSource);
+      startSegment(h, "90000", "180000");
+      playVfr(h, 93000, 177000);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      h.present("30000");
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("reaches the window off the grid to 0.1 s past the position where the element paused", () => {
+      const h = attachPlaying(vfrSource);
+      startSegment(h, "90000", "180000");
+      playVfr(h, 93000, 174000);
+      // The callback of 177000 runs late, and the element pauses 0.3 s past the Out, at 2.3 s.
+      h.video.advanceTo(2.3);
+      h.present("177000");
+      const stop = h.store.getState().playbackStop;
+      expect(stop?.phase === "stopped" ? stop.windowEndSeconds : null).toBeCloseTo(
+        2.4,
+        9,
+      );
+      expect(h.video.seeks).toBe(1);
+
+      // A frame at 2.39 s lies in the window, and one at 2.41 s past it.
+      const inside = attachPlaying(vfrSource);
+      startSegment(inside, "90000", "180000");
+      playVfr(inside, 93000, 174000);
+      inside.video.advanceTo(2.3);
+      inside.present("177000");
+      inside.present("215100");
+      expect(inside.video.seeks).toBe(2);
+      expect(inside.video.currentTime).toBeCloseTo(179999 / 90000, 9);
+
+      h.present("216900");
+      expect(h.video.seeks).toBe(1);
+      expect(h.store.getState().playbackStop).toBeNull();
+    });
+
+    it("clears the stop for a seek back inside the segment, so a later seek is not pulled back", () => {
+      const h = attachPlaying(vfrSource);
+      startSegment(h, "90000", "180000");
+      playVfr(h, 93000, 177000);
+      expect(h.store.getState().playbackStop).toMatchObject({
+        phase: "stopped",
+        restPts: "177000",
+      });
+      // The media controls of the system seek back to 150000, inside the segment and before the
+      // frame of the stop.
+      h.present("150000");
+      expect(h.store.getState().playbackStop).toBeNull();
+      // A later seek from the system to the Out frame stays where it lands.
+      h.present("180000");
+      expect(h.video.seeks).toBe(1);
+      expect(h.shown()).toBe("180000");
+    });
+
+    it("refuses a segment after the extent in ticks off the grid", () => {
+      // The extent ends at 900000.
+      expect(canPlaySegment(vfrSource, "900000" as Pts, "950000" as Pts)).toBe(false);
+      expect(canPlaySegment(vfrSource, "920000" as Pts, "950000" as Pts)).toBe(false);
+      // A segment that starts inside the extent plays, also with an Out past it.
+      expect(canPlaySegment(vfrSource, "899000" as Pts, "950000" as Pts)).toBe(true);
+      // Without an extent in ticks, no such limit applies.
+      expect(
+        canPlaySegment(
+          { ...vfrSource, videoDurationTicks: null },
+          "920000" as Pts,
+          "950000" as Pts,
+        ),
+      ).toBe(true);
+      const h = attachPlaying(vfrSource);
+      h.store.getState().playSegment("920000" as Pts, "950000" as Pts);
+      expect(h.video.seeks).toBe(0);
+      expect(h.video.playCalls).toBe(0);
+    });
+
+    it("seeks back to the last tick when the playback reached the Out", () => {
+      const h = attachPlaying(vfrSource);
+      startSegment(h, "90000", "180000");
+      playVfr(h, 93000, 174000);
+      // The callback of 177000 was skipped.
+      h.frame("180000");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(179999 / 90000, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+    });
+
+    it("waits for the Out without a nominal rate, then seeks back", () => {
+      const h = attachPlaying({
+        ...vfrSource,
+        path: "/media/no-rate.mp4",
+        avgFrameRate: null,
+        rFrameRate: null,
+      });
+      startSegment(h, "90000", "180000");
+      playVfr(h, 93000, 177000);
+      expect(h.store.getState().isPlaying).toBe(true);
+      h.frame("180000");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(179999 / 90000, 9);
+    });
+
+    // 23.976 fps on 1/24: one tick is almost one frame, so the grid is not exact.
+    const coarseSource: PlaybackSource = {
+      path: "/media/coarse.mkv",
+      size: 4096,
+      mtime: 1724978300,
+      videoTimeBase: { n: 1, d: 24 },
+      videoStartPts: "0" as Pts,
+      videoDurationTicks: "240" as TickCount,
+      approximateDurationSeconds: 10,
+      avgFrameRate: { n: 24000, d: 1001 },
+      rFrameRate: { n: 24000, d: 1001 },
+    };
+
+    it("pauses with no seek on a coarse time base when the frame on screen is the last tick", () => {
+      const h = attachPlaying(coarseSource);
+      startSegment(h, "48", "96");
+      playFrames(h, 49, 94);
+      expect(h.store.getState().isPlaying).toBe(true);
+      h.frame("95");
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.video.seeks).toBe(1);
+      expect(h.shown()).toBe("95");
+
+      // A frame after the pause that is not the last tick gets one seek back.
+      h.present("96");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(95 / 24, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+    });
+
+    it("seeks back on a coarse time base where two ticks separate the last frame and the Out", () => {
+      const h = attachPlaying(coarseSource);
+      startSegment(h, "48", "96");
+      playFrames(h, 49, 93);
+      // The frame after 94 starts at 96: 94 is the last frame, it does not start at the last
+      // tick, and it is not predicted, so the playback reaches the Out.
+      h.frame("94");
+      expect(h.store.getState().isPlaying).toBe(true);
+      h.frame("96");
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(95 / 24, 9);
+    });
+  });
+
+  describe("what cancels the stop", () => {
+    /** A grid source that plays [50, 100) and stands on frame 70. */
+    function midSegment(): Harness {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 70);
+      return h;
+    }
+
+    it("Space pauses and clears it, and a later play has no stop point", () => {
+      const h = midSegment();
+      h.store.getState().togglePlayback();
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.store.getState().playbackStop).toBeNull();
+
+      h.store.getState().togglePlayback();
+      const pauses = h.video.pauseCalls;
+      playFrames(h, 71, 110);
+      expect(h.store.getState().isPlaying).toBe(true);
+      expect(h.video.pauseCalls).toBe(pauses);
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("Space after the stop plays on with no stop point", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 99);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      h.store.getState().togglePlayback();
+      expect(h.store.getState().playbackStop).toBeNull();
+      playFrames(h, 100, 105);
+      expect(h.store.getState().isPlaying).toBe(true);
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("a frame step clears it", () => {
+      const h = midSegment();
+      h.store.getState().seekNominal(1);
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.store.getState().isPlaying).toBe(false);
+    });
+
+    it("a seek of any kind clears it: a click, a scrub, a typed frame and End", () => {
+      const seeks: readonly ((h: Harness) => void)[] = [
+        (h) => h.store.getState().seekToPts("20" as Pts),
+        (h) => h.store.getState().seekToPts("20" as Pts, { scrub: true }),
+        (h) => h.store.getState().seekApproximate(1),
+        (h) => h.store.getState().seekToFrameIndex(249),
+        (h) => h.store.getState().seekToPts("249" as Pts, EXTENT_END_SEEK_OPTIONS),
+      ];
+      for (const seek of seeks) {
+        const h = midSegment();
+        seek(h);
+        expect(h.store.getState().playbackStop).toBeNull();
+      }
+    });
+
+    it("a second segment replaces the first", () => {
+      const h = midSegment();
+      h.store.getState().playSegment("150" as Pts, "160" as Pts);
+      expect(h.store.getState().playbackStop).toEqual({
+        inPts: "150",
+        outPts: "160",
+        phase: "playing",
+      });
+      h.seeked("150");
+      playFrames(h, 151, 158);
+      expect(h.store.getState().isPlaying).toBe(true);
+      h.frame("159");
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+    });
+
+    it("a new source, a detach, a reset and a loss of readiness clear it", () => {
+      const attached = midSegment();
+      attached.store.getState().attach(otherSource, createPlayingVideo(10));
+      expect(attached.store.getState().playbackStop).toBeNull();
+
+      const detached = midSegment();
+      detached.store.getState().detach(detached.key, detached.video);
+      expect(detached.store.getState().playbackStop).toBeNull();
+
+      const reset = midSegment();
+      reset.store.getState().reset();
+      expect(reset.store.getState().playbackStop).toBeNull();
+
+      const unready = midSegment();
+      unready.store.getState().syncUnready(unready.key, unready.video);
+      expect(unready.store.getState().playbackStop).toBeNull();
+    });
+
+    it("a seek from outside while the segment plays keeps it, and a later frame is pulled back", () => {
+      const h = midSegment();
+      // The media controls of the system seek to frame 150 while the segment plays. The store
+      // cannot tell this `seeking` event from the late one of the seek to the In.
+      h.video.currentTime = h.timeOf("150");
+      h.store.getState().syncSeeking(h.key, h.video);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+
+      // Frame 150 lies past the last frame, so it meets the stop, and the store seeks back.
+      h.seeked("150");
+      expect(h.video.seeks).toBe(3);
+      expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+    });
+
+    it("a pause from the system clears it", () => {
+      const h = midSegment();
+      h.video.pause();
+      h.store.getState().syncPause(h.key, h.video);
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.store.getState().isPlaying).toBe(false);
+    });
+
+    it("a play that the element starts after the stop clears it", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 99);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      h.video.paused = false;
+      h.store.getState().syncPlay(h.key, h.video);
+      expect(h.store.getState().playbackStop).toBeNull();
+      playFrames(h, 100, 102);
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("a play that fails clears it", async () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({
+        playImpl: () => Promise.reject(new DOMException("blocked", "NotAllowedError")),
+      });
+      const key = getSourceRevisionKey(gridSource);
+      store.getState().attach(gridSource, video);
+      store.getState().syncReady(key, video);
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      store.getState().playSegment("50" as Pts, "100" as Pts);
+      expect(store.getState().playbackStop?.phase).toBe("playing");
+      await flushAsync();
+      expect(store.getState().error).toBe("playbackFailed");
+      expect(store.getState().playbackStop).toBeNull();
+    });
+
+    it("a loss of the calibration clears it, and the playback goes on", () => {
+      const h = midSegment();
+      h.store.getState().syncPresentationUnavailable(h.key, h.video);
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.store.getState().isPlaying).toBe(true);
+    });
+  });
+
+  describe("the conditions", () => {
+    it("does nothing while the calibration is open or unavailable", () => {
+      const store = createPlaybackStore();
+      const video = createPlayingVideo(10);
+      const key = getSourceRevisionKey(gridSource);
+      store.getState().attach(gridSource, video);
+      store.getState().syncReady(key, video);
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+      store.getState().playSegment("50" as Pts, "100" as Pts);
+      expect(video.seeks).toBe(0);
+      expect(video.playCalls).toBe(0);
+      expect(store.getState().playbackStop).toBeNull();
+      expect(store.getState().hasDeferredNavigation).toBe(false);
+
+      store.getState().syncPresentationUnavailable(key, video);
+      store.getState().playSegment("50" as Pts, "100" as Pts);
+      expect(video.seeks).toBe(0);
+      expect(video.playCalls).toBe(0);
+      expect(store.getState().playbackStop).toBeNull();
+    });
+
+    it("does nothing for a segment that holds no frame", () => {
+      const source: PlaybackSource = { ...gridSource, videoStartPts: "10" as Pts };
+      const h = attachPlaying(source);
+      for (const [inPts, outPts] of [
+        ["100", "50"],
+        ["50", "50"],
+        ["0", "10"],
+        ["5O", "100"],
+      ]) {
+        expect(canPlaySegment(source, inPts as Pts, outPts as Pts)).toBe(false);
+        h.store.getState().playSegment(inPts as Pts, outPts as Pts);
+      }
+      expect(h.video.seeks).toBe(0);
+      expect(h.video.playCalls).toBe(0);
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(canPlaySegment(source, "0" as Pts, "11" as Pts)).toBe(true);
+    });
+
+    it("does not play when the seek to the In fails", () => {
+      const h = attachPlaying({ ...gridSource, videoStartPts: "100" as Pts });
+      // PTS 0 lies 4 s before the first frame, before the start of the browser timeline.
+      h.store.getState().playSegment("0" as Pts, "150" as Pts);
+      expect(h.store.getState().error).toBe("seekFailed");
+      expect(h.video.playCalls).toBe(0);
+      expect(h.store.getState().playbackStop).toBeNull();
+    });
+  });
+
+  describe("the backstop of a window that presents no frames", () => {
+    it("stops on the approximate clock once the position lies far enough past the Out", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      // A hidden window: the clock runs on, and no frame callback comes.
+      h.video.advanceTo(h.timeOf("98"));
+      h.store.getState().syncBrowserTime(h.key, h.video);
+      // 0.05 s past the Out is less than the distance of the backstop, 0.1 s.
+      h.video.advanceTo(h.timeOf("100") + 0.05);
+      h.store.getState().syncBrowserTime(h.key, h.video);
+      expect(h.store.getState().isPlaying).toBe(true);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+      expect(h.video.seeks).toBe(1);
+
+      h.video.advanceTo(h.timeOf("100") + 0.1);
+      h.store.getState().syncBrowserTime(h.key, h.video);
+      expect(h.store.getState().isPlaying).toBe(false);
+      expect(h.video.paused).toBe(true);
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+      expect(h.store.getState().seekTargetSeconds).toBeCloseTo(99 / 25, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+
+      // The window shows again, and the frame of the seek arrives.
+      h.seeked("99");
+      expect(h.shown()).toBe("99");
+      expect(h.video.seeks).toBe(2);
+    });
+
+    it("leaves a visible window to the frame callbacks, which stop the playback first", () => {
+      const h = attachPlaying(gridSource);
+      startSegment(h, "50", "100");
+      playFrames(h, 51, 98);
+      // A `timeupdate` just past the Out comes before the callback of the last frame.
+      h.video.advanceTo(h.timeOf("100") + 0.02);
+      h.store.getState().syncBrowserTime(h.key, h.video);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+      expect(h.video.seeks).toBe(1);
+      // The callback of frame 99 then stops the playback with no seek.
+      h.present("99");
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.video.seeks).toBe(1);
+      // A later `timeupdate` does nothing in the stopped phase.
+      h.video.advanceTo(h.timeOf("100") + 0.3);
+      h.store.getState().syncBrowserTime(h.key, h.video);
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("waits at least one nominal interval past the Out on a slow rate", () => {
+      // 5 fps on 1/5: one interval is 0.2 s, more than the distance of 0.1 s.
+      const slow: PlaybackSource = {
+        ...gridSource,
+        path: "/media/slow.mp4",
+        videoTimeBase: { n: 1, d: 5 },
+        videoDurationTicks: "50" as TickCount,
+        avgFrameRate: { n: 5, d: 1 },
+        rFrameRate: { n: 5, d: 1 },
+      };
+      const h = attachPlaying(slow);
+      startSegment(h, "10", "20");
+      h.video.advanceTo(h.timeOf("20") + 0.15);
+      h.store.getState().syncBrowserTime(h.key, h.video);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+      h.video.advanceTo(h.timeOf("20") + 0.2);
+      h.store.getState().syncBrowserTime(h.key, h.video);
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.video.currentTime).toBeCloseTo(19.5 / 5, 9);
+    });
+
+    it("does not act while the seek to the In runs", () => {
+      const h = attachPlaying(gridSource);
+      h.video.advanceTo(h.timeOf("200"));
+      h.store.getState().playSegment("50" as Pts, "100" as Pts);
+      // A seek assigns the element position at once, but a late `timeupdate` must not act before
+      // the seek settles.
+      h.video.advanceTo(h.timeOf("200"));
+      h.store.getState().syncBrowserTime(h.key, h.video);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("seeks off the grid to the last tick before the Out", () => {
+      const vfr: PlaybackSource = {
+        path: "/media/phone-hidden.mp4",
+        size: 4096,
+        mtime: 1724978400,
+        videoTimeBase: { n: 1, d: 90000 },
+        videoStartPts: "0" as Pts,
+        videoDurationTicks: "900000" as TickCount,
+        approximateDurationSeconds: 10,
+        avgFrameRate: { n: 2997, d: 100 },
+        rFrameRate: { n: 30, d: 1 },
+      };
+      const h = attachPlaying(vfr);
+      startSegment(h, "90000", "180000");
+      h.video.advanceTo(2.1);
+      h.store.getState().syncBrowserTime(h.key, h.video);
+      expect(h.video.seeks).toBe(2);
+      expect(h.video.currentTime).toBeCloseTo(179999 / 90000, 9);
+      expect(h.store.getState().playbackStop).toBeNull();
+    });
+  });
+
+  describe("a late ended event", () => {
+    it("does not end a segment playback that started after the end of the media", () => {
+      const h = attachPlaying(gridSource);
+      h.store.getState().seekToPts("240" as Pts);
+      h.seeked("240");
+      h.store.getState().play();
+      playFrames(h, 241, 249);
+      // The element reaches its end, and its `pause` and `ended` events wait in the queue.
+      h.video.advanceTo(10);
+      h.video.paused = true;
+      h.video.ended = true;
+
+      // The user presses / before they run. The seek leaves the end and play starts the element.
+      h.store.getState().playSegment("50" as Pts, "100" as Pts);
+      h.video.ended = false;
+      h.store.getState().syncPause(h.key, h.video);
+      h.store.getState().syncEnded(h.key, h.video);
+      h.store.getState().syncPlay(h.key, h.video);
+      expect(h.store.getState().playbackStop?.phase).toBe("playing");
+
+      h.seeked("50");
+      playFrames(h, 51, 99);
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.shown()).toBe("99");
+      expect(h.video.seeks).toBe(2);
+    });
+  });
+
+  describe("off the grid, after the stop", () => {
+    // 23.976 fps on 1/24, as above: the frames lie one tick apart.
+    const coarse: PlaybackSource = {
+      path: "/media/coarse-after.mkv",
+      size: 4096,
+      mtime: 1724978500,
+      videoTimeBase: { n: 1, d: 24 },
+      videoStartPts: "0" as Pts,
+      videoDurationTicks: "240" as TickCount,
+      approximateDurationSeconds: 10,
+      avgFrameRate: { n: 24000, d: 1001 },
+      rFrameRate: { n: 24000, d: 1001 },
+    };
+
+    it("pauses with no seek on the last tick even when the element passed the Out", () => {
+      const h = attachPlaying(coarse);
+      startSegment(h, "48", "96");
+      playFrames(h, 49, 94);
+      h.video.advanceTo(h.timeOf("96") + 0.01);
+      h.present("95");
+      expect(h.store.getState().playbackStop?.phase).toBe("stopped");
+      expect(h.video.seeks).toBe(1);
+    });
+
+    it("seeks back for the Out frame, and not for a frame from a seek elsewhere", () => {
+      const back = attachPlaying(coarse);
+      startSegment(back, "48", "96");
+      playFrames(back, 49, 95);
+      back.present("96");
+      expect(back.video.seeks).toBe(2);
+      expect(back.store.getState().playbackStop).toBeNull();
+
+      // The window ends 0.1 s after the Out: two ticks after it lie inside, three lie outside.
+      const inside = attachPlaying(coarse);
+      startSegment(inside, "48", "96");
+      playFrames(inside, 49, 95);
+      inside.present("98");
+      expect(inside.video.seeks).toBe(2);
+      expect(inside.video.currentTime).toBeCloseTo(95 / 24, 9);
+
+      const elsewhere = attachPlaying(coarse);
+      startSegment(elsewhere, "48", "96");
+      playFrames(elsewhere, 49, 95);
+      elsewhere.present("99");
+      expect(elsewhere.video.seeks).toBe(1);
+      expect(elsewhere.store.getState().playbackStop).toBeNull();
+    });
+  });
+
+  describe("a last frame before the frame of the In", () => {
+    it("refuses a segment that starts at the end of the extent on the grid", () => {
+      // 25 fps on 1/1000, with an extent of 9976 ticks: the last frame, 249, starts at 9960. An
+      // In at 9976 has the ADR 028 index 249 too, so only the end of the extent refuses it.
+      const shortEnd: PlaybackSource = {
+        ...gridSource,
+        path: "/media/short-end.mp4",
+        videoTimeBase: { n: 1, d: 1000 },
+        videoDurationTicks: "9976" as TickCount,
+        approximateDurationSeconds: 9.976,
+      };
+      const h = attachPlaying(shortEnd);
+      expect(canPlaySegment(shortEnd, "9976" as Pts, "10000" as Pts)).toBe(false);
+      h.store.getState().playSegment("9976" as Pts, "10000" as Pts);
+      expect(h.video.seeks).toBe(0);
+      expect(h.video.playCalls).toBe(0);
+      // A segment that starts on the last frame of the extent still plays.
+      expect(canPlaySegment(shortEnd, "9960" as Pts, "10000" as Pts)).toBe(true);
+      // A segment past the extent is refused as well.
+      expect(canPlaySegment(gridSource, "255" as Pts, "260" as Pts)).toBe(false);
+    });
+
+    it("refuses a segment of one tick on a grid whose margin is one tick", () => {
+      // 29.97 fps on 1/1000: an exact grid, and one tick is the margin. Frame 30 starts at 1001.
+      const ntscMs: PlaybackSource = {
+        ...gridSource,
+        path: "/media/ntsc-ms.mkv",
+        videoTimeBase: { n: 1, d: 1000 },
+        videoDurationTicks: "10010" as TickCount,
+        avgFrameRate: { n: 30000, d: 1001 },
+        rFrameRate: { n: 30000, d: 1001 },
+      };
+      expect(canPlaySegment(ntscMs, "1001" as Pts, "1002" as Pts)).toBe(false);
+      expect(canPlaySegment(ntscMs, "1001" as Pts, "1035" as Pts)).toBe(true);
+      // On a grid whose frames start on ticks, one tick holds the start of its frame.
+      const ms25: PlaybackSource = {
+        ...ntscMs,
+        path: "/media/25-ms.mp4",
+        avgFrameRate: { n: 25, d: 1 },
+        rFrameRate: { n: 25, d: 1 },
+      };
+      expect(canPlaySegment(ms25, "400" as Pts, "401" as Pts)).toBe(true);
     });
   });
 });

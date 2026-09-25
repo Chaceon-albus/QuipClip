@@ -9,7 +9,7 @@ import { runShortcutCommand } from "./useKeyboardShortcuts";
 
 type SeekActions = Pick<
   PlaybackStoreState,
-  "seekToPts" | "seekToFrameIndex" | "seekApproximate"
+  "seekToPts" | "seekToFrameIndex" | "seekApproximate" | "playSegment" | "pause"
 >;
 
 // The calls of the real command runner, on the production playback store. The seek actions are
@@ -19,6 +19,8 @@ describe("runShortcutCommand", () => {
   const seekToPts = vi.fn<PlaybackStoreState["seekToPts"]>();
   const seekToFrameIndex = vi.fn<PlaybackStoreState["seekToFrameIndex"]>();
   const seekApproximate = vi.fn<PlaybackStoreState["seekApproximate"]>();
+  const playSegment = vi.fn<PlaybackStoreState["playSegment"]>();
+  const pause = vi.fn<PlaybackStoreState["pause"]>();
 
   beforeEach(() => {
     const state = playbackStore.getState();
@@ -26,11 +28,21 @@ describe("runShortcutCommand", () => {
       seekToPts: state.seekToPts,
       seekToFrameIndex: state.seekToFrameIndex,
       seekApproximate: state.seekApproximate,
+      playSegment: state.playSegment,
+      pause: state.pause,
     };
     seekToPts.mockReset();
     seekToFrameIndex.mockReset();
     seekApproximate.mockReset();
-    playbackStore.setState({ seekToPts, seekToFrameIndex, seekApproximate });
+    playSegment.mockReset();
+    pause.mockReset();
+    playbackStore.setState({
+      seekToPts,
+      seekToFrameIndex,
+      seekApproximate,
+      playSegment,
+      pause,
+    });
   });
 
   afterEach(() => {
@@ -60,5 +72,16 @@ describe("runShortcutCommand", () => {
       10,
       APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
     );
+  });
+
+  it("runs Play Segment with the In and the Out, and a second press as a pause", () => {
+    runShortcutCommand({
+      kind: "playSegment",
+      inPts: "50" as Pts,
+      outPts: "100" as Pts,
+    });
+    expect(playSegment).toHaveBeenCalledExactlyOnceWith("50", "100");
+    runShortcutCommand({ kind: "pause" });
+    expect(pause).toHaveBeenCalledOnce();
   });
 });

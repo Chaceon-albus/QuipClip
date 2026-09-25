@@ -21,6 +21,7 @@ import {
 } from "@/lib/time";
 import {
   frameBoundaryMarginSeconds,
+  frameIndexOfTicks,
   isFrameGridExact,
   lastFrameIndexOfExtent,
 } from "@/lib/timecode";
@@ -32,6 +33,7 @@ import type {
   PlaybackMediaElement,
   PlaybackSource,
   PlaybackState,
+  PlaybackStop,
   PlaybackStoreState,
   SeekOptions,
 } from "./types";
@@ -105,6 +107,187 @@ export function hasExactFrameGrid(
     !hasVariableFrameRate(source) &&
     isFrameGridExact(fps, source.videoTimeBase)
   );
+}
+
+/** The probe facts that the stop of a segment playback reads (canPlaySegment). */
+export type PlaybackStopSource = Pick<
+  PlaybackSource,
+  | "videoStartPts"
+  | "videoTimeBase"
+  | "videoDurationTicks"
+  | "avgFrameRate"
+  | "rFrameRate"
+>;
+
+/**
+ * The last frame of a segment, where a segment playback stops (ADR 026).
+ *
+ * - `frame`: on the frame grid (hasExactFrameGrid), the ADR 028 index of the last frame, counted
+ *   from the calibrated first frame.
+ * - `tick`: off the grid no frame boundary is known. The last frame is the frame that holds the
+ *   last tick before the Out, `outPts - 1`. `fps` is the nominal rate, or null without one.
+ */
+type PlaybackStopTarget =
+  | { readonly kind: "frame"; readonly fps: Rational; readonly lastFrame: number }
+  | {
+      readonly kind: "tick";
+      readonly fps: Rational | null;
+      readonly out: bigint;
+      readonly lastTick: Pts;
+    };
+
+/**
+ * The last frame of the half-open segment `[inPts, outPts)` (ADR 002), or null when the segment
+ * holds no frame of the source: a PTS that does not parse, `inPts >= outPts`, an Out at or before
+ * `videoStartPts`, an invalid time base, or an In at or after the end of the extent when the probe
+ * gives the extent in ticks, `videoStartPts + videoDurationTicks`. An Out after that end is valid,
+ * as long as the In lies before it: on the grid the stop is the last frame of the extent, and off
+ * the grid the end of the media ends the playback. On the frame grid it is also null when the
+ * last frame lies before the ADR 028 frame of the In, the frame that the seek to the In shows: an
+ * extent that ends before the segment, or a segment that ends no more than the margin after a
+ * frame start, such as a segment of one tick on a grid whose margin is one tick.
+ *
+ * On the frame grid the last frame is the last nominal frame whose start lies before the Out by
+ * more than the frame boundary margin of ADR 028: `lastFrameIndexOfExtent` of the ticks from
+ * `videoStartPts` to the Out, the rule that End uses for the extent (ADR 026). For an Out that a
+ * frame presented, which lies within one tick of its nominal start, that is the index of the Out
+ * minus one. For an Out at the end of the extent it is the frame that End goes to, also when that
+ * frame is shorter than an interval, where the index of the Out minus one would name the frame
+ * before it. An Out past the end of the extent in ticks stops on the last frame of the extent.
+ * An index past the safe integers goes by the tick instead.
+ */
+function playbackStopTarget(
+  source: PlaybackStopSource,
+  inPts: Pts,
+  outPts: Pts,
+): PlaybackStopTarget | null {
+  const { videoStartPts, videoTimeBase, videoDurationTicks } = source;
+  if (
+    !isPtsString(inPts) ||
+    !isPtsString(outPts) ||
+    !isPtsString(videoStartPts) ||
+    !isPositiveRational(videoTimeBase)
+  ) {
+    return null;
+  }
+  const start = BigInt(videoStartPts);
+  const inValue = BigInt(inPts);
+  const out = BigInt(outPts);
+  if (inValue >= out || out <= start) {
+    return null;
+  }
+  // A segment that starts at or after the end of the extent in ticks holds no frame of the
+  // extent, on the grid or off it.
+  if (
+    isTickCountString(videoDurationTicks) &&
+    inValue >= start + BigInt(videoDurationTicks)
+  ) {
+    return null;
+  }
+  const fps = getNominalFrameRate(source);
+  if (fps !== null && hasExactFrameGrid(source)) {
+    let last = lastFrameIndexOfExtent(out - start, videoTimeBase, fps);
+    if (last === null) {
+      // No frame starts before the Out by more than the margin.
+      return null;
+    }
+    if (isTickCountString(videoDurationTicks)) {
+      const extentLast = lastFrameIndexOfExtent(
+        BigInt(videoDurationTicks),
+        videoTimeBase,
+        fps,
+      );
+      if (extentLast !== null && extentLast < last) {
+        last = extentLast;
+      }
+    }
+    // The last frame must not lie before the frame that the seek to the In shows. Otherwise the
+    // first frame of the playback would meet the stop, and the stop would seek out of the
+    // segment.
+    const inIndex =
+      inValue <= start
+        ? 0n
+        : frameIndexOfTicks(inValue - start, videoTimeBase, fps, videoTimeBase);
+    if (inIndex === null || last < inIndex) {
+      return null;
+    }
+    if (last <= BigInt(Number.MAX_SAFE_INTEGER)) {
+      return { kind: "frame", fps, lastFrame: Number(last) };
+    }
+  }
+  return { kind: "tick", fps, out, lastTick: (out - 1n).toString() as Pts };
+}
+
+/**
+ * True when `playSegment` can play the segment `[inPts, outPts)` on the source: the segment holds
+ * a frame (playbackStopTarget). The window keyboard layer tests the same rule (ADR 026). The
+ * action also needs an attached, ready element and a ready calibration, which the caller tests.
+ */
+export function canPlaySegment(
+  source: PlaybackStopSource,
+  inPts: Pts,
+  outPts: Pts,
+): boolean {
+  return playbackStopTarget(source, inPts, outPts) !== null;
+}
+
+/**
+ * The prediction of the last frame off the frame grid: true when the Out lies less than one and
+ * a half nominal intervals after the start of the frame at `pts`. The next frame is expected one
+ * interval later, so it would then be the Out or a later frame. The comparison is exact:
+ * `(out - pts) * timeBase < 3 / (2 * rate)`.
+ *
+ * On the frame grid the same rule would name the last frame exactly, because a real frame start
+ * lies less than one tick, and so less than half an interval, from its nominal start. Off the grid
+ * it is a prediction, and the store pauses on a predicted frame with no seek, as on a proven one:
+ * when the prediction is right, which is the usual case, that frame already holds the last tick
+ * before the Out, and a seek to that tick would land on the frame on screen (ADR 022). A late
+ * prediction lets the playback reach the Out, and the store seeks back from the Out frame. An early
+ * one pauses one frame or more before the last frame. When the element has moved on before the
+ * pause took effect, the browser presents a later frame. A later frame before the Out lies in the
+ * segment at or before the real last frame, and it keeps the stop; it can still lie before the
+ * real last frame. A later frame in the seek-back window is pulled back. When the element has not
+ * moved on, the playback rests on the early frame. The half interval splits the two errors: a
+ * frame is taken as the last frame when the Out is nearer to one interval after it than to two.
+ */
+function isPredictedLastFrame(
+  pts: bigint,
+  out: bigint,
+  timeBase: Rational,
+  fps: Rational,
+): boolean {
+  return (
+    2n * (out - pts) * BigInt(timeBase.n) * BigInt(fps.n) <
+    3n * BigInt(timeBase.d) * BigInt(fps.d)
+  );
+}
+
+/**
+ * The least distance in seconds past the Out that two rules of a segment playback read (ADR 026).
+ * Each rule also uses one nominal interval when that is longer (playbackStopWindowSeconds).
+ *
+ * - The seek-back window of the "stopped" phase. A frame callback runs after the browser
+ *   presented the frame, and the pause runs later still, so the paused position can lie some
+ *   frames past the last frame: at 50 or 60 fps the delay of a callback is close to one frame.
+ *   When the browser then presents the frame at that position, a frame that lies at most this
+ *   distance past the Out is a frame of that delay, and the store seeks back from it. When the
+ *   element paused after the Out, the window can also end at the paused position plus this same
+ *   distance (stopWindowEndSeconds).
+ * - The backstop of syncBrowserTime. A window that is hidden or minimized presents no frames, so
+ *   no frame callback comes, and the sound would play past the Out. The approximate clock stops
+ *   the playback when its position lies this distance past the Out. On a visible window the frame
+ *   callbacks come for every frame, and the distance keeps two or more of them between the Out
+ *   and the backstop at the usual rates.
+ *
+ * The picture follows the element clock while the decoder keeps up. When decoding lags, as with a
+ * heavy file that a web view decodes in software, the picture can trail the clock by more than
+ * this distance.
+ */
+const PLAYBACK_STOP_BACKSTOP_SECONDS = 0.1;
+
+/** The distance past the Out of the seek-back window and of the backstop, in seconds. */
+function playbackStopWindowSeconds(fps: Rational | null): number {
+  return Math.max(PLAYBACK_STOP_BACKSTOP_SECONDS, fps === null ? 0 : fps.d / fps.n);
 }
 
 /**
@@ -1208,6 +1391,486 @@ export function createPlaybackStore(
       });
     };
 
+    /**
+     * Clears the stop point of a segment playback (ADR 026). Every action that the user starts,
+     * and every change of the source or of the calibration, calls it, so a playback that starts
+     * later plays with no stop point. It writes only when a stop point is set.
+     */
+    const dropPlaybackStop = (): void => {
+      if (get().playbackStop !== null) {
+        set({ playbackStop: null });
+      }
+    };
+
+    /**
+     * Pauses the attached element, stops the cue and invalidates a pending play promise. It does
+     * not touch presentedFrame. `pause` runs it after it clears the stop point, and the stop of a
+     * segment playback runs it with the stop point kept.
+     */
+    const pauseElement = (): void => {
+      lastScrubAudioTarget = null;
+      scrubAudioController.stop();
+
+      if (!attachedSource || !attachedElement) {
+        set({ isPlaying: false });
+        return;
+      }
+
+      playSessionId++;
+      try {
+        attachedElement.pause();
+      } catch {
+        // Ignore DOM exception
+      }
+      set({ isPlaying: false });
+    };
+
+    /**
+     * The ADR 028 index of the frame at a presented PTS on the frame grid, counted from
+     * videoStartPts, or -1 for a PTS before it. The index of a real frame is exact on the grid
+     * (ADR 022), and this is the rule that End reads for the frame on screen (ADR 026).
+     */
+    const stopFrameIndexOfPts = (
+      source: PlaybackSource,
+      fps: Rational,
+      pts: Pts,
+    ): number => {
+      const startPts = source.videoStartPts;
+      if (startPts === null || !isPtsString(startPts) || !isPtsString(pts)) {
+        return -1;
+      }
+      const index = frameIndexOfTicks(
+        BigInt(pts) - BigInt(startPts),
+        source.videoTimeBase,
+        fps,
+        source.videoTimeBase,
+      );
+      return index === null ? -1 : Number(index);
+    };
+
+    /**
+     * True when the playback rests with a pause alone on the frame at a presented PTS, once the
+     * stop is reached (applyPlaybackStop):
+     *
+     * - On the frame grid, the ADR 028 index of the frame is the index of the last frame.
+     * - Off the grid, the frame starts before the Out. The playback reaches the stop on such a
+     *   frame only when it starts at the last tick before the Out, which proves the last frame, or
+     *   when the prediction names it (isPredictedLastFrame).
+     *
+     * The position of the element does not count. A frame callback runs after the browser
+     * presented the frame, and the pause runs later still, so the paused position can lie past the
+     * last frame while the picture still shows it. A seek from there could land on the frame on
+     * screen, which can bring no frame callback (ADR 022). When the browser does present a later
+     * frame, its callback comes in the "stopped" phase (isInStopWindow).
+     */
+    const isRestFrame = (
+      source: PlaybackSource,
+      target: PlaybackStopTarget,
+      framePts: Pts,
+    ): boolean => {
+      if (target.kind === "frame") {
+        return stopFrameIndexOfPts(source, target.fps, framePts) === target.lastFrame;
+      }
+      return isPtsString(framePts) && BigInt(framePts) < target.out;
+    };
+
+    /**
+     * True when a settled frame in the "stopped" phase is a frame of the stop, which keeps it:
+     *
+     * - On the frame grid, the frame has the index of the last frame: the last frame shown again.
+     * - Off the grid, the frame starts at or after the frame that the stop rested on, and before
+     *   the Out. It is that frame shown again, or a later frame that the browser presents after the
+     *   pause. After an early prediction, such a later frame lies in the segment at or before the
+     *   real last frame, and it can still lie before it.
+     *
+     * A frame before the frame of the stop comes from a seek that the store did not make, as on
+     * the grid.
+     */
+    const keepsStop = (
+      source: PlaybackSource,
+      target: PlaybackStopTarget,
+      stop: Extract<PlaybackStop, { phase: "stopped" }>,
+      framePts: Pts,
+    ): boolean => {
+      if (target.kind === "frame") {
+        return stopFrameIndexOfPts(source, target.fps, framePts) === target.lastFrame;
+      }
+      if (!isPtsString(framePts) || !isPtsString(stop.restPts)) {
+        return false;
+      }
+      const pts = BigInt(framePts);
+      return pts >= BigInt(stop.restPts) && pts < target.out;
+    };
+
+    /**
+     * The end of the seek-back window of a stop that rests with a pause alone, in seconds from
+     * videoStartPts, or null when the Out has no safe elapsed time.
+     *
+     * The window reaches playbackStopWindowSeconds past the Out. When the element paused after
+     * outPts, after a stall of the page or with a decoder that lags, the window reaches the
+     * position where it paused, on the calibrated mapping, plus the same distance again, when that
+     * is later. The frame that holds that position then lies in it. The browser normally
+     * presents no later frame after the pause. The distance past the position allows for a
+     * position that the web view reports as an estimate: with the media in another process, as
+     * WKWebView runs it, `currentTime` right after a pause can lie a little before the position
+     * where the element stops.
+     */
+    const stopWindowEndSeconds = (
+      source: PlaybackSource,
+      target: PlaybackStopTarget,
+      outPts: Pts,
+      position: number,
+    ): number | null => {
+      const startPts = source.videoStartPts;
+      if (startPts === null || !isPtsString(startPts)) {
+        return null;
+      }
+      const outElapsed = ptsElapsedSeconds(outPts, startPts, source.videoTimeBase);
+      if (outElapsed === null) {
+        return null;
+      }
+      const windowSeconds = playbackStopWindowSeconds(target.fps);
+      const fromOut = outElapsed + windowSeconds;
+      if (
+        calibratedMediaTime === null ||
+        typeof position !== "number" ||
+        !Number.isFinite(position)
+      ) {
+        return fromOut;
+      }
+      return Math.max(fromOut, position - calibratedMediaTime + windowSeconds);
+    };
+
+    /**
+     * True when a settled frame in the "stopped" phase lies in the seek-back window: after the
+     * last frame, and at or before the frame that holds the end of the window
+     * (stopWindowEndSeconds).
+     *
+     * - On the frame grid, its ADR 028 index lies after the index of the last frame, and at or
+     *   before the index of the frame that holds the end of the window.
+     * - Off the grid, it starts at or after the Out, and at or before the end of the window.
+     *
+     * Such a frame is a frame that the browser presented after the pause, from a position that
+     * the element reached before the pause took effect. The seek back from it goes to another
+     * frame than the one on screen, so it brings a frame callback. A frame past the window comes
+     * from a seek that the store did not make, such as one from the media controls of the system.
+     */
+    const isInStopWindow = (
+      source: PlaybackSource,
+      target: PlaybackStopTarget,
+      stop: Extract<PlaybackStop, { phase: "stopped" }>,
+      framePts: Pts,
+    ): boolean => {
+      const startPts = source.videoStartPts;
+      const windowEnd = stop.windowEndSeconds;
+      if (
+        !isPtsString(framePts) ||
+        startPts === null ||
+        !isPtsString(startPts) ||
+        windowEnd === null
+      ) {
+        return false;
+      }
+      if (target.kind === "frame") {
+        const index = stopFrameIndexOfPts(source, target.fps, framePts);
+        if (index <= target.lastFrame) {
+          return false;
+        }
+        // The frame that holds the end of the window, by the ADR 028 rule.
+        const margin = frameBoundaryMarginSeconds(target.fps, source.videoTimeBase);
+        const windowEndFrame = Math.floor(
+          ((windowEnd + margin) * target.fps.n) / target.fps.d,
+        );
+        return index <= windowEndFrame;
+      }
+      if (BigInt(framePts) < target.out) {
+        return false;
+      }
+      const elapsed = ptsElapsedSeconds(framePts, startPts, source.videoTimeBase);
+      return elapsed !== null && elapsed <= windowEnd;
+    };
+
+    /**
+     * True when the last frame of the segment is the last frame of the video: the Out lies at or
+     * after the end of the extent in ticks, so no frame of the video follows the segment. On the
+     * frame grid, the last frame is the last frame of the extent (the rule of End, ADR 026). Off
+     * the grid, the Out lies at or after `videoStartPts + videoDurationTicks`. False when the probe
+     * gives no extent in ticks.
+     *
+     * The element can play on after that frame, because the audio can last longer than the video.
+     * The picture then keeps the last frame of the video, which is the last frame of the segment,
+     * so a seek to it would land on the frame on screen.
+     */
+    const endsWithVideo = (
+      source: PlaybackSource,
+      target: PlaybackStopTarget,
+    ): boolean => {
+      const extent = source.videoDurationTicks;
+      const startPts = source.videoStartPts;
+      if (!isTickCountString(extent) || startPts === null || !isPtsString(startPts)) {
+        return false;
+      }
+      if (target.kind === "frame") {
+        const extentLast = lastFrameIndexOfExtent(
+          BigInt(extent),
+          source.videoTimeBase,
+          target.fps,
+        );
+        return extentLast !== null && BigInt(target.lastFrame) >= extentLast;
+      }
+      return target.out >= BigInt(startPts) + BigInt(extent);
+    };
+
+    /**
+     * True when the element stands at least playbackStopWindowSeconds past the media time of the
+     * Out, on the calibrated mapping: the rule of the backstop (applyPlaybackStopBackstop).
+     */
+    const isPastStopWindow = (
+      source: PlaybackSource,
+      target: PlaybackStopTarget,
+      stop: PlaybackStop,
+      position: number,
+    ): boolean => {
+      const startPts = source.videoStartPts;
+      if (
+        calibratedMediaTime === null ||
+        startPts === null ||
+        typeof position !== "number" ||
+        !Number.isFinite(position)
+      ) {
+        return false;
+      }
+      const outTime = ptsToMediaTime(
+        stop.outPts,
+        startPts,
+        calibratedMediaTime,
+        source.videoTimeBase,
+      );
+      return (
+        outTime !== null && position >= outTime + playbackStopWindowSeconds(target.fps)
+      );
+    };
+
+    /**
+     * Clears the stop point and seeks to the last frame of the segment: on the frame grid with
+     * the frame step to its index, which aims at the middle of the frame and shows its nominal
+     * start (seekToFrameIndex, ADR 022), and off the grid with seekToPts of the last tick, which
+     * the browser shows as the frame that holds it. Neither requests a cue (ADR 019).
+     *
+     * On the grid the step counts from the frame on screen, `framePts`, which always lies after
+     * the last frame. With no frame named, it counts from the position of the element: with no
+     * frame on screen, the frame step starts from the position (stepToFrame).
+     */
+    const seekToStopFrame = (
+      target: PlaybackStopTarget,
+      framePts: Pts | null,
+    ): void => {
+      set({ playbackStop: null });
+      if (!attachedSource || !attachedElement) {
+        return;
+      }
+      if (target.kind === "tick") {
+        get().seekToPts(target.lastTick);
+        return;
+      }
+      const state = get();
+      stepToFrame(
+        { kind: "absolute", frameIndex: target.lastFrame },
+        framePts === null ? { ...state, presentedFrame: null } : state,
+        attachedSource,
+        attachedElement,
+        target.fps,
+      );
+    };
+
+    /**
+     * Tests a presented frame against the stop point of a segment playback (ADR 026).
+     * syncPresentedFrame calls it for a settled frame of a ready calibration: no seek runs or
+     * waits, so the frame comes from the playback and not from a seek that is still running.
+     *
+     * While the playback runs, the stop is reached at the first frame that is the last frame of
+     * the segment, or is predicted to be, or lies past it:
+     *
+     * - On the frame grid, the ADR 028 index of the frame is the index of the last frame or a
+     *   later one. The index is exact, so the rule finds the last frame itself.
+     * - Off the grid, the frame starts at or after the last tick before the Out, or the Out lies
+     *   less than one and a half nominal intervals after it (isPredictedLastFrame). Without a
+     *   nominal rate, only the first test applies.
+     *
+     * The store then pauses. When the frame is the last frame, or off the grid any frame before
+     * the Out (isRestFrame), the pause is the whole stop, and the phase becomes "stopped", with the
+     * frame and the end of the seek-back window (stopWindowEndSeconds). No seek lands on the frame
+     * on screen. When the frame lies past the last frame, because a callback came late or was
+     * skipped, the store seeks back from it (seekToStopFrame).
+     *
+     * In the "stopped" phase the element is paused. A frame of the stop keeps it (keepsStop). A
+     * frame in the seek-back window (isInStopWindow) gets one seek back. Any other frame comes from
+     * a seek that the store did not make, and the stop point goes with no seek.
+     */
+    const applyPlaybackStop = (framePts: Pts): void => {
+      const stop = get().playbackStop;
+      if (stop === null || !attachedSource || !attachedElement) {
+        return;
+      }
+      const target = playbackStopTarget(attachedSource, stop.inPts, stop.outPts);
+      if (target === null || !isPtsString(framePts)) {
+        set({ playbackStop: null });
+        return;
+      }
+
+      if (stop.phase === "stopped") {
+        // An element that plays again was started from outside the store, and its `play` event
+        // can run after this frame callback. The stop is over, as syncPlay would decide, and a
+        // seek back would pause the playback that the user started.
+        if (get().isPlaying || attachedElement.paused === false) {
+          set({ playbackStop: null });
+          return;
+        }
+        if (keepsStop(attachedSource, target, stop, framePts)) {
+          return;
+        }
+        if (isInStopWindow(attachedSource, target, stop, framePts)) {
+          seekToStopFrame(target, framePts);
+        } else {
+          set({ playbackStop: null });
+        }
+        return;
+      }
+
+      const reached =
+        target.kind === "frame"
+          ? stopFrameIndexOfPts(attachedSource, target.fps, framePts) >=
+            target.lastFrame
+          : BigInt(framePts) >= target.out - 1n ||
+            (target.fps !== null &&
+              isPredictedLastFrame(
+                BigInt(framePts),
+                target.out,
+                attachedSource.videoTimeBase,
+                target.fps,
+              ));
+      if (!reached) {
+        return;
+      }
+      pauseElement();
+      if (!isRestFrame(attachedSource, target, framePts)) {
+        seekToStopFrame(target, framePts);
+        return;
+      }
+      // The phase changes in the call that pauses, before the `pause` event of this pause runs,
+      // so that event does not read as a pause from the system (syncPause). The position is read
+      // after the pause, where the element stopped.
+      set({
+        playbackStop: {
+          phase: "stopped",
+          inPts: stop.inPts,
+          outPts: stop.outPts,
+          restPts: framePts,
+          windowEndSeconds: stopWindowEndSeconds(
+            attachedSource,
+            target,
+            stop.outPts,
+            attachedElement.currentTime,
+          ),
+        },
+      });
+    };
+
+    /**
+     * The backstop of a segment playback on the approximate clock (ADR 026). syncBrowserTime
+     * calls it for each `timeupdate`.
+     *
+     * The stop reads frame callbacks, and a window that is hidden or minimized presents no
+     * frames, so the playback would run past the Out. While the phase is "playing" and no seek
+     * runs or waits, a position that lies playbackStopWindowSeconds or more past the Out
+     * (isPastStopWindow) pauses the element and seeks to the last frame, counted from the
+     * position (seekToStopFrame). When the last frame of the segment is the last frame of the
+     * video (endsWithVideo), the picture keeps that frame, and the pause is the whole stop.
+     *
+     * On a visible window the frame callbacks stop the playback first: the distance keeps two or
+     * more of them between the Out and the backstop. While the decoder keeps up, the picture
+     * follows the element clock, so a backstop that still fires there seeks to another frame than
+     * the one on screen. A decoder that lags can leave the last frame on screen, and the seek of
+     * the backstop can then land on it.
+     */
+    const applyPlaybackStopBackstop = (element: PlaybackMediaElement): void => {
+      const stop = get().playbackStop;
+      if (
+        stop === null ||
+        stop.phase !== "playing" ||
+        !attachedSource ||
+        element.seeking === true ||
+        queuedSeek !== null
+      ) {
+        return;
+      }
+      const target = playbackStopTarget(attachedSource, stop.inPts, stop.outPts);
+      if (
+        target === null ||
+        !isPastStopWindow(attachedSource, target, stop, element.currentTime)
+      ) {
+        return;
+      }
+      pauseElement();
+      if (endsWithVideo(attachedSource, target)) {
+        set({ playbackStop: null });
+        return;
+      }
+      seekToStopFrame(target, null);
+    };
+
+    /**
+     * Ends a segment playback when the element reaches the end of the media before the stop
+     * (ADR 026). The element sends `pause` and then `ended`, and the first of the two calls this.
+     * Both callers call it only while the element reports `ended`, so a late `ended` event of an
+     * earlier end does not end a segment playback that started after it.
+     *
+     * The stop point goes. The store seeks back to the last frame only when the playback passed
+     * the Out with no frame callback. It does not seek in two cases:
+     *
+     * - The last frame of the segment is the last frame of the video (endsWithVideo). The element
+     *   ends with the audio, which can last longer than the video, and the picture keeps the last
+     *   frame of the video. This is the case of an Out at the end of the extent (ADR 026), and of
+     *   an extent that ends after the last frame, where the last frame of the grid does not exist.
+     * - The Out lies at or after the position where the element ended. This test applies whenever
+     *   the first one does not, also when the probe gives no extent in ticks.
+     */
+    const endPlaybackStopAtEnd = (element: PlaybackMediaElement): void => {
+      const stop = get().playbackStop;
+      if (stop === null || stop.phase !== "playing") {
+        return;
+      }
+      set({ playbackStop: null });
+      if (!attachedSource || calibratedMediaTime === null) {
+        return;
+      }
+      const target = playbackStopTarget(attachedSource, stop.inPts, stop.outPts);
+      const startPts = attachedSource.videoStartPts;
+      const position = element.currentTime;
+      if (
+        target === null ||
+        startPts === null ||
+        endsWithVideo(attachedSource, target) ||
+        typeof position !== "number" ||
+        !Number.isFinite(position)
+      ) {
+        return;
+      }
+      const outTime = ptsToMediaTime(
+        stop.outPts,
+        startPts,
+        calibratedMediaTime,
+        attachedSource.videoTimeBase,
+      );
+      if (
+        outTime === null ||
+        outTime >= position - NOMINAL_STEP_EDGE_TOLERANCE_SECONDS
+      ) {
+        return;
+      }
+      seekToStopFrame(target, null);
+    };
+
     return {
       presentedFrame: initialState?.presentedFrame ?? null,
       calibrationStatus: initialState?.calibrationStatus ?? "unavailable",
@@ -1217,6 +1880,7 @@ export function createPlaybackStore(
         initialState?.approximateBrowserTimeSeconds ?? null,
       seekTargetSeconds: initialState?.seekTargetSeconds ?? null,
       hasDeferredNavigation: initialState?.hasDeferredNavigation ?? false,
+      playbackStop: initialState?.playbackStop ?? null,
       isPlaying: initialState?.isPlaying ?? false,
       isAttached: initialState?.isAttached ?? false,
       attachedSourceRevisionKey: initialState?.attachedSourceRevisionKey ?? null,
@@ -1306,6 +1970,7 @@ export function createPlaybackStore(
           approximateBrowserTimeSeconds: null,
           seekTargetSeconds: null,
           hasDeferredNavigation: false,
+          playbackStop: null,
           isPlaying: false,
           isAttached: true,
           attachedSourceRevisionKey: newIdentity,
@@ -1358,6 +2023,7 @@ export function createPlaybackStore(
           approximateBrowserTimeSeconds: null,
           seekTargetSeconds: null,
           hasDeferredNavigation: false,
+          playbackStop: null,
           isPlaying: false,
           isAttached: false,
           attachedSourceRevisionKey: null,
@@ -1429,6 +2095,7 @@ export function createPlaybackStore(
           isPlaying: false,
           seekTargetSeconds: null,
           hasDeferredNavigation: false,
+          playbackStop: null,
         });
       },
 
@@ -1441,6 +2108,9 @@ export function createPlaybackStore(
       },
 
       play: () => {
+        // A playback that the user starts plays with no stop point (ADR 026). playSegment sets
+        // its stop point after this call.
+        dropPlaybackStop();
         const state = get();
         if (!attachedSource || !attachedElement || !state.isReady) {
           return;
@@ -1507,7 +2177,7 @@ export function createPlaybackStore(
             attachedElement === targetElement &&
             get().isReady
           ) {
-            set({ isPlaying: false, error: "playbackFailed" });
+            set({ isPlaying: false, error: "playbackFailed", playbackStop: null });
           }
           return;
         }
@@ -1533,31 +2203,50 @@ export function createPlaybackStore(
                 attachedElement === targetElement &&
                 get().isReady
               ) {
-                set({ isPlaying: false, error: "playbackFailed" });
+                // A play that fails ends a segment playback, so its stop point goes too.
+                set({ isPlaying: false, error: "playbackFailed", playbackStop: null });
               }
             });
         }
       },
 
       pause: () => {
-        lastScrubAudioTarget = null;
-        scrubAudioController.stop();
+        // Space, the pause button and a second Play Segment end a segment playback (ADR 026).
+        dropPlaybackStop();
+        pauseElement();
+      },
 
-        if (!attachedSource || !attachedElement) {
-          set({ isPlaying: false });
+      playSegment: (inPts: Pts, outPts: Pts) => {
+        const state = get();
+        if (
+          !attachedSource ||
+          !attachedElement ||
+          !state.isReady ||
+          state.calibrationStatus !== "ready" ||
+          calibratedMediaTime === null ||
+          !canPlaySegment(attachedSource, inPts, outPts)
+        ) {
           return;
         }
-
-        playSessionId++;
-        try {
-          attachedElement.pause();
-        } catch {
-          // Ignore DOM exception
+        // The seek and the play clear any earlier stop point, so a second segment replaces the
+        // first. play calls the element in this same call, which keeps the user activation. A
+        // pending seek to the In is flushed as an exact seek before the element plays (ADR 022).
+        get().seekToPts(inPts);
+        if (get().error !== null) {
+          return;
         }
-        set({ isPlaying: false });
+        get().play();
+        if (!get().isPlaying) {
+          return;
+        }
+        const stop: PlaybackStop = { inPts, outPts, phase: "playing" };
+        set({ playbackStop: stop });
       },
 
       seekToPts: (targetPts: Pts, options?: SeekOptions) => {
+        // Every seek ends a segment playback (ADR 026): a click, a scrub, a trim, Home, End, Go
+        // to In and Go to Out.
+        dropPlaybackStop();
         const scrub = options?.scrub === true;
         if (!scrub) {
           scrubAudioController.stop();
@@ -1689,6 +2378,8 @@ export function createPlaybackStore(
       },
 
       seekNominal: (deltaFrames: number) => {
+        // A frame step ends a segment playback (ADR 026), also a step at an edge.
+        dropPlaybackStop();
         if (
           typeof deltaFrames !== "number" ||
           !Number.isSafeInteger(deltaFrames) ||
@@ -1745,6 +2436,7 @@ export function createPlaybackStore(
       },
 
       seekToFrameIndex: (frameIndex: number) => {
+        dropPlaybackStop();
         if (
           typeof frameIndex !== "number" ||
           !Number.isSafeInteger(frameIndex) ||
@@ -1808,6 +2500,7 @@ export function createPlaybackStore(
       },
 
       seekApproximate: (seconds: number, options?: SeekOptions) => {
+        dropPlaybackStop();
         const scrub = options?.scrub === true;
         if (!scrub) {
           scrubAudioController.stop();
@@ -1913,6 +2606,9 @@ export function createPlaybackStore(
               // The flag is true only while calibrating. runDeferredNavigation below reads the
               // request itself, not this flag.
               hasDeferredNavigation: false,
+              // Without the calibration no presented frame names the last frame of a segment,
+              // so a segment playback goes on as a normal playback (ADR 026).
+              playbackStop: null,
               ...(settled
                 ? { seekTargetSeconds: null }
                 : retarget !== undefined
@@ -2039,6 +2735,12 @@ export function createPlaybackStore(
           presentedFrame: { mediaTime, inferredSourcePts: inferredPts },
           ...(settled ? { seekTargetSeconds: null } : {}),
         });
+
+        // A frame that arrives while a seek runs or waits can come from before that seek, such as
+        // the seek to the In of a segment playback, so only a settled frame meets the stop.
+        if (settled) {
+          applyPlaybackStop(inferredPts);
+        }
       },
 
       syncPresentationUnavailable: (
@@ -2064,6 +2766,7 @@ export function createPlaybackStore(
           calibrationStatus: "unavailable",
           presentedFrame: null,
           hasDeferredNavigation: false,
+          playbackStop: null,
           ...(retarget !== undefined ? { seekTargetSeconds: retarget } : {}),
         });
         // A navigation deferred while the anchor was open now runs on the approximate path.
@@ -2108,10 +2811,31 @@ export function createPlaybackStore(
             : null;
         // `timeupdate` fires while the element is paused on some browsers, so an identical
         // write would notify every subscriber for nothing.
-        if (get().approximateBrowserTimeSeconds === next) {
+        if (get().approximateBrowserTimeSeconds !== next) {
+          set({ approximateBrowserTimeSeconds: next });
+        }
+        // A segment playback on a window that presents no frames stops here (ADR 026).
+        applyPlaybackStopBackstop(element);
+      },
+
+      syncSeeking: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
+        if (
+          !attachedSource ||
+          attachedElement !== element ||
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey
+        ) {
           return;
         }
-        set({ approximateBrowserTimeSeconds: next });
+        // Every seek of the store clears the stop point before it moves the element: each seek
+        // action calls dropPlaybackStop, and the seek back of the stop (seekToStopFrame) clears it
+        // first. So a seek that starts in the "stopped" phase comes from outside the store, such
+        // as the media controls of the system, and the stop is over. Without this, the later
+        // frame of that seek could lie in the seek-back window and be pulled back. In the
+        // "playing" phase the late `seeking` event of the seek to the In still arrives after
+        // playSegment set the stop point, so that phase keeps it.
+        if (get().playbackStop?.phase === "stopped") {
+          set({ playbackStop: null });
+        }
       },
 
       syncSeeked: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
@@ -2185,12 +2909,17 @@ export function createPlaybackStore(
         // moves on its own, so the deferred target no longer shows where it goes.
         const droppedDeferred = deferredNavigation !== null;
         deferredNavigation = null;
+        // A segment playback that the store stopped on its last frame is over. A play that
+        // starts from the element plays with no stop point (ADR 026). The `play` event of the
+        // play that started the segment playback finds the "playing" phase and keeps it.
+        const droppedStop = get().playbackStop?.phase === "stopped";
         set({
           isPlaying: true,
           error: null,
           ...(droppedDeferred
             ? { seekTargetSeconds: null, hasDeferredNavigation: false }
             : {}),
+          ...(droppedStop ? { playbackStop: null } : {}),
         });
       },
 
@@ -2205,6 +2934,20 @@ export function createPlaybackStore(
 
         if (attachedElement !== element) {
           return;
+        }
+
+        // While a segment playback runs, a pause from the system ends it (ADR 026). The pause of
+        // the stop itself never reaches this test, because the stop moves the phase to "stopped"
+        // before it pauses. Two other pauses do not end it. An element that reached its end
+        // sends `pause` before `ended`, and the end has its own rule. A `pause` event that finds
+        // the element playing again is the late event of the seek to the In, which play
+        // followed.
+        if (get().playbackStop?.phase === "playing") {
+          if (element.ended === true) {
+            endPlaybackStopAtEnd(element);
+          } else if (element.paused !== false) {
+            set({ playbackStop: null });
+          }
         }
 
         playSessionId++;
@@ -2224,6 +2967,11 @@ export function createPlaybackStore(
           return;
         }
 
+        // A late `ended` event of an earlier end finds the element away from its end, and it
+        // does not end a segment playback that started after that end.
+        if (element.ended === true) {
+          endPlaybackStopAtEnd(element);
+        }
         playSessionId++;
         set({ isPlaying: false });
       },
@@ -2272,6 +3020,7 @@ export function createPlaybackStore(
           approximateBrowserTimeSeconds: null,
           seekTargetSeconds: null,
           hasDeferredNavigation: false,
+          playbackStop: null,
           isPlaying: false,
           isAttached: false,
           attachedSourceRevisionKey: null,

@@ -34,7 +34,63 @@ export interface PlaybackMediaElement {
   duration?: number;
   readyState?: number;
   seeking?: boolean;
+  /**
+   * `HTMLMediaElement.paused`. The stop of a segment playback reads it at a `pause` event, to
+   * tell a pause that still holds from the late `pause` event of a seek that play followed. It
+   * also reads it in a frame callback in the "stopped" phase: an element that plays again was
+   * started from outside the store, before its `play` event ran.
+   */
+  paused?: boolean;
+  /**
+   * `HTMLMediaElement.ended`. The element sends `pause` before `ended` when it reaches its end,
+   * and the stop of a segment playback reads the end at the first of the two.
+   */
+  ended?: boolean;
 }
+
+/**
+ * The stop point of a segment playback (Play Segment, ADR 026): the store plays the half-open
+ * segment `[inPts, outPts)` (ADR 002) and stops on its last frame, the frame before `outPts`.
+ *
+ * - `playing`: the playback runs toward the stop. Each presented frame is tested against it.
+ * - `stopped`: the store stopped the playback with a pause alone, on the frame at `restPts`. A
+ *   settled frame that the browser presents after that pause is tested once more:
+ *   - The frame of the stop shown again keeps the stop: on the frame grid a frame with the index
+ *     of the last frame, and off the grid a frame that starts at or after `restPts` and before
+ *     the Out. After an early prediction off the grid, such a later frame lies in the segment at
+ *     or before the real last frame.
+ *   - A frame after the last frame and at or before the end of the seek-back window,
+ *     `windowEndSeconds`, gets one seek back to the last frame, and the stop point goes. The
+ *     browser presents such a frame from a position that the element reached before the pause
+ *     took effect.
+ *   - Any other frame comes from a seek that the store did not make, and the stop point goes
+ *     with no seek. That includes a frame past the window and a frame before the stop.
+ *
+ *   A seek that starts in this phase comes from outside the store and clears the stop point
+ *   (syncSeeking), and so does a frame callback that finds the element playing again.
+ *
+ * It is display and transport state only. It never enters the project, and no edit reads it.
+ */
+export type PlaybackStop =
+  | {
+      readonly phase: "playing";
+      readonly inPts: Pts;
+      readonly outPts: Pts;
+    }
+  | {
+      readonly phase: "stopped";
+      readonly inPts: Pts;
+      readonly outPts: Pts;
+      /** The PTS of the frame on screen when the store paused. */
+      readonly restPts: Pts;
+      /**
+       * The end of the seek-back window, in seconds from `videoStartPts`: the Out plus 0.1 s, or
+       * plus one nominal interval when that is longer. When the element paused after the Out and
+       * that is later, it is the position where the element paused plus the same distance. Null
+       * when the Out has no safe elapsed time, and there is no window.
+       */
+      readonly windowEndSeconds: number | null;
+    };
 
 /**
  * Options for seek actions (ADR 022).
@@ -130,6 +186,30 @@ export interface PlaybackState {
    * true, and only then, so a source that nobody navigates keeps waiting for its first frame.
    */
   readonly hasDeferredNavigation: boolean;
+  /**
+   * The stop point of a segment playback (`playSegment`), or null when playback has no stop
+   * point. These clear it:
+   *
+   * - every other transport action, every seek that the store makes (a click, a scrub, a trim,
+   *   a step, Home, End, Go to In, Go to Out, a typed timecode), a source change, a loss of
+   *   readiness or of the calibration, and a failed play;
+   * - a pause that the element makes on its own in the "playing" phase, and a play that it makes
+   *   on its own in the "stopped" phase;
+   * - the end of the media in the "playing" phase;
+   * - the seek back of the stop itself, from a frame past the last frame or from the backstop,
+   *   and the pause of the backstop when the segment ends with the video;
+   * - a seek that starts in the "stopped" phase, which comes from outside the store. A seek from
+   *   outside the store while the segment plays, in the "playing" phase, does not clear it: the
+   *   store cannot tell its `seeking` event from the late one of the seek to the In. A frame past
+   *   the last frame that such a seek shows is then pulled back to the last frame;
+   * - in the "stopped" phase, a frame callback that finds the element playing again;
+   * - in the "stopped" phase, a settled frame that is neither a frame of the stop nor in the
+   *   seek-back window: a frame past the window, or a frame before the stop (see PlaybackStop).
+   *
+   * A playback that the user starts later therefore plays with no stop point. It is not a
+   * display target: the playhead and the timecode never read it (ADR 022).
+   */
+  readonly playbackStop: PlaybackStop | null;
   /** True when video is currently playing. */
   readonly isPlaying: boolean;
   /** True when a media element is attached. */
@@ -192,6 +272,29 @@ export interface PlaybackActions {
    * Explicitly pauses playback.
    */
   pause: () => void;
+
+  /**
+   * Plays the half-open segment `[inPts, outPts)` of the attached source and stops on its last
+   * frame, the frame before `outPts` (Play Segment, ADR 026). It seeks to `inPts` with
+   * `seekToPts`, plays as `play` does, so the sound and the mute preference are those of normal
+   * playback and no cue sounds (ADR 019), and it sets `playbackStop`.
+   *
+   * The stop reads the presented frames (ADR 003). On the frame grid (hasExactFrameGrid) the
+   * last frame is known by its index, and the store pauses on it. Off the grid the store pauses
+   * with no seek on the frame at the last tick before the Out, or on the frame that the Out lies
+   * less than one and a half nominal intervals after. A presented frame past the last frame
+   * seeks back to the last frame: on the grid by its index, and off the grid to the last tick
+   * before the Out. After the pause, a later frame seeks back only while it lies in the seek-back
+   * window, and a frame past the window clears the stop with no seek. Off the grid, a later frame
+   * that still starts before the Out keeps the stop (see PlaybackStop). The element `ended` event
+   * ends the playback at the end of the media, and a `timeupdate` far past the Out stops a
+   * playback that presents no frames, as a hidden window does.
+   *
+   * It needs an attached, ready element, a ready calibration, and a segment that holds a frame
+   * (canPlaySegment): on the frame grid, a last frame at or after the frame of the In. Otherwise
+   * it does nothing. When the seek to `inPts` fails, it does not play.
+   */
+  playSegment: (inPts: Pts, outPts: Pts) => void;
 
   /**
    * Seeks to a target PTS in source video time base using checked inverse calibrated mapping.
@@ -288,6 +391,14 @@ export interface PlaybackActions {
    * Skips an identical write, because `timeupdate` also fires while the element is paused.
    */
   syncBrowserTime: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
+
+  /**
+   * Synchronizes state when the matching video element starts a seek (onSeeking event).
+   * In the "stopped" phase of a segment playback it clears the stop point (ADR 026): every seek
+   * that the store makes clears the stop point first, so a seek that starts in that phase comes
+   * from outside the store, such as the media controls of the system. It changes nothing else.
+   */
+  syncSeeking: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
    * Synchronizes state when the matching video element finishes a seek (onSeeked event).

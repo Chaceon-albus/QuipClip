@@ -208,6 +208,12 @@ function createStoreHarness({
 
   const run = (command: ShortcutCommand): void => {
     switch (command.kind) {
+      case "playSegment":
+        playback.getState().playSegment(command.inPts, command.outPts);
+        return;
+      case "pause":
+        playback.getState().pause();
+        return;
       case "seekToPts":
         playback.getState().seekToPts(command.pts, command.options);
         return;
@@ -1116,6 +1122,163 @@ describe("planShortcutCommand", () => {
     });
   });
 
+  describe("Play Segment", () => {
+    const withSegments = (
+      timeline: Partial<ShortcutSnapshot["timeline"]>,
+      playback: Partial<ShortcutSnapshot["playback"]> = {},
+    ): ShortcutSnapshot => createSnapshot({ timeline, playback });
+
+    it("plays the selected segment, wherever the frame on screen is", () => {
+      const snapshot = withSegments({
+        segments: [segment("a", "300000", "360000"), segment("b", "60000", "120000")],
+        currentSegmentId: "a",
+      });
+      expect(planShortcutCommand("playSegment", snapshot)).toEqual({
+        kind: "playSegment",
+        inPts: "300000",
+        outPts: "360000",
+      });
+      // The selection needs no frame on screen, so a pending seek does not stop it.
+      expect(
+        planShortcutCommand(
+          "playSegment",
+          withSegments(
+            { segments: [segment("a", "300000", "360000")], currentSegmentId: "a" },
+            { presentedFrame: null, seekTargetSeconds: 2 },
+          ),
+        ),
+      ).toEqual({ kind: "playSegment", inPts: "300000", outPts: "360000" });
+    });
+
+    it("plays the segment that holds the frame on screen when none is selected", () => {
+      const segments = [segment("a", "0", "60000"), segment("b", "60000", "120000")];
+      // The frame on screen is PTS 90000.
+      expect(planShortcutCommand("playSegment", withSegments({ segments }))).toEqual({
+        kind: "playSegment",
+        inPts: "60000",
+        outPts: "120000",
+      });
+      // Half open: the In belongs to the segment, and the Out does not (ADR 002).
+      const atIn = withSegments(
+        { segments },
+        { presentedFrame: { mediaTime: 0.667, inferredSourcePts: pts("60000") } },
+      );
+      expect(planShortcutCommand("playSegment", atIn)).toMatchObject({
+        inPts: "60000",
+      });
+      const atOut = withSegments({ segments: [segment("a", "0", "90000")] });
+      expect(planShortcutCommand("playSegment", atOut)).toBeNull();
+    });
+
+    it("does nothing with no segment there, with overlapping segments there, or with no frame", () => {
+      expect(planShortcutCommand("playSegment", withSegments({}))).toBeNull();
+      expect(
+        planShortcutCommand(
+          "playSegment",
+          withSegments({ segments: [segment("a", "0", "30000")] }),
+        ),
+      ).toBeNull();
+      // Two segments hold PTS 90000, and ADR 007 refuses a guess between them.
+      expect(
+        planShortcutCommand(
+          "playSegment",
+          withSegments({
+            segments: [segment("a", "0", "120000"), segment("b", "60000", "180000")],
+          }),
+        ),
+      ).toBeNull();
+      // A pending seek clears the frame on screen.
+      expect(
+        planShortcutCommand(
+          "playSegment",
+          withSegments(
+            { segments: [segment("a", "0", "120000")] },
+            { presentedFrame: null, seekTargetSeconds: 1 },
+          ),
+        ),
+      ).toBeNull();
+    });
+
+    it("does not use a segment of another source, and does not replace a selection that cannot play", () => {
+      // A current segment of another source does not resolve, so the frame on screen decides.
+      const foreign = withSegments({
+        segments: [
+          segment("x", "0", "900000", "source-2"),
+          segment("b", "60000", "120000"),
+        ],
+        currentSegmentId: "x",
+      });
+      expect(planShortcutCommand("playSegment", foreign)).toMatchObject({
+        inPts: "60000",
+        outPts: "120000",
+      });
+      // A selected segment that ends at or before videoStartPts holds no frame.
+      const empty = withSegments({
+        segments: [segment("a", "-3000", "0"), segment("b", "60000", "120000")],
+        currentSegmentId: "a",
+      });
+      expect(planShortcutCommand("playSegment", empty)).toBeNull();
+      // A selected segment after the last frame of the extent (frame 299 of 900000 ticks) has
+      // its last frame before the frame of its In, so it does not play either.
+      const pastExtent = withSegments({
+        segments: [segment("a", "930000", "960000")],
+        currentSegmentId: "a",
+      });
+      expect(planShortcutCommand("playSegment", pastExtent)).toBeNull();
+    });
+
+    it("needs a ready calibration", () => {
+      const segments = [segment("a", "60000", "120000")];
+      for (const calibrationStatus of ["calibrating", "unavailable"] as const) {
+        for (const currentSegmentId of [null, "a"]) {
+          expect(
+            planShortcutCommand(
+              "playSegment",
+              withSegments(
+                { segments, currentSegmentId },
+                { calibrationStatus, presentedFrame: null },
+              ),
+            ),
+          ).toBeNull();
+        }
+      }
+    });
+
+    it("pauses on a second press while the segment plays, and plays it again after the stop", () => {
+      const segments = [segment("a", "60000", "120000")];
+      const playing = withSegments(
+        { segments },
+        {
+          isPlaying: true,
+          playbackStop: {
+            inPts: pts("60000"),
+            outPts: pts("120000"),
+            phase: "playing",
+          },
+        },
+      );
+      expect(planShortcutCommand("playSegment", playing)).toEqual({ kind: "pause" });
+
+      const stopped = withSegments(
+        { segments },
+        {
+          playbackStop: {
+            inPts: pts("60000"),
+            outPts: pts("120000"),
+            phase: "stopped",
+            restPts: pts("117000"),
+            windowEndSeconds: 1.4,
+          },
+        },
+      );
+      expect(planShortcutCommand("playSegment", stopped)).toEqual({
+        kind: "playSegment",
+        inPts: "60000",
+        outPts: "120000",
+      });
+    });
+  });
+
   describe("Delete, Escape, undo and redo", () => {
     it("deletes the current segment only", () => {
       expect(planShortcutCommand("deleteSegment", createSnapshot())).toBeNull();
@@ -1765,6 +1928,138 @@ describe("planShortcutCommand", () => {
       expect(h.element.currentTime).toBeCloseTo(1, 9);
       h.presentSeekedFrame();
       expect(h.shownPts()).toBe("25");
+    });
+
+    describe("Play Segment", () => {
+      /**
+       * The playback reaches frame k: the browser presents it. On the harness source PTS k is
+       * frame k, at k / 25 s. The element position stays where the seek to the In left it, inside
+       * the segment.
+       */
+      const playTo = (
+        h: ReturnType<typeof createStoreHarness>,
+        from: number,
+        to: number,
+      ) => {
+        for (let k = from; k <= to; k++) {
+          h.anchor(k / 25);
+        }
+      };
+
+      /** A harness with one segment [50, 100), selected. */
+      function withSegment() {
+        const h = createStoreHarness();
+        h.timeline.getState().markIn(pts("50"));
+        h.timeline.getState().markOut(pts("100"));
+        expect(h.timeline.getState().currentSegmentId).toBe("segment-1");
+        return h;
+      }
+
+      it("/ plays the selected segment and stops on its last frame, and / plays it again", () => {
+        const h = withSegment();
+        expect(h.press("playSegment")).toEqual({
+          kind: "playSegment",
+          inPts: "50",
+          outPts: "100",
+        });
+        expect(h.element.currentTime).toBe(2);
+        expect(h.playback.getState().isPlaying).toBe(true);
+        h.presentSeekedFrame();
+        playTo(h, 51, 99);
+        expect(h.playback.getState().isPlaying).toBe(false);
+        expect(h.shownPts()).toBe("99");
+        expect(h.playheadSeconds()).toBeCloseTo(99 / 25, 9);
+        expect(h.element.currentTimeSets).toBe(1);
+        // The last frame stays markable.
+        expect(planShortcutCommand("markOut", h.snapshot())).toEqual({
+          kind: "markOut",
+          pts: "99",
+        });
+
+        expect(h.press("playSegment")).toMatchObject({ kind: "playSegment" });
+        expect(h.element.currentTimeSets).toBe(2);
+        expect(h.element.currentTime).toBe(2);
+        expect(h.playback.getState().playbackStop?.phase).toBe("playing");
+      });
+
+      it("/ / pauses the playback, and the stop point goes", () => {
+        const h = withSegment();
+        h.press("playSegment");
+        h.presentSeekedFrame();
+        playTo(h, 51, 70);
+        expect(h.press("playSegment")).toEqual({ kind: "pause" });
+        expect(h.playback.getState().isPlaying).toBe(false);
+        expect(h.playback.getState().playbackStop).toBeNull();
+      });
+
+      it("/ then Space pauses, and a later Space plays past the Out", () => {
+        const h = withSegment();
+        h.press("playSegment");
+        h.presentSeekedFrame();
+        playTo(h, 51, 70);
+        h.playback.getState().togglePlayback();
+        expect(h.playback.getState().playbackStop).toBeNull();
+        h.playback.getState().togglePlayback();
+        playTo(h, 71, 110);
+        expect(h.playback.getState().isPlaying).toBe(true);
+        expect(h.shownPts()).toBe("110");
+      });
+
+      it("/ then → steps, and the step clears the stop", () => {
+        const h = withSegment();
+        h.press("playSegment");
+        h.presentSeekedFrame();
+        playTo(h, 51, 70);
+        expect(h.press("stepForwardOneFrame")).toEqual({
+          kind: "seekNominal",
+          frames: 1,
+        });
+        expect(h.playback.getState().playbackStop).toBeNull();
+        expect(h.playback.getState().isPlaying).toBe(false);
+      });
+
+      it("/ then a click on the ruler seeks, and the seek clears the stop", () => {
+        const h = withSegment();
+        h.press("playSegment");
+        h.presentSeekedFrame();
+        playTo(h, 51, 70);
+        h.clickRulerAt("200");
+        expect(h.playback.getState().playbackStop).toBeNull();
+        expect(h.shownPts()).toBe("200");
+      });
+
+      it("/ with no selection plays the segment under the frame on screen, and does nothing outside one", () => {
+        const h = withSegment();
+        h.press("finishSegment");
+        expect(h.timeline.getState().currentSegmentId).toBeNull();
+        h.clickRulerAt("200");
+        expect(h.press("playSegment")).toBeNull();
+        expect(h.playback.getState().isPlaying).toBe(false);
+
+        h.clickRulerAt("75");
+        expect(h.press("playSegment")).toEqual({
+          kind: "playSegment",
+          inPts: "50",
+          outPts: "100",
+        });
+        h.presentSeekedFrame();
+        playTo(h, 51, 99);
+        expect(h.shownPts()).toBe("99");
+        expect(h.playback.getState().isPlaying).toBe(false);
+      });
+
+      it("/ before the anchor does nothing, and plays once the anchor arrives", () => {
+        const h = createStoreHarness({ anchored: false });
+        h.timeline.getState().markIn(pts("50"));
+        h.timeline.getState().markOut(pts("100"));
+        expect(h.press("playSegment")).toBeNull();
+        expect(h.element.currentTimeSets).toBe(0);
+        expect(h.playback.getState().playbackStop).toBeNull();
+
+        h.anchor();
+        expect(h.press("playSegment")).toMatchObject({ kind: "playSegment" });
+        expect(h.element.currentTimeSets).toBe(1);
+      });
     });
   });
 });

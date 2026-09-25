@@ -28,6 +28,7 @@ export function getShortcutPlatform(): ShortcutPlatform {
 /** Every action that a binding of the table can name. */
 export const SHORTCUT_ACTIONS = [
   "togglePlayback",
+  "playSegment",
   "stepBackOneFrame",
   "stepForwardOneFrame",
   "stepBackTenFrames",
@@ -152,10 +153,10 @@ export interface ShortcutBinding {
   readonly yieldsToOpenTooltip?: boolean;
   /**
    * True for a second binding of a symbol that some layouts type with `Shift` and others
-   * without, such as `=` on JIS or `+` on a German keyboard. The layer matches it like any
-   * other binding. `aria-keyshortcuts` leaves it out, because it names a symbol that the
-   * attribute already lists, and the chip never names it, because it is never the first
-   * binding of its action.
+   * without, such as `=` on JIS, `+` on a German keyboard, or `/` on German and French AZERTY.
+   * The layer matches it like any other binding. `aria-keyshortcuts` leaves it out, because it
+   * names a symbol that the attribute already lists, and the chip never names it, because it is
+   * never the first binding of its action.
    */
   readonly layoutVariant?: boolean;
 }
@@ -198,6 +199,18 @@ const numpad = (value: string, code: `Numpad${string}`): ShortcutKey => ({
  */
 export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
   { key: named(" "), modifiers: [], action: "togglePlayback", repeat: "taken" },
+  // Final Cut Pro's Play Selection: play the selected segment, or the segment under the frame on
+  // screen, and stop on its last frame (ADR 026). The row matches the `/` that the layout types,
+  // and the Slash position when that key types no ASCII character, as the comma of primary+`,`
+  // does. On German, Spanish, Italian and Nordic layouts the Slash position types `-`, an ASCII
+  // character that is not `/`, so that key is not this row and still zooms out. The numpad `/`
+  // types `/`, so it matches too. A layout that types `/` with Shift has a variant row below.
+  {
+    key: character("/", "Slash"),
+    modifiers: [],
+    action: "playSegment",
+    repeat: "taken",
+  },
   {
     key: named("ArrowLeft"),
     modifiers: [],
@@ -307,6 +320,17 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     modifiers: ["shift"],
     action: "zoomIn",
     repeat: "acts",
+    layoutVariant: true,
+  },
+  // The layout variant of Play Segment: German, Spanish and Nordic layouts type `/` with
+  // Shift+7, and French AZERTY with Shift and the `:` key. The row matches the `/` that the layout
+  // types and names no position (`code` null): on US, Shift+Slash types `?`, which is no binding.
+  // No other row holds Shift with `/`, so the row takes no key press from another binding.
+  {
+    key: character("/", null),
+    modifiers: ["shift"],
+    action: "playSegment",
+    repeat: "taken",
     layoutVariant: true,
   },
   // Final Cut Pro's Zoom to Fit, for a layout where `\` needs AltGr or Option, which no

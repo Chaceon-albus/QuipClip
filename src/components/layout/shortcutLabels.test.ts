@@ -72,6 +72,7 @@ const ROWS: readonly Row[] = [
     ariaMacos: "Space",
     ariaWindows: "Space",
   },
+  { id: "playSegment:/", macos: "/", windows: "/", ariaMacos: "/", ariaWindows: "/" },
   {
     id: "stepBackOneFrame:ArrowLeft",
     macos: "←",
@@ -239,6 +240,13 @@ const ROWS: readonly Row[] = [
     windows: "Shift++",
     ariaMacos: "Shift+Plus",
     ariaWindows: "Shift+Plus",
+  },
+  {
+    id: "playSegment:shift:/",
+    macos: "⇧/",
+    windows: "Shift+/",
+    ariaMacos: "Shift+/",
+    ariaWindows: "Shift+/",
   },
   {
     id: "zoomToFit:shift:Z",
@@ -475,6 +483,11 @@ describe("shortcutLabels", () => {
         // Not "= Plus Shift+= Shift+Plus": the variants name = and + again.
         expect(ariaKeyShortcutsFor("zoomIn", platform)).toBe("= Plus");
         expect(ariaKeyShortcutsFor("zoomToFit", platform)).toBe("\\ Shift+Z");
+        // Not "/ Shift+/": the variant names / again, and the chip names / only.
+        expect(ariaKeyShortcutsFor("playSegment", platform)).toBe("/");
+        expect(
+          chipShortcutsFor("playSegment", platform).map((b) => b.key),
+        ).toStrictEqual([{ kind: "character", character: "/", code: "Slash" }]);
       }
       // Every binding that is not a variant appears.
       for (const action of SHORTCUT_ACTIONS) {

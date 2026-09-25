@@ -57,6 +57,12 @@ describe("shortcutBindings", () => {
         repeat: "taken",
       },
       {
+        name: "/",
+        press: () => press({ key: "/", code: "Slash" }),
+        action: "playSegment",
+        repeat: "taken",
+      },
+      {
         name: "ArrowLeft",
         press: () => press({ key: "ArrowLeft", code: "ArrowLeft" }),
         action: "stepBackOneFrame",
@@ -213,6 +219,12 @@ describe("shortcutBindings", () => {
         press: () => press({ key: "+", code: "Equal", shiftKey: true }),
         action: "zoomIn",
         repeat: "acts",
+      },
+      {
+        name: "Shift+/ (German Shift+7)",
+        press: () => press({ key: "/", code: "Digit7", shiftKey: true }),
+        action: "playSegment",
+        repeat: "taken",
       },
       {
         name: "Shift+Z",
@@ -745,6 +757,123 @@ describe("shortcutBindings", () => {
         ).toBeNull();
         // The same holds for a Cyrillic layout, which types letters on these positions.
         expect(actionOf(press({ key: "ъ", code: "Equal" }), platform)).toBeNull();
+      }
+    });
+
+    it("plays the segment from the / that the layout types, and from the Slash position", () => {
+      for (const platform of PLATFORMS) {
+        // US and JIS type / on Slash, and the numpad / types it too.
+        expect(actionOf(press({ key: "/", code: "Slash" }), platform)).toBe(
+          "playSegment",
+        );
+        expect(actionOf(press({ key: "/", code: "NumpadDivide" }), platform)).toBe(
+          "playSegment",
+        );
+        // A layout that types a letter on the Slash position, such as Thai, falls back to it,
+        // as the comma of primary+, does.
+        expect(actionOf(press({ key: "ฝ", code: "Slash" }), platform)).toBe(
+          "playSegment",
+        );
+        // German, Spanish and Nordic layouts type - on Slash, and that key still zooms out.
+        // Russian types a period there, which is no binding.
+        expect(actionOf(press({ key: "-", code: "Slash" }), platform)).toBe("zoomOut");
+        expect(actionOf(press({ key: ".", code: "Slash" }), platform)).toBeNull();
+        // The modifier match is exact: primary+/ and Alt+/ stay with the system.
+        expect(
+          actionOf(press({ key: "/", code: "Slash", ...primary(platform) }), platform),
+        ).toBeNull();
+        expect(
+          actionOf(press({ key: "/", code: "Slash", altKey: true }), platform),
+        ).toBeNull();
+      }
+    });
+
+    it("plays the segment from a / that the layout types with Shift, by the symbol only", () => {
+      const variant = SHORTCUT_BINDINGS.find(
+        (b) => b.action === "playSegment" && b.modifiers.includes("shift"),
+      );
+      expect(variant?.key).toStrictEqual({
+        kind: "character",
+        character: "/",
+        code: null,
+      });
+      expect(variant?.layoutVariant).toBe(true);
+      expect(variant?.repeat).toBe("taken");
+      for (const platform of PLATFORMS) {
+        // German, Spanish and Nordic: Shift+7 types /.
+        expect(
+          actionOf(press({ key: "/", code: "Digit7", shiftKey: true }), platform),
+        ).toBe("playSegment");
+        // French AZERTY: Shift with the : key, on the Period position, types /.
+        expect(
+          actionOf(press({ key: "/", code: "Period", shiftKey: true }), platform),
+        ).toBe("playSegment");
+        // US: Shift+Slash types ?, which is no binding, and the position does not count.
+        expect(
+          actionOf(press({ key: "?", code: "Slash", shiftKey: true }), platform),
+        ).toBeNull();
+        // German Shift+7 with primary or Alt as well stays with the system.
+        expect(
+          actionOf(
+            press({ key: "/", code: "Digit7", shiftKey: true, ...primary(platform) }),
+            platform,
+          ),
+        ).toBeNull();
+        expect(
+          actionOf(
+            press({ key: "/", code: "Digit7", shiftKey: true, altKey: true }),
+            platform,
+          ),
+        ).toBeNull();
+      }
+    });
+
+    it("lets no other Shift row take a Shift press that types /, and the / variant no other", () => {
+      const matchesOf = (p: ShortcutKeyPress, platform: ShortcutPlatform) =>
+        SHORTCUT_BINDINGS.filter(
+          (b) =>
+            bindingAppliesToPlatform(b, platform) &&
+            matchesShortcutModifiers(b.modifiers, p, platform) &&
+            matchesShortcutKey(b.key, p),
+        );
+      // Every press that types / with Shift on a tested layout: German, Spanish and Nordic
+      // Shift+7, French AZERTY Shift+:, and Shift with the numpad /.
+      const slashPresses = [
+        press({ key: "/", code: "Digit7", shiftKey: true }),
+        press({ key: "/", code: "Period", shiftKey: true }),
+        press({ key: "/", code: "NumpadDivide", shiftKey: true }),
+      ];
+      // Every other Shift press that this file tests, on US, JIS, German, Dvorak and Russian.
+      const otherShiftPresses = [
+        press({ key: "?", code: "Slash", shiftKey: true }),
+        press({ key: "ArrowLeft", code: "ArrowLeft", shiftKey: true }),
+        press({ key: "ArrowRight", code: "ArrowRight", shiftKey: true }),
+        press({ key: "I", code: "KeyI", shiftKey: true }),
+        press({ key: "O", code: "KeyO", shiftKey: true }),
+        press({ key: "Z", code: "KeyZ", shiftKey: true }),
+        press({ key: "Z", code: "KeyY", shiftKey: true }),
+        press({ key: "Ш", code: "KeyI", shiftKey: true }),
+        press({ key: "Я", code: "KeyZ", shiftKey: true }),
+        press({ key: "=", code: "Minus", shiftKey: true }),
+        press({ key: "=", code: "Digit0", shiftKey: true }),
+        press({ key: "+", code: "Equal", shiftKey: true }),
+        press({ key: "+", code: "Semicolon", shiftKey: true }),
+        press({ key: "*", code: "BracketRight", shiftKey: true }),
+        press({ key: "<", code: "Comma", shiftKey: true }),
+        press({ key: "Dead", code: "Equal", shiftKey: true }),
+      ];
+      for (const platform of PLATFORMS) {
+        for (const p of slashPresses) {
+          const matched = matchesOf(p, platform);
+          expect(matched).toHaveLength(1);
+          expect(matched[0]?.action).toBe("playSegment");
+          expect(matched[0]?.layoutVariant).toBe(true);
+        }
+        for (const p of otherShiftPresses) {
+          expect(matchesOf(p, platform).some((b) => b.action === "playSegment")).toBe(
+            false,
+          );
+        }
       }
     });
 

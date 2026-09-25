@@ -80,6 +80,7 @@ const {
   syncPresentationUnavailable,
   syncBrowserDuration,
   syncBrowserTime,
+  syncSeeking,
   syncSeeked,
   syncPlay,
   syncPause,
@@ -792,6 +793,11 @@ export function PreviewPane() {
                       }
                     }}
                     onTimeUpdate={handleTimeUpdate}
+                    onSeeking={(e) => {
+                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                        syncSeeking(sourceRevisionKey, e.currentTarget);
+                      }
+                    }}
                     onSeeked={(e) => {
                       handleTimeUpdate(e);
                       if (sourceGuard.isActive(sourceRevisionKey)) {

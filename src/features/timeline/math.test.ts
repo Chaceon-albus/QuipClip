@@ -14,6 +14,7 @@ import {
   canMarkOut,
   canSplitCurrentSegment,
   findCurrentSegment,
+  findSegmentAtPts,
   getActiveSourceSegmentEntries,
   getCurrentSegmentTarget,
   getSegmentBounds,
@@ -62,6 +63,41 @@ describe("timeline PTS editing", () => {
     // Segment "c" belongs to source-b. ADR 002 forbids reading its PTS on this timeline.
     expect(findCurrentSegment(segments, "c", "source-a")).toBeNull();
     expect(findCurrentSegment(segments, "b", null)).toBeNull();
+  });
+
+  it("finds the one segment of the active source that holds a PTS, half open", () => {
+    // The In belongs to the segment and the Out does not (ADR 002).
+    expect(findSegmentAtPts(segments, "source-a", pts("50"))).toEqual({
+      index: 1,
+      segment: segments[1],
+    });
+    expect(findSegmentAtPts(segments, "source-a", pts("99"))?.segment.id).toBe("b");
+    expect(findSegmentAtPts(segments, "source-a", pts("100"))).toBeNull();
+    // A negative PTS compares exactly, and PTS 0 is the Out of "a".
+    expect(findSegmentAtPts(segments, "source-a", pts("-1"))?.segment.id).toBe("a");
+    expect(findSegmentAtPts(segments, "source-a", pts("0"))).toBeNull();
+    // Segment "c" of source-b holds 20, but it is not on this timeline.
+    expect(findSegmentAtPts(segments, "source-a", pts("20"))).toBeNull();
+    expect(findSegmentAtPts(segments, "source-b", pts("20"))?.segment.id).toBe("c");
+    expect(findSegmentAtPts(segments, null, pts("60"))).toBeNull();
+    expect(findSegmentAtPts(segments, "source-a", pts("6O"))).toBeNull();
+  });
+
+  it("finds no segment where segments overlap, and skips one that does not parse", () => {
+    const overlapping: Segment[] = [
+      { id: "x", sourceId: "source-a", inPts: pts("0"), outPts: pts("100") },
+      { id: "y", sourceId: "source-a", inPts: pts("50"), outPts: pts("150") },
+      { id: "bad", sourceId: "source-a", inPts: pts("01"), outPts: pts("200") },
+    ];
+    expect(findSegmentAtPts(overlapping, "source-a", pts("49"))?.segment.id).toBe("x");
+    // Both hold 50 to 99, and ADR 007 refuses a guess between them.
+    expect(findSegmentAtPts(overlapping, "source-a", pts("50"))).toBeNull();
+    expect(findSegmentAtPts(overlapping, "source-a", pts("99"))).toBeNull();
+    expect(findSegmentAtPts(overlapping, "source-a", pts("100"))).toEqual({
+      index: 1,
+      segment: overlapping[1],
+    });
+    expect(findSegmentAtPts(overlapping, "source-a", pts("160"))).toBeNull();
   });
 
   it("parses the current segment bounds and rejects a malformed PTS", () => {

@@ -50,6 +50,14 @@ export function runShortcutCommand(command: ShortcutCommand): void {
     case "togglePlayback":
       playback.togglePlayback();
       return;
+    case "pause":
+      // A second Play Segment while the segment plays (ADR 026).
+      playback.pause();
+      return;
+    case "playSegment":
+      // Play Segment: seek to the In, play, and stop on the last frame of the segment (ADR 026).
+      playback.playSegment(command.inPts, command.outPts);
+      return;
     case "seekNominal":
       playback.seekNominal(command.frames);
       return;
