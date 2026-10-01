@@ -189,5 +189,6 @@ git tag -d v0.2.0
   the first start. A published release cannot get signed bundles later, so signed bundles
   need a new version.
 - The project makes no pre-release versions. ADR 034 gives the reason.
-- The actions in `release.yml` are pinned to commits, and they do not update without a
-  change. Update the pins and their comments by hand.
+- `release.yml` and `ci.yml` pin their actions to commits, and the pins do not update
+  without a change. Update the pins and their comments by hand. Where both files use the
+  same action, pin the same commit in both.

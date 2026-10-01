@@ -111,7 +111,14 @@ each release tag. It obeys these rules:
    `gh release verify`. A failure in these two steps does not make the release wrong.
 
 Only the `draft` and `publish` jobs have a token that can write. They run the scripts of
-the repository, `gh`, and `curl`, and no build code. Each action is pinned to a commit.
+the repository, `gh`, `jq`, and `curl`, and no build code. Their only actions are
+`actions/checkout` and `actions/download-artifact`. They have no `actions/setup-node`
+step. The scripts use only the built-in modules of Node. In these two jobs, the Node of
+the `ubuntu-latest` runner image runs the scripts.
+
+`release.yml` and `ci.yml` pin each action to a commit, and a comment gives its version.
+The `ci` job runs `ci.yml` in the release run, so the actions of `ci.yml` also run in
+each release. Where the two files use the same action, they pin the same commit.
 
 **macOS signature.** `tauri.macos.conf.json` sets `bundle.macOS.signingIdentity` to `-`,
 so the Tauri bundler signs the macOS bundle ad hoc. Without it, the bundle has only the
@@ -148,7 +155,15 @@ nobody can move or delete the tag.
 - `scripts/release-assets.mjs` knows the bundle names of Tauri 2. When Tauri changes a
   bundle name, the check stops the publish. The script then needs a change on `main`, and
   the tag moves to the new commit.
-- The pinned actions do not update. A person updates them by hand.
+- The pinned actions in `release.yml` and `ci.yml` do not update. A person updates them
+  by hand. CI on a push to `main`, on a pull request, and on a manual run also uses the
+  pinned actions of `ci.yml`.
+- No workflow sets the Node version of the `draft` and `publish` jobs. They use the Node
+  of the `ubuntu-latest` runner image, and the workflow does not check its version. On
+  2026-10-01, the `ubuntu-latest` label gave Ubuntu 24.04 with Node 22. GitHub announced
+  that the label moves to Ubuntu 26.04, with Node 24, in November 2026. The scripts
+  needed Node 16.9 or later. When a script throws an error, it exits 1, and the job stops
+  before the publish.
 - A Mac with an Intel processor gets no bundle. It cannot run the `aarch64` disk image,
   because Rosetta translates only `x86_64` code on Apple silicon.
 - The bundles have no signature from a developer identity. macOS blocks the first start
