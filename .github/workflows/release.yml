@@ -45,9 +45,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # setup-node turns on a pnpm cache when package.json has a packageManager field.
+      # Each setup-node step in this file turns it off. This job has no pnpm, and the
+      # jobs in this file use no dependency cache.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
+          package-manager-cache: false
 
       - name: Check the version and the tag name
         run: node scripts/version.mjs check --tag "$GITHUB_REF_NAME"
@@ -111,6 +115,7 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
+          package-manager-cache: false
 
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -160,6 +165,7 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
+          package-manager-cache: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -274,6 +280,7 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
+          package-manager-cache: false
 
       # The same bundles that the draft job attached. The check below compares their
       # digests with the digests of the draft assets.
