@@ -195,15 +195,17 @@ function main(argv) {
   return 0;
 }
 
-/** True when Node runs this file, and false when a test imports it. */
+/**
+ * True when Node runs this file, and false when a test or another script imports it.
+ * When Node cannot resolve `process.argv[1]` or the path of this file, the check
+ * throws. A direct run then exits with status 1, and an import fails. The script must
+ * not skip `main` and exit with 0, because the release workflow continues after exit
+ * status 0.
+ */
 function isEntryPoint() {
   const entry = process.argv[1];
   if (entry === undefined) return false;
-  try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
-  } catch {
-    return false;
-  }
+  return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
 }
 
 if (isEntryPoint()) {

@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   checkFiles,
@@ -10,6 +12,9 @@ import {
   replaceManifestVersion,
   tagFor,
 } from "./version.mjs";
+
+const SCRIPT = fileURLToPath(new URL("./version.mjs", import.meta.url));
+const PRELOAD = new URL("./entry-check-failure.mjs", import.meta.url).href;
 
 const MANIFEST = `[package]
 name = "quipclip"
@@ -290,5 +295,24 @@ describe("this repository", () => {
     const { version, problems } = checkFiles(readRepoFiles());
     expect(problems).toEqual([]);
     expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});
+
+describe("the command", () => {
+  // The release workflow continues after exit status 0. A run that skips `main` must
+  // not exit with 0.
+  it("fails when its entry check fails, and does not exit with 0", () => {
+    const { version } = checkFiles(readRepoFiles());
+    const shown = spawnSync("node", [SCRIPT, "show"], { encoding: "utf8" });
+    expect(shown.status).toBe(0);
+    expect(shown.stdout.trim()).toBe(version);
+
+    const failed = spawnSync("node", ["--import", PRELOAD, SCRIPT, "show"], {
+      encoding: "utf8",
+      env: { ...process.env, ENTRY_CHECK_FAILS: "version.mjs" },
+    });
+    expect(failed.status).toBe(1);
+    expect(failed.stdout).toBe("");
+    expect(failed.stderr).toContain("simulated realpath failure in version.mjs");
   });
 });

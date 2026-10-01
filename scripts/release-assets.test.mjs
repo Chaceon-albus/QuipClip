@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -13,6 +13,7 @@ import {
 import { readManifest, readRepoFiles } from "./version.mjs";
 
 const SCRIPT = fileURLToPath(new URL("./release-assets.mjs", import.meta.url));
+const PRELOAD = new URL("./entry-check-failure.mjs", import.meta.url).href;
 const NAMES = releaseAssetNames("QuipClip", "1.2.3");
 
 describe("releaseAssetNames", () => {
@@ -113,7 +114,11 @@ describe("the command", () => {
     try {
       return {
         status: 0,
-        out: execFileSync("node", [SCRIPT, ...args], { encoding: "utf8" }),
+        // "pipe" keeps the error output of the script out of the test log.
+        out: execFileSync("node", [SCRIPT, ...args], {
+          encoding: "utf8",
+          stdio: "pipe",
+        }),
       };
     } catch (error) {
       const failed = /** @type {{ status: number, stderr: string }} */ (error);
@@ -181,5 +186,23 @@ describe("the command", () => {
 
   it("prints the usage for a wrong command", () => {
     expect(run(["upload"]).status).toBe(2);
+  });
+
+  // The release workflow continues after exit status 0. A run that skips `main` must
+  // not exit with 0.
+  it("fails when its entry check fails, and does not exit with 0", () => {
+    dir = mkdtempSync(path.join(tmpdir(), "release-assets-"));
+    for (const name of releaseAssetNames("QuipClip", version)) {
+      writeFileSync(path.join(dir, name), "x");
+    }
+    expect(run(["files", dir]).status).toBe(0);
+
+    const failed = spawnSync("node", ["--import", PRELOAD, SCRIPT, "files", dir], {
+      encoding: "utf8",
+      env: { ...process.env, ENTRY_CHECK_FAILS: "release-assets.mjs" },
+    });
+    expect(failed.status).toBe(1);
+    expect(failed.stdout).toBe("");
+    expect(failed.stderr).toContain("simulated realpath failure in release-assets.mjs");
   });
 });
