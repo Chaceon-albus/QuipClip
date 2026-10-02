@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-04
 - Deciders: capric98
-- Amended by: ADR 023, ADR 036
+- Amended by: ADR 023, ADR 036, ADR 040
 
 ## Context
 
@@ -207,7 +207,9 @@ A later unit makes the pixel format a field of the preset, such as `p010le`. A f
 chain would then cost up to 19 bytes for each segment, and at the cap of 100 segments only 130
 bytes were free. The format chain must stay first in the text (measurement 19). The widest
 plan that the settings permit measures 30136 bytes at the cap, which leaves 1607 bytes of the
-Windows budget free, and 105 segments fit.
+Windows budget free, and 105 segments fit. (Changed on 2026-10-02: the preset now names the
+pixel format, and its encoder options can add 1024 bytes. The widest plan measures 31620 bytes
+and leaves 123 bytes free, and 100 segments fit, ADR 040.)
 
 The chains end in `concat`, in project array order. `scale` and `setsar=1` appear only when
 the preset gives an explicit resolution, and the leading `aformat` pins the input link to the

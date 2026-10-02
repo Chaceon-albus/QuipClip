@@ -4,7 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 006, ADR 013, ADR 014
-- Amended by: ADR 036
+- Amended by: ADR 036, ADR 040
 
 ## Context
 
@@ -84,6 +84,8 @@ when the preset holds a value, as it does for `ffmpegPath`.
 
 The schema version stays 1. The application has no release yet, and each change here is an
 addition that an old document satisfies through the defaults.
+(Changed on 2026-10-02: v0.1.0 fixed the preset shape, so the fields of ADR 040 come with
+schema version 2.)
 
 ### Seeds
 

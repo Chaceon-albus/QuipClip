@@ -60,6 +60,7 @@ document summarizes them and shows how the parts fit together.
 | [`037-player-first-navigation-keys.md`](../.agents/decisions/037-player-first-navigation-keys.md)                                           | The arrows jump in time, `,` and `.` step frames, ↑ and ↓ find edit points |
 | [`038-settings-in-its-own-window.md`](../.agents/decisions/038-settings-in-its-own-window.md)                                               | Settings opens in its own window, with a grant for each command            |
 | [`039-recover-the-preview-after-a-decode-error.md`](../.agents/decisions/039-recover-the-preview-after-a-decode-error.md)                   | A decode error mid-file stalls the preview, and the next seek reloads it   |
+| [`040-preset-schema-2-encoder-options.md`](../.agents/decisions/040-preset-schema-2-encoder-options.md)                                     | Encoder options, constant quality and a pixel format in each preset        |
 
 ## Shape
 
@@ -386,6 +387,12 @@ default. The sample rate is `source` or a value in hertz. The channel setting is
 which is the output that export wrote before. The editor disables the bitrate for the
 lossless encoders `flac` and `alac`. It refuses a preset that pairs `mov` with `flac` or
 `libopus`, because the `mov` muxer refuses both.
+
+ADR 040 adds three fields at schema version 2: ordered encoder options for the video and the
+audio, rendered as `-name:v value` and `-name:a value` after the managed flags and checked
+against a list of names that would break the export; the quality kind `cq`, rendered as
+`-cq N -b:v 0`; and the pixel format of the output video, which the first chain of the graph
+uses. A version 1 file loads with the defaults.
 
 A missing file seeds presets in memory and writes them on the first save. The seeded
 identifiers are constants. The restore action replaces a seeded preset by identifier and

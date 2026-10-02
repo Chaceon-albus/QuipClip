@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-03
 - Deciders: capric98
-- Amended by: ADR 023, ADR 038
+- Amended by: ADR 023, ADR 038, ADR 040
 
 ## Context
 
@@ -26,6 +26,8 @@ and Rust cannot read the web view store.
 ## Decision
 
 Keep both in one file, `<app_data>/settings.json`, at schema version 1. Rust owns the file.
+(Changed on 2026-10-02: schema version 2 adds encoder options, the quality kind `cq` and a
+pixel format to each preset, ADR 040. A version 1 file still loads.)
 ADR 001 gives Rust every operation that touches the file system.
 
 ```json
