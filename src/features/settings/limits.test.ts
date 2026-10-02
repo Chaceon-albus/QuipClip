@@ -1,10 +1,28 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { QUALITY_KINDS, type Preset } from "./types";
+import { QUALITY_KINDS, type Preset, type PresetOption } from "./types";
 import {
   canAddPreset,
+  DEFAULT_PIXEL_FORMAT,
   defaultQualityValue,
+  DENIED_OPTION_NAMES,
   ENCODER_NAME_PATTERN,
+  isDeniedOptionName,
   isValidEncoderName,
+  isValidOptionName,
+  isValidOptionValue,
+  isValidPixelFormat,
+  MAX_OPTION_NAME_CHARS,
+  MAX_OPTION_VALUE_CHARS,
+  MAX_PIXEL_FORMAT_CHARS,
+  MAX_PRESET_OPTION_BYTES,
+  MAX_PRESET_OPTIONS,
+  OPTION_NAME_PATTERN,
+  optionFlag,
+  PIXEL_FORMAT_PATTERN,
+  presetOptionBytes,
+  renderedOptionBytes,
   MAX_AUDIO_BITRATE_KBPS,
   MAX_AUDIO_SAMPLE_RATE,
   MAX_ENCODER_NAME_CHARS,
@@ -19,6 +37,40 @@ import {
   validatePresetFields,
 } from "./limits";
 
+/** The settings module of the Rust backend, which holds every bound this module mirrors. */
+const RUST_SETTINGS_SOURCE = readFileSync(
+  fileURLToPath(new URL("../../../src-tauri/src/settings/mod.rs", import.meta.url)),
+  "utf8",
+);
+
+/**
+ * Reads every name of `DENIED_OPTION_NAMES` out of the Rust source, in its order. The
+ * declaration is matched rather than the whole file, so a string elsewhere cannot contribute a
+ * name.
+ */
+function readRustDeniedOptionNames(): string[] {
+  const declaration =
+    /\npub const DENIED_OPTION_NAMES: &\[&str\] = &\[\n([\s\S]*?)\n\];\n/.exec(
+      RUST_SETTINGS_SOURCE,
+    );
+  expect(declaration).not.toBeNull();
+  const names = declaration![1].matchAll(/^ {4}"([^"]+)",$/gm);
+  return Array.from(names, (match) => match[1]);
+}
+
+/** Reads the value of a `pub const <name>: usize = <value>;` or `u32` out of the Rust source. */
+function readRustNumber(name: string): number {
+  const declaration = new RegExp(
+    `\\npub const ${name}: (?:usize|u32) = ([0-9_]+);\\n`,
+  ).exec(RUST_SETTINGS_SOURCE);
+  expect(declaration).not.toBeNull();
+  return Number(declaration![1].replaceAll("_", ""));
+}
+
+function option(name: string, value: string): PresetOption {
+  return { name, value };
+}
+
 function createPreset(overrides: Partial<Preset> = {}): Preset {
   return {
     id: "default-h264-mp4",
@@ -32,6 +84,9 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
+    pixelFormat: "yuv420p",
+    videoOptions: [],
+    audioOptions: [],
     ...overrides,
   };
 }
@@ -52,9 +107,286 @@ describe("limits", () => {
       expect(ENCODER_NAME_PATTERN.source).toBe("^[0-9A-Za-z][0-9A-Za-z_.-]*$");
       expect(QUALITY_RANGES).toEqual({
         crf: { min: 0, max: 63 },
+        cq: { min: 1, max: 63 },
         bitrate: { min: 1, max: 200_000 },
         qualityScale: { min: 1, max: 100 },
       });
+      expect(DEFAULT_PIXEL_FORMAT).toBe("yuv420p");
+      expect(MAX_PIXEL_FORMAT_CHARS).toBe(32);
+      expect(PIXEL_FORMAT_PATTERN.source).toBe("^[a-z0-9_]{1,32}$");
+      expect(MAX_PRESET_OPTIONS).toBe(32);
+      expect(MAX_OPTION_NAME_CHARS).toBe(64);
+      expect(MAX_OPTION_VALUE_CHARS).toBe(512);
+      expect(MAX_PRESET_OPTION_BYTES).toBe(1024);
+      expect(OPTION_NAME_PATTERN.source).toBe("^[A-Za-z][A-Za-z0-9_.-]{0,63}$");
+    });
+
+    it("holds the same schema-2 bounds as the Rust settings module", () => {
+      expect(readRustNumber("MIN_CONSTANT_QUALITY")).toBe(QUALITY_RANGES.cq.min);
+      expect(readRustNumber("MAX_CONSTANT_QUALITY")).toBe(QUALITY_RANGES.cq.max);
+      expect(readRustNumber("MAX_PIXEL_FORMAT_CHARS")).toBe(MAX_PIXEL_FORMAT_CHARS);
+      expect(readRustNumber("MAX_PRESET_OPTIONS")).toBe(MAX_PRESET_OPTIONS);
+      expect(readRustNumber("MAX_OPTION_NAME_CHARS")).toBe(MAX_OPTION_NAME_CHARS);
+      expect(readRustNumber("MAX_OPTION_VALUE_CHARS")).toBe(MAX_OPTION_VALUE_CHARS);
+      expect(readRustNumber("MAX_PRESET_OPTION_BYTES")).toBe(MAX_PRESET_OPTION_BYTES);
+      expect(RUST_SETTINGS_SOURCE).toContain(
+        `pub const DEFAULT_PIXEL_FORMAT: &str = "${DEFAULT_PIXEL_FORMAT}";`,
+      );
+    });
+  });
+
+  describe("DENIED_OPTION_NAMES", () => {
+    it("names exactly the Rust list, in its order", () => {
+      const rustNames = readRustDeniedOptionNames();
+      // Guards the parse itself: a moved or renamed declaration would otherwise read as an
+      // empty list and pass the comparison below.
+      expect(rustNames.length).toBeGreaterThan(150);
+      expect(new Set(rustNames).size).toBe(rustNames.length);
+      expect([...DENIED_OPTION_NAMES]).toEqual(rustNames);
+    });
+
+    it("holds the managed flags, the argument-less options, and their no forms", () => {
+      for (const name of [
+        "c",
+        "codec",
+        "f",
+        "i",
+        "y",
+        "n",
+        "map",
+        "filter_complex",
+        "lavfi",
+        "pix_fmt",
+        "crf",
+        "cq",
+        "q",
+        "b",
+        "progress",
+        "nostats",
+        "loglevel",
+        "copyts",
+        "shortest",
+        "noshortest",
+        "an",
+        "vn",
+        "movflags",
+      ]) {
+        expect(isDeniedOptionName(name)).toBe(true);
+      }
+    });
+
+    it("compares names exactly, so an encoder option that only starts like one passes", () => {
+      for (const name of [
+        "mapping_family",
+        "Y",
+        "preset",
+        "x264-params",
+        "tag",
+        "profile",
+      ]) {
+        expect(isDeniedOptionName(name)).toBe(false);
+      }
+    });
+
+    it("holds no name that the name rule refuses, because such a name could never reach it", () => {
+      for (const name of DENIED_OPTION_NAMES) {
+        expect(isValidOptionName(name)).toBe(true);
+      }
+    });
+  });
+
+  describe("option rules", () => {
+    it("renders the flag with the specifier of the stream", () => {
+      expect(optionFlag({ name: "preset" }, "video")).toBe("-preset:v");
+      expect(optionFlag({ name: "aac_coder" }, "audio")).toBe("-aac_coder:a");
+    });
+
+    it("counts the UTF-8 bytes of the flag and the value, as Rust does", () => {
+      expect(renderedOptionBytes(option("x", "abc"), "video")).toBe(4 + 3);
+      // "é" is two bytes in UTF-8, one code point.
+      expect(renderedOptionBytes(option("x", "é"), "audio")).toBe(4 + 2);
+      expect(
+        presetOptionBytes({
+          videoOptions: [option("preset", "slow")],
+          audioOptions: [option("ac4", "1")],
+        }),
+      ).toBe("-preset:vslow".length + "-ac4:a1".length);
+    });
+
+    it("accepts the option names of common encoders and refuses every other shape", () => {
+      for (const name of [
+        "preset",
+        "x264-params",
+        "b_ref_mode",
+        "rc-lookahead",
+        "a.b",
+      ]) {
+        expect(isValidOptionName(name)).toBe(true);
+      }
+      expect(isValidOptionName("a".repeat(64))).toBe(true);
+      for (const name of [
+        "",
+        "-g",
+        "/filter_complex",
+        "profile:v",
+        "1pass",
+        "_x",
+        "a b",
+        "é",
+        "a".repeat(65),
+      ]) {
+        expect(isValidOptionName(name)).toBe(false);
+      }
+    });
+
+    it("accepts a value of 1 to 512 code points without a line break, a NUL, a double quote, or a final backslash", () => {
+      expect(isValidOptionValue("a")).toBe(true);
+      expect(isValidOptionValue("\u{1F600}".repeat(512))).toBe(true);
+      expect(isValidOptionValue("C:\\x265\\stats")).toBe(true);
+      for (const value of [
+        "",
+        "a".repeat(513),
+        "a\nb",
+        "a\rb",
+        "a\0b",
+        'a"b',
+        "C:\\x265\\",
+      ]) {
+        expect(isValidOptionValue(value)).toBe(false);
+      }
+    });
+
+    it("accepts a pixel format of lowercase letters, digits, and underscores", () => {
+      for (const name of ["yuv420p", "p010le", "nv12", "a".repeat(32)]) {
+        expect(isValidPixelFormat(name)).toBe(true);
+      }
+      for (const name of [
+        "",
+        "YUV420P",
+        "yuv420p:x",
+        "yuv 420p",
+        "-custom",
+        "a".repeat(33),
+      ]) {
+        expect(isValidPixelFormat(name)).toBe(false);
+      }
+    });
+  });
+
+  describe("pixel format and option validation", () => {
+    it("passes the defaults and the options of the seeds", () => {
+      expect(
+        validatePresetFields(
+          createPreset({
+            pixelFormat: "p010le",
+            videoOptions: [
+              option("profile", "main10"),
+              option("prio_speed", "0"),
+              option("tag", "hvc1"),
+            ],
+            audioOptions: [option("profile", "aac_low")],
+          }),
+        ),
+      ).toEqual([]);
+    });
+
+    it("reports a blank or a malformed pixel format", () => {
+      expect(validatePresetFields(createPreset({ pixelFormat: "  " }))).toEqual([
+        { field: "pixelFormat", code: "required" },
+      ]);
+      expect(validatePresetFields(createPreset({ pixelFormat: "yuv420p,x" }))).toEqual([
+        { field: "pixelFormat", code: "pixelFormat", values: { max: 32 } },
+      ]);
+    });
+
+    it("refuses every denied option name on both streams, noshortest included", () => {
+      for (const name of DENIED_OPTION_NAMES) {
+        expect(
+          validatePresetFields(createPreset({ videoOptions: [option(name, "1")] })),
+        ).toEqual([{ field: "videoOptions", code: "optionDenied", values: { name } }]);
+        expect(
+          validatePresetFields(createPreset({ audioOptions: [option(name, "1")] })),
+        ).toEqual([{ field: "audioOptions", code: "optionDenied", values: { name } }]);
+      }
+      expect(
+        validatePresetFields(
+          createPreset({ audioOptions: [option("noshortest", "1")] }),
+        ),
+      ).toEqual([
+        { field: "audioOptions", code: "optionDenied", values: { name: "noshortest" } },
+      ]);
+    });
+
+    it("reports the first issue of each list, in the order Rust checks it", () => {
+      expect(
+        validatePresetFields(
+          createPreset({
+            videoOptions: [option("g", "1"), option("bad:name", "1"), option("y", "1")],
+            audioOptions: [option("profile", ""), option("profile", "x")],
+          }),
+        ),
+      ).toEqual([
+        { field: "videoOptions", code: "optionName", values: { name: "bad:name" } },
+        {
+          field: "audioOptions",
+          code: "optionValue",
+          values: { name: "profile", max: 512 },
+        },
+      ]);
+      expect(
+        validatePresetFields(
+          createPreset({ videoOptions: [option("g", "1"), option("g", "2")] }),
+        ),
+      ).toEqual([
+        { field: "videoOptions", code: "optionDuplicate", values: { name: "g" } },
+      ]);
+      // One name on both streams is not a duplicate.
+      expect(
+        validatePresetFields(
+          createPreset({
+            videoOptions: [option("profile", "main")],
+            audioOptions: [option("profile", "aac_low")],
+          }),
+        ),
+      ).toEqual([]);
+    });
+
+    it("enforces the number of options of each list", () => {
+      const options = (count: number) =>
+        Array.from({ length: count }, (_, index) => option(`o${index}`, "1"));
+      expect(
+        validatePresetFields(
+          createPreset({ videoOptions: options(32), audioOptions: options(32) }),
+        ),
+      ).toEqual([]);
+      expect(validatePresetFields(createPreset({ audioOptions: options(33) }))).toEqual(
+        [{ field: "audioOptions", code: "tooManyOptions", values: { max: 32 } }],
+      );
+    });
+
+    it("enforces the byte limit of both lists together, on the list that passes it", () => {
+      // 2 × 505 bytes of video options and 14 bytes of audio options: exactly the limit.
+      const atLimit = createPreset({
+        videoOptions: [option("xa", "v".repeat(500)), option("xb", "v".repeat(500))],
+        audioOptions: [option("xc", "a".repeat(9))],
+      });
+      expect(presetOptionBytes(atLimit)).toBe(1024);
+      expect(validatePresetFields(atLimit)).toEqual([]);
+
+      const over = createPreset({
+        ...atLimit,
+        audioOptions: [option("xc", "a".repeat(10))],
+      });
+      expect(validatePresetFields(over)).toEqual([
+        { field: "audioOptions", code: "optionsTooLong", values: { max: 1024 } },
+      ]);
+
+      const videoOver = createPreset({
+        videoOptions: [0, 1, 2].map((index) => option(`o${index}`, "v".repeat(400))),
+      });
+      expect(validatePresetFields(videoOver)).toEqual([
+        { field: "videoOptions", code: "optionsTooLong", values: { max: 1024 } },
+      ]);
     });
   });
 
@@ -556,6 +888,9 @@ describe("limits", () => {
         quality: { kind: "crf", value: 99 },
         resolution: { w: 0, h: 0 },
         frameRate: { n: 0, d: 1 },
+        pixelFormat: "yuv420p",
+        videoOptions: [],
+        audioOptions: [],
         container: "mp4",
       };
 
@@ -601,6 +936,9 @@ describe("limits", () => {
         quality: { kind: "crf", value: 20.5 },
         resolution: { w: 0, h: 1080 },
         frameRate: { n: 0, d: 1 },
+        pixelFormat: "yuv420p",
+        videoOptions: [],
+        audioOptions: [],
         container: "mp4",
       };
 

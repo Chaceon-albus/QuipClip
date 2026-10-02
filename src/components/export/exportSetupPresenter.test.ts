@@ -63,13 +63,16 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
+    pixelFormat: "yuv420p",
+    videoOptions: [],
+    audioOptions: [],
     ...overrides,
   };
 }
 
 function createSettings(presets: Preset[], activePresetId?: string): Settings {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 1,
     activePresetId,
     presets,
@@ -381,6 +384,12 @@ describe("exportSetupPresenter", () => {
               valueValues: { value: "22" },
             },
             {
+              id: "pixelFormat",
+              labelKey: "settings.preset.pixelFormatLabel",
+              valueKey: "export.setup.value",
+              valueValues: { value: "yuv420p" },
+            },
+            {
               id: "resolution",
               labelKey: "settings.preset.resolutionLabel",
               valueKey: "export.setup.resolutionValue",
@@ -436,6 +445,16 @@ describe("exportSetupPresenter", () => {
       expect(presentPresetSummary(preset, formatter, createSource())).toEqual(
         presentPresetSummary(preset, formatter, null),
       );
+    });
+
+    it("handles the constant quality kind", () => {
+      const preset = createPreset({ quality: { kind: "cq", value: 25 } });
+      expect(rowOf(presentPresetSummary(preset, formatter, null), "quality")).toEqual({
+        id: "quality",
+        labelKey: "export.setup.qualityLabel",
+        valueKey: "export.setup.qualityCq",
+        valueValues: { value: "25" },
+      });
     });
 
     it("handles quality kinds bitrate and qualityScale", () => {
@@ -607,7 +626,55 @@ describe("exportSetupPresenter", () => {
         rows: [],
         noteKey: "export.setup.noSourceAudio",
       });
-      expect(summary.groups[0].rows).toHaveLength(4);
+      expect(summary.groups[0].rows).toHaveLength(5);
+    });
+
+    it("names the pixel format and the extra parameters of each stream, in command order", () => {
+      const preset = createPreset({
+        pixelFormat: "p010le",
+        videoOptions: [
+          { name: "profile", value: "main10" },
+          { name: "tag", value: "hvc1" },
+        ],
+        audioOptions: [{ name: "aac_coder", value: "twoloop" }],
+      });
+      const summary = presentPresetSummary(preset, formatter, null);
+      expect(rowOf(summary, "pixelFormat")).toEqual({
+        id: "pixelFormat",
+        labelKey: "settings.preset.pixelFormatLabel",
+        valueKey: "export.setup.value",
+        valueValues: { value: "p010le" },
+      });
+      expect(summary.groups[0].rows.map((row) => row.id)).toEqual([
+        "videoEncoder",
+        "quality",
+        "pixelFormat",
+        "resolution",
+        "frameRate",
+        "videoOptions",
+      ]);
+      expect(rowOf(summary, "videoOptions")).toEqual({
+        id: "videoOptions",
+        labelKey: "settings.preset.optionsLabel",
+        valueKey: "export.setup.value",
+        valueValues: { value: "-profile main10 -tag hvc1" },
+      });
+      expect(summary.groups[1].rows.map((row) => row.id)).toEqual([
+        "audioEncoder",
+        "audioBitrate",
+        "audioSampleRate",
+        "audioChannels",
+        "audioOptions",
+      ]);
+      expect(rowOf(summary, "audioOptions")?.valueValues).toEqual({
+        value: "-aac_coder twoloop",
+      });
+    });
+
+    it("shows no extra parameter row for a stream without options", () => {
+      const summary = presentPresetSummary(createPreset(), formatter, null);
+      expect(rowOf(summary, "videoOptions")).toBeUndefined();
+      expect(rowOf(summary, "audioOptions")).toBeUndefined();
     });
 
     it("formats 44.1 kHz sample rate correctly", () => {

@@ -512,6 +512,7 @@ export const en = {
       empty: "No presets yet.",
       noSelection: "No preset selected.",
       rowSummaryCrf: "{{container}} · {{encoder}} · CRF {{value}}",
+      rowSummaryCq: "{{container}} · {{encoder}} · CQ {{value}}",
       rowSummaryBitrate: "{{container}} · {{encoder}} · {{value}} kbps",
       rowSummaryQualityScale: "{{container}} · {{encoder}} · Quality scale {{value}}",
       limitReached: "Limit of {{max}} presets reached.",
@@ -557,6 +558,8 @@ export const en = {
       qualityKindLabel: "Quality Type",
       qualityValueLabel: "Quality Value",
       qualityHintCrf: "Lower is higher quality. The scale depends on the encoder.",
+      qualityHintCq:
+        "Passed to the encoder as -cq, together with -b:v 0. Lower is higher quality.",
       qualityHintBitrate: "Target video bitrate.",
       qualityHintQualityScale:
         "Passed to the encoder as -q:v. The scale depends on the encoder.",
@@ -568,6 +571,16 @@ export const en = {
       heightLabel: "Height",
       frameRateNumeratorLabel: "Numerator",
       frameRateDenominatorLabel: "Denominator",
+      pixelFormatLabel: "Pixel Format",
+      // {{name}} is an FFmpeg pixel format name, such as "yuv420p". It is never translated.
+      pixelFormatValue8Bit: "{{name}} (8-bit)",
+      pixelFormatValue10Bit: "{{name}} (10-bit)",
+      pixelFormatValueOther: "{{name}}",
+      pixelFormatHint:
+        "Software encoders usually take yuv420p or yuv420p10le. Hardware encoders usually take nv12 or p010le.",
+      pixelFormatCustomLabel: "Custom Pixel Format",
+      pixelFormatCustomHint: "Use an FFmpeg pixel format name, such as yuv422p10le.",
+      optionsLabel: "Extra Parameters",
       unitKbps: "kbps",
       unitPixels: "px",
       sourceOption: "Same as Source",
@@ -575,6 +588,7 @@ export const en = {
     },
     quality: {
       crf: "Constant Quality (CRF)",
+      cq: "NVENC Constant Quality (CQ)",
       bitrate: "Bitrate (kbps)",
       qualityScale: "Quality Scale",
     },
@@ -605,6 +619,19 @@ export const en = {
       notInteger: "Enter a whole number.",
       containerMismatch:
         "{{container}} cannot hold {{encoder}} audio. Choose MP4 or MKV, or another audio encoder.",
+      pixelFormat:
+        "Use 1 to {{max}} characters: lowercase letters, digits, or underscores.",
+      tooManyOptions: "Use {{max}} parameters or fewer.",
+      // {{name}} is the option name without its leading hyphen, as the user typed it.
+      optionName:
+        "“{{name}}” is not a valid parameter name. Start with a letter. After that, use only letters, digits, underscores, periods, or hyphens, 64 characters at most.",
+      optionDenied:
+        "QuipClip sets -{{name}} itself, or -{{name}} would break the export. Remove it.",
+      optionDuplicate: "-{{name}} occurs more than once. Keep one of them.",
+      optionValue:
+        "Give -{{name}} a value of 1 to {{max}} characters, with no line break and no double quote, that does not end in a backslash.",
+      optionsTooLong:
+        "The extra parameters are too long. Use {{max}} bytes or fewer for the video and audio parameters together.",
     },
   },
   common: {
@@ -698,6 +725,7 @@ export const en = {
       qualityLabel: "Quality",
       value: "{{value}}",
       qualityCrf: "CRF {{value}}",
+      qualityCq: "CQ {{value}}",
       qualityBitrate: "{{value}} kbps",
       qualityScale: "Quality scale {{value}}",
       audioBitrateLossless: "Lossless",

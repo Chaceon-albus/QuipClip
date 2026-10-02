@@ -395,6 +395,7 @@ export const zhCN: TranslationCatalog = {
       empty: "暂无预设。",
       noSelection: "未选择预设。",
       rowSummaryCrf: "{{container}} · {{encoder}} · CRF {{value}}",
+      rowSummaryCq: "{{container}} · {{encoder}} · CQ {{value}}",
       rowSummaryBitrate: "{{container}} · {{encoder}} · {{value}} kbps",
       rowSummaryQualityScale: "{{container}} · {{encoder}} · 质量系数 {{value}}",
       limitReached: "已达到 {{max}} 个预设的上限。",
@@ -439,6 +440,7 @@ export const zhCN: TranslationCatalog = {
       qualityKindLabel: "质量类型",
       qualityValueLabel: "质量数值",
       qualityHintCrf: "数值越小画质越高，范围因编码器而异。",
+      qualityHintCq: "以 -cq 传给编码器，并同时传入 -b:v 0。数值越小画质越高。",
       qualityHintBitrate: "目标视频比特率。",
       qualityHintQualityScale: "以 -q:v 传给编码器，数值含义因编码器而异。",
       resolutionLabel: "分辨率",
@@ -449,6 +451,15 @@ export const zhCN: TranslationCatalog = {
       heightLabel: "高度",
       frameRateNumeratorLabel: "分子",
       frameRateDenominatorLabel: "分母",
+      pixelFormatLabel: "像素格式",
+      pixelFormatValue8Bit: "{{name}}（8 位）",
+      pixelFormatValue10Bit: "{{name}}（10 位）",
+      pixelFormatValueOther: "{{name}}",
+      pixelFormatHint:
+        "软件编码器通常使用 yuv420p 或 yuv420p10le，硬件编码器通常使用 nv12 或 p010le。",
+      pixelFormatCustomLabel: "自定义像素格式",
+      pixelFormatCustomHint: "请使用 FFmpeg 的像素格式名称，例如 yuv422p10le。",
+      optionsLabel: "额外参数",
       unitKbps: "kbps",
       unitPixels: "px",
       sourceOption: "与源相同",
@@ -456,6 +467,7 @@ export const zhCN: TranslationCatalog = {
     },
     quality: {
       crf: "恒定质量（CRF）",
+      cq: "NVENC 恒定质量（CQ）",
       bitrate: "比特率（kbps）",
       qualityScale: "质量系数",
     },
@@ -486,6 +498,15 @@ export const zhCN: TranslationCatalog = {
       notInteger: "请输入一个整数。",
       containerMismatch:
         "{{container}} 不支持 {{encoder}} 音频。请选择 MP4 或 MKV，或者更换其他音频编码器。",
+      pixelFormat: "请使用 1 到 {{max}} 个字符，只能使用小写字母、数字或下划线。",
+      tooManyOptions: "最多可使用 {{max}} 个参数。",
+      optionName:
+        "“{{name}}”不是有效的参数名称。请以字母开头，后续只能使用字母、数字、下划线、句点或连字符，最多 64 个字符。",
+      optionDenied: "-{{name}} 由 QuipClip 自行设置，或者会破坏导出，请将其删除。",
+      optionDuplicate: "-{{name}} 出现了多次，请只保留一个。",
+      optionValue:
+        "请为 -{{name}} 提供 1 到 {{max}} 个字符的值，不能包含换行和双引号，也不能以反斜杠结尾。",
+      optionsTooLong: "额外参数过长。视频参数和音频参数合计最多 {{max}} 字节。",
     },
   },
   common: {
@@ -571,6 +592,7 @@ export const zhCN: TranslationCatalog = {
       qualityLabel: "质量",
       value: "{{value}}",
       qualityCrf: "CRF {{value}}",
+      qualityCq: "CQ {{value}}",
       qualityBitrate: "{{value}} kbps",
       qualityScale: "质量系数 {{value}}",
       audioBitrateLossless: "无损",

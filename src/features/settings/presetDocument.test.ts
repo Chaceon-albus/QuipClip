@@ -30,6 +30,9 @@ function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
+    pixelFormat: "yuv420p",
+    videoOptions: [],
+    audioOptions: [],
     ...overrides,
   };
 }
@@ -47,7 +50,7 @@ const TEST_REVISION = 7;
 
 function createSettings(overrides: Partial<Settings> = {}): Settings {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: TEST_REVISION,
     presets: [],
     ...overrides,
@@ -85,7 +88,17 @@ describe("createPresetDraft", () => {
       quality: { kind: "crf", value: 20 },
       resolution: "source",
       frameRate: "source",
+      pixelFormat: "yuv420p",
+      videoOptions: [],
+      audioOptions: [],
     });
+  });
+
+  it("gives each draft its own option lists", () => {
+    const first = createPresetDraft("a", "A");
+    const second = createPresetDraft("b", "B");
+    expect(first.videoOptions).not.toBe(second.videoOptions);
+    expect(first.audioOptions).not.toBe(second.audioOptions);
   });
 });
 
@@ -429,10 +442,10 @@ describe("schemaVersion", () => {
       activePresetId: "a",
     });
 
-    expect(addPreset(settings, createPreset("b")).schemaVersion).toBe(1);
-    expect(updatePreset(settings, createPreset("a")).schemaVersion).toBe(1);
-    expect(deletePreset(settings, "a").schemaVersion).toBe(1);
-    expect(setActivePreset(settings, null).schemaVersion).toBe(1);
+    expect(addPreset(settings, createPreset("b")).schemaVersion).toBe(2);
+    expect(updatePreset(settings, createPreset("a")).schemaVersion).toBe(2);
+    expect(deletePreset(settings, "a").schemaVersion).toBe(2);
+    expect(setActivePreset(settings, null).schemaVersion).toBe(2);
   });
 });
 

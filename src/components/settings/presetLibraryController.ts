@@ -57,6 +57,7 @@ import {
   frameRateFromChoice,
   OUTPUT_CUSTOM_VALUE,
   OUTPUT_SOURCE_VALUE,
+  PIXEL_FORMAT_CUSTOM_VALUE,
   resolutionChoiceValue,
   resolutionFromChoice,
 } from "@/features/settings/videoOutputChoices";
@@ -101,10 +102,10 @@ function parseNumericField(raw: string): number {
 /**
  * Deep-copies a preset so mutating the copy never alters the stored preset.
  *
- * A shallow `{ ...preset }` shares `quality`, `resolution`, and `frameRate` with the stored
- * document, because those fields are themselves objects (except when `resolution` or
- * `frameRate` holds the literal string "source"). Writing `draft.quality.value = 63` on a
- * shallow copy would mutate the settings document in place.
+ * A shallow `{ ...preset }` shares `quality`, `resolution`, `frameRate`, and the two option
+ * lists with the stored document, because those fields are themselves objects (except when
+ * `resolution` or `frameRate` holds the literal string "source"). Writing
+ * `draft.quality.value = 63` on a shallow copy would mutate the settings document in place.
  */
 function clonePreset(preset: Preset): Preset {
   return {
@@ -112,6 +113,8 @@ function clonePreset(preset: Preset): Preset {
     quality: { ...preset.quality },
     resolution: preset.resolution === "source" ? "source" : { ...preset.resolution },
     frameRate: preset.frameRate === "source" ? "source" : { ...preset.frameRate },
+    videoOptions: preset.videoOptions.map((option) => ({ ...option })),
+    audioOptions: preset.audioOptions.map((option) => ({ ...option })),
   };
 }
 
@@ -166,6 +169,19 @@ export type PresetLibraryView = {
    * `resolutionChoice`, with `frameRateChoiceValue` for the mapping.
    */
   frameRateChoice: string;
+
+  /**
+   * Whether the user explicitly chose "custom" in the pixel format `<Select>`, which opens a
+   * text field. It follows the rules of `videoEncoderIsCustom`: a stored format that is not one
+   * of the `PIXEL_FORMAT_CHOICES` is an ordinary option of the list, not custom.
+   */
+  pixelFormatIsCustom: boolean;
+
+  /**
+   * The value of the pixel format `<Select>`: `PIXEL_FORMAT_CUSTOM_VALUE` while
+   * `pixelFormatIsCustom` is true, else the stored format of the draft.
+   */
+  pixelFormatChoice: string;
 };
 
 /**
@@ -242,6 +258,9 @@ export class PresetLibraryController {
   private resolutionIsCustom = false;
   private frameRateIsCustom = false;
 
+  // Controller state, not derived from the draft: see `PresetLibraryView.pixelFormatIsCustom`.
+  private pixelFormatIsCustom = false;
+
   constructor(options: PresetLibraryControllerOptions = {}) {
     this.getSettingsFn =
       options.getSettings ?? (() => settingsStore.getState().settings);
@@ -283,6 +302,10 @@ export class PresetLibraryController {
         : this.frameRateIsCustom
           ? OUTPUT_CUSTOM_VALUE
           : frameRateChoiceValue(this.draft.frameRate),
+      pixelFormatIsCustom: this.pixelFormatIsCustom,
+      pixelFormatChoice: this.pixelFormatIsCustom
+        ? PIXEL_FORMAT_CUSTOM_VALUE
+        : (this.draft?.pixelFormat ?? ""),
     };
   }
 
@@ -590,6 +613,38 @@ export class PresetLibraryController {
         : this.draft.frameRate;
     this.frameRateIsCustom = true;
     this.updateDraft({ frameRate: { ...base, [field]: parseNumericField(raw) } });
+  }
+
+  /**
+   * Handles a selection from the pixel format `<Select>`. It follows the rules of
+   * `chooseEncoder`: `PIXEL_FORMAT_CUSTOM_VALUE` opens the text field and keeps the stored
+   * format, so the field starts from it. Any other value is stored as the format.
+   *
+   * No-op when there is no draft.
+   */
+  choosePixelFormat(value: string): void {
+    if (!this.draft) {
+      return;
+    }
+    if (value === PIXEL_FORMAT_CUSTOM_VALUE) {
+      this.pixelFormatIsCustom = true;
+      // As in `chooseEncoder`, the method marks the draft dirty even when the format stays.
+      this.updateDraft({});
+      return;
+    }
+    this.pixelFormatIsCustom = false;
+    this.updateDraft({ pixelFormat: value });
+  }
+
+  /**
+   * Sets the draft's pixel format from the custom text field, verbatim. It does not trim or
+   * lower the text, for the reason `setEncoderName` gives: `validatePresetFields` reports the
+   * text as it is, and Rust would refuse it as it is.
+   *
+   * No-op when there is no draft.
+   */
+  setPixelFormatName(raw: string): void {
+    this.updateDraft({ pixelFormat: raw });
   }
 
   /**
@@ -937,6 +992,7 @@ export class PresetLibraryController {
     this.audioEncoderIsCustom = false;
     this.resolutionIsCustom = false;
     this.frameRateIsCustom = false;
+    this.pixelFormatIsCustom = false;
   }
 
   /**

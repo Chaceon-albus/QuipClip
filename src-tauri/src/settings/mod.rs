@@ -1,11 +1,12 @@
 //! Document types, validation, and file operations for the application settings file.
 //!
-//! ADR 013 defines the on-disk shape: `<app_data>/settings.json`, at schema version 1,
-//! holding an optional ffmpeg path, a list of export presets, and an optional active preset
-//! id. The top of this module holds the pure parts of that decision -- the serde types and
-//! [`validate_settings`] -- with no file I/O. The bottom half holds loading, saving, seeding,
-//! restore, reset, the permissive ffmpeg-path accessor, and the read/write lock that
-//! coordinates them.
+//! ADR 013 defines the on-disk shape: `<app_data>/settings.json`, holding an optional ffmpeg
+//! path, a list of export presets, and an optional active preset id. This build writes schema
+//! version 2 and still reads version 1, the version of the first release; see
+//! [`CURRENT_SCHEMA_VERSION`]. The top of this module holds the pure parts of that decision --
+//! the serde types and [`validate_settings`] -- with no file I/O. The bottom half holds
+//! loading, saving, seeding, restore, reset, the permissive ffmpeg-path accessor, and the
+//! read/write lock that coordinates them.
 
 pub mod defaults;
 
@@ -20,8 +21,23 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-/// The settings schema this build reads and writes; see ADR 013.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// The settings schema this build writes; see ADR 013.
+///
+/// Version 2 adds three preset fields: [`Preset::pixel_format`], [`Preset::video_options`],
+/// and [`Preset::audio_options`]. The first release, v0.1.0, fixed the preset shape at
+/// version 1 (ADR 023), and its `Preset` refuses an unknown key. A document with the new keys
+/// therefore needs a new version, so that v0.1.0 reports a newer file, writes nothing, and the
+/// document survives a downgrade (ADR 013).
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+/// The settings schema of the first release, which [`load`] still reads.
+///
+/// A version-1 preset holds none of the three version-2 keys. Each one reads as the value that
+/// keeps the export of version 1: no encoder options, and the `yuv420p` that the graph wrote
+/// as a constant before [`Preset::pixel_format`] existed. The command line of such a preset
+/// gains `-pix_fmt yuv420p` only, which names the format the graph already ends in. [`load`]
+/// then holds the document as version 2, and the next save writes version 2.
+pub const FIRST_RELEASE_SCHEMA_VERSION: u32 = 1;
 
 /// The largest number of presets [`validate_settings`] accepts.
 pub const MAX_PRESETS: usize = 100;
@@ -59,13 +75,312 @@ pub const MAX_AUDIO_SAMPLE_RATE: u32 = 192_000;
 /// then, byte for byte, so the absent key reads as this value and not as `source`.
 const LEGACY_AUDIO_SAMPLE_RATE: u32 = 48_000;
 
+/// The smallest [`QualityKind::Cq`] value [`validate_settings`] accepts.
+///
+/// NVENC reads `-cq 0` as "choose automatically", not as a quality, so the range starts at 1.
+pub const MIN_CONSTANT_QUALITY: u32 = 1;
+
+/// The largest [`QualityKind::Cq`] value [`validate_settings`] accepts.
+///
+/// This is the top of the widest `-cq` range, the one of `av1_nvenc`. `h264_nvenc` and
+/// `hevc_nvenc` stop at 51, and ffmpeg refuses a larger value for them with an error. The
+/// range is not narrowed for each encoder, for the reason ADR 013 gives about the `crf` range.
+pub const MAX_CONSTANT_QUALITY: u32 = 63;
+
+/// The pixel format a preset takes when its document holds no `pixelFormat` key.
+///
+/// This is the format ADR 014 wrote into the graph as a constant before the preset named one.
+pub const DEFAULT_PIXEL_FORMAT: &str = "yuv420p";
+
+/// The largest [`Preset::pixel_format`] length [`validate_settings`] accepts.
+pub const MAX_PIXEL_FORMAT_CHARS: usize = 32;
+
+/// The largest number of entries [`validate_settings`] accepts in one of
+/// [`Preset::video_options`] and [`Preset::audio_options`].
+pub const MAX_PRESET_OPTIONS: usize = 32;
+
+/// The largest [`PresetOption::name`] length [`validate_settings`] accepts.
+pub const MAX_OPTION_NAME_CHARS: usize = 64;
+
+/// The largest [`PresetOption::value`] length, counted in `chars()`, [`validate_settings`]
+/// accepts.
+pub const MAX_OPTION_VALUE_CHARS: usize = 512;
+
+/// The most bytes the encoder options of one preset may add to the command line, for the video
+/// list and the audio list together; see [`PresetOption::rendered_bytes`].
+///
+/// ADR 014 holds the whole command line inside the Windows limit at the segment cap, and the
+/// options of a preset are written once, not once for each segment. The test
+/// `the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap` in
+/// `ffmpeg::export::arguments` measures the widest plan with this many bytes of options.
+pub const MAX_PRESET_OPTION_BYTES: usize = 1024;
+
+/// The option names [`validate_settings`] refuses in [`Preset::video_options`] and
+/// [`Preset::audio_options`]. The comparison is exact and case-sensitive, as ffmpeg's is.
+///
+/// `src/features/settings/limits.ts` holds a copy, and `limits.test.ts` reads this list to
+/// compare the two.
+///
+/// The renderer writes each option as two arguments, `-<name>:v <value>` or
+/// `-<name>:a <value>`. Two kinds of name break that shape.
+///
+/// **Options that take no argument.** fftools looks an option up by the part of the name in
+/// front of the `:`. An option that takes no argument then leaves the value behind, and ffmpeg
+/// reads the value as a second output file: `-shortest:v x` sets `-shortest` and writes a file
+/// named `x`. The first four groups are every such option in the fftools tables of the FFmpeg
+/// tags n7.1, n7.1.2, n8.0, n8.0.2, n8.1, n9.0, and n9.0.2 (`fftools/opt_common.h` and the
+/// `options[]` table of `fftools/ffmpeg_opt.c`): each `OPT_TYPE_BOOL` option, the `no` form that fftools reads for
+/// each of them, each `OPT_TYPE_FUNC` option without `OPT_FUNC_ARG`, and each `OPT_EXIT`
+/// option, which ends the process. Two names of those tables are not here, `?` and `-help`,
+/// because the name rule already refuses them. On FFmpeg 9.0.2, the command-line split of
+/// `-<name>:v x`, for every name of those tables, made `x` an output file for exactly each
+/// boolean option, each `no` form, `report`, and `vstats`. `qphist` is gone from 9.0, and an
+/// `OPT_EXIT` option takes the next argument and then ends the process.
+///
+/// **Options that QuipClip sets, or that break the export.** The other groups take an argument.
+/// Each one sets something that a preset field or the renderer owns, changes the inputs or the
+/// timestamps that the cut relies on (ADR 014), changes the frames or the streams that the
+/// success checks count (ADR 016, ADR 036), controls the process, or writes a file beside the
+/// output. The two group separators `i` and `dec` are here too. A file of options, such as
+/// `-fpre`, is refused, because this list cannot check what such a file holds.
+///
+/// A name outside the fftools tables reaches ffmpeg as an encoder option. With the `:v` or
+/// `:a` specifier, ffmpeg looks it up among the encoder options only, and refuses an unknown
+/// name with an error. A muxer option, such as `movflags`, can therefore never take effect
+/// here; it is listed because QuipClip sets it.
+///
+/// Two risks remain, and this list does not remove them. A parameter string of an encoder can
+/// still write a file, for example `x264-params` with `stats=` and `pass=1`, `x265-params` with
+/// `csv=`, or `-flags:v +pass1`, which writes a log in the working directory of ffmpeg. That is
+/// the trust that a user already has through the path of ffmpeg. And the list covers FFmpeg up
+/// to 9.0.2: a later release can add an option with no argument, whose value then becomes an
+/// output file that `-y` overwrites. The check above must run again for each new release of
+/// FFmpeg that QuipClip supports.
+pub const DENIED_OPTION_NAMES: &[&str] = &[
+    // fftools options that print something and end the process (`OPT_EXIT`).
+    "L",
+    "license",
+    "h",
+    "help",
+    "version",
+    "buildconf",
+    "formats",
+    "muxers",
+    "demuxers",
+    "devices",
+    "codecs",
+    "decoders",
+    "encoders",
+    "bsfs",
+    "protocols",
+    "filters",
+    "pix_fmts",
+    "layouts",
+    "sample_fmts",
+    "dispositions",
+    "colors",
+    "sources",
+    "sinks",
+    "hwaccels",
+    // fftools functions that take no argument.
+    "report",
+    "vstats",
+    "qphist",
+    // fftools boolean options.
+    "accurate_seek",
+    "an",
+    "auto_conversion_filters",
+    "autorotate",
+    "autoscale",
+    "benchmark",
+    "benchmark_all",
+    "bitexact",
+    "copy_unknown",
+    "copyinkf",
+    "copyts",
+    "debug_ts",
+    "display_hflip",
+    "display_vflip",
+    "dn",
+    "dump",
+    "find_stream_info",
+    "fix_sub_duration",
+    "fix_sub_duration_heartbeat",
+    "force_fps",
+    "hex",
+    "hide_banner",
+    "ignore_unknown",
+    "n",
+    "print_graphs",
+    "re",
+    "recast_media",
+    "shortest",
+    "sn",
+    "start_at_zero",
+    "stats",
+    "stdin",
+    "vn",
+    "xerror",
+    "y",
+    // The `no` form of each boolean option, which sets it to false.
+    "noaccurate_seek",
+    "noan",
+    "noauto_conversion_filters",
+    "noautorotate",
+    "noautoscale",
+    "nobenchmark",
+    "nobenchmark_all",
+    "nobitexact",
+    "nocopy_unknown",
+    "nocopyinkf",
+    "nocopyts",
+    "nodebug_ts",
+    "nodisplay_hflip",
+    "nodisplay_vflip",
+    "nodn",
+    "nodump",
+    "nofind_stream_info",
+    "nofix_sub_duration",
+    "nofix_sub_duration_heartbeat",
+    "noforce_fps",
+    "nohex",
+    "nohide_banner",
+    "noignore_unknown",
+    "non",
+    "noprint_graphs",
+    "nore",
+    "norecast_media",
+    "noshortest",
+    "nosn",
+    "nostart_at_zero",
+    "nostats",
+    "nostdin",
+    "novn",
+    "noxerror",
+    "noy",
+    // The group separators of the command line: an input file, and a loopback decoder.
+    "i",
+    "dec",
+    // The streams, the encoders, and the muxer, which the renderer selects.
+    "map",
+    "map_metadata",
+    "map_chapters",
+    "c",
+    "codec",
+    "vcodec",
+    "acodec",
+    "scodec",
+    "dcodec",
+    "f",
+    "target",
+    "attach",
+    // Filters. The renderer writes the one filter graph of the export.
+    "filter",
+    "filter_complex",
+    "filter_complex_script",
+    "filter_script",
+    "filter_threads",
+    "filter_complex_threads",
+    "filter_hw_device",
+    "filter_buffered_frames",
+    "lavfi",
+    "vf",
+    "af",
+    // The picture and the sound that preset fields set: size, rate, pixel format, sample
+    // rate, channels, aspect, time base, and rotation.
+    "s",
+    "r",
+    "fpsmax",
+    "fps_mode",
+    "vsync",
+    "pix_fmt",
+    "ar",
+    "ac",
+    "ch_layout",
+    "channel_layout",
+    "apad",
+    "aspect",
+    "sar",
+    "enc_time_base",
+    "time_base",
+    "display_rotation",
+    // The quality control and the bitrates, which the quality kind and the audio bitrate set.
+    "b",
+    "ab",
+    "crf",
+    "cq",
+    "q",
+    "qscale",
+    "aq",
+    "global_quality",
+    // The length of the output and the number of frames, which the success checks count.
+    "t",
+    "to",
+    "ss",
+    "sseof",
+    "fs",
+    "frames",
+    "vframes",
+    "aframes",
+    "dframes",
+    "shortest_buf_duration",
+    "frame_drop_threshold",
+    // The inputs and their timestamps, which the cut relies on.
+    "itsoffset",
+    "itsscale",
+    "stream_loop",
+    "readrate",
+    "readrate_initial_burst",
+    "readrate_catchup",
+    "seek_timestamp",
+    "isync",
+    "dts_delta_threshold",
+    "dts_error_threshold",
+    "copytb",
+    "reinit_filter",
+    "drop_changed",
+    // The process: its log, its progress report, its time limit, and its exit status.
+    "loglevel",
+    "v",
+    "progress",
+    "stats_period",
+    "timelimit",
+    "max_error_rate",
+    // Files beside the output, and files of options.
+    "pass",
+    "passlogfile",
+    "vstats_file",
+    "vstats_version",
+    "stats_enc_pre",
+    "stats_enc_post",
+    "stats_mux_pre",
+    "stats_enc_pre_fmt",
+    "stats_enc_post_fmt",
+    "stats_mux_pre_fmt",
+    "print_graphs_file",
+    "print_graphs_format",
+    "sdp_file",
+    "dump_attachment",
+    "pre",
+    "apre",
+    "vpre",
+    "spre",
+    "fpre",
+    // The muxer and the packets: muxer flags, metadata, and bitstream filters, which can
+    // rewrite timestamps or drop packets after the encoder.
+    "movflags",
+    "metadata",
+    "bsf",
+];
+
 // A fourth private copy of the JavaScript `Number.MAX_SAFE_INTEGER` bound. `project/mod.rs`,
 // `commands/project.rs`, and `commands/media.rs` each already hold their own; ADR 009 caps a
 // commit to one refactor, and hoisting this constant to a shared location is not this
 // milestone's refactor.
 const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
-/// The application settings document, `<app_data>/settings.json` at schema version 1.
+/// The application settings document, `<app_data>/settings.json` at
+/// [`CURRENT_SCHEMA_VERSION`].
 ///
 /// `ffmpeg_path` and `active_preset_id` are absent from the JSON, never `null`, when they
 /// hold no value; see ADR 013. A read still accepts an explicit `null` for either, because
@@ -74,7 +389,8 @@ const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
     /// The schema version this document claims. Must equal [`CURRENT_SCHEMA_VERSION`] to
-    /// pass [`validate_settings`].
+    /// pass [`validate_settings`]. [`load`] reads a document at
+    /// [`FIRST_RELEASE_SCHEMA_VERSION`] and returns it at the current version.
     pub schema_version: u32,
     /// The compare-and-swap token [`save`] uses to refuse a save built on a document another
     /// process has already replaced; see ADR 013.
@@ -117,12 +433,17 @@ pub struct Settings {
 }
 
 /// One export preset: an identity, a container, two encoder names, three audio output
-/// settings, a quality control, and two video output settings.
+/// settings, a quality control, three video output settings, and two lists of encoder
+/// options.
 ///
 /// The three audio fields arrived with ADR 023, after documents without them already existed.
 /// Each one therefore reads an absent key as the behaviour from before ADR 023 -- no `-b:a`,
 /// 48000 Hz, stereo -- so an older document renders the same command line as before, byte for
-/// byte, and the schema version stays 1.
+/// byte, and the schema version stayed 1.
+///
+/// The pixel format and the two option lists arrived with schema version 2, after the first
+/// release; see [`CURRENT_SCHEMA_VERSION`]. A version-1 document holds none of them, and each
+/// one reads an absent key as the value that keeps the export of version 1.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Preset {
@@ -163,6 +484,114 @@ pub struct Preset {
     pub resolution: ResolutionSetting,
     /// The output frame rate: the source frame rate, or an explicit rational rate.
     pub frame_rate: FrameRateSetting,
+    /// The pixel format of the output video, as ffmpeg names it: 1 to
+    /// [`MAX_PIXEL_FORMAT_CHARS`] characters from `[a-z0-9_]`.
+    ///
+    /// The graph converts the joined video to this format in its first chain (ADR 014
+    /// measurement 19), and the renderer also writes `-pix_fmt <format>` after `-c:v`, so that
+    /// ffmpeg warns when the encoder cannot take the format. That warning shows only in a run
+    /// at warning level, such as the test of a preset; the export runs at error level. The
+    /// settings module does not know which formats an encoder takes, for the reason ADR 013
+    /// gives about quality ranges.
+    ///
+    /// An absent key reads as [`DEFAULT_PIXEL_FORMAT`]. A save always writes the key.
+    #[serde(default = "default_pixel_format")]
+    pub pixel_format: String,
+    /// Encoder options for the video stream, in the order the renderer writes them.
+    ///
+    /// The renderer writes each one as `-<name>:v <value>`, after the flags it writes for the
+    /// video stream itself; see [`PresetOption`] for the rules each entry follows. An absent
+    /// key reads as no options. A save always writes the key.
+    #[serde(default)]
+    pub video_options: Vec<PresetOption>,
+    /// Encoder options for the audio stream, written as `-<name>:a <value>` after the flags
+    /// the renderer writes for the audio stream. The rules of [`Self::video_options`] apply.
+    #[serde(default)]
+    pub audio_options: Vec<PresetOption>,
+}
+
+/// The value an absent `pixelFormat` key reads as. A function, because `#[serde(default)]`
+/// needs one to build a `String`.
+fn default_pixel_format() -> String {
+    DEFAULT_PIXEL_FORMAT.to_owned()
+}
+
+/// One encoder option of a preset: a name, without its leading `-`, and its value.
+///
+/// The renderer writes it as two arguments, the flag `-<name>:v` or `-<name>:a` and the
+/// value; see [`PresetOption::flag`]. [`validate_settings`] enforces the rules that keep that
+/// shape safe:
+///
+/// - The name holds 1 to [`MAX_OPTION_NAME_CHARS`] characters. It starts with an ASCII letter,
+///   and then holds only ASCII letters, digits, `_`, `.`, and `-`. The rule refuses a `:`,
+///   which would change the stream specifier, and a `/`, because FFmpeg 7.1 and later read the
+///   value of `-/<name>` from a file.
+/// - The name is not in [`DENIED_OPTION_NAMES`].
+/// - The value holds 1 to [`MAX_OPTION_VALUE_CHARS`] characters, and no NUL, CR, LF or `"`,
+///   and it does not end in `\`.
+///
+/// No shell is involved, so the value reaches ffmpeg as one argument whatever it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresetOption {
+    /// The option name, without its leading `-` and without a stream specifier.
+    pub name: String,
+    /// The option value, verbatim.
+    pub value: String,
+}
+
+impl PresetOption {
+    /// The flag argument the renderer writes for this option on `stream`: `-<name>:v` or
+    /// `-<name>:a`.
+    ///
+    /// The specifier keeps a video option off the audio encoder, and an audio option off the
+    /// video encoder, because ffmpeg applies a scoped encoder option to the matching streams
+    /// only.
+    #[must_use]
+    pub fn flag(&self, stream: OptionStream) -> String {
+        format!("-{}:{}", self.name, stream.specifier())
+    }
+
+    /// The bytes this option adds to the command line on `stream`: the flag and the value,
+    /// without the separators and quotes the operating system adds around each argument.
+    ///
+    /// [`MAX_PRESET_OPTION_BYTES`] bounds the sum of this value over both lists of a preset.
+    #[must_use]
+    pub fn rendered_bytes(&self, stream: OptionStream) -> usize {
+        self.flag(stream).len() + self.value.len()
+    }
+}
+
+/// The stream that one list of [`PresetOption`] values applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionStream {
+    Video,
+    Audio,
+}
+
+impl OptionStream {
+    /// The stream specifier the renderer appends to each option name.
+    #[must_use]
+    pub const fn specifier(self) -> &'static str {
+        match self {
+            Self::Video => "v",
+            Self::Audio => "a",
+        }
+    }
+
+    /// The wire name of the preset field that holds the list for this stream.
+    const fn field(self) -> &'static str {
+        match self {
+            Self::Video => "videoOptions",
+            Self::Audio => "audioOptions",
+        }
+    }
+}
+
+impl fmt::Display for OptionStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.field())
+    }
 }
 
 /// The output container. The set is closed: the render layer of ADR 004 selects a muxer
@@ -192,6 +621,12 @@ pub struct Quality {
 pub enum QualityKind {
     /// Constant Rate Factor: lower is higher quality. Valid range `0..=63`.
     Crf,
+    /// The constant quality of NVENC, written as `-cq <value> -b:v 0`. Valid range
+    /// [`MIN_CONSTANT_QUALITY`]`..=`[`MAX_CONSTANT_QUALITY`].
+    ///
+    /// `-b:v 0` belongs to the kind: the NVENC encoders set a default bitrate of 2 Mbit/s, and
+    /// that bitrate would cap the constant quality.
+    Cq,
     /// A fixed bitrate, in **kilobits per second**. Valid range `1..=200_000`.
     Bitrate,
     /// An encoder-defined quality scale. Valid range `1..=100`.
@@ -450,6 +885,7 @@ impl fmt::Display for QualityKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::Crf => "crf",
+            Self::Cq => "cq",
             Self::Bitrate => "bitrate",
             Self::QualityScale => "qualityScale",
         };
@@ -508,6 +944,51 @@ pub enum SettingsValidationError {
     InvalidFrameRate {
         index: usize,
     },
+    /// [`Preset::pixel_format`] is empty, longer than [`MAX_PIXEL_FORMAT_CHARS`], or holds a
+    /// character outside `[a-z0-9_]`. The graph writes the name into a filter, so a `:`, `,`,
+    /// `;`, or `[` would change the graph.
+    InvalidPixelFormat {
+        index: usize,
+    },
+    /// One option list of the preset at `index` holds more than [`MAX_PRESET_OPTIONS`]
+    /// entries.
+    TooManyOptions {
+        index: usize,
+        stream: OptionStream,
+        count: usize,
+    },
+    /// The name of option `option` breaks the character rule of [`PresetOption`].
+    InvalidOptionName {
+        index: usize,
+        stream: OptionStream,
+        option: usize,
+    },
+    /// The name of option `option` is in [`DENIED_OPTION_NAMES`].
+    DeniedOptionName {
+        index: usize,
+        stream: OptionStream,
+        option: usize,
+    },
+    /// The name of option `option` repeats the name of an earlier option of the same list.
+    DuplicateOptionName {
+        index: usize,
+        stream: OptionStream,
+        option: usize,
+    },
+    /// The value of option `option` is empty, longer than [`MAX_OPTION_VALUE_CHARS`], holds a
+    /// NUL, a CR, an LF or a `"`, or ends in `\`.
+    InvalidOptionValue {
+        index: usize,
+        stream: OptionStream,
+        option: usize,
+    },
+    /// The two option lists of the preset at `index` render more than
+    /// [`MAX_PRESET_OPTION_BYTES`]. `stream` names the list whose option passed the limit.
+    OptionsTooLong {
+        index: usize,
+        stream: OptionStream,
+        bytes: usize,
+    },
     UnsafeInteger {
         field: String,
         value: i128,
@@ -562,6 +1043,57 @@ impl fmt::Display for SettingsValidationError {
             Self::InvalidFrameRate { index } => {
                 write!(formatter, "presets[{index}].frameRate is invalid")
             }
+            Self::InvalidPixelFormat { index } => {
+                write!(formatter, "presets[{index}].pixelFormat is not a valid pixel format name")
+            }
+            Self::TooManyOptions {
+                index,
+                stream,
+                count,
+            } => write!(
+                formatter,
+                "presets[{index}].{stream} holds {count} entries, more than the {MAX_PRESET_OPTIONS} allowed"
+            ),
+            Self::InvalidOptionName {
+                index,
+                stream,
+                option,
+            } => write!(
+                formatter,
+                "presets[{index}].{stream}[{option}].name is not a valid option name"
+            ),
+            Self::DeniedOptionName {
+                index,
+                stream,
+                option,
+            } => write!(
+                formatter,
+                "presets[{index}].{stream}[{option}].name names an option QuipClip does not accept"
+            ),
+            Self::DuplicateOptionName {
+                index,
+                stream,
+                option,
+            } => write!(
+                formatter,
+                "presets[{index}].{stream}[{option}].name repeats an earlier option"
+            ),
+            Self::InvalidOptionValue {
+                index,
+                stream,
+                option,
+            } => write!(
+                formatter,
+                "presets[{index}].{stream}[{option}].value is empty, too long, or holds a line break or a NUL"
+            ),
+            Self::OptionsTooLong {
+                index,
+                stream,
+                bytes,
+            } => write!(
+                formatter,
+                "presets[{index}].{stream} takes the options of the preset to {bytes} bytes, more than the {MAX_PRESET_OPTION_BYTES} allowed"
+            ),
             Self::UnsafeInteger { field, value } => write!(
                 formatter,
                 "{field} value {value} is outside the JavaScript safe integer range"
@@ -585,8 +1117,9 @@ impl Error for SettingsValidationError {}
 /// value exists, because deserialization rejects a structurally invalid document before this
 /// function ever runs. This function checks what remains: the schema version, preset id and
 /// name shape, the encoder-name security rule, the audio bitrate and sample rate ranges, the
-/// quality and resolution ranges, the safe-integer bounds on a custom frame rate, and the two
-/// cross-references
+/// quality and resolution ranges, the safe-integer bounds on a custom frame rate, the pixel
+/// format name, the rules of each encoder option and the limits of the two option lists, and
+/// the two cross-references
 /// (`active_preset_id` naming a preset, and every preset id being unique).
 ///
 /// [`Settings::revision`] is deliberately not checked. It is a compare-and-swap counter, not a
@@ -688,6 +1221,29 @@ pub fn validate_settings(settings: &Settings) -> Result<(), SettingsValidationEr
                 return Err(SettingsValidationError::InvalidFrameRate { index });
             }
         }
+
+        if !is_valid_pixel_format(&preset.pixel_format) {
+            return Err(SettingsValidationError::InvalidPixelFormat { index });
+        }
+
+        validate_options(index, OptionStream::Video, &preset.video_options)?;
+        validate_options(index, OptionStream::Audio, &preset.audio_options)?;
+        let video_bytes = option_list_bytes(OptionStream::Video, &preset.video_options);
+        let bytes = video_bytes + option_list_bytes(OptionStream::Audio, &preset.audio_options);
+        if bytes > MAX_PRESET_OPTION_BYTES {
+            // The renderer writes the video options first, so the audio list passes the limit
+            // unless the video list already does on its own.
+            let stream = if video_bytes > MAX_PRESET_OPTION_BYTES {
+                OptionStream::Video
+            } else {
+                OptionStream::Audio
+            };
+            return Err(SettingsValidationError::OptionsTooLong {
+                index,
+                stream,
+                bytes,
+            });
+        }
     }
 
     if let Some(active_preset_id) = &settings.active_preset_id {
@@ -729,9 +1285,106 @@ fn is_valid_encoder_name(name: &str) -> bool {
 fn is_valid_quality(quality: Quality) -> bool {
     match quality.kind {
         QualityKind::Crf => quality.value <= 63,
+        QualityKind::Cq => (MIN_CONSTANT_QUALITY..=MAX_CONSTANT_QUALITY).contains(&quality.value),
         QualityKind::Bitrate => (1..=200_000).contains(&quality.value),
         QualityKind::QualityScale => (1..=100).contains(&quality.value),
     }
+}
+
+/// Check a pixel format name: 1 to [`MAX_PIXEL_FORMAT_CHARS`] characters from `[a-z0-9_]`,
+/// the characters of every name `ffmpeg -pix_fmts` lists.
+fn is_valid_pixel_format(name: &str) -> bool {
+    (1..=MAX_PIXEL_FORMAT_CHARS).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// Check an option name against the character rule of [`PresetOption`]: an ASCII letter, then
+/// up to [`MAX_OPTION_NAME_CHARS`]` - 1` ASCII letters, digits, `_`, `.`, or `-`.
+///
+/// Every character of a valid name is ASCII, so the byte length is the character count.
+fn is_valid_option_name(name: &str) -> bool {
+    (1..=MAX_OPTION_NAME_CHARS).contains(&name.len())
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+}
+
+/// Check an option value: 1 to [`MAX_OPTION_VALUE_CHARS`] characters, with no NUL, CR, LF or
+/// `"`, and no `\` at its end.
+///
+/// A NUL cannot cross into a process argument at all. A line break is refused so that the
+/// option lists, shown as text, keep each option on one line. The last two rules keep the
+/// command line budget exact on Windows: there the argument quoting writes each `"` as `\"`
+/// and doubles the backslashes in front of it, and it doubles the backslashes at the end of an
+/// argument that it puts in quotes. Without a `"` and a final `\`, an argument costs its
+/// bytes plus at most three, which is what `command_line_length` counts. No encoder setting
+/// needs either character, and a parameter string takes its own separators.
+fn is_valid_option_value(value: &str) -> bool {
+    (1..=MAX_OPTION_VALUE_CHARS).contains(&value.chars().count())
+        && !value.contains(['\0', '\r', '\n', '"'])
+        && !value.ends_with('\\')
+}
+
+/// Check one option list of the preset at `index`: its length, then each entry in order.
+fn validate_options(
+    index: usize,
+    stream: OptionStream,
+    options: &[PresetOption],
+) -> Result<(), SettingsValidationError> {
+    if options.len() > MAX_PRESET_OPTIONS {
+        return Err(SettingsValidationError::TooManyOptions {
+            index,
+            stream,
+            count: options.len(),
+        });
+    }
+    let mut names = HashSet::new();
+    for (option_index, option) in options.iter().enumerate() {
+        if !is_valid_option_name(&option.name) {
+            return Err(SettingsValidationError::InvalidOptionName {
+                index,
+                stream,
+                option: option_index,
+            });
+        }
+        if DENIED_OPTION_NAMES.contains(&option.name.as_str()) {
+            return Err(SettingsValidationError::DeniedOptionName {
+                index,
+                stream,
+                option: option_index,
+            });
+        }
+        if !names.insert(option.name.as_str()) {
+            return Err(SettingsValidationError::DuplicateOptionName {
+                index,
+                stream,
+                option: option_index,
+            });
+        }
+        if !is_valid_option_value(&option.value) {
+            return Err(SettingsValidationError::InvalidOptionValue {
+                index,
+                stream,
+                option: option_index,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The bytes one option list adds to the command line on `stream`; see
+/// [`PresetOption::rendered_bytes`].
+fn option_list_bytes(stream: OptionStream, options: &[PresetOption]) -> usize {
+    options
+        .iter()
+        .map(|option| option.rendered_bytes(stream))
+        .sum()
 }
 
 /// Reject a value outside the JavaScript safe-integer range, mirroring `project`'s
@@ -935,6 +1588,9 @@ pub struct LoadedSettings {
 /// read before the full document deserializes, exactly as `project::load` does, so a document
 /// from a later build is reported by its version rather than as an opaque JSON error.
 ///
+/// A document at [`FIRST_RELEASE_SCHEMA_VERSION`] is returned at [`CURRENT_SCHEMA_VERSION`],
+/// with the defaults of the keys version 2 added. The file stays as it is until a save.
+///
 /// This takes no lock; see [`SETTINGS_LOCK`] for why.
 pub fn load(app_data_directory: &Path) -> Result<LoadedSettings, SettingsFileError> {
     let path = app_data_directory.join(SETTINGS_FILE_NAME);
@@ -957,7 +1613,14 @@ pub fn load(app_data_directory: &Path) -> Result<LoadedSettings, SettingsFileErr
         });
     }
 
-    let settings: Settings = serde_json::from_slice(&bytes)?;
+    let mut settings: Settings = serde_json::from_slice(&bytes)?;
+    // A document of the first release reads as the current version. Its presets have none of
+    // the keys that version 2 added, and the defaults of those keys keep the export of version
+    // 1 (see `FIRST_RELEASE_SCHEMA_VERSION`). Nothing is written here: the next save writes
+    // version 2.
+    if settings.schema_version == FIRST_RELEASE_SCHEMA_VERSION {
+        settings.schema_version = CURRENT_SCHEMA_VERSION;
+    }
     validate_settings(&settings)?;
     Ok(LoadedSettings {
         settings,
@@ -1168,6 +1831,9 @@ pub fn reset(app_data_directory: &Path) -> Result<Settings, SettingsFileError> {
 /// check mirrors [`validate_settings`]'s own [`SettingsValidationError::InvalidFfmpegPath`]
 /// rule, so this permissive probe never reports a path the strict [`load`] would reject.
 ///
+/// Every version up to the current one is read, so a version-1 file that no save has upgraded
+/// yet still gives its path. The key has the same meaning in both versions.
+///
 /// This exists so that ffmpeg discovery survives a damaged preset. Without it, one malformed
 /// preset entry anywhere in `presets` would fail strict deserialization of the whole
 /// [`Settings`] document, costing the user their configured ffmpeg path along with it, and the
@@ -1193,6 +1859,71 @@ pub fn configured_ffmpeg_path(app_data_directory: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(ffmpeg_path))
 }
 
+/// A settings file as the first release, v0.1.0, writes it on macOS: schema version 1, its
+/// three seeds, one preset of the user's own, and a configured ffmpeg path. Tests here and in
+/// `commands::export` read it as the file a user upgrades from.
+#[cfg(test)]
+pub(crate) const VERSION_1_FIXTURE: &str = r#"{
+  "schemaVersion": 1,
+  "revision": 7,
+  "ffmpegPath": "/opt/homebrew/bin",
+  "presets": [
+    {
+      "id": "default-h264-mp4",
+      "name": "H.264 MP4",
+      "container": "mp4",
+      "videoEncoder": "libx264",
+      "audioEncoder": "aac",
+      "audioBitrate": 320,
+      "audioSampleRate": "source",
+      "audioChannels": "source",
+      "quality": { "kind": "crf", "value": 20 },
+      "resolution": "source",
+      "frameRate": "source"
+    },
+    {
+      "id": "default-hevc-mp4",
+      "name": "HEVC MP4",
+      "container": "mp4",
+      "videoEncoder": "libx265",
+      "audioEncoder": "aac",
+      "audioBitrate": 320,
+      "audioSampleRate": "source",
+      "audioChannels": "source",
+      "quality": { "kind": "crf", "value": 24 },
+      "resolution": "source",
+      "frameRate": "source"
+    },
+    {
+      "id": "default-videotoolbox-mp4",
+      "name": "H.264 MP4 (hardware)",
+      "container": "mp4",
+      "videoEncoder": "h264_videotoolbox",
+      "audioEncoder": "aac",
+      "audioBitrate": 320,
+      "audioSampleRate": "source",
+      "audioChannels": "source",
+      "quality": { "kind": "bitrate", "value": 12000 },
+      "resolution": "source",
+      "frameRate": "source"
+    },
+    {
+      "id": "user-prores",
+      "name": "ProRes for the editor",
+      "container": "mov",
+      "videoEncoder": "prores_ks",
+      "audioEncoder": "alac",
+      "audioSampleRate": 48000,
+      "audioChannels": "stereo",
+      "quality": { "kind": "qualityScale", "value": 9 },
+      "resolution": { "w": 1920, "h": 1080 },
+      "frameRate": { "n": 30000, "d": 1001 }
+    }
+  ],
+  "activePresetId": "user-prores"
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1213,6 +1944,16 @@ mod tests {
             },
             resolution: ResolutionSetting::Source,
             frame_rate: FrameRateSetting::Source,
+            pixel_format: DEFAULT_PIXEL_FORMAT.to_owned(),
+            video_options: vec![],
+            audio_options: vec![],
+        }
+    }
+
+    fn option(name: &str, value: &str) -> PresetOption {
+        PresetOption {
+            name: name.to_owned(),
+            value: value.to_owned(),
         }
     }
 
@@ -1259,7 +2000,7 @@ mod tests {
         };
 
         let value = serde_json::to_value(&settings).unwrap();
-        assert_eq!(value["schemaVersion"], serde_json::json!(1));
+        assert_eq!(value["schemaVersion"], serde_json::json!(2));
         assert_eq!(value["revision"], serde_json::json!(7));
         assert_eq!(
             value["presets"][0]["videoEncoder"],
@@ -1996,6 +2737,7 @@ mod tests {
         }
         for (kind, wire) in [
             (QualityKind::Crf, "crf"),
+            (QualityKind::Cq, "cq"),
             (QualityKind::Bitrate, "bitrate"),
             (QualityKind::QualityScale, "qualityScale"),
         ] {
@@ -2006,16 +2748,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_schema_version_other_than_one() {
-        let mut settings = sample_settings(vec![]);
-        settings.schema_version = 2;
-        assert!(matches!(
-            validate_settings(&settings),
-            Err(SettingsValidationError::SchemaVersion {
-                found: 2,
-                expected: 1
-            })
-        ));
+    fn rejects_a_schema_version_other_than_the_current_one() {
+        // Version 1 too: `load` upgrades a version-1 document before it validates, so only a
+        // caller that sends version 1 reaches this check with it, and a save never writes it.
+        for found in [0, 1, 3] {
+            let mut settings = sample_settings(vec![]);
+            settings.schema_version = found;
+            assert_eq!(
+                validate_settings(&settings),
+                Err(SettingsValidationError::SchemaVersion { found, expected: 2 })
+            );
+        }
+        assert_eq!(CURRENT_SCHEMA_VERSION, 2);
+        assert_eq!(FIRST_RELEASE_SCHEMA_VERSION, 1);
     }
 
     #[test]
@@ -2027,6 +2772,429 @@ mod tests {
         settings.active_preset_id = Some("default".to_owned());
         settings.ffmpeg_path = Some("/opt/homebrew/bin/ffmpeg".to_owned());
         assert!(validate_settings(&settings).is_ok());
+    }
+
+    // -- The schema-2 preset fields: the pixel format, the encoder options, and `cq`. --
+
+    #[test]
+    fn a_saved_preset_always_writes_the_pixel_format_and_both_option_lists() {
+        let mut preset = sample_preset("preset-1");
+        let value = serde_json::to_value(&preset).unwrap();
+        assert_eq!(value["pixelFormat"], serde_json::json!("yuv420p"));
+        assert_eq!(value["videoOptions"], serde_json::json!([]));
+        assert_eq!(value["audioOptions"], serde_json::json!([]));
+
+        preset.pixel_format = "p010le".to_owned();
+        preset.video_options = vec![option("preset", "slow"), option("tag", "hvc1")];
+        preset.audio_options = vec![option("aac_coder", "twoloop")];
+        let value = serde_json::to_value(&preset).unwrap();
+        assert_eq!(value["pixelFormat"], serde_json::json!("p010le"));
+        assert_eq!(
+            value["videoOptions"],
+            serde_json::json!([
+                {"name": "preset", "value": "slow"},
+                {"name": "tag", "value": "hvc1"},
+            ])
+        );
+        assert_eq!(
+            value["audioOptions"],
+            serde_json::json!([{"name": "aac_coder", "value": "twoloop"}])
+        );
+        assert_eq!(serde_json::from_value::<Preset>(value).unwrap(), preset);
+    }
+
+    #[test]
+    fn a_preset_without_the_schema_2_keys_reads_as_the_export_of_version_1() {
+        let preset: Preset = serde_json::from_value(pre_adr_023_preset_json()).unwrap();
+        assert_eq!(preset.pixel_format, DEFAULT_PIXEL_FORMAT);
+        assert_eq!(DEFAULT_PIXEL_FORMAT, "yuv420p");
+        assert!(preset.video_options.is_empty());
+        assert!(preset.audio_options.is_empty());
+    }
+
+    #[test]
+    fn an_option_entry_refuses_an_unknown_or_missing_key() {
+        let mut value = pre_adr_023_preset_json();
+        value["videoOptions"] = serde_json::json!([{"name": "g", "value": "1", "scope": "v"}]);
+        let error = serde_json::from_value::<Preset>(value).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field"),
+            "message was: {error}"
+        );
+
+        let mut value = pre_adr_023_preset_json();
+        value["videoOptions"] = serde_json::json!([{"name": "g"}]);
+        assert!(serde_json::from_value::<Preset>(value).is_err());
+    }
+
+    #[test]
+    fn enforces_the_constant_quality_range() {
+        for value in [MIN_CONSTANT_QUALITY, 25, MAX_CONSTANT_QUALITY] {
+            let mut preset = sample_preset("preset-1");
+            preset.quality = Quality {
+                kind: QualityKind::Cq,
+                value,
+            };
+            assert!(
+                validate_settings(&sample_settings(vec![preset])).is_ok(),
+                "rejected cq {value}"
+            );
+        }
+        // NVENC reads 0 as "choose automatically", so 0 is not a quality.
+        for value in [0, MAX_CONSTANT_QUALITY + 1] {
+            let mut preset = sample_preset("preset-1");
+            preset.quality = Quality {
+                kind: QualityKind::Cq,
+                value,
+            };
+            assert_eq!(
+                validate_settings(&sample_settings(vec![preset])),
+                Err(SettingsValidationError::QualityOutOfRange {
+                    index: 0,
+                    kind: QualityKind::Cq,
+                    value
+                })
+            );
+        }
+        assert_eq!((MIN_CONSTANT_QUALITY, MAX_CONSTANT_QUALITY), (1, 63));
+    }
+
+    #[test]
+    fn enforces_the_pixel_format_rule() {
+        for name in ["yuv420p", "yuv420p10le", "p010le", "nv12", "gbrap16le"] {
+            let mut preset = sample_preset("preset-1");
+            preset.pixel_format = name.to_owned();
+            assert!(
+                validate_settings(&sample_settings(vec![preset])).is_ok(),
+                "rejected {name}"
+            );
+        }
+        let mut longest = sample_preset("preset-1");
+        longest.pixel_format = "a".repeat(MAX_PIXEL_FORMAT_CHARS);
+        assert!(validate_settings(&sample_settings(vec![longest])).is_ok());
+
+        // A `:`, `,`, `;`, `[`, or `]` would change the filter graph the name is written into.
+        for name in [
+            String::new(),
+            "YUV420P".to_owned(),
+            "yuv420p:x".to_owned(),
+            "yuv420p,scale=2:2".to_owned(),
+            "yuv420p[v];".to_owned(),
+            "yuv 420p".to_owned(),
+            "-yuv420p".to_owned(),
+            "a".repeat(MAX_PIXEL_FORMAT_CHARS + 1),
+        ] {
+            let mut preset = sample_preset("preset-1");
+            preset.pixel_format = name.clone();
+            let other = sample_preset("preset-0");
+            assert_eq!(
+                validate_settings(&sample_settings(vec![other, preset])),
+                Err(SettingsValidationError::InvalidPixelFormat { index: 1 }),
+                "accepted {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_the_encoder_options_of_the_seeds_and_of_common_command_lines() {
+        let mut preset = sample_preset("preset-1");
+        preset.video_options = vec![
+            option("preset", "slow"),
+            option(
+                "x264-params",
+                "aq-mode=3:aq-strength=0.9:psy-rd=0.8,0.0:deblock=0,0",
+            ),
+            option("profile", "main10"),
+            option("tag", "hvc1"),
+            option("b_ref_mode", "middle"),
+            option("rc-lookahead", "32"),
+            option("g", "-1"),
+            option("maxrate", "24M"),
+            option("a.b", "x y z"),
+        ];
+        preset.audio_options = vec![option("profile", "aac_low"), option("cutoff", "20000")];
+        assert!(validate_settings(&sample_settings(vec![preset])).is_ok());
+    }
+
+    #[test]
+    fn refuses_an_option_name_outside_the_character_rule() {
+        for (stream, list) in [
+            (OptionStream::Video, "video"),
+            (OptionStream::Audio, "audio"),
+        ] {
+            for name in [
+                String::new(),
+                "-g".to_owned(),
+                "/filter_complex".to_owned(),
+                "profile:v".to_owned(),
+                "1pass".to_owned(),
+                "_x".to_owned(),
+                "a b".to_owned(),
+                "é".to_owned(),
+                "a".repeat(MAX_OPTION_NAME_CHARS + 1),
+            ] {
+                let mut preset = sample_preset("preset-1");
+                let options = vec![option("preset", "slow"), option(&name, "1")];
+                match stream {
+                    OptionStream::Video => preset.video_options = options,
+                    OptionStream::Audio => preset.audio_options = options,
+                }
+                assert_eq!(
+                    validate_settings(&sample_settings(vec![preset])),
+                    Err(SettingsValidationError::InvalidOptionName {
+                        index: 0,
+                        stream,
+                        option: 1
+                    }),
+                    "{list}: accepted {name:?}"
+                );
+            }
+        }
+        let mut longest = sample_preset("preset-1");
+        longest.video_options = vec![option(&"a".repeat(MAX_OPTION_NAME_CHARS), "1")];
+        assert!(validate_settings(&sample_settings(vec![longest])).is_ok());
+    }
+
+    #[test]
+    fn refuses_every_denied_option_name_in_both_lists() {
+        // `noshortest` is named on its own: fftools reads `-noshortest` as `-shortest` set to
+        // false, and the option takes no argument either way.
+        assert!(DENIED_OPTION_NAMES.contains(&"shortest"));
+        assert!(DENIED_OPTION_NAMES.contains(&"noshortest"));
+        for name in DENIED_OPTION_NAMES {
+            for stream in [OptionStream::Video, OptionStream::Audio] {
+                let mut preset = sample_preset("preset-1");
+                let options = vec![option(name, "1")];
+                match stream {
+                    OptionStream::Video => preset.video_options = options,
+                    OptionStream::Audio => preset.audio_options = options,
+                }
+                assert_eq!(
+                    validate_settings(&sample_settings(vec![preset])),
+                    Err(SettingsValidationError::DeniedOptionName {
+                        index: 0,
+                        stream,
+                        option: 0
+                    }),
+                    "accepted {name} for {stream}"
+                );
+            }
+        }
+        // The comparison is exact: a name that only starts like a denied one is an encoder
+        // option, such as the `mapping_family` of libopus.
+        let mut preset = sample_preset("preset-1");
+        preset.audio_options = vec![option("mapping_family", "1"), option("Y", "1")];
+        assert!(validate_settings(&sample_settings(vec![preset])).is_ok());
+    }
+
+    #[test]
+    fn the_denied_option_names_are_unique_and_each_one_passes_the_name_rule() {
+        // A name the character rule refuses could never reach the list check, so it would be
+        // dead weight here, and a repeated name would hide a missing one.
+        let unique: HashSet<&str> = DENIED_OPTION_NAMES.iter().copied().collect();
+        assert_eq!(unique.len(), DENIED_OPTION_NAMES.len());
+        for name in DENIED_OPTION_NAMES {
+            assert!(is_valid_option_name(name), "{name}");
+        }
+        // The managed flags of the renderer, each one by name.
+        for name in [
+            "c",
+            "codec",
+            "f",
+            "i",
+            "y",
+            "map",
+            "filter_complex",
+            "pix_fmt",
+            "crf",
+            "cq",
+            "q",
+            "b",
+            "ar",
+            "ac",
+            "progress",
+            "nostats",
+            "loglevel",
+            "copyts",
+            "movflags",
+            "ss",
+            "t",
+        ] {
+            assert!(unique.contains(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_repeated_option_name_in_one_list_but_not_across_the_two() {
+        let mut preset = sample_preset("preset-1");
+        preset.video_options = vec![
+            option("preset", "slow"),
+            option("g", "250"),
+            option("preset", "fast"),
+        ];
+        assert_eq!(
+            validate_settings(&sample_settings(vec![preset])),
+            Err(SettingsValidationError::DuplicateOptionName {
+                index: 0,
+                stream: OptionStream::Video,
+                option: 2
+            })
+        );
+
+        let mut preset = sample_preset("preset-1");
+        preset.video_options = vec![option("profile", "main10")];
+        preset.audio_options = vec![option("profile", "aac_low")];
+        assert!(validate_settings(&sample_settings(vec![preset])).is_ok());
+    }
+
+    #[test]
+    fn enforces_the_option_value_rule() {
+        let mut longest = sample_preset("preset-1");
+        longest.video_options = vec![option("x", &"a".repeat(MAX_OPTION_VALUE_CHARS))];
+        assert!(validate_settings(&sample_settings(vec![longest])).is_ok());
+        // A multi-byte character proves the count uses `chars()`: "é" is two bytes. A preset
+        // could not carry this value, because it renders past the byte limit of the lists.
+        assert!(is_valid_option_value(&"é".repeat(MAX_OPTION_VALUE_CHARS)));
+        assert!(!is_valid_option_value(
+            &"é".repeat(MAX_OPTION_VALUE_CHARS + 1)
+        ));
+
+        for value in [
+            String::new(),
+            "a".repeat(MAX_OPTION_VALUE_CHARS + 1),
+            "a\nb".to_owned(),
+            "a\rb".to_owned(),
+            "a\0b".to_owned(),
+            // The Windows quoting would lengthen these past the counted budget.
+            "a\"b".to_owned(),
+            "C:\\x265\\".to_owned(),
+        ] {
+            let mut preset = sample_preset("preset-1");
+            preset.audio_options = vec![option("x", &value)];
+            assert_eq!(
+                validate_settings(&sample_settings(vec![preset])),
+                Err(SettingsValidationError::InvalidOptionValue {
+                    index: 0,
+                    stream: OptionStream::Audio,
+                    option: 0
+                }),
+                "accepted {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enforces_the_option_count_of_each_list() {
+        let options = |count: usize| -> Vec<PresetOption> {
+            (0..count)
+                .map(|index| option(&format!("o{index}"), "1"))
+                .collect()
+        };
+        let mut full = sample_preset("preset-1");
+        full.video_options = options(MAX_PRESET_OPTIONS);
+        full.audio_options = options(MAX_PRESET_OPTIONS);
+        assert!(validate_settings(&sample_settings(vec![full])).is_ok());
+
+        let mut over = sample_preset("preset-1");
+        over.audio_options = options(MAX_PRESET_OPTIONS + 1);
+        assert_eq!(
+            validate_settings(&sample_settings(vec![over])),
+            Err(SettingsValidationError::TooManyOptions {
+                index: 0,
+                stream: OptionStream::Audio,
+                count: MAX_PRESET_OPTIONS + 1
+            })
+        );
+        assert_eq!(MAX_PRESET_OPTIONS, 32);
+    }
+
+    #[test]
+    fn enforces_the_byte_limit_of_both_option_lists_together() {
+        // `-x:v` is the flag, four bytes, and the value adds its own bytes.
+        let flag_bytes = option("x", "").flag(OptionStream::Video).len();
+        assert_eq!(flag_bytes, 4);
+        assert_eq!(
+            option("x", "abc").rendered_bytes(OptionStream::Audio),
+            "-x:a".len() + "abc".len()
+        );
+
+        // Exactly the limit, split over both lists, passes: 2 × 505 bytes of video options and
+        // 14 bytes of audio options.
+        let mut at_limit = sample_preset("preset-1");
+        at_limit.video_options = vec![
+            option("xa", &"v".repeat(500)),
+            option("xb", &"v".repeat(500)),
+        ];
+        at_limit.audio_options = vec![option("xc", &"a".repeat(9))];
+        assert_eq!(
+            option_list_bytes(OptionStream::Video, &at_limit.video_options)
+                + option_list_bytes(OptionStream::Audio, &at_limit.audio_options),
+            MAX_PRESET_OPTION_BYTES
+        );
+        assert!(validate_settings(&sample_settings(vec![at_limit.clone()])).is_ok());
+
+        // One byte more is refused, and the audio list is the one that passed the limit.
+        let mut over = at_limit.clone();
+        over.audio_options[0].value.push('a');
+        assert_eq!(
+            validate_settings(&sample_settings(vec![over])),
+            Err(SettingsValidationError::OptionsTooLong {
+                index: 0,
+                stream: OptionStream::Audio,
+                bytes: MAX_PRESET_OPTION_BYTES + 1
+            })
+        );
+
+        // The video list alone over the limit names the video list.
+        let mut video_over = sample_preset("preset-1");
+        video_over.video_options = (0..3)
+            .map(|index| option(&format!("o{index}"), &"v".repeat(400)))
+            .collect();
+        assert!(matches!(
+            validate_settings(&sample_settings(vec![video_over])),
+            Err(SettingsValidationError::OptionsTooLong {
+                stream: OptionStream::Video,
+                ..
+            })
+        ));
+        assert_eq!(MAX_PRESET_OPTION_BYTES, 1024);
+    }
+
+    #[test]
+    fn the_schema_2_errors_name_the_field_path() {
+        for (error, path) in [
+            (
+                SettingsValidationError::InvalidPixelFormat { index: 2 },
+                "presets[2].pixelFormat",
+            ),
+            (
+                SettingsValidationError::DeniedOptionName {
+                    index: 1,
+                    stream: OptionStream::Video,
+                    option: 3,
+                },
+                "presets[1].videoOptions[3].name",
+            ),
+            (
+                SettingsValidationError::InvalidOptionValue {
+                    index: 0,
+                    stream: OptionStream::Audio,
+                    option: 4,
+                },
+                "presets[0].audioOptions[4].value",
+            ),
+            (
+                SettingsValidationError::TooManyOptions {
+                    index: 5,
+                    stream: OptionStream::Audio,
+                    count: 33,
+                },
+                "presets[5].audioOptions",
+            ),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains(path), "{message}");
+        }
     }
 
     // -- File operations: load, save, restore, reset, and the permissive accessor. --
@@ -2168,7 +3336,7 @@ mod tests {
         // Syntactically valid JSON, and even a schema-envelope-valid future document, but
         // this build must still refuse it: ADR 013 requires a later build's document to
         // survive an older build's save rather than being overwritten.
-        let original_bytes = br#"{"schemaVersion":2,"presets":[],"somethingNew":true}"#.to_vec();
+        let original_bytes = br#"{"schemaVersion":3,"presets":[],"somethingNew":true}"#.to_vec();
         fs::write(&path, &original_bytes).unwrap();
 
         let settings = sample_settings(vec![sample_preset("preset-1")]);
@@ -2426,13 +3594,13 @@ mod tests {
         let settings = sample_settings(vec![]);
         let mut value = serde_json::to_value(&settings).unwrap();
 
-        value["schemaVersion"] = serde_json::json!(2);
+        value["schemaVersion"] = serde_json::json!(3);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(matches!(
             load(&directory.path),
             Err(SettingsFileError::FutureSchemaVersion {
-                found: 2,
-                supported: 1
+                found: 3,
+                supported: 2
             })
         ));
 
@@ -2443,10 +3611,124 @@ mod tests {
             Err(SettingsFileError::Validation(
                 SettingsValidationError::SchemaVersion {
                     found: 0,
-                    expected: 1
+                    expected: 2
                 }
             ))
         ));
+    }
+
+    // -- The read of a version-1 file. --
+
+    #[test]
+    fn a_version_1_file_loads_as_version_2_with_the_defaults_and_writes_nothing() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        fs::write(&path, VERSION_1_FIXTURE).unwrap();
+
+        let loaded = load(&directory.path).unwrap();
+        assert!(!loaded.seeded);
+        let settings = loaded.settings;
+        assert_eq!(settings.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(settings.revision, 7);
+        assert_eq!(settings.ffmpeg_path.as_deref(), Some("/opt/homebrew/bin"));
+        assert_eq!(settings.active_preset_id.as_deref(), Some("user-prores"));
+        assert_eq!(settings.presets.len(), 4);
+        for preset in &settings.presets {
+            assert_eq!(preset.pixel_format, "yuv420p", "{}", preset.id);
+            assert!(preset.video_options.is_empty(), "{}", preset.id);
+            assert!(preset.audio_options.is_empty(), "{}", preset.id);
+        }
+        // Every version-1 value survives the read as it was.
+        let prores = &settings.presets[3];
+        assert_eq!(prores.video_encoder, "prores_ks");
+        assert_eq!(prores.audio_bitrate, None);
+        assert_eq!(
+            prores.quality,
+            Quality {
+                kind: QualityKind::QualityScale,
+                value: 9
+            }
+        );
+        assert_eq!(
+            prores.resolution,
+            ResolutionSetting::Custom(Resolution { w: 1920, h: 1080 })
+        );
+
+        // The read wrote nothing: the file still holds the version-1 bytes, and no other file
+        // appeared beside it.
+        assert_eq!(fs::read_to_string(&path).unwrap(), VERSION_1_FIXTURE);
+        assert_eq!(fs::read_dir(&directory.path).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_save_over_a_version_1_file_writes_version_2_at_the_next_revision() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        fs::write(&path, VERSION_1_FIXTURE).unwrap();
+
+        let loaded = load(&directory.path).unwrap().settings;
+        let saved = save(&directory.path, &loaded).unwrap();
+        assert_eq!(saved.schema_version, 2);
+        assert_eq!(saved.revision, 8);
+
+        let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["schemaVersion"], serde_json::json!(2));
+        assert_eq!(on_disk["revision"], serde_json::json!(8));
+        for preset in on_disk["presets"].as_array().unwrap() {
+            assert_eq!(preset["pixelFormat"], serde_json::json!("yuv420p"));
+            assert_eq!(preset["videoOptions"], serde_json::json!([]));
+            assert_eq!(preset["audioOptions"], serde_json::json!([]));
+        }
+        assert_eq!(load(&directory.path).unwrap().settings, saved);
+
+        // A copy that still holds the version-1 revision is refused like any stale copy.
+        let error = save(&directory.path, &loaded).unwrap_err();
+        assert!(matches!(
+            error,
+            SettingsFileError::Conflict {
+                expected: 7,
+                found: 8
+            }
+        ));
+    }
+
+    #[test]
+    fn a_save_refuses_a_document_that_claims_version_1() {
+        // The interface sends the document it loaded, which is at version 2. A document that
+        // still claims version 1 did not come from this build, and the file stays as it was.
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        fs::write(&path, VERSION_1_FIXTURE).unwrap();
+        let mut stale = load(&directory.path).unwrap().settings;
+        stale.schema_version = FIRST_RELEASE_SCHEMA_VERSION;
+
+        let error = save(&directory.path, &stale).unwrap_err();
+        assert!(matches!(
+            error,
+            SettingsFileError::Validation(SettingsValidationError::SchemaVersion {
+                found: 1,
+                expected: 2
+            })
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), VERSION_1_FIXTURE);
+    }
+
+    #[test]
+    fn configured_ffmpeg_path_reads_a_version_1_and_a_version_2_file() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        fs::write(&path, VERSION_1_FIXTURE).unwrap();
+        assert_eq!(
+            configured_ffmpeg_path(&directory.path),
+            Some(PathBuf::from("/opt/homebrew/bin"))
+        );
+
+        let saved = save(&directory.path, &load(&directory.path).unwrap().settings).unwrap();
+        assert_eq!(saved.schema_version, 2);
+        assert_eq!(
+            configured_ffmpeg_path(&directory.path),
+            Some(PathBuf::from("/opt/homebrew/bin"))
+        );
     }
 
     #[test]
@@ -2480,7 +3762,7 @@ mod tests {
         assert_eq!(configured_ffmpeg_path(&directory.path), None);
 
         let future = serde_json::json!({
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "ffmpegPath": "/opt/homebrew/bin/ffmpeg",
             "presets": [],
         });

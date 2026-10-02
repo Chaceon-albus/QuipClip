@@ -410,6 +410,41 @@ fn map_validation_error(error: SettingsValidationError) -> SettingsCommandError 
             field: Some(format!("presets[{index}].frameRate")),
             ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
         },
+        SettingsValidationError::InvalidPixelFormat { index } => SettingsCommandError {
+            field: Some(format!("presets[{index}].pixelFormat")),
+            ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
+        },
+        SettingsValidationError::TooManyOptions { index, stream, .. }
+        | SettingsValidationError::OptionsTooLong { index, stream, .. } => SettingsCommandError {
+            field: Some(format!("presets[{index}].{stream}")),
+            ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
+        },
+        SettingsValidationError::InvalidOptionName {
+            index,
+            stream,
+            option,
+        }
+        | SettingsValidationError::DeniedOptionName {
+            index,
+            stream,
+            option,
+        }
+        | SettingsValidationError::DuplicateOptionName {
+            index,
+            stream,
+            option,
+        } => SettingsCommandError {
+            field: Some(format!("presets[{index}].{stream}[{option}].name")),
+            ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
+        },
+        SettingsValidationError::InvalidOptionValue {
+            index,
+            stream,
+            option,
+        } => SettingsCommandError {
+            field: Some(format!("presets[{index}].{stream}[{option}].value")),
+            ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
+        },
         SettingsValidationError::UnsafeInteger { field, value } => SettingsCommandError {
             field: Some(field),
             value: Some(value.to_string()),
@@ -454,6 +489,9 @@ mod tests {
             },
             resolution: settings::ResolutionSetting::Source,
             frame_rate: settings::FrameRateSetting::Source,
+            pixel_format: settings::DEFAULT_PIXEL_FORMAT.to_owned(),
+            video_options: vec![],
+            audio_options: vec![],
         }
     }
 
@@ -518,7 +556,10 @@ mod tests {
         };
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["seeded"], serde_json::json!(true));
-        assert_eq!(value["settings"]["schemaVersion"], serde_json::json!(1));
+        assert_eq!(
+            value["settings"]["schemaVersion"],
+            serde_json::json!(settings::CURRENT_SCHEMA_VERSION)
+        );
 
         let with_schema = SettingsCommandError {
             found_schema_version: Some(2),
@@ -618,16 +659,16 @@ mod tests {
         // The remaining `map_validation_error` arms, one assertion each, so every arm has at
         // least one behavioural test.
         let future_version = map_validation_error(SettingsValidationError::SchemaVersion {
-            found: 2,
-            expected: 1,
+            found: 3,
+            expected: 2,
         });
         assert_eq!(
             future_version.code,
             SettingsCommandErrorCode::FutureSchemaVersion
         );
         let stale_version = map_validation_error(SettingsValidationError::SchemaVersion {
-            found: 0,
-            expected: 1,
+            found: 1,
+            expected: 2,
         });
         assert_eq!(
             stale_version.code,
@@ -725,6 +766,75 @@ mod tests {
             serde_json::to_value(&error).unwrap(),
             serde_json::json!({"code": "invalidSettings", "field": "presets[1].audioSampleRate"})
         );
+
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn save_refuses_a_bad_option_or_pixel_format_with_its_field_path_on_the_wire() {
+        // The schema-2 preset fields, end to end. Each refusal names the entry and the part of
+        // it, and the file on disk stays as it was.
+        let directory = TestDirectory::new();
+        let valid = sample_settings(vec![sample_preset("preset-0"), sample_preset("preset-1")]);
+        settings::save(&directory.path, &valid).unwrap();
+        let path = directory.path.join(settings::SETTINGS_FILE_NAME);
+        let before = fs::read(&path).unwrap();
+
+        fn option(name: &str, value: &str) -> settings::PresetOption {
+            settings::PresetOption {
+                name: name.to_owned(),
+                value: value.to_owned(),
+            }
+        }
+        let cases: [(fn(&mut settings::Preset), &str); 7] = [
+            (
+                |preset| preset.pixel_format = "yuv420p:x".to_owned(),
+                "presets[1].pixelFormat",
+            ),
+            (
+                |preset| {
+                    preset.video_options = vec![option("preset", "slow"), option("shortest", "1")];
+                },
+                "presets[1].videoOptions[1].name",
+            ),
+            (
+                |preset| preset.audio_options = vec![option("noshortest", "1")],
+                "presets[1].audioOptions[0].name",
+            ),
+            (
+                |preset| preset.audio_options = vec![option("profile:v", "main")],
+                "presets[1].audioOptions[0].name",
+            ),
+            (
+                |preset| preset.video_options = vec![option("g", "1\n2")],
+                "presets[1].videoOptions[0].value",
+            ),
+            (
+                |preset| {
+                    preset.video_options = (0..=settings::MAX_PRESET_OPTIONS)
+                        .map(|index| option(&format!("o{index}"), "1"))
+                        .collect();
+                },
+                "presets[1].videoOptions",
+            ),
+            (
+                |preset| {
+                    preset.audio_options = vec![option("xa", &"a".repeat(500))];
+                    preset.video_options = vec![option("xb", &"a".repeat(500))];
+                    preset.audio_options.push(option("xc", &"a".repeat(30)));
+                },
+                "presets[1].audioOptions",
+            ),
+        ];
+        for (edit, field) in cases {
+            let mut document = valid.clone();
+            edit(&mut document.presets[1]);
+            let error = save_settings_with(&directory.path, document).unwrap_err();
+            assert_eq!(
+                serde_json::to_value(&error).unwrap(),
+                serde_json::json!({"code": "invalidSettings", "field": field})
+            );
+        }
 
         assert_eq!(fs::read(&path).unwrap(), before);
     }
@@ -856,13 +966,16 @@ mod tests {
         let directory = TestDirectory::new();
         let path = directory.path.join(settings::SETTINGS_FILE_NAME);
         let mut value = serde_json::to_value(sample_settings(vec![])).unwrap();
-        value["schemaVersion"] = serde_json::json!(2);
+        value["schemaVersion"] = serde_json::json!(settings::CURRENT_SCHEMA_VERSION + 1);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
 
         let error = load_settings_with(&directory.path).unwrap_err();
 
         assert_eq!(error.code, SettingsCommandErrorCode::FutureSchemaVersion);
-        assert_eq!(error.found_schema_version, Some(2));
+        assert_eq!(
+            error.found_schema_version,
+            Some(u64::from(settings::CURRENT_SCHEMA_VERSION + 1))
+        );
         assert_eq!(
             error.supported_schema_version,
             Some(settings::CURRENT_SCHEMA_VERSION)

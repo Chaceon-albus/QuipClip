@@ -14,7 +14,7 @@
 
 use super::{
     AudioChannels, AudioSampleRateSetting, Container, FrameRateSetting, Preset, Quality,
-    QualityKind, ResolutionSetting, Settings, CURRENT_SCHEMA_VERSION,
+    QualityKind, ResolutionSetting, Settings, CURRENT_SCHEMA_VERSION, DEFAULT_PIXEL_FORMAT,
 };
 
 /// The id of the default H.264-in-MP4 seed. [`seeded_settings`] selects this as the initial
@@ -70,6 +70,9 @@ fn crf_preset(id: &str, name: &str, video_encoder: &str, crf: u32) -> Preset {
         },
         resolution: ResolutionSetting::Source,
         frame_rate: FrameRateSetting::Source,
+        pixel_format: DEFAULT_PIXEL_FORMAT.to_owned(),
+        video_options: vec![],
+        audio_options: vec![],
     }
 }
 
@@ -97,6 +100,9 @@ fn hardware_preset() -> Option<Preset> {
         },
         resolution: ResolutionSetting::Source,
         frame_rate: FrameRateSetting::Source,
+        pixel_format: DEFAULT_PIXEL_FORMAT.to_owned(),
+        video_options: vec![],
+        audio_options: vec![],
     })
 }
 

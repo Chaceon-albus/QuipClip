@@ -378,6 +378,7 @@ pub fn build_plan(
                 output_channels: preset.audio_channels,
                 encoder: preset.audio_encoder.clone(),
                 bitrate: preset.audio_bitrate,
+                options: preset.audio_options.clone(),
                 // Summed over the segments below.
                 expected_duration: zero,
             })
@@ -521,6 +522,8 @@ pub fn build_plan(
             resolution,
             encoder: preset.video_encoder.clone(),
             quality: preset.quality,
+            pixel_format: preset.pixel_format.clone(),
+            options: preset.video_options.clone(),
             expected_frames: Some(total_frames),
         }),
         audio,
@@ -763,6 +766,9 @@ mod tests {
             },
             resolution: ResolutionSetting::Source,
             frame_rate: FrameRateSetting::Source,
+            pixel_format: "yuv420p".to_owned(),
+            video_options: vec![],
+            audio_options: vec![],
         }
     }
 
@@ -1427,6 +1433,7 @@ mod tests {
                 output_channels: AudioChannels::Stereo,
                 encoder: "aac".to_owned(),
                 bitrate: None,
+                options: vec![],
                 // The probe reports no extent, so the whole segment is expected.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
             })
@@ -1465,6 +1472,7 @@ mod tests {
                 output_channels: AudioChannels::Stereo,
                 encoder: "aac".to_owned(),
                 bitrate: None,
+                options: vec![],
                 // The probe reports no extent, so the whole segment is expected.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
             })
@@ -1588,6 +1596,7 @@ mod tests {
                 output_channels: AudioChannels::Source,
                 encoder: "aac".to_owned(),
                 bitrate: None,
+                options: vec![],
                 // The probe reports no extent, so the whole segment is expected.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
             })
@@ -1755,6 +1764,8 @@ mod tests {
                 value: 8_000,
             },
             // 90000 ticks at 1/90000 is one second, at 30 frames per second.
+            pixel_format: "yuv420p".to_owned(),
+            options: vec![],
             expected_frames: Some(30),
         };
 

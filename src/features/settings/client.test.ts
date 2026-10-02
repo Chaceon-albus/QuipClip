@@ -34,6 +34,9 @@ function createValidPreset(overrides: Partial<Preset> = {}): Preset {
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
+    pixelFormat: "yuv420p",
+    videoOptions: [],
+    audioOptions: [],
     ...overrides,
   };
 }
@@ -48,7 +51,7 @@ const TEST_REVISION = 7;
 
 function createValidSettings(overrides: Partial<Settings> = {}): Settings {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: TEST_REVISION,
     ffmpegPath: undefined,
     presets: [createValidPreset()],

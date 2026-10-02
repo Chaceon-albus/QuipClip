@@ -20,6 +20,7 @@ import {
   type PresetAudioSampleRate,
   type PresetContainer,
   type PresetFrameRate,
+  type PresetOption,
   type PresetQuality,
   type PresetResolution,
   type QualityKind,
@@ -154,6 +155,26 @@ export function isPresetAudioSampleRate(
 }
 
 /**
+ * Validates whether an unknown value is a valid PresetOption structure: a name and a value,
+ * both strings. The rules for the name and the value are checks of `limits.ts`, not of the
+ * wire shape.
+ */
+export function isPresetOption(value: unknown): value is PresetOption {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const o = value as Record<string, unknown>;
+  return typeof o.name === "string" && typeof o.value === "string";
+}
+
+/**
+ * Validates whether an unknown value is a valid list of PresetOption entries.
+ */
+export function isPresetOptionList(value: unknown): value is PresetOption[] {
+  return Array.isArray(value) && value.every(isPresetOption);
+}
+
+/**
  * Validates whether an unknown value is a valid Preset structure.
  */
 export function isPreset(value: unknown): value is Preset {
@@ -176,7 +197,10 @@ export function isPreset(value: unknown): value is Preset {
     isPresetAudioChannels(p.audioChannels) &&
     isPresetQuality(p.quality) &&
     isPresetResolution(p.resolution) &&
-    isPresetFrameRate(p.frameRate)
+    isPresetFrameRate(p.frameRate) &&
+    typeof p.pixelFormat === "string" &&
+    isPresetOptionList(p.videoOptions) &&
+    isPresetOptionList(p.audioOptions)
   );
 }
 

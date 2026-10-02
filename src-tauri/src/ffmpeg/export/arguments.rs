@@ -45,7 +45,7 @@
 
 use super::graph::build_filter_graph;
 use super::{ExportPlan, GraphShape};
-use crate::settings::{Container, Quality, QualityKind};
+use crate::settings::{Container, OptionStream, PresetOption, Quality, QualityKind};
 use crate::time::Rational;
 use std::path::Path;
 
@@ -92,7 +92,7 @@ pub const WINDOWS_COMMAND_LINE_LIMIT: usize = 32_767;
 /// budget would therefore fail with `E2BIG` on macOS.
 ///
 /// Nothing reaches it. [`super::MAX_EXPORT_SEGMENTS`] holds the widest command the settings
-/// permit near 30100 bytes, about 35 times smaller, so this constant is a real platform number
+/// permit near 31600 bytes, about 33 times smaller, so this constant is a real platform number
 /// for the platform rather than a bound the renderer ever tests -- and one consequence is worth
 /// stating plainly: because [`COMMAND_LINE_BUDGET`] is the host's own, [`GraphShape::SingleInput`]
 /// is unreachable on macOS in production. Only a Windows user's export can select the fallback;
@@ -235,10 +235,15 @@ fn command_line_length(arguments: &[String]) -> usize {
 ///
 /// # Video
 ///
-/// `-map "[v]"`, `-c:v`, and the quality flag appear exactly when [`ExportPlan::video`] is
-/// [`Some`], which is exactly when [`build_filter_graph`] writes a `[v]` output label.
-/// [`super::plan::build_plan`] plans video for every export that writes it, so every such
-/// command carries all three, and an audio-only command carries none of them.
+/// `-map "[v]"`, `-c:v`, `-pix_fmt`, and the quality flags appear exactly when
+/// [`ExportPlan::video`] is [`Some`], which is exactly when [`build_filter_graph`] writes a
+/// `[v]` output label. [`super::plan::build_plan`] plans video for every export that writes
+/// it, so every such command carries them all, and an audio-only command carries none of them.
+///
+/// The order for the video stream is `-c:v <encoder> -pix_fmt <format>`, then the quality
+/// flags, then each encoder option of the preset as `-<name>:v <value>`. The audio stream
+/// follows the same pattern: `-c:a`, `-b:a` when the preset holds a bitrate, then each
+/// `-<name>:a <value>`.
 ///
 /// A plan without video also changes the muxer. An audio-only export writes an audio file, an
 /// `.m4a` beside an MP4 or a MOV preset and an `.mka` beside an MKV preset. The frontend will
@@ -312,8 +317,14 @@ pub fn build_arguments(
 
     if let Some(video) = &plan.video {
         push_pair(&mut arguments, "-c:v", &video.encoder);
-        let (quality_flag, quality_value) = quality_arguments(video.quality);
-        push_pair(&mut arguments, quality_flag, &quality_value);
+        // The graph already ends the video in this format. With the flag, ffmpeg reports an
+        // encoder that cannot take the format with a warning, where the graph alone would let it
+        // convert to a format of the encoder's own with no word. The export runs at
+        // `-loglevel error`, so only a run at warning level, such as the test of a preset,
+        // shows that warning; the export then still writes the encoder's own format.
+        push_pair(&mut arguments, "-pix_fmt", &video.pixel_format);
+        push_quality(&mut arguments, video.quality);
+        push_options(&mut arguments, &video.options, OptionStream::Video);
     }
     if let Some(audio) = &plan.audio {
         push_pair(&mut arguments, "-c:a", &audio.encoder);
@@ -322,6 +333,7 @@ pub fn build_arguments(
         if let Some(bitrate) = audio.bitrate {
             push_pair(&mut arguments, "-b:a", &format!("{bitrate}k"));
         }
+        push_options(&mut arguments, &audio.options, OptionStream::Audio);
     }
 
     let (muxer, faststart) = muxer_of(plan.container, plan.video.is_some());
@@ -357,16 +369,36 @@ fn push_pair(arguments: &mut Vec<String>, flag: &str, value: &str) {
     arguments.push(value.to_owned());
 }
 
-/// The quality flag and rendered value for one preset's [`Quality`], from ADR 013.
+/// Append the quality flags for one preset's [`Quality`], from ADR 013.
 ///
 /// `Bitrate` is stored in kilobits per second, so it reaches ffmpeg with the `k` suffix; the
 /// bare number would mean bits per second, which is a thousand times too small and would still
 /// encode, badly, without any error.
-fn quality_arguments(quality: Quality) -> (&'static str, String) {
+///
+/// `Cq` writes `-b:v 0` after `-cq`. The NVENC encoders set a default bitrate of 2 Mbit/s,
+/// and a constant quality under that bitrate would be capped by it.
+fn push_quality(arguments: &mut Vec<String>, quality: Quality) {
+    let value = quality.value.to_string();
     match quality.kind {
-        QualityKind::Crf => ("-crf", quality.value.to_string()),
-        QualityKind::Bitrate => ("-b:v", format!("{}k", quality.value)),
-        QualityKind::QualityScale => ("-q:v", quality.value.to_string()),
+        QualityKind::Crf => push_pair(arguments, "-crf", &value),
+        QualityKind::Cq => {
+            push_pair(arguments, "-cq", &value);
+            push_pair(arguments, "-b:v", "0");
+        }
+        QualityKind::Bitrate => push_pair(arguments, "-b:v", &format!("{value}k")),
+        QualityKind::QualityScale => push_pair(arguments, "-q:v", &value),
+    }
+}
+
+/// Append the encoder options of one stream, in their order, each as its flag and its value.
+///
+/// The flag carries the stream specifier (see [`crate::settings::PresetOption::flag`]), so a
+/// video option never reaches the audio encoder. Each option comes after the flags this module
+/// writes for its stream, so an option that `settings::validate_settings` let through cannot
+/// take the place of one of them. The value is one argument, verbatim: no shell reads it.
+fn push_options(arguments: &mut Vec<String>, options: &[PresetOption], stream: OptionStream) {
+    for option in options {
+        push_pair(arguments, &option.flag(stream), &option.value);
     }
 }
 
@@ -477,8 +509,10 @@ mod tests {
     };
     use crate::project::Resolution;
     use crate::settings::{
-        AudioChannels, MAX_AUDIO_BITRATE_KBPS, MAX_AUDIO_SAMPLE_RATE, MAX_ENCODER_NAME_CHARS,
-        MAX_RESOLUTION_DIMENSION, MIN_AUDIO_BITRATE_KBPS, MIN_AUDIO_SAMPLE_RATE,
+        AudioChannels, MAX_AUDIO_BITRATE_KBPS, MAX_AUDIO_SAMPLE_RATE, MAX_CONSTANT_QUALITY,
+        MAX_ENCODER_NAME_CHARS, MAX_PIXEL_FORMAT_CHARS, MAX_PRESET_OPTIONS,
+        MAX_PRESET_OPTION_BYTES, MAX_RESOLUTION_DIMENSION, MIN_AUDIO_BITRATE_KBPS,
+        MIN_AUDIO_SAMPLE_RATE,
     };
     use crate::time::Pts;
     use std::path::PathBuf;
@@ -549,6 +583,7 @@ mod tests {
             output_channels: AudioChannels::Stereo,
             encoder: "aac".to_owned(),
             bitrate: None,
+            options: vec![],
             // The command does not read it; any value renders the same command.
             expected_duration: Rational::new(1, 1).unwrap(),
         }
@@ -573,6 +608,8 @@ mod tests {
                     kind: QualityKind::Crf,
                     value: 20,
                 },
+                pixel_format: "yuv420p".to_owned(),
+                options: vec![],
                 expected_frames: Some(u64::try_from(frames).unwrap()),
             }),
             audio: Some(legacy_audio(2, 44_100)),
@@ -627,6 +664,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-c:a",
@@ -677,6 +716,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-c:a",
@@ -721,6 +762,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-c:a",
@@ -765,6 +808,8 @@ mod tests {
                 "[v]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-movflags",
@@ -930,7 +975,7 @@ mod tests {
                     faststart,
                     "{container:?} {shape:?}: {emitted:?}"
                 );
-                for flag in ["[v]", "-c:v", "-crf", "-b:v", "-q:v"] {
+                for flag in ["[v]", "-c:v", "-pix_fmt", "-crf", "-cq", "-b:v", "-q:v"] {
                     assert!(
                         !emitted.iter().any(|argument| argument == flag),
                         "{flag} in an audio-only command: {emitted:?}"
@@ -990,6 +1035,8 @@ mod tests {
                 "[v]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-movflags",
@@ -1035,6 +1082,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-c:a",
@@ -1077,6 +1126,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-c:a",
@@ -1122,6 +1173,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-c:a",
@@ -1168,6 +1221,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "h264_nvenc",
+                "-pix_fmt",
+                "yuv420p",
                 "-b:v",
                 "8000k",
                 "-c:a",
@@ -1216,6 +1271,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-q:v",
                 "3",
                 "-c:a",
@@ -1260,6 +1317,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-c:a",
@@ -1310,6 +1369,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-c:a",
@@ -1420,6 +1481,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-c:a",
@@ -1532,6 +1595,8 @@ mod tests {
                 "[a]",
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-crf",
                 "20",
                 "-c:a",
@@ -1543,6 +1608,244 @@ mod tests {
                 "/export/.out.mp4.tmp-4242-0",
             ]
         );
+    }
+
+    fn option(name: &str, value: &str) -> PresetOption {
+        PresetOption {
+            name: name.to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    /// The fixture plan with a 10-bit pixel format, the NVENC constant quality, and encoder
+    /// options on both streams.
+    fn plan_with_options(count: usize) -> ExportPlan {
+        let mut plan = fixture_plan(count);
+        let video = video_mut(&mut plan);
+        video.encoder = "hevc_nvenc".to_owned();
+        video.pixel_format = "p010le".to_owned();
+        video.quality = Quality {
+            kind: QualityKind::Cq,
+            value: 25,
+        };
+        video.options = vec![
+            option("preset", "p7"),
+            option("rc", "vbr"),
+            option("tag", "hvc1"),
+        ];
+        let audio = audio_mut(&mut plan);
+        audio.bitrate = Some(320);
+        audio.options = vec![option("aac_coder", "twoloop")];
+        plan
+    }
+
+    #[test]
+    fn writes_the_pixel_format_the_quality_and_the_options_of_each_stream_in_order() {
+        // The order for each stream: the encoder, `-pix_fmt` for video, the managed quality or
+        // bitrate flags, and then the options of the preset with the specifier of the stream.
+        // `-b:v 0` belongs to the constant quality, so it follows `-cq` at once.
+        assert_eq!(
+            arguments(&plan_with_options(1), GraphShape::InputPerSegment),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-ss",
+                "6.6",
+                "-i",
+                "/media/source.mp4",
+                "-filter_complex",
+                "<graph>",
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
+                "-c:v",
+                "hevc_nvenc",
+                "-pix_fmt",
+                "p010le",
+                "-cq",
+                "25",
+                "-b:v",
+                "0",
+                "-preset:v",
+                "p7",
+                "-rc:v",
+                "vbr",
+                "-tag:v",
+                "hvc1",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "320k",
+                "-aac_coder:a",
+                "twoloop",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "/export/.out.mp4.tmp-4242-0",
+            ]
+        );
+    }
+
+    #[test]
+    fn each_quality_kind_writes_its_own_flags_after_the_pixel_format() {
+        for (kind, value, flags) in [
+            (QualityKind::Crf, 20, vec!["-crf", "20"]),
+            (QualityKind::Cq, 1, vec!["-cq", "1", "-b:v", "0"]),
+            (QualityKind::Bitrate, 8_000, vec!["-b:v", "8000k"]),
+            (QualityKind::QualityScale, 80, vec!["-q:v", "80"]),
+        ] {
+            let mut plan = fixture_plan(1);
+            video_mut(&mut plan).quality = Quality { kind, value };
+            let emitted = arguments(&plan, GraphShape::InputPerSegment);
+            let video = emitted
+                .iter()
+                .position(|argument| argument == "-c:v")
+                .expect("the command names -c:v");
+            assert_eq!(emitted[video + 2], "-pix_fmt", "{kind:?}");
+            assert_eq!(
+                emitted[video + 4..video + 4 + flags.len()],
+                flags[..],
+                "{kind:?}: {emitted:?}"
+            );
+            assert_eq!(emitted[video + 4 + flags.len()], "-c:a", "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn an_export_without_a_stream_writes_none_of_its_options() {
+        // The options of a stream leave with the stream, as its encoder and its flags do.
+        let mut audio_only = plan_with_options(2);
+        audio_only.video = None;
+        let emitted = arguments(&audio_only, GraphShape::InputPerSegment);
+        for flag in ["-pix_fmt", "-cq", "-preset:v", "-rc:v", "-tag:v"] {
+            assert!(
+                !emitted.iter().any(|argument| argument == flag),
+                "{flag}: {emitted:?}"
+            );
+        }
+        assert!(emitted.iter().any(|argument| argument == "-aac_coder:a"));
+
+        let mut video_only = plan_with_options(2);
+        video_only.audio = None;
+        for segment in &mut video_only.segments {
+            segment.audio_in_tick = None;
+            segment.audio_out_tick = None;
+        }
+        let emitted = arguments(&video_only, GraphShape::SingleInput);
+        assert!(!emitted.iter().any(|argument| argument == "-aac_coder:a"));
+        assert!(emitted.iter().any(|argument| argument == "-tag:v"));
+    }
+
+    #[test]
+    fn an_option_value_reaches_ffmpeg_as_one_argument_verbatim() {
+        // No shell reads the command, so quotes, spaces, colons, and a leading `-` stay inside
+        // the one argument after the flag.
+        let value = r#"aq-mode=3:psy-rd=0.8,0.0 "quoted" -1 $HOME"#;
+        let mut plan = fixture_plan(1);
+        video_mut(&mut plan).options = vec![option("x264-params", value)];
+        let emitted = arguments(&plan, GraphShape::InputPerSegment);
+        let flag = emitted
+            .iter()
+            .position(|argument| argument == "-x264-params:v")
+            .expect("the option reaches the command");
+        assert_eq!(emitted[flag + 1], value);
+        assert_eq!(emitted[flag + 2], "-c:a");
+    }
+
+    #[test]
+    fn the_settings_measure_of_the_options_is_the_bytes_of_their_arguments() {
+        // `settings::validate_settings` bounds the options by `PresetOption::rendered_bytes`.
+        // The bound means something only when it counts the arguments this module writes.
+        let plan = plan_with_options(1);
+        let emitted = arguments(&plan, GraphShape::InputPerSegment);
+        let video_options = &plan.video.as_ref().expect("the plan has video").options;
+        let audio_options = &plan.audio.as_ref().expect("the plan has audio").options;
+        let mut measured = 0;
+        for (stream, options) in [
+            (OptionStream::Video, video_options),
+            (OptionStream::Audio, audio_options),
+        ] {
+            for option in options {
+                let flag = option.flag(stream);
+                let position = emitted
+                    .iter()
+                    .position(|argument| *argument == flag)
+                    .expect("each option reaches the command");
+                assert_eq!(emitted[position + 1], option.value);
+                measured += emitted[position].len() + emitted[position + 1].len();
+                assert_eq!(
+                    option.rendered_bytes(stream),
+                    emitted[position].len() + emitted[position + 1].len()
+                );
+            }
+        }
+        assert_eq!(
+            measured,
+            "-preset:vp7-rc:vvbr-tag:vhvc1-aac_coder:atwoloop".len()
+        );
+    }
+
+    #[test]
+    fn the_widest_options_are_at_both_limits_of_the_settings() {
+        // `widest_plan` is only as wide as these lists: the most entries in each list, and
+        // the most bytes both lists may render together. The settings must also accept them.
+        let options = widest_options();
+        assert_eq!(options.len(), MAX_PRESET_OPTIONS);
+        let bytes: usize = [OptionStream::Video, OptionStream::Audio]
+            .iter()
+            .map(|stream| {
+                options
+                    .iter()
+                    .map(|option| option.rendered_bytes(*stream))
+                    .sum::<usize>()
+            })
+            .sum();
+        assert_eq!(bytes, MAX_PRESET_OPTION_BYTES);
+
+        let mut preset = crate::settings::defaults::default_presets().remove(0);
+        preset.pixel_format = "a".repeat(MAX_PIXEL_FORMAT_CHARS);
+        preset.video_options = options.clone();
+        preset.audio_options = options;
+        preset.quality = Quality {
+            kind: QualityKind::Cq,
+            value: MAX_CONSTANT_QUALITY,
+        };
+        let mut settings = crate::settings::defaults::seeded_settings();
+        settings.presets = vec![preset];
+        settings.active_preset_id = None;
+        assert_eq!(crate::settings::validate_settings(&settings), Ok(()));
+    }
+
+    #[test]
+    fn the_constant_quality_is_the_widest_quality_kind() {
+        // `-cq 63 -b:v 0` is four arguments, against two for each other kind, so it is the
+        // widest even beside `-b:v 200000k`. Each kind at the top of its range is measured.
+        let reservation = longest_windows_path(".mp4.tmp-13724-0");
+        let widest = widest_plan(MAX_EXPORT_SEGMENTS);
+        for (kind, value) in [
+            (QualityKind::Crf, 63),
+            (QualityKind::Bitrate, 200_000),
+            (QualityKind::QualityScale, 100),
+        ] {
+            let mut plan = widest_plan(MAX_EXPORT_SEGMENTS);
+            video_mut(&mut plan).quality = Quality { kind, value };
+            for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+                assert!(
+                    measured_length(&plan, shape, &reservation)
+                        < measured_length(&widest, shape, &reservation),
+                    "{kind:?} as {shape:?} is not narrower than the constant quality"
+                );
+            }
+        }
     }
 
     /// Every plan and shape the guard tests below sweep: both shapes, every container, with
@@ -1563,6 +1866,7 @@ mod tests {
             }
             for kind in [
                 QualityKind::Crf,
+                QualityKind::Cq,
                 QualityKind::Bitrate,
                 QualityKind::QualityScale,
             ] {
@@ -1570,6 +1874,7 @@ mod tests {
                 video_mut(&mut plan).quality = Quality { kind, value: 7 };
                 cases.push((plan, shape));
             }
+            cases.push((plan_with_options(2), shape));
             let mut with_audio_bitrate = fixture_plan(2);
             audio_mut(&mut with_audio_bitrate).bitrate = Some(320);
             cases.push((with_audio_bitrate, shape));
@@ -1739,7 +2044,8 @@ mod tests {
         }
 
         // And what the vector does if one ever got through anyway: the name stays in its value
-        // position and displaces nothing, so the command reads `-c:v -i -crf 20 -c:a ...`.
+        // position and displaces nothing, so the command reads
+        // `-c:v -i -pix_fmt yuv420p -crf 20 -c:a ...`.
         // ffmpeg fails loudly on it -- measured as `Unknown encoder '-i'`, exit 8, no output
         // written -- rather than consuming it as an input option, which is the outcome that
         // makes a missing escape here recoverable instead of silent.
@@ -1750,8 +2056,9 @@ mod tests {
             .position(|argument| argument == "-c:v")
             .expect("the command names -c:v");
         assert_eq!(emitted[video + 1], "-i");
-        assert_eq!(emitted[video + 2], "-crf");
-        assert_eq!(emitted[video + 3], "20");
+        assert_eq!(emitted[video + 2], "-pix_fmt");
+        assert_eq!(emitted[video + 4], "-crf");
+        assert_eq!(emitted[video + 5], "20");
     }
 
     /// A long, realistic Windows source path: a dated capture folder under a user profile.
@@ -1818,6 +2125,8 @@ mod tests {
                     kind: QualityKind::Crf,
                     value: 20,
                 },
+                pixel_format: "yuv420p".to_owned(),
+                options: vec![],
                 expected_frames: Some(30 * u64::try_from(count).expect("the count fits in a u64")),
             }),
             audio: Some(legacy_audio(2, 48_000)),
@@ -1849,10 +2158,10 @@ mod tests {
         // `choose_graph_shape` *returns* fits. There is no third shape, so the fallback's own
         // length is the real limit of the renderer.
         //
-        // This plan measures 28776 of the 31743 available bytes. Do not read that gap as the
-        // margin the cap has: this fixture uses a 106-character path and ordinary encoder
-        // names, and the widest plan the settings actually permit needs 30136 at the same
-        // count. `the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap` measures
+        // This plan measures 28797 of the 31743 available bytes. Do not read that gap as the
+        // margin the cap has: this fixture uses a 106-character path, ordinary encoder names,
+        // and no encoder options, and the widest plan the settings actually permit needs 31620
+        // at the same count. `the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap` measures
         // that one, and it is the test that justifies the cap. This one is about the realistic
         // case, and about the fallback being reached at all.
         let plan = windows_plan(MAX_EXPORT_SEGMENTS);
@@ -1911,9 +2220,26 @@ mod tests {
             output_channels: AudioChannels::Stereo,
             encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
             bitrate: Some(MAX_AUDIO_BITRATE_KBPS),
+            options: widest_options(),
             // The command does not read it; any value renders the same command.
             expected_duration: Rational::new(1, 1).unwrap(),
         }
+    }
+
+    /// The option list that, on both streams, spells the longest options the settings permit: [`MAX_PRESET_OPTIONS`] entries of 16 bytes each,
+    /// so the two lists render exactly [`MAX_PRESET_OPTION_BYTES`].
+    ///
+    /// The count is at its maximum because each option costs two arguments, and each argument
+    /// costs [`ARGUMENT_OVERHEAD_BYTES`] beyond its content. For a fixed number of rendered
+    /// bytes, more options spell a longer command line.
+    /// `the_widest_options_are_at_both_limits_of_the_settings` checks both limits.
+    fn widest_options() -> Vec<PresetOption> {
+        (0..MAX_PRESET_OPTIONS)
+            .map(|index| PresetOption {
+                name: format!("opt{index:02}"),
+                value: "v".repeat(8),
+            })
+            .collect()
     }
 
     /// The widest plan the settings schema permits, over `count` segments.
@@ -1921,9 +2247,11 @@ mod tests {
     /// Every dimension is at the maximum `settings::validate_settings` accepts, or at the
     /// widest a real source can make it, so this measures the bound rather than a fixture:
     /// `MAX_PATH` for the source *and* the reservation, [`MAX_ENCODER_NAME_CHARS`] for both
-    /// encoder names, `MAX_RESOLUTION_DIMENSION` on both axes, the longest quality argument
-    /// (`-b:v 200000k`, the top of the bitrate range), MP4 for its extra `-movflags
-    /// +faststart`, an NTSC rate, two-digit stream indices, the widest audio format
+    /// encoder names, `MAX_RESOLUTION_DIMENSION` on both axes, the longest quality arguments
+    /// (`-cq 63 -b:v 0`, four arguments; see `the_constant_quality_is_the_widest_quality_kind`),
+    /// [`MAX_PIXEL_FORMAT_CHARS`] for the pixel format, which the first chain of the graph and
+    /// `-pix_fmt` both carry, the widest option lists [`widest_options`] names, MP4 for its extra
+    /// `-movflags +faststart`, an NTSC rate, two-digit stream indices, the widest audio format
     /// [`widest_audio`] names, the longest audio bitrate (`-b:a 1536k`, the top of ADR 023's
     /// range), eleven-digit PTS values, twelve-digit audio ticks, and a seek that fills every
     /// decimal place [`SEEK_DECIMALS`] allows.
@@ -1956,9 +2284,11 @@ mod tests {
                 }),
                 encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
                 quality: Quality {
-                    kind: QualityKind::Bitrate,
-                    value: 200_000,
+                    kind: QualityKind::Cq,
+                    value: MAX_CONSTANT_QUALITY,
                 },
+                pixel_format: "a".repeat(MAX_PIXEL_FORMAT_CHARS),
+                options: widest_options(),
                 expected_frames: Some(30 * u64::try_from(count).expect("the count fits in a u64")),
             }),
             audio: Some(widest_audio()),
@@ -1979,10 +2309,15 @@ mod tests {
         // for the largest segment count that still fits, on the fixture above, choosing the
         // shape the way production does.
         //
-        // Measured at the time of writing: the widest permitted plan needs 30136 of the 31743
-        // available bytes at the cap, so 1607 bytes of slack remain, and 105 segments fit while
-        // 106 do not. (A realistic plan on a 106-character path measures 28776 at the same
-        // count.) The slack was 130 bytes, and 101 segments did not fit, while every video chain
+        // Measured at the time of writing: the widest permitted plan needs 31620 of the 31743
+        // available bytes at the cap, so 123 bytes of slack remain, and 100 segments fit while
+        // 101 do not. (A realistic plan on a 106-character path measures 28797 at the same
+        // count.) Schema 2 of the settings spent 1484 of the 1607 bytes that were there before
+        // it: 1408 for the two option lists at their limits (1024 bytes, and 384 for the
+        // separators and quotes of 128 arguments), 71 for a 32-character pixel format in the
+        // graph and in `-pix_fmt`, and 5 for `-cq 63 -b:v 0` over `-b:v 200000k`. The options
+        // are written once, not once for each segment, so they did not move the growth for each
+        // segment. The slack was 130 bytes, and 101 segments did not fit, while every video chain
         // ended in its own `format`. One `format` behind `concat` (`graph::video_output_format`)
         // gave back 1477 bytes at the cap. Earlier, ADR 023's audio settings cost 115 of the 245
         // bytes that were there before them; see

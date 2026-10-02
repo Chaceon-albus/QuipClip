@@ -19,6 +19,7 @@ import type { Preset, Settings } from "@/features/settings/types";
 import {
   OUTPUT_CUSTOM_VALUE,
   OUTPUT_SOURCE_VALUE,
+  PIXEL_FORMAT_CUSTOM_VALUE,
 } from "@/features/settings/videoOutputChoices";
 import {
   CUSTOM_ENCODER_VALUE,
@@ -43,6 +44,9 @@ function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
+    pixelFormat: "yuv420p",
+    videoOptions: [],
+    audioOptions: [],
     ...overrides,
   };
 }
@@ -59,7 +63,7 @@ const TEST_REVISION = 7;
 
 function createSettings(overrides: Partial<Settings> = {}): Settings {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: TEST_REVISION,
     presets: [],
     ...overrides,
@@ -1247,6 +1251,32 @@ describe("PresetLibraryController", () => {
       expect(settings.presets[0]).toBe(original);
     });
 
+    it("copies the option lists and each entry, so an edit of the draft leaves the stored lists", () => {
+      const original = createPreset("p1", {
+        videoOptions: [{ name: "preset", value: "slow" }],
+        audioOptions: [{ name: "profile", value: "aac_low" }],
+      });
+      const settings = createSettings({ presets: [original] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      const draft = controller.getView().draft;
+      expect(draft?.videoOptions).toEqual(original.videoOptions);
+      expect(draft?.videoOptions).not.toBe(original.videoOptions);
+      expect(draft?.videoOptions[0]).not.toBe(original.videoOptions[0]);
+      expect(draft?.audioOptions[0]).not.toBe(original.audioOptions[0]);
+      if (draft) {
+        draft.videoOptions[0].value = "fast";
+        draft.audioOptions.push({ name: "cutoff", value: "20000" });
+      }
+
+      expect(original.videoOptions).toEqual([{ name: "preset", value: "slow" }]);
+      expect(original.audioOptions).toEqual([{ name: "profile", value: "aac_low" }]);
+    });
+
     it("discards an unsaved draft without warning, leaving dirty for the caller to check first", () => {
       const settings = createSettings({
         presets: [
@@ -2108,6 +2138,117 @@ describe("PresetLibraryController", () => {
       controller.setQualityKind("bitrate");
 
       expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("the constant quality kind", () => {
+    it("writes the cq default, which lies inside the cq range", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { quality: { kind: "crf", value: 20 } })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.setQualityKind("cq");
+
+      const view = controller.getView();
+      expect(view.draft?.quality).toEqual({ kind: "cq", value: 25 });
+      expect(defaultQualityValue("cq")).toBe(25);
+      expect(view.canSave).toBe(true);
+
+      controller.updateQualityValue("0");
+      expect(controller.getView().issues).toContainEqual({
+        field: "quality",
+        code: "outOfRange",
+        values: { kind: "cq", min: 1, max: 63 },
+      });
+    });
+  });
+
+  describe("pixel format", () => {
+    it("shows the stored format in the select, and stores a chosen one", () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      expect(controller.getView().pixelFormatChoice).toBe("yuv420p");
+      expect(controller.getView().pixelFormatIsCustom).toBe(false);
+
+      controller.choosePixelFormat("p010le");
+      const view = controller.getView();
+      expect(view.draft?.pixelFormat).toBe("p010le");
+      expect(view.pixelFormatChoice).toBe("p010le");
+      expect(view.dirty).toBe(true);
+      expect(view.canSave).toBe(true);
+    });
+
+    it("opens the custom field on the stored format, and stores the typed text verbatim", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1", { pixelFormat: "nv12" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.choosePixelFormat(PIXEL_FORMAT_CUSTOM_VALUE);
+      let view = controller.getView();
+      expect(view.pixelFormatIsCustom).toBe(true);
+      expect(view.pixelFormatChoice).toBe(PIXEL_FORMAT_CUSTOM_VALUE);
+      expect(view.draft?.pixelFormat).toBe("nv12");
+
+      controller.setPixelFormatName("YUV422P10LE ");
+      view = controller.getView();
+      expect(view.draft?.pixelFormat).toBe("YUV422P10LE ");
+      expect(view.issues).toEqual([
+        { field: "pixelFormat", code: "pixelFormat", values: { max: 32 } },
+      ]);
+      expect(view.canSave).toBe(false);
+
+      controller.setPixelFormatName("yuv422p10le");
+      expect(controller.getView().canSave).toBe(true);
+    });
+
+    it("closes the custom field when a choice is made or another preset loads", () => {
+      const settings = createSettings({
+        presets: [createPreset("p1"), createPreset("p2", { pixelFormat: "gray" })],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+
+      controller.select("p1");
+      controller.choosePixelFormat(PIXEL_FORMAT_CUSTOM_VALUE);
+      controller.choosePixelFormat("yuv420p10le");
+      expect(controller.getView().pixelFormatIsCustom).toBe(false);
+
+      controller.choosePixelFormat(PIXEL_FORMAT_CUSTOM_VALUE);
+      controller.select("p2");
+      const view = controller.getView();
+      expect(view.pixelFormatIsCustom).toBe(false);
+      expect(view.pixelFormatChoice).toBe("gray");
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+
+      controller.choosePixelFormat("p010le");
+      controller.setPixelFormatName("nv12");
+
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().pixelFormatChoice).toBe("");
       expect(controller.getView().dirty).toBe(false);
     });
   });

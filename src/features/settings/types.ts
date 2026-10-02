@@ -8,8 +8,11 @@ import type { Rational, Resolution } from "@/types/project";
 
 /**
  * The canonical schema version for settings.json.
+ *
+ * Version 2 adds `pixelFormat`, `videoOptions`, and `audioOptions` to each preset. Rust still
+ * reads a version-1 file, and returns it as version 2, so this build never sees version 1.
  */
-export const SETTINGS_SCHEMA_VERSION = 1;
+export const SETTINGS_SCHEMA_VERSION = 2;
 
 /**
  * Output container formats supported by export presets.
@@ -21,9 +24,9 @@ export type PresetContainer = (typeof PRESET_CONTAINERS)[number];
 
 /**
  * Quality control strategies supported by export presets.
- * Closed set matching the Rust `QualityKind` enum.
+ * Closed set matching the Rust `QualityKind` enum, in its order.
  */
-export const QUALITY_KINDS = ["crf", "bitrate", "qualityScale"] as const;
+export const QUALITY_KINDS = ["crf", "cq", "bitrate", "qualityScale"] as const;
 
 export type QualityKind = (typeof QUALITY_KINDS)[number];
 
@@ -36,6 +39,7 @@ export type QualityKind = (typeof QUALITY_KINDS)[number];
  *
  * Valid ranges enforced by backend validation:
  * - crf: 0..=63 (lower is higher quality)
+ * - cq: 1..=63 (the NVENC constant quality, written as `-cq <value> -b:v 0`)
  * - bitrate: 1..=200_000 (kilobits per second)
  * - qualityScale: 1..=100 (encoder-defined scale)
  */
@@ -78,6 +82,17 @@ export type PresetAudioChannels = (typeof AUDIO_CHANNEL_SETTINGS)[number];
 export type PresetAudioSampleRate = "source" | number;
 
 /**
+ * One encoder option of a preset: a name, without its leading `-`, and its value.
+ *
+ * Rust writes it as two arguments, `-<name>:v <value>` or `-<name>:a <value>`, after the flags
+ * it writes for that stream. `limits.ts` holds the rules each entry follows.
+ */
+export type PresetOption = {
+  name: string;
+  value: string;
+};
+
+/**
  * Single export preset definition matching the Rust `Preset` wire schema.
  */
 export type Preset = {
@@ -102,15 +117,27 @@ export type Preset = {
   quality: PresetQuality;
   resolution: PresetResolution;
   frameRate: PresetFrameRate;
+  /**
+   * The pixel format of the output video, as ffmpeg names it, such as "yuv420p" or "p010le".
+   */
+  pixelFormat: string;
+  /**
+   * Encoder options of the video stream, in the order Rust writes them.
+   */
+  videoOptions: PresetOption[];
+  /**
+   * Encoder options of the audio stream, in the order Rust writes them.
+   */
+  audioOptions: PresetOption[];
 };
 
 /**
- * Application settings document stored at `<app_data>/settings.json` (schema version 1).
+ * Application settings document stored at `<app_data>/settings.json` (schema version 2).
  *
  * `ffmpegPath` and `activePresetId` are absent when unset, never null.
  */
 export type Settings = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   /**
    * The compare-and-swap token Rust uses to refuse a save built on a document another
    * window or another copy of QuipClip has already replaced (ADR 013).

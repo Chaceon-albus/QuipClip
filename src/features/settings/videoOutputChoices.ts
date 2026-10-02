@@ -135,3 +135,31 @@ export function resolutionFromChoice(value: string): PresetResolution | null {
   const choice = RESOLUTION_CHOICES.find((candidate) => candidate.value === value);
   return choice ? { w: choice.size.w, h: choice.size.h } : null;
 }
+
+/** One fixed pixel format in the preset editor. */
+export type PixelFormatChoice = {
+  /** The ffmpeg name, which is both the `<Select>` value and the stored value. */
+  readonly value: string;
+  /** The bit depth of each sample, for the label only. */
+  readonly bitDepth: 8 | 10;
+};
+
+/**
+ * The fixed pixel formats, in the order that the `<Select>` lists them: the two planar formats
+ * that software encoders take, then the two semi-planar formats that hardware encoders take.
+ */
+export const PIXEL_FORMAT_CHOICES: readonly PixelFormatChoice[] = [
+  { value: "yuv420p", bitDepth: 8 },
+  { value: "yuv420p10le", bitDepth: 10 },
+  { value: "p010le", bitDepth: 10 },
+  { value: "nv12", bitDepth: 8 },
+];
+
+/**
+ * The `<Select>` value of "Custom…" in the pixel format `<Select>`, which opens a text field.
+ *
+ * It MUST NOT be a name that `isValidPixelFormat` accepts, or choosing "custom" could not be
+ * told apart from a stored format of that name. A `-` is outside `[a-z0-9_]`, so
+ * `OUTPUT_CUSTOM_VALUE` does not serve here: "custom" is a valid name.
+ */
+export const PIXEL_FORMAT_CUSTOM_VALUE = "-custom";

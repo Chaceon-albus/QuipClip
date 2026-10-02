@@ -26,6 +26,9 @@ function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
+    pixelFormat: "yuv420p",
+    videoOptions: [],
+    audioOptions: [],
     ...overrides,
   };
 }
@@ -43,7 +46,7 @@ const TEST_REVISION = 7;
 
 function createSettings(overrides: Partial<Settings> = {}): Settings {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: TEST_REVISION,
     presets: [],
     ...overrides,
@@ -159,7 +162,7 @@ describe("FfmpegPathController", () => {
 
       expect(result).toBe(true);
       const sent = saveSettings.mock.calls[0]?.[0] as Settings;
-      expect(sent.schemaVersion).toBe(1);
+      expect(sent.schemaVersion).toBe(2);
       expect(sent.presets).toBe(presets);
       expect(sent.activePresetId).toBe("p1");
       expect(sent.ffmpegPath).toBe("/opt/ffmpeg/bin/ffmpeg");
@@ -723,7 +726,7 @@ describe("FfmpegPathController", () => {
       const sent = saveSettings.mock.calls[0]?.[0] as Settings;
       expect("ffmpegPath" in sent).toBe(false);
       expect(sent).toStrictEqual({
-        schemaVersion: 1,
+        schemaVersion: 2,
         revision: TEST_REVISION,
         presets: [],
         activePresetId: "p1",
@@ -748,7 +751,7 @@ describe("FfmpegPathController", () => {
       const sent = saveSettings.mock.calls[0]?.[0] as Settings;
       expect("ffmpegPath" in sent).toBe(false);
       expect(sent).toStrictEqual({
-        schemaVersion: 1,
+        schemaVersion: 2,
         revision: TEST_REVISION,
         presets: [],
       });

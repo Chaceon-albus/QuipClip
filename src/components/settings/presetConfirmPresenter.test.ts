@@ -36,6 +36,9 @@ function createPreset(id: string, name: string): Preset {
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
+    pixelFormat: "yuv420p",
+    videoOptions: [],
+    audioOptions: [],
   };
 }
 
@@ -107,7 +110,7 @@ describe("presentDeletePresetConfirm", () => {
     for (const active of presets) {
       const view = presentDeletePresetConfirm(presets, active.id, active.id);
       const settings: Settings = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         revision: 0,
         presets,
         activePresetId: active.id,

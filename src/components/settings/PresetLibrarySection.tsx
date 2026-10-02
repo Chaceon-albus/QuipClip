@@ -93,6 +93,7 @@ import {
   presentFrameRateSelect,
   presentFrameRateTermInput,
   presentNumericField,
+  presentPixelFormatSelect,
   presentQualityKind,
   presentQualityValueInput,
   presentResolutionInput,
@@ -280,6 +281,11 @@ function PresetEditor({
   const channelsSelect = presentAudioChannelsSelect();
   const resolutionSelect = presentResolutionSelect();
   const frameRateSelect = presentFrameRateSelect(numberFormatter);
+  // While the custom field is open, it holds the name, and the list gets no option for the
+  // text the user types.
+  const pixelFormatSelect = presentPixelFormatSelect(
+    view.pixelFormatIsCustom ? "" : draft.pixelFormat,
+  );
   const qualityInput = presentQualityValueInput(draft.quality.kind);
   const resolutionInput = presentResolutionInput();
   const frameRateTermInput = presentFrameRateTermInput();
@@ -337,6 +343,11 @@ function PresetEditor({
     qualityValueUnit: `${idBase}-quality-value-unit`,
     qualityHint: `${idBase}-quality-hint`,
     qualityError: `${idBase}-quality-error`,
+    pixelFormat: `${idBase}-pixel-format`,
+    pixelFormatHint: `${idBase}-pixel-format-hint`,
+    pixelFormatCustom: `${idBase}-pixel-format-custom`,
+    pixelFormatCustomHint: `${idBase}-pixel-format-custom-hint`,
+    pixelFormatError: `${idBase}-pixel-format-error`,
     resolution: `${idBase}-resolution`,
     resolutionW: `${idBase}-resolution-w`,
     resolutionWUnit: `${idBase}-resolution-w-unit`,
@@ -356,6 +367,7 @@ function PresetEditor({
   const audioBitrateInvalid = issueGroups.audioBitrate.length > 0;
   const audioSampleRateInvalid = issueGroups.audioSampleRate.length > 0;
   const qualityInvalid = issueGroups.quality.length > 0;
+  const pixelFormatInvalid = issueGroups.pixelFormat.length > 0;
 
   // An encoder issue belongs to the control that holds the name. With the custom field open,
   // that is the text input and not the list.
@@ -363,6 +375,17 @@ function PresetEditor({
   const videoCustomInvalid = videoEncoderInvalid && view.videoEncoderIsCustom;
   const audioListInvalid = audioEncoderInvalid && !view.audioEncoderIsCustom;
   const audioCustomInvalid = audioEncoderInvalid && view.audioEncoderIsCustom;
+  // The same rule for the pixel format: the text field holds the name while it is open.
+  const pixelFormatListInvalid = pixelFormatInvalid && !view.pixelFormatIsCustom;
+  const pixelFormatCustomInvalid = pixelFormatInvalid && view.pixelFormatIsCustom;
+
+  // The option lists have no control in this editor, so their messages show in the box at the
+  // end of the editor, with any message that names no field.
+  const boxMessages = [
+    ...issueGroups.videoOptions,
+    ...issueGroups.audioOptions,
+    ...issueGroups.other,
+  ];
 
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
@@ -540,6 +563,83 @@ function PresetEditor({
         <p id={ids.qualityHint} className="col-start-2 text-xs text-muted-foreground">
           {translate(qualityInput.hintKey)}
         </p>
+
+        {/* Pixel Format */}
+        <FieldLabel htmlFor={ids.pixelFormat}>
+          {t("settings.preset.pixelFormatLabel")}
+        </FieldLabel>
+        <Select
+          value={view.pixelFormatChoice}
+          onValueChange={(val) => controller.choosePixelFormat(val)}
+        >
+          <SelectTrigger
+            id={ids.pixelFormat}
+            aria-invalid={pixelFormatListInvalid}
+            aria-describedby={joinDescribedBy(
+              pixelFormatListInvalid && ids.pixelFormatError,
+              ids.pixelFormatHint,
+            )}
+            className="w-full min-w-0"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {pixelFormatSelect.options.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {/* A stored custom format is free text of up to 32 characters. */}
+                <EncoderOptionLabel>
+                  {translate(option.labelKey, option.labelValues)}
+                </EncoderOptionLabel>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {pixelFormatListInvalid ? (
+          <FieldError
+            id={ids.pixelFormatError}
+            messages={issueGroups.pixelFormat}
+            translate={translate}
+          />
+        ) : null}
+        <p
+          id={ids.pixelFormatHint}
+          className="col-start-2 text-xs text-muted-foreground"
+        >
+          {t("settings.preset.pixelFormatHint")}
+        </p>
+        {view.pixelFormatIsCustom ? (
+          <>
+            <FieldLabel htmlFor={ids.pixelFormatCustom}>
+              {t("settings.preset.pixelFormatCustomLabel")}
+            </FieldLabel>
+            <Input
+              id={ids.pixelFormatCustom}
+              aria-invalid={pixelFormatCustomInvalid}
+              aria-describedby={joinDescribedBy(
+                pixelFormatCustomInvalid && ids.pixelFormatError,
+                ids.pixelFormatCustomHint,
+              )}
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              value={draft.pixelFormat}
+              onChange={(e) => controller.setPixelFormatName(e.target.value)}
+            />
+            {pixelFormatCustomInvalid ? (
+              <FieldError
+                id={ids.pixelFormatError}
+                messages={issueGroups.pixelFormat}
+                translate={translate}
+              />
+            ) : null}
+            <p
+              id={ids.pixelFormatCustomHint}
+              className="col-start-2 text-xs text-muted-foreground"
+            >
+              {t("settings.preset.pixelFormatCustomHint")}
+            </p>
+          </>
+        ) : null}
 
         {/* Resolution */}
         <FieldLabel htmlFor={ids.resolution}>
@@ -847,11 +947,12 @@ function PresetEditor({
         </Select>
       </FormGroup>
 
-      {/* An issue that names no field of this editor. Each other issue shows at its field. */}
-      {issueGroups.other.length > 0 ? (
+      {/* An issue of the option lists, or one that names no field of this editor. Each other
+          issue shows at its field. */}
+      {boxMessages.length > 0 ? (
         <Notice tone="destructive">
-          <div className="space-y-1">
-            {issueGroups.other.map((message, index) => (
+          <div className="space-y-1 wrap-break-word">
+            {boxMessages.map((message, index) => (
               <p key={index}>{translate(message.key, message.values)}</p>
             ))}
           </div>

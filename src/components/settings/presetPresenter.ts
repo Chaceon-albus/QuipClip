@@ -36,6 +36,8 @@ import {
   FRAME_RATE_CHOICES,
   OUTPUT_CUSTOM_VALUE,
   OUTPUT_SOURCE_VALUE,
+  PIXEL_FORMAT_CHOICES,
+  PIXEL_FORMAT_CUSTOM_VALUE,
   RESOLUTION_CHOICES,
 } from "@/features/settings/videoOutputChoices";
 import type { Rational, Resolution } from "@/types/project";
@@ -88,6 +90,27 @@ export function presentPresetIssue(issue: PresetFieldIssue): MessageView {
       break;
     case "containerMismatch":
       key = "settings.field.containerMismatch";
+      break;
+    case "pixelFormat":
+      key = "settings.field.pixelFormat";
+      break;
+    case "tooManyOptions":
+      key = "settings.field.tooManyOptions";
+      break;
+    case "optionName":
+      key = "settings.field.optionName";
+      break;
+    case "optionDenied":
+      key = "settings.field.optionDenied";
+      break;
+    case "optionDuplicate":
+      key = "settings.field.optionDuplicate";
+      break;
+    case "optionValue":
+      key = "settings.field.optionValue";
+      break;
+    case "optionsTooLong":
+      key = "settings.field.optionsTooLong";
       break;
   }
 
@@ -143,6 +166,9 @@ const ISSUE_TARGETS: Record<PresetIssueTarget, true> = {
   quality: true,
   resolution: true,
   frameRate: true,
+  pixelFormat: true,
+  videoOptions: true,
+  audioOptions: true,
 };
 
 function isIssueTarget(value: string): value is PresetIssueTarget {
@@ -185,6 +211,9 @@ export function groupIssuesByField(
     quality: [],
     resolution: [],
     frameRate: [],
+    pixelFormat: [],
+    videoOptions: [],
+    audioOptions: [],
     other: [],
   };
   for (const issue of issues) {
@@ -552,6 +581,8 @@ export function presentQualityKind(kind: QualityKind): string {
   switch (kind) {
     case "crf":
       return "settings.quality.crf";
+    case "cq":
+      return "settings.quality.cq";
     case "bitrate":
       return "settings.quality.bitrate";
     case "qualityScale":
@@ -582,7 +613,7 @@ export function presentContainer(container: PresetContainer): string {
  * it, so an encoder that this machine does not have, or a custom name, shows the same as any
  * other name. The encoder mark beside the line reports whether the encoder works (ADR 013).
  *
- * The quality kind selects one of three complete messages, because each kind puts its unit in
+ * The quality kind selects one of four complete messages, because each kind puts its unit in
  * a different place.
  */
 export function presentPresetRowSummary(
@@ -597,6 +628,8 @@ export function presentPresetRowSummary(
   switch (preset.quality.kind) {
     case "crf":
       return { key: "settings.preset.rowSummaryCrf", values };
+    case "cq":
+      return { key: "settings.preset.rowSummaryCq", values };
     case "bitrate":
       return { key: "settings.preset.rowSummaryBitrate", values };
     case "qualityScale":
@@ -788,6 +821,50 @@ export function presentAudioChannelsSelect(): AudioChannelsSelectView {
   };
 }
 
+/** View model for one entry in the pixel format `<Select>`. */
+export type PixelFormatOptionView = {
+  value: string;
+  labelKey: string;
+  labelValues?: { name: string };
+};
+
+/**
+ * Builds the options for the pixel format `<Select>`: each of the `PIXEL_FORMAT_CHOICES` with
+ * its bit depth, the stored format when it is none of them, and "Custom…" last.
+ *
+ * A stored format that is no choice, such as "yuv422p10le" from a hand-edited file or from the
+ * custom field, shows under its own name, so the `<Select>` always has an option for the value
+ * that `PresetLibraryView.pixelFormatChoice` names. The name is an ffmpeg identifier and is
+ * never translated.
+ */
+export function presentPixelFormatSelect(currentPixelFormat: string): {
+  options: PixelFormatOptionView[];
+} {
+  const options: PixelFormatOptionView[] = PIXEL_FORMAT_CHOICES.map((choice) => ({
+    value: choice.value,
+    labelKey:
+      choice.bitDepth === 10
+        ? "settings.preset.pixelFormatValue10Bit"
+        : "settings.preset.pixelFormatValue8Bit",
+    labelValues: { name: choice.value },
+  }));
+  if (
+    currentPixelFormat !== "" &&
+    !PIXEL_FORMAT_CHOICES.some((choice) => choice.value === currentPixelFormat)
+  ) {
+    options.push({
+      value: currentPixelFormat,
+      labelKey: "settings.preset.pixelFormatValueOther",
+      labelValues: { name: currentPixelFormat },
+    });
+  }
+  options.push({
+    value: PIXEL_FORMAT_CUSTOM_VALUE,
+    labelKey: "settings.preset.customOption",
+  });
+  return { options };
+}
+
 /** View model for one entry in the resolution or the frame rate `<Select>`. */
 export type VideoOutputOptionView = {
   value: string;
@@ -874,6 +951,8 @@ export function presentQualityValueInput(kind: QualityKind): QualityValueInputVi
   switch (kind) {
     case "crf":
       return { min, max, step: 1, hintKey: "settings.preset.qualityHintCrf" };
+    case "cq":
+      return { min, max, step: 1, hintKey: "settings.preset.qualityHintCq" };
     case "bitrate":
       return {
         min,

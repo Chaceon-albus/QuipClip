@@ -8,7 +8,7 @@ import type { Settings } from "./types";
 
 function createSettings(overrides: Partial<Settings> = {}): Settings {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 4,
     presets: [
       {
@@ -23,6 +23,9 @@ function createSettings(overrides: Partial<Settings> = {}): Settings {
         quality: { kind: "crf", value: 20 },
         resolution: "source",
         frameRate: "source",
+        pixelFormat: "yuv420p",
+        videoOptions: [],
+        audioOptions: [],
       },
     ],
     activePresetId: "default-h264-mp4",
@@ -76,7 +79,7 @@ describe("validateSettingsChangedPayload", () => {
     ).toBeNull();
     expect(
       validateSettingsChangedPayload({
-        settings: { ...settings, schemaVersion: 2 },
+        settings: { ...settings, schemaVersion: 3 },
         origin: "main",
       }),
     ).toBeNull();

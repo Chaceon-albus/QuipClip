@@ -47,15 +47,11 @@ use super::{ExportPlan, OutputTiming, PlannedAudio, PlannedSegment, PlannedVideo
 use crate::project::Resolution;
 use crate::settings::AudioChannels;
 
-/// The pixel format every export writes, from ADR 014's chain template.
-///
-/// This is the one value [`video_output_format`] renders. It stays a constant until a preset
-/// can name a pixel format; that unit passes the planned value instead of this one, and nothing
-/// else in the graph changes.
-const VIDEO_PIXEL_FORMAT: &str = "yuv420p";
-
 /// Render the one `format` filter of the graph: from the joined video at `[vc]` to the graph's
-/// `[v]` output label, at `pixel_format`.
+/// `[v]` output label, at `pixel_format`, which is [`PlannedVideo::pixel_format`].
+///
+/// `settings::validate_settings` holds the name to `[a-z0-9_]`, so it cannot change the graph
+/// around it.
 ///
 /// [`build_filter_graph`] writes this as the **first** chain of the graph, ahead of every
 /// segment chain and of the `concat` that writes `[vc]`. A chain can read a label that a later
@@ -248,8 +244,8 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
     // The pixel format goes first in the text, ahead of the chains and the `concat` whose output
     // it reads. ffmpeg negotiates in text order, and only this position converts each segment
     // once; see `video_output_format`.
-    if video.is_some() {
-        chains.push(video_output_format(VIDEO_PIXEL_FORMAT));
+    if let Some(video) = video {
+        chains.push(video_output_format(&video.pixel_format));
     }
 
     if shape == GraphShape::SingleInput {
@@ -529,6 +525,8 @@ mod tests {
                     kind: QualityKind::Crf,
                     value: 20,
                 },
+                pixel_format: "yuv420p".to_owned(),
+                options: vec![],
                 expected_frames: Some(u64::try_from(frames).unwrap()),
             }),
             audio: Some(fixture_audio(2, 44_100)),
@@ -548,6 +546,7 @@ mod tests {
             output_channels: AudioChannels::Stereo,
             encoder: "aac".to_owned(),
             bitrate: None,
+            options: vec![],
             // The graph does not read it; any value renders the same graph.
             expected_duration: Rational::new(1, 1).unwrap(),
         }
@@ -1104,6 +1103,9 @@ mod tests {
             },
             resolution: ResolutionSetting::Source,
             frame_rate: FrameRateSetting::Source,
+            pixel_format: "yuv420p".to_owned(),
+            video_options: vec![],
+            audio_options: vec![],
         };
         let segments: Vec<SegmentBoundary> = fixture_segments(2)
             .iter()
@@ -1448,15 +1450,47 @@ mod tests {
     fn the_format_behind_concat_renders_the_pixel_format_it_is_given() {
         // One parameter carries the pixel format, so a preset value reaches the graph through
         // this function alone.
-        assert_eq!(
-            video_output_format(VIDEO_PIXEL_FORMAT),
-            "[vc]format=yuv420p[v]"
-        );
+        assert_eq!(video_output_format("yuv420p"), "[vc]format=yuv420p[v]");
         assert_eq!(video_output_format("p010le"), "[vc]format=p010le[v]");
         assert_eq!(
             video_output_format("yuv420p10le"),
             "[vc]format=yuv420p10le[v]"
         );
+    }
+
+    #[test]
+    fn the_planned_pixel_format_reaches_the_first_chain_and_nowhere_else() {
+        // The preset value replaces the constant of ADR 014's template, and the chain that
+        // carries it stays the first chain of the graph (measurement 19), in both shapes and
+        // with or without `scale`.
+        for format in ["p010le", "yuv420p10le", "nv12"] {
+            let mut scaled = fixture_plan(3);
+            video_mut(&mut scaled).resolution = Some(Resolution { w: 1280, h: 720 });
+            for mut plan in [fixture_plan(1), fixture_plan(3), scaled] {
+                video_mut(&mut plan).pixel_format = format.to_owned();
+                for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+                    let graph = build_filter_graph(&plan, shape);
+                    let first = format!("[vc]format={format}[v]");
+                    assert_eq!(graph.split(';').next(), Some(first.as_str()), "{graph}");
+                    assert_eq!(graph.matches("[vc]format=").count(), 1, "{graph}");
+                    assert!(!graph.contains(",format="), "{graph}");
+                    assert!(!graph.contains("format=yuv420p["), "{graph}");
+
+                    // Nothing else in the graph moves: the graph of the default format, with
+                    // the one name replaced, is the same string.
+                    let mut default = plan.clone();
+                    video_mut(&mut default).pixel_format = "yuv420p".to_owned();
+                    assert_eq!(
+                        build_filter_graph(&default, shape).replacen(
+                            "format=yuv420p",
+                            &format!("format={format}"),
+                            1
+                        ),
+                        graph
+                    );
+                }
+            }
+        }
     }
 
     #[test]

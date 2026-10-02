@@ -82,7 +82,7 @@ pub use registry::{ExportRegistry, ExportSlot};
 pub use verify::{verify_audio_output, AudioOutputMismatch};
 
 use crate::project::Resolution;
-use crate::settings::{AudioChannels, Container, Quality};
+use crate::settings::{AudioChannels, Container, PresetOption, Quality};
 use crate::time::{Pts, Rational};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -249,6 +249,14 @@ pub struct PlannedVideo {
     pub encoder: String,
     /// The quality control and its value, verbatim from the preset.
     pub quality: Quality,
+    /// The pixel format of the output video, verbatim from the preset.
+    ///
+    /// The graph converts the joined video to it in its first chain, and the argument builder
+    /// writes it as `-pix_fmt` after `-c:v`.
+    pub pixel_format: String,
+    /// The encoder options of the video stream, verbatim from the preset, in the order the
+    /// argument builder writes them: each one as `-<name>:v <value>`, after the quality flags.
+    pub options: Vec<PresetOption>,
     /// The expected final `frame` count, for ADR 014's progress and frame-count comparison.
     ///
     /// This is `Some` under every [`OutputTiming`] this crate implements today. It is an
@@ -302,6 +310,9 @@ pub struct PlannedAudio {
     ///
     /// The argument builder writes it as `-b:a <n>k` directly after `-c:a` (ADR 023).
     pub bitrate: Option<u32>,
+    /// The encoder options of the audio stream, verbatim from the preset, in the order the
+    /// argument builder writes them: each one as `-<name>:a <value>`, after `-b:a`.
+    pub options: Vec<PresetOption>,
     /// The length of audio the segments can take from the source stream, in seconds, exact.
     ///
     /// This is the sum, over the segments, of each segment's overlap with the stream's probed

@@ -29,6 +29,7 @@ import {
 } from "@/features/settings/presetNaming";
 import type {
   Preset,
+  PresetOption,
   Settings,
   SettingsError,
   SettingsStatus,
@@ -293,6 +294,9 @@ function presentQualityRow(
     case "crf":
       valueKey = "export.setup.qualityCrf";
       break;
+    case "cq":
+      valueKey = "export.setup.qualityCq";
+      break;
     case "bitrate":
       valueKey = "export.setup.qualityBitrate";
       break;
@@ -305,6 +309,30 @@ function presentQualityRow(
     labelKey: "export.setup.qualityLabel",
     valueKey,
     valueValues: { value: formatter.format(preset.quality.value) },
+  };
+}
+
+/**
+ * The row of the encoder options of one stream, or null when the preset holds none: an empty
+ * list adds nothing to the command, so the summary has nothing to say about it.
+ *
+ * The value is the options as the preset editor shows them, `-<name> <value>` for each, in the
+ * order of the command. The names and the values are technical text, never translated.
+ */
+function presentOptionsRow(
+  id: "videoOptions" | "audioOptions",
+  options: readonly PresetOption[],
+): PresetSummaryRowView | null {
+  if (options.length === 0) {
+    return null;
+  }
+  return {
+    id,
+    labelKey: "settings.preset.optionsLabel",
+    valueKey: "export.setup.value",
+    valueValues: {
+      value: options.map((option) => `-${option.name} ${option.value}`).join(" "),
+    },
   };
 }
 
@@ -467,8 +495,10 @@ function presentChannelsRow(
  * Builds the preset summary of the setup step: the container, then a Video group and an Audio
  * group, in the order of the fields in the preset editor.
  *
- * - Video: the encoder, the quality, the resolution, and the frame rate.
- * - Audio: the encoder, the bitrate, the sample rate, and the channels.
+ * - Video: the encoder, the quality, the pixel format, the resolution, the frame rate, and the
+ *   extra parameters when the preset holds any.
+ * - Audio: the encoder, the bitrate, the sample rate, the channels, and the extra parameters
+ *   when the preset holds any.
  *
  * A "Same as Source" value also names the value of the open source, from the probe:
  * "Same as Source (1920 × 1080)", "Same as Source (29.97 fps)", "Same as Source (48 kHz)", or
@@ -495,6 +525,7 @@ export function presentPresetSummary(
     valueValues: { value: presentContainer(preset.container) },
   };
 
+  const videoOptions = presentOptionsRow("videoOptions", preset.videoOptions);
   const video: PresetSummaryGroupView = {
     id: "video",
     headingKey: "settings.preset.groupVideo",
@@ -506,10 +537,18 @@ export function presentPresetSummary(
         valueValues: { value: preset.videoEncoder },
       },
       presentQualityRow(preset, formatter),
+      {
+        id: "pixelFormat",
+        labelKey: "settings.preset.pixelFormatLabel",
+        valueKey: "export.setup.value",
+        valueValues: { value: preset.pixelFormat },
+      },
       presentResolutionRow(preset, source),
       presentFrameRateRow(preset, source, formatter),
+      ...(videoOptions === null ? [] : [videoOptions]),
     ],
   };
+  const audioOptions = presentOptionsRow("audioOptions", preset.audioOptions);
 
   const audio: PresetSummaryGroupView =
     source !== null && source.audio === null
@@ -532,6 +571,7 @@ export function presentPresetSummary(
             presentAudioBitrateRow(preset, formatter),
             presentSampleRateRow(preset, source, formatter),
             presentChannelsRow(preset, source),
+            ...(audioOptions === null ? [] : [audioOptions]),
           ],
         };
 

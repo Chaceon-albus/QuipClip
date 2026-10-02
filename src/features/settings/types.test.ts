@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   AUDIO_CHANNEL_SETTINGS,
@@ -16,10 +18,36 @@ declare global {
   }
 }
 
+/** The settings module of the Rust backend, the one source of the wire vocabulary. */
+function readRustSettingsSource(): string {
+  return readFileSync(
+    fileURLToPath(new URL("../../../src-tauri/src/settings/mod.rs", import.meta.url)),
+    "utf8",
+  );
+}
+
+/**
+ * Reads the wire strings of every `QualityKind` variant out of the Rust source, in their
+ * order. The enum carries `#[serde(rename_all = "camelCase")]`, so the wire string of a variant
+ * is its name with the first letter lowered. The attribute is asserted rather than assumed.
+ */
+function readRustQualityKinds(): string[] {
+  const declaration =
+    /#\[serde\(rename_all = "camelCase"\)\]\npub enum QualityKind \{\n([\s\S]*?)\n\}\n/.exec(
+      readRustSettingsSource(),
+    );
+  expect(declaration).not.toBeNull();
+  const variants = declaration![1].matchAll(/^ {4}([A-Z][A-Za-z0-9]*),$/gm);
+  return Array.from(variants, (match) => match[1][0].toLowerCase() + match[1].slice(1));
+}
+
 describe("Settings Types & Wire Constants", () => {
   describe("Schema Version", () => {
-    it("pins the schema version to 1", () => {
-      expect(SETTINGS_SCHEMA_VERSION).toBe(1);
+    it("pins the schema version to 2, the version Rust writes", () => {
+      expect(SETTINGS_SCHEMA_VERSION).toBe(2);
+      expect(readRustSettingsSource()).toContain(
+        "pub const CURRENT_SCHEMA_VERSION: u32 = 2;",
+      );
     });
   });
 
@@ -34,10 +62,15 @@ describe("Settings Types & Wire Constants", () => {
 
   describe("Quality Kinds", () => {
     it("contains exactly the literal wire strings for quality kinds matching Rust", () => {
-      expect(QUALITY_KINDS).toEqual(["crf", "bitrate", "qualityScale"]);
+      expect(QUALITY_KINDS).toEqual(["crf", "cq", "bitrate", "qualityScale"]);
       expect(QUALITY_KINDS).toContain("crf");
+      expect(QUALITY_KINDS).toContain("cq");
       expect(QUALITY_KINDS).toContain("bitrate");
       expect(QUALITY_KINDS).toContain("qualityScale");
+    });
+
+    it("names exactly the variants of the Rust QualityKind enum, in its order", () => {
+      expect([...QUALITY_KINDS]).toEqual(readRustQualityKinds());
     });
   });
 

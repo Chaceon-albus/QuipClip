@@ -1125,6 +1125,9 @@ mod tests {
             },
             resolution: ResolutionSetting::Source,
             frame_rate: FrameRateSetting::Source,
+            pixel_format: "yuv420p".to_owned(),
+            video_options: vec![],
+            audio_options: vec![],
         }
     }
 
@@ -1174,6 +1177,8 @@ mod tests {
                     kind: QualityKind::Crf,
                     value: 20,
                 },
+                pixel_format: "yuv420p".to_owned(),
+                options: vec![],
                 expected_frames: Some(30),
             }),
             audio: None,
@@ -1735,6 +1740,116 @@ mod tests {
         // usable extension.
         assert!(prepared.arguments.iter().any(|argument| argument == "-y"));
         assert!(prepared.arguments.iter().any(|argument| argument == "-f"));
+    }
+
+    #[test]
+    fn a_version_1_settings_file_prepares_the_command_of_version_1_and_saving_it_keeps_the_command()
+    {
+        // A user upgrades from the first release, and the settings file is still at schema
+        // version 1. Each preset reads with the defaults of the keys version 2 added: the graph
+        // is the graph of version 1, byte for byte, and the arguments add `-pix_fmt yuv420p`
+        // only, which names the format the graph already ends in. After a save writes version
+        // 2, the same export prepares the same command.
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let destination = directory.path.join("out.mp4");
+        let settings_path = directory.path.join(settings::SETTINGS_FILE_NAME);
+        fs::write(&settings_path, settings::VERSION_1_FIXTURE).unwrap();
+        let request = ExportRequestWire {
+            source_path: source.to_string_lossy().into_owned(),
+            output_path: destination.to_string_lossy().into_owned(),
+            segments: vec![ExportSegmentBoundaryWire {
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            preset_id: Some("default-h264-mp4".to_owned()),
+            streams: ExportStreams::VideoAndAudio,
+        };
+        let prepare = || {
+            prepare_export_with(
+                &request,
+                &directory.path,
+                &AtomicBool::new(false),
+                |_| {
+                    Ok(FfmpegPaths {
+                        ffmpeg: directory.path.join("ffmpeg"),
+                        ffprobe: directory.path.join("ffprobe"),
+                        origin: ExecutableOrigin::Path,
+                    })
+                },
+                settings::load,
+                |_, _| Ok(sample_probe_with_audio()),
+            )
+            .unwrap()
+        };
+        // The command without its last argument, the reservation, whose name counts up.
+        let command = |prepared: &PreparedExport| -> Vec<String> {
+            let mut arguments = prepared.arguments.clone();
+            assert_eq!(
+                arguments.pop().as_deref(),
+                Some(path_to_string(prepared.pending.path()).as_str())
+            );
+            arguments
+        };
+
+        let from_version_1 = command(&prepare());
+        let source_argument = path_to_string(&source);
+        assert_eq!(
+            from_version_1,
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-i",
+                source_argument.as_str(),
+                "-filter_complex",
+                concat!(
+                    "[vc]format=yuv420p[v];",
+                    "[0:0]trim=start_pts=0:end_pts=90000,setpts=PTS-STARTPTS,fps=30/1[v0];",
+                    "[0:1]aformat=sample_rates=48000,atrim=start_pts=0:end_pts=48000,",
+                    "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000[a0];",
+                    "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
+                ),
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-crf",
+                "20",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "320k",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+            ]
+        );
+        // The preparation read the file and wrote nothing to it.
+        assert_eq!(
+            fs::read_to_string(&settings_path).unwrap(),
+            settings::VERSION_1_FIXTURE
+        );
+
+        let upgraded = settings::save(
+            &directory.path,
+            &settings::load(&directory.path).unwrap().settings,
+        )
+        .unwrap();
+        assert_eq!(upgraded.schema_version, 2);
+        assert_eq!(command(&prepare()), from_version_1);
     }
 
     #[test]
@@ -2470,6 +2585,7 @@ mod tests {
             output_channels: AudioChannels::Stereo,
             encoder: "aac".to_owned(),
             bitrate: None,
+            options: vec![],
             // The source audio covers the whole segment.
             expected_duration: Rational::new(1, 1).unwrap(),
         });

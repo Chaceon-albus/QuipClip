@@ -82,6 +82,9 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
+    pixelFormat: "yuv420p",
+    videoOptions: [],
+    audioOptions: [],
     ...overrides,
   };
 }
@@ -91,7 +94,7 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
  */
 function createSettings(presets: Preset[], activePresetId?: string): Settings {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 7,
     activePresetId: activePresetId ?? presets[0]?.id,
     presets,

@@ -54,6 +54,9 @@ function createPreset(id: string, name: string): Preset {
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
+    pixelFormat: "yuv420p",
+    videoOptions: [],
+    audioOptions: [],
   };
 }
 
@@ -65,7 +68,7 @@ function viewAfter(
   presets: Preset[],
   act: (controller: ReturnType<typeof createPresetLibraryController>) => void,
 ): PresetLibraryView {
-  const settings: Settings = { schemaVersion: 1, revision: 7, presets };
+  const settings: Settings = { schemaVersion: 2, revision: 7, presets };
   const controller = createPresetLibraryController({ getSettings: () => settings });
   act(controller);
   return controller.getView();

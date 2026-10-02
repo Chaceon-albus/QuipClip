@@ -36,6 +36,7 @@ import {
   presentEncoderSelect,
   presentFrameRateInvalid,
   presentNumericField,
+  presentPixelFormatSelect,
   presentPresetEncoderMark,
   presentPresetIssue,
   presentPresetRowSummary,
@@ -54,9 +55,12 @@ import {
   frameRateChoiceValue,
   OUTPUT_CUSTOM_VALUE,
   OUTPUT_SOURCE_VALUE,
+  PIXEL_FORMAT_CHOICES,
+  PIXEL_FORMAT_CUSTOM_VALUE,
   RESOLUTION_CHOICES,
   resolutionChoiceValue,
 } from "@/features/settings/videoOutputChoices";
+import { isValidPixelFormat } from "@/features/settings/limits";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 import { QUALITY_KINDS } from "@/features/settings/types";
 
@@ -101,6 +105,9 @@ describe("presetPresenter", () => {
       quality: { kind: "crf", value: 20 },
       resolution: "source",
       frameRate: "source",
+      pixelFormat: "yuv420p",
+      videoOptions: [],
+      audioOptions: [],
     };
 
     it("maps a name over 120 characters to settings.field.tooLong carrying { max: 120 }", () => {
@@ -203,6 +210,9 @@ describe("presetPresenter", () => {
       quality: { kind: "crf", value: 20 },
       resolution: "source",
       frameRate: "source",
+      pixelFormat: "yuv420p",
+      videoOptions: [],
+      audioOptions: [],
     };
 
     const EMPTY_GROUPS = {
@@ -215,6 +225,9 @@ describe("presetPresenter", () => {
       quality: [],
       resolution: [],
       frameRate: [],
+      pixelFormat: [],
+      videoOptions: [],
+      audioOptions: [],
       other: [],
     };
 
@@ -258,6 +271,28 @@ describe("presetPresenter", () => {
       expect(groups.resolution).toStrictEqual(notInteger);
       expect(groups.frameRate).toStrictEqual(notInteger);
       expect(groups.other).toStrictEqual([]);
+    });
+
+    it("puts a pixel format issue and an option issue under their own fields", () => {
+      const preset: Preset = {
+        ...basePreset,
+        pixelFormat: "YUV420P",
+        videoOptions: [{ name: "shortest", value: "1" }],
+        audioOptions: [
+          { name: "profile", value: "aac_low" },
+          { name: "profile", value: "aac_he" },
+        ],
+      };
+      expect(groupIssuesByField(validatePresetFields(preset))).toStrictEqual({
+        ...EMPTY_GROUPS,
+        pixelFormat: [{ key: "settings.field.pixelFormat", values: { max: 32 } }],
+        videoOptions: [
+          { key: "settings.field.optionDenied", values: { name: "shortest" } },
+        ],
+        audioOptions: [
+          { key: "settings.field.optionDuplicate", values: { name: "profile" } },
+        ],
+      });
     });
 
     it("shows a containerMismatch issue under both the audio encoder and the container", () => {
@@ -483,6 +518,9 @@ describe("presetPresenter", () => {
       quality: { kind: "crf", value: 20 },
       resolution: { w: 1280, h: 720 },
       frameRate: "source",
+      pixelFormat: "yuv420p",
+      videoOptions: [],
+      audioOptions: [],
     };
 
     function invalidFor(resolution: Preset["resolution"]) {
@@ -539,6 +577,9 @@ describe("presetPresenter", () => {
       quality: { kind: "crf", value: 20 },
       resolution: "source",
       frameRate: { n: 30000, d: 1001 },
+      pixelFormat: "yuv420p",
+      videoOptions: [],
+      audioOptions: [],
     };
 
     function invalidFor(frameRate: Preset["frameRate"]) {
@@ -928,6 +969,83 @@ describe("presetPresenter", () => {
     it("maps qualityScale to settings.quality.qualityScale", () => {
       expect(presentQualityKind("qualityScale")).toBe("settings.quality.qualityScale");
     });
+
+    it("maps cq to settings.quality.cq", () => {
+      expect(presentQualityKind("cq")).toBe("settings.quality.cq");
+    });
+
+    it.each(QUALITY_KINDS)("names a key of both catalogs for %s", (kind) => {
+      const key = presentQualityKind(kind);
+      expect(typeof resolveCatalogKey(en, key)).toBe("string");
+      expect(typeof resolveCatalogKey(zhCN, key)).toBe("string");
+    });
+  });
+
+  describe("presentPixelFormatSelect", () => {
+    it("lists the four choices with their bit depth, then Custom", () => {
+      expect(presentPixelFormatSelect("yuv420p")).toStrictEqual({
+        options: [
+          {
+            value: "yuv420p",
+            labelKey: "settings.preset.pixelFormatValue8Bit",
+            labelValues: { name: "yuv420p" },
+          },
+          {
+            value: "yuv420p10le",
+            labelKey: "settings.preset.pixelFormatValue10Bit",
+            labelValues: { name: "yuv420p10le" },
+          },
+          {
+            value: "p010le",
+            labelKey: "settings.preset.pixelFormatValue10Bit",
+            labelValues: { name: "p010le" },
+          },
+          {
+            value: "nv12",
+            labelKey: "settings.preset.pixelFormatValue8Bit",
+            labelValues: { name: "nv12" },
+          },
+          {
+            value: PIXEL_FORMAT_CUSTOM_VALUE,
+            labelKey: "settings.preset.customOption",
+          },
+        ],
+      });
+    });
+
+    it("adds a stored format that is no choice, under its own name, before Custom", () => {
+      const { options } = presentPixelFormatSelect("yuv422p10le");
+      expect(options.map((option) => option.value)).toStrictEqual([
+        ...PIXEL_FORMAT_CHOICES.map((choice) => choice.value),
+        "yuv422p10le",
+        PIXEL_FORMAT_CUSTOM_VALUE,
+      ]);
+      expect(options[4]).toStrictEqual({
+        value: "yuv422p10le",
+        labelKey: "settings.preset.pixelFormatValueOther",
+        labelValues: { name: "yuv422p10le" },
+      });
+    });
+
+    it("adds no option for an empty format", () => {
+      expect(presentPixelFormatSelect("").options).toHaveLength(
+        PIXEL_FORMAT_CHOICES.length + 1,
+      );
+    });
+
+    it("keeps the Custom sentinel outside the names a pixel format can have", () => {
+      expect(isValidPixelFormat(PIXEL_FORMAT_CUSTOM_VALUE)).toBe(false);
+      for (const choice of PIXEL_FORMAT_CHOICES) {
+        expect(isValidPixelFormat(choice.value)).toBe(true);
+      }
+    });
+
+    it("names keys of both catalogs", () => {
+      for (const option of presentPixelFormatSelect("gray").options) {
+        expect(typeof resolveCatalogKey(en, option.labelKey)).toBe("string");
+        expect(typeof resolveCatalogKey(zhCN, option.labelKey)).toBe("string");
+      }
+    });
   });
 
   describe("presentContainer", () => {
@@ -960,6 +1078,9 @@ describe("presetPresenter", () => {
         quality: { kind: "crf", value: 20 },
         resolution: "source",
         frameRate: "source",
+        pixelFormat: "yuv420p",
+        videoOptions: [],
+        audioOptions: [],
         ...overrides,
       };
     }
@@ -984,7 +1105,7 @@ describe("presetPresenter", () => {
     });
 
     it("selects the message of each quality kind", () => {
-      const keys = (["crf", "bitrate", "qualityScale"] as const).map(
+      const keys = (["crf", "cq", "bitrate", "qualityScale"] as const).map(
         (kind: QualityKind) =>
           presentPresetRowSummary(
             createPreset("a", { quality: { kind, value: 5 } }),
@@ -993,6 +1114,7 @@ describe("presetPresenter", () => {
       );
       expect(keys).toStrictEqual([
         "settings.preset.rowSummaryCrf",
+        "settings.preset.rowSummaryCq",
         "settings.preset.rowSummaryBitrate",
         "settings.preset.rowSummaryQualityScale",
       ]);
@@ -1024,7 +1146,7 @@ describe("presetPresenter", () => {
     );
 
     it("names only keys that both catalogs define", () => {
-      for (const kind of ["crf", "bitrate", "qualityScale"] as const) {
+      for (const kind of QUALITY_KINDS) {
         const { key } = presentPresetRowSummary(
           createPreset("a", { quality: { kind, value: 1 } }),
           formatter,
@@ -1036,9 +1158,11 @@ describe("presetPresenter", () => {
 
     it.each([
       ["en", "crf", 20, "MP4 · libx264 · CRF 20"],
+      ["en", "cq", 25, "MP4 · libx264 · CQ 25"],
       ["en", "bitrate", 8000, "MP4 · libx264 · 8,000 kbps"],
       ["en", "qualityScale", 5, "MP4 · libx264 · Quality scale 5"],
       ["zh-CN", "crf", 20, "MP4 · libx264 · CRF 20"],
+      ["zh-CN", "cq", 25, "MP4 · libx264 · CQ 25"],
       ["zh-CN", "bitrate", 8000, "MP4 · libx264 · 8,000 kbps"],
       ["zh-CN", "qualityScale", 5, "MP4 · libx264 · 质量系数 5"],
     ] as const)(
@@ -1481,6 +1605,15 @@ describe("presetPresenter", () => {
       });
     });
 
+    it("gives the constant quality range of NVENC, no unit, and the cq hint", () => {
+      expect(presentQualityValueInput("cq")).toEqual({
+        min: 1,
+        max: 63,
+        step: 1,
+        hintKey: "settings.preset.qualityHintCq",
+      });
+    });
+
     it.each(QUALITY_KINDS)(
       "agrees with validatePresetFields at both ends of the %s range",
       (kind) => {
@@ -1543,7 +1676,7 @@ describe("presetPresenter", () => {
   // screen. Follows the same convention as `settingsErrorPresenter.test.ts`.
   describe("catalog coverage", () => {
     const emittedKeys = [
-      // all seven field issue codes
+      // all fourteen field issue codes
       "settings.field.required",
       "settings.field.tooLong",
       "settings.field.charset",
@@ -1551,6 +1684,13 @@ describe("presetPresenter", () => {
       "settings.field.notInteger",
       "settings.field.positive",
       "settings.field.containerMismatch",
+      "settings.field.pixelFormat",
+      "settings.field.tooManyOptions",
+      "settings.field.optionName",
+      "settings.field.optionDenied",
+      "settings.field.optionDuplicate",
+      "settings.field.optionValue",
+      "settings.field.optionsTooLong",
       // the Duplicate action
       "settings.preset.duplicateBlockedUnsaved",
       "settings.preset.limitReached",
@@ -1577,10 +1717,12 @@ describe("presetPresenter", () => {
       "settings.preset.encoderMarkTitle",
       // the summary line of a preset, one message for each quality kind
       "settings.preset.rowSummaryCrf",
+      "settings.preset.rowSummaryCq",
       "settings.preset.rowSummaryBitrate",
       "settings.preset.rowSummaryQualityScale",
-      // all three quality kinds
+      // all four quality kinds
       "settings.quality.crf",
+      "settings.quality.cq",
       "settings.quality.bitrate",
       "settings.quality.qualityScale",
       // all three complete encoder option labels
@@ -1595,8 +1737,17 @@ describe("presetPresenter", () => {
       "settings.preset.unitKbps",
       "settings.preset.unitPixels",
       "settings.preset.qualityHintCrf",
+      "settings.preset.qualityHintCq",
       "settings.preset.qualityHintBitrate",
       "settings.preset.qualityHintQualityScale",
+      // the pixel format choices and their hints
+      "settings.preset.pixelFormatLabel",
+      "settings.preset.pixelFormatValue8Bit",
+      "settings.preset.pixelFormatValue10Bit",
+      "settings.preset.pixelFormatValueOther",
+      "settings.preset.pixelFormatHint",
+      "settings.preset.pixelFormatCustomLabel",
+      "settings.preset.pixelFormatCustomHint",
     ];
 
     it.each(emittedKeys)(
