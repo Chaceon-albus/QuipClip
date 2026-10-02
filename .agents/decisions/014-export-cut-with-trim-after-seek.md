@@ -77,6 +77,9 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     for the first three segments. It holds the smaller graph from four segments upward,
     measured as 29804 bytes against 31266 bytes at the segment cap. No decision reads this number: the shape
     is chosen on the length of the whole command line, not on the size of the graph.
+    (Changed on 2026-10-02.) After measurement 19 moved the pixel format out of the chains,
+    the two graphs measure 28327 bytes against 29789 bytes at the segment cap. One input
+    still holds the larger graph for the first three segments.
 16. `setsar=1` changes the picture of a source that does not have square pixels. A 720x480
     source with a sample aspect ratio of 32:27 shows a display aspect ratio of 16:9. The
     filter `setsar=1` gives that source a display aspect ratio of 3:2, which is compressed
@@ -90,6 +93,32 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
 18. `-copyts` is global, not per input. One instance before the first input gives raw source
     PTS on every input. A command with two inputs and one `-copyts` reports PTS 128000 on
     both. The same command without it reports PTS 297.
+19. (Added on 2026-10-02.) The position of the `format` filter in the graph text decides where
+    FFmpeg converts a segment whose decoded pixel format differs from the others. FFmpeg
+    merges the format lists of the links in the order of the filters in the graph text, and
+    `concat` shares one format list across its video pads. FFmpeg does not document that order.
+    - With one `format` behind `concat` and last in the text, the shared list took the format
+      of the first segment. A segment of another format was converted to that format in front
+      of `concat`, and the joined video was converted again behind it. The output changed. This
+      happened only at the source resolution, with one input for each segment, and when the
+      input of the first segment had no `-ss`.
+    - With the same filter as the first chain of the text, `[vc]format=<pix>[v]`, each segment
+      of another format is converted once, in front of `concat`.
+    - With `format` at the end of each chain, as before, each segment is also converted once.
+
+    The measurement used FFmpeg 9.0.2 and wrote video and audio framemd5 from the real input
+    shape: one `-copyts`, the same seeks and both graph shapes, with and without `scale`. The
+    fixtures were the six of this record, a 4:2:2 10-bit ProRes source, three stream copies
+    that join a 4:2:2 part to a 4:2:0 part, a 10-bit part to an 8-bit part and an 8-bit part to
+    a 10-bit part, and two generated inputs of different formats. In 68 runs, the graph with
+    the format chain first matched the graph with `format` in each chain, for video and for
+    audio. A later FFmpeg can change the order of the merge. This measurement must then be
+    repeated.
+
+    A change of the pixel format inside one input is a different case. FFmpeg then rebuilds the
+    graph and loses frames, in every position of `format`. This happens with one input on a
+    joined source. The frame count check of ADR 016 then reports `frameCountMismatch`, so the
+    export fails and no wrong cut is published.
 
 ## Decision
 
@@ -158,6 +187,23 @@ Each segment has this chain:
      atrim=start_pts=<in>:end_pts=<out>,asetpts=PTS-STARTPTS,
      aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a<i>];
 ```
+
+(Changed on 2026-10-02.) The video chain no longer ends in `format=yuv420p`. One chain at the
+start of the graph text sets the pixel format of the joined video, and `concat` writes `[vc]`:
+
+```
+[vc]format=yuv420p[v];
+[<i>:<videoStreamIndex>]trim=start_pts=<in>:end_pts=<out>,setpts=PTS-STARTPTS,
+     fps=<rate>[,scale=<w>:<h>,setsar=1][v<i>];
+...
+[v0][a0][v1][a1]...concat=n=<count>:v=1:a=1[vc][a]
+```
+
+A later unit makes the pixel format a field of the preset, such as `p010le`. A format in each
+chain would then cost up to 19 bytes for each segment, and at the cap of 100 segments only 130
+bytes were free. The format chain must stay first in the text (measurement 19). The widest
+plan that the settings permit measures 30136 bytes at the cap, which leaves 1607 bytes of the
+Windows budget free, and 105 segments fit.
 
 The chains end in `concat`, in project array order. `scale` and `setsar=1` appear only when
 the preset gives an explicit resolution, and the leading `aformat` pins the input link to the
