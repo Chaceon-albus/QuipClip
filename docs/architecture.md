@@ -266,8 +266,9 @@ input to `inPts * videoTimeBase - formatStartTime - SEEK_MARGIN_SECONDS`, clamps
 at zero, and omits `-ss` when the result is zero. Each segment chain cuts with `trim` and
 `atrim` on those raw PTS values. Each audio chain pins its input link to the source sample
 rate with an `aformat` before `atrim`. Under the second shape below, that pin is emitted once,
-in front of `asplit`, because the chains share one input link. Each chain then resets the timestamps and normalizes
-the streams. The chains end in `concat`, in project array order.
+in front of `asplit`, because the chains share one input link. Each chain then resets the
+timestamps to its In point, fills a late start or a gap of the audio with silence, and
+normalizes the streams (ADR 014 measurement 20). The chains end in `concat`, in project array order.
 
 The renderer has two graph shapes. It opens one input for each segment while the assembled
 command line stays inside the platform budget. It otherwise opens one input, seeks once, and

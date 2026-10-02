@@ -75,7 +75,8 @@ option such as `movflags` can therefore never take effect through this path.
 The widest plan that the settings permit holds 100 segments, the longest paths, 64 options that
 render 1024 bytes, and a pixel format of 32 characters. It measures 31620 of the 31743 bytes of
 the Windows budget, which leaves 123 bytes. 101 segments do not fit. ADR 014 gave 1607 free
-bytes before this record.
+bytes before this record. (Changed on 2026-10-02: the shorter audio chain of ADR 014
+measurement 20 brings the widest plan to 31509 bytes, which leaves 234 bytes.)
 
 ### Schema version 2
 

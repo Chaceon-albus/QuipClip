@@ -68,7 +68,12 @@ The success check reads the output file. After FFmpeg exits with status 0:
    duration in whole microseconds.
 
 The expected duration is the sum of the overlap of each segment with the audio stream of the
-source. The probe reads the start and the duration of that stream. A side of the stream that the
+source. (Changed on 2026-10-02: since ADR 014 measurement 20 fills a late start with silence,
+a segment that the audio reaches counts from its In point to the earlier of its Out point and
+the end of the audio. A segment wholly before the first sample, or wholly after the last one,
+still writes nothing and counts nothing. In 160 runs, late starts measured 0 to +0.023 s and
+early ends −0.014 to +0.023 s against this rule.) The probe reads the start and the duration of
+that stream. A side of the stream that the
 probe does not know limits nothing, and an overflow of the sum gives the planned duration. Without
 this rule a correct export failed whenever the audio of the source started late or ended early,
 as many phone and screen recordings do. Only an audio-only plan computes this value. An
@@ -140,13 +145,20 @@ video; the muxer is set explicitly, so the file is still valid.
 
 ## Consequences
 
+- (Added on 2026-10-02.) An audio-only export and an export with video differ for a segment
+  that lies wholly before the first audio sample: the export with video fills it with silence,
+  and the audio-only export writes nothing for it, so its later segments come earlier in the
+  file. Near an Out point, an error in the probed start of the audio can therefore move the
+  expected duration by the whole segment and fail a correct export. A segment wholly inside a
+  gap of the stream counts in full and writes nothing, which also fails the check.
+
 - An audio-only export has no progress percentage, no speed and no time estimate.
 - A loss of audio shorter than 0.10 s plus the overhang of the output passes the check: about
   0.10 s in `.m4a`, and up to about 0.42 s for `aac_at` in `.mka` at 8 kHz.
 - `libmp3lame` in `.m4a` fails at 8 kHz and 11.025 kHz, and `aac_at` fails at 96 kHz and 192 kHz.
   FFmpeg exits with an error, and the run reports `ffmpegProcessFailed`.
 - The measurement found a fault that existed before this record and that this record does not
-  correct. In a video and audio export of a source whose audio starts late, `asetpts=PTS-STARTPTS`
+  correct. (Changed on 2026-10-02: ADR 014 measurement 20 corrects it.) In a video and audio export of a source whose audio starts late, `asetpts=PTS-STARTPTS`
   removes the gap before the first audio sample, and `concat` pads silence at the end of the
   segment instead. The audio of that segment then plays about as early as the gap, 0.3 s in the
   measurement. A later unit must correct it.

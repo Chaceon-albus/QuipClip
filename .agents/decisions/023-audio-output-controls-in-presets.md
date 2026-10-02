@@ -77,7 +77,9 @@ machine does not have.
 
 A read that finds no `audioSampleRate` takes 48000. A read that finds no `audioChannels`
 takes `stereo`. A read that finds no `audioBitrate` writes no `-b:a`. A preset from an older
-file therefore renders the same command line as before, byte for byte.
+file therefore renders the same command line as before, byte for byte. (Changed on 2026-10-02:
+ADR 014 measurement 20 changes the audio chain and the spelling of its `aformat`, so the command
+line of a preset from before is no longer the same byte for byte. The samples are the same.)
 
 A save always writes `audioSampleRate` and `audioChannels`. It writes `audioBitrate` only
 when the preset holds a value, as it does for `ffmpegPath`.

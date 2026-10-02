@@ -120,6 +120,30 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     joined source. The frame count check of ADR 016 then reports `frameCountMismatch`, so the
     export fails and no wrong cut is published.
 
+20. (Added on 2026-10-02.) `asetpts=PTS-STARTPTS` moved the audio of a segment to its first
+    sample, not to its In point. When the audio of the source starts after the In point, or has
+    a gap there, the audio of the segment then played early by that gap, and `concat` padded
+    silence at its end. FFmpeg 9.0.2 on macOS measured the offset of a tone burst against a
+    white frame on the same frame. Sources were 30 fps with AAC at 44.1 kHz and 48 kHz, in MP4
+    and MKV, normal, with audio 0.3 s late, with audio that ends 1 s early, and with a 0.5 s gap
+    of packets, in both graph shapes and three output formats, in 480 runs:
+
+    | Case | Before | After |
+    | --- | --- | --- |
+    | Audio 0.3 s late, a segment from 0 | −277 to −300 ms | 0.0 ms |
+    | Audio late, a segment that starts inside the late part, not first | −43 to −67 ms | −0.1 to +0.2 ms |
+    | A 0.5 s gap inside a segment | −500 ms after the gap | 0 to +0.9 ms |
+    | 100 segments of the gap source | −310.6 ms | 0.0 ms |
+    | Audio that ends early, and normal sources | 0 to −0.2 ms | 0 to −0.2 ms |
+
+    Each audio chain now resets its timestamps to the In tick, `asetpts=PTS-<in>`, and fills a
+    leading gap with silence, `aresample=<sourceRate>:first_pts=0`. On the six fixtures of this
+    record, on stereo and 5.1 sources, and at 100 segments, the samples that leave the graph are
+    identical to before, and the video frames too. On MPEG-TS, four runs differ only in the
+    audio timestamps, by one tick, because they are now contiguous. Two other forms failed: one
+    fill behind `concat` left late starts under 0.1 s unfilled in a later segment, and one fill
+    on the input link changed the cut on MPEG-TS by 2 samples.
+
 ## Decision
 
 ### The boundary mechanism
@@ -191,6 +215,22 @@ Each segment has this chain:
      atrim=start_pts=<in>:end_pts=<out>,asetpts=PTS-STARTPTS,
      aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a<i>];
 ```
+
+(Changed on 2026-10-02.) The audio chain starts at the In point (measurement 20):
+
+```
+[<i>:<audioStreamIndex>]aformat=r=<sourceRate>,
+     atrim=start_pts=<in>:end_pts=<out>,asetpts=PTS-<in>,
+     aresample=<sourceRate>:first_pts=0,aformat=f=fltp:r=<outputRate>[:cl=<layout>][a<i>];
+```
+
+`<in>` is the In point in ticks of the source sample rate, and a negative tick renders as
+`PTS+<magnitude>`. `first_pts` makes swresample pad the time from the In point to the first
+sample with silence, when that time is more than 1 ms, and fill a gap of more than 0.1 s inside
+the segment. The fill names the source rate, so the conversion to the output rate stays in the
+final `aformat`. The short option names `r`, `f` and `cl` need FFmpeg 4.3 or later, and keep the
+command line within the budget. The widest plan now measures 31509 bytes at the cap, which leaves
+234 bytes of the Windows budget free.
 
 (Changed on 2026-10-02.) The video chain no longer ends in `format=yuv420p`. One chain at the
 start of the graph text sets the pixel format of the joined video, and `concat` writes `[vc]`:
@@ -299,6 +339,18 @@ after a success.
 The renderer decodes the original media. It must not decode a preview proxy.
 
 ## Consequences
+
+- (Added on 2026-10-02.) The fill of measurement 20 holds the whole of a gap in memory before it
+  writes it. A leading gap of 600 s on 48 kHz 5.1 audio took 1.6 GB, against 44 MB for 10 s. A
+  segment that spans a long late start or a long drop of the audio therefore needs memory in
+  proportion to the gap. QuipClip does not bound it.
+- (Added on 2026-10-02.) A source whose audio timestamps drift from the sample count builds up an
+  error. When the error passes 0.1 s, swresample drops or fills at least 0.1 s at once, in the
+  middle of a segment. Timestamps that ran 2% slow gave one drop of 0.1 s in 10 s. Before
+  measurement 20, every sample passed. A gap or an overlap shorter than 0.1 s stays as it is.
+- (Added on 2026-10-02.) `first_pts` fills a gap inside the stream by the behaviour of the code of
+  swresample, which its documentation does not state. Measurement 20 must run again for each new
+  release of FFmpeg that QuipClip supports.
 
 - An export cuts at the frames that the user selected, on each container that was tested.
 - An export of a short part of a long source does not decode the parts that it does not
