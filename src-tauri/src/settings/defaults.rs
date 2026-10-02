@@ -556,6 +556,7 @@ mod tests {
                 channels: Some(2),
                 start_time: None,
                 duration: None,
+                tagged_end: None,
             }),
         }
     }

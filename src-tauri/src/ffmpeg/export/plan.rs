@@ -1534,6 +1534,7 @@ mod tests {
             channels: Some(2),
             start_time: None,
             duration: None,
+            tagged_end: None,
         });
         // 1001 ticks * 1/30000 s = 1001/30000 s; * 44100 = 44144100/30000 = 1471.47,
         // which rounds to 1471.
@@ -1573,6 +1574,7 @@ mod tests {
             channels: Some(2),
             start_time: None,
             duration: None,
+            tagged_end: None,
         });
         // 1001 ticks * 1/30000 s = 1001/30000 s; * 48000 = 48048000/30000 = 1601.6,
         // which rounds to 1602.
@@ -1622,6 +1624,7 @@ mod tests {
             channels: Some(2),
             start_time: None,
             duration: None,
+            tagged_end: None,
         });
         let plan = plan_with(
             &[boundary(128_000, 140_800)],
@@ -1660,6 +1663,7 @@ mod tests {
             channels: Some(6),
             start_time: None,
             duration: None,
+            tagged_end: None,
         });
         let error = plan_with(
             &[boundary(0, 1001)],
@@ -1689,6 +1693,7 @@ mod tests {
             channels: Some(6),
             start_time: None,
             duration: None,
+            tagged_end: None,
         });
         probe
     }
@@ -1814,6 +1819,7 @@ mod tests {
             channels: Some(1),
             start_time: None,
             duration: None,
+            tagged_end: None,
         });
         // in_pts = -3s: seek = -3 - 0 - 5 margin = -8, clamps to None.
         // audio_in_tick = round(-3s * 2 Hz) = -6.
@@ -1902,6 +1908,7 @@ mod tests {
             channels: Some(2),
             start_time: None,
             duration: None,
+            tagged_end: None,
         });
         let with_audio =
             plan_with(&[boundary(0, 90_000)], &probe, &preset, valid_path_facts()).unwrap();
@@ -1922,6 +1929,7 @@ mod tests {
             channels: Some(2),
             start_time: None,
             duration: None,
+            tagged_end: None,
         });
         probe
     }
@@ -1936,6 +1944,7 @@ mod tests {
             channels: Some(6),
             start_time: None,
             duration: None,
+            tagged_end: None,
         });
         probe
     }

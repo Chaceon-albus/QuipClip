@@ -317,12 +317,15 @@ pub async fn start_export(
     published.clear();
 
     // Preparation spawns ffprobe and touches the filesystem, so it does not belong on the
-    // async executor. It is bounded work -- one short-lived child process -- which is what
-    // the blocking pool is for; the export itself runs for minutes and gets its own thread.
+    // async executor. It is bounded work -- at most two short-lived child processes, one after
+    // the other -- which is what the blocking pool is for; the export itself runs for minutes
+    // and gets its own thread.
     //
     // The flag goes with it: preparation is the one stretch of a run that can last tens of
     // seconds -- `ffmpeg::probe::PROBE_TIMEOUT` alone is 30 -- and a cancel that arrives
-    // inside it must not have to wait for every remaining step to finish.
+    // inside it must not have to wait for every remaining step to finish. The read of the first
+    // audio packet also stops on the flag, because it reads as far into the file as the audio
+    // starts.
     let cancel = slot.cancel_flag();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         prepare_export_with(
@@ -332,6 +335,7 @@ pub async fn start_export(
             discover_for_export,
             settings::load,
             ffmpeg::probe_media,
+            ffmpeg::probe_first_audio_packet,
         )
     })
     .await
@@ -373,9 +377,10 @@ pub async fn cancel_export(
 ///
 /// This serves the one window [`cancel_export`] cannot. [`start_export`] claims the slot,
 /// prepares, and answers with the run id only afterward, and preparation includes a re-probe
-/// bounded at [`crate::ffmpeg::probe::PROBE_TIMEOUT`], which is 30 seconds. For that whole
-/// window the frontend holds no id, so it has nothing to name to [`cancel_export`] and the user
-/// cannot stop a run that is already holding the single export slot.
+/// bounded at [`crate::ffmpeg::probe::PROBE_TIMEOUT`], which is 30 seconds, and for an export
+/// that writes audio a read of the first audio packet with the same bound. For that whole window,
+/// up to 60 seconds, the frontend holds no id, so it has nothing to name to [`cancel_export`] and
+/// the user cannot stop a run that is already holding the single export slot.
 ///
 /// # Why cancelling without naming a run is correct here
 ///
@@ -430,10 +435,23 @@ fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateE
 
 /// Do every fallible step an export needs before ffmpeg starts, in ADR 016's order.
 ///
-/// The three injected functions are the ones that reach outside the process: executable
-/// discovery, the settings read, and the ffprobe re-probe. ADR 014's "Other rules" requires
-/// that re-probe -- the renderer reads the container start time and the selected stream
-/// indices from a fresh probe, never from stale project metadata.
+/// The four injected functions are the ones that reach outside the process: executable
+/// discovery, the settings read, the ffprobe re-probe, and the read of the first audio packet.
+/// ADR 014's "Other rules" requires that re-probe -- the renderer reads the container start time
+/// and the selected stream indices from a fresh probe, never from stale project metadata.
+///
+/// `first_audio_packet` runs only when the export writes audio and the re-probe found an audio
+/// stream with a sample rate. The re-probe analyzes about the first 5 s of the file, and in a
+/// Matroska or MPEG-TS source whose audio starts later it reports the start of the container as
+/// the start of the audio (ADR 014 measurements 22 and 23). The plan reads that start for three
+/// decisions: the expected duration of an audio-only export, the bound on the silence in front of
+/// the audio, and the second input for the audio.
+/// [`crate::ffmpeg::AudioProbe::take_first_packet`] corrects the start, and the length with it.
+/// This step only adds accuracy, so it never fails the export: when it cannot start, exits
+/// unsuccessfully, writes an answer that does not parse, or times out, the plan uses the values of
+/// the re-probe, as it did before this step existed. A cancel that stops it ends the run as
+/// canceled. A stream without a sample rate is not read, because the plan refuses its audio with
+/// `sourceAudioRateUnknown` whatever its start.
 ///
 /// See this module's documentation for the five ordering obligations the body below carries.
 ///
@@ -446,18 +464,21 @@ fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateE
 /// the run from working through every remaining step after the answer is no longer wanted, and
 /// it means a cancel during preparation ends with the slot released and no reserved file left
 /// on disk.
-fn prepare_export_with<Discover, Load, Probe>(
+fn prepare_export_with<Discover, Load, Probe, FirstAudioPacket>(
     request: &ExportRequestWire,
     app_data_directory: &Path,
     cancel: &AtomicBool,
     discover: Discover,
     load: Load,
     probe: Probe,
+    first_audio_packet: FirstAudioPacket,
 ) -> Result<PreparedExport, ExportCommandError>
 where
     Discover: FnOnce(&Path) -> Result<FfmpegPaths, LocateError>,
     Load: FnOnce(&Path) -> Result<LoadedSettings, SettingsFileError>,
     Probe: FnOnce(&Path, &Path) -> Result<MediaProbe, ProbeError>,
+    FirstAudioPacket:
+        FnOnce(&Path, &Path, u32, &AtomicBool) -> Result<Option<Rational>, ProbeError>,
 {
     // Read the same way `ExportSlot::is_canceled` reads it, so the ordering pairs with
     // `ExportRegistry::cancel`'s store.
@@ -493,11 +514,34 @@ where
     let source = PathBuf::from(&request.source_path);
     let destination = PathBuf::from(&request.output_path);
 
-    // Before the re-probe, which is the one step here that can spend tens of seconds.
+    // Before the re-probe, the first of the two steps here that can spend tens of seconds.
     if canceled() {
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
-    let probe = probe(&executables.ffprobe, &source).map_err(map_reprobe_error)?;
+    let mut probe = probe(&executables.ffprobe, &source).map_err(map_reprobe_error)?;
+    // A stream without a sample rate is refused in the plan with `sourceAudioRateUnknown`
+    // whatever its start, so its first packet is not read.
+    if let Some(audio) = probe
+        .audio
+        .as_mut()
+        .filter(|audio| request.streams.writes_audio() && audio.sample_rate.is_some())
+    {
+        // Before the read of the first audio packet, the second of those steps. The re-probe
+        // takes no cancel flag, so a cancel can arrive while it runs.
+        if canceled() {
+            return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+        }
+        match first_audio_packet(&executables.ffprobe, &source, audio.index, cancel) {
+            Ok(Some(first_packet)) => {
+                audio.take_first_packet(first_packet);
+            }
+            Err(ProbeError::Canceled) => {
+                return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+            }
+            // No packet, or a probe that failed: the values of the re-probe stand.
+            Ok(None) | Err(_) => {}
+        }
+    }
 
     let segments: Vec<SegmentBoundary> = request
         .segments
@@ -1164,6 +1208,17 @@ mod tests {
         }
     }
 
+    /// A read of the first audio packet that finds no packet, so the values of the re-probe
+    /// stand.
+    fn no_first_packet(
+        _: &Path,
+        _: &Path,
+        _: u32,
+        _: &AtomicBool,
+    ) -> Result<Option<Rational>, ProbeError> {
+        Ok(None)
+    }
+
     fn sample_plan(destination: &Path) -> ExportPlan {
         ExportPlan {
             source: PathBuf::from("/media/source.mp4"),
@@ -1677,6 +1732,7 @@ mod tests {
                 *probed.borrow_mut() = true;
                 unreachable!()
             },
+            no_first_packet,
         )
         .unwrap_err();
 
@@ -1722,6 +1778,7 @@ mod tests {
                 assert_eq!(path, source);
                 Ok(sample_probe())
             },
+            no_first_packet,
         )
         .unwrap();
 
@@ -1781,6 +1838,7 @@ mod tests {
                 },
                 settings::load,
                 |_, _| Ok(sample_probe_with_audio()),
+                no_first_packet,
             )
             .unwrap()
         };
@@ -1898,6 +1956,7 @@ mod tests {
                 })
             },
             |_, _| Ok(sample_probe()),
+            no_first_packet,
         )
         .unwrap_err();
 
@@ -1943,6 +2002,7 @@ mod tests {
                 })
             },
             |_, _| Ok(sample_probe()),
+            no_first_packet,
         )
         .unwrap_err();
 
@@ -2006,6 +2066,7 @@ mod tests {
                 })
             },
             |_, _| Ok(sample_probe()),
+            no_first_packet,
         );
 
         // Release the file before the assertions, so a failing assertion cannot leave a file that
@@ -2085,6 +2146,7 @@ mod tests {
             },
             |_| unreachable!(),
             |_, _| unreachable!(),
+            no_first_packet,
         )
         .unwrap_err();
 
@@ -2145,6 +2207,7 @@ mod tests {
                 *probed.borrow_mut() = true;
                 unreachable!()
             },
+            no_first_packet,
         )
         .unwrap_err();
 
@@ -2197,6 +2260,7 @@ mod tests {
                 cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(sample_probe())
             },
+            no_first_packet,
         )
         .unwrap_err();
 
@@ -2231,6 +2295,7 @@ mod tests {
             |_| Err(LocateError::NotFound { inspected: vec![] }),
             |_| unreachable!(),
             |_, _| unreachable!(),
+            no_first_packet,
         )
         .unwrap_err();
 
@@ -2286,6 +2351,7 @@ mod tests {
                     *probed.borrow_mut() = true;
                     unreachable!()
                 },
+                no_first_packet,
             )
             .unwrap_err();
 
@@ -2442,6 +2508,7 @@ mod tests {
                 channels: Some(2),
                 start_time: None,
                 duration: None,
+                tagged_end: None,
             }),
             ..sample_probe()
         }
@@ -2454,6 +2521,31 @@ mod tests {
         streams: ExportStreams,
         probe: MediaProbe,
     ) -> Result<PreparedExport, ExportCommandError> {
+        prepare_reading_first_packet(
+            directory,
+            streams,
+            probe,
+            &[(0, 1)],
+            &AtomicBool::new(false),
+            no_first_packet,
+        )
+    }
+
+    /// [`prepare_streams`] over `segments`, in whole seconds of the sample probe's video, under
+    /// `cancel`, with the read of the first audio packet injected.
+    fn prepare_reading_first_packet(
+        directory: &TestDirectory,
+        streams: ExportStreams,
+        probe: MediaProbe,
+        segments: &[(i64, i64)],
+        cancel: &AtomicBool,
+        first_audio_packet: impl FnOnce(
+            &Path,
+            &Path,
+            u32,
+            &AtomicBool,
+        ) -> Result<Option<Rational>, ProbeError>,
+    ) -> Result<PreparedExport, ExportCommandError> {
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
         let request = ExportRequestWire {
@@ -2463,17 +2555,20 @@ mod tests {
                 .join("out.m4a")
                 .to_string_lossy()
                 .into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
-                in_pts: Pts::new(0),
-                out_pts: Pts::new(90_000),
-            }],
+            segments: segments
+                .iter()
+                .map(|(in_seconds, out_seconds)| ExportSegmentBoundaryWire {
+                    in_pts: Pts::new(in_seconds * 90_000),
+                    out_pts: Pts::new(out_seconds * 90_000),
+                })
+                .collect(),
             preset_id: None,
             streams,
         };
         prepare_export_with(
             &request,
             &directory.path,
-            &AtomicBool::new(false),
+            cancel,
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -2488,6 +2583,7 @@ mod tests {
                 })
             },
             |_, _| Ok(probe),
+            first_audio_packet,
         )
     }
 
@@ -2571,6 +2667,365 @@ mod tests {
         let start = start_payload("42-7", &prepared);
         assert_eq!(start.streams, ExportStreams::VideoOnly);
         assert_eq!(start.expected_frames, Some(30));
+    }
+
+    // -- the first audio packet --------------------------------------------------------------
+
+    /// The sample probe as the re-probe reads a Matroska source of 120 s whose audio starts
+    /// after its first 5 s: the start and the length of the container, and the tag of the track
+    /// (ADR 014 measurement 23).
+    fn sample_probe_with_a_missed_audio_start() -> MediaProbe {
+        let mut probe = MediaProbe {
+            video_duration_ticks: Some(TickCount::new(120 * 90_000).unwrap()),
+            approximate_duration_seconds: Some(120.0),
+            ..sample_probe_with_audio()
+        };
+        let audio = probe.audio.as_mut().unwrap();
+        audio.start_time = Some(Rational::new(0, 1).unwrap());
+        audio.duration = Some(Rational::new(120, 1).unwrap());
+        audio.tagged_end = Some(Rational::new(120, 1).unwrap());
+        probe
+    }
+
+    /// A read of the first audio packet that finds it at `seconds`.
+    fn first_packet_at(
+        seconds: i64,
+    ) -> impl FnOnce(&Path, &Path, u32, &AtomicBool) -> Result<Option<Rational>, ProbeError> {
+        move |_, _, _, _| Ok(Rational::new(seconds, 1))
+    }
+
+    #[test]
+    fn a_later_first_audio_packet_gives_the_plan_the_audio_start_the_re_probe_missed() {
+        // The re-probe puts the audio at 0 s, so the plan neither sees the late start nor takes the
+        // audio from a second input, and FFmpeg keeps 12 s of decoded video in memory. The first
+        // packet at 12 s corrects both.
+        let directory = TestDirectory::new();
+        let cancel = AtomicBool::new(false);
+        let read = RefCell::new(None);
+        let prepared = prepare_reading_first_packet(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_a_missed_audio_start(),
+            &[(0, 1)],
+            &cancel,
+            |ffprobe, source, stream, flag| {
+                *read.borrow_mut() = Some((
+                    ffprobe.to_path_buf(),
+                    source.to_path_buf(),
+                    stream,
+                    std::ptr::eq(flag, &cancel),
+                ));
+                Ok(Rational::new(12, 1))
+            },
+        )
+        .unwrap();
+
+        // The read names the located ffprobe, the source, the absolute index of the audio
+        // stream, and the cancel flag of this run.
+        assert_eq!(
+            read.into_inner(),
+            Some((
+                directory.path.join("ffprobe"),
+                directory.path.join("source.mp4"),
+                1,
+                true
+            ))
+        );
+        assert!(prepared.plan.separate_audio_input);
+
+        let uncorrected = prepare_streams(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_a_missed_audio_start(),
+        )
+        .unwrap();
+        assert!(!uncorrected.plan.separate_audio_input);
+    }
+
+    #[test]
+    fn the_corrected_audio_start_bounds_the_silence_in_front_of_it() {
+        // A segment from 0 s to 75 s needs 70 s of silence in front of audio that starts at 70 s,
+        // which is more than the 60 s bound (ADR 014 measurement 21).
+        let directory = TestDirectory::new();
+        let error = match prepare_reading_first_packet(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_a_missed_audio_start(),
+            &[(0, 75)],
+            &AtomicBool::new(false),
+            first_packet_at(70),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("70 s of silence is over the bound"),
+        };
+        assert_eq!(error.code, ExportErrorCode::AudioGapTooLong);
+        assert_eq!(leftover_reservations(&directory), 0);
+
+        let directory = TestDirectory::new();
+        assert!(prepare_reading_first_packet(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_a_missed_audio_start(),
+            &[(0, 75)],
+            &AtomicBool::new(false),
+            no_first_packet,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn an_audio_only_export_counts_its_audio_from_the_corrected_start() {
+        // A segment that ends before the first packet writes no audio. The plan refuses it rather
+        // than expect 10 s of audio and fail the check after the encode.
+        let directory = TestDirectory::new();
+        let error = match prepare_reading_first_packet(
+            &directory,
+            ExportStreams::AudioOnly,
+            sample_probe_with_a_missed_audio_start(),
+            &[(0, 10)],
+            &AtomicBool::new(false),
+            first_packet_at(12),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("the audio starts after the segment"),
+        };
+        assert_eq!(error.code, ExportErrorCode::SourceHasNoAudio);
+
+        // A segment that reaches the first packet counts from its In point, and the audio still
+        // ends at 120 s, not at 12 s + 120 s: the length of the container is not kept as a length.
+        let directory = TestDirectory::new();
+        let prepared = prepare_reading_first_packet(
+            &directory,
+            ExportStreams::AudioOnly,
+            sample_probe_with_a_missed_audio_start(),
+            &[(10, 20), (110, 130)],
+            &AtomicBool::new(false),
+            first_packet_at(12),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.plan.audio.unwrap().expected_duration,
+            Rational::new(20, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_first_audio_packet_at_or_before_the_reported_start_leaves_the_command_as_it_was() {
+        // A source that the re-probe reads correctly: its first packet lies at the reported start,
+        // or before it by the priming of the encoder. The plan and the command do not change, byte
+        // for byte. The start of 0.6 s is past the 0.5 s threshold of the second input, so a packet
+        // at 0.4 s that moved the start would drop that input.
+        let plan_and_command = |prepared: PreparedExport| -> (ExportPlan, Vec<String>) {
+            let mut arguments = prepared.arguments.clone();
+            arguments.pop();
+            (prepared.plan.clone(), arguments)
+        };
+        let directory = TestDirectory::new();
+        let mut probe = sample_probe_with_a_missed_audio_start();
+        probe.audio.as_mut().unwrap().start_time = Rational::new(3, 5);
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            let expected = plan_and_command(
+                prepare_reading_first_packet(
+                    &directory,
+                    streams,
+                    probe.clone(),
+                    &[(0, 1), (30, 40)],
+                    &AtomicBool::new(false),
+                    no_first_packet,
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                expected.0.separate_audio_input,
+                streams == ExportStreams::VideoAndAudio
+            );
+            for first_packet in [Rational::new(3, 5), Rational::new(2, 5)] {
+                let prepared = prepare_reading_first_packet(
+                    &directory,
+                    streams,
+                    probe.clone(),
+                    &[(0, 1), (30, 40)],
+                    &AtomicBool::new(false),
+                    move |_, _, _, _| Ok(first_packet),
+                )
+                .unwrap();
+                assert_eq!(plan_and_command(prepared), expected, "{first_packet:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_audio_packet_is_read_only_for_an_export_that_writes_the_audio_of_a_source() {
+        let directory = TestDirectory::new();
+        let never =
+            |_: &Path, _: &Path, _: u32, _: &AtomicBool| -> Result<Option<Rational>, ProbeError> {
+                unreachable!("nothing reads the audio")
+            };
+        prepare_reading_first_packet(
+            &directory,
+            ExportStreams::VideoOnly,
+            sample_probe_with_a_missed_audio_start(),
+            &[(0, 1)],
+            &AtomicBool::new(false),
+            never,
+        )
+        .unwrap();
+        prepare_reading_first_packet(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe(),
+            &[(0, 1)],
+            &AtomicBool::new(false),
+            never,
+        )
+        .unwrap();
+
+        // A stream without a sample rate: the plan refuses its audio whatever its start, so the
+        // read would be wasted.
+        let mut probe = sample_probe_with_a_missed_audio_start();
+        probe.audio.as_mut().unwrap().sample_rate = None;
+        let error = match prepare_reading_first_packet(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            probe,
+            &[(0, 1)],
+            &AtomicBool::new(false),
+            never,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("audio without a sample rate cannot be cut"),
+        };
+        assert_eq!(error.code, ExportErrorCode::SourceAudioRateUnknown);
+    }
+
+    #[test]
+    fn a_cancel_during_the_re_probe_ends_preparation_before_the_first_audio_packet_is_read() {
+        // The re-probe takes no cancel flag, so a cancel that lands while it runs is read only
+        // after it. The read of the first packet is the next step that can spend tens of seconds.
+        let directory = TestDirectory::new();
+        let cancel = AtomicBool::new(false);
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let request = ExportRequestWire {
+            source_path: source.to_string_lossy().into_owned(),
+            output_path: directory
+                .path
+                .join("out.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            segments: vec![ExportSegmentBoundaryWire {
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            preset_id: None,
+            streams: ExportStreams::VideoAndAudio,
+        };
+        let error = prepare_export_with(
+            &request,
+            &directory.path,
+            &cancel,
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_| {
+                Ok(LoadedSettings {
+                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
+                    seeded: false,
+                })
+            },
+            |_, _| {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(sample_probe_with_a_missed_audio_start())
+            },
+            |_, _, _, _| unreachable!("the run was canceled before the read"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::Canceled);
+        assert_eq!(leftover_reservations(&directory), 0);
+    }
+
+    #[test]
+    fn a_failed_read_of_the_first_audio_packet_keeps_the_re_probe_and_the_export() {
+        // The read only adds accuracy. A failure leaves the plan the re-probe gives, and the
+        // command is the command of an export without the read. Every run uses one directory, so
+        // the commands name one source; the last argument, the reservation, is left out.
+        let command = |prepared: PreparedExport| -> Vec<String> {
+            let mut arguments = prepared.arguments.clone();
+            arguments.pop();
+            arguments
+        };
+        let directory = TestDirectory::new();
+        let expected = command(
+            prepare_streams(
+                &directory,
+                ExportStreams::VideoAndAudio,
+                sample_probe_with_a_missed_audio_start(),
+            )
+            .unwrap(),
+        );
+        let failures = [
+            ProbeError::Spawn {
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "gone"),
+            },
+            ProbeError::ProcessFailed {
+                code: Some(1),
+                stderr: b"Invalid data found when processing input".to_vec(),
+            },
+            ProbeError::Parse {
+                source: crate::ffmpeg::ProbeParseError::Json(
+                    serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err(),
+                ),
+                stderr: Vec::new(),
+            },
+            ProbeError::TimedOut {
+                timeout: Duration::from_secs(30),
+                stderr: Vec::new(),
+            },
+        ];
+        for failure in failures {
+            let shown = failure.to_string();
+            let prepared = prepare_reading_first_packet(
+                &directory,
+                ExportStreams::VideoAndAudio,
+                sample_probe_with_a_missed_audio_start(),
+                &[(0, 1)],
+                &AtomicBool::new(false),
+                move |_, _, _, _| Err(failure),
+            )
+            .unwrap_or_else(|error| panic!("{shown}: {:?}", error.code));
+            assert!(!prepared.plan.separate_audio_input, "{shown}");
+            assert_eq!(command(prepared), expected, "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_cancel_during_the_read_of_the_first_audio_packet_ends_the_run_with_nothing_reserved() {
+        // The read stops on the flag of the run and reports the cancel. A read that finished in the
+        // same poll as the cancel still ends the run before the reservation.
+        for answer in [Err(ProbeError::Canceled), Ok(Rational::new(12, 1))] {
+            let directory = TestDirectory::new();
+            let error = match prepare_reading_first_packet(
+                &directory,
+                ExportStreams::VideoAndAudio,
+                sample_probe_with_a_missed_audio_start(),
+                &[(0, 1)],
+                &AtomicBool::new(false),
+                move |_, _, _, cancel| {
+                    cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    answer
+                },
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("the run was canceled"),
+            };
+            assert_eq!(error.code, ExportErrorCode::Canceled);
+            assert_eq!(leftover_reservations(&directory), 0);
+        }
     }
 
     // -- the stream choice: the success check of an export without video -------------------

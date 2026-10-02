@@ -120,19 +120,79 @@ pub struct AudioProbe {
     /// The export reads this and [`Self::duration`] only to know how much audio its segments can
     /// take from the stream (`PlannedAudio::expected_duration`), and this to bound the silence
     /// that its segments need in front of the first sample (`MAX_LEADING_AUDIO_SILENCE_SECONDS`
-    /// of the export module). Neither is an edit boundary
-    /// (ADR 002), and neither is on the import wire: the interface does not read them.
+    /// of the export module) and to choose a second input for the audio
+    /// (`ExportPlan::separate_audio_input`). Neither is an edit boundary (ADR 002), and neither is
+    /// on the import wire: the interface does not read them.
+    ///
+    /// ffprobe can report the start of the container here when the audio starts more than about
+    /// 5 s into a Matroska or MPEG-TS file. An export that writes audio therefore corrects this
+    /// value, and [`Self::duration`] with it, from the first packet of the stream
+    /// ([`Self::take_first_packet`]).
     #[serde(skip)]
     pub start_time: Option<Rational>,
     /// The length of this stream in seconds, or `None` when ffprobe reports none.
     ///
     /// This is `duration_ts` times the stream's `time_base`, exact; then the decimal `duration`;
-    /// then the `DURATION` tag less [`Self::start_time`], because the `matroska` demuxer reports no
-    /// other length for a stream and its tag holds the end of the track. A source whose audio
+    /// then [`Self::tagged_end`] less [`Self::start_time`], because the `matroska` demuxer reports
+    /// no other length for a stream and its tag holds the end of the track. A source whose audio
     /// stops before its video, such as a phone recording, has a value below the video's length
     /// here.
     #[serde(skip)]
     pub duration: Option<Rational>,
+    /// The end of this stream in seconds on the timeline of the container, from its `DURATION`
+    /// tag, or `None` when the stream has no such tag or the tag does not parse.
+    ///
+    /// Only [`Self::take_first_packet`] reads this field directly. It is the end of the track
+    /// that [`Self::duration`] subtracts the start from. It is kept so that a start that moves
+    /// still has an end when ffprobe reported no end of the stream, or reported an end that does
+    /// not lie after the first packet.
+    #[serde(skip)]
+    pub tagged_end: Option<Rational>,
+}
+
+impl AudioProbe {
+    /// Correct [`Self::start_time`] with `first_packet`, the time of the first packet of this
+    /// stream that [`probe_first_audio_packet`] read. Returns whether the start moved.
+    ///
+    /// The start moves only when the packet comes after the reported start, or when ffprobe
+    /// reported no start. An earlier packet changes nothing: a source that ffprobe reads
+    /// correctly has its first packet at the reported start, or before it by the priming of the
+    /// encoder, which the reported start of a Matroska stream already skips.
+    ///
+    /// The first packet comes after the reported start only when the analysis of ffprobe read
+    /// no packet of the stream. The start and the length that ffprobe then reports belong to the
+    /// container: `libavformat` gives a stream that it has no time for the start and the
+    /// duration of the container. That `duration_ts` is therefore not a length of the stream, and
+    /// the length must not stay as it is.
+    ///
+    /// This keeps the end of the stream and moves its start. The end is the reported start plus
+    /// the reported length, which is the end of the container when the values are the
+    /// container's. Only when that end is unknown, or does not lie after `first_packet`, is the
+    /// end [`Self::tagged_end`], and only when the tag lies after the packet. The reported end
+    /// comes first because a muxer other than FFmpeg's can write the length of the track in the
+    /// tag (ADR 036), and such a tag read as an end would end the audio early. When ffprobe
+    /// reported a start, the end therefore never moves before the end that the export used
+    /// without this correction. When it reported none, there was no end before, and the tag can
+    /// give one. The length is the end less the new start, or `None` when no end lies after the
+    /// packet.
+    pub fn take_first_packet(&mut self, first_packet: Rational) -> bool {
+        if self.start_time.is_some_and(|start| first_packet <= start) {
+            return false;
+        }
+        let reported_end = self
+            .start_time
+            .zip(self.duration)
+            .and_then(|(start, length)| start.add(length));
+        let end = reported_end
+            .into_iter()
+            .chain(self.tagged_end)
+            .find(|end| *end > first_packet);
+        self.start_time = Some(first_packet);
+        self.duration = end
+            .and_then(|end| end.sub(first_packet))
+            .filter(|length| length.num() > 0);
+        true
+    }
 }
 
 /// A failure to invoke ffprobe or normalize its output.
@@ -157,9 +217,9 @@ pub enum ProbeError {
     },
     /// The caller's cancel flag was set while `ffprobe` ran, and the run killed it.
     ///
-    /// Only [`probe_output_audio`] takes a cancel flag: it runs while an export holds the export
-    /// slot, after the encode, where a user's Stop and an application quit (ADR 017) must not
-    /// wait out [`PROBE_TIMEOUT`]. The probe of a source never reports this.
+    /// Only [`probe_output_audio`] and [`probe_first_audio_packet`] take a cancel flag: they run
+    /// while an export holds the export slot, where a user's Stop and an application quit
+    /// (ADR 017) must not wait out [`PROBE_TIMEOUT`]. [`probe_media`] never reports this.
     Canceled,
 }
 
@@ -442,6 +502,93 @@ fn parse_decimal_seconds(value: Option<&str>) -> Option<Rational> {
         .map(str::trim)
         .filter(|text| !text.is_empty() && *text != "N/A")?;
     Rational::from_decimal_str(text)
+}
+
+/// Run the resolved ffprobe executable to read the time of the first packet of the stream
+/// `stream_index` of `media_path`, within [`PROBE_TIMEOUT`], and stop it when `cancel` is set.
+///
+/// [`probe_media`] analyzes about the first 5 s of a file. In a Matroska or MPEG-TS source whose
+/// audio starts later than that, it reports the start of the container as the start of the audio
+/// (ADR 014 measurement 22). After the same analysis, this run reads packets until the first
+/// packet of the one stream, and decodes none of them, so it finds that start at any distance.
+/// [`AudioProbe::take_first_packet`] applies the answer.
+///
+/// The answer is `Some` with the `pts` of that packet times the `time_base` of the stream, exact,
+/// and `None` when the stream has no packet or the packet has no `pts`. The runner, the deadline
+/// and the cancel rule are those of [`probe_output_audio`] (`procutil`, ADR 018).
+pub fn probe_first_audio_packet(
+    ffprobe_path: &Path,
+    media_path: &Path,
+    stream_index: u32,
+    cancel: &AtomicBool,
+) -> Result<Option<Rational>, ProbeError> {
+    let stream = stream_index.to_string();
+    let arguments = [
+        OsStr::new("-v"),
+        OsStr::new("error"),
+        OsStr::new("-select_streams"),
+        OsStr::new(&stream),
+        OsStr::new("-show_entries"),
+        OsStr::new("packet=pts:stream=time_base"),
+        // Stop after one packet of the selected stream. The packets of the other streams in
+        // front of it are read and dropped, not decoded.
+        OsStr::new("-read_intervals"),
+        OsStr::new("%+#1"),
+        OsStr::new("-of"),
+        OsStr::new("json"),
+        OsStr::new("-i"),
+        media_path.as_os_str(),
+    ];
+    let run = run_probe_process(
+        ffprobe_path,
+        &arguments,
+        PROBE_TIMEOUT,
+        PROBE_POLL_INTERVAL,
+        Some(cancel),
+    )
+    .map_err(|source| ProbeError::Spawn { source })?;
+    finish_probe_run_with(run, PROBE_TIMEOUT, parse_first_packet_json)
+}
+
+/// Read the answer of [`probe_first_audio_packet`].
+///
+/// Only malformed JSON fails. No packet, a packet without a usable `pts`, and a missing or
+/// non-positive time base all read as `None`: the caller then keeps what [`probe_media`]
+/// reported.
+pub fn parse_first_packet_json(json: &[u8]) -> Result<Option<Rational>, ProbeParseError> {
+    let raw: RawFirstPacket = serde_json::from_slice(json)?;
+    let pts = raw.packets.first().and_then(|packet| {
+        parse_optional_i64_value(packet.pts.as_ref(), "packets.pts")
+            .ok()
+            .flatten()
+    });
+    let time_base = raw
+        .streams
+        .first()
+        .and_then(|stream| stream.time_base.as_deref())
+        .and_then(Rational::from_ffprobe)
+        .filter(|value| value.num() > 0);
+    Ok(pts
+        .zip(time_base)
+        .and_then(|(pts, time_base)| pts_seconds(Pts::new(pts), time_base)))
+}
+
+#[derive(Deserialize)]
+struct RawFirstPacket {
+    #[serde(default)]
+    packets: Vec<RawPacket>,
+    #[serde(default)]
+    streams: Vec<RawPacketStream>,
+}
+
+#[derive(Deserialize)]
+struct RawPacket {
+    pts: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct RawPacketStream {
+    time_base: Option<String>,
 }
 
 /// Turn one finished run into a probe or into the failure it reports.
@@ -742,6 +889,8 @@ fn normalize_audio(raw: &RawStream) -> Result<AudioProbe, ProbeDataError> {
         field: "streams.audio.index",
         value: stream_index.to_string(),
     })?;
+    let start_time = audio_start_time(raw);
+    let tagged_end = parse_tag_duration(raw.tags.duration.as_deref());
     Ok(AudioProbe {
         index,
         codec: raw.codec_name.clone(),
@@ -758,8 +907,9 @@ fn normalize_audio(raw: &RawStream) -> Result<AudioProbe, ProbeDataError> {
             .transpose()?
             .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value > 0),
-        start_time: audio_start_time(raw),
-        duration: audio_duration(raw, audio_start_time(raw)),
+        start_time,
+        duration: audio_duration(raw, start_time, tagged_end),
+        tagged_end,
     })
 }
 
@@ -787,21 +937,25 @@ fn audio_start_time(raw: &RawStream) -> Option<Rational> {
 }
 
 /// [`AudioProbe::duration`]: `duration_ts` in the stream's time base, else the decimal
-/// `duration`, else the `DURATION` tag less `start`. A negative length reads as unknown. As for
-/// [`audio_start_time`], nothing here fails the probe.
+/// `duration`, else `tagged_end`, the parsed `DURATION` tag, less `start`. A negative length reads
+/// as unknown. As for [`audio_start_time`], nothing here fails the probe.
 ///
 /// The tag is not a length. The `matroska` muxer of ffmpeg 9.0.2 writes it as the end of the
 /// track on the container timeline: an audio track muxed to start at 0.3 s with 129.721 s of
 /// audio carries `00:02:10.021000000`. Its length is therefore the tag less the start of the
 /// stream, and a tag with no known start gives no length.
-fn audio_duration(raw: &RawStream, start: Option<Rational>) -> Option<Rational> {
+fn audio_duration(
+    raw: &RawStream,
+    start: Option<Rational>,
+    tagged_end: Option<Rational>,
+) -> Option<Rational> {
     let exact = parse_optional_i64_value(raw.duration_ts.as_ref(), "streams.audio.duration_ts")
         .ok()
         .flatten()
         .zip(audio_time_base(raw))
         .and_then(|(ticks, time_base)| pts_seconds(Pts::new(ticks), time_base));
     let tagged = || {
-        parse_tag_duration(raw.tags.duration.as_deref())
+        tagged_end
             .zip(start)
             .and_then(|(end, start)| end.sub(start))
     };
@@ -1666,7 +1820,291 @@ mod tests {
         let audio = value["audio"].as_object().unwrap();
         assert!(!audio.contains_key("startTime"));
         assert!(!audio.contains_key("duration"));
+        assert!(!audio.contains_key("taggedEnd"));
         assert_eq!(value["audio"]["index"], 1);
+    }
+
+    // -- the first packet of the source audio stream ------------------------------------------
+
+    fn parse_first_packet(value: Value) -> Option<Rational> {
+        parse_first_packet_json(&serde_json::to_vec(&value).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_first_packet_is_its_pts_in_the_time_base_of_the_stream_exactly() {
+        // The answers ffprobe 9.0.2 wrote for sources whose audio starts 60 s after the video:
+        // Matroska at 1/1000, MPEG-TS at 1/90000 with its program, and MP4 at 1/48000.
+        let matroska = parse_first_packet(serde_json::json!({
+            "packets": [{ "pts": 59979, "side_data_list": [{}] }],
+            "programs": [],
+            "stream_groups": [],
+            "streams": [{ "time_base": "1/1000" }]
+        }));
+        assert_eq!(matroska, Some(seconds("59.979")));
+        let transport = parse_first_packet(serde_json::json!({
+            "packets": [{ "pts": 5524080, "side_data_list": [{}] }],
+            "programs": [{ "streams": [{ "time_base": "1/90000" }] }],
+            "stream_groups": [],
+            "streams": [{ "time_base": "1/90000" }]
+        }));
+        assert_eq!(transport, Rational::new(5_524_080, 90_000));
+        let mp4 = parse_first_packet(serde_json::json!({
+            "packets": [{ "pts": 2878976 }],
+            "streams": [{ "time_base": "1/48000" }]
+        }));
+        assert_eq!(mp4, Rational::new(2_878_976, 48_000));
+        // The priming of an encoder puts the first packet before zero.
+        let primed = parse_first_packet(serde_json::json!({
+            "packets": [{ "pts": -1024 }],
+            "streams": [{ "time_base": "1/48000" }]
+        }));
+        assert_eq!(primed, Rational::new(-1024, 48_000));
+    }
+
+    #[test]
+    fn an_answer_without_a_usable_packet_or_time_base_reads_as_none_and_only_bad_json_fails() {
+        for answer in [
+            serde_json::json!({}),
+            serde_json::json!({ "packets": [], "streams": [{ "time_base": "1/1000" }] }),
+            serde_json::json!({ "packets": [{}], "streams": [{ "time_base": "1/1000" }] }),
+            serde_json::json!({
+                "packets": [{ "pts": "N/A" }],
+                "streams": [{ "time_base": "1/1000" }]
+            }),
+            serde_json::json!({
+                "packets": [{ "pts": "x" }],
+                "streams": [{ "time_base": "1/1000" }]
+            }),
+            serde_json::json!({ "packets": [{ "pts": 12 }], "streams": [] }),
+            serde_json::json!({ "packets": [{ "pts": 12 }], "streams": [{ "time_base": "0/1" }] }),
+            serde_json::json!({ "packets": [{ "pts": 12 }], "streams": [{}] }),
+        ] {
+            assert_eq!(parse_first_packet(answer.clone()), None, "{answer}");
+        }
+        assert!(matches!(
+            parse_first_packet_json(b"{"),
+            Err(ProbeParseError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn a_first_packet_probe_run_reports_the_failures_of_every_probe() {
+        let run = |end, stdout: &[u8]| ProbeRun {
+            end,
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        };
+        let answer = br#"{"packets":[{"pts":12000}],"streams":[{"time_base":"1/1000"}]}"#;
+        let exited = |success| {
+            ProbeEnd::Exited(ProbeExit {
+                code: Some(if success { 0 } else { 1 }),
+                success,
+            })
+        };
+        assert_eq!(
+            finish_probe_run_with(
+                run(exited(true), answer),
+                PROBE_TIMEOUT,
+                parse_first_packet_json
+            )
+            .unwrap(),
+            Some(seconds("12"))
+        );
+        assert!(matches!(
+            finish_probe_run_with(
+                run(exited(false), b""),
+                PROBE_TIMEOUT,
+                parse_first_packet_json
+            ),
+            Err(ProbeError::ProcessFailed { code: Some(1), .. })
+        ));
+        assert!(matches!(
+            finish_probe_run_with(
+                run(ProbeEnd::TimedOut, answer),
+                PROBE_TIMEOUT,
+                parse_first_packet_json
+            ),
+            Err(ProbeError::TimedOut { .. })
+        ));
+        assert!(matches!(
+            finish_probe_run_with(
+                run(ProbeEnd::Canceled, answer),
+                PROBE_TIMEOUT,
+                parse_first_packet_json
+            ),
+            Err(ProbeError::Canceled)
+        ));
+    }
+
+    #[test]
+    fn a_later_first_packet_moves_a_missed_matroska_start_and_keeps_the_reported_end() {
+        // The shape ffprobe 9.0.2 reported for a Matroska source whose audio starts 60 s after
+        // its video: the start of the container, the duration of the container as `duration_ts`,
+        // and the tag of the track. A length kept as a length would end the audio at 180.01 s.
+        let mut audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "duration_ts": 120010,
+            "duration": "120.010000",
+            "tags": { "DURATION": "00:02:00.010000000" }
+        }))
+        .audio
+        .unwrap();
+        assert_eq!(audio.start_time, Some(seconds("0")));
+        assert_eq!(audio.duration, Some(seconds("120.01")));
+        assert_eq!(audio.tagged_end, Some(seconds("120.01")));
+
+        assert!(audio.take_first_packet(seconds("59.979")));
+        assert_eq!(audio.start_time, Some(seconds("59.979")));
+        assert_eq!(audio.duration, Some(seconds("60.031")));
+
+        // A tag that another muxer wrote as the length of the track, 108 s of audio from 12 s in
+        // a file of 120 s. Read as an end, it would end the audio at 108 s, before the end the
+        // export used without the correction. The reported end, the end of the container, stays.
+        let mut audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "duration_ts": 120000,
+            "tags": { "DURATION": "00:01:48.000000000" }
+        }))
+        .audio
+        .unwrap();
+        assert!(audio.take_first_packet(seconds("12")));
+        assert_eq!(audio.start_time, Some(seconds("12")));
+        assert_eq!(audio.duration, Some(seconds("108")));
+
+        // The same end wins over a tag of FFmpeg's muxer that ends the audio before the
+        // container. That keeps the end the export used before, and gives up the earlier end.
+        let mut audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "duration_ts": 120010,
+            "tags": { "DURATION": "00:01:40.000000000" }
+        }))
+        .audio
+        .unwrap();
+        assert!(audio.take_first_packet(seconds("12")));
+        assert_eq!(audio.duration, Some(seconds("108.01")));
+    }
+
+    #[test]
+    fn a_later_first_packet_moves_a_missed_transport_stream_start_and_keeps_its_end() {
+        // The shape ffprobe 9.0.2 reported for an MPEG-TS source whose audio starts 60 s after
+        // its video: the start and the duration of the container, and no tag. The end of the
+        // container stays the end of the audio.
+        let mut audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/90000",
+            "start_pts": 126000,
+            "start_time": "1.400000",
+            "duration_ts": 10800000,
+            "duration": "120.000000"
+        }))
+        .audio
+        .unwrap();
+        let first_packet = Rational::new(5_524_080, 90_000).unwrap();
+        assert!(audio.take_first_packet(first_packet));
+        assert_eq!(audio.start_time, Some(first_packet));
+        assert_eq!(
+            audio.duration,
+            seconds("121.4").sub(first_packet),
+            "the end stays at 1.4 s + 120 s"
+        );
+    }
+
+    #[test]
+    fn a_first_packet_at_or_before_the_reported_start_changes_nothing() {
+        // A source that ffprobe reads correctly. In Matroska, the reported start already skips the
+        // priming of the encoder, so the first packet lies 21 ms before it. In MPEG-TS the two are
+        // equal.
+        let matroska = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "tags": { "DURATION": "00:02:00.021000000" }
+        }))
+        .audio
+        .unwrap();
+        let mut corrected = matroska.clone();
+        assert!(!corrected.take_first_packet(seconds("-0.021")));
+        assert_eq!(corrected, matroska);
+        assert!(!corrected.take_first_packet(seconds("0")));
+        assert_eq!(corrected, matroska);
+    }
+
+    #[test]
+    fn a_first_packet_gives_a_start_that_was_not_reported_and_a_length_only_from_an_end() {
+        // No start was reported, so a reported length places no end; the tag still does.
+        let mut audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "duration_ts": 50000,
+            "tags": { "DURATION": "00:01:00.000000000" }
+        }))
+        .audio
+        .unwrap();
+        assert_eq!(audio.start_time, None);
+        assert!(audio.take_first_packet(seconds("12")));
+        assert_eq!(audio.start_time, Some(seconds("12")));
+        assert_eq!(audio.duration, Some(seconds("48")));
+
+        let mut audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "duration_ts": 50000
+        }))
+        .audio
+        .unwrap();
+        assert!(audio.take_first_packet(seconds("12")));
+        assert_eq!(audio.start_time, Some(seconds("12")));
+        assert_eq!(audio.duration, None);
+    }
+
+    #[test]
+    fn an_end_at_or_before_the_first_packet_is_not_an_end() {
+        // A reported end before the first packet gives way to a tag after it.
+        let mut audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "duration_ts": 10000,
+            "tags": { "DURATION": "00:00:30.000000000" }
+        }))
+        .audio
+        .unwrap();
+        assert!(audio.take_first_packet(seconds("12")));
+        assert_eq!(audio.duration, Some(seconds("18")));
+
+        // A tag at the first packet is no end either.
+        let mut audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "tags": { "DURATION": "00:01:00.000000000" }
+        }))
+        .audio
+        .unwrap();
+        assert!(audio.take_first_packet(seconds("60")));
+        assert_eq!(audio.start_time, Some(seconds("60")));
+        assert_eq!(audio.duration, None);
+
+        // Neither end lies after the first packet.
+        let mut audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "duration_ts": 10000,
+            "tags": { "DURATION": "00:00:12.000000000" }
+        }))
+        .audio
+        .unwrap();
+        assert!(audio.take_first_packet(seconds("12")));
+        assert_eq!(audio.duration, None);
+
+        // No end after the first packet at all: the length is unknown, not zero or negative.
+        let mut audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "duration_ts": 10000
+        }))
+        .audio
+        .unwrap();
+        assert!(audio.take_first_packet(seconds("10")));
+        assert_eq!(audio.start_time, Some(seconds("10")));
+        assert_eq!(audio.duration, None);
     }
 
     // -- the probe of an export output without video ------------------------------------------
