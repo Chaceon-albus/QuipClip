@@ -61,6 +61,7 @@ document summarizes them and shows how the parts fit together.
 | [`038-settings-in-its-own-window.md`](../.agents/decisions/038-settings-in-its-own-window.md)                                               | Settings opens in its own window, with a grant for each command            |
 | [`039-recover-the-preview-after-a-decode-error.md`](../.agents/decisions/039-recover-the-preview-after-a-decode-error.md)                   | A decode error mid-file stalls the preview, and the next seek reloads it   |
 | [`040-preset-schema-2-encoder-options.md`](../.agents/decisions/040-preset-schema-2-encoder-options.md)                                     | Encoder options, constant quality and a pixel format in each preset        |
+| [`041-test-a-preset-on-this-machine.md`](../.agents/decisions/041-test-a-preset-on-this-machine.md)                                         | A preset can be tested on this machine with its own arguments              |
 
 ## Shape
 

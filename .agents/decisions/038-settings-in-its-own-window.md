@@ -4,6 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 006, ADR 011, ADR 013, ADR 020, ADR 021, ADR 024, ADR 026, ADR 027, ADR 031, ADR 032
+- Amended by: ADR 041
 
 ## Context
 
@@ -100,8 +101,10 @@ manifest existed, so every page could call every command.
   `core:default` and its window, dialog and progress permissions.
 - The Settings window may call `load_settings`, `save_settings`, `restore_default_presets`,
   `reset_settings`, `start_capability_probe`, `take_settings_window_request` and
-  `close_settings_window`. It holds `core:event:default`, four window permissions (set the title,
-  set the theme, show, set the focus) and `dialog:allow-open` for the FFmpeg path. It holds no
+  `close_settings_window`, and (added on 2026-10-02) `test_preset` and `preset_test_results` of
+  ADR 041, which the main window may call too. It holds `core:event:default`, four window
+  permissions (set the title, set the theme, show, set the focus) and `dialog:allow-open` for
+  the FFmpeg path. It holds no
   menu permission, so it cannot replace the macOS menu that holds Quit.
 - `load_project` and `save_project` are granted to no window, because version 1 keeps no project
   file.

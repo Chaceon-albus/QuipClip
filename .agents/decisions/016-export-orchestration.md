@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 036
+- Amended by: ADR 036, ADR 041
 
 ## Context
 
@@ -177,6 +177,8 @@ reason has inverted. It was dismissable because a cancel was impossible and refu
 dismissal would have given the interface a state it could enter and not leave; the cost was an
 orphaned run that kept encoding, held the slot, and refused the next export. The dismissal now
 asks the run to stop first, so leaving is an escape rather than the orphan.
+
+(Changed on 2026-10-02.) The export registry also counts the exports that began, so the test of a preset (ADR 041) can tell that an export started and ended while it ran, and then does not store its result.
 
 ## Consequences
 

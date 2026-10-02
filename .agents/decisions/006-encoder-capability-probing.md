@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-03
 - Deciders: capric98
-- Amended by: ADR 023, ADR 038
+- Amended by: ADR 023, ADR 038, ADR 041
 
 ## Context
 
@@ -135,6 +135,8 @@ candidate that it inspected, in search order. Each candidate holds the `ffmpeg` 
 macOS that order includes the two Homebrew directories from ADR 012.
 
 (Changed on 2026-10-02.) A forced probe sends `ffmpeg:capability-probe-forced` before its worker starts, and the other window takes that run over (ADR 038). The frontend of each window still drops the events of a run that it does not follow.
+
+(Changed on 2026-10-02.) The test of a preset on this machine (ADR 041) holds the same lock as a smoke test, so the two never run at the same time. Its results live in their own file, `preset-tests.json`, keyed by the same cache key of the binary.
 
 ## Consequences
 
