@@ -35,14 +35,31 @@ The finished dialog shows the file name, its folder and the time the export took
 Finder (Show in File Explorer on Windows), Open, and Done. The status bar result of a hidden
 export (ADR 025) offers Show as well.
 
+(Changed on 2026-10-02.) The application no longer opens the output. The user asked for one
+file action, because three buttons were too many and the Windows label was too long.
+
+- The finished dialog shows Show File and Done. The label of Show File is the same on both
+  platforms. Its tooltip names the file manager: Show in Finder on macOS, and Show in File
+  Explorer on Windows. The accessible name of the button is its visible text, and the tooltip
+  is only a description.
+- The command `open_export_output` is removed, together with its check of the file extension
+  and the error codes `outputNotVideo` and `openFailed`. The codes that remain are
+  `outputUnknown`, `outputMissing` and `revealFailed`.
+- `reveal_export_output` does not change. It still acts only on the path that the run
+  recorded, and the opener plugin stays unregistered.
+- The status bar result keeps its icon button. Its accessible name is still the full phrase of
+  the platform.
+
 ## Consequences
 
-- The web view can show or open only the file that the last export wrote.
+- The web view can show or open only the file that the last export wrote. (Changed on
+  2026-10-02: it can only show that file.)
 - A file that the user moved or deleted after the export gives `outputMissing`.
 - The command surface grows by two commands, and the error codes of these commands are a
   second small wire contract next to the export events.
 - A new container in the export presets must also be added to the extension list of
-  `open_export_output`. A compile-time check fails when a container is missing.
+  `open_export_output`. A compile-time check fails when a container is missing. (Changed on
+  2026-10-02: the command and its list are removed, so a new container needs no entry here.)
 - A new run clears the record of the last run when it takes the export slot, so the record is
   never older than the run that the interface shows.
 - This amends the finished result of ADR 025: the status bar chip gains a Show control next to

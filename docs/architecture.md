@@ -250,8 +250,8 @@ See ADR 004 and ADR 014.
 ADR 004 gives the semantic steps. ADR 014 selects the command shape from measurements on
 ffmpeg 9.0.1. ADR 016 adds the orchestration. The renderer is written, and `start_export`,
 `cancel_export`, and `cancel_active_export` are registered commands. After a run finishes,
-`reveal_export_output` and `open_export_output` show or open the file that the run wrote.
-They take the run identifier, never a path (ADR 029).
+`reveal_export_output` shows the file that the run wrote in the file manager. It takes the
+run identifier, never a path (ADR 029).
 
 One `ffmpeg` process writes one output. One `-copyts`, placed once before the first input,
 keeps the raw source PTS visible to the filter graph on every input. The renderer seeks each

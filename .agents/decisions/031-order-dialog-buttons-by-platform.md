@@ -46,7 +46,8 @@ The footers of the export dialog use these roles:
 - Run: Run in Background is `primary`, and Stop Export is `discard`, because it throws away
   the encode (ADR 025).
 - Finished: Done is `cancel`, because it only closes the dialog, and Show and Open are
-  alternatives.
+  alternatives. (Changed on 2026-10-02: Open is removed, and Show File is the one
+  alternative, ADR 029.)
 - Result: Close is `cancel`, and Back or Open Settings is `primary`.
 
 ### The default focus
