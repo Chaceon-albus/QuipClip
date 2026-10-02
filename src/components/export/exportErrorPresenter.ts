@@ -73,6 +73,8 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
 
   // The stream choice: an export that writes the video can succeed from the same source.
   sourceHasNoAudio: BACK_TO_SETUP,
+  // An export of the video only can succeed, and so can In points nearer to the audio.
+  audioGapTooLong: BACK_TO_SETUP,
 
   // A condition that can clear by itself: a share that stopped answering, a command that
   // did not reach the backend, a slot that a stopped run has not released yet (ADR 016),

@@ -118,7 +118,9 @@ pub struct AudioProbe {
     /// video's start here.
     ///
     /// The export reads this and [`Self::duration`] only to know how much audio its segments can
-    /// take from the stream (`PlannedAudio::expected_duration`). Neither is an edit boundary
+    /// take from the stream (`PlannedAudio::expected_duration`), and this to bound the silence
+    /// that its segments need in front of the first sample (`MAX_LEADING_AUDIO_SILENCE_SECONDS`
+    /// of the export module). Neither is an edit boundary
     /// (ADR 002), and neither is on the import wire: the interface does not read them.
     #[serde(skip)]
     pub start_time: Option<Rational>,

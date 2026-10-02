@@ -337,6 +337,8 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   sourceAudioRateUnknown: null,
   // Another stream choice in the setup step can export the same source.
   sourceHasNoAudio: BACK,
+  // A video-only export needs no fill, and a nearer In point needs a shorter one.
+  audioGapTooLong: BACK,
   encoderUnavailable: OPEN_FFMPEG,
   ffmpegSpawnFailed: OPEN_FFMPEG,
   ffmpegProcessFailed: BACK,

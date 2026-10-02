@@ -11,7 +11,7 @@
 
 use super::{
     ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PlannedAudio, PlannedSegment,
-    PlannedVideo, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
+    PlannedVideo, MAX_EXPORT_SEGMENTS, MAX_LEADING_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::probe::MediaProbe;
 use crate::settings::{AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting};
@@ -178,6 +178,12 @@ pub enum PathFacts {
 ///     audio stream whose sample rate is absent, not positive, or larger than `u32` --
 ///     [`ExportErrorCode::SourceAudioRateUnknown`]. A video-only export never reads the
 ///     audio stream, so it skips this check.
+/// 15. The export writes audio, and the parts of the segments before the first sample of the
+///     source audio stream add up to more than [`MAX_LEADING_AUDIO_SILENCE_SECONDS`] --
+///     [`ExportErrorCode::AudioGapTooLong`]. An audio-only export counts only the segments that
+///     reach that sample, because it writes nothing for the others. The sum is checked after
+///     each segment, in order, together with the conversions of its boundaries. A probe that
+///     reports no start of the stream bounds nothing.
 ///
 /// `destination` must be absolute for the same reason `source` must: a CWD-relative path
 /// would carry an ambiguous location into a pipeline that spawns a child process and later
@@ -400,6 +406,12 @@ pub fn build_plan(
             (audio.start_time, end)
         });
 
+    // The first sample of the source audio, for the bound on the silence in front of it
+    // (`MAX_LEADING_AUDIO_SILENCE_SECONDS`). Only a plan that writes audio has one.
+    let audio_start = source_audio.and_then(|audio| audio.start_time);
+    let max_leading_silence = max_leading_audio_silence_rational();
+    let mut leading_silence = zero;
+
     let mut planned_segments = Vec::with_capacity(segments.len());
     let mut total_duration = zero;
     let mut total_frames: u64 = 0;
@@ -427,6 +439,27 @@ pub fn build_plan(
         let duration = out_seconds
             .sub(in_seconds)
             .ok_or(ExportErrorCode::InvalidSegment)?;
+
+        // The part of a segment before the first sample of the audio becomes silence. The audio
+        // chain fills it when the segment reaches that sample. When the segment ends at or before
+        // it, `concat` pads it, if another segment follows. FFmpeg holds each of the two whole in
+        // memory, and the chains of all segments build theirs before `concat` reads them, so the
+        // bound is on the sum. A segment with nothing behind it counts too, which over-counts
+        // and is safe. Without video, `concat` pads nothing, so there only a segment that
+        // reaches the first sample counts.
+        if let Some(start) = audio_start.filter(|start| *start > in_seconds) {
+            let reaches = start < out_seconds;
+            if reaches || streams.writes_video() {
+                let silence_end = if reaches { start } else { out_seconds };
+                leading_silence = silence_end
+                    .sub(in_seconds)
+                    .and_then(|silence| leading_silence.add(silence))
+                    .ok_or(ExportErrorCode::InvalidSegment)?;
+                if leading_silence > max_leading_silence {
+                    return Err(ExportErrorCode::AudioGapTooLong);
+                }
+            }
+        }
 
         let raw_seek = in_seconds
             .sub(format_start_time)
@@ -573,6 +606,13 @@ fn zero_rational() -> Rational {
 fn seek_margin_rational() -> Rational {
     Rational::new(SEEK_MARGIN_SECONDS, 1)
         .expect("SEEK_MARGIN_SECONDS/1 always reduces to a valid Rational")
+}
+
+/// [`MAX_LEADING_AUDIO_SILENCE_SECONDS`] as a [`Rational`], for the same reason as
+/// [`zero_rational`].
+fn max_leading_audio_silence_rational() -> Rational {
+    Rational::new(MAX_LEADING_AUDIO_SILENCE_SECONDS, 1)
+        .expect("MAX_LEADING_AUDIO_SILENCE_SECONDS/1 always reduces to a valid Rational")
 }
 
 /// Convert one source PTS into an audio tick at `sample_rate`, as `round(pts * time_base *
@@ -2183,6 +2223,122 @@ mod tests {
                 assert_eq!(plan.segments[0].audio_out_tick, Some(96_000), "{streams:?}");
             }
         }
+    }
+
+    /// Plans `segments` of a source whose audio starts at 60.5 s, for `streams`.
+    fn plan_late_audio(
+        streams: ExportStreams,
+        segments: &[SegmentBoundary],
+    ) -> Result<ExportPlan, ExportErrorCode> {
+        plan_streams(
+            streams,
+            segments,
+            &probe_with_audio_extent(Some("60.5"), Some("60")),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+    }
+
+    #[test]
+    fn a_segment_that_needs_more_than_the_longest_leading_silence_is_refused_with_audio() {
+        // [0.4, 61) would take 60.1 s of silence in front of the first sample. [0.5, 61) takes
+        // exactly 60 s.
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            let error = plan_late_audio(streams, &[seconds_boundary("0.4", "61")]).unwrap_err();
+            assert_eq!(error, ExportErrorCode::AudioGapTooLong, "{streams:?}");
+            plan_late_audio(streams, &[seconds_boundary("0.5", "61")]).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_leading_silence_of_all_segments_is_bounded_together() {
+        // Two overlapping segments each need about 30 s, which the graph builds at once.
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            let error = plan_late_audio(
+                streams,
+                &[
+                    seconds_boundary("30.5", "61"),
+                    seconds_boundary("30.4", "62"),
+                ],
+            )
+            .unwrap_err();
+            assert_eq!(error, ExportErrorCode::AudioGapTooLong, "{streams:?}");
+            plan_late_audio(
+                streams,
+                &[
+                    seconds_boundary("30.5", "61"),
+                    seconds_boundary("30.5", "61"),
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_segment_before_the_audio_counts_its_whole_length_when_the_export_writes_video() {
+        // `concat` pads the whole of [0, 60.5) with silence, so with video it counts in full,
+        // and a cut at the first sample does not get around the bound. An audio-only export
+        // writes nothing for it, so it counts nothing there.
+        let alone = [seconds_boundary("0", "60.5"), seconds_boundary("61", "62")];
+        let cut = [
+            seconds_boundary("0", "30.5"),
+            seconds_boundary("30.5", "61"),
+        ];
+        for segments in [&alone[..], &cut[..]] {
+            let error = plan_late_audio(ExportStreams::VideoAndAudio, segments).unwrap_err();
+            assert_eq!(error, ExportErrorCode::AudioGapTooLong);
+        }
+        plan_late_audio(ExportStreams::AudioOnly, &alone).unwrap();
+        plan_late_audio(ExportStreams::VideoAndAudio, &[seconds_boundary("0", "60")]).unwrap();
+    }
+
+    #[test]
+    fn a_segment_after_the_first_sample_needs_no_leading_silence() {
+        plan_late_audio(
+            ExportStreams::VideoAndAudio,
+            &[seconds_boundary("60.5", "130")],
+        )
+        .unwrap();
+        // A stream that starts before the video, at a negative time, bounds nothing either.
+        plan_streams(
+            ExportStreams::VideoAndAudio,
+            &[seconds_boundary("0", "130")],
+            &probe_with_audio_extent(Some("-1"), Some("131")),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_leading_silence_is_not_bounded_without_audio_or_without_a_probed_start() {
+        let segment = [seconds_boundary("0", "120")];
+        // A video-only export reads no audio.
+        plan_late_audio(ExportStreams::VideoOnly, &segment).unwrap();
+        // A probe that reports no start of the stream bounds nothing.
+        plan_streams(
+            ExportStreams::VideoAndAudio,
+            &segment,
+            &probe_with_audio_extent(None, None),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_unknown_sample_rate_is_reported_before_the_leading_silence() {
+        let mut probe = probe_with_audio_extent(Some("100"), Some("20"));
+        probe.audio.as_mut().unwrap().sample_rate = None;
+        let error = plan_streams(
+            ExportStreams::VideoAndAudio,
+            &[seconds_boundary("0", "120")],
+            &probe,
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap_err();
+        assert_eq!(error, ExportErrorCode::SourceAudioRateUnknown);
     }
 
     #[test]

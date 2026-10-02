@@ -82,6 +82,7 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "sourceFrameRateUnknown",
   "sourceAudioRateUnknown",
   "sourceHasNoAudio",
+  "audioGapTooLong",
   "encoderUnavailable",
   "ffmpegSpawnFailed",
   "ffmpegProcessFailed",

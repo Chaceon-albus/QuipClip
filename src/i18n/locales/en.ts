@@ -953,6 +953,10 @@ export const en = {
       "QuipClip could not determine the sample rate of the source audio, so it cannot cut the audio exactly.",
     sourceHasNoAudio:
       "The source video has no audio in the marked segments, so QuipClip cannot export its audio.",
+    // 60 is MAX_LEADING_AUDIO_SILENCE_SECONDS of the Rust export module. Each part of a
+    // segment before the first audio sample becomes silence, and the parts add up.
+    audioGapTooLong:
+      "The marked segments need more than 60 seconds of silence in total before the source audio starts. QuipClip would need too much memory to add that silence. Move the In points nearer to the start of the audio, or export the video only.",
     encoderUnavailable: "The required encoder is not available on this system.",
     ffmpegSpawnFailed: "QuipClip could not start the FFmpeg process.",
     ffmpegProcessFailed: "FFmpeg failed during video export.",

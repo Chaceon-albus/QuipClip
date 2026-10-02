@@ -156,6 +156,19 @@ impl ExportStreams {
 /// require that work, and this crate does not do it.
 pub const MAX_EXPORT_SEGMENTS: usize = 100;
 
+/// The longest silence, in whole seconds, that the segments of an export may need in front of
+/// the first sample of the source audio stream, all together.
+///
+/// The part of a segment before that sample becomes silence: the audio chain fills it when the
+/// segment reaches the sample (`graph::audio_chain`), and `concat` pads it when the segment ends
+/// at or before the sample and another segment follows. FFmpeg holds each of the two whole in
+/// memory before it writes it.
+/// ADR 014 measurement 21 measured the fill alone on AAC audio, at this bound: 95 MiB on 48000 Hz
+/// stereo, 215 MiB on 48000 Hz 5.1, and 532 MiB on 96000 Hz 7.1. The plan refuses more with
+/// [`ExportErrorCode::AudioGapTooLong`]. The bound does not cover the decoded video that FFmpeg
+/// keeps until the first audio frame arrives, which measurement 21 also records.
+pub const MAX_LEADING_AUDIO_SILENCE_SECONDS: i64 = 60;
+
 /// The seek margin ADR 014 selects, in whole seconds.
 ///
 /// ADR 014 measurement 9 found that input seek alone is not frame-exact on MPEG-TS: a
@@ -557,6 +570,16 @@ export_error_codes! {
     /// the source reports no audio stream. A plan without video and without audio would write
     /// nothing, so the export is refused before anything is reserved.
     SourceHasNoAudio => "sourceHasNoAudio",
+    /// Produced by [`plan::build_plan`]: the export writes audio, and the parts of its segments
+    /// before the first sample of the source audio stream add up to more than
+    /// [`MAX_LEADING_AUDIO_SILENCE_SECONDS`].
+    ///
+    /// Each of those parts becomes silence that FFmpeg holds in memory until it is complete. An
+    /// export with [`ExportStreams::AudioOnly`] counts only the segments that reach the first
+    /// sample, because it writes nothing for the others. An export with
+    /// [`ExportStreams::VideoOnly`] reads no audio, so it never produces this code. The probe
+    /// reports only where the stream starts, so a gap inside the stream is not bounded.
+    AudioGapTooLong => "audioGapTooLong",
     /// Reserved: the preset names an encoder the capability probe did not report as
     /// working.
     ///
@@ -637,6 +660,7 @@ mod tests {
             vec![
                 "appDataUnavailable",
                 "audioDurationMismatch",
+                "audioGapTooLong",
                 "canceled",
                 "commandExecutionFailed",
                 "encoderUnavailable",

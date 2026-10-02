@@ -769,6 +769,8 @@ export const zhCN: TranslationCatalog = {
     sourceFrameRateUnknown: "无法确定源视频的帧率。",
     sourceAudioRateUnknown: "无法确定源音频的采样率，因此无法精确剪切音频。",
     sourceHasNoAudio: "源视频在标记的片段内没有音频，因此无法导出其音频。",
+    audioGapTooLong:
+      "标记的片段在源音频开头之前合计需要超过 60 秒的静音，补上这些静音所需的内存过多。请把入点移到更靠近音频开头的位置，或只导出视频。",
     encoderUnavailable: "当前系统缺少所需的编码器。",
     ffmpegSpawnFailed: "无法启动 FFmpeg 进程。",
     ffmpegProcessFailed: "FFmpeg 在视频导出期间失败。",

@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
 import {
   BACKEND_EXPORT_ERROR_CODES,
   EXPORT_ERROR_CODES,
@@ -97,6 +99,21 @@ function readRustExportStreams(): string[] {
 
 describe("Export Types & Wire Constants", () => {
   describe("Rust vocabulary parity", () => {
+    it("names the Rust bound of the leading audio silence in the message of audioGapTooLong", () => {
+      const source = readFileSync(
+        fileURLToPath(
+          new URL("../../../src-tauri/src/ffmpeg/export/mod.rs", import.meta.url),
+        ),
+        "utf8",
+      );
+      const bound =
+        /\npub const MAX_LEADING_AUDIO_SILENCE_SECONDS: i64 = (\d+);\n/.exec(source);
+      expect(bound).not.toBeNull();
+      for (const catalog of [en, zhCN]) {
+        expect(catalog.exportError.audioGapTooLong).toContain(` ${bound![1]} `);
+      }
+    });
+
     it("names exactly the codes the Rust export vocabulary emits", () => {
       const rustCodes = readRustExportErrorCodes();
 
@@ -163,6 +180,7 @@ describe("Export Types & Wire Constants", () => {
         "sourceFrameRateUnknown",
         "sourceAudioRateUnknown",
         "sourceHasNoAudio",
+        "audioGapTooLong",
         "encoderUnavailable",
         "ffmpegSpawnFailed",
         "ffmpegProcessFailed",
