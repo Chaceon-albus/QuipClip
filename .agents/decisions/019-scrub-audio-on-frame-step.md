@@ -121,6 +121,23 @@ already at the correct position. Without this rule a held key restarts the eleme
 continuously and the result is a stutter. A backward request always seeks, because audio
 does not play backwards.
 
+(Changed on 2026-10-02.) A held backward step makes no sound. Each backward request seeks
+and plays 50 ms forward, so a burst overlaps the frame that the user just left, and a burst
+has no fade. A held key repeats approximately 30 times each second, so the result was a
+stutter of short forward pieces, and a user reported that it sounded wrong. The rules are:
+
+- A single backward step keeps its burst. That is one key press, one click on a step button,
+  or the first press of a hold.
+- Each repeat after the first press of a backward step requests no burst. It stops a burst
+  that sounds. A repeat is a key press that the web view reports with `repeat`, a repeat of
+  the timer of a held step button (ADR 021), or a repeat of a held Enter on a focused step
+  button. The step of ten frames follows the same rule.
+- A step from the context menu, the native menu or the timecode entry is never a repeat.
+- A forward step, a held forward step and the continuation rule do not change.
+
+The playback store learns the repeat through an option of `seekNominal`, `held`. The
+controller does not change. Its `stop` operation already serves `play` and `pause`.
+
 (Changed on 2026-09-25.) A forward request continues the burst when three conditions are
 true. Its target is at most `SCRUB_CONTINUATION_TOLERANCE_SECONDS` after the last target.
 The element is behind the new target by no more than a lag limit. The element is ahead of

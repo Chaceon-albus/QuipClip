@@ -435,6 +435,11 @@ zero move. It also drops a scrub request that repeats the time of the last accep
 request. The continuation rule of ADR 019 makes a slow
 forward drag sound continuous.
 
+(Changed on 2026-10-02.) A scrub sample whose direction is backward requests no burst. It
+stops a burst that sounds. A backward drag made a stutter of short forward pieces, as a held
+backward step did (ADR 019). The store still records the target of the backward sample, so
+the direction of the next sample is measured from it. A forward drag does not change.
+
 (Changed on 2026-09-25.) The store sends each scrub burst with the kind `drag`. The
 controller of ADR 019 then continues a drag burst only while the element is at most 0.1
 seconds behind the target, so the sound of a drag stays near the pointer. A frame step has
