@@ -270,7 +270,10 @@ in front of `asplit`, because the chains share one input link. Each chain then r
 timestamps to its In point, fills a late start or a gap of the audio with silence, and
 normalizes the streams (ADR 014 measurement 20). The fill holds its silence in memory, so the
 plan refuses segments that need more than 60 s of silence in total before the first audio sample
-(`audioGapTooLong`, measurement 21). The chains end in `concat`, in project array order.
+(`audioGapTooLong`, measurement 21). An export with video pads the audio of its last chain with
+silence to the length of the segment. An export without video pads the audio of each chain in the
+same way. A segment that the audio of the source does not reach then gets silence (measurement
+23). The chains end in `concat`, in project array order.
 
 The renderer has three graph shapes. It opens one input for each segment while the assembled
 command line stays inside the platform budget. It otherwise opens one input, seeks once, and
