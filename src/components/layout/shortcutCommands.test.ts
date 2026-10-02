@@ -21,6 +21,7 @@ import {
   type ShortcutProbe,
   type ShortcutSnapshot,
 } from "./shortcutCommands";
+import { TIME_JUMP_SECONDS, type TimeJumpAction } from "./timeJump";
 
 const pts = (value: string): Pts => value as Pts;
 const ticks = (value: string): TickCount => value as TickCount;
@@ -220,12 +221,15 @@ function createStoreHarness({
         playback.getState().seekToPts(command.pts, command.options);
         return;
       case "seekToFrameIndex":
-        playback.getState().seekToFrameIndex(command.frameIndex);
+        playback.getState().seekToFrameIndex(command.frameIndex, command.options);
         return;
       case "seekApproximate":
         playback
           .getState()
-          .seekApproximate(command.seconds, APPROXIMATE_SHORTCUT_SEEK_OPTIONS);
+          .seekApproximate(
+            command.seconds,
+            command.options ?? APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
+          );
         return;
       case "seekNominal":
         playback.getState().seekNominal(command.frames, { held: command.held });
@@ -526,6 +530,257 @@ describe("planShortcutCommand", () => {
       ] as const) {
         expect(planShortcutCommand(action, noRate)).toBeNull();
       }
+    });
+  });
+
+  describe("the time jumps", () => {
+    const KEEP_PLAYING = { keepPlaying: true };
+
+    it("jumps 5 s, 1 s and 30 s on the frame grid, and keeps the playback running", () => {
+      // Frame 30 (1 s) is on screen at 30 fps, and the extent ends at 10 s.
+      expect(planShortcutCommand("jumpForwardFiveSeconds", createSnapshot())).toEqual({
+        kind: "seekToFrameIndex",
+        frameIndex: 180,
+        options: KEEP_PLAYING,
+      });
+      expect(planShortcutCommand("jumpForwardOneSecond", createSnapshot())).toEqual({
+        kind: "seekToFrameIndex",
+        frameIndex: 60,
+        options: KEEP_PLAYING,
+      });
+      expect(planShortcutCommand("jumpBackOneSecond", createSnapshot())).toEqual({
+        kind: "seekToFrameIndex",
+        frameIndex: 0,
+        options: KEEP_PLAYING,
+      });
+      const atSix = createSnapshot({
+        playback: { presentedFrame: null, seekTargetSeconds: 6 },
+      });
+      expect(planShortcutCommand("jumpBackFiveSeconds", atSix)).toEqual({
+        kind: "seekToFrameIndex",
+        frameIndex: 30,
+        options: KEEP_PLAYING,
+      });
+    });
+
+    it("plans the same jump for a key repeat, a press and a menu", () => {
+      for (const action of Object.keys(TIME_JUMP_SECONDS) as TimeJumpAction[]) {
+        const once = planShortcutCommand(action, createSnapshot());
+        expect(planShortcutCommand(action, createSnapshot(), { repeat: true })).toEqual(
+          once,
+        );
+        expect(
+          planShortcutCommand(action, createSnapshot(), { repeat: false }),
+        ).toEqual(once);
+      }
+    });
+
+    it("goes where Home goes for a target before the start, and plays on", () => {
+      expect(planShortcutCommand("jumpBackFiveSeconds", createSnapshot())).toEqual({
+        kind: "seekToPts",
+        pts: "0",
+        options: KEEP_PLAYING,
+      });
+      expect(planShortcutCommand("jumpBackThirtySeconds", createSnapshot())).toEqual({
+        kind: "seekToPts",
+        pts: "0",
+        options: KEEP_PLAYING,
+      });
+      // Home does nothing on the first frame, and so does the jump.
+      const atStart = createSnapshot({
+        playback: {
+          presentedFrame: { mediaTime: 0, inferredSourcePts: pts("0") },
+          approximateBrowserTimeSeconds: 0,
+        },
+      });
+      expect(planShortcutCommand("jumpBackOneSecond", atStart)).toBeNull();
+      // Without a calibration, Home goes to time zero on the approximate clock.
+      const uncalibrated = createSnapshot({
+        playback: {
+          calibrationStatus: "unavailable",
+          presentedFrame: null,
+          approximateBrowserTimeSeconds: 2,
+        },
+      });
+      expect(planShortcutCommand("jumpBackFiveSeconds", uncalibrated)).toEqual({
+        kind: "seekApproximate",
+        seconds: 0,
+        options: { ...APPROXIMATE_SHORTCUT_SEEK_OPTIONS, keepPlaying: true },
+      });
+    });
+
+    it("goes where End goes for a target at or after the end, and plays on", () => {
+      // The last frame of 10 s at 30 fps is frame 299.
+      expect(planShortcutCommand("jumpForwardThirtySeconds", createSnapshot())).toEqual(
+        {
+          kind: "seekToFrameIndex",
+          frameIndex: 299,
+          options: KEEP_PLAYING,
+        },
+      );
+      // End does nothing on the last frame, and so does the jump.
+      const atLast = createSnapshot({
+        playback: {
+          presentedFrame: { mediaTime: 299 / 30, inferredSourcePts: pts("897000") },
+        },
+      });
+      expect(planShortcutCommand("jumpForwardFiveSeconds", atLast)).toBeNull();
+      // Off the grid, End seeks to the last tick with its own option.
+      const variable = createSnapshot({
+        probe: createProbe({ rFrameRate: { n: 60, d: 1 } }),
+      });
+      expect(planShortcutCommand("jumpForwardThirtySeconds", variable)).toEqual({
+        kind: "seekToPts",
+        pts: "899999",
+        options: { ...EXTENT_END_SEEK_OPTIONS, keepPlaying: true },
+      });
+      // Without a calibration, End goes to the end of the ruler on the approximate clock.
+      const uncalibrated = createSnapshot({
+        playback: {
+          calibrationStatus: "unavailable",
+          presentedFrame: null,
+          approximateBrowserTimeSeconds: 8,
+        },
+      });
+      expect(planShortcutCommand("jumpForwardFiveSeconds", uncalibrated)).toEqual({
+        kind: "seekApproximate",
+        seconds: 10,
+        options: { ...APPROXIMATE_SHORTCUT_SEEK_OPTIONS, keepPlaying: true },
+      });
+    });
+
+    it("seeks off the grid by PTS, and without a calibration on the approximate clock", () => {
+      const variable = createSnapshot({
+        probe: createProbe({ rFrameRate: { n: 60, d: 1 } }),
+      });
+      expect(planShortcutCommand("jumpForwardFiveSeconds", variable)).toEqual({
+        kind: "seekToPts",
+        pts: "540000",
+        options: KEEP_PLAYING,
+      });
+      const uncalibrated = createSnapshot({
+        playback: {
+          calibrationStatus: "unavailable",
+          presentedFrame: null,
+          approximateBrowserTimeSeconds: 2,
+        },
+      });
+      expect(planShortcutCommand("jumpForwardOneSecond", uncalibrated)).toEqual({
+        kind: "seekApproximate",
+        seconds: 3,
+        options: KEEP_PLAYING,
+      });
+    });
+
+    it("does nothing while the extent is indeterminate", () => {
+      const indeterminate = createSnapshot({
+        probe: createProbe({
+          videoDurationTicks: null,
+          approximateDurationSeconds: null,
+        }),
+        playback: { runtimeBrowserDurationSeconds: null },
+      });
+      for (const action of Object.keys(TIME_JUMP_SECONDS) as TimeJumpAction[]) {
+        expect(planShortcutCommand(action, indeterminate)).toBeNull();
+      }
+    });
+
+    it("jumps while a drag trims a segment edge, as Home and End do", () => {
+      expect(
+        planShortcutCommand("jumpForwardOneSecond", {
+          ...createSnapshot(),
+          isTrimDragging: true,
+        }),
+      ).toEqual({ kind: "seekToFrameIndex", frameIndex: 60, options: KEEP_PLAYING });
+    });
+  });
+
+  describe("the edit points", () => {
+    /** Two segments, [0.5 s, 1 s) and [2 s, 3 s), and frame 30 (1 s) on screen. */
+    const withSegments = (overrides: SnapshotOverrides = {}) =>
+      createSnapshot({
+        ...overrides,
+        timeline: {
+          segments: [segment("a", "45000", "90000"), segment("b", "180000", "270000")],
+          ...overrides.timeline,
+        },
+      });
+
+    it("goes to the previous and the next point, past the point on screen", () => {
+      // The Out of a is on screen.
+      expect(planShortcutCommand("goToPreviousEditPoint", withSegments())).toEqual({
+        kind: "seekToPts",
+        pts: "45000",
+      });
+      expect(planShortcutCommand("goToNextEditPoint", withSegments())).toEqual({
+        kind: "seekToPts",
+        pts: "180000",
+      });
+    });
+
+    it("goes to the pending In", () => {
+      const pending = createSnapshot({ timeline: { pendingInPts: pts("150000") } });
+      expect(planShortcutCommand("goToNextEditPoint", pending)).toEqual({
+        kind: "seekToPts",
+        pts: "150000",
+      });
+      expect(planShortcutCommand("goToPreviousEditPoint", pending)).toBeNull();
+    });
+
+    it("owns the key and does nothing when no point lies on that side", () => {
+      expect(planShortcutCommand("goToPreviousEditPoint", createSnapshot())).toBeNull();
+      expect(planShortcutCommand("goToNextEditPoint", createSnapshot())).toBeNull();
+      const afterAll = withSegments({
+        playback: {
+          presentedFrame: { mediaTime: 5, inferredSourcePts: pts("450000") },
+        },
+      });
+      expect(planShortcutCommand("goToNextEditPoint", afterAll)).toBeNull();
+      expect(planShortcutCommand("goToPreviousEditPoint", afterAll)).toEqual({
+        kind: "seekToPts",
+        pts: "270000",
+      });
+    });
+
+    it("needs a calibration, as Go to In does, and asks for the seek while it is open", () => {
+      const unavailable = withSegments({
+        playback: { calibrationStatus: "unavailable", presentedFrame: null },
+      });
+      expect(planShortcutCommand("goToNextEditPoint", unavailable)).toBeNull();
+      expect(planShortcutCommand("goToPreviousEditPoint", unavailable)).toBeNull();
+      // While the calibration is open, the store defers the seek until the anchor.
+      const calibrating = withSegments({
+        playback: {
+          calibrationStatus: "calibrating",
+          presentedFrame: null,
+          approximateBrowserTimeSeconds: 0,
+        },
+      });
+      expect(planShortcutCommand("goToNextEditPoint", calibrating)).toEqual({
+        kind: "seekToPts",
+        pts: "45000",
+      });
+    });
+
+    it("counts from the pending target", () => {
+      const pending = withSegments({
+        playback: { presentedFrame: null, seekTargetSeconds: 2 },
+      });
+      expect(planShortcutCommand("goToNextEditPoint", pending)).toEqual({
+        kind: "seekToPts",
+        pts: "270000",
+      });
+      expect(planShortcutCommand("goToPreviousEditPoint", pending)).toEqual({
+        kind: "seekToPts",
+        pts: "90000",
+      });
+    });
+
+    it("ignores the points of another source", () => {
+      const other = createSnapshot({
+        timeline: { segments: [segment("x", "180000", "270000", "source-2")] },
+      });
+      expect(planShortcutCommand("goToNextEditPoint", other)).toBeNull();
     });
   });
 
@@ -1499,8 +1754,125 @@ describe("planShortcutCommand", () => {
   // store would clear presentedFrame, and ADR 022 says that such a seek may bring no frame
   // callback, so the edit actions would stay disabled.
   describe("key sequences on the real stores", () => {
-    // ADR 019: audio does not play backwards, so a held ← sounds only its first step.
-    it("a held ← cues its first step only, and a held → cues every step", () => {
+    it("a held → adds one jump for each repeat while the element still seeks", () => {
+      const request = vi.spyOn(scrubAudioController, "request");
+      try {
+        const h = createStoreHarness();
+        h.clickRulerAt("25");
+        const seeks = h.element.currentTimeSets;
+
+        // The key down of a held Shift+→, then two key repeats, while the first seek runs.
+        expect(h.press("jumpForwardOneSecond", { repeat: false })).toEqual({
+          kind: "seekToFrameIndex",
+          frameIndex: 50,
+          options: { keepPlaying: true },
+        });
+        expect(h.element.seeking).toBe(true);
+        h.press("jumpForwardOneSecond", { repeat: true });
+        h.press("jumpForwardOneSecond", { repeat: true });
+        // Each repeat counts from the pending target, so the playhead shows 4 s at once. The
+        // element got one seek, and the store keeps the latest target as the queued seek.
+        expect(h.playheadSeconds()).toBeCloseTo(4, 9);
+        expect(h.element.currentTimeSets).toBe(seeks + 1);
+        expect(h.element.currentTime).toBeCloseTo(50.5 / 25, 9);
+
+        // The first seek ends, and the queued seek goes to the middle of frame 100.
+        h.presentSeekedFrame();
+        expect(h.element.currentTime).toBeCloseTo(100.5 / 25, 9);
+        h.presentSeekedFrame(100 / 25);
+        expect(h.shownPts()).toBe("100");
+        expect(h.playheadSeconds()).toBeCloseTo(4, 9);
+        // A jump is a seek, not a frame step: it plays no cue (ADR 019).
+        expect(request).not.toHaveBeenCalled();
+
+        // ← from 4 s goes back past the start, where Home goes.
+        expect(h.press("jumpBackFiveSeconds")).toEqual({
+          kind: "seekToPts",
+          pts: "0",
+          options: { keepPlaying: true },
+        });
+        h.presentSeekedFrame();
+        expect(h.shownPts()).toBe("0");
+        // And from the first frame it does nothing, as Home, Home does.
+        const atStart = h.element.currentTimeSets;
+        expect(h.press("jumpBackOneSecond")).toBeNull();
+        expect(h.element.currentTimeSets).toBe(atStart);
+      } finally {
+        request.mockRestore();
+      }
+    });
+
+    it("a jump while the video plays keeps it playing, and Shift+, pauses", () => {
+      const h = createStoreHarness();
+      h.clickRulerAt("25");
+      const pause = vi.spyOn(h.element, "pause");
+      h.playback.getState().play();
+      expect(h.playback.getState().isPlaying).toBe(true);
+
+      h.press("jumpForwardFiveSeconds");
+      expect(h.element.currentTime).toBeCloseTo(150.5 / 25, 9);
+      expect(h.playback.getState().isPlaying).toBe(true);
+      expect(pause).not.toHaveBeenCalled();
+
+      // A jump past the end goes where End goes, and plays on from there.
+      h.presentSeekedFrame(150 / 25);
+      h.press("jumpForwardThirtySeconds");
+      expect(h.element.currentTime).toBeCloseTo(249.5 / 25, 9);
+      expect(h.playback.getState().isPlaying).toBe(true);
+
+      // A frame step means that the user stops to look at frames, so it pauses (ADR 022).
+      h.presentSeekedFrame(249 / 25);
+      h.press("stepBackTenFrames");
+      expect(h.playback.getState().isPlaying).toBe(false);
+    });
+
+    it("a held ↓ walks the edit points from the pending target, and ↑ walks back", () => {
+      const h = createStoreHarness();
+      // The segment [25, 50), finished, and a pending In at 100.
+      h.timeline.getState().markIn(pts("25"));
+      h.timeline.getState().markOut(pts("50"));
+      h.timeline.getState().newSegment();
+      h.timeline.getState().markIn(pts("100"));
+      expect(h.timeline.getState().pendingInPts).toBe("100");
+      const seeks = h.element.currentTimeSets;
+
+      // The key down and three repeats of a held ↓, while the first seek runs.
+      expect(h.press("goToNextEditPoint", { repeat: false })).toEqual({
+        kind: "seekToPts",
+        pts: "25",
+      });
+      expect(h.press("goToNextEditPoint", { repeat: true })).toEqual({
+        kind: "seekToPts",
+        pts: "50",
+      });
+      expect(h.press("goToNextEditPoint", { repeat: true })).toEqual({
+        kind: "seekToPts",
+        pts: "100",
+      });
+      // No point lies after the pending In: the key is owned, and nothing moves.
+      expect(h.press("goToNextEditPoint", { repeat: true })).toBeNull();
+      expect(h.playheadSeconds()).toBeCloseTo(4, 9);
+      expect(h.element.currentTimeSets).toBe(seeks + 1);
+
+      // The first seek ends, and the queued seek goes to the pending In.
+      h.presentSeekedFrame();
+      h.presentSeekedFrame(4);
+      expect(h.shownPts()).toBe("100");
+
+      // ↑ walks back, also from the target of its own pending seek.
+      expect(h.press("goToPreviousEditPoint")).toEqual({
+        kind: "seekToPts",
+        pts: "50",
+      });
+      expect(h.press("goToPreviousEditPoint", { repeat: true })).toEqual({
+        kind: "seekToPts",
+        pts: "25",
+      });
+      expect(h.press("goToPreviousEditPoint", { repeat: true })).toBeNull();
+    });
+
+    // ADR 019: audio does not play backwards, so a held , sounds only its first step.
+    it("a held , cues its first step only, and a held . cues every step", () => {
       const request = vi.spyOn(scrubAudioController, "request");
       const stop = vi.spyOn(scrubAudioController, "stop");
       try {

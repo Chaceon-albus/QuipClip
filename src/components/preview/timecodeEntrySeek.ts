@@ -25,7 +25,7 @@
  *   frame while a calibration holds or is still open and the probe gives the extent in ticks, and
  *   to the end of the ruler on the approximate clock otherwise. The editors move the playhead to
  *   the end, and do not refuse the entry. A relative step past either end stops at that end, as a
- *   held arrow key does.
+ *   held step key does.
  * - A seek to the frame on screen does nothing (ADR 022, ADR 026): a seek that lands on the frame
  *   already on screen may bring no frame callback. The `seeked` event restores that frame in
  *   most cases, and in the others Mark In would stay disabled.

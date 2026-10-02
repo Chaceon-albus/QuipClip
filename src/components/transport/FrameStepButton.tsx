@@ -28,7 +28,7 @@ export interface FrameStepButtonProps {
  * One frame step button of the transport bar, with press and hold (see `stepHold.ts`).
  *
  * A primary press steps at once, and a press of 400 ms repeats the step about 30 times each
- * second, one `seekNominal` request for each repeat, as a held arrow key does (ADR 021). The
+ * second, one `seekNominal` request for each repeat, as a held step key does (ADR 021). The
  * repeat stops on release and on pointer cancel anywhere in the window, on pointer leave,
  * when the window loses the focus, when the button becomes disabled, and when it leaves the
  * tree. Enter on a focused button sends a click with a count of 0, which steps once and does

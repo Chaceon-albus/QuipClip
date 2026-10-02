@@ -5,11 +5,16 @@ import {
   MODAL_LAYER_SELECTOR,
   OPEN_TOOLTIP_SELECTOR,
   ESCAPE_OWNER_SELECTOR,
+  MENU_TRIGGER_SELECTOR,
+  SCROLL_KEYS_ATTRIBUTE,
+  SCROLL_KEYS_SELECTOR,
   SPLITTER_KEYS,
   SPLITTER_SELECTOR,
+  VERTICAL_ARROW_KEYS,
   isGestureEscape,
   isShortcutSuppressed,
   isSplitterKey,
+  isVerticalArrowOwned,
   resolveShortcut,
   type ShortcutContext,
   type ShortcutEventTarget,
@@ -84,6 +89,10 @@ function eventForBinding(
       key = binding.key.character;
       // A row with no position matches the typed symbol, so any code names it.
       code = binding.key.code ?? "Unidentified";
+      break;
+    case "characterAt":
+      key = binding.key.character;
+      code = binding.key.code;
       break;
     case "numpad":
       key = binding.key.character;
@@ -168,22 +177,32 @@ describe("keyboardShortcutController", () => {
       });
     });
 
-    // 2. ArrowLeft with both capabilities -> stepBackOneFrame
-    it("resolves ArrowLeft with both capabilities to stepBackOneFrame", () => {
+    // 2. ArrowLeft -> the jump of 5 s back
+    it("resolves ArrowLeft to jumpBackFiveSeconds", () => {
       const event = createKeyEvent({ key: "ArrowLeft" });
       expect(resolveShortcut(event, allAvailable)).toEqual({
         claimed: true,
-        action: "stepBackOneFrame",
+        action: "jumpBackFiveSeconds",
       });
     });
 
-    // 3. ArrowRight with both capabilities -> stepForwardOneFrame
-    it("resolves ArrowRight with both capabilities to stepForwardOneFrame", () => {
+    // 3. ArrowRight -> the jump of 5 s forward
+    it("resolves ArrowRight to jumpForwardFiveSeconds", () => {
       const event = createKeyEvent({ key: "ArrowRight" });
       expect(resolveShortcut(event, allAvailable)).toEqual({
         claimed: true,
-        action: "stepForwardOneFrame",
+        action: "jumpForwardFiveSeconds",
       });
+    });
+
+    // The frame steps moved from the arrows to the comma and the period.
+    it("resolves , and . to the one-frame steps", () => {
+      expect(
+        resolveShortcut(createKeyEvent({ key: ",", code: "Comma" }), allAvailable),
+      ).toEqual({ claimed: true, action: "stepBackOneFrame" });
+      expect(
+        resolveShortcut(createKeyEvent({ key: ".", code: "Period" }), allAvailable),
+      ).toEqual({ claimed: true, action: "stepForwardOneFrame" });
     });
 
     // 4. target: null resolves the same as a body target (nothing focused is the main case)
@@ -202,7 +221,7 @@ describe("keyboardShortcutController", () => {
         ),
       ).toEqual({
         claimed: true,
-        action: "stepBackOneFrame",
+        action: "jumpBackFiveSeconds",
       });
 
       expect(
@@ -212,7 +231,17 @@ describe("keyboardShortcutController", () => {
         ),
       ).toEqual({
         claimed: true,
-        action: "stepForwardOneFrame",
+        action: "jumpForwardFiveSeconds",
+      });
+
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: "ArrowDown", target: null }),
+          allAvailable,
+        ),
+      ).toEqual({
+        claimed: true,
+        action: "goToNextEditPoint",
       });
 
       expect(
@@ -226,8 +255,8 @@ describe("keyboardShortcutController", () => {
       });
     });
 
-    // 5. A role="slider" target resolves to a step action
-    it("resolves a role='slider' target to a step action", () => {
+    // 5. A role="slider" target resolves to a jump and to an edit point
+    it("resolves a role='slider' target to a jump and to an edit point", () => {
       // In the DOM, a slider element has role="slider" and is not inside any menu/dialog.
       // closest(KEYBOARD_OWNER_SELECTOR) returns null because KEYBOARD_OWNER_SELECTOR
       // does not include role="slider".
@@ -248,7 +277,7 @@ describe("keyboardShortcutController", () => {
         ),
       ).toEqual({
         claimed: true,
-        action: "stepBackOneFrame",
+        action: "jumpBackFiveSeconds",
       });
 
       expect(
@@ -258,7 +287,18 @@ describe("keyboardShortcutController", () => {
         ),
       ).toEqual({
         claimed: true,
-        action: "stepForwardOneFrame",
+        action: "jumpForwardFiveSeconds",
+      });
+
+      // The slider is no container that scrolls, so ArrowUp goes to the edit point there.
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: "ArrowUp", target: sliderTarget }),
+          allAvailable,
+        ),
+      ).toEqual({
+        claimed: true,
+        action: "goToPreviousEditPoint",
       });
 
       // The slider pattern goes to the minimum and the maximum on Home and End, and the
@@ -276,15 +316,7 @@ describe("keyboardShortcutController", () => {
 
     // 6. Unmapped keys -> {claimed: false, action: null}
     it("returns {claimed: false, action: null} for unmapped keys", () => {
-      const unmappedKeys = [
-        "a",
-        "Enter",
-        "ArrowUp",
-        "ArrowDown",
-        "Tab",
-        "PageUp",
-        "F5",
-      ];
+      const unmappedKeys = ["a", "Enter", "Tab", "PageUp", "PageDown", "F5"];
       for (const key of unmappedKeys) {
         expect(resolveShortcut(createKeyEvent({ key }), allAvailable)).toEqual(
           NOT_CLAIMED,
@@ -317,7 +349,7 @@ describe("keyboardShortcutController", () => {
     });
 
     // 8. ArrowRight whose action is unavailable -> {claimed: true, action: null}
-    it("claims ArrowRight without an action when the step is unavailable", () => {
+    it("claims ArrowRight without an action when the jump is unavailable", () => {
       expect(
         resolveShortcut(
           createKeyEvent({ key: "ArrowRight" }),
@@ -327,7 +359,7 @@ describe("keyboardShortcutController", () => {
     });
 
     // 9. ArrowLeft whose action is unavailable -> {claimed: true, action: null}
-    it("claims ArrowLeft without an action when the step is unavailable", () => {
+    it("claims ArrowLeft without an action when the jump is unavailable", () => {
       expect(
         resolveShortcut(createKeyEvent({ key: "ArrowLeft" }), contextWith([])),
       ).toEqual(CLAIMED_WITHOUT_ACTION);
@@ -348,11 +380,31 @@ describe("keyboardShortcutController", () => {
       expect(isActionAvailable).toHaveBeenCalledWith("togglePlayback");
     });
 
-    // 11. repeat: true on both arrows -> the step action, unchanged
-    it("passes through repeat: true on both arrows to support continuous stepping", () => {
+    // 11. repeat: true on both arrows and both step keys -> the action, unchanged
+    it("passes through repeat: true on the arrows and the step keys for a held key", () => {
       expect(
         resolveShortcut(
           createKeyEvent({ key: "ArrowLeft", repeat: true }),
+          allAvailable,
+        ),
+      ).toEqual({
+        claimed: true,
+        action: "jumpBackFiveSeconds",
+      });
+
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: "ArrowRight", repeat: true }),
+          allAvailable,
+        ),
+      ).toEqual({
+        claimed: true,
+        action: "jumpForwardFiveSeconds",
+      });
+
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: ",", code: "Comma", repeat: true }),
           allAvailable,
         ),
       ).toEqual({
@@ -362,7 +414,7 @@ describe("keyboardShortcutController", () => {
 
       expect(
         resolveShortcut(
-          createKeyEvent({ key: "ArrowRight", repeat: true }),
+          createKeyEvent({ key: ".", code: "Period", repeat: true }),
           allAvailable,
         ),
       ).toEqual({
@@ -449,10 +501,27 @@ describe("keyboardShortcutController", () => {
 
     it("acts on a repeated press of every key that ADR 026 marks 'acts'", () => {
       const acts: readonly [ShortcutKeyEvent, ShortcutAction][] = [
-        [createKeyEvent({ key: "ArrowLeft" }), "stepBackOneFrame"],
-        [createKeyEvent({ key: "ArrowRight" }), "stepForwardOneFrame"],
-        [createKeyEvent({ key: "ArrowLeft", shiftKey: true }), "stepBackTenFrames"],
-        [createKeyEvent({ key: "ArrowRight", shiftKey: true }), "stepForwardTenFrames"],
+        [createKeyEvent({ key: "ArrowLeft" }), "jumpBackFiveSeconds"],
+        [createKeyEvent({ key: "ArrowRight" }), "jumpForwardFiveSeconds"],
+        [createKeyEvent({ key: "ArrowLeft", shiftKey: true }), "jumpBackOneSecond"],
+        [createKeyEvent({ key: "ArrowRight", shiftKey: true }), "jumpForwardOneSecond"],
+        [createKeyEvent({ key: "ArrowLeft", ctrlKey: true }), "jumpBackThirtySeconds"],
+        [
+          createKeyEvent({ key: "ArrowRight", ctrlKey: true }),
+          "jumpForwardThirtySeconds",
+        ],
+        [createKeyEvent({ key: "ArrowUp" }), "goToPreviousEditPoint"],
+        [createKeyEvent({ key: "ArrowDown" }), "goToNextEditPoint"],
+        [createKeyEvent({ key: ",", code: "Comma" }), "stepBackOneFrame"],
+        [createKeyEvent({ key: ".", code: "Period" }), "stepForwardOneFrame"],
+        [
+          createKeyEvent({ key: "<", code: "Comma", shiftKey: true }),
+          "stepBackTenFrames",
+        ],
+        [
+          createKeyEvent({ key: ">", code: "Period", shiftKey: true }),
+          "stepForwardTenFrames",
+        ],
         [createKeyEvent({ key: "z", code: "KeyZ", ctrlKey: true }), "undo"],
         [
           createKeyEvent({ key: "Z", code: "KeyZ", ctrlKey: true, shiftKey: true }),
@@ -529,33 +598,40 @@ describe("keyboardShortcutController", () => {
   // The modifier rule of ADR 026: a binding matches only when the held modifiers equal its
   // set exactly. Every combination the table does not name is not claimed.
   describe("the modifier rule", () => {
-    it("does not claim Space or ArrowRight with Ctrl held", () => {
+    it("does not claim Space with Ctrl held, and claims Ctrl+ArrowRight on Windows only", () => {
       for (const platform of PLATFORMS) {
         const spaceEvent = createKeyEvent({ key: " ", ctrlKey: true });
         expect(isShortcutSuppressed(spaceEvent)).toBe(false);
         expect(resolveShortcut(spaceEvent, contextWith("all", platform))).toEqual(
           NOT_CLAIMED,
         );
-
-        const arrowEvent = createKeyEvent({ key: "ArrowRight", ctrlKey: true });
-        expect(resolveShortcut(arrowEvent, contextWith("all", platform))).toEqual(
-          NOT_CLAIMED,
-        );
       }
+      // primary is Ctrl on Windows. On macOS, Ctrl with an arrow belongs to the system.
+      const arrowEvent = createKeyEvent({ key: "ArrowRight", ctrlKey: true });
+      expect(resolveShortcut(arrowEvent, contextWith("all", "windows"))).toEqual({
+        claimed: true,
+        action: "jumpForwardThirtySeconds",
+      });
+      expect(resolveShortcut(arrowEvent, contextWith("all", "macos"))).toEqual(
+        NOT_CLAIMED,
+      );
     });
 
-    it("does not claim Space or ArrowRight with Meta held", () => {
+    it("does not claim Space with Meta held, and claims Cmd+ArrowRight on macOS only", () => {
       for (const platform of PLATFORMS) {
         const spaceEvent = createKeyEvent({ key: " ", metaKey: true });
         expect(resolveShortcut(spaceEvent, contextWith("all", platform))).toEqual(
           NOT_CLAIMED,
         );
-
-        const arrowEvent = createKeyEvent({ key: "ArrowRight", metaKey: true });
-        expect(resolveShortcut(arrowEvent, contextWith("all", platform))).toEqual(
-          NOT_CLAIMED,
-        );
       }
+      const arrowEvent = createKeyEvent({ key: "ArrowRight", metaKey: true });
+      expect(resolveShortcut(arrowEvent, contextWith("all", "macos"))).toEqual({
+        claimed: true,
+        action: "jumpForwardThirtySeconds",
+      });
+      expect(resolveShortcut(arrowEvent, contextWith("all", "windows"))).toEqual(
+        NOT_CLAIMED,
+      );
     });
 
     it("does not claim Space or ArrowRight with Alt held", () => {
@@ -577,17 +653,24 @@ describe("keyboardShortcutController", () => {
       expect(resolveShortcut(spaceEvent, allAvailable)).toEqual(NOT_CLAIMED);
     });
 
-    // Changed by ADR 026: ADR 021 refused Shift+ArrowRight and held Shift free for this step.
-    it("claims Shift+ArrowLeft and Shift+ArrowRight as the ten-frame step", () => {
+    // Shift with an arrow was the ten-frame step of ADR 026. It is now the jump of one second,
+    // and the ten-frame step is Shift with the comma or the period.
+    it("claims Shift+ArrowLeft and Shift+ArrowRight as the one-second jump", () => {
       expect(
         resolveShortcut(
           createKeyEvent({ key: "ArrowRight", shiftKey: true }),
           allAvailable,
         ),
-      ).toEqual({ claimed: true, action: "stepForwardTenFrames" });
+      ).toEqual({ claimed: true, action: "jumpForwardOneSecond" });
       expect(
         resolveShortcut(
           createKeyEvent({ key: "ArrowLeft", shiftKey: true }),
+          allAvailable,
+        ),
+      ).toEqual({ claimed: true, action: "jumpBackOneSecond" });
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: "<", code: "Comma", shiftKey: true }),
           allAvailable,
         ),
       ).toEqual({ claimed: true, action: "stepBackTenFrames" });
@@ -711,6 +794,12 @@ describe("keyboardShortcutController", () => {
         { key: "Escape", code: "Escape" },
         { key: "ArrowLeft", code: "ArrowLeft" },
         { key: "ArrowRight", code: "ArrowRight", shiftKey: true },
+        { key: "ArrowLeft", code: "ArrowLeft", metaKey: true },
+        { key: "ArrowUp", code: "ArrowUp" },
+        { key: "ArrowDown", code: "ArrowDown" },
+        { key: ",", code: "Comma" },
+        { key: ".", code: "Period" },
+        { key: "<", code: "Comma", shiftKey: true },
         { key: "Home", code: "Home" },
         { key: "End", code: "End" },
         { key: " ", code: "Space" },
@@ -821,7 +910,7 @@ describe("keyboardShortcutController", () => {
       });
     });
 
-    it("claims ArrowRight and returns stepForwardOneFrame on a closed popup trigger", () => {
+    it("claims ArrowRight and returns jumpForwardFiveSeconds on a closed popup trigger", () => {
       const popupTriggerTarget: ShortcutEventTarget = {
         tagName: "BUTTON",
         isContentEditable: false,
@@ -839,7 +928,7 @@ describe("keyboardShortcutController", () => {
       expect(isShortcutSuppressed(event)).toBe(false);
       expect(resolveShortcut(event, allAvailable)).toEqual({
         claimed: true,
-        action: "stepForwardOneFrame",
+        action: "jumpForwardFiveSeconds",
       });
     });
 
@@ -1233,7 +1322,7 @@ describe("keyboardShortcutController", () => {
       }
     });
 
-    it("still plays with Space and steps with the arrows that do not move it", () => {
+    it("still plays with Space and jumps with the arrows that do not move it", () => {
       expect(
         resolveShortcut(
           createKeyEvent({ key: " ", target: splitterTarget }),
@@ -1245,7 +1334,20 @@ describe("keyboardShortcutController", () => {
           createKeyEvent({ key: "ArrowLeft", target: splitterTarget }),
           allAvailable,
         ),
-      ).toEqual({ claimed: true, action: "stepBackOneFrame" });
+      ).toEqual({ claimed: true, action: "jumpBackFiveSeconds" });
+    });
+
+    it("keeps ArrowUp and ArrowDown from the edit points while the splitter has the focus", () => {
+      for (const key of ["ArrowUp", "ArrowDown"]) {
+        const onBody = createKeyEvent({ key });
+        expect(resolveShortcut(onBody, allAvailable).claimed).toBe(true);
+        expect(
+          resolveShortcut(
+            createKeyEvent({ key, target: splitterTarget }),
+            allAvailable,
+          ),
+        ).toEqual(NOT_CLAIMED);
+      }
     });
 
     it("does not own a splitter key with Ctrl, Cmd or Alt", () => {
@@ -1262,6 +1364,167 @@ describe("keyboardShortcutController", () => {
     it("does not own a splitter key when the target is not a splitter", () => {
       expect(isSplitterKey(createKeyEvent({ key: "Home" }))).toBe(false);
       expect(isSplitterKey(createKeyEvent({ key: "Home", target: null }))).toBe(false);
+    });
+  });
+
+  describe("ArrowUp and ArrowDown, the keys of the edit points", () => {
+    /**
+     * A target inside an element that matches one selector part, as `closest` answers. With
+     * `overflows`, the closest element of that selector is taller inside than outside.
+     */
+    const insideOf = (
+      part: string,
+      tagName = "BUTTON",
+      overflows = false,
+    ): ShortcutEventTarget => {
+      const matches = (selector: string) =>
+        selector.split(",").some((candidate) => candidate.trim() === part);
+      return createTarget({
+        tagName,
+        hasAncestorMatching: matches,
+        closestOverflowsVertically: (selector) => overflows && matches(selector),
+      });
+    };
+
+    it("names the menu trigger and the scroll marker", () => {
+      expect(SCROLL_KEYS_ATTRIBUTE).toBe("data-scroll-keys");
+      expect(SCROLL_KEYS_SELECTOR).toBe("[data-scroll-keys]");
+      expect(MENU_TRIGGER_SELECTOR).toBe('[aria-haspopup="menu"]');
+      expect(VERTICAL_ARROW_KEYS).toEqual(["ArrowUp", "ArrowDown"]);
+    });
+
+    it("goes to the edit points with the focus on the body or on a button", () => {
+      for (const target of [
+        null,
+        createTarget(),
+        createTarget({ tagName: "BUTTON" }),
+      ]) {
+        expect(
+          resolveShortcut(createKeyEvent({ key: "ArrowUp", target }), allAvailable),
+        ).toEqual({ claimed: true, action: "goToPreviousEditPoint" });
+        expect(
+          resolveShortcut(createKeyEvent({ key: "ArrowDown", target }), allAvailable),
+        ).toEqual({ claimed: true, action: "goToNextEditPoint" });
+      }
+    });
+
+    it("claims them without an action when no edit point is available", () => {
+      for (const key of ["ArrowUp", "ArrowDown"]) {
+        expect(resolveShortcut(createKeyEvent({ key }), contextWith([]))).toEqual(
+          CLAIMED_WITHOUT_ACTION,
+        );
+      }
+    });
+
+    it("leaves them to a closed menu trigger, which opens its menu on ArrowDown", () => {
+      const trigger = insideOf('[aria-haspopup="menu"]');
+      expect(trigger.hasAncestorMatching(KEYBOARD_OWNER_SELECTOR)).toBe(false);
+      for (const key of ["ArrowUp", "ArrowDown"]) {
+        const event = createKeyEvent({ key, target: trigger });
+        expect(isVerticalArrowOwned(event)).toBe(true);
+        expect(resolveShortcut(event, allAvailable)).toEqual(NOT_CLAIMED);
+      }
+      // Every other key keeps its meaning on the trigger.
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: "ArrowLeft", target: trigger }),
+          allAvailable,
+        ),
+      ).toEqual({ claimed: true, action: "jumpBackFiveSeconds" });
+      expect(
+        resolveShortcut(createKeyEvent({ key: " ", target: trigger }), allAvailable),
+      ).toEqual({ claimed: true, action: "togglePlayback" });
+    });
+
+    it("leaves them to a marked container that overflows, and to a control inside it", () => {
+      for (const target of [
+        insideOf("[data-scroll-keys]", "PRE", true),
+        insideOf("[data-scroll-keys]", "BUTTON", true),
+      ]) {
+        for (const key of ["ArrowUp", "ArrowDown"]) {
+          const event = createKeyEvent({ key, target });
+          expect(isVerticalArrowOwned(event)).toBe(true);
+          expect(resolveShortcut(event, allAvailable)).toEqual(NOT_CLAIMED);
+          // With a modifier too: the browser still scrolls there.
+          expect(isVerticalArrowOwned({ ...event, shiftKey: true })).toBe(true);
+        }
+        expect(
+          resolveShortcut(
+            createKeyEvent({ key: ",", code: "Comma", target }),
+            allAvailable,
+          ),
+        ).toEqual({ claimed: true, action: "stepBackOneFrame" });
+      }
+    });
+
+    it("keeps them for the edit points in a marked container whose content fits", () => {
+      // WebView2 focuses a button on a click, so a click on a notice puts the focus inside the
+      // notice stack. While the stack does not scroll, the keys still go to the edit points.
+      for (const target of [
+        insideOf("[data-scroll-keys]", "BUTTON"),
+        insideOf("[data-scroll-keys]", "PRE"),
+      ]) {
+        expect(
+          resolveShortcut(createKeyEvent({ key: "ArrowDown", target }), allAvailable),
+        ).toEqual({ claimed: true, action: "goToNextEditPoint" });
+        expect(isVerticalArrowOwned(createKeyEvent({ key: "ArrowUp", target }))).toBe(
+          false,
+        );
+      }
+      // A target that cannot answer the question does not overflow.
+      const plain = createTarget({
+        hasAncestorMatching: (selector) => selector === SCROLL_KEYS_SELECTOR,
+      });
+      expect(
+        isVerticalArrowOwned(createKeyEvent({ key: "ArrowUp", target: plain })),
+      ).toBe(false);
+    });
+
+    it("asks the overflow of the marked container only, not of a menu trigger", () => {
+      const asked: string[] = [];
+      const target = createTarget({
+        hasAncestorMatching: () => false,
+        closestOverflowsVertically: (selector) => {
+          asked.push(selector);
+          return false;
+        },
+      });
+      isVerticalArrowOwned(createKeyEvent({ key: "ArrowDown", target }));
+      expect(asked).toEqual([SCROLL_KEYS_SELECTOR]);
+    });
+
+    it("leaves them to a list box and a menu, by the suppression rules", () => {
+      for (const part of ['[role="listbox"]', '[role="menu"]', '[role="option"]']) {
+        const target = insideOf(part, "DIV");
+        for (const key of ["ArrowUp", "ArrowDown"]) {
+          const event = createKeyEvent({ key, target });
+          expect(isShortcutSuppressed(event)).toBe(true);
+          expect(resolveShortcut(event, allAvailable)).toEqual(NOT_CLAIMED);
+        }
+      }
+    });
+
+    it("leaves them to an open overlay with the focus on the body", () => {
+      for (const key of ["ArrowUp", "ArrowDown"]) {
+        expect(
+          resolveShortcut(createKeyEvent({ key, isOverlayOpen: true }), allAvailable),
+        ).toEqual(NOT_CLAIMED);
+      }
+    });
+
+    it("does not own another key, and does not own the two keys on an unmarked target", () => {
+      expect(
+        isVerticalArrowOwned(
+          createKeyEvent({
+            key: "ArrowLeft",
+            target: insideOf("[data-scroll-keys]", "BUTTON", true),
+          }),
+        ),
+      ).toBe(false);
+      expect(isVerticalArrowOwned(createKeyEvent({ key: "ArrowUp" }))).toBe(false);
+      expect(
+        isVerticalArrowOwned(createKeyEvent({ key: "ArrowUp", target: null })),
+      ).toBe(false);
     });
   });
 

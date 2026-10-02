@@ -67,12 +67,40 @@ export const ESCAPE_OWNER_SELECTOR = `[${RESIZING_TIMELINE_ATTRIBUTE}]`;
  */
 export const SPLITTER_KEYS: readonly string[] = ["ArrowUp", "ArrowDown", "Home", "End"];
 
+/**
+ * The marker of a container that the browser can scroll with `ArrowUp` and `ArrowDown`: a
+ * container that scrolls and that the user can focus, or that holds a control the user can
+ * focus. While the focus is inside the closest marked container and that container overflows
+ * vertically, the two keys scroll it. `DiagnosticDetails` marks its text, and the preview marks
+ * the panels and the notice stack that scroll when the preview is small.
+ */
+export const SCROLL_KEYS_ATTRIBUTE = "data-scroll-keys";
+
+/** Selector for a container with the marker `SCROLL_KEYS_ATTRIBUTE`. */
+export const SCROLL_KEYS_SELECTOR = `[${SCROLL_KEYS_ATTRIBUTE}]`;
+
+/**
+ * Selector for a menu trigger. Radix opens a dropdown menu from its trigger on `ArrowDown`, and
+ * its trigger carries `aria-haspopup="menu"`. A trigger keeps the role of a button, so
+ * `KEYBOARD_OWNER_SELECTOR` does not name it.
+ */
+export const MENU_TRIGGER_SELECTOR = '[aria-haspopup="menu"]';
+
+/** The keys that a menu trigger and a marked container that overflows can own. */
+export const VERTICAL_ARROW_KEYS: readonly string[] = ["ArrowUp", "ArrowDown"];
+
 /** The narrow view of the event target the rules read, so a test can pass a fake. */
 export interface ShortcutEventTarget {
   readonly tagName: string;
   readonly isContentEditable: boolean;
   /** Answers `Element.closest(selector) !== null` for the target. */
   readonly hasAncestorMatching: (selector: string) => boolean;
+  /**
+   * Answers whether `Element.closest(selector)` for the target, the target itself or an
+   * ancestor, overflows vertically: its `scrollHeight` is greater than its `clientHeight`.
+   * False when no element matches. Absent means false, for a target that cannot scroll.
+   */
+  readonly closestOverflowsVertically?: (selector: string) => boolean;
 }
 
 export interface ShortcutKeyEvent extends ShortcutKeyPress {
@@ -163,7 +191,7 @@ export function isShortcutSuppressed(event: ShortcutKeyEvent): boolean {
  * Unlike the owners of `KEYBOARD_OWNER_SELECTOR`, a splitter owns only the keys that move it.
  * `Home` and `End` are also in the key table (ADR 026), so without this rule a press on the
  * splitter would go to the first or the last frame. Every other key keeps its meaning: `Space`
- * still plays and `ArrowLeft` still steps while the splitter has the focus.
+ * still plays and `ArrowLeft` still jumps while the splitter has the focus.
  */
 export function isSplitterKey(event: ShortcutKeyEvent): boolean {
   return (
@@ -173,6 +201,29 @@ export function isSplitterKey(event: ShortcutKeyEvent): boolean {
     !event.altKey &&
     event.target !== null &&
     event.target.hasAncestorMatching(SPLITTER_SELECTOR)
+  );
+}
+
+/**
+ * Determines whether the target of the key press owns `ArrowUp` or `ArrowDown`, whatever the
+ * modifiers: the target is inside a menu trigger (`MENU_TRIGGER_SELECTOR`), or inside a marked
+ * container (`SCROLL_KEYS_SELECTOR`) whose content is taller than the container.
+ *
+ * The two keys go to the previous and the next edit point everywhere else. ADR 021 keeps them
+ * for the containers that scroll and for the controls that open or move a menu, so the layer
+ * leaves them to a menu trigger, which opens its menu on `ArrowDown`, and to a marked container,
+ * which the browser scrolls. A marked container whose content fits does not scroll, so there
+ * the keys still go to the edit points. The test reads the closest marked container only, as the
+ * browser scrolls the closest container. Every other key keeps its meaning there: `ArrowLeft`
+ * still jumps while a menu trigger has the focus.
+ */
+export function isVerticalArrowOwned(event: ShortcutKeyEvent): boolean {
+  const { target } = event;
+  return (
+    VERTICAL_ARROW_KEYS.includes(event.key) &&
+    target !== null &&
+    (target.hasAncestorMatching(MENU_TRIGGER_SELECTOR) ||
+      target.closestOverflowsVertically?.(SCROLL_KEYS_SELECTOR) === true)
   );
 }
 
@@ -230,15 +281,20 @@ export function isGestureEscape(
  * of the action is false, the layer owns the key press and performs nothing, so the key cannot
  * go to another handler that the user cannot see.
  *
- * A key press that matches no binding of the table is not claimed. ArrowUp and ArrowDown are
- * in no binding: they belong to scroll containers and to Radix roving focus (ArrowDown opens a
- * focused dropdown).
+ * A key press that matches no binding of the table is not claimed. ArrowUp and ArrowDown go to
+ * the edit points, except inside a dialog, a menu, a list box, a focused splitter, a menu
+ * trigger and a marked scroll container, which keep them (`isVerticalArrowOwned`).
  */
 export function resolveShortcut(
   event: ShortcutKeyEvent,
   context: ShortcutContext,
 ): ShortcutResolution {
-  if (isShortcutSuppressed(event) || isSplitterKey(event) || isGestureEscape(event)) {
+  if (
+    isShortcutSuppressed(event) ||
+    isSplitterKey(event) ||
+    isVerticalArrowOwned(event) ||
+    isGestureEscape(event)
+  ) {
     return NOT_CLAIMED;
   }
 
@@ -258,8 +314,8 @@ export function resolveShortcut(
   }
 
   // A "taken" key must not act thirty times a second while it is held, and must still not
-  // reach the page: a held Space would otherwise scroll it. An "acts" key, such as an arrow,
-  // steps on every repeat so that holding it steps continuously.
+  // reach the page: a held Space would otherwise scroll it. An "acts" key, such as an arrow or
+  // a frame step key, acts on every repeat so that holding it jumps or steps continuously.
   if (event.repeat && binding.repeat === "taken") {
     return CLAIMED_WITHOUT_ACTION;
   }

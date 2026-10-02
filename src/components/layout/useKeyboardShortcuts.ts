@@ -67,14 +67,18 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       playback.seekToPts(command.pts, command.options);
       return;
     case "seekToFrameIndex":
-      // End on the frame grid (ADR 026).
-      playback.seekToFrameIndex(command.frameIndex);
+      // End on the frame grid (ADR 026), and a time jump there, which keeps the playback
+      // running (`timeJump.ts`).
+      playback.seekToFrameIndex(command.frameIndex, command.options);
       return;
     case "seekApproximate":
       // Home on a source that cannot calibrate, and End on the approximate clock (`planEndSeek`).
       // Both seek on the approximate clock after the anchor, so a request deferred before the
-      // anchor keeps that clock (ADR 022).
-      playback.seekApproximate(command.seconds, APPROXIMATE_SHORTCUT_SEEK_OPTIONS);
+      // anchor keeps that clock (ADR 022). A time jump passes its own options.
+      playback.seekApproximate(
+        command.seconds,
+        command.options ?? APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
+      );
       return;
     case "markIn":
       timeline.markIn(command.pts);
@@ -147,6 +151,14 @@ export function useKeyboardShortcuts(): void {
               ? element.isContentEditable
               : false,
           hasAncestorMatching: (selector: string) => element.closest(selector) !== null,
+          // A marked container keeps ArrowUp and ArrowDown only while its content is taller
+          // than the container, so the browser can scroll it (`isVerticalArrowOwned`).
+          closestOverflowsVertically: (selector: string) => {
+            const container = element.closest(selector);
+            return (
+              container !== null && container.scrollHeight > container.clientHeight
+            );
+          },
         };
       }
 

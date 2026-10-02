@@ -156,7 +156,7 @@ export type FrameIndexSeekOptions = Pick<SeekOptions, "keepPlaying">;
 /**
  * Options for a frame step (`seekNominal`).
  *
- * `held`: true for each step that repeats a held step: a key repeat of a held arrow key, and a
+ * `held`: true for each step that repeats a held step: a key repeat of a held step key, and a
  * timer repeat of a held step button (ADR 021). False or absent for a single press, a click and
  * the first step of a hold. A held backward step plays no cue and stops any cue that sounds,
  * because audio does not play backwards and each backward cue would replay a forward snippet

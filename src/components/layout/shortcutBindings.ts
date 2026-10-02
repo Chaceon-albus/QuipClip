@@ -29,6 +29,14 @@ export function getShortcutPlatform(): ShortcutPlatform {
 export const SHORTCUT_ACTIONS = [
   "togglePlayback",
   "playSegment",
+  "jumpBackFiveSeconds",
+  "jumpForwardFiveSeconds",
+  "jumpBackOneSecond",
+  "jumpForwardOneSecond",
+  "jumpBackThirtySeconds",
+  "jumpForwardThirtySeconds",
+  "goToPreviousEditPoint",
+  "goToNextEditPoint",
   "stepBackOneFrame",
   "stepForwardOneFrame",
   "stepBackTenFrames",
@@ -55,7 +63,16 @@ export type ShortcutAction = (typeof SHORTCUT_ACTIONS)[number];
 
 /** A key that `event.key` names with a word, and `" "` for the space bar (ADR 021). */
 export type ShortcutNamedKey =
-  " " | "ArrowLeft" | "ArrowRight" | "Home" | "End" | "Delete" | "Backspace" | "Escape";
+  | " "
+  | "ArrowLeft"
+  | "ArrowRight"
+  | "ArrowUp"
+  | "ArrowDown"
+  | "Home"
+  | "End"
+  | "Delete"
+  | "Backspace"
+  | "Escape";
 
 export type ShortcutLetter =
   | "A"
@@ -102,6 +119,16 @@ export type ShortcutLetter =
  *   because a Cyrillic layout types a letter there and its users press that key. The zoom
  *   rows name none: on other layouts the US positions of `=`, `-` and `\` show other
  *   symbols, such as the German `´` and `ß` and the Spanish `ç`, and those must not zoom.
+ *   A position in `excludedCodes` never matches, whatever it types: the frame steps refuse
+ *   the decimal key of the numpad, which types `,` on a German layout.
+ * - `characterAt`: a punctuation key on one position. It matches only when `event.key` is the
+ *   character and `event.code` is the position, both together. A layout row of the frame steps
+ *   uses it where one symbol means the step only on one key: a German layout types `:` with
+ *   Shift on the Period position, and a US layout types `:` with Shift on the Semicolon
+ *   position, which must not step. With `fallback`, the position also matches when `event.key`
+ *   is not one printable ASCII character, as `character` does. `keyCap` is the symbol that a
+ *   label names for the row: the ten-frame step back types `<` with Shift on the Comma
+ *   position, and its chip shows Shift with `,`, the key that the user presses.
  * - `numpad`: a key of the numeric keypad. It matches `event.code` only, so the position names
  *   it on every layout and in both Num Lock states. `character` is the symbol on its key cap,
  *   which the labels show. ADR 026 names the numpad `+` and `-` this way.
@@ -114,6 +141,21 @@ export type ShortcutKey =
       readonly character: string;
       /** The position to match when `event.key` is not ASCII, or null for none. */
       readonly code: string | null;
+      /** The positions that never match, whatever they type. Absent means none. */
+      readonly excludedCodes?: readonly string[];
+    }
+  | {
+      readonly kind: "characterAt";
+      readonly character: string;
+      /** The position that must also match. */
+      readonly code: string;
+      /** True when the position also matches while `event.key` is not ASCII. */
+      readonly fallback: boolean;
+      /**
+       * The unshifted symbol of the US key at `code`, which a label names instead of
+       * `character`. Absent for a row of another layout, whose label names `character`.
+       */
+      readonly keyCap?: string;
     }
   | {
       readonly kind: "numpad";
@@ -153,10 +195,12 @@ export interface ShortcutBinding {
   readonly yieldsToOpenTooltip?: boolean;
   /**
    * True for a second binding of a symbol that some layouts type with `Shift` and others
-   * without, such as `=` on JIS, `+` on a German keyboard, or `/` on German and French AZERTY.
-   * The layer matches it like any other binding. `aria-keyshortcuts` leaves it out, because it
-   * names a symbol that the attribute already lists, and the chip never names it, because it is
-   * never the first binding of its action.
+   * without, such as `=` on JIS, `+` on a German keyboard, or `/` on German and French AZERTY,
+   * and for a binding that gives a frame step to a layout whose step key types another symbol,
+   * such as `;` with Shift on a German keyboard. The layer matches it like any other binding.
+   * `aria-keyshortcuts` leaves it out, because it names a key that the attribute already lists
+   * for a US layout, and the chip never names it, because it is never the first binding of its
+   * action.
    */
   readonly layoutVariant?: boolean;
 }
@@ -178,11 +222,33 @@ const letter = (value: ShortcutLetter): ShortcutKey => ({
   letter: value,
 });
 
-const character = (value: string, code: string | null): ShortcutKey => ({
-  kind: "character",
-  character: value,
-  code,
-});
+const character = (
+  value: string,
+  code: string | null,
+  excludedCodes?: readonly string[],
+): ShortcutKey =>
+  excludedCodes === undefined
+    ? { kind: "character", character: value, code }
+    : { kind: "character", character: value, code, excludedCodes };
+
+const characterAt = (
+  value: string,
+  code: string,
+  {
+    fallback = false,
+    keyCap,
+  }: { readonly fallback?: boolean; readonly keyCap?: string } = {},
+): ShortcutKey =>
+  keyCap === undefined
+    ? { kind: "characterAt", character: value, code, fallback }
+    : { kind: "characterAt", character: value, code, fallback, keyCap };
+
+/**
+ * The positions of the numeric keypad that type a decimal separator. The decimal key types `,`
+ * on a German layout and `.` on a US layout, and the comma key of a JIS or Brazilian keypad
+ * types `,` or `.`. A frame step names a key of the main block, so it refuses both.
+ */
+const NUMPAD_SEPARATOR_CODES: readonly string[] = ["NumpadDecimal", "NumpadComma"];
 
 const numpad = (value: string, code: `Numpad${string}`): ShortcutKey => ({
   kind: "numpad",
@@ -211,26 +277,99 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     action: "playSegment",
     repeat: "taken",
   },
+  // The time jumps of a media player, such as PotPlayer and mpv: 5 s with the arrow alone, 1 s
+  // with Shift, 30 s with primary (`timeJump.ts`). A held arrow jumps on every repeat, and each
+  // jump counts from the target of the jump before it.
   {
     key: named("ArrowLeft"),
     modifiers: [],
-    action: "stepBackOneFrame",
+    action: "jumpBackFiveSeconds",
     repeat: "acts",
   },
   {
     key: named("ArrowRight"),
     modifiers: [],
-    action: "stepForwardOneFrame",
+    action: "jumpForwardFiveSeconds",
     repeat: "acts",
   },
   {
     key: named("ArrowLeft"),
     modifiers: ["shift"],
-    action: "stepBackTenFrames",
+    action: "jumpBackOneSecond",
     repeat: "acts",
   },
   {
     key: named("ArrowRight"),
+    modifiers: ["shift"],
+    action: "jumpForwardOneSecond",
+    repeat: "acts",
+  },
+  {
+    key: named("ArrowLeft"),
+    modifiers: ["primary"],
+    action: "jumpBackThirtySeconds",
+    repeat: "acts",
+  },
+  {
+    key: named("ArrowRight"),
+    modifiers: ["primary"],
+    action: "jumpForwardThirtySeconds",
+    repeat: "acts",
+  },
+  // The previous and the next edit point: an In or an Out of a segment, or the pending In
+  // (`editPointJump.ts`). A container that scrolls, a menu trigger, a list box and the focused
+  // splitter keep these two keys (`keyboardShortcutController.ts`).
+  {
+    key: named("ArrowUp"),
+    modifiers: [],
+    action: "goToPreviousEditPoint",
+    repeat: "acts",
+  },
+  {
+    key: named("ArrowDown"),
+    modifiers: [],
+    action: "goToNextEditPoint",
+    repeat: "acts",
+  },
+  // The frame steps of mpv: `,` and `.` step one frame, and Shift with the same key steps ten.
+  // A held key steps on every repeat (ADR 021), with the cue of ADR 019.
+  //
+  // `,` and `.` match the symbol that the layout types (ADR 026), and the Comma and Period
+  // positions only when that key types no ASCII character, as the comma of primary+`,` does. So
+  // the French AZERTY `,` on the M position, the Turkish Q `,` and `.` on the Backslash and Slash
+  // positions, and the Russian `.` on the Slash position step. The Russian `б` and `ю` and the
+  // Turkish Q `ö` and `ç` on the Comma and Period positions step from those positions. Neither
+  // row matches the decimal key of the numpad, which types `,` on a German layout
+  // (NUMPAD_SEPARATOR_CODES).
+  //
+  // The ten-frame rows match the symbol and the position together, because one symbol is the
+  // shifted step key only on some keys. `<` and `>` are the symbols of US, UK, JIS, Brazilian,
+  // Greek, Korean and Colemak layouts on the Comma and Period positions. With `fallback`, a
+  // Cyrillic, Thai or Turkish Q layout steps ten frames from the same positions. `<` and `>` on any other
+  // key do not step: on a German, French, Spanish, Italian, Nordic, Swiss or Portuguese ISO
+  // keyboard they share the key beside the left Shift, unshifted and shifted, and that key is
+  // not a step key. The layout variants below serve the other layouts. The chip of the two rows
+  // names the key cap, `⇧,` and `⇧.` on macOS and `Shift+,` and `Shift+.` on Windows.
+  {
+    key: character(",", "Comma", NUMPAD_SEPARATOR_CODES),
+    modifiers: [],
+    action: "stepBackOneFrame",
+    repeat: "acts",
+  },
+  {
+    key: character(".", "Period", NUMPAD_SEPARATOR_CODES),
+    modifiers: [],
+    action: "stepForwardOneFrame",
+    repeat: "acts",
+  },
+  {
+    key: characterAt("<", "Comma", { fallback: true, keyCap: "," }),
+    modifiers: ["shift"],
+    action: "stepBackTenFrames",
+    repeat: "acts",
+  },
+  {
+    key: characterAt(">", "Period", { fallback: true, keyCap: "." }),
     modifiers: ["shift"],
     action: "stepForwardTenFrames",
     repeat: "acts",
@@ -333,6 +472,74 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     repeat: "taken",
     layoutVariant: true,
   },
+  // The layout variants of the frame steps. Each matches one symbol on one position with Shift,
+  // so it takes no key press from another layout. On a US layout none of these presses exists:
+  // Shift with Comma and Period types `<` and `>`, Shift with M types `M`, and Shift with W and
+  // E types `W` and `E`. Shift with Semicolon types `:`, and no row names that position.
+  //
+  // - Dvorak types `,` and `.` on the W and E positions, and `<` and `>` there with Shift.
+  // - German, Swiss, Spanish, Italian, Portuguese and Nordic layouts type `;` and `:` with Shift
+  //   on Comma and Period.
+  // - Czech, Slovak and Hungarian type `?` and `:` there. `:` is the row of the German layouts.
+  // - French and Belgian AZERTY type `,` on the M position, and `?` there with Shift, which steps
+  //   ten frames back. They type `.` with Shift on the Comma position, so that press steps one
+  //   frame forward, the frame step of the `.` that the user typed.
+  //
+  // Some layouts lose a binding:
+  //
+  // - French and Belgian AZERTY: ten frames forward. Their `.` needs Shift already, and Shift
+  //   with the next key, the Period position, types `/`, which is Play Segment.
+  // - A layout that types another ASCII symbol with Shift on Comma or Period, such as `'` and
+  //   `"` on Canadian Multilingual Standard, loses the ten-frame steps.
+  {
+    key: characterAt("<", "KeyW"),
+    modifiers: ["shift"],
+    action: "stepBackTenFrames",
+    repeat: "acts",
+    layoutVariant: true,
+  },
+  {
+    key: characterAt(">", "KeyE"),
+    modifiers: ["shift"],
+    action: "stepForwardTenFrames",
+    repeat: "acts",
+    layoutVariant: true,
+  },
+  {
+    key: characterAt(";", "Comma"),
+    modifiers: ["shift"],
+    action: "stepBackTenFrames",
+    repeat: "acts",
+    layoutVariant: true,
+  },
+  {
+    key: characterAt(":", "Period"),
+    modifiers: ["shift"],
+    action: "stepForwardTenFrames",
+    repeat: "acts",
+    layoutVariant: true,
+  },
+  {
+    key: characterAt("?", "Comma"),
+    modifiers: ["shift"],
+    action: "stepBackTenFrames",
+    repeat: "acts",
+    layoutVariant: true,
+  },
+  {
+    key: characterAt("?", "KeyM"),
+    modifiers: ["shift"],
+    action: "stepBackTenFrames",
+    repeat: "acts",
+    layoutVariant: true,
+  },
+  {
+    key: characterAt(".", "Comma"),
+    modifiers: ["shift"],
+    action: "stepForwardOneFrame",
+    repeat: "acts",
+    layoutVariant: true,
+  },
   // Final Cut Pro's Zoom to Fit, for a layout where `\` needs AltGr or Option, which no
   // binding holds. The modifier match is exact, so this row and primary+Z (undo) and
   // primary+Shift+Z (redo) never match the same key press.
@@ -371,11 +578,21 @@ export function matchesShortcutKey(
       }
       return press.code === `Key${key.letter}`;
     case "character":
+      if (key.excludedCodes?.includes(press.code) === true) {
+        return false;
+      }
       if (PRINTABLE_ASCII.test(press.key)) {
         return press.key === key.character;
       }
       // A row with no position matches the typed symbol only.
       return key.code !== null && press.code === key.code;
+    case "characterAt":
+      if (press.code !== key.code) {
+        return false;
+      }
+      return PRINTABLE_ASCII.test(press.key)
+        ? press.key === key.character
+        : key.fallback;
     case "numpad":
       return press.code === key.code;
   }

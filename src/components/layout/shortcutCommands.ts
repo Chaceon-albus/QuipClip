@@ -17,6 +17,7 @@ import {
   hasExactFrameGrid,
   hasNominalFrameRate,
   NOMINAL_STEP_EDGE_TOLERANCE_SECONDS,
+  type FrameIndexSeekOptions,
   type PlaybackState,
   type SeekOptions,
 } from "@/features/playback";
@@ -47,9 +48,11 @@ import {
   canZoomTimelineOut,
   isSourceActive,
 } from "./actionConditions";
+import { findEditPoint } from "./editPointJump";
 import type { ShortcutAction } from "./shortcutBindings";
+import { planTimeJump, TIME_JUMP_SECONDS, TIME_JUMP_SEEK_OPTIONS } from "./timeJump";
 
-/** The number of nominal frame intervals that one Shift+Arrow step moves (ADR 026). */
+/** The number of nominal frame intervals that one ten-frame step moves (ADR 026). */
 export const LARGE_FRAME_STEP = 10;
 
 /**
@@ -161,8 +164,21 @@ export type ShortcutCommand =
        */
       readonly options?: SeekOptions;
     }
-  | { readonly kind: "seekToFrameIndex"; readonly frameIndex: number }
-  | { readonly kind: "seekApproximate"; readonly seconds: number }
+  | {
+      readonly kind: "seekToFrameIndex";
+      readonly frameIndex: number;
+      /** Only a time jump passes options: it keeps the playback running (`timeJump.ts`). */
+      readonly options?: FrameIndexSeekOptions;
+    }
+  | {
+      readonly kind: "seekApproximate";
+      readonly seconds: number;
+      /**
+       * Only a time jump passes options. Without them, the seek is Home or End on the
+       * approximate clock, and the runner passes APPROXIMATE_SHORTCUT_SEEK_OPTIONS.
+       */
+      readonly options?: SeekOptions;
+    }
   | { readonly kind: "markIn"; readonly pts: Pts }
   | { readonly kind: "markOut"; readonly pts: Pts }
   | { readonly kind: "deleteSegment" }
@@ -490,6 +506,92 @@ export function planEndSeek(
 }
 
 /**
+ * The seek of Home (ADR 026), or null when Home must not seek.
+ *
+ * A calibrated source goes to the frame that `videoStartPts` names. So does a source whose
+ * calibration is still open: the store defers the seek until the anchor, and then drops it,
+ * because the anchor is that frame and it is on screen (ADR 022). Home still replaces the frame
+ * steps before it, so the latest request wins. A source that cannot calibrate goes to time zero
+ * on the approximate clock, because `seekToPts` would report a failed seek there (ADR 026).
+ *
+ * A time jump to a target before the start uses the same seek (`planTimeJump`).
+ *
+ * @param playback The playback state of the snapshot.
+ * @param hasActiveSource True while media is open and its element is attached and ready.
+ * @param probe The probe of the open media, or null while no media is open.
+ */
+export function planStartSeek(
+  playback: BoundarySeekPlayback,
+  hasActiveSource: boolean,
+  probe: ShortcutProbe | null,
+): ShortcutCommand | null {
+  if (!hasActiveSource || probe === null) {
+    return null;
+  }
+  if (
+    playback.calibrationStatus !== "unavailable" &&
+    probe.videoStartPts !== null &&
+    isPtsString(probe.videoStartPts)
+  ) {
+    // Already there: Home, Home moves nothing and keeps the frame for Mark In.
+    if (isTargetOnScreen(playback, probe.videoStartPts)) {
+      return null;
+    }
+    return { kind: "seekToPts", pts: probe.videoStartPts };
+  }
+  return { kind: "seekApproximate", seconds: 0 };
+}
+
+/**
+ * Gives the seek of Home or End the option of a time jump, `keepPlaying`, so a jump past an end
+ * goes where Home or End goes and plays on from there, as every other jump does. The target and
+ * the no-op of Home and End do not change. A seek on the approximate clock keeps the options of
+ * Home and End too (APPROXIMATE_SHORTCUT_SEEK_OPTIONS).
+ */
+function keepPlayingOf(command: ShortcutCommand | null): ShortcutCommand | null {
+  switch (command?.kind) {
+    case "seekToPts":
+      return { ...command, options: { ...command.options, ...TIME_JUMP_SEEK_OPTIONS } };
+    case "seekToFrameIndex":
+      return { ...command, options: TIME_JUMP_SEEK_OPTIONS };
+    case "seekApproximate":
+      return {
+        ...command,
+        options: { ...APPROXIMATE_SHORTCUT_SEEK_OPTIONS, ...TIME_JUMP_SEEK_OPTIONS },
+      };
+    default:
+      return command ?? null;
+  }
+}
+
+/**
+ * The call of a time jump of `seconds` (`planTimeJump`), or null when it must not act. A target
+ * before the start goes where Home goes, and a target at or after the end goes where End goes,
+ * with the no-op of each, and every seek keeps the playback running.
+ */
+function planTimeJumpCommand(
+  seconds: number,
+  snapshot: ShortcutSnapshot,
+  hasActiveSource: boolean,
+): ShortcutCommand | null {
+  const plan = planTimeJump(seconds, snapshot);
+  switch (plan?.kind) {
+    case undefined:
+      return null;
+    case "start":
+      return keepPlayingOf(
+        planStartSeek(snapshot.playback, hasActiveSource, snapshot.probe),
+      );
+    case "end":
+      return keepPlayingOf(
+        planEndSeek(snapshot.playback, hasActiveSource, snapshot.probe),
+      );
+    default:
+      return plan;
+  }
+}
+
+/**
  * The PTS of the named segment that Go to In (`inPts`) or Go to Out (`outPts`) seeks to.
  *
  * With no current segment, Go to In goes to the pending In mark. The two never hold a value
@@ -626,29 +728,29 @@ export function planShortcutCommand(
       return { kind: "seekNominal", frames: sign * size, held: press?.repeat === true };
     }
 
-    case "goToStart": {
-      if (!hasActiveSource || probe === null) {
-        return null;
-      }
-      // A calibrated source goes to the frame that `videoStartPts` names. So does a source
-      // whose calibration is still open: the store defers the seek until the anchor, and then
-      // drops it, because the anchor is that frame and it is on screen (ADR 022). Home still
-      // replaces the frame steps before it, so the latest request wins. A source that cannot
-      // calibrate goes to time zero on the approximate clock, because `seekToPts` would report
-      // a failed seek there (ADR 026).
-      if (
-        playback.calibrationStatus !== "unavailable" &&
-        probe.videoStartPts !== null &&
-        isPtsString(probe.videoStartPts)
-      ) {
-        // Already there: Home, Home moves nothing and keeps the frame for Mark In.
-        if (isTargetOnScreen(playback, probe.videoStartPts)) {
-          return null;
-        }
-        return { kind: "seekToPts", pts: probe.videoStartPts };
-      }
-      return { kind: "seekApproximate", seconds: 0 };
-    }
+    case "jumpBackFiveSeconds":
+    case "jumpForwardFiveSeconds":
+    case "jumpBackOneSecond":
+    case "jumpForwardOneSecond":
+    case "jumpBackThirtySeconds":
+    case "jumpForwardThirtySeconds":
+      return planTimeJumpCommand(TIME_JUMP_SECONDS[action], snapshot, hasActiveSource);
+
+    case "goToPreviousEditPoint":
+    case "goToNextEditPoint":
+      // A seek to a stored boundary PTS, as Go to In and Go to Out make, under the same
+      // condition: it needs a calibration, and it pauses the playback.
+      return planBoundarySeek(
+        playback,
+        hasActiveSource,
+        findEditPoint(
+          action === "goToPreviousEditPoint" ? "previous" : "next",
+          snapshot,
+        ),
+      );
+
+    case "goToStart":
+      return planStartSeek(playback, hasActiveSource, probe);
 
     case "goToEnd":
       return planEndSeek(playback, hasActiveSource, probe);

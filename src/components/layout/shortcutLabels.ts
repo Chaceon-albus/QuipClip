@@ -89,6 +89,8 @@ const MAC_FORWARD_DELETE = "⌦";
 const MAC_BACKWARD_DELETE = "⌫";
 const ARROW_LEFT = "←";
 const ARROW_RIGHT = "→";
+const ARROW_UP = "↑";
+const ARROW_DOWN = "↓";
 
 /**
  * The symbol that a chip shows for a punctuation key. A hyphen-minus is short and sits low in
@@ -112,6 +114,10 @@ function formatNamedKey(
       return ARROW_LEFT;
     case "ArrowRight":
       return ARROW_RIGHT;
+    case "ArrowUp":
+      return ARROW_UP;
+    case "ArrowDown":
+      return ARROW_DOWN;
     case "Home":
       return keyNames.home;
     case "End":
@@ -137,6 +143,10 @@ function formatKey(
       return key.letter;
     case "character":
       return formatCharacter(key.character);
+    case "characterAt":
+      // The key cap that the user presses with Shift, such as `,` for the `<` of Shift with
+      // Comma, so the chip reads Shift with that key.
+      return formatCharacter(key.keyCap ?? key.character);
     case "numpad":
       return `${keyNames.numpad} ${formatCharacter(key.character)}`;
   }
@@ -190,7 +200,11 @@ function ariaKeyName(key: ShortcutKey): string {
       return key.key === " " ? "Space" : key.key;
     case "letter":
       return key.letter;
+    // The attribute names the `KeyboardEvent.key` value that the press reports, with the
+    // modifiers held. Shift with Comma reports `<`, so the ten-frame step back is `Shift+<`,
+    // where its chip names the key cap `,`.
     case "character":
+    case "characterAt":
     case "numpad":
       return ariaCharacterName(key.character);
   }
@@ -244,6 +258,15 @@ function menuAcceleratorKey(key: ShortcutKey): string | null {
       return `Key${key.letter}`;
     case "character":
       return MENU_ACCELERATOR_CODE[key.character] ?? null;
+    case "characterAt":
+      // A row with a key cap is a press of a US key: Shift with Comma types `<` on a US layout,
+      // and the accelerator `Shift+Comma` draws as `⇧,`, as the chip does. A row without one
+      // names a symbol on a position of another layout, such as `;` with Shift on the Comma
+      // position of a German keyboard. A US layout types another symbol there, so that row has
+      // no accelerator form.
+      return key.keyCap === undefined
+        ? null
+        : (MENU_ACCELERATOR_CODE[key.keyCap] ?? null);
     case "numpad":
       return key.code;
   }
@@ -369,9 +392,10 @@ export function chipShortcutsFor(
  * in the attribute.
  *
  * A layout variant (`ShortcutBinding.layoutVariant`) is left out. It names `=` or `+` again,
- * with the Shift that one layout needs to type it, and the attribute already lists the
- * symbol. Zoom In therefore stays `= Plus`, and not `= Plus Shift+= Shift+Plus`. A second key
- * that is not a variant stays in, so Fit is `\ Shift+Z`.
+ * with the Shift that one layout needs to type it, or the step key of another layout, and the
+ * attribute already lists the key. Zoom In therefore stays `= Plus`, and not
+ * `= Plus Shift+= Shift+Plus`, and the ten-frame step back stays `Shift+<`, without the `;` and
+ * `?` of other layouts. A second key that is not a variant stays in, so Fit is `\ Shift+Z`.
  */
 export function ariaKeyShortcutsFor(
   action: ShortcutAction,

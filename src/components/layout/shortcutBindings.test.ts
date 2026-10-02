@@ -65,24 +65,74 @@ describe("shortcutBindings", () => {
       {
         name: "ArrowLeft",
         press: () => press({ key: "ArrowLeft", code: "ArrowLeft" }),
-        action: "stepBackOneFrame",
+        action: "jumpBackFiveSeconds",
         repeat: "acts",
       },
       {
         name: "ArrowRight",
         press: () => press({ key: "ArrowRight", code: "ArrowRight" }),
-        action: "stepForwardOneFrame",
+        action: "jumpForwardFiveSeconds",
         repeat: "acts",
       },
       {
         name: "Shift+ArrowLeft",
         press: () => press({ key: "ArrowLeft", code: "ArrowLeft", shiftKey: true }),
-        action: "stepBackTenFrames",
+        action: "jumpBackOneSecond",
         repeat: "acts",
       },
       {
         name: "Shift+ArrowRight",
         press: () => press({ key: "ArrowRight", code: "ArrowRight", shiftKey: true }),
+        action: "jumpForwardOneSecond",
+        repeat: "acts",
+      },
+      {
+        name: "primary+ArrowLeft",
+        press: (platform) =>
+          press({ key: "ArrowLeft", code: "ArrowLeft", ...primary(platform) }),
+        action: "jumpBackThirtySeconds",
+        repeat: "acts",
+      },
+      {
+        name: "primary+ArrowRight",
+        press: (platform) =>
+          press({ key: "ArrowRight", code: "ArrowRight", ...primary(platform) }),
+        action: "jumpForwardThirtySeconds",
+        repeat: "acts",
+      },
+      {
+        name: "ArrowUp",
+        press: () => press({ key: "ArrowUp", code: "ArrowUp" }),
+        action: "goToPreviousEditPoint",
+        repeat: "acts",
+      },
+      {
+        name: "ArrowDown",
+        press: () => press({ key: "ArrowDown", code: "ArrowDown" }),
+        action: "goToNextEditPoint",
+        repeat: "acts",
+      },
+      {
+        name: ",",
+        press: () => press({ key: ",", code: "Comma" }),
+        action: "stepBackOneFrame",
+        repeat: "acts",
+      },
+      {
+        name: ".",
+        press: () => press({ key: ".", code: "Period" }),
+        action: "stepForwardOneFrame",
+        repeat: "acts",
+      },
+      {
+        name: "Shift+, (US <)",
+        press: () => press({ key: "<", code: "Comma", shiftKey: true }),
+        action: "stepBackTenFrames",
+        repeat: "acts",
+      },
+      {
+        name: "Shift+. (US >)",
+        press: () => press({ key: ">", code: "Period", shiftKey: true }),
         action: "stepForwardTenFrames",
         repeat: "acts",
       },
@@ -232,6 +282,49 @@ describe("shortcutBindings", () => {
         action: "zoomToFit",
         repeat: "taken",
       },
+      // The layout variants of the frame steps.
+      {
+        name: "Shift+< (Dvorak Shift+W)",
+        press: () => press({ key: "<", code: "KeyW", shiftKey: true }),
+        action: "stepBackTenFrames",
+        repeat: "acts",
+      },
+      {
+        name: "Shift+> (Dvorak Shift+E)",
+        press: () => press({ key: ">", code: "KeyE", shiftKey: true }),
+        action: "stepForwardTenFrames",
+        repeat: "acts",
+      },
+      {
+        name: "Shift+; (German Shift+Comma)",
+        press: () => press({ key: ";", code: "Comma", shiftKey: true }),
+        action: "stepBackTenFrames",
+        repeat: "acts",
+      },
+      {
+        name: "Shift+: (German Shift+Period)",
+        press: () => press({ key: ":", code: "Period", shiftKey: true }),
+        action: "stepForwardTenFrames",
+        repeat: "acts",
+      },
+      {
+        name: "Shift+? (Czech Shift+Comma)",
+        press: () => press({ key: "?", code: "Comma", shiftKey: true }),
+        action: "stepBackTenFrames",
+        repeat: "acts",
+      },
+      {
+        name: "Shift+? (AZERTY Shift+M)",
+        press: () => press({ key: "?", code: "KeyM", shiftKey: true }),
+        action: "stepBackTenFrames",
+        repeat: "acts",
+      },
+      {
+        name: "Shift+. (AZERTY Shift+Comma)",
+        press: () => press({ key: ".", code: "Comma", shiftKey: true }),
+        action: "stepForwardOneFrame",
+        repeat: "acts",
+      },
     ];
 
     for (const platform of PLATFORMS) {
@@ -284,7 +377,9 @@ describe("shortcutBindings", () => {
               ? `letter:${key.letter}`
               : key.kind === "numpad"
                 ? `numpad:${key.code}`
-                : `character:${key.character}`;
+                : key.kind === "characterAt"
+                  ? `characterAt:${key.character}@${key.code}`
+                  : `character:${key.character}`;
         return `${name}|${[...binding.modifiers].sort().join("+")}`;
       };
       for (const platform of PLATFORMS) {
@@ -367,10 +462,69 @@ describe("shortcutBindings", () => {
       }
     });
 
-    it("leaves ArrowUp, ArrowDown, Enter and Tab out of the table", () => {
+    it("leaves Enter and Tab out of the table", () => {
       for (const platform of PLATFORMS) {
-        for (const key of ["ArrowUp", "ArrowDown", "Enter", "Tab"]) {
+        for (const key of ["Enter", "Tab"]) {
           expect(findShortcutBinding(press({ key, code: key }), platform)).toBeNull();
+        }
+      }
+    });
+
+    it("binds ArrowUp and ArrowDown with no modifier only", () => {
+      for (const platform of PLATFORMS) {
+        for (const key of ["ArrowUp", "ArrowDown"]) {
+          for (const modifiers of [
+            { shiftKey: true },
+            { altKey: true },
+            primary(platform),
+          ]) {
+            expect(
+              actionOf(press({ key, code: key, ...modifiers }), platform),
+            ).toBeNull();
+          }
+        }
+      }
+    });
+
+    it("lists the one-frame steps first, so a chip names , and . and not a variant", () => {
+      const first = (action: ShortcutAction) =>
+        SHORTCUT_BINDINGS.find((b) => b.action === action);
+      expect(first("stepBackOneFrame")?.key).toStrictEqual({
+        kind: "character",
+        character: ",",
+        code: "Comma",
+        excludedCodes: ["NumpadDecimal", "NumpadComma"],
+      });
+      expect(first("stepForwardOneFrame")?.key).toStrictEqual({
+        kind: "character",
+        character: ".",
+        code: "Period",
+        excludedCodes: ["NumpadDecimal", "NumpadComma"],
+      });
+      expect(first("stepBackTenFrames")?.key).toStrictEqual({
+        kind: "characterAt",
+        character: "<",
+        code: "Comma",
+        fallback: true,
+        keyCap: ",",
+      });
+      expect(first("stepForwardTenFrames")?.key).toStrictEqual({
+        kind: "characterAt",
+        character: ">",
+        code: "Period",
+        fallback: true,
+        keyCap: ".",
+      });
+      // Every later binding of a frame step is a layout variant.
+      for (const action of [
+        "stepBackOneFrame",
+        "stepForwardOneFrame",
+        "stepBackTenFrames",
+        "stepForwardTenFrames",
+      ] as const) {
+        const later = SHORTCUT_BINDINGS.filter((b) => b.action === action).slice(1);
+        for (const binding of later) {
+          expect(binding.layoutVariant).toBe(true);
         }
       }
     });
@@ -415,11 +569,11 @@ describe("shortcutBindings", () => {
       }
     });
 
-    it("rejects primary with an arrow, Home, End, I, O, Delete and Escape", () => {
+    it("rejects primary with ArrowUp, ArrowDown, Home, End, I, Delete and Escape", () => {
       for (const platform of PLATFORMS) {
         for (const [key, code] of [
-          ["ArrowLeft", "ArrowLeft"],
-          ["ArrowRight", "ArrowRight"],
+          ["ArrowUp", "ArrowUp"],
+          ["ArrowDown", "ArrowDown"],
           ["Home", "Home"],
           ["End", "End"],
           ["i", "KeyI"],
@@ -477,12 +631,68 @@ describe("shortcutBindings", () => {
       ).toBeNull();
     });
 
-    it("rejects a plain Z, E and comma, which need primary", () => {
+    it("rejects a plain Z and E, which need primary, and steps from a plain comma", () => {
       for (const platform of PLATFORMS) {
         expect(actionOf(press({ key: "z", code: "KeyZ" }), platform)).toBeNull();
         expect(actionOf(press({ key: "e", code: "KeyE" }), platform)).toBeNull();
-        expect(actionOf(press({ key: ",", code: "Comma" }), platform)).toBeNull();
+        expect(actionOf(press({ key: ",", code: "Comma" }), platform)).toBe(
+          "stepBackOneFrame",
+        );
+        expect(
+          actionOf(press({ key: ",", code: "Comma", ...primary(platform) }), platform),
+        ).toBe("openSettings");
       }
+    });
+
+    it("keeps Shift, primary and primary+Shift with an arrow apart", () => {
+      for (const platform of PLATFORMS) {
+        expect(actionOf(press({ key: "ArrowLeft", code: "ArrowLeft" }), platform)).toBe(
+          "jumpBackFiveSeconds",
+        );
+        expect(
+          actionOf(
+            press({ key: "ArrowLeft", code: "ArrowLeft", shiftKey: true }),
+            platform,
+          ),
+        ).toBe("jumpBackOneSecond");
+        expect(
+          actionOf(
+            press({ key: "ArrowLeft", code: "ArrowLeft", ...primary(platform) }),
+            platform,
+          ),
+        ).toBe("jumpBackThirtySeconds");
+        // primary with Shift, and Alt, stay with the system.
+        expect(
+          actionOf(
+            press({
+              key: "ArrowRight",
+              code: "ArrowRight",
+              shiftKey: true,
+              ...primary(platform),
+            }),
+            platform,
+          ),
+        ).toBeNull();
+        expect(
+          actionOf(
+            press({ key: "ArrowRight", code: "ArrowRight", altKey: true }),
+            platform,
+          ),
+        ).toBeNull();
+      }
+      // primary is Cmd on macOS: Ctrl with an arrow switches the spaces of macOS.
+      expect(
+        actionOf(
+          press({ key: "ArrowLeft", code: "ArrowLeft", ctrlKey: true }),
+          "macos",
+        ),
+      ).toBeNull();
+      expect(
+        actionOf(
+          press({ key: "ArrowLeft", code: "ArrowLeft", metaKey: true }),
+          "windows",
+        ),
+      ).toBeNull();
     });
 
     it("rejects primary+Shift+O, primary+Shift+E and primary+Shift+comma", () => {
@@ -775,9 +985,11 @@ describe("shortcutBindings", () => {
           "playSegment",
         );
         // German, Spanish and Nordic layouts type - on Slash, and that key still zooms out.
-        // Russian types a period there, which is no binding.
+        // Russian types a period there, which is the frame step forward and not /.
         expect(actionOf(press({ key: "-", code: "Slash" }), platform)).toBe("zoomOut");
-        expect(actionOf(press({ key: ".", code: "Slash" }), platform)).toBeNull();
+        expect(actionOf(press({ key: ".", code: "Slash" }), platform)).toBe(
+          "stepForwardOneFrame",
+        );
         // The modifier match is exact: primary+/ and Alt+/ stay with the system.
         expect(
           actionOf(press({ key: "/", code: "Slash", ...primary(platform) }), platform),
@@ -981,6 +1193,288 @@ describe("shortcutBindings", () => {
       expect(matchesShortcutKey(letterI, { key: "Unidentified", code: "KeyI" })).toBe(
         true,
       );
+    });
+  });
+
+  describe("the frame step keys and the arrows on real layouts", () => {
+    type Expectation = readonly [
+      name: string,
+      press: Partial<ShortcutKeyPress>,
+      action: ShortcutAction | null,
+    ];
+
+    // Each row is a key press as the layout reports it: `key` is the typed symbol, `code` the
+    // US position.
+    const LAYOUTS: { readonly [layout: string]: readonly Expectation[] } = {
+      US: [
+        [",", { key: ",", code: "Comma" }, "stepBackOneFrame"],
+        [".", { key: ".", code: "Period" }, "stepForwardOneFrame"],
+        ["Shift+,", { key: "<", code: "Comma", shiftKey: true }, "stepBackTenFrames"],
+        [
+          "Shift+.",
+          { key: ">", code: "Period", shiftKey: true },
+          "stepForwardTenFrames",
+        ],
+        ["/", { key: "/", code: "Slash" }, "playSegment"],
+        ["Shift+/", { key: "?", code: "Slash", shiftKey: true }, null],
+        [";", { key: ";", code: "Semicolon" }, null],
+        ["Shift+;", { key: ":", code: "Semicolon", shiftKey: true }, null],
+        ["M", { key: "m", code: "KeyM" }, null],
+        ["Shift+M", { key: "M", code: "KeyM", shiftKey: true }, null],
+        ["Shift+W", { key: "W", code: "KeyW", shiftKey: true }, null],
+        ["Shift+E", { key: "E", code: "KeyE", shiftKey: true }, null],
+        ["numpad .", { key: ".", code: "NumpadDecimal" }, null],
+        [
+          "Shift+numpad . (macOS)",
+          { key: ".", code: "NumpadDecimal", shiftKey: true },
+          null,
+        ],
+        ["ArrowUp", { key: "ArrowUp", code: "ArrowUp" }, "goToPreviousEditPoint"],
+        ["ArrowDown", { key: "ArrowDown", code: "ArrowDown" }, "goToNextEditPoint"],
+        ["ArrowLeft", { key: "ArrowLeft", code: "ArrowLeft" }, "jumpBackFiveSeconds"],
+        [
+          "Shift+ArrowRight",
+          { key: "ArrowRight", code: "ArrowRight", shiftKey: true },
+          "jumpForwardOneSecond",
+        ],
+      ],
+      UK: [
+        [",", { key: ",", code: "Comma" }, "stepBackOneFrame"],
+        [".", { key: ".", code: "Period" }, "stepForwardOneFrame"],
+        ["Shift+,", { key: "<", code: "Comma", shiftKey: true }, "stepBackTenFrames"],
+        [
+          "Shift+.",
+          { key: ">", code: "Period", shiftKey: true },
+          "stepForwardTenFrames",
+        ],
+        // The ISO key beside the left Shift types \ and |.
+        ["\\ (ISO)", { key: "\\", code: "IntlBackslash" }, "zoomToFit"],
+        ["Shift+\\ (ISO)", { key: "|", code: "IntlBackslash", shiftKey: true }, null],
+      ],
+      German: [
+        [",", { key: ",", code: "Comma" }, "stepBackOneFrame"],
+        [".", { key: ".", code: "Period" }, "stepForwardOneFrame"],
+        ["Shift+,", { key: ";", code: "Comma", shiftKey: true }, "stepBackTenFrames"],
+        [
+          "Shift+.",
+          { key: ":", code: "Period", shiftKey: true },
+          "stepForwardTenFrames",
+        ],
+        ["-", { key: "-", code: "Slash" }, "zoomOut"],
+        ["Shift+-", { key: "_", code: "Slash", shiftKey: true }, null],
+        ["Shift+7", { key: "/", code: "Digit7", shiftKey: true }, "playSegment"],
+        // The ISO key beside the left Shift types < and >. It is not a step key. macOS can
+        // report that key as Backquote on an ISO keyboard.
+        ["<", { key: "<", code: "IntlBackslash" }, null],
+        ["Shift+<", { key: ">", code: "IntlBackslash", shiftKey: true }, null],
+        ["< (macOS ISO)", { key: "<", code: "Backquote" }, null],
+        ["Shift+< (macOS ISO)", { key: ">", code: "Backquote", shiftKey: true }, null],
+        // The decimal key of the numpad types a comma.
+        ["numpad ,", { key: ",", code: "NumpadDecimal" }, null],
+      ],
+      Spanish: [
+        [",", { key: ",", code: "Comma" }, "stepBackOneFrame"],
+        ["Shift+,", { key: ";", code: "Comma", shiftKey: true }, "stepBackTenFrames"],
+        [
+          "Shift+.",
+          { key: ":", code: "Period", shiftKey: true },
+          "stepForwardTenFrames",
+        ],
+        ["Shift+ñ", { key: "Ñ", code: "Semicolon", shiftKey: true }, null],
+      ],
+      Czech: [
+        [",", { key: ",", code: "Comma" }, "stepBackOneFrame"],
+        [".", { key: ".", code: "Period" }, "stepForwardOneFrame"],
+        ["Shift+,", { key: "?", code: "Comma", shiftKey: true }, "stepBackTenFrames"],
+        [
+          "Shift+.",
+          { key: ":", code: "Period", shiftKey: true },
+          "stepForwardTenFrames",
+        ],
+      ],
+      "French AZERTY": [
+        [", (the M position)", { key: ",", code: "KeyM" }, "stepBackOneFrame"],
+        ["Shift+,", { key: "?", code: "KeyM", shiftKey: true }, "stepBackTenFrames"],
+        ["; (the Comma position)", { key: ";", code: "Comma" }, null],
+        [
+          "Shift+; types .",
+          { key: ".", code: "Comma", shiftKey: true },
+          "stepForwardOneFrame",
+        ],
+        [": (the Period position)", { key: ":", code: "Period" }, null],
+        [
+          "Shift+: types /",
+          { key: "/", code: "Period", shiftKey: true },
+          "playSegment",
+        ],
+        ["!", { key: "!", code: "Slash" }, null],
+        ["Shift+!", { key: "§", code: "Slash", shiftKey: true }, null],
+        ["m", { key: "m", code: "Semicolon" }, null],
+        ["<", { key: "<", code: "IntlBackslash" }, null],
+        ["Shift+<", { key: ">", code: "IntlBackslash", shiftKey: true }, null],
+        ["numpad .", { key: ".", code: "NumpadDecimal" }, null],
+      ],
+      JIS: [
+        [",", { key: ",", code: "Comma" }, "stepBackOneFrame"],
+        [".", { key: ".", code: "Period" }, "stepForwardOneFrame"],
+        ["Shift+,", { key: "<", code: "Comma", shiftKey: true }, "stepBackTenFrames"],
+        [
+          "Shift+.",
+          { key: ">", code: "Period", shiftKey: true },
+          "stepForwardTenFrames",
+        ],
+        [":", { key: ":", code: "Quote" }, null],
+        ["Shift+:", { key: "*", code: "Quote", shiftKey: true }, null],
+        ["Shift+;", { key: "+", code: "Semicolon", shiftKey: true }, "zoomIn"],
+        ["numpad ,", { key: ",", code: "NumpadComma" }, null],
+        ["/", { key: "/", code: "Slash" }, "playSegment"],
+      ],
+      Russian: [
+        ["б (the Comma position)", { key: "б", code: "Comma" }, "stepBackOneFrame"],
+        [
+          "ю (the Period position)",
+          { key: "ю", code: "Period" },
+          "stepForwardOneFrame",
+        ],
+        ["Shift+б", { key: "Б", code: "Comma", shiftKey: true }, "stepBackTenFrames"],
+        [
+          "Shift+ю",
+          { key: "Ю", code: "Period", shiftKey: true },
+          "stepForwardTenFrames",
+        ],
+        [". (the Slash position)", { key: ".", code: "Slash" }, "stepForwardOneFrame"],
+        ["Shift+. types ,", { key: ",", code: "Slash", shiftKey: true }, null],
+        ["Shift+ж", { key: "Ж", code: "Semicolon", shiftKey: true }, null],
+      ],
+      Dvorak: [
+        [", (the W position)", { key: ",", code: "KeyW" }, "stepBackOneFrame"],
+        [". (the E position)", { key: ".", code: "KeyE" }, "stepForwardOneFrame"],
+        ["Shift+,", { key: "<", code: "KeyW", shiftKey: true }, "stepBackTenFrames"],
+        ["Shift+.", { key: ">", code: "KeyE", shiftKey: true }, "stepForwardTenFrames"],
+        ["w (the Comma position)", { key: "w", code: "Comma" }, null],
+        ["v (the Period position)", { key: "v", code: "Period" }, null],
+        ["Shift+W", { key: "W", code: "Comma", shiftKey: true }, null],
+        ["Shift+;", { key: ":", code: "KeyZ", shiftKey: true }, null],
+        ["/", { key: "/", code: "BracketLeft" }, "playSegment"],
+      ],
+      "Turkish Q": [
+        // The , and . keys follow the symbol.
+        [",", { key: ",", code: "Backslash" }, "stepBackOneFrame"],
+        [".", { key: ".", code: "Slash" }, "stepForwardOneFrame"],
+        ["Shift+,", { key: ";", code: "Backslash", shiftKey: true }, null],
+        ["Shift+.", { key: ":", code: "Slash", shiftKey: true }, null],
+        // ö and ç on the Comma and Period positions are not ASCII, so those positions step,
+        // and step ten frames with Shift.
+        ["ö", { key: "ö", code: "Comma" }, "stepBackOneFrame"],
+        ["ç", { key: "ç", code: "Period" }, "stepForwardOneFrame"],
+        ["Shift+ö", { key: "Ö", code: "Comma", shiftKey: true }, "stepBackTenFrames"],
+        [
+          "Shift+ç",
+          { key: "Ç", code: "Period", shiftKey: true },
+          "stepForwardTenFrames",
+        ],
+      ],
+    };
+
+    for (const [layout, expectations] of Object.entries(LAYOUTS)) {
+      for (const platform of PLATFORMS) {
+        it(`maps the ${layout} keys on ${platform}`, () => {
+          for (const [name, keyPress, action] of expectations) {
+            expect({ name, action: actionOf(press(keyPress), platform) }).toStrictEqual(
+              {
+                name,
+                action,
+              },
+            );
+          }
+        });
+      }
+    }
+
+    it("gives a US Shift press of every punctuation key one meaning at most", () => {
+      // Every Shift press of the main punctuation block of a US keyboard, with the symbol it
+      // types. Only the ten-frame steps and the zoom variant answer.
+      const presses: readonly [string, string, ShortcutAction | null][] = [
+        ["~", "Backquote", null],
+        ["_", "Minus", null],
+        ["+", "Equal", "zoomIn"],
+        ["{", "BracketLeft", null],
+        ["}", "BracketRight", null],
+        ["|", "Backslash", null],
+        [":", "Semicolon", null],
+        ['"', "Quote", null],
+        ["<", "Comma", "stepBackTenFrames"],
+        [">", "Period", "stepForwardTenFrames"],
+        ["?", "Slash", null],
+      ];
+      for (const platform of PLATFORMS) {
+        for (const [key, code, action] of presses) {
+          const matches = SHORTCUT_BINDINGS.filter(
+            (b) =>
+              bindingAppliesToPlatform(b, platform) &&
+              matchesShortcutModifiers(
+                b.modifiers,
+                press({ key, code, shiftKey: true }),
+                platform,
+              ) &&
+              matchesShortcutKey(b.key, { key, code }),
+          );
+          expect({ key, actions: matches.map((b) => b.action) }).toStrictEqual({
+            key,
+            actions: action === null ? [] : [action],
+          });
+        }
+      }
+    });
+
+    it("matches a characterAt key on its own position only", () => {
+      const semicolonAtComma: ShortcutKey = {
+        kind: "characterAt",
+        character: ";",
+        code: "Comma",
+        fallback: false,
+      };
+      expect(matchesShortcutKey(semicolonAtComma, { key: ";", code: "Comma" })).toBe(
+        true,
+      );
+      expect(
+        matchesShortcutKey(semicolonAtComma, { key: ";", code: "Semicolon" }),
+      ).toBe(false);
+      expect(matchesShortcutKey(semicolonAtComma, { key: ",", code: "Comma" })).toBe(
+        false,
+      );
+      // Without the fallback, a symbol that is not ASCII does not name the position.
+      expect(matchesShortcutKey(semicolonAtComma, { key: "Б", code: "Comma" })).toBe(
+        false,
+      );
+
+      const lessAtComma: ShortcutKey = {
+        kind: "characterAt",
+        character: "<",
+        code: "Comma",
+        fallback: true,
+      };
+      expect(matchesShortcutKey(lessAtComma, { key: "Б", code: "Comma" })).toBe(true);
+      expect(matchesShortcutKey(lessAtComma, { key: "Dead", code: "Comma" })).toBe(
+        true,
+      );
+      expect(matchesShortcutKey(lessAtComma, { key: "Б", code: "Period" })).toBe(false);
+      // An ASCII symbol that is not the character does not match, with the fallback too.
+      expect(matchesShortcutKey(lessAtComma, { key: ";", code: "Comma" })).toBe(false);
+    });
+
+    it("refuses an excluded position whatever it types", () => {
+      const comma: ShortcutKey = {
+        kind: "character",
+        character: ",",
+        code: "Comma",
+        excludedCodes: ["NumpadDecimal"],
+      };
+      expect(matchesShortcutKey(comma, { key: ",", code: "NumpadDecimal" })).toBe(
+        false,
+      );
+      expect(matchesShortcutKey(comma, { key: ",", code: "KeyM" })).toBe(true);
+      expect(matchesShortcutKey(comma, { key: "б", code: "Comma" })).toBe(true);
     });
   });
 

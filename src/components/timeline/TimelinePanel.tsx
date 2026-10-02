@@ -1395,14 +1395,16 @@ export function TimelinePanel({
              *
              * Pointer only, by intent: the keyboard path is the window-level layer, which
              * answers wherever focus is. Two handlers for one behaviour would move the
-             * playhead two frames for one key press, and the capture phase gives the
-             * slider no way to yield — the global layer has already decided by the time
-             * a React handler runs.
+             * playhead twice for one key press, and the capture phase gives the slider no
+             * way to yield — the global layer has already decided by the time a React
+             * handler runs.
              *
-             * The seek surface below keeps `role="slider"`. The window layer serves Left
-             * and Right wherever the focus is, so a focused slider still steps and
-             * `aria-valuenow` still updates; Up, Down, Home and End are deliberately
-             * unbound, so the element does not implement the full ARIA slider key set.
+             * The seek surface below keeps `role="slider"`. The window layer serves the
+             * arrow keys, Home and End wherever the focus is, so `aria-valuenow` changes
+             * for each of them: Left and Right jump in time, Up and Down go to the previous
+             * and the next edit point, and Home and End go to the first and the last
+             * frame. The element has no key handler of its own, and Page Up and Page Down
+             * are not bound, so it does not implement the ARIA slider key set exactly.
              *
              * The lane is also a hover surface for the hover line.
              */}

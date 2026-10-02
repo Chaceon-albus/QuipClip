@@ -55,10 +55,14 @@ export function DiagnosticDetails({
         {open ? (openSummary ?? summary) : summary}
       </summary>
       <div className="mt-2 space-y-1.5">
-        {/* `tabIndex` lets a keyboard user scroll a long diagnostic. */}
+        {/* `tabIndex` lets a keyboard user scroll a long diagnostic. The marker keeps the
+            up and down arrows for that scroll: while the text overflows, the window keyboard
+            layer does not take them for the edit points inside it
+            (`SCROLL_KEYS_ATTRIBUTE`). */}
         <pre
           ref={textRef}
           tabIndex={0}
+          data-scroll-keys
           className="max-h-40 overflow-y-auto rounded-md border border-border bg-muted/40 p-2 font-mono text-xs wrap-break-word whitespace-pre-wrap text-foreground focus-ring outline-none select-text"
         >
           {text}

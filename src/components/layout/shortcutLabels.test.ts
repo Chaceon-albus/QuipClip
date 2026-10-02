@@ -51,7 +51,9 @@ function idOf(binding: ShortcutBinding): string {
         ? binding.key.letter
         : binding.key.kind === "numpad"
           ? binding.key.code
-          : binding.key.character;
+          : binding.key.kind === "characterAt"
+            ? `${binding.key.character}@${binding.key.code}`
+            : binding.key.character;
   return [binding.action, ...binding.modifiers, key].join(":");
 }
 
@@ -75,32 +77,90 @@ const ROWS: readonly Row[] = [
   },
   { id: "playSegment:/", macos: "/", windows: "/", ariaMacos: "/", ariaWindows: "/" },
   {
-    id: "stepBackOneFrame:ArrowLeft",
+    id: "jumpBackFiveSeconds:ArrowLeft",
     macos: "←",
     windows: "←",
     ariaMacos: "ArrowLeft",
     ariaWindows: "ArrowLeft",
   },
   {
-    id: "stepForwardOneFrame:ArrowRight",
+    id: "jumpForwardFiveSeconds:ArrowRight",
     macos: "→",
     windows: "→",
     ariaMacos: "ArrowRight",
     ariaWindows: "ArrowRight",
   },
   {
-    id: "stepBackTenFrames:shift:ArrowLeft",
+    id: "jumpBackOneSecond:shift:ArrowLeft",
     macos: "⇧←",
     windows: "Shift+←",
     ariaMacos: "Shift+ArrowLeft",
     ariaWindows: "Shift+ArrowLeft",
   },
   {
-    id: "stepForwardTenFrames:shift:ArrowRight",
+    id: "jumpForwardOneSecond:shift:ArrowRight",
     macos: "⇧→",
     windows: "Shift+→",
     ariaMacos: "Shift+ArrowRight",
     ariaWindows: "Shift+ArrowRight",
+  },
+  {
+    id: "jumpBackThirtySeconds:primary:ArrowLeft",
+    macos: "⌘←",
+    windows: "Ctrl+←",
+    ariaMacos: "Meta+ArrowLeft",
+    ariaWindows: "Control+ArrowLeft",
+  },
+  {
+    id: "jumpForwardThirtySeconds:primary:ArrowRight",
+    macos: "⌘→",
+    windows: "Ctrl+→",
+    ariaMacos: "Meta+ArrowRight",
+    ariaWindows: "Control+ArrowRight",
+  },
+  {
+    id: "goToPreviousEditPoint:ArrowUp",
+    macos: "↑",
+    windows: "↑",
+    ariaMacos: "ArrowUp",
+    ariaWindows: "ArrowUp",
+  },
+  {
+    id: "goToNextEditPoint:ArrowDown",
+    macos: "↓",
+    windows: "↓",
+    ariaMacos: "ArrowDown",
+    ariaWindows: "ArrowDown",
+  },
+  {
+    id: "stepBackOneFrame:,",
+    macos: ",",
+    windows: ",",
+    ariaMacos: ",",
+    ariaWindows: ",",
+  },
+  {
+    id: "stepForwardOneFrame:.",
+    macos: ".",
+    windows: ".",
+    ariaMacos: ".",
+    ariaWindows: ".",
+  },
+  // The chip names the key cap that the user presses with Shift. The attribute names the
+  // symbol that the press reports.
+  {
+    id: "stepBackTenFrames:shift:<@Comma",
+    macos: "⇧,",
+    windows: "Shift+,",
+    ariaMacos: "Shift+<",
+    ariaWindows: "Shift+<",
+  },
+  {
+    id: "stepForwardTenFrames:shift:>@Period",
+    macos: "⇧.",
+    windows: "Shift+.",
+    ariaMacos: "Shift+>",
+    ariaWindows: "Shift+>",
   },
   {
     id: "goToStart:Home",
@@ -256,6 +316,57 @@ const ROWS: readonly Row[] = [
     ariaMacos: "Shift+Z",
     ariaWindows: "Shift+Z",
   },
+  // The layout variants of the frame steps. No chip names them, and ariaKeyShortcutsFor leaves
+  // them out.
+  {
+    id: "stepBackTenFrames:shift:<@KeyW",
+    macos: "⇧<",
+    windows: "Shift+<",
+    ariaMacos: "Shift+<",
+    ariaWindows: "Shift+<",
+  },
+  {
+    id: "stepForwardTenFrames:shift:>@KeyE",
+    macos: "⇧>",
+    windows: "Shift+>",
+    ariaMacos: "Shift+>",
+    ariaWindows: "Shift+>",
+  },
+  {
+    id: "stepBackTenFrames:shift:;@Comma",
+    macos: "⇧;",
+    windows: "Shift+;",
+    ariaMacos: "Shift+;",
+    ariaWindows: "Shift+;",
+  },
+  {
+    id: "stepForwardTenFrames:shift::@Period",
+    macos: "⇧:",
+    windows: "Shift+:",
+    ariaMacos: "Shift+:",
+    ariaWindows: "Shift+:",
+  },
+  {
+    id: "stepBackTenFrames:shift:?@Comma",
+    macos: "⇧?",
+    windows: "Shift+?",
+    ariaMacos: "Shift+?",
+    ariaWindows: "Shift+?",
+  },
+  {
+    id: "stepBackTenFrames:shift:?@KeyM",
+    macos: "⇧?",
+    windows: "Shift+?",
+    ariaMacos: "Shift+?",
+    ariaWindows: "Shift+?",
+  },
+  {
+    id: "stepForwardOneFrame:shift:.@Comma",
+    macos: "⇧.",
+    windows: "Shift+.",
+    ariaMacos: "Shift+.",
+    ariaWindows: "Shift+.",
+  },
 ];
 
 function rowOf(binding: ShortcutBinding): Row {
@@ -335,7 +446,10 @@ describe("shortcutLabels", () => {
       expect(label("deleteSegment", "windows")).toBe("<delete>");
       expect(label("finishSegment", "macos")).toBe("<escape>");
       expect(label("redo", "windows")).toBe("<ctrl>+<shift>+Z");
-      expect(label("stepBackTenFrames", "windows")).toBe("<shift>+←");
+      expect(label("jumpBackOneSecond", "windows")).toBe("<shift>+←");
+      expect(label("jumpBackThirtySeconds", "windows")).toBe("<ctrl>+←");
+      expect(label("stepBackTenFrames", "windows")).toBe("<shift>+,");
+      expect(label("stepForwardTenFrames", "macos")).toBe("⇧.");
       // macOS draws the modifiers and the delete keys as symbols.
       expect(label("redo", "macos")).toBe("⇧⌘Z");
       expect(label("deleteSegment", "macos")).toBe("⌫");
@@ -431,11 +545,42 @@ describe("shortcutLabels", () => {
       );
     });
 
-    it("names the one-frame step for the step buttons, not the ten-frame step", () => {
-      const back = shortcutFor("stepBackOneFrame", "windows");
-      const forward = shortcutFor("stepForwardOneFrame", "macos");
-      expect(back && formatShortcut(back, "windows", EN_NAMES)).toBe("←");
-      expect(forward && formatShortcut(forward, "macos", EN_NAMES)).toBe("→");
+    it("names , and . for the step buttons, not the ten-frame step or a variant", () => {
+      for (const platform of PLATFORMS) {
+        const back = shortcutFor("stepBackOneFrame", platform);
+        const forward = shortcutFor("stepForwardOneFrame", platform);
+        expect(back && formatShortcut(back, platform, EN_NAMES)).toBe(",");
+        expect(forward && formatShortcut(forward, platform, EN_NAMES)).toBe(".");
+        expect(
+          chipShortcutsFor("stepForwardOneFrame", platform).map((chip) =>
+            formatShortcut(chip, platform, EN_NAMES),
+          ),
+        ).toStrictEqual(["."]);
+        expect(ariaKeyShortcutsFor("stepBackOneFrame", platform)).toBe(",");
+        expect(ariaKeyShortcutsFor("stepForwardOneFrame", platform)).toBe(".");
+      }
+    });
+
+    it("names the jumps and the edit points with the arrow glyphs and primary", () => {
+      const keys = (
+        action: Parameters<typeof shortcutFor>[0],
+        platform: ShortcutPlatform,
+      ) => {
+        const found = shortcutFor(action, platform);
+        return found && formatShortcut(found, platform, EN_NAMES);
+      };
+      expect(keys("jumpBackThirtySeconds", "macos")).toBe("⌘←");
+      expect(keys("jumpForwardThirtySeconds", "macos")).toBe("⌘→");
+      expect(keys("jumpBackThirtySeconds", "windows")).toBe("Ctrl+←");
+      expect(keys("jumpForwardThirtySeconds", "windows")).toBe("Ctrl+→");
+      expect(keys("jumpBackOneSecond", "macos")).toBe("⇧←");
+      expect(keys("jumpForwardOneSecond", "windows")).toBe("Shift+→");
+      for (const platform of PLATFORMS) {
+        expect(keys("jumpBackFiveSeconds", platform)).toBe("←");
+        expect(keys("jumpForwardFiveSeconds", platform)).toBe("→");
+        expect(keys("goToPreviousEditPoint", platform)).toBe("↑");
+        expect(keys("goToNextEditPoint", platform)).toBe("↓");
+      }
     });
 
     it("returns the same binding as the first entry of shortcutsFor", () => {
@@ -486,6 +631,11 @@ describe("shortcutLabels", () => {
         expect(ariaKeyShortcutsFor("zoomToFit", platform)).toBe("\\ Shift+Z");
         // Not "/ Shift+/": the variant names / again, and the chip names / only.
         expect(ariaKeyShortcutsFor("playSegment", platform)).toBe("/");
+        // The frame steps name the keys of a US layout. The rows of Dvorak, German, Czech and
+        // French AZERTY are variants.
+        expect(ariaKeyShortcutsFor("stepBackTenFrames", platform)).toBe("Shift+<");
+        expect(ariaKeyShortcutsFor("stepForwardTenFrames", platform)).toBe("Shift+>");
+        expect(ariaKeyShortcutsFor("stepForwardOneFrame", platform)).toBe(".");
         expect(
           chipShortcutsFor("playSegment", platform).map((b) => b.key),
         ).toStrictEqual([{ kind: "character", character: "/", code: "Slash" }]);
@@ -543,7 +693,15 @@ describe("shortcutLabels", () => {
 
     it("lists one binding for an action with one binding", () => {
       expect(ariaKeyShortcutsFor("togglePlayback", "macos")).toBe("Space");
-      expect(ariaKeyShortcutsFor("stepBackOneFrame", "windows")).toBe("ArrowLeft");
+      expect(ariaKeyShortcutsFor("stepBackOneFrame", "windows")).toBe(",");
+      expect(ariaKeyShortcutsFor("jumpBackFiveSeconds", "windows")).toBe("ArrowLeft");
+      expect(ariaKeyShortcutsFor("jumpBackThirtySeconds", "macos")).toBe(
+        "Meta+ArrowLeft",
+      );
+      expect(ariaKeyShortcutsFor("jumpBackThirtySeconds", "windows")).toBe(
+        "Control+ArrowLeft",
+      );
+      expect(ariaKeyShortcutsFor("goToNextEditPoint", "macos")).toBe("ArrowDown");
       expect(ariaKeyShortcutsFor("openSettings", "macos")).toBe("Meta+,");
       expect(ariaKeyShortcutsFor("export", "windows")).toBe("Control+E");
     });
@@ -597,8 +755,16 @@ describe("shortcutLabels", () => {
         "Space",
       );
       expect(
-        formatMenuAccelerator(binding("stepBackTenFrames", "shift", "ArrowLeft")),
+        formatMenuAccelerator(binding("jumpBackOneSecond", "shift", "ArrowLeft")),
       ).toBe("Shift+ArrowLeft");
+      expect(
+        formatMenuAccelerator(
+          binding("jumpForwardThirtySeconds", "primary", "ArrowRight"),
+        ),
+      ).toBe("CmdOrCtrl+ArrowRight");
+      expect(
+        formatMenuAccelerator(binding("goToPreviousEditPoint", "", "ArrowUp")),
+      ).toBe("ArrowUp");
       expect(formatMenuAccelerator(binding("finishSegment", "", "Escape"))).toBe(
         "Escape",
       );
@@ -611,6 +777,17 @@ describe("shortcutLabels", () => {
       expect(formatMenuAccelerator(binding("zoomIn", "", "NumpadAdd"))).toBe(
         "NumpadAdd",
       );
+      expect(formatMenuAccelerator(binding("stepBackOneFrame", "", ","))).toBe("Comma");
+      expect(formatMenuAccelerator(binding("stepForwardOneFrame", "", "."))).toBe(
+        "Period",
+      );
+      // The ten-frame steps name the US key of their key cap.
+      expect(
+        formatMenuAccelerator(binding("stepBackTenFrames", "shift", "<@Comma")),
+      ).toBe("Shift+Comma");
+      expect(
+        formatMenuAccelerator(binding("stepForwardTenFrames", "shift", ">@Period")),
+      ).toBe("Shift+Period");
     });
 
     it("gives no accelerator for a symbol with no key position of its own", () => {
@@ -619,7 +796,11 @@ describe("shortcutLabels", () => {
       expect(formatMenuAccelerator(binding("zoomIn", "shift", "+"))).toBeNull();
       for (const each of SHORTCUT_BINDINGS) {
         const isPlus = each.key.kind === "character" && each.key.character === "+";
-        expect(formatMenuAccelerator(each) === null).toBe(isPlus);
+        // A symbol on one position of another layout has no accelerator either: on a US
+        // layout that press types another symbol.
+        const isAtPosition =
+          each.key.kind === "characterAt" && each.key.keyCap === undefined;
+        expect(formatMenuAccelerator(each) === null).toBe(isPlus || isAtPosition);
       }
     });
   });

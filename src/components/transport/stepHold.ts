@@ -3,7 +3,7 @@
  *
  * A primary pointer press steps one frame at once. When the press lasts `STEP_HOLD_DELAY_MS`,
  * the button steps again every `STEP_HOLD_INTERVAL_MS`, about 30 times each second. This is
- * the pattern of a held arrow key: the key down steps, and after the key repeat delay each
+ * the pattern of a held step key: the key down steps, and after the key repeat delay each
  * repeat steps once (ADR 021). Each step is one request, so the step count stays equal to the
  * count of steps the user asked for, and the continuation rule of the ADR 019 cue, which
  * exists for that rate, keeps the sound of a held button continuous.
@@ -25,7 +25,7 @@
  * on every pointer down in the window, before the button sees that pointer down.
  *
  * Each step tells whether it is a timer repeat. The step of the press and the step of a click
- * are not, and every repeat after the delay is, as a key repeat of a held arrow key is. A held
+ * are not, and every repeat after the delay is, as a key repeat of a held step key is. A held
  * backward step plays no cue (FrameStepOptions, ADR 019).
  *
  * The helper holds no DOM reference. The caller forwards the events, and it stops the repeat

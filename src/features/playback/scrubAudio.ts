@@ -339,7 +339,7 @@ export function createScrubAudioController(
    * no more than the lag limit of the request kind, and ahead of it by no more than the
    * tolerance. While a seek runs, the position of the element is the target of that seek.
    *
-   * A held arrow key repeats about 30 times each second. At 24 to 30 frames each second, that
+   * A held step key repeats about 30 times each second. At 24 to 30 frames each second, that
    * is 1 to 1.26 times real time. The element starts late, so it plays behind the target by
    * the step rate times the time of its seek and its start. A seek in WebKit took 40 to 150
    * milliseconds in a measurement. In Chrome on macOS, the clock stood almost still for 300 to

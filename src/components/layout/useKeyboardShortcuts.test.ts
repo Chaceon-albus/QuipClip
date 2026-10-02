@@ -5,6 +5,7 @@ import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
   EXTENT_END_SEEK_OPTIONS,
 } from "./shortcutCommands";
+import { TIME_JUMP_SEEK_OPTIONS } from "./timeJump";
 import { runShortcutCommand } from "./useKeyboardShortcuts";
 
 type SeekActions = Pick<
@@ -70,10 +71,34 @@ describe("runShortcutCommand", () => {
     ]);
   });
 
-  it("runs End on the frame grid as seekToFrameIndex", () => {
+  it("runs End on the frame grid as seekToFrameIndex, with no options", () => {
     runShortcutCommand({ kind: "seekToFrameIndex", frameIndex: 249 });
-    expect(seekToFrameIndex).toHaveBeenCalledExactlyOnceWith(249);
+    expect(seekToFrameIndex).toHaveBeenCalledExactlyOnceWith(249, undefined);
     expect(seekToPts).not.toHaveBeenCalled();
+  });
+
+  it("passes keepPlaying of a time jump to each seek", () => {
+    runShortcutCommand({
+      kind: "seekToFrameIndex",
+      frameIndex: 125,
+      options: TIME_JUMP_SEEK_OPTIONS,
+    });
+    runShortcutCommand({
+      kind: "seekToPts",
+      pts: "450000" as Pts,
+      options: TIME_JUMP_SEEK_OPTIONS,
+    });
+    runShortcutCommand({
+      kind: "seekApproximate",
+      seconds: 6,
+      options: TIME_JUMP_SEEK_OPTIONS,
+    });
+    expect(seekToFrameIndex).toHaveBeenCalledExactlyOnceWith(125, {
+      keepPlaying: true,
+    });
+    expect(seekToPts).toHaveBeenCalledExactlyOnceWith("450000", { keepPlaying: true });
+    // A jump on the approximate clock passes its own options, not those of Home and End.
+    expect(seekApproximate).toHaveBeenCalledExactlyOnceWith(6, { keepPlaying: true });
   });
 
   it("passes the options of End off the grid to seekToPts, and none for the other seeks", () => {

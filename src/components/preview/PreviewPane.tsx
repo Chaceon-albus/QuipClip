@@ -728,6 +728,9 @@ export function PreviewPane() {
                   <div
                     className="flex max-h-full max-w-md flex-col items-center gap-2 overflow-y-auto p-4 text-center"
                     aria-live="polite"
+                    // The up and down arrows scroll the panel while it overflows and one of
+                    // its controls has the focus (`SCROLL_KEYS_ATTRIBUTE`).
+                    data-scroll-keys
                   >
                     <AlertCircle
                       aria-hidden="true"
@@ -942,7 +945,12 @@ export function PreviewPane() {
                   the frame, and the chip keeps to the left edge of the banners
                   (`preview-notice-fit`). */}
               <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex preview-notice-area flex-col">
-                <div className="preview-notice-fit flex min-h-0 flex-col gap-2 overflow-y-auto empty:hidden">
+                {/* The up and down arrows scroll the stack while it overflows and one of
+                    its controls has the focus (`SCROLL_KEYS_ATTRIBUTE`). */}
+                <div
+                  className="preview-notice-fit flex min-h-0 flex-col gap-2 overflow-y-auto empty:hidden"
+                  data-scroll-keys
+                >
                   {showLoading && (
                     <div
                       className="pointer-events-auto flex items-center gap-2 self-start rounded-md border border-border/80 bg-background/90 px-2.5 py-1 text-xs text-foreground shadow-md backdrop-blur-xs"

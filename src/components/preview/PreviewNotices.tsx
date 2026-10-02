@@ -289,7 +289,12 @@ export function ImportErrorEmptyState({ error }: { error: ImportMediaError }) {
   const actions = importErrorActions(error.code, "empty");
   const hintKey = importErrorHintKey(error.code);
   return (
-    <div className="flex max-h-full w-full max-w-md flex-col items-center gap-3 overflow-y-auto p-4 text-center">
+    // The up and down arrows scroll the panel while it overflows and one of its controls has
+    // the focus (`SCROLL_KEYS_ATTRIBUTE`).
+    <div
+      className="flex max-h-full w-full max-w-md flex-col items-center gap-3 overflow-y-auto p-4 text-center"
+      data-scroll-keys
+    >
       <div role="alert" className="flex flex-col items-center gap-3">
         <div className="grid size-12 shrink-0 place-items-center rounded-xl border border-preview-border bg-preview-background">
           <AlertCircle aria-hidden="true" className="size-6 text-destructive" />
