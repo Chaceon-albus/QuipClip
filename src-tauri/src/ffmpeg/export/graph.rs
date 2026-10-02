@@ -5,7 +5,7 @@
 //! graph is testable without ffmpeg installed -- which is what the pinned-string tests below
 //! do, exactly as `capabilities::smoke`'s tests pin ADR 006's two smoke commands verbatim.
 //!
-//! Five of ADR 014's decisions live here and nowhere else:
+//! Six of ADR 014's decisions live here and nowhere else:
 //!
 //! - Every chain binds an **absolute** stream index, never the short specifier `[i:v]` or
 //!   `[i:a]`. A short specifier selects the first stream of its type; the probe selects the
@@ -28,6 +28,10 @@
 //!   sample: it subtracts the In tick, and an `aresample` fills a late start and a gap with
 //!   silence. A source whose audio starts after the In point otherwise plays early against its
 //!   video; see [`audio_chain`] for the measurement.
+//! - Every audio chain that `concat` does not pad **ends at the segment's length**: the last
+//!   chain of a graph with video, and every chain of a graph without video, pad their audio with
+//!   silence to the planned tick length. A segment that lies wholly before the first audio sample
+//!   or wholly after the last one otherwise writes no audio at all; see [`audio_end_pad`].
 //! - The two graph shapes exist because one input for each segment repeats the source path,
 //!   and Windows limits a command line to 32767 bytes. [`GraphShape`] names the choice but
 //!   does not make it: only the argument builder knows the assembled command's length, so
@@ -238,9 +242,11 @@ impl GraphShape {
 /// A plan with no audio produces no audio anywhere: no `atrim` chain, no `asplit`, `a=0` on
 /// `concat`, and `[v]` as the only output label. That plan comes from a source without audio,
 /// and from a video-only export of any source; the two render the same graph. ADR 014 records
-/// why version 1 needs no silence generation here -- it exports one source, so a segment
-/// without audio cannot occur between segments with audio -- and ADR 004's silence generation
-/// belongs to the multi-source work.
+/// why version 1 needs no silence generation for a source without audio -- it exports one
+/// source, so a segment without an audio stream cannot occur between segments with one -- and
+/// ADR 004's silence generation belongs to the multi-source work. A segment of a source *with*
+/// audio that the stream does not reach is a different case, and its own chain writes the
+/// silence: see [`audio_end_pad`].
 ///
 /// This function treats audio as one decision for the whole graph rather than one per
 /// segment. [`build_plan`](super::plan::build_plan) is the only producer of an
@@ -314,11 +320,15 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
             chains.push(video_chain(video, shape, index, *segment));
         }
         if let Some((planned, ticks)) = &audio {
+            // `concat` pads the audio of a segment to its video when another segment follows, so
+            // only the chains it does not pad need their own end; see `audio_end_pad`.
+            let padded = video.is_none() || index + 1 == count;
             chains.push(audio_chain(
                 planned,
                 audio_inputs[index],
                 index,
                 ticks[index],
+                padded,
             ));
         }
     }
@@ -479,7 +489,8 @@ fn video_chain(
 /// preceded by silence, a gap of more than 0.1 s (`min_hard_comp`) inside the segment is filled
 /// with silence, and an overlap of more than 0.1 s is dropped. Nothing is stretched. A shorter
 /// gap inside a segment stays unfilled: the rest of that segment plays early by up to 0.1 s, and
-/// `concat` pads the end of the segment, so the next one starts in sync again.
+/// `concat` or [`audio_end_pad`] pads the end of the segment, so the next one starts in sync
+/// again.
 ///
 /// The filter's output rate is the source rate, [`PlannedAudio::sample_rate`]. It therefore
 /// resamples nothing. When the closing [`audio_output_format`] asks for another rate, ffmpeg
@@ -510,8 +521,72 @@ fn audio_timestamp_reset(in_tick: i64) -> String {
     }
 }
 
+/// Render the filters that pad a segment's audio with silence to its planned length:
+/// `apad=whole_len=<out tick - in tick>,asetpts=N`.
+///
+/// `atrim` passes no sample for a segment that lies wholly before the first sample of the source
+/// audio or wholly after the last one, and none for the part of a segment after the last sample.
+/// [`audio_gap_fill`] fills only *in front of* a sample, so such a chain wrote nothing, or ended
+/// early. `concat` pads the audio of a segment to the length of its video when another segment
+/// follows it. It never pads the last segment, and it pads nothing in a graph without video. ADR
+/// 014 measurement 23 (ffmpeg 9.0.2) found the results without this pad:
+///
+/// - With one segment wholly outside the audio, ffmpeg failed with "Could not open encoder before
+///   EOF" when no input gave an audio frame. Otherwise it exited zero and wrote an MP4 without an
+///   audio track, which the frame count check passes.
+/// - With a last segment wholly outside the audio, the audio track ended with the segment before.
+/// - An audio-only export wrote nothing for such a segment, so its later segments came earlier in
+///   the file than in the export with video (ADR 036).
+///
+/// [`build_filter_graph`] therefore pads exactly the chains `concat` does not pad: the last chain
+/// of a graph with video, and every chain of a graph without video.
+///
+/// `whole_len` is a minimum count of samples on the link that `apad` reads, at the source rate
+/// that [`audio_gap_fill`] sets. ffmpeg inserts its own resampler behind these filters, in front
+/// of the closing [`audio_output_format`]; the measurement found it there in every graph. The
+/// length is the difference of the plan's ticks, the numbers `atrim` cuts at, so a chain whose
+/// audio covers the segment without a gap already holds that many samples, and `apad` adds none.
+/// A gap of 0.1 s or less inside the segment, which [`audio_gap_fill`] leaves unfilled, comes
+/// back as silence at the end of the segment: the samples after the gap stay early, as they were,
+/// and the segment still ends at its length. `apad` never removes a sample.
+///
+/// `asetpts=N` is necessary. `apad` stamps its silence with the timestamp after the last frame
+/// it passed, and with no timestamp when it passed none. `concat` rescales that missing value as
+/// a number, and the measurement found such frames at about -9.2e18 behind `concat`. ffmpeg 9.0.2
+/// repaired them before the encoder, which it does not document. `N` is the count of samples in
+/// front of each frame, in the time base of 1/rate that [`audio_gap_fill`] gives the link, and
+/// that filter already numbers its output contiguously from 0. So `N` changes nothing in a chain
+/// whose audio covers the segment, and it numbers the silence after the last frame.
+///
+/// The silence streams: `apad` writes a frame only when the next filter asks for one. A last
+/// segment of 575 s after the end of 48000 Hz 5.1 audio peaked at 42 MiB, against 45 MiB for a
+/// source whose audio covers it. The padding of `concat` is not streamed: the same segment with
+/// another one behind it took 900 MiB. A pad in every chain of a graph with video removes that
+/// cost too, but the two filters cost 26 bytes and the digits of the length in each chain, and at
+/// [`super::MAX_EXPORT_SEGMENTS`] the widest command does not have them; see `arguments.rs`.
+///
+/// On sources whose audio covers every segment, measurement 23 found the video and audio frames
+/// that leave the graph identical by framemd5 with and without the pad, in 441 runs: MP4, MKV,
+/// MPEG-TS and MOV, 32000 to 48000 Hz, mono, stereo and 5.1, 1, 3 and 100 segments, every graph
+/// shape, at the source format, at 48000 Hz stereo and at 44100 Hz mono.
+///
+/// Two of these results depend on ffmpeg behaviour that ffmpeg does not document. ffmpeg merges
+/// the formats of the links in the order of the filters in the graph text, and that order keeps
+/// the link into `apad` at the source rate and puts the resampler behind `asetpts=N`. And
+/// `asetpts=N` is an identity only because [`audio_gap_fill`] numbers its output from 0 without a
+/// gap. A later ffmpeg can change either, and measurement 23 must then be repeated.
+fn audio_end_pad(in_tick: i64, out_tick: i64) -> String {
+    debug_assert!(
+        in_tick <= out_tick,
+        "a planned segment cannot end before it starts"
+    );
+    let length = out_tick.saturating_sub(in_tick).max(0);
+    format!("apad=whole_len={length},asetpts=N")
+}
+
 /// Render one segment's audio chain, from its input link to its `[a<index>]` output label:
-/// the cut, the timestamp reset, the gap fill, and the output format.
+/// the cut, the timestamp reset, the gap fill, the end pad when `padded` is true, and the output
+/// format.
 ///
 /// Under [`GraphShape::InputPerSegment`] this chain starts at an input link, so it carries
 /// [`audio_input_pin`] itself. Under [`GraphShape::SingleInput`] it starts behind `asplit`,
@@ -564,6 +639,7 @@ fn audio_chain(
     input: Option<usize>,
     index: usize,
     ticks: (i64, i64),
+    padded: bool,
 ) -> String {
     let source = match input {
         Some(input) => format!("[{input}:{}]{}", audio.stream_index, audio_input_pin(audio)),
@@ -573,8 +649,13 @@ fn audio_chain(
     let head = format!("{source}atrim=start_pts={in_tick}:end_pts={out_tick}");
     let reset = audio_timestamp_reset(in_tick);
     let fill = audio_gap_fill(audio);
+    let pad = if padded {
+        format!(",{}", audio_end_pad(in_tick, out_tick))
+    } else {
+        String::new()
+    };
     let format = audio_output_format(audio);
-    format!("{head},{reset},{fill},{format}[a{index}]")
+    format!("{head},{reset},{fill}{pad},{format}[a{index}]")
 }
 
 /// Render the `concat` filter, with the joined video at `[vc]` and the joined audio at the
@@ -730,7 +811,8 @@ mod tests {
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -748,7 +830,8 @@ mod tests {
                 "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -769,7 +852,8 @@ mod tests {
                 "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[2:1]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1[v2];",
                 "[2:2]aformat=r=44100,atrim=start_pts=882000:end_pts=903168,asetpts=PTS-882000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a2];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a2];",
                 "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vc][a]",
             )
         );
@@ -800,7 +884,8 @@ mod tests {
                 "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[2:1]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1[v2];",
                 "[5:2]aformat=r=44100,atrim=start_pts=882000:end_pts=903168,asetpts=PTS-882000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a2];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a2];",
                 "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vc][a]",
             )
         );
@@ -847,7 +932,8 @@ mod tests {
                 "[0:2]aformat=r=44100,asplit=1[sa0];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -867,7 +953,8 @@ mod tests {
                 "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -890,7 +977,8 @@ mod tests {
                 "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[sv2]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1[v2];",
                 "[sa2]atrim=start_pts=882000:end_pts=903168,asetpts=PTS-882000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a2];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a2];",
                 "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vc][a]",
             )
         );
@@ -988,7 +1076,8 @@ mod tests {
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=r=32000,atrim=start_pts=371200:end_pts=378880,asetpts=PTS-371200,",
-                "aresample=32000:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=32000:first_pts=0,apad=whole_len=7680,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1000,7 +1089,8 @@ mod tests {
                 "[0:2]aformat=r=32000,asplit=1[sa0];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=371200:end_pts=378880,asetpts=PTS-371200,",
-                "aresample=32000:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=32000:first_pts=0,apad=whole_len=7680,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1034,7 +1124,8 @@ mod tests {
                 "aresample=44100:first_pts=0,aformat=f=fltp:r=44100:cl=stereo[a0];",
                 "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100:cl=stereo[a1];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=44100:cl=stereo[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -1049,7 +1140,8 @@ mod tests {
                 "aresample=44100:first_pts=0,aformat=f=fltp:r=44100:cl=stereo[a0];",
                 "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100:cl=stereo[a1];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=44100:cl=stereo[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -1071,7 +1163,8 @@ mod tests {
                 "aresample=44100:first_pts=0,aformat=f=fltp:r=44100[a0];",
                 "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100[a1];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=44100[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -1086,7 +1179,8 @@ mod tests {
                 "aresample=44100:first_pts=0,aformat=f=fltp:r=44100[a0];",
                 "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100[a1];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=44100[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -1110,7 +1204,8 @@ mod tests {
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=mono[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=mono[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1122,7 +1217,8 @@ mod tests {
                 "[0:2]aformat=r=44100,asplit=1[sa0];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=mono[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=mono[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1207,9 +1303,11 @@ mod tests {
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(
                 "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[a0][a1]concat=n=2:v=0:a=1[a]",
             )
         );
@@ -1218,9 +1316,11 @@ mod tests {
             concat!(
                 "[0:2]aformat=r=44100,asplit=2[sa0][sa1];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[a0][a1]concat=n=2:v=0:a=1[a]",
             )
         );
@@ -1393,9 +1493,11 @@ mod tests {
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(
                 "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[a0][a1]concat=n=2:v=0:a=1[a]",
             )
         );
@@ -1404,9 +1506,11 @@ mod tests {
             concat!(
                 "[0:2]aformat=r=44100,asplit=2[sa0][sa1];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[a0][a1]concat=n=2:v=0:a=1[a]",
             )
         );
@@ -1435,7 +1539,7 @@ mod tests {
                     );
                     let chain = format!(
                         "atrim=start_pts={in_tick}:end_pts={out_tick},asetpts=PTS-{in_tick},\
-                         aresample=44100:first_pts=0,aformat=f=fltp:"
+                         aresample=44100:first_pts=0,"
                     );
                     assert_eq!(graph.matches(&chain).count(), 1, "{streams:?} {graph}");
                 }
@@ -1498,7 +1602,8 @@ mod tests {
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1518,7 +1623,8 @@ mod tests {
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "scale=1920:1080,setsar=1[v0];",
                 "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1537,7 +1643,8 @@ mod tests {
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=30000/1001[v0];",
                 "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1560,7 +1667,8 @@ mod tests {
                 "[vc]format=yuv420p[v];",
                 "[0:2]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:5]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1572,7 +1680,8 @@ mod tests {
                 "[0:5]aformat=r=44100,asplit=1[sa0];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1735,7 +1844,16 @@ mod tests {
                         audio_chains.iter().zip(&plan.segments).enumerate()
                     {
                         let in_tick = segment.audio_in_tick.expect("fixture ticks");
-                        let tail = format!(",asetpts=PTS-{in_tick},{fill},{closing}[a{index}]");
+                        let out_tick = segment.audio_out_tick.expect("fixture ticks");
+                        // The last chain also ends at the segment's length; see
+                        // `the_chains_that_concat_does_not_pad_end_at_the_planned_length`.
+                        let pad = if index + 1 == count {
+                            format!(",{}", audio_end_pad(in_tick, out_tick))
+                        } else {
+                            String::new()
+                        };
+                        let tail =
+                            format!(",asetpts=PTS-{in_tick},{fill}{pad},{closing}[a{index}]");
                         assert!(chain.ends_with(&tail), "{chain}");
                         assert!(!chain.contains("STARTPTS"), "{chain}");
                     }
@@ -1827,6 +1945,101 @@ mod tests {
                 assert!(!graph.ends_with(';'), "trailing separator in {graph}");
                 assert!(!graph.contains(";;"), "empty chain in {graph}");
             }
+        }
+    }
+
+    // -- The end pad ------------------------------------------------------------------------
+
+    #[test]
+    fn the_chains_that_concat_does_not_pad_end_at_the_planned_length() {
+        // `concat` pads the audio of a segment to its video only when another segment follows,
+        // so a graph with video pads its last chain, and a graph without video pads every chain
+        // (measurement 23). A chain that pads nothing else stays as it was, byte for byte, which
+        // is what keeps a source whose audio covers the segments unchanged.
+        for count in 1..=3 {
+            for with_video in [true, false] {
+                let mut plan = fixture_plan(count);
+                if !with_video {
+                    plan.video = None;
+                }
+                let audio = plan.audio.clone().expect("fixture audio");
+                for shape in [
+                    GraphShape::InputPerSegment,
+                    GraphShape::SingleInput,
+                    GraphShape::SingleInputSharedAudio,
+                ] {
+                    let graph = build_filter_graph(&plan, shape);
+                    let audio_chains: Vec<&str> = graph
+                        .split(';')
+                        .filter(|chain| chain.contains("atrim="))
+                        .collect();
+                    assert_eq!(audio_chains.len(), count, "{graph}");
+                    for (index, (chain, segment)) in
+                        audio_chains.iter().zip(&plan.segments).enumerate()
+                    {
+                        let in_tick = segment.audio_in_tick.expect("fixture ticks");
+                        let out_tick = segment.audio_out_tick.expect("fixture ticks");
+                        let fill = audio_gap_fill(&audio);
+                        let closing = audio_output_format(&audio);
+                        let padded = !with_video || index + 1 == count;
+                        let tail = if padded {
+                            format!(
+                                ",{fill},apad=whole_len={},asetpts=N,{closing}[a{index}]",
+                                out_tick - in_tick
+                            )
+                        } else {
+                            format!(",{fill},{closing}[a{index}]")
+                        };
+                        assert!(chain.ends_with(&tail), "{shape:?} {chain}");
+                    }
+                    let pads = if with_video { 1 } else { count };
+                    assert_eq!(graph.matches("apad=").count(), pads, "{graph}");
+                    assert_eq!(graph.matches(",asetpts=N,").count(), pads, "{graph}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_pad_length_is_the_planned_tick_length_of_the_segment() {
+        // The length is the difference of the two ticks `atrim` cuts at, in samples of the
+        // source rate, so it never adds a sample to a chain whose audio covers the segment. A
+        // negative In tick, which ADR 002 permits, still gives the length and not a position.
+        assert_eq!(
+            audio_end_pad(511_560, 522_144),
+            "apad=whole_len=10584,asetpts=N"
+        );
+        assert_eq!(audio_end_pad(-6, 4), "apad=whole_len=10,asetpts=N");
+        assert_eq!(audio_end_pad(0, 0), "apad=whole_len=0,asetpts=N");
+
+        let mut plan = fixture_plan(1);
+        plan.segments[0].audio_in_tick = Some(-6);
+        plan.segments[0].audio_out_tick = Some(4);
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            let graph = build_filter_graph(&plan, shape);
+            assert!(
+                graph.contains(
+                    "asetpts=PTS+6,aresample=44100:first_pts=0,apad=whole_len=10,asetpts=N,aformat="
+                ),
+                "{graph}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pad_follows_the_gap_fill_at_the_source_rate_and_never_the_closing_format() {
+        // `whole_len` counts samples of the link `apad` reads. Behind the gap fill that link runs
+        // at the source rate, the unit of the ticks; behind the closing `aformat` it would run at
+        // the output rate, 48000 Hz on this 44100 Hz fixture, and the length would be wrong by
+        // the ratio of the two rates.
+        let plan = fixture_plan(2);
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            let graph = build_filter_graph(&plan, shape);
+            assert!(
+                graph.contains("aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,"),
+                "{graph}"
+            );
+            assert!(!graph.contains("cl=stereo,apad"), "{graph}");
         }
     }
 }

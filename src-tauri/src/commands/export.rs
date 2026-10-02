@@ -172,9 +172,9 @@ pub struct ExportCommandError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub measured_duration_us: Option<u64>,
     /// The duration the plan expected, in whole microseconds, for `audioDurationMismatch`: the
-    /// audio the segments can take from the source stream. It equals `totalDurationUs` in
-    /// [`ExportStart`] when the source audio covers every segment, and is shorter when it does
-    /// not. Absent on every other code.
+    /// planned duration of the segments, which equals `totalDurationUs` in [`ExportStart`]. The
+    /// graph writes the audio of every segment at its whole length, whatever part of it the
+    /// source audio covers (`graph::audio_end_pad`). Absent on every other code.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_duration_us: Option<u64>,
 }
@@ -953,8 +953,8 @@ fn verified_frame_count(
 ///    - The run was canceled while ffprobe ran: `canceled`.
 /// 3. [`verify_audio_output`] compares the answer with the plan: one audio stream, no video
 ///    stream, and `expected` within its tolerance. `expected` is
-///    [`crate::ffmpeg::export::PlannedAudio::expected_duration`], the audio the segments can take
-///    from the source. A wrong stream set reports `outputStreamsMismatch`. A duration outside the
+///    [`crate::ffmpeg::export::PlannedAudio::expected_duration`], the planned duration of the
+///    segments. A wrong stream set reports `outputStreamsMismatch`. A duration outside the
 ///    tolerance, or none, reports `audioDurationMismatch`, with the measured and the expected
 ///    duration as named values.
 ///
@@ -1815,7 +1815,8 @@ mod tests {
                     "[vc]format=yuv420p[v];",
                     "[0:0]trim=start_pts=0:end_pts=90000,setpts=PTS-STARTPTS,fps=30/1[v0];",
                     "[0:1]aformat=r=48000,atrim=start_pts=0:end_pts=48000,asetpts=PTS-0,",
-                    "aresample=48000:first_pts=0,aformat=f=fltp:r=48000[a0];",
+                    "aresample=48000:first_pts=0,apad=whole_len=48000,asetpts=N,",
+                    "aformat=f=fltp:r=48000[a0];",
                     "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
                 ),
                 "-map",
