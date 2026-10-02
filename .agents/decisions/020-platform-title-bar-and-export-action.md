@@ -84,6 +84,16 @@ decision, as a private function, and no unit test covered it.
 
 (Changed on 2026-10-02.) The Settings window has the title bar of the system on both platforms (ADR 038). This record still governs the title bar of the main window.
 
+(Changed on 2026-10-02.) The main window stays movable while a dialog is open. The scrim of
+the export dialog and of the confirmation prompts starts below the title bar, at the height
+`--title-bar-height`, and the dialog centres in the area below it. The scrim has no blur. Radix
+sets `pointer-events: none` on the body while a modal dialog is open, so the title bar takes the
+pointer again. Its application controls, the File menu, Export and the file title, take no
+pointer then, so a press on them falls through to the bar and moves the window. A press on the
+bar keeps the focus in the dialog and does not close it. On Windows the three window buttons
+work, and the close button takes the quit path of ADR 027. The Settings window sets the height
+to 0, because it has the title bar of the system (ADR 038).
+
 ## Consequences
 
 - The platform test reads the user agent. Everything that is not macOS takes the

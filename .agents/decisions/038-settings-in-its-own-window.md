@@ -151,8 +151,9 @@ longer runs the source check again.
 - A new Settings window that is still hidden 5 seconds after its build is shown by Rust, so a page
   that fails to render does not leave a hidden window for good. Each build has a number, and a
   timer of an earlier window does not act on a newer one.
-- The export and quit dialogs of the main window still cover its title bar. A later unit lets the
-  main window move while they are open.
+- The export and quit dialogs of the main window covered its title bar. (Changed on 2026-10-02:
+  their scrim now starts below the title bar, and the main window moves while they are open, ADR
+  020.)
 - The built application must confirm: the placement on a second monitor with another scale, the
   native caption in each theme on Windows, the close prompt from each way to close, the quit with
   a draft open in Settings, and that every command of each window still answers under the
