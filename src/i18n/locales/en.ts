@@ -542,6 +542,7 @@ export const en = {
       groupGeneral: "General",
       groupVideo: "Video",
       groupAudio: "Audio",
+      groupOptions: "Extra Parameters",
       nameLabel: "Name",
       containerLabel: "Container",
       videoEncoderLabel: "Video Encoder",
@@ -586,6 +587,56 @@ export const en = {
       sourceOption: "Same as Source",
       customOption: "Custom…",
     },
+    // The extra parameters of a preset: FFmpeg options as text. {{line}} and {{column}} count
+    // from 1. {{flag}} and {{other}} are flags as the user typed them, such as "-crf" or
+    // "-tag:v", and {{value}} is a value as the user typed it. None of them is translated.
+    options: {
+      textLabel: "FFmpeg Parameters",
+      hint: "Paste or type parameters as in an FFmpeg command, such as -preset slow. A parameter with :a goes to the audio encoder, and every other parameter goes to the video encoder. -c:v, -c:a, -crf, -cq, -q:v, -b:v, -b:a, -ar, -ac, and -pix_fmt go into the fields above.",
+      apply: "Apply",
+      pending: "Not applied yet. Save also applies it.",
+      error: {
+        unterminatedQuote:
+          "Line {{line}}, column {{column}}: this quote has no closing quote on its line.",
+        curlyQuote:
+          "Line {{line}}, column {{column}}: replace this curly quote with a straight quote.",
+        unexpectedValue:
+          "Line {{line}}, column {{column}}: “{{value}}” is a value with no parameter in front of it.",
+        missingValue: "Line {{line}}, column {{column}}: {{flag}} needs a value.",
+        streamSpecifier:
+          "Line {{line}}, column {{column}}: in {{flag}}, use :v, :a, or no stream specifier.",
+        optionName:
+          "Line {{line}}, column {{column}}: {{flag}} is not a valid parameter name. Start with a letter (A–Z). After that, use only letters (A–Z), digits, underscores, periods, or hyphens, 64 characters at most.",
+        optionDenied:
+          "Line {{line}}, column {{column}}: QuipClip sets {{flag}} itself, or {{flag}} would break the export. Remove it.",
+        optionDuplicate:
+          "Line {{line}}, column {{column}}: {{flag}} occurs more than once. Keep one of them.",
+        optionValue:
+          "Line {{line}}, column {{column}}: give {{flag}} a value of 1 to {{max}} characters.",
+        integerValue:
+          "Line {{line}}, column {{column}}: {{flag}} needs a whole number, not “{{value}}”.",
+        bitrateValue:
+          "Line {{line}}, column {{column}}: {{flag}} needs a bitrate in whole kilobits per second, such as 320k or 24M, not “{{value}}”.",
+        channelsValue:
+          "Line {{line}}, column {{column}}: {{flag}} must be 1 or 2. For another channel layout, choose Same as Source for Channels.",
+        qualityConflict:
+          "Line {{line}}, column {{column}}: {{flag}} and {{other}} both set the quality. Keep one of them.",
+        zeroBitrate:
+          "Line {{line}}, column {{column}}: {{flag}} 0 sets no bitrate. Choose a quality type other than Bitrate, or give a bitrate.",
+        tooManyOptions:
+          "Line {{line}}, column {{column}}: one encoder can take {{max}} parameters at most.",
+        optionsTooLong:
+          "Line {{line}}, column {{column}}: the parameters are too long from here on. Use {{max}} bytes or fewer for the video and audio parameters together.",
+      },
+      note: {
+        // {{flags}} is a list of flags, such as "-c:v, -crf, and -pix_fmt".
+        movedToFields: "{{flags}} went into the fields above.",
+        zeroBitrateCq:
+          "-b:v 0 is part of the CQ quality type, and QuipClip writes it itself.",
+        zeroBitrateConstant:
+          "-b:v 0 is not needed with this quality type, so QuipClip left it out.",
+      },
+    },
     quality: {
       crf: "Constant Quality (CRF)",
       cq: "NVENC Constant Quality (CQ)",
@@ -624,7 +675,7 @@ export const en = {
       tooManyOptions: "Use {{max}} parameters or fewer.",
       // {{name}} is the option name without its leading hyphen, as the user typed it.
       optionName:
-        "“{{name}}” is not a valid parameter name. Start with a letter. After that, use only letters, digits, underscores, periods, or hyphens, 64 characters at most.",
+        "“{{name}}” is not a valid parameter name. Start with a letter (A–Z). After that, use only letters (A–Z), digits, underscores, periods, or hyphens, 64 characters at most.",
       optionDenied:
         "QuipClip sets -{{name}} itself, or -{{name}} would break the export. Remove it.",
       optionDuplicate: "-{{name}} occurs more than once. Keep one of them.",

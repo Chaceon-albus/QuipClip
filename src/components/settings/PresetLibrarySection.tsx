@@ -93,6 +93,8 @@ import {
   presentFrameRateSelect,
   presentFrameRateTermInput,
   presentNumericField,
+  presentOptionSyntaxError,
+  presentOptionSyntaxNote,
   presentPixelFormatSelect,
   presentQualityKind,
   presentQualityValueInput,
@@ -205,6 +207,22 @@ function NumberInput({
 }
 
 /**
+ * The text field of the extra parameters: a multi-line field with the look of `Input`, in the
+ * monospaced face, because its text is FFmpeg syntax.
+ */
+function OptionsTextArea({ className, ...props }: ComponentProps<"textarea">) {
+  return (
+    <textarea
+      {...props}
+      className={cn(
+        "min-h-24 w-full min-w-0 resize-y rounded-lg border border-border-strong bg-surface-2 px-2.5 py-1.5 font-mono text-xs focus-ring transition-colors outline-none placeholder:text-muted-foreground disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40",
+        className,
+      )}
+    />
+  );
+}
+
+/**
  * The validation messages under one field. `id` is the target of the field's
  * `aria-describedby`. Renders nothing when the field has no message. It sits in the control
  * column of the `FormGroup` grid. A message can hold a custom encoder name with no space in
@@ -244,6 +262,7 @@ function PresetEditor({
   controller,
   ffmpegState,
   numberFormatter,
+  listFormatter,
   focusName,
   onNameFocused,
 }: {
@@ -252,6 +271,8 @@ function PresetEditor({
   controller: PresetLibraryController;
   ffmpegState: Pick<FfmpegState, "status" | "results">;
   numberFormatter: Intl.NumberFormat;
+  /** Joins the flags of an import note in the interface language. */
+  listFormatter: Intl.ListFormat;
   /**
    * True when Add or Duplicate just created this preset, or when Enter or F2 on its list row
    * asked for the name. The name field then takes the focus once, with its text selected, and
@@ -358,6 +379,10 @@ function PresetEditor({
     frameRateN: `${idBase}-frame-rate-n`,
     frameRateD: `${idBase}-frame-rate-d`,
     frameRateError: `${idBase}-frame-rate-error`,
+    optionsText: `${idBase}-options-text`,
+    optionsHint: `${idBase}-options-hint`,
+    optionsError: `${idBase}-options-error`,
+    optionsNotes: `${idBase}-options-notes`,
   };
 
   const nameInvalid = issueGroups.name.length > 0;
@@ -379,13 +404,17 @@ function PresetEditor({
   const pixelFormatListInvalid = pixelFormatInvalid && !view.pixelFormatIsCustom;
   const pixelFormatCustomInvalid = pixelFormatInvalid && view.pixelFormatIsCustom;
 
-  // The option lists have no control in this editor, so their messages show in the box at the
-  // end of the editor, with any message that names no field.
-  const boxMessages = [
+  // The extra parameters field shows the errors of its last import, then the issues of the two
+  // option lists of the draft, which it holds as text.
+  const optionsMessages = [
+    ...view.optionsErrors.map(presentOptionSyntaxError),
     ...issueGroups.videoOptions,
     ...issueGroups.audioOptions,
-    ...issueGroups.other,
   ];
+  const optionsInvalid = optionsMessages.length > 0;
+  const optionsNotes = view.optionsNotes.map((note) =>
+    presentOptionSyntaxNote(note, listFormatter),
+  );
 
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
@@ -947,12 +976,68 @@ function PresetEditor({
         </Select>
       </FormGroup>
 
-      {/* An issue of the option lists, or one that names no field of this editor. Each other
-          issue shows at its field. */}
-      {boxMessages.length > 0 ? (
+      <FormGroup legend={t("settings.preset.groupOptions")}>
+        {/* Extra Parameters: the two option lists as FFmpeg syntax. */}
+        <FieldLabel htmlFor={ids.optionsText}>
+          {t("settings.options.textLabel")}
+        </FieldLabel>
+        <OptionsTextArea
+          id={ids.optionsText}
+          rows={6}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          aria-invalid={optionsInvalid}
+          aria-describedby={joinDescribedBy(
+            optionsInvalid && ids.optionsError,
+            optionsNotes.length > 0 && ids.optionsNotes,
+            ids.optionsHint,
+          )}
+          value={view.optionsText}
+          onChange={(e) => controller.setOptionsText(e.target.value)}
+        />
+        <div className="col-start-2 flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!view.optionsTextPending || view.pending}
+            onClick={() => {
+              controller.applyOptionsText();
+            }}
+          >
+            {t("settings.options.apply")}
+          </Button>
+          {view.optionsTextPending ? (
+            <span className="text-xs text-muted-foreground">
+              {t("settings.options.pending")}
+            </span>
+          ) : null}
+        </div>
+        <FieldError
+          id={ids.optionsError}
+          messages={optionsMessages}
+          translate={translate}
+        />
+        {optionsNotes.length > 0 ? (
+          <div
+            id={ids.optionsNotes}
+            className="col-start-2 min-w-0 space-y-0.5 text-xs wrap-break-word text-muted-foreground"
+          >
+            {optionsNotes.map((note, index) => (
+              <p key={index}>{translate(note.key, note.values)}</p>
+            ))}
+          </div>
+        ) : null}
+        <p id={ids.optionsHint} className="col-start-2 text-xs text-muted-foreground">
+          {t("settings.options.hint")}
+        </p>
+      </FormGroup>
+
+      {/* An issue that names no field of this editor. Each other issue shows at its field. */}
+      {issueGroups.other.length > 0 ? (
         <Notice tone="destructive">
-          <div className="space-y-1 wrap-break-word">
-            {boxMessages.map((message, index) => (
+          <div className="space-y-1">
+            {issueGroups.other.map((message, index) => (
               <p key={index}>{translate(message.key, message.values)}</p>
             ))}
           </div>
@@ -982,7 +1067,7 @@ function PresetEditorFooter({
     key: string,
     options?: Record<string, string | number>,
   ) => string;
-  const saveBlocked = presentSaveBlockedSummary(view.issues);
+  const saveBlocked = presentSaveBlockedSummary(view.issues, view.optionsErrors);
   const idBase = useId();
   const saveBlockedId = `${idBase}-save-blocked`;
 
@@ -1107,6 +1192,10 @@ export function PresetLibrarySection({
   const resolvedLanguage = getResolvedLanguage(i18n);
   const numberFormatter = useMemo(
     () => new Intl.NumberFormat(resolvedLanguage),
+    [resolvedLanguage],
+  );
+  const listFormatter = useMemo(
+    () => new Intl.ListFormat(resolvedLanguage, { type: "conjunction" }),
     [resolvedLanguage],
   );
 
@@ -1683,6 +1772,7 @@ export function PresetLibrarySection({
                 controller={controller}
                 ffmpegState={ffmpegState}
                 numberFormatter={numberFormatter}
+                listFormatter={listFormatter}
                 focusName={focusNameId === view.draft.id}
                 onNameFocused={handleNameFocused}
               />

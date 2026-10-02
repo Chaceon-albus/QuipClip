@@ -424,6 +424,7 @@ export const zhCN: TranslationCatalog = {
       groupGeneral: "常规",
       groupVideo: "视频",
       groupAudio: "音频",
+      groupOptions: "额外参数",
       nameLabel: "名称",
       containerLabel: "容器",
       videoEncoderLabel: "视频编码器",
@@ -465,6 +466,49 @@ export const zhCN: TranslationCatalog = {
       sourceOption: "与源相同",
       customOption: "自定义…",
     },
+    options: {
+      textLabel: "FFmpeg 参数",
+      hint: "按 FFmpeg 命令的写法粘贴或输入参数，例如 -preset slow。带 :a 的参数用于音频编码器，其他参数都用于视频编码器。-c:v、-c:a、-crf、-cq、-q:v、-b:v、-b:a、-ar、-ac 和 -pix_fmt 会填入上方对应的字段。",
+      apply: "应用",
+      pending: "尚未应用。保存时也会应用。",
+      error: {
+        unterminatedQuote:
+          "第 {{line}} 行第 {{column}} 列：此引号在本行内没有结束引号。",
+        curlyQuote: "第 {{line}} 行第 {{column}} 列：请把这个弯引号换成直引号。",
+        unexpectedValue:
+          "第 {{line}} 行第 {{column}} 列：“{{value}}”是一个值，但它前面没有参数。",
+        missingValue: "第 {{line}} 行第 {{column}} 列：{{flag}} 需要一个值。",
+        streamSpecifier:
+          "第 {{line}} 行第 {{column}} 列：{{flag}} 中请使用 :v、:a，或者不使用流说明符。",
+        optionName:
+          "第 {{line}} 行第 {{column}} 列：{{flag}} 不是有效的参数名称。请以英文字母开头，后续只能使用英文字母、数字、下划线、句点或连字符，最多 64 个字符。",
+        optionDenied:
+          "第 {{line}} 行第 {{column}} 列：{{flag}} 由 QuipClip 自行设置，或者会破坏导出，请将其删除。",
+        optionDuplicate:
+          "第 {{line}} 行第 {{column}} 列：{{flag}} 出现了多次，请只保留一个。",
+        optionValue:
+          "第 {{line}} 行第 {{column}} 列：请为 {{flag}} 提供 1 到 {{max}} 个字符的值。",
+        integerValue:
+          "第 {{line}} 行第 {{column}} 列：{{flag}} 需要一个整数，而不是“{{value}}”。",
+        bitrateValue:
+          "第 {{line}} 行第 {{column}} 列：{{flag}} 需要以整数 kbps 表示的比特率，例如 320k 或 24M，而不是“{{value}}”。",
+        channelsValue:
+          "第 {{line}} 行第 {{column}} 列：{{flag}} 只能是 1 或 2。如需其他声道布局，请将“声道”设为“与源相同”。",
+        qualityConflict:
+          "第 {{line}} 行第 {{column}} 列：{{flag}} 和 {{other}} 都设置了质量，请只保留一个。",
+        zeroBitrate:
+          "第 {{line}} 行第 {{column}} 列：{{flag}} 0 没有设置比特率。请选择“比特率”以外的质量类型，或者给出一个比特率。",
+        tooManyOptions:
+          "第 {{line}} 行第 {{column}} 列：一个编码器最多可使用 {{max}} 个参数。",
+        optionsTooLong:
+          "第 {{line}} 行第 {{column}} 列：从此处起参数过长。视频参数和音频参数合计最多 {{max}} 字节。",
+      },
+      note: {
+        movedToFields: "{{flags}} 已填入上方对应的字段。",
+        zeroBitrateCq: "-b:v 0 属于 CQ 质量类型，QuipClip 会自行写入。",
+        zeroBitrateConstant: "此质量类型不需要 -b:v 0，因此 QuipClip 未保留它。",
+      },
+    },
     quality: {
       crf: "恒定质量（CRF）",
       cq: "NVENC 恒定质量（CQ）",
@@ -501,7 +545,7 @@ export const zhCN: TranslationCatalog = {
       pixelFormat: "请使用 1 到 {{max}} 个字符，只能使用小写字母、数字或下划线。",
       tooManyOptions: "最多可使用 {{max}} 个参数。",
       optionName:
-        "“{{name}}”不是有效的参数名称。请以字母开头，后续只能使用字母、数字、下划线、句点或连字符，最多 64 个字符。",
+        "“{{name}}”不是有效的参数名称。请以英文字母开头，后续只能使用英文字母、数字、下划线、句点或连字符，最多 64 个字符。",
       optionDenied: "-{{name}} 由 QuipClip 自行设置，或者会破坏导出，请将其删除。",
       optionDuplicate: "-{{name}} 出现了多次，请只保留一个。",
       optionValue:

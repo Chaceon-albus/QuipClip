@@ -11,6 +11,11 @@ import {
   audioBitrateChoices,
   isLosslessAudioEncoder,
 } from "@/features/settings/audioCodecs";
+import type {
+  OptionSyntaxError,
+  OptionSyntaxErrorCode,
+  OptionSyntaxNote,
+} from "@/features/settings/ffmpegOptionSyntax";
 import {
   MAX_PRESETS,
   MAX_RESOLUTION_DIMENSION,
@@ -231,19 +236,78 @@ export function groupIssuesByField(
 
 /**
  * Presents the short line beside Save that says why Save is off, or `null` when the draft has
- * no issues.
+ * no issues and the extra parameters field holds no error.
  *
- * `count` is the number of issues, not the number of messages in `groupIssuesByField`: a
- * `containerMismatch` issue shows under two fields, but it is one problem to fix. The key is a
- * plural family, so i18next selects the form for the count in each language (ADR 011).
+ * `count` is the number of issues and errors, not the number of messages in
+ * `groupIssuesByField`: a `containerMismatch` issue shows under two fields, but it is one
+ * problem to fix. The key is a plural family, so i18next selects the form for the count in
+ * each language (ADR 011).
  */
 export function presentSaveBlockedSummary(
   issues: readonly PresetFieldIssue[],
+  optionsErrors: readonly OptionSyntaxError[] = [],
 ): MessageView | null {
-  if (issues.length === 0) {
+  const count = issues.length + optionsErrors.length;
+  if (count === 0) {
     return null;
   }
-  return { key: "settings.preset.saveBlocked", values: { count: issues.length } };
+  return { key: "settings.preset.saveBlocked", values: { count } };
+}
+
+/**
+ * The key of the message of each import error. The `Record` type makes the compiler reject
+ * this object when a new code has no message.
+ */
+const OPTION_SYNTAX_ERROR_KEYS: Record<OptionSyntaxErrorCode, string> = {
+  unterminatedQuote: "settings.options.error.unterminatedQuote",
+  curlyQuote: "settings.options.error.curlyQuote",
+  unexpectedValue: "settings.options.error.unexpectedValue",
+  missingValue: "settings.options.error.missingValue",
+  streamSpecifier: "settings.options.error.streamSpecifier",
+  optionName: "settings.options.error.optionName",
+  optionDenied: "settings.options.error.optionDenied",
+  optionDuplicate: "settings.options.error.optionDuplicate",
+  optionValue: "settings.options.error.optionValue",
+  integerValue: "settings.options.error.integerValue",
+  bitrateValue: "settings.options.error.bitrateValue",
+  channelsValue: "settings.options.error.channelsValue",
+  qualityConflict: "settings.options.error.qualityConflict",
+  zeroBitrate: "settings.options.error.zeroBitrate",
+  tooManyOptions: "settings.options.error.tooManyOptions",
+  optionsTooLong: "settings.options.error.optionsTooLong",
+};
+
+/**
+ * Presents one error of the import of the extra parameters field. Each message is complete
+ * and starts with the line and the column, so the user finds the place in the text (ADR 011).
+ * The flags and the values are text of the user, passed through untranslated.
+ */
+export function presentOptionSyntaxError(error: OptionSyntaxError): MessageView {
+  return {
+    key: OPTION_SYNTAX_ERROR_KEYS[error.code],
+    values: { line: error.line, column: error.column, ...error.values },
+  };
+}
+
+/**
+ * Presents one note of an import that succeeded. `listFormat` joins the flags that went into
+ * fields in the way of the interface language, such as "-c:v, -crf, and -pix_fmt".
+ */
+export function presentOptionSyntaxNote(
+  note: OptionSyntaxNote,
+  listFormat: Intl.ListFormat,
+): MessageView {
+  switch (note.code) {
+    case "zeroBitrateCq":
+      return { key: "settings.options.note.zeroBitrateCq" };
+    case "zeroBitrateConstant":
+      return { key: "settings.options.note.zeroBitrateConstant" };
+    case "movedToFields":
+      return {
+        key: "settings.options.note.movedToFields",
+        values: { flags: listFormat.format(note.flags) },
+      };
+  }
 }
 
 /** The state of the Duplicate action of the preset library. */

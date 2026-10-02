@@ -717,6 +717,29 @@ describe("PresetLibraryController", () => {
       expect(controller.getView().dirty).toBe(true);
       expect(controller.getView().draft?.name).toBe("Renamed again");
     });
+
+    it("resolves false when text lands in the extra parameters field while the write is in flight", async () => {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const deferred = createDeferred<Settings | null>();
+      const saveSettings = vi.fn().mockReturnValue(deferred.promise);
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings,
+      });
+
+      controller.select("p1");
+      controller.setName("Renamed");
+      const leaving = controller.saveDraftBeforeLeaving();
+      // The text does not replace the draft object, so only the pending flag records it.
+      controller.setOptionsText("-preset:v slow");
+
+      deferred.resolve(settings);
+
+      await expect(leaving).resolves.toBe(false);
+      expect(controller.getView().dirty).toBe(true);
+      expect(controller.getView().optionsTextPending).toBe(true);
+      expect(controller.getView().optionsText).toBe("-preset:v slow");
+    });
   });
 
   describe("addPreset", () => {
@@ -2249,6 +2272,138 @@ describe("PresetLibraryController", () => {
 
       expect(controller.getView().draft).toBeNull();
       expect(controller.getView().pixelFormatChoice).toBe("");
+      expect(controller.getView().dirty).toBe(false);
+    });
+  });
+
+  describe("the extra parameters field", () => {
+    function setUp(preset: Preset = createPreset("p1")) {
+      const store = createAcceptingStore(createSettings({ presets: [preset] }));
+      const controller = createPresetLibraryController(store);
+      controller.select(preset.id);
+      return { controller, store };
+    }
+
+    it("shows the canonical text of the stored lists, with nothing pending", () => {
+      const { controller } = setUp(
+        createPreset("p1", {
+          videoOptions: [{ name: "preset", value: "slow" }],
+          audioOptions: [{ name: "profile", value: "aac_low" }],
+        }),
+      );
+      const view = controller.getView();
+      expect(view.optionsText).toBe("-preset:v slow\n-profile:a aac_low");
+      expect(view.optionsTextPending).toBe(false);
+      expect(view.optionsErrors).toEqual([]);
+      expect(view.optionsNotes).toEqual([]);
+      expect(view.dirty).toBe(false);
+    });
+
+    it("marks the draft dirty while an edit of the text is pending, and changes no field", () => {
+      const { controller } = setUp();
+      controller.setOptionsText("-c:v libx265 -g 60");
+      const view = controller.getView();
+      expect(view.optionsText).toBe("-c:v libx265 -g 60");
+      expect(view.optionsTextPending).toBe(true);
+      expect(view.dirty).toBe(true);
+      expect(view.draft?.videoEncoder).toBe("libx264");
+      expect(view.draft?.videoOptions).toEqual([]);
+    });
+
+    it("imports the text on apply, moves the managed flags into fields, and shows the notes", () => {
+      const { controller } = setUp();
+      controller.setOptionsText("-c:v h264_nvenc -cq 25 -b:v 0 -preset p7");
+      expect(controller.applyOptionsText()).toBe(true);
+      const view = controller.getView();
+      expect(view.draft?.videoEncoder).toBe("h264_nvenc");
+      expect(view.draft?.quality).toEqual({ kind: "cq", value: 25 });
+      expect(view.draft?.videoOptions).toEqual([{ name: "preset", value: "p7" }]);
+      expect(view.optionsText).toBe("-preset:v p7");
+      expect(view.optionsTextPending).toBe(false);
+      expect(view.optionsNotes).toEqual([
+        { code: "movedToFields", flags: ["-c:v", "-cq"] },
+        { code: "zeroBitrateCq" },
+      ]);
+      expect(view.dirty).toBe(true);
+      expect(view.canSave).toBe(true);
+    });
+
+    it("keeps the draft and shows the errors when the import fails, until the text changes", () => {
+      const { controller } = setUp();
+      controller.setOptionsText("-g 60 -y");
+      expect(controller.applyOptionsText()).toBe(false);
+      let view = controller.getView();
+      expect(view.draft?.videoOptions).toEqual([]);
+      expect(view.optionsErrors).toEqual([
+        { code: "optionDenied", line: 1, column: 7, values: { flag: "-y" } },
+      ]);
+      expect(view.optionsTextPending).toBe(true);
+      expect(view.canSave).toBe(false);
+
+      controller.setOptionsText("-g 60");
+      view = controller.getView();
+      expect(view.optionsErrors).toEqual([]);
+      expect(view.canSave).toBe(true);
+    });
+
+    it("imports a pending text before it saves, so the save holds what the field shows", async () => {
+      const { controller, store } = setUp();
+      controller.setOptionsText("-tune film");
+      expect(await controller.saveDraft()).toBe(true);
+      const saved = store.saveSettings.mock.calls[0]?.[0] as Settings;
+      expect(saved.presets[0].videoOptions).toEqual([{ name: "tune", value: "film" }]);
+      const view = controller.getView();
+      expect(view.dirty).toBe(false);
+      expect(view.optionsTextPending).toBe(false);
+      expect(view.optionsText).toBe("-tune:v film");
+    });
+
+    it("saves nothing when the pending text does not import", async () => {
+      const { controller, store } = setUp();
+      controller.setOptionsText('-x264-params "aq-mode=3');
+      expect(await controller.saveDraft()).toBe(false);
+      expect(await controller.saveDraftBeforeLeaving()).toBe(false);
+      expect(store.saveSettings).not.toHaveBeenCalled();
+      expect(controller.getView().optionsErrors).toEqual([
+        { code: "unterminatedQuote", line: 1, column: 14 },
+      ]);
+    });
+
+    it("discards a pending text on cancel and when another preset loads", () => {
+      const settings = createSettings({
+        presets: [
+          createPreset("p1", { videoOptions: [{ name: "g", value: "1" }] }),
+          createPreset("p2"),
+        ],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+      controller.select("p1");
+      controller.setOptionsText("-g 2 -y");
+      controller.applyOptionsText();
+      controller.cancelDraft();
+      let view = controller.getView();
+      expect(view.optionsText).toBe("-g:v 1");
+      expect(view.optionsTextPending).toBe(false);
+      expect(view.optionsErrors).toEqual([]);
+
+      controller.setOptionsText("-g 3");
+      controller.select("p2");
+      view = controller.getView();
+      expect(view.optionsText).toBe("");
+      expect(view.optionsTextPending).toBe(false);
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+      controller.setOptionsText("-g 1");
+      expect(controller.applyOptionsText()).toBe(false);
+      expect(controller.getView().optionsText).toBe("");
       expect(controller.getView().dirty).toBe(false);
     });
   });

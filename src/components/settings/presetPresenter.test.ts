@@ -36,6 +36,8 @@ import {
   presentEncoderSelect,
   presentFrameRateInvalid,
   presentNumericField,
+  presentOptionSyntaxError,
+  presentOptionSyntaxNote,
   presentPixelFormatSelect,
   presentPresetEncoderMark,
   presentPresetIssue,
@@ -61,6 +63,11 @@ import {
   resolutionChoiceValue,
 } from "@/features/settings/videoOutputChoices";
 import { isValidPixelFormat } from "@/features/settings/limits";
+import {
+  importOptionsText,
+  type OptionSyntaxError,
+  type OptionSyntaxErrorCode,
+} from "@/features/settings/ffmpegOptionSyntax";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 import { QUALITY_KINDS } from "@/features/settings/types";
 
@@ -358,6 +365,21 @@ describe("presetPresenter", () => {
   describe("presentSaveBlockedSummary", () => {
     it("returns null when there are no issues", () => {
       expect(presentSaveBlockedSummary([])).toBeNull();
+      expect(presentSaveBlockedSummary([], [])).toBeNull();
+    });
+
+    it("counts the errors of the extra parameters field with the issues", () => {
+      const errors: OptionSyntaxError[] = [
+        { code: "missingValue", line: 1, column: 1, values: { flag: "-g" } },
+        { code: "optionDenied", line: 2, column: 1, values: { flag: "-y" } },
+      ];
+      expect(presentSaveBlockedSummary([], errors)).toStrictEqual({
+        key: "settings.preset.saveBlocked",
+        values: { count: 2 },
+      });
+      expect(
+        presentSaveBlockedSummary([{ field: "name", code: "required" }], errors),
+      ).toStrictEqual({ key: "settings.preset.saveBlocked", values: { count: 3 } });
     });
 
     it("counts issues, not messages: a containerMismatch that shows at two fields counts once", () => {
@@ -978,6 +1000,117 @@ describe("presetPresenter", () => {
       const key = presentQualityKind(kind);
       expect(typeof resolveCatalogKey(en, key)).toBe("string");
       expect(typeof resolveCatalogKey(zhCN, key)).toBe("string");
+    });
+  });
+
+  describe("presentOptionSyntaxError", () => {
+    const CODES: OptionSyntaxErrorCode[] = [
+      "unterminatedQuote",
+      "unexpectedValue",
+      "missingValue",
+      "streamSpecifier",
+      "optionName",
+      "optionDenied",
+      "optionDuplicate",
+      "optionValue",
+      "integerValue",
+      "bitrateValue",
+      "channelsValue",
+      "qualityConflict",
+      "zeroBitrate",
+      "tooManyOptions",
+      "optionsTooLong",
+    ];
+
+    it("puts the line, the column, and the values of the error into the message", () => {
+      expect(
+        presentOptionSyntaxError({
+          code: "qualityConflict",
+          line: 3,
+          column: 9,
+          values: { flag: "-cq", other: "-crf" },
+        }),
+      ).toStrictEqual({
+        key: "settings.options.error.qualityConflict",
+        values: { line: 3, column: 9, flag: "-cq", other: "-crf" },
+      });
+      expect(
+        presentOptionSyntaxError({ code: "unterminatedQuote", line: 1, column: 4 }),
+      ).toStrictEqual({
+        key: "settings.options.error.unterminatedQuote",
+        values: { line: 1, column: 4 },
+      });
+    });
+
+    it.each(CODES)("names a key of both catalogs for %s", (code) => {
+      const { key } = presentOptionSyntaxError({ code, line: 1, column: 1 });
+      expect(key).toBe(`settings.options.error.${code}`);
+      expect(typeof resolveCatalogKey(en, key)).toBe("string");
+      expect(typeof resolveCatalogKey(zhCN, key)).toBe("string");
+    });
+
+    it.each([
+      [
+        "en",
+        "Line 2, column 5: QuipClip sets -y itself, or -y would break the export. Remove it.",
+      ],
+      [
+        "zh-CN",
+        "第 2 行第 5 列：-y 由 QuipClip 自行设置，或者会破坏导出，请将其删除。",
+      ],
+    ] as const)("renders an error of an import in %s", async (language, expected) => {
+      const instance = await createI18nInstance({
+        initialPreference: language,
+        storage: null,
+        systemLanguages: [],
+      });
+      const translate = instance.t as unknown as (
+        key: string,
+        options?: Record<string, string | number>,
+      ) => string;
+      const result = importOptionsText("-g 1\n    -y 1", createPresetDraft("p", "P"));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        const message = presentOptionSyntaxError(result.errors[0]);
+        expect(translate(message.key, message.values)).toBe(expected);
+      }
+    });
+  });
+
+  describe("presentOptionSyntaxNote", () => {
+    it("joins the moved flags with the list format of the language", () => {
+      const note = {
+        code: "movedToFields" as const,
+        flags: ["-c:v", "-crf", "-pix_fmt"],
+      };
+      expect(
+        presentOptionSyntaxNote(
+          note,
+          new Intl.ListFormat("en", { type: "conjunction" }),
+        ),
+      ).toStrictEqual({
+        key: "settings.options.note.movedToFields",
+        values: { flags: "-c:v, -crf, and -pix_fmt" },
+      });
+      expect(
+        presentOptionSyntaxNote(
+          note,
+          new Intl.ListFormat("zh-CN", { type: "conjunction" }),
+        ).values,
+      ).toStrictEqual({ flags: "-c:v、-crf和-pix_fmt" });
+    });
+
+    it("names a key of both catalogs for each note", () => {
+      const listFormat = new Intl.ListFormat("en", { type: "conjunction" });
+      for (const note of [
+        { code: "zeroBitrateCq" as const },
+        { code: "zeroBitrateConstant" as const },
+        { code: "movedToFields" as const, flags: ["-c:v"] },
+      ]) {
+        const { key } = presentOptionSyntaxNote(note, listFormat);
+        expect(typeof resolveCatalogKey(en, key)).toBe("string");
+        expect(typeof resolveCatalogKey(zhCN, key)).toBe("string");
+      }
     });
   });
 

@@ -10,7 +10,7 @@
 
 import type { Rational, Resolution } from "@/types/project";
 
-import { DEFAULT_AUDIO_BITRATE_KBPS } from "./audioCodecs";
+import { DEFAULT_AUDIO_BITRATE_KBPS, isLosslessAudioEncoder } from "./audioCodecs";
 import { DEFAULT_PIXEL_FORMAT } from "./limits";
 import type { Preset, Settings } from "./types";
 
@@ -57,6 +57,27 @@ export function createPresetDraft(id: string, name: string): Preset {
     videoOptions: [],
     audioOptions: [],
   };
+}
+
+/**
+ * Returns a copy of `preset` with `audioEncoder` set, and the bitrate rule of ADR 023 applied:
+ *
+ * - A lossless encoder takes no bitrate, so the copy has no `audioBitrate` key.
+ * - A change from a lossless encoder to a lossy one, with no bitrate stored, sets
+ *   `DEFAULT_AUDIO_BITRATE_KBPS`, so the lossy encoder does not run at its own default.
+ *
+ * The encoder list of the editor and the ffmpeg-syntax import both change the encoder through
+ * this function, so the two follow one rule.
+ */
+export function withAudioEncoder(preset: Preset, audioEncoder: string): Preset {
+  const wasLossless = isLosslessAudioEncoder(preset.audioEncoder);
+  const next: Preset = { ...preset, audioEncoder };
+  if (isLosslessAudioEncoder(audioEncoder)) {
+    delete next.audioBitrate;
+  } else if (wasLossless && next.audioBitrate === undefined) {
+    next.audioBitrate = DEFAULT_AUDIO_BITRATE_KBPS;
+  }
+  return next;
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   findPreset,
   setActivePreset,
   updatePreset,
+  withAudioEncoder,
 } from "./presetDocument";
 import type { Preset, Settings } from "./types";
 
@@ -99,6 +100,27 @@ describe("createPresetDraft", () => {
     const second = createPresetDraft("b", "B");
     expect(first.videoOptions).not.toBe(second.videoOptions);
     expect(first.audioOptions).not.toBe(second.audioOptions);
+  });
+});
+
+describe("withAudioEncoder", () => {
+  it("removes the bitrate for a lossless encoder", () => {
+    const next = withAudioEncoder(createPresetDraft("a", "A"), "flac");
+    expect(next.audioEncoder).toBe("flac");
+    expect("audioBitrate" in next).toBe(false);
+  });
+
+  it("sets the default bitrate when a lossy encoder replaces a lossless one with none", () => {
+    const flac = withAudioEncoder(createPresetDraft("a", "A"), "alac");
+    expect(withAudioEncoder(flac, "libopus").audioBitrate).toBe(320);
+  });
+
+  it("keeps the bitrate between two lossy encoders, and never changes its input", () => {
+    const draft = { ...createPresetDraft("a", "A"), audioBitrate: 192 };
+    const next = withAudioEncoder(draft, "libmp3lame");
+    expect(next.audioBitrate).toBe(192);
+    expect(next).not.toBe(draft);
+    expect(draft.audioEncoder).toBe("aac");
   });
 });
 

@@ -15,6 +15,12 @@
  */
 
 import {
+  importOptionsText,
+  renderOptionsText,
+  type OptionSyntaxError,
+  type OptionSyntaxNote,
+} from "@/features/settings/ffmpegOptionSyntax";
+import {
   addPreset as addPresetToDocument,
   createPresetDraft,
   DEFAULT_CUSTOM_FRAME_RATE,
@@ -22,6 +28,7 @@ import {
   deletePreset as deletePresetFromDocument,
   setActivePreset,
   updatePreset,
+  withAudioEncoder,
 } from "@/features/settings/presetDocument";
 import {
   canAddPreset,
@@ -29,10 +36,6 @@ import {
   validatePresetFields,
   type PresetFieldIssue,
 } from "@/features/settings/limits";
-import {
-  DEFAULT_AUDIO_BITRATE_KBPS,
-  isLosslessAudioEncoder,
-} from "@/features/settings/audioCodecs";
 import {
   nextFreeCopyName,
   nextFreePresetName,
@@ -182,6 +185,24 @@ export type PresetLibraryView = {
    * `pixelFormatIsCustom` is true, else the stored format of the draft.
    */
   pixelFormatChoice: string;
+
+  /**
+   * The text of the extra parameters field. A loaded draft shows the canonical text of its
+   * option lists (`renderOptionsText`). The user edits it, and `applyOptionsText` imports it.
+   */
+  optionsText: string;
+
+  /**
+   * True while `optionsText` holds an edit that is not imported yet. The draft is then dirty,
+   * and a save imports the text first.
+   */
+  optionsTextPending: boolean;
+
+  /** The errors of the last import that failed. Empty after an edit of the text. */
+  optionsErrors: OptionSyntaxError[];
+
+  /** The notes of the last import that succeeded. Empty after an edit of the text. */
+  optionsNotes: OptionSyntaxNote[];
 };
 
 /**
@@ -261,6 +282,12 @@ export class PresetLibraryController {
   // Controller state, not derived from the draft: see `PresetLibraryView.pixelFormatIsCustom`.
   private pixelFormatIsCustom = false;
 
+  // The extra parameters field. See `PresetLibraryView.optionsText` and the fields after it.
+  private optionsText = "";
+  private optionsTextPending = false;
+  private optionsErrors: OptionSyntaxError[] = [];
+  private optionsNotes: OptionSyntaxNote[] = [];
+
   constructor(options: PresetLibraryControllerOptions = {}) {
     this.getSettingsFn =
       options.getSettings ?? (() => settingsStore.getState().settings);
@@ -287,7 +314,10 @@ export class PresetLibraryController {
       dirty: this.dirty,
       issues: this.issues,
       canAdd: canAddPreset(presets.length),
-      canSave: this.dirty && this.issues.length === 0,
+      // A text that failed its import blocks the save until the user edits it, because the
+      // save would import it again and fail again.
+      canSave:
+        this.dirty && this.issues.length === 0 && this.optionsErrors.length === 0,
       pending: this.pendingCount > 0,
       ready: settings !== null,
       videoEncoderIsCustom: this.videoEncoderIsCustom,
@@ -306,6 +336,10 @@ export class PresetLibraryController {
       pixelFormatChoice: this.pixelFormatIsCustom
         ? PIXEL_FORMAT_CUSTOM_VALUE
         : (this.draft?.pixelFormat ?? ""),
+      optionsText: this.optionsText,
+      optionsTextPending: this.optionsTextPending,
+      optionsErrors: this.optionsErrors,
+      optionsNotes: this.optionsNotes,
     };
   }
 
@@ -405,28 +439,16 @@ export class PresetLibraryController {
   }
 
   /**
-   * Applies an audio encoder change to the draft, enforcing lossless vs. lossy bitrate rules (ADR 023):
-   * - A new encoder that is lossless removes `audioBitrate`.
-   * - A change from a lossless encoder to a non-lossless encoder, with no bitrate stored, sets `DEFAULT_AUDIO_BITRATE_KBPS`.
+   * Applies an audio encoder change to the draft, enforcing the lossless vs. lossy bitrate
+   * rules of ADR 023 through `withAudioEncoder`: a lossless encoder removes `audioBitrate`, and
+   * a change from a lossless encoder to a lossy one, with no bitrate stored, sets
+   * `DEFAULT_AUDIO_BITRATE_KBPS`.
    */
   private applyAudioEncoder(newEncoder: string): void {
     if (!this.draft) {
       return;
     }
-    const wasLossless = isLosslessAudioEncoder(this.draft.audioEncoder);
-    const isLossless = isLosslessAudioEncoder(newEncoder);
-    const nextDraft: Preset = {
-      ...this.draft,
-      audioEncoder: newEncoder,
-    };
-
-    if (isLossless) {
-      delete nextDraft.audioBitrate;
-    } else if (wasLossless && nextDraft.audioBitrate === undefined) {
-      nextDraft.audioBitrate = DEFAULT_AUDIO_BITRATE_KBPS;
-    }
-
-    this.draft = nextDraft;
+    this.draft = withAudioEncoder(this.draft, newEncoder);
     this.issues = validatePresetFields(this.draft);
     this.dirty = true;
     this.notify();
@@ -648,11 +670,70 @@ export class PresetLibraryController {
   }
 
   /**
+   * Sets the text of the extra parameters field, verbatim, and marks the draft dirty. The text
+   * changes no field until `applyOptionsText` imports it. The errors and the notes of the last
+   * import no longer describe the text, so they clear.
+   *
+   * No-op when there is no draft.
+   */
+  setOptionsText(raw: string): void {
+    if (!this.draft) {
+      return;
+    }
+    this.optionsText = raw;
+    this.optionsTextPending = true;
+    this.optionsErrors = [];
+    this.optionsNotes = [];
+    this.dirty = true;
+    this.notify();
+  }
+
+  /**
+   * Imports the text of the extra parameters field into the draft (`importOptionsText`).
+   *
+   * On success, the option lists of the draft and the fields that the text names take the
+   * imported values, the text becomes the canonical text of the new lists, and the notes of
+   * the import show. A flag such as `-crf` therefore leaves the text and shows in its field.
+   * On failure, the draft does not change, and the errors show.
+   *
+   * Returns true when the draft holds the text afterwards, which is also the case when no
+   * text was pending. No-op that returns false when there is no draft.
+   */
+  applyOptionsText(): boolean {
+    if (!this.draft) {
+      return false;
+    }
+    if (!this.optionsTextPending) {
+      return true;
+    }
+    const result = importOptionsText(this.optionsText, this.draft);
+    if (!result.ok) {
+      this.optionsErrors = result.errors;
+      this.optionsNotes = [];
+      this.notify();
+      return false;
+    }
+    this.draft = result.preset;
+    this.issues = validatePresetFields(this.draft);
+    this.dirty = true;
+    this.optionsText = renderOptionsText(this.draft);
+    this.optionsTextPending = false;
+    this.optionsErrors = [];
+    this.optionsNotes = result.notes;
+    this.notify();
+    return true;
+  }
+
+  /**
    * Writes the current draft to the settings document, using `updatePreset` when the draft id
    * already exists in the document and `addPreset` when it does not.
    *
+   * A pending text of the extra parameters field is imported first (`applyOptionsText`), so
+   * the save holds what the field shows.
+   *
    * Performs no IPC and returns `false` when there is no draft, when the draft is not dirty,
-   * when `issues` is non-empty, or when the settings document has not loaded yet. Clears
+   * when the import of a pending text fails, when `issues` is non-empty, or when the settings
+   * document has not loaded yet. Clears
    * `dirty` only when the write succeeds AND `this.draft` is still the draft this call
    * started with; a `null` result from `saveSettings` (the store's failure signal) leaves
    * `dirty` true so the user's edit is not lost.
@@ -665,7 +746,12 @@ export class PresetLibraryController {
    * a second request-id counter here would duplicate state the settings store already owns.
    */
   async saveDraft(): Promise<boolean> {
-    if (!this.draft || !this.dirty || this.issues.length > 0) {
+    if (
+      !this.draft ||
+      !this.dirty ||
+      !this.applyOptionsText() ||
+      this.issues.length > 0
+    ) {
       return false;
     }
     const settings = this.getSettingsFn();
@@ -693,7 +779,9 @@ export class PresetLibraryController {
       return false;
     }
 
-    if (this.draft === draft) {
+    // Text typed into the extra parameters field while the write ran is not in the write, and
+    // it does not replace `this.draft`, so the identity check alone would miss it.
+    if (this.draft === draft && !this.optionsTextPending) {
       this.dirty = false;
     }
     this.notify();
@@ -985,6 +1073,10 @@ export class PresetLibraryController {
     this.draft = preset ? clonePreset(preset) : null;
     this.issues = preset ? validatePresetFields(preset) : [];
     this.dirty = false;
+    this.optionsText = preset ? renderOptionsText(preset) : "";
+    this.optionsTextPending = false;
+    this.optionsErrors = [];
+    this.optionsNotes = [];
     // A newly loaded draft never inherits an in-progress "choose a custom encoder" edit from
     // whatever was loaded before it. The same holds for the custom resolution and frame rate:
     // the loaded values then select their choice, if one matches.
