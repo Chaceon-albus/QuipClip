@@ -172,6 +172,43 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
       source removes this cost. Then the segment from 0 took 255 MiB at 640x360 with 5.1 audio,
       and 226 MiB at 1280x720 with stereo audio. The rest was the fill.
 
+22. (Added on 2026-10-02.) A second input of the source with the same seek, from which the graph
+    reads only the audio, gives the same output as the input of the segment. FFmpeg 9.0.2 on
+    macOS compared the framemd5 of every video and audio frame that leaves the graph, with the
+    audio from the input of each segment and with the audio from second inputs. The sources had
+    audio 3 s late in MP4, MKV and MPEG-TS, audio 12 s late in MP4 and MKV, and audio that ends
+    at 20 s of 40 s in MP4 and MKV. Six plans included a segment from 0, a segment that ends
+    before the first sample, three segments out of source order, an In point after the first
+    sample, a segment after the last sample, and a segment that ends after the last sample with
+    another segment behind it. All 72 runs with second inputs, in both shapes, were identical.
+    In 36 more runs, on sources whose audio starts at most 0.3 s late and on the plans that the
+    rule of the decision leaves alone, the command did not change.
+
+    The second input decodes no video, because no filter reads its video stream. With libx264,
+    the peak memory fell as follows, in new runs, and the time of the export did not change:
+
+    | Case | One input | Second input |
+    | --- | --- | --- |
+    | Audio 60 s late, segment from 0, 640x360, 5.1 | 925 MiB | 256 MiB |
+    | The same at 1280x720, stereo | 2675 MiB | 229 MiB |
+    | Three segments, one input for each | 1121 MiB | 134 MiB |
+    | Three segments, one input | 790 MiB | 177 MiB |
+    | Keyframes 10 s apart, audio 25 s late, seek at 28 s | 332 MiB | 158 MiB |
+    | Audio ends at 20 s, a segment at 60 s, one input for each | 2870 MiB | 186 MiB |
+    | Audio ends at 20 s, [17, 22) then [23, 83), one input | 1609 MiB | 170 MiB |
+
+    In the keyframe case the seek lies after the first audio sample, but FFmpeg reads from the
+    keyframe at 20 s, before it. In the last case the audio of [17, 22) ends only at the end of
+    the file, and `concat` holds the video that `split` gives [23, 83) until then. With one input
+    for each segment, the same plan took 186 MiB without the second input. A source with no
+    late audio used the same memory as before. Two hundred inputs, the most that the first shape
+    can open, ran with about 50 of the 256 file descriptors of a macOS application to spare.
+
+    The default analysis of ffprobe reads about 5 s of a file. In MKV and MPEG-TS sources
+    whose audio starts later than that, it reports the start of the audio stream as 0 or as the
+    start of the container. In one MPEG-TS source with audio 12 s late, it reported no sample
+    rate either. An MP4 file has an index, so its probe reported each start correctly.
+
 ## Decision
 
 ### The boundary mechanism
@@ -270,7 +307,8 @@ the bound. An audio-only export writes nothing for such a segment, so it counts 
 that reach the sample. At the bound, the fill alone took 95 MiB on 48000 Hz stereo and 215 MiB on
 48000 Hz 5.1. A video-only export reads no audio. The probe reports only where the stream starts,
 so the bound does not apply to a gap inside the stream. This bound does not cover the decoded
-video that waits for the first audio frame (measurement 21).
+video that waits for the first audio frame (measurement 21). A second input of the source removes
+that wait; see "The graph shape".
 
 (Changed on 2026-10-02.) The video chain no longer ends in `format=yuv420p`. One chain at the
 start of the graph text sets the pixel format of the joined video, and `concat` writes `[vc]`:
@@ -336,6 +374,35 @@ export of more than about 125 segments on Windows.
 `MAX_EXPORT_SEGMENTS` is therefore 100. That value stays inside the Windows budget for a
 long path. It is also far above the number of segments a person marks by hand.
 
+(Changed on 2026-10-02.) Every segment takes its audio from a second input of the source, with
+the seek of the segment, when the plan writes video and audio and one of three conditions holds
+(measurements 21 and 22):
+
+- The first sample of the source audio comes more than 0.5 s after the start of the container.
+- An input of a segment starts to read less than 0.5 s before the last sample of the audio, or
+  after it. The input starts to read no later than its seek, or the start of the container when
+  the seek is clamped.
+- A segment that another segment follows in concat order ends less than 0.5 s before the last
+  sample, or after it. Under one input, its audio ends only at the end of the file, and
+  `concat` holds the video of the segments behind it until then.
+
+The last two conditions apply only when the probe reports where the audio starts and how long
+it is.
+
+The graph then has its first audio frame at once, so FFmpeg does not keep the decoded video
+until the audio arrives. The rule is one for the whole plan, because an input reads from the
+keyframe at or before its seek. The plan does not know where that keyframe is, so a segment
+whose seek lies after the first audio sample can still start to read before it. Under the first
+shape, the second inputs follow the inputs of the segments, in segment order: input `n + i`
+gives the audio of segment `i`. Under the second shape there is one second input, with the one
+seek. When the second shape and its second input do not fit in the budget, a third shape drops
+the second input and writes the command of the second shape as it was before. Then the graph
+waits for the audio again. At the cap on the longest Windows path, with every setting at its
+widest, the second input costs 288 bytes and misses the budget by 54 bytes, so that plan uses
+the third shape. A plan whose audio neither starts late nor ends before a segment does has no
+second input and does not change. Below the threshold the wait stays: at 3840x2160 and 60 fps,
+0.5 s of decoded video is about 370 MB with 8-bit samples, and about 750 MB with 10-bit samples.
+
 A larger export needs the graph off the command line. That syntax exists as
 `-/filter_complex <file>` in FFmpeg 7.1 and later. The capability probe already reads the
 version. A later unit can select that form when the installed build offers it. It keeps the
@@ -391,6 +458,21 @@ The renderer decodes the original media. It must not decode a preview proxy.
   decoded video frame of that input in memory (measurement 21). A segment that starts long
   before the first sample therefore needs memory in proportion to that time and to the size of
   a frame: 2.6 GiB for 60 s at 1280x720. This cost is older than measurement 20.
+  (Changed on 2026-10-02.) A second input for the audio now removes it (measurement 22). The
+  wait stays in these cases:
+  - the third shape of the budget;
+  - an MKV or MPEG-TS source whose probe misses a late start of the audio, which then also
+    takes the length of the audio from the container, so the end of the audio is wrong too;
+  - a probe that reports no length of the audio, so the conditions at its end do not apply;
+  - a seek into a gap inside the audio stream, which the probe does not report;
+  - a wait shorter than 0.5 s.
+- (Added on 2026-10-02.) Under one input, `split` can give a segment its video before the
+  segments ahead of it in concat order have finished, and `concat` then holds that decoded
+  video. This happens when the segments are out of source order or overlap, and it has nothing
+  to do with the audio, so a second input does not help. On a 1280x720 source with libx264,
+  [60, 70) then [0, 50) took 2078 MiB, against 156 MiB in source order. Only the second shape has this cost,
+  and Windows uses it only when the first shape does not fit, at about 75 segments or more on a
+  path of 106 characters. This cost is older than measurement 20.
 - (Added on 2026-10-02.) A last or only segment that lies wholly before the first audio sample
   gets no audio, because `concat` pads only a segment that another segment follows. When it is
   the only segment, an export with video fails in FFmpeg (measurement 21).

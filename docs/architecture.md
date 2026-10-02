@@ -272,9 +272,14 @@ normalizes the streams (ADR 014 measurement 20). The fill holds its silence in m
 plan refuses segments that need more than 60 s of silence in total before the first audio sample
 (`audioGapTooLong`, measurement 21). The chains end in `concat`, in project array order.
 
-The renderer has two graph shapes. It opens one input for each segment while the assembled
+The renderer has three graph shapes. It opens one input for each segment while the assembled
 command line stays inside the platform budget. It otherwise opens one input, seeks once, and
-divides that input with `split` and `asplit`.
+divides that input with `split` and `asplit`. When the source audio starts more than 0.5 s
+after the container, or an input starts to read near or after its end, or a segment with another
+behind it ends near or after its end, every segment takes its audio from a second input with
+the same seek. FFmpeg then does not keep the decoded video until
+the audio arrives (ADR 014 measurement 22). When the second shape with that input does not fit,
+a third shape drops it.
 
 The final `aformat` of each audio chain takes its sample rate and its channel layout from the
 preset (ADR 023). The value `source` selects the rate of the source stream, or omits the
