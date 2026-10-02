@@ -114,7 +114,7 @@ fn video_output_format(pixel_format: &str) -> String {
 /// stands at the head of the chain. Both are needed, for opposite reasons: this one converts
 /// the cut audio to the one format `concat` joins at; that one stops ffmpeg from converting
 /// the audio *before* the cut, which would read the boundary ticks in the wrong unit.
-fn audio_output_format(audio: &PlannedAudio) -> String {
+pub(crate) fn audio_output_format(audio: &PlannedAudio) -> String {
     let layout = match audio.output_channels {
         AudioChannels::Source => "",
         AudioChannels::Stereo => ":channel_layouts=stereo",

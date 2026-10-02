@@ -11,6 +11,8 @@
 /// in `src/lib.rs` compares this list with the registration and with the two capabilities.
 const APP_COMMANDS: &[&str] = &[
     "start_capability_probe",
+    "test_preset",
+    "preset_test_results",
     "start_export",
     "cancel_export",
     "cancel_active_export",

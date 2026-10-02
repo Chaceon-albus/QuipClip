@@ -17,6 +17,8 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "allow-start-capability-probe",
+    "allow-test-preset",
+    "allow-preset-test-results",
     "allow-start-export",
     "allow-cancel-export",
     "allow-cancel-active-export",

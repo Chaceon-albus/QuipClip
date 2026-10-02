@@ -44,7 +44,7 @@
 //! and it carries no staleness protection at all; its own documentation states what a caller
 //! must know before it uses it.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// The export that currently owns the single slot, and the flag that asks it to stop.
@@ -83,6 +83,10 @@ pub struct ExportRegistry {
     /// A poisoned lock here is always recovered, never propagated; see
     /// [`ExportRegistry::lock`].
     active: Mutex<Option<ActiveExport>>,
+    /// How many runs [`ExportRegistry::begin`] has admitted since the registry was made.
+    ///
+    /// See [`ExportRegistry::begun_count`].
+    begun: AtomicU64,
 }
 
 /// A claim on the single export slot: the run's identifier, its cancellation flag, and the
@@ -174,6 +178,9 @@ impl ExportRegistry {
                 run_id: run_id.clone(),
                 cancel: Arc::clone(&cancel),
             });
+            // Inside the critical section, so a reader that finds the slot free and then reads
+            // the same count again knows that no run began in between.
+            self.begun.fetch_add(1, Ordering::SeqCst);
         }
 
         Some(ExportSlot {
@@ -289,6 +296,17 @@ impl ExportRegistry {
     #[must_use]
     pub fn active_run_id(&self) -> Option<String> {
         self.lock().as_ref().map(|export| export.run_id.clone())
+    }
+
+    /// How many runs [`ExportRegistry::begin`] has admitted since the registry was made.
+    ///
+    /// The test of a preset (`commands::preset_test`) reads it before and after its encode. A
+    /// different value means that an export began while the test ran, even one that also
+    /// ended in that time, which [`ExportRegistry::active_run_id`] alone cannot show. The two
+    /// encodes then competed for the encoder, so the test does not store its result.
+    #[must_use]
+    pub fn begun_count(&self) -> u64 {
+        self.begun.load(Ordering::SeqCst)
     }
 
     /// Release the slot held by `run_id`, so the next export can begin.
@@ -751,5 +769,27 @@ mod tests {
             "the run the registry considers active must be the thread that won"
         );
         assert!(winners[0].is_canceled());
+    }
+
+    #[test]
+    fn the_begun_count_moves_once_for_each_admitted_run_and_never_for_a_refusal() {
+        let registry = registry();
+        assert_eq!(registry.begun_count(), 0);
+
+        let first = registry.begin("run-1").expect("the slot starts free");
+        assert_eq!(registry.begun_count(), 1);
+        assert!(registry.begin("run-2").is_none());
+        assert_eq!(
+            registry.begun_count(),
+            1,
+            "a refused run did not begin, so it must not count"
+        );
+
+        // A run that began and ended leaves the slot as it found it, and only the count shows
+        // that it ran.
+        drop(first);
+        assert!(registry.active_run_id().is_none());
+        let _second = registry.begin("run-3").expect("the slot is free again");
+        assert_eq!(registry.begun_count(), 2);
     }
 }

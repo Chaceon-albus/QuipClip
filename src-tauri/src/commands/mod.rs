@@ -8,6 +8,7 @@ pub mod export;
 pub mod export_output;
 pub mod media;
 pub mod preferences;
+pub mod preset_test;
 pub mod project;
 pub mod quit;
 pub mod settings;

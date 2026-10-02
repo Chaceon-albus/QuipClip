@@ -66,7 +66,11 @@ pub const PROBE_DETAIL_LIMIT: usize = 512;
 /// and that competition reports a working encoder as broken. [`run_smoke_test`] holds this
 /// lock for the duration of one test, so a superseded probe run and the active probe run
 /// never test an encoder at the same time; the active run simply waits its turn.
-static SMOKE_LOCK: Mutex<()> = Mutex::new(());
+///
+/// The test of a preset on this machine ([`super::preset_test`]) holds the same lock for its
+/// one encode, for the same reason: it starts the same encoders, and it must not run beside a
+/// smoke test or beside a second preset test.
+pub(super) static SMOKE_LOCK: Mutex<()> = Mutex::new(());
 
 /// How a smoke-test process ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

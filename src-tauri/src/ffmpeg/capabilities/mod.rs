@@ -8,9 +8,15 @@
 //! The smoke test itself, its timed process runner, and the application-wide smoke-test
 //! lock live in [`smoke`]. The cache file that stores a [`CapabilityReport`] per probed
 //! binary lives in [`cache`].
+//!
+//! The test of one preset on this machine lives in [`preset_test`], and the file that stores
+//! its results lives in [`preset_test_cache`]. A smoke test encodes with the defaults of an
+//! encoder; a preset test encodes with the settings of a preset, under the same lock.
 
 pub mod cache;
 pub mod listing;
+pub mod preset_test;
+pub mod preset_test_cache;
 pub mod smoke;
 
 pub use listing::{

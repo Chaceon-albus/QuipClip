@@ -44,7 +44,7 @@
 //! `render_seek` has the rounding rule and its one-sided guarantee.
 
 use super::graph::build_filter_graph;
-use super::{ExportPlan, GraphShape};
+use super::{ExportPlan, GraphShape, PlannedAudio, PlannedVideo};
 use crate::settings::{Container, OptionStream, PresetOption, Quality, QualityKind};
 use crate::time::Rational;
 use std::path::Path;
@@ -315,34 +315,62 @@ pub fn build_arguments(
         push_pair(&mut arguments, "-map", "[a]");
     }
 
-    if let Some(video) = &plan.video {
-        push_pair(&mut arguments, "-c:v", &video.encoder);
+    push_encoder_arguments(&mut arguments, plan.video.as_ref(), plan.audio.as_ref());
+    push_muxer_arguments(&mut arguments, plan.container, plan.video.is_some());
+    arguments.push(path_argument(output));
+    arguments
+}
+
+/// Append the encoder arguments of each part a command writes: the video ones when `video` is
+/// [`Some`], then the audio ones when `audio` is [`Some`], in the order [`build_arguments`]
+/// documents.
+///
+/// [`build_arguments`] calls this for an export, and the test of a preset on this machine
+/// (`crate::ffmpeg::capabilities::preset_test`) calls it for its short encode, so the test
+/// writes exactly the encoder flags an export of the same preset writes.
+pub(crate) fn push_encoder_arguments(
+    arguments: &mut Vec<String>,
+    video: Option<&PlannedVideo>,
+    audio: Option<&PlannedAudio>,
+) {
+    if let Some(video) = video {
+        push_pair(arguments, "-c:v", &video.encoder);
         // The graph already ends the video in this format. With the flag, ffmpeg reports an
         // encoder that cannot take the format with a warning, where the graph alone would let it
         // convert to a format of the encoder's own with no word. The export runs at
         // `-loglevel error`, so only a run at warning level, such as the test of a preset,
         // shows that warning; the export then still writes the encoder's own format.
-        push_pair(&mut arguments, "-pix_fmt", &video.pixel_format);
-        push_quality(&mut arguments, video.quality);
-        push_options(&mut arguments, &video.options, OptionStream::Video);
+        push_pair(arguments, "-pix_fmt", &video.pixel_format);
+        push_quality(arguments, video.quality);
+        push_options(arguments, &video.options, OptionStream::Video);
     }
-    if let Some(audio) = &plan.audio {
-        push_pair(&mut arguments, "-c:a", &audio.encoder);
+    if let Some(audio) = audio {
+        push_pair(arguments, "-c:a", &audio.encoder);
         // Kilobits per second on the wire, with the `k` suffix, as for `-b:v`: the bare number
         // would mean bits per second, which is a thousand times too small.
         if let Some(bitrate) = audio.bitrate {
-            push_pair(&mut arguments, "-b:a", &format!("{bitrate}k"));
+            push_pair(arguments, "-b:a", &format!("{bitrate}k"));
         }
-        push_options(&mut arguments, &audio.options, OptionStream::Audio);
+        push_options(arguments, &audio.options, OptionStream::Audio);
     }
+}
 
-    let (muxer, faststart) = muxer_of(plan.container, plan.video.is_some());
+/// Append the muxer arguments for `container`: `-movflags +faststart` where it applies, then
+/// `-f <muxer>`. See [`muxer_of`] for the choice.
+///
+/// The test of a preset calls this too, and it writes its short encode through the same muxer
+/// to a real file, because some faults, such as a codec tag the muxer refuses, show only when
+/// the muxer writes the header.
+pub(crate) fn push_muxer_arguments(
+    arguments: &mut Vec<String>,
+    container: Container,
+    with_video: bool,
+) {
+    let (muxer, faststart) = muxer_of(container, with_video);
     if faststart {
-        push_pair(&mut arguments, "-movflags", "+faststart");
+        push_pair(arguments, "-movflags", "+faststart");
     }
-    push_pair(&mut arguments, "-f", muxer);
-    arguments.push(path_argument(output));
-    arguments
+    push_pair(arguments, "-f", muxer);
 }
 
 /// Append one input group: the seek when there is one, and `-i <source>`.

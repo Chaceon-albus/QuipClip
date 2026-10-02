@@ -141,6 +141,8 @@ pub fn run() {
     let application = builder
         .invoke_handler(tauri::generate_handler![
             commands::capabilities::start_capability_probe,
+            commands::preset_test::test_preset,
+            commands::preset_test::preset_test_results,
             commands::export::start_export,
             commands::export::cancel_export,
             commands::export::cancel_active_export,
@@ -565,6 +567,9 @@ mod tests {
     /// of Settings (`settingsWindowClient.ts`).
     const MAIN_WINDOW_COMMANDS: &[&str] = &[
         "start_capability_probe",
+        // The preset test of the export setup (`features/settings/presetTest.ts`).
+        "test_preset",
+        "preset_test_results",
         "start_export",
         "cancel_export",
         "cancel_active_export",
@@ -590,6 +595,9 @@ mod tests {
         "restore_default_presets",
         "reset_settings",
         "start_capability_probe",
+        // The preset test of the editor (`features/settings/presetTest.ts`).
+        "test_preset",
+        "preset_test_results",
         "take_settings_window_request",
         "close_settings_window",
         "report_settings_draft",

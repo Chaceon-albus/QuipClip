@@ -276,6 +276,19 @@ pub fn default_presets() -> Vec<Preset> {
     presets
 }
 
+/// The seeds of every platform, in the order of the table in this module's documentation, for a
+/// test that must cover each seed on any host, such as the golden commands of the preset test.
+#[cfg(test)]
+pub(crate) fn every_platform_seed() -> Vec<Preset> {
+    vec![
+        h264_preset(),
+        av1_preset(),
+        hevc_videotoolbox_preset(),
+        h264_nvenc_preset(),
+        hevc_nvenc_preset(),
+    ]
+}
+
 /// Build the whole seeded settings document: [`default_presets`], no configured ffmpeg path,
 /// and [`DEFAULT_H264_MP4_ID`] selected as the active preset.
 ///
