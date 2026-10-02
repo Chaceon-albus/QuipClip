@@ -105,10 +105,20 @@ manifest existed, so every page could call every command.
 - `load_project` and `save_project` are granted to no window, because version 1 keeps no project
   file.
 
+(Changed on 2026-10-02.) The Settings window holds `core:event:allow-listen` and
+`core:event:allow-unlisten` only, not `core:event:default`, so its page cannot send an event,
+such as a false `app:quit-requested` to the main window. What the page must send goes through
+two synchronous commands that check their input and send the event from Rust:
+`report_settings_draft`, which only the Settings window may call and which cuts the name to 120
+characters, and `broadcast_preference`, which accepts only the theme, the language and the
+timecode format with their allowed values. A synchronous command keeps two reports in the order
+of the calls. The main window sends neither event.
+
 A window permission of Tauri takes the label of its target from the caller. The Settings window
 therefore has no permission to destroy a window. `close_settings_window` destroys only the window
-that calls it, and only when that window is the Settings window. Tests pin both lists, and a test
-fails when a command is registered without a decision.
+that calls it, and only when that window is the Settings window. It is `async`, as the destroy
+command of Tauri is, so the destroy does not run inside the IPC callback of the web view that it
+destroys. Tests pin both lists, and a test fails when a command is registered without a decision.
 
 ### Events of one window
 
@@ -119,8 +129,9 @@ Settings window for `settings-window:navigate`, through the listener of the curr
 ### Files dropped on Settings
 
 The Settings window turns off the native drop handler, so a drop on it never imports into the
-main window. The page cancels `dragover` and `drop` of a drag that carries files, so a drop also
-never replaces the page and its draft.
+main window. The page cancels `dragover` and `drop` of every drag, files, links and images
+included, so a drop never replaces the page and its draft. Text dragged over a text field keeps
+its normal behaviour.
 
 ### The export dialog
 
@@ -137,7 +148,9 @@ longer runs the source check again.
 - When the cache of capabilities misses, the Settings window starts a second probe behind the
   probe of the main window. The smoke lock of ADR 006 keeps the tests serial, but the total time
   doubles.
-- If the page of a hidden Settings window failed to render, a second open would not reveal it.
+- A new Settings window that is still hidden 5 seconds after its build is shown by Rust, so a page
+  that fails to render does not leave a hidden window for good. Each build has a number, and a
+  timer of an earlier window does not act on a newer one.
 - The export and quit dialogs of the main window still cover its title bar. A later unit lets the
   main window move while they are open.
 - The built application must confirm: the placement on a second monitor with another scale, the
