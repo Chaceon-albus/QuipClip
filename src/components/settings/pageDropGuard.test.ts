@@ -1,52 +1,98 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  refuseFileDragOver,
-  refuseFileDrop,
+  isEditableDropTarget,
+  refuseDragOver,
+  refuseDrop,
   startPageDropGuard,
   type PageDragEvent,
   type PageDropTarget,
 } from "./pageDropGuard";
 
-function dragEvent(types: string[] | null) {
+const TEXT_FIELD = { tagName: "INPUT", type: "text" };
+const PAGE = { tagName: "DIV" };
+
+function dragEvent(target: unknown, types: string[] | null) {
   const preventDefault = vi.fn<() => void>();
   const event: PageDragEvent = {
+    target,
     dataTransfer: types === null ? null : { types, dropEffect: "copy" },
     preventDefault,
   };
   return Object.assign(event, { preventDefault });
 }
 
-describe("refuseFileDragOver", () => {
-  it("cancels a drag of files and shows the pointer that refuses it", () => {
-    const event = dragEvent(["Files"]);
-    refuseFileDragOver(event);
-    expect(event.preventDefault).toHaveBeenCalledTimes(1);
-    expect(event.dataTransfer?.dropEffect).toBe("none");
+describe("isEditableDropTarget", () => {
+  it("is true for a text input, a text area and an editable element", () => {
+    expect(isEditableDropTarget(TEXT_FIELD)).toBe(true);
+    expect(isEditableDropTarget({ tagName: "INPUT", type: "search" })).toBe(true);
+    expect(isEditableDropTarget({ tagName: "INPUT", type: "" })).toBe(true);
+    expect(isEditableDropTarget({ tagName: "TEXTAREA" })).toBe(true);
+    expect(isEditableDropTarget({ tagName: "DIV", isContentEditable: true })).toBe(
+      true,
+    );
   });
 
-  it("leaves a drag of text to its default action", () => {
-    const event = dragEvent(["text/plain"]);
-    refuseFileDragOver(event);
-    expect(event.preventDefault).not.toHaveBeenCalled();
-    expect(event.dataTransfer?.dropEffect).toBe("copy");
-
-    const empty = dragEvent(null);
-    refuseFileDragOver(empty);
-    expect(empty.preventDefault).not.toHaveBeenCalled();
+  it("is false for every other element and for a field that cannot be edited", () => {
+    expect(isEditableDropTarget(PAGE)).toBe(false);
+    expect(isEditableDropTarget({ tagName: "BUTTON" })).toBe(false);
+    expect(isEditableDropTarget({ tagName: "INPUT", type: "checkbox" })).toBe(false);
+    expect(isEditableDropTarget({ tagName: "INPUT", type: "file" })).toBe(false);
+    expect(isEditableDropTarget({ ...TEXT_FIELD, readOnly: true })).toBe(false);
+    expect(isEditableDropTarget({ ...TEXT_FIELD, disabled: true })).toBe(false);
+    expect(isEditableDropTarget(null)).toBe(false);
+    expect(isEditableDropTarget("INPUT")).toBe(false);
   });
 });
 
-describe("refuseFileDrop", () => {
-  it("cancels a drop of files, which would replace the page", () => {
-    const event = dragEvent(["text/uri-list", "Files"]);
-    refuseFileDrop(event);
-    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+describe("refuseDragOver", () => {
+  it("refuses a drag of files, a link and an image over the page", () => {
+    for (const types of [
+      ["Files"],
+      ["text/uri-list", "text/plain"],
+      ["text/html"],
+      null,
+    ]) {
+      const event = dragEvent(PAGE, types);
+      refuseDragOver(event);
+      expect(event.preventDefault).toHaveBeenCalledTimes(1);
+      if (event.dataTransfer !== null) {
+        expect(event.dataTransfer.dropEffect).toBe("none");
+      }
+    }
   });
 
-  it("leaves a drop of text to its default action", () => {
-    const event = dragEvent(["text/plain"]);
-    refuseFileDrop(event);
+  it("leaves a drag of text over a text field to its default action", () => {
+    const event = dragEvent(TEXT_FIELD, ["text/plain"]);
+    refuseDragOver(event);
     expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(event.dataTransfer?.dropEffect).toBe("copy");
+  });
+
+  it("refuses a drag of files over a text field too", () => {
+    const event = dragEvent(TEXT_FIELD, ["Files"]);
+    refuseDragOver(event);
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(event.dataTransfer?.dropEffect).toBe("none");
+  });
+});
+
+describe("refuseDrop", () => {
+  it("cancels a drop on the page, which would open what was dropped", () => {
+    for (const types of [["text/uri-list"], ["Files"], ["text/plain"]]) {
+      const event = dragEvent(PAGE, types);
+      refuseDrop(event);
+      expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("leaves a drop of text into a text field to its default action", () => {
+    const event = dragEvent(TEXT_FIELD, ["text/plain"]);
+    refuseDrop(event);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+
+    const files = dragEvent(TEXT_FIELD, ["Files"]);
+    refuseDrop(files);
+    expect(files.preventDefault).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -64,8 +110,8 @@ describe("startPageDropGuard", () => {
       },
     };
     const stop = startPageDropGuard(target);
-    expect(listeners.get("dragover")).toBe(refuseFileDragOver);
-    expect(listeners.get("drop")).toBe(refuseFileDrop);
+    expect(listeners.get("dragover")).toBe(refuseDragOver);
+    expect(listeners.get("drop")).toBe(refuseDrop);
     stop();
     expect(listeners.size).toBe(0);
   });

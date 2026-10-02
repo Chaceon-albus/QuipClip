@@ -1,5 +1,10 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WINDOW_EVENTS, type EmitFn, type EventSubscribe } from "@/lib/ipc";
+import { LANGUAGE_PREFERENCES } from "@/i18n";
+import { BACKEND_COMMANDS, type EventSubscribe, type InvokeFn } from "@/lib/ipc";
+import { THEME_PREFERENCES } from "@/lib/theme";
+import { TIMECODE_FORMATS } from "@/lib/timecode";
 import {
   applyPreferenceChange,
   broadcastLanguagePreference,
@@ -16,27 +21,68 @@ import {
   timecodePreferenceStore,
 } from "./timecodePreference";
 
+/** Reads a `const <name>: &[&str] = &[...]` list of `src-tauri/src/commands/preferences.rs`. */
+function readRustValues(name: string): string[] {
+  const source = readFileSync(
+    fileURLToPath(
+      new URL("../../../src-tauri/src/commands/preferences.rs", import.meta.url),
+    ),
+    "utf8",
+  );
+  const match = new RegExp(`const ${name}: &\\[&str\\] = &\\[([^\\]]*)\\];`).exec(
+    source,
+  );
+  expect(match, name).not.toBeNull();
+  return Array.from(match![1].matchAll(/"([^"]+)"/g), (value) => value[1]);
+}
+
+/** The values that `broadcast_preference` takes for each key, read from the Rust source. */
+const RUST_VALUES: Readonly<Record<string, readonly string[]>> = {
+  theme: readRustValues("THEME_VALUES"),
+  language: readRustValues("LANGUAGE_VALUES"),
+  timecodeFormat: readRustValues("TIMECODE_FORMAT_VALUES"),
+};
+
 /**
- * A fake of the Tauri event bus: every emit reaches every listener, the listener of the
- * emitting window included, as `listen` with the default target does.
+ * A fake of Tauri for windows that hold the capability of the Settings window: a page can
+ * listen and invoke, and it has no emit at all. The invoke of each window stands for Rust:
+ * `broadcast_preference` checks the key and the value as the command does, and sends the event
+ * to every listener, the listener of the calling window included, with the label of the
+ * calling window. Every other command is refused, as a command that the capability does not
+ * grant is.
  */
-function createBus() {
+function createTauri() {
   const listeners = new Set<(payload: unknown) => void>();
-  const emitted: { event: string; payload: unknown }[] = [];
-  const emit = vi.fn<EmitFn>((event, payload) => {
-    emitted.push({ event, payload });
+  const sent: unknown[] = [];
+  const deliver = (payload: unknown) => {
+    sent.push(payload);
     for (const listener of listeners) {
       listener(payload);
     }
-    return Promise.resolve();
-  });
+  };
   const subscribe: EventSubscribe = (handler) => {
     listeners.add(handler);
     return Promise.resolve(() => {
       listeners.delete(handler);
     });
   };
-  return { emit, subscribe, emitted };
+  const calls: { label: string; cmd: string; args?: Record<string, unknown> }[] = [];
+  const invokeAs =
+    (label: string): InvokeFn =>
+    <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+      calls.push({ label, cmd, args });
+      if (cmd !== BACKEND_COMMANDS.BROADCAST_PREFERENCE) {
+        return Promise.reject(new Error(`${cmd} not allowed`));
+      }
+      const key = String(args?.key);
+      const value = String(args?.value);
+      if (!(RUST_VALUES[key] ?? []).includes(value)) {
+        return Promise.reject(new Error("invalidPreference"));
+      }
+      deliver({ key, value, origin: label });
+      return Promise.resolve(null as T);
+    };
+  return { subscribe, deliver, sent, calls, invokeAs };
 }
 
 function createTargets() {
@@ -121,43 +167,45 @@ describe("validatePreferenceChangedPayload", () => {
   });
 });
 
+describe("the values of each preference", () => {
+  it("are the values that Rust takes in broadcast_preference", () => {
+    // A value that only the page knows would be refused, and the other window would keep
+    // its old value with no error to show.
+    expect(RUST_VALUES.theme).toEqual([...THEME_PREFERENCES]);
+    expect(RUST_VALUES.language).toEqual([...LANGUAGE_PREFERENCES]);
+    expect(RUST_VALUES.timecodeFormat).toEqual([...TIMECODE_FORMATS]);
+  });
+});
+
 describe("broadcastPreferenceChange", () => {
-  it("emits the change with the label of this window", () => {
-    const bus = createBus();
+  it("asks Rust to send the change, and Rust names the calling window", () => {
+    const tauri = createTauri();
     broadcastPreferenceChange(
       { key: "theme", value: "light" },
-      { emit: bus.emit, ownLabel: "settings" },
+      { invoke: tauri.invokeAs("settings") },
     );
-    expect(bus.emitted).toEqual([
+    expect(tauri.calls).toEqual([
       {
-        event: WINDOW_EVENTS.PREFERENCES_CHANGED,
-        payload: { key: "theme", value: "light", origin: "settings" },
+        label: "settings",
+        cmd: BACKEND_COMMANDS.BROADCAST_PREFERENCE,
+        args: { key: "theme", value: "light" },
       },
     ]);
+    expect(tauri.sent).toEqual([{ key: "theme", value: "light", origin: "settings" }]);
   });
 
-  it("emits nothing outside the Tauri shell, where the window has no label", () => {
-    const bus = createBus();
-    broadcastPreferenceChange(
-      { key: "theme", value: "light" },
-      { emit: bus.emit, ownLabel: null },
-    );
-    expect(bus.emit).not.toHaveBeenCalled();
-  });
-
-  it("survives an emit that rejects or throws", async () => {
+  it("survives an invoke that rejects or throws", async () => {
     expect(() => {
       broadcastPreferenceChange(
         { key: "language", value: "en" },
-        { emit: () => Promise.reject(new Error("refused")), ownLabel: "settings" },
+        { invoke: () => Promise.reject(new Error("refused")) },
       );
       broadcastPreferenceChange(
         { key: "language", value: "en" },
         {
-          emit: () => {
+          invoke: () => {
             throw new Error("no runtime");
           },
-          ownLabel: "settings",
         },
       );
     }).not.toThrow();
@@ -165,35 +213,35 @@ describe("broadcastPreferenceChange", () => {
   });
 
   it("sends a language that the language control applied", () => {
-    const bus = createBus();
-    broadcastLanguagePreference("zh-CN", { emit: bus.emit, ownLabel: "settings" });
-    expect(bus.emitted[0]?.payload).toEqual({
-      key: "language",
-      value: "zh-CN",
-      origin: "settings",
-    });
+    const tauri = createTauri();
+    broadcastLanguagePreference("zh-CN", { invoke: tauri.invokeAs("settings") });
+    expect(tauri.sent).toEqual([
+      { key: "language", value: "zh-CN", origin: "settings" },
+    ]);
   });
 });
 
 describe("changeThemePreference and changeTimecodeFormat", () => {
   it("apply the value in this window and send it", () => {
-    const bus = createBus();
-    changeThemePreference("dark", { emit: bus.emit, ownLabel: "settings" });
-    changeTimecodeFormat("milliseconds", { emit: bus.emit, ownLabel: "settings" });
+    const tauri = createTauri();
+    const options = { invoke: tauri.invokeAs("settings") };
+    changeThemePreference("dark", options);
+    changeTimecodeFormat("milliseconds", options);
 
     expect(themePreferenceStore.getState().preference).toBe("dark");
     expect(timecodePreferenceStore.getState().format).toBe("milliseconds");
-    expect(bus.emitted.map((entry) => entry.payload)).toEqual([
+    expect(tauri.sent).toEqual([
       { key: "theme", value: "dark", origin: "settings" },
       { key: "timecodeFormat", value: "milliseconds", origin: "settings" },
     ]);
   });
 
   it("ignore a value that the preference does not take", () => {
-    const bus = createBus();
-    changeThemePreference("blue" as never, { emit: bus.emit, ownLabel: "settings" });
-    changeTimecodeFormat("seconds" as never, { emit: bus.emit, ownLabel: "settings" });
-    expect(bus.emit).not.toHaveBeenCalled();
+    const tauri = createTauri();
+    const options = { invoke: tauri.invokeAs("settings") };
+    changeThemePreference("blue" as never, options);
+    changeTimecodeFormat("seconds" as never, options);
+    expect(tauri.calls).toEqual([]);
     expect(themePreferenceStore.getState().preference).toBe("system");
   });
 });
@@ -212,48 +260,37 @@ describe("applyPreferenceChange", () => {
 
 describe("startPreferenceSync", () => {
   it("applies a change of another window and ignores its own and a malformed one", async () => {
-    const bus = createBus();
+    const tauri = createTauri();
     const targets = createTargets();
     const stop = startPreferenceSync({
-      subscribe: bus.subscribe,
+      subscribe: tauri.subscribe,
       ownLabel: "main",
       targets,
     });
     await flushPromises();
 
-    await bus.emit(WINDOW_EVENTS.PREFERENCES_CHANGED, {
-      key: "theme",
-      value: "dark",
-      origin: "main",
-    });
-    await bus.emit(WINDOW_EVENTS.PREFERENCES_CHANGED, { key: "theme", value: 7 });
+    tauri.deliver({ key: "theme", value: "dark", origin: "main" });
+    tauri.deliver({ key: "theme", value: 7 });
     expect(targets.applyTheme).not.toHaveBeenCalled();
 
-    await bus.emit(WINDOW_EVENTS.PREFERENCES_CHANGED, {
-      key: "theme",
-      value: "dark",
-      origin: "settings",
-    });
+    tauri.deliver({ key: "theme", value: "dark", origin: "settings" });
     expect(targets.applyTheme).toHaveBeenCalledWith("dark");
 
     stop();
-    await bus.emit(WINDOW_EVENTS.PREFERENCES_CHANGED, {
-      key: "theme",
-      value: "light",
-      origin: "settings",
-    });
+    tauri.deliver({ key: "theme", value: "light", origin: "settings" });
     expect(targets.applyTheme).toHaveBeenCalledTimes(1);
   });
 
-  it("carries a change from the Settings window to the main window, once", async () => {
-    // The Settings window is the module stores; the main window has stores of its own.
-    const bus = createBus();
+  it("carries a change from the Settings window to the main window, once, with no emit", async () => {
+    // The Settings window is the module stores; the main window has stores of its own. The
+    // page of the Settings window only invokes and listens, as its capability allows.
+    const tauri = createTauri();
     const mainTheme = createThemePreferenceStore({ storage: null });
     const mainTimecode = createTimecodePreferenceStore({ storage: null });
     const mainLanguage = vi.fn();
     const settingsTargets = createTargets();
     const stopMain = startPreferenceSync({
-      subscribe: bus.subscribe,
+      subscribe: tauri.subscribe,
       ownLabel: "main",
       targets: {
         applyTheme: (value) => {
@@ -266,13 +303,13 @@ describe("startPreferenceSync", () => {
       },
     });
     const stopSettings = startPreferenceSync({
-      subscribe: bus.subscribe,
+      subscribe: tauri.subscribe,
       ownLabel: "settings",
       targets: settingsTargets,
     });
     await flushPromises();
 
-    const options = { emit: bus.emit, ownLabel: "settings" };
+    const options = { invoke: tauri.invokeAs("settings") };
     changeThemePreference("dark", options);
     changeTimecodeFormat("milliseconds", options);
     broadcastLanguagePreference("zh-CN", options);
@@ -282,13 +319,33 @@ describe("startPreferenceSync", () => {
     expect(mainLanguage).toHaveBeenCalledWith("zh-CN");
     // One event for each change: the receiver applies the value and sends nothing back, and
     // the Settings window ignores its own event.
-    expect(bus.emit).toHaveBeenCalledTimes(3);
+    expect(tauri.calls).toHaveLength(3);
+    expect(tauri.sent).toHaveLength(3);
     expect(settingsTargets.applyTheme).not.toHaveBeenCalled();
     expect(settingsTargets.applyTimecodeFormat).not.toHaveBeenCalled();
     expect(settingsTargets.applyLanguage).not.toHaveBeenCalled();
 
     stopMain();
     stopSettings();
+  });
+
+  it("sends nothing for a value that Rust refuses", async () => {
+    const tauri = createTauri();
+    const targets = createTargets();
+    const stop = startPreferenceSync({
+      subscribe: tauri.subscribe,
+      ownLabel: "main",
+      targets,
+    });
+    await flushPromises();
+
+    broadcastPreferenceChange({ key: "theme", value: "blue" } as never, {
+      invoke: tauri.invokeAs("settings"),
+    });
+    await flushPromises();
+    expect(tauri.sent).toEqual([]);
+    expect(targets.applyTheme).not.toHaveBeenCalled();
+    stop();
   });
 });
 

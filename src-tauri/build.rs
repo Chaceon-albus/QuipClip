@@ -27,6 +27,8 @@ const APP_COMMANDS: &[&str] = &[
     "open_settings_window",
     "take_settings_window_request",
     "close_settings_window",
+    "report_settings_draft",
+    "broadcast_preference",
 ];
 
 fn main() {

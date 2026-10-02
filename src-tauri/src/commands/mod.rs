@@ -7,6 +7,7 @@ pub mod capabilities;
 pub mod export;
 pub mod export_output;
 pub mod media;
+pub mod preferences;
 pub mod project;
 pub mod quit;
 pub mod settings;

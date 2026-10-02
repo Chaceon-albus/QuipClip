@@ -38,6 +38,7 @@
 //! application would end with no quit decision (ADR 027).
 
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Runtime, State,
@@ -57,13 +58,27 @@ pub const NAVIGATE_EVENT: &str = "settings-window:navigate";
 
 /// The event that carries the name of the unsaved preset draft of the Settings window to the
 /// main window, whose quit guard names it (ADR 027). Its payload is [`SettingsWindowDraft`].
-/// The page of the Settings window sends it on each change, and Rust sends it with no name
+/// Rust sends it for each report of the page ([`report_settings_draft`]), and with no name
 /// when the window is destroyed ([`report_draft_cleared`]), so the main window never names
 /// the draft of a window that is gone.
 ///
-/// `src/lib/ipc.ts` holds the same name in `WINDOW_EVENTS.SETTINGS_WINDOW_DRAFT`, and
+/// The page holds no emit permission: an emit could send any event to the main window, such
+/// as the quit request of ADR 027. It reports through the command, and Rust sends the event.
+///
+/// `src/lib/ipc.ts` holds the same name in `BACKEND_EVENTS.SETTINGS_WINDOW_DRAFT`, and
 /// `src/lib/ipc.test.ts` reads this line to compare the two.
 pub const DRAFT_EVENT: &str = "settings-window:draft";
+
+/// The longest draft name that a report carries, in characters: the longest preset name that
+/// the settings file takes (ADR 013). A longer name, such as one that the user is still typing,
+/// is cut to this length, so the quit prompt still names the draft.
+const MAX_DRAFT_NAME_CHARS: usize = crate::settings::MAX_PRESET_NAME_CHARS;
+
+/// The name that a draft report carries: the name of the page, cut to
+/// [`MAX_DRAFT_NAME_CHARS`] characters.
+fn bounded_draft_name(name: Option<String>) -> Option<String> {
+    name.map(|name| name.chars().take(MAX_DRAFT_NAME_CHARS).collect())
+}
 
 /// The payload of [`DRAFT_EVENT`]. `src/features/settings/settingsWindowDraft.ts` reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -85,6 +100,75 @@ pub fn report_draft_cleared<R: Runtime>(app: &AppHandle<R>) {
     };
     if let Err(error) = app.emit_to(crate::MAIN_WINDOW_LABEL, DRAFT_EVENT, payload) {
         eprintln!("settings window: the cleared draft was not reported: {error}");
+    }
+}
+
+/// Sends the name of the unsaved preset draft of the Settings window, or `None`, to the main
+/// window. Only the page of the Settings window reports a draft, so a call from another window
+/// sends nothing.
+///
+/// The command is synchronous on purpose. Tauri runs each `async` command as its own task on a
+/// runtime with several threads, so two reports close together could reach the main window in
+/// the wrong order, and a late `None` would hide an unsaved draft from the quit guard. An emit
+/// only queues the event, so it is safe inside the IPC callback, unlike the destroy of
+/// [`close_settings_window`].
+#[tauri::command]
+pub fn report_settings_draft(app: AppHandle, window: WebviewWindow, name: Option<String>) {
+    if !is_settings_window(window.label()) {
+        return;
+    }
+    let name = bounded_draft_name(name);
+    let payload = SettingsWindowDraft {
+        name: name.as_deref(),
+        origin: SETTINGS_WINDOW_LABEL,
+    };
+    if let Err(error) = app.emit_to(crate::MAIN_WINDOW_LABEL, DRAFT_EVENT, payload) {
+        eprintln!("settings window: the draft was not reported: {error}");
+    }
+}
+
+/// How long a new Settings window may stay hidden before Rust shows it. The page shows the
+/// window after its first render, which takes a fraction of a second. A page that never
+/// renders, for example after a script error, would otherwise leave a hidden window for good,
+/// and every later opening would find it and do nothing.
+const REVEAL_FALLBACK_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether the fallback shows the window: it is still hidden and not minimized, and it is the
+/// window that the fallback was started for, not a later window with the same label.
+fn should_reveal_after_delay(
+    started_for_build: u64,
+    current_build: u64,
+    visible: bool,
+    minimized: bool,
+) -> bool {
+    started_for_build == current_build && !visible && !minimized
+}
+
+/// Shows the new window after [`REVEAL_FALLBACK_DELAY`] if its page did not show it. It runs
+/// on a thread of its own, because it only waits and then makes two window calls.
+fn start_reveal_fallback<R: Runtime>(app: &AppHandle<R>, build: u64) {
+    let app = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("settings-window-reveal".to_owned())
+        .spawn(move || {
+            std::thread::sleep(REVEAL_FALLBACK_DELAY);
+            let Some(window) = app.get_webview_window(SETTINGS_WINDOW_LABEL) else {
+                return;
+            };
+            let current_build = app.state::<SettingsWindowState>().current_build();
+            if should_reveal_after_delay(
+                build,
+                current_build,
+                window.is_visible().unwrap_or(true),
+                window.is_minimized().unwrap_or(false),
+            ) {
+                eprintln!("settings window: the page did not show the window; showing it");
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        });
+    if let Err(error) = spawned {
+        eprintln!("settings window: the reveal fallback did not start: {error}");
     }
 }
 
@@ -163,9 +247,22 @@ pub struct SettingsWindowState {
     /// window and both build one, and the second build fails on the label. The opening has no
     /// await point, so a plain mutex is correct, and the main thread never takes it.
     opening: Mutex<()>,
+    /// Counts the windows that an opening built, so a reveal fallback acts only on the window
+    /// that it was started for.
+    builds: AtomicU64,
 }
 
 impl SettingsWindowState {
+    /// Counts one more built window, and returns its number.
+    fn next_build(&self) -> u64 {
+        self.builds.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The number of the last built window.
+    fn current_build(&self) -> u64 {
+        self.builds.load(Ordering::SeqCst)
+    }
+
     /// Replaces the pending request.
     pub fn store(&self, request: SettingsWindowRequest) {
         *lock(&self.pending) = Some(request);
@@ -242,10 +339,12 @@ pub fn take_settings_window_request(
 /// the draft holds no unsaved edit, or the user answered the unsaved-changes prompt. It takes
 /// no label, so no page can name the main window here (see the module comment).
 ///
-/// A destroy only queues a message for the event loop, so this synchronous command does not
-/// wait for the main thread that runs it.
+/// The command is `async`, as the destroy command of the window plugin is. A synchronous
+/// command runs on the main thread, inside the IPC callback of the web view that it destroys,
+/// and on that thread the runtime can act on the window at once. On the async runtime the
+/// destroy reaches the event loop as a message, after the callback has returned.
 #[tauri::command]
-pub fn close_settings_window(window: WebviewWindow) {
+pub async fn close_settings_window(window: WebviewWindow) {
     if !is_settings_window(window.label()) {
         return;
     }
@@ -330,6 +429,9 @@ fn open<R: Runtime>(
         return Ok(());
     }
 
+    // The number of this build is taken before the build, so the timer of an earlier window
+    // that fires while this one is built already sees a newer number and leaves it alone.
+    let build = state.next_build();
     let window = WebviewWindowBuilder::new(
         app,
         SETTINGS_WINDOW_LABEL,
@@ -355,6 +457,7 @@ fn open<R: Runtime>(
     })?;
 
     place_over_main_window(app, &window);
+    start_reveal_fallback(app, build);
     Ok(())
 }
 
@@ -655,6 +758,56 @@ mod tests {
             step_for_existing_window(false, false),
             ExistingWindowStep::LeaveToPage
         );
+    }
+
+    #[test]
+    fn a_draft_name_is_cut_to_the_longest_preset_name() {
+        assert_eq!(bounded_draft_name(None), None);
+        assert_eq!(bounded_draft_name(Some(String::new())), Some(String::new()));
+        assert_eq!(
+            bounded_draft_name(Some("Web 1080p".to_owned())),
+            Some("Web 1080p".to_owned())
+        );
+        // Characters, not bytes, so a name in another script is cut on a character.
+        let long = "\u{9884}".repeat(MAX_DRAFT_NAME_CHARS + 50);
+        let cut = bounded_draft_name(Some(long)).expect("a name stays a name");
+        assert_eq!(cut.chars().count(), MAX_DRAFT_NAME_CHARS);
+    }
+
+    #[test]
+    fn a_draft_report_names_the_preset_and_the_settings_window() {
+        let payload = SettingsWindowDraft {
+            name: Some("Archive"),
+            origin: SETTINGS_WINDOW_LABEL,
+        };
+        assert_eq!(
+            serde_json::to_value(payload).expect("a draft report serializes"),
+            serde_json::json!({ "name": "Archive", "origin": "settings" })
+        );
+    }
+
+    #[test]
+    fn the_fallback_shows_only_a_window_that_is_still_hidden() {
+        assert!(should_reveal_after_delay(1, 1, false, false));
+        // The page showed it, or the user minimized it.
+        assert!(!should_reveal_after_delay(1, 1, true, false));
+        assert!(!should_reveal_after_delay(1, 1, false, true));
+    }
+
+    #[test]
+    fn the_fallback_leaves_a_later_window_alone() {
+        // The window was closed and opened again within the delay. The new window has a
+        // fallback of its own.
+        assert!(!should_reveal_after_delay(1, 2, false, false));
+    }
+
+    #[test]
+    fn the_build_counter_numbers_each_window() {
+        let state = SettingsWindowState::default();
+        assert_eq!(state.current_build(), 0);
+        assert_eq!(state.next_build(), 1);
+        assert_eq!(state.next_build(), 2);
+        assert_eq!(state.current_build(), 2);
     }
 
     #[test]

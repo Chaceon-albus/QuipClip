@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "settings",
-  "description": "Capability for the Settings window: its events, title, theme, first show and focus, the settings file, the capability probe, its own request and close, and the ffmpeg path picker",
+  "description": "Capability for the Settings window: its event listeners, title, theme, first show and focus, the settings file, the capability probe, its own request, close, draft report and preference broadcast, and the ffmpeg path picker",
   "windows": ["settings"],
   "permissions": [
-    "core:event:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "core:window:allow-set-title",
     "core:window:allow-set-theme",
     "core:window:allow-show",
@@ -16,6 +17,8 @@
     "allow-reset-settings",
     "allow-start-capability-probe",
     "allow-take-settings-window-request",
-    "allow-close-settings-window"
+    "allow-close-settings-window",
+    "allow-report-settings-draft",
+    "allow-broadcast-preference"
   ]
 }

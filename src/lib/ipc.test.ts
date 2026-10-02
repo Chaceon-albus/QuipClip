@@ -4,14 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BACKEND_COMMANDS,
   BACKEND_EVENTS,
-  WINDOW_EVENTS,
-  emitEvent,
-  emitEventTo,
   listenInCurrentWindow,
   listenWindowEvent,
   startEventListener,
-  type EmitFn,
-  type EmitToFn,
   type EventSubscribe,
   type ListenFn,
   type UnlistenFn,
@@ -115,11 +110,20 @@ describe("Backend event parity", () => {
   });
 
   it("names the Settings window draft event exactly as the Rust constant does", () => {
-    // Rust sends this event when it destroys the Settings window. A rename on one side only
-    // leaves the quit guard naming a draft of a window that is gone.
+    // Rust sends this event for each report of the Settings window and when it destroys that
+    // window. A rename on one side only leaves the quit guard naming no draft, or a draft of a
+    // window that is gone.
     expect(readRustEventConstant("commands/settings_window.rs", "DRAFT_EVENT")).toBe(
-      WINDOW_EVENTS.SETTINGS_WINDOW_DRAFT,
+      BACKEND_EVENTS.SETTINGS_WINDOW_DRAFT,
     );
+  });
+
+  it("names the preference change event exactly as the Rust constant does", () => {
+    // A rename on one side only leaves the main window on the theme, the language and the
+    // timecode format that it loaded with.
+    expect(
+      readRustEventConstant("commands/preferences.rs", "PREFERENCES_CHANGED_EVENT"),
+    ).toBe(BACKEND_EVENTS.PREFERENCES_CHANGED);
   });
 
   it("names the forced probe event exactly as the Rust constant does", () => {
@@ -143,14 +147,6 @@ function readRustEventConstant(file: string, name: string): string | null {
   const match = new RegExp(`pub const ${name}: &str = "([^"]+)";`).exec(source);
   return match === null ? null : match[1];
 }
-
-describe("emitEvent", () => {
-  it("emits the window event with its payload", async () => {
-    const emit = vi.fn<EmitFn>(() => Promise.resolve());
-    await emitEvent(WINDOW_EVENTS.PREFERENCES_CHANGED, { origin: "main" }, emit);
-    expect(emit).toHaveBeenCalledWith("preferences:changed", { origin: "main" });
-  });
-});
 
 describe("startEventListener", () => {
   /** A subscription whose promise the test settles, so a test can order it after a release. */
@@ -286,7 +282,7 @@ describe("listenWindowEvent", () => {
       return Promise.resolve(() => {});
     };
     const handler = vi.fn();
-    await listenWindowEvent(WINDOW_EVENTS.SETTINGS_WINDOW_DRAFT, handler, listen);
+    await listenWindowEvent(BACKEND_EVENTS.SETTINGS_WINDOW_DRAFT, handler, listen);
     deliver!({ payload: { name: null, origin: "settings" } });
     expect(handler).toHaveBeenCalledWith({ name: null, origin: "settings" });
   });
@@ -298,29 +294,10 @@ describe("listenWindowEvent", () => {
   });
 });
 
-describe("emitEventTo", () => {
-  it("emits the window event to the named window with its payload", async () => {
-    const emitTo = vi.fn<EmitToFn>(() => Promise.resolve());
-    await emitEventTo(
-      "main",
-      WINDOW_EVENTS.SETTINGS_WINDOW_DRAFT,
-      { name: null, origin: "settings" },
-      emitTo,
-    );
-    expect(emitTo).toHaveBeenCalledWith("main", "settings-window:draft", {
-      name: null,
-      origin: "settings",
-    });
-  });
-});
-
-describe("Window event names", () => {
-  it("are distinct from every backend event name", () => {
-    // A window event that shared a name with a backend event would reach a listener that
-    // validates another payload.
-    const backend = new Set<string>(Object.values(BACKEND_EVENTS));
-    for (const name of Object.values(WINDOW_EVENTS)) {
-      expect(backend.has(name)).toBe(false);
-    }
+describe("Backend event names", () => {
+  it("are distinct", () => {
+    // Two events with one name would reach a listener that validates another payload.
+    const names = Object.values(BACKEND_EVENTS);
+    expect(new Set(names).size).toBe(names.length);
   });
 });

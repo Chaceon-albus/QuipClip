@@ -3,27 +3,26 @@
  *
  * A quit drops an unsaved preset draft, so the quit guard of the main window names it (ADR
  * 027). The draft lives in the page of the Settings window, and the quit guard runs in the
- * main window. The Settings window therefore reports the name of the draft, or null, to the
- * main window each time it changes (`reportSettingsWindowDraft`), and the main window keeps
- * the last report in `settingsWindowDraftStore`. Rust reports null when it destroys the
- * Settings window, so the mirror never names a draft of a window that is gone.
+ * main window. The Settings window therefore reports the name of the draft, or null, each time
+ * it changes (`reportSettingsWindowDraft`). It reports through `report_settings_draft`, and
+ * Rust sends the event to the main window: the page holds no emit permission, because an emit
+ * could send any event to the main window, such as the quit request. The main window keeps the
+ * last report in `settingsWindowDraftStore`. Rust reports null when it destroys the Settings
+ * window, so the mirror never names a draft of a window that is gone.
  */
 
 import { useEffect } from "react";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import {
-  WINDOW_EVENTS,
-  emitEventTo,
+  BACKEND_COMMANDS,
+  BACKEND_EVENTS,
+  invokeCommand,
   listenWindowEvent,
   startEventListener,
-  type EmitToFn,
   type EventSubscribe,
+  type InvokeFn,
 } from "@/lib/ipc";
-import {
-  MAIN_WINDOW_LABEL,
-  getCurrentWindowLabel,
-  isForeignOrigin,
-} from "@/lib/windowLabel";
+import { getCurrentWindowLabel, isForeignOrigin } from "@/lib/windowLabel";
 
 /** The payload of `settings-window:draft`. */
 export interface SettingsWindowDraftPayload {
@@ -54,36 +53,27 @@ export function validateSettingsWindowDraftPayload(
   return { name, origin };
 }
 
-/** What a report uses. A test passes fakes. */
+/** What a report uses. A test passes a fake invoke. */
 export interface SettingsWindowDraftReportOptions {
-  /** Emits the event to one window. Defaults to the Tauri event. */
-  readonly emitTo?: EmitToFn;
-  /** The label of this window. Defaults to the label of the current Tauri window. */
-  readonly ownLabel?: string | null;
+  /** Calls `report_settings_draft`. Defaults to the Tauri invoke. */
+  readonly invoke?: InvokeFn;
 }
 
 /**
- * Sends the draft of the Settings window to the main window. Outside the Tauri shell there is
- * no main window to send to. A failed emit leaves the quit guard with the last report, so a
- * quit can drop a draft without naming it, which is the cost of one lost event.
+ * Sends the draft of the Settings window to the main window through Rust
+ * (`report_settings_draft`), which adds the label of the Settings window as the origin. A
+ * failed call, also outside the Tauri shell, leaves the quit guard with the last report, so a
+ * quit can drop a draft without naming it, which is the cost of one lost report.
  */
 export function reportSettingsWindowDraft(
   name: string | null,
   options: SettingsWindowDraftReportOptions = {},
 ): void {
-  const origin =
-    options.ownLabel !== undefined ? options.ownLabel : getCurrentWindowLabel();
-  if (origin === null) {
-    return;
-  }
-  const payload: SettingsWindowDraftPayload = { name, origin };
+  const invoke = options.invoke ?? invokeCommand;
   try {
-    void emitEventTo(
-      MAIN_WINDOW_LABEL,
-      WINDOW_EVENTS.SETTINGS_WINDOW_DRAFT,
-      payload,
-      options.emitTo,
-    ).catch(() => {});
+    void invoke<unknown>(BACKEND_COMMANDS.REPORT_SETTINGS_DRAFT, { name }).catch(
+      () => {},
+    );
   } catch {
     // No Tauri runtime answered.
   }
@@ -125,7 +115,7 @@ export function startSettingsWindowDraftMirror(
   const subscribe =
     options.subscribe ??
     ((handler) =>
-      listenWindowEvent<unknown>(WINDOW_EVENTS.SETTINGS_WINDOW_DRAFT, handler));
+      listenWindowEvent<unknown>(BACKEND_EVENTS.SETTINGS_WINDOW_DRAFT, handler));
   const ownLabel =
     options.ownLabel !== undefined ? options.ownLabel : getCurrentWindowLabel();
   const store = options.store ?? settingsWindowDraftStore;

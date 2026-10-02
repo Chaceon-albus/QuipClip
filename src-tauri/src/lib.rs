@@ -156,7 +156,9 @@ pub fn run() {
             commands::settings::reset_settings,
             commands::settings_window::open_settings_window,
             commands::settings_window::take_settings_window_request,
-            commands::settings_window::close_settings_window
+            commands::settings_window::close_settings_window,
+            commands::settings_window::report_settings_draft,
+            commands::preferences::broadcast_preference
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -576,9 +578,10 @@ mod tests {
 
     /// The commands that the page of the Settings window calls: the settings file, its
     /// restore and its reset (`features/settings/client.ts`), the probe of the FFmpeg tab
-    /// (`features/ffmpeg/client.ts`), and its own request and close
-    /// (`settingsWindowClient.ts`, `SettingsWindow.tsx`). It cannot quit, export, import, or
-    /// open a window.
+    /// (`features/ffmpeg/client.ts`), its own request and close (`settingsWindowClient.ts`,
+    /// `SettingsWindow.tsx`), and the two reports that Rust sends on as events: the unsaved
+    /// draft for the quit guard (`settingsWindowDraft.ts`) and a changed preference
+    /// (`preferenceSync.ts`). It cannot quit, export, import, or open a window.
     const SETTINGS_WINDOW_COMMANDS: &[&str] = &[
         "load_settings",
         "save_settings",
@@ -587,6 +590,8 @@ mod tests {
         "start_capability_probe",
         "take_settings_window_request",
         "close_settings_window",
+        "report_settings_draft",
+        "broadcast_preference",
     ];
 
     /// Registered commands that no window may call: no frontend code calls them. Version 1
@@ -655,15 +660,18 @@ mod tests {
 
     #[test]
     fn the_settings_window_holds_only_the_permissions_that_its_page_uses() {
-        // Each one has a caller in the page: the events of the window sync, the localized
+        // Each one has a caller in the page: the listeners of the window sync, the localized
         // title, the theme of the system title bar, the show and the focus after the first
         // render, and the ffmpeg path picker. The page holds no `core:default`: that set
         // includes the menu commands, which could replace the macOS menu that holds the Quit
         // item of ADR 027. It holds no window destroy either: the window commands act on any
         // label that the caller names, so the page closes its window through
-        // `close_settings_window`.
+        // `close_settings_window`. And it holds no emit: an emit can send any event to the
+        // main window, such as the quit request, so the page reports through commands and
+        // Rust sends the events.
         let mut expected: Vec<String> = [
-            "core:event:default",
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
             "core:window:allow-set-title",
             "core:window:allow-set-theme",
             "core:window:allow-show",

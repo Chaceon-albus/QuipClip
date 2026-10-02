@@ -6,11 +6,7 @@
  */
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import {
-  emit as tauriEmit,
-  emitTo as tauriEmitTo,
-  listen as tauriListen,
-} from "@tauri-apps/api/event";
+import { listen as tauriListen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 /**
@@ -32,12 +28,20 @@ export const BACKEND_COMMANDS = {
   OPEN_SETTINGS_WINDOW: "open_settings_window",
   TAKE_SETTINGS_WINDOW_REQUEST: "take_settings_window_request",
   CLOSE_SETTINGS_WINDOW: "close_settings_window",
+  REPORT_SETTINGS_DRAFT: "report_settings_draft",
+  BROADCAST_PREFERENCE: "broadcast_preference",
 } as const;
 
 export type BackendCommand = (typeof BACKEND_COMMANDS)[keyof typeof BACKEND_COMMANDS];
 
 /**
  * Stable backend Tauri event names emitted from Rust.
+ *
+ * A Tauri listener of the frontend hears an event that Rust sends to every window, so a
+ * payload that one window caused names that window in `origin`, and a receiver ignores its
+ * own. No page emits an event itself: the Settings window holds no emit permission, because
+ * an emit could send any event to any window, such as the quit request of ADR 027. A page that
+ * must reach the other window calls a command, and Rust sends the event.
  */
 export const BACKEND_EVENTS = {
   CAPABILITY_PROBE: "ffmpeg:capability-probe",
@@ -64,81 +68,20 @@ export const BACKEND_EVENTS = {
    * empty (`src/features/settings/settingsWindowClient.ts`).
    */
   SETTINGS_WINDOW_NAVIGATE: "settings-window:navigate",
-} as const;
-
-export type BackendEvent = (typeof BACKEND_EVENTS)[keyof typeof BACKEND_EVENTS];
-
-/**
- * Stable event names that one window emits for the other windows.
- *
- * A Tauri listener of the frontend hears an event from every window, its own window
- * included. Each payload therefore names the window that sent it in `origin`, and a receiver
- * ignores its own.
- */
-export const WINDOW_EVENTS = {
   /**
    * A preference that lives in web view storage changed in one window
-   * (`src/features/settings/preferenceSync.ts`).
+   * (`src/features/settings/preferenceSync.ts`). Rust sends it for `broadcast_preference`.
    */
   PREFERENCES_CHANGED: "preferences:changed",
   /**
    * The name of the unsaved preset draft of the Settings window, or null, for the quit guard
-   * of the main window (`src/features/settings/settingsWindowDraft.ts`). Rust also sends it,
-   * with null, when the Settings window is destroyed.
+   * of the main window (`src/features/settings/settingsWindowDraft.ts`). Rust sends it for
+   * `report_settings_draft`, and with null when the Settings window is destroyed.
    */
   SETTINGS_WINDOW_DRAFT: "settings-window:draft",
 } as const;
 
-export type WindowEvent = (typeof WINDOW_EVENTS)[keyof typeof WINDOW_EVENTS];
-
-/**
- * Signature for Tauri emit-compatible functions.
- */
-export type EmitFn = (event: string, payload?: unknown) => Promise<void>;
-
-/**
- * Signature for Tauri emitTo-compatible functions.
- */
-export type EmitToFn = (
-  target: string,
-  event: string,
-  payload?: unknown,
-) => Promise<void>;
-
-/**
- * Emits a window event to the window with the label `target`.
- *
- * A listener with the default target hears an event that was sent to another window too, so
- * the payload still carries the `origin` of the emitting window.
- *
- * @param target The label of the window that the event is for.
- * @param event The typed window event identifier.
- * @param payload The payload. It must carry the `origin` of the emitting window.
- * @param emitToFn Optional custom emitTo implementation (defaults to Tauri event emitTo).
- */
-export async function emitEventTo(
-  target: string,
-  event: WindowEvent,
-  payload: unknown,
-  emitToFn: EmitToFn = tauriEmitTo,
-): Promise<void> {
-  await emitToFn(target, event, payload);
-}
-
-/**
- * Emits a window event to every window, the emitting window included.
- *
- * @param event The typed window event identifier.
- * @param payload The payload. It must carry the `origin` of the emitting window.
- * @param emitFn Optional custom emit implementation (defaults to Tauri event emit).
- */
-export async function emitEvent(
-  event: WindowEvent,
-  payload: unknown,
-  emitFn: EmitFn = tauriEmit,
-): Promise<void> {
-  await emitFn(event, payload);
-}
+export type BackendEvent = (typeof BACKEND_EVENTS)[keyof typeof BACKEND_EVENTS];
 
 /**
  * Signature for Tauri invoke-compatible functions.
@@ -177,13 +120,13 @@ export type ListenFn = <T>(
 /**
  * Type-safe event listener wrapper around `@tauri-apps/api/event` listen.
  *
- * @param event The typed backend or window event identifier to subscribe to.
+ * @param event The typed backend event identifier to subscribe to.
  * @param handler Callback receiving the unwrapped payload when the event fires.
  * @param listenFn Optional custom listen implementation (defaults to Tauri event listen).
  * @returns Promise resolving to an unlisten function.
  */
 export async function listenEvent<T>(
-  event: BackendEvent | WindowEvent,
+  event: BackendEvent,
   handler: (payload: T) => void,
   listenFn: ListenFn = tauriListen,
 ): Promise<UnlistenFn> {
@@ -191,9 +134,9 @@ export async function listenEvent<T>(
 }
 
 /**
- * The listen function of the current window: it hears an event that Rust or another window
- * sent to this window (`emit_to`, `emitTo`) or to every window (`emit`), and not an event that
- * was sent to another window. `listen` hears every event of every window.
+ * The listen function of the current window: it hears an event that Rust sent to this window
+ * (`emit_to`) or to every window (`emit`), and not an event that was sent to another window.
+ * `listen` hears every event of every window.
  *
  * It throws outside the Tauri shell, where the window has no metadata, as `listen` fails
  * there.
@@ -206,12 +149,12 @@ export const listenInCurrentWindow: ListenFn = (event, handler) =>
  * only this window may act on, such as the quit request of ADR 027, so that the other window
  * never acts on it as well.
  *
- * @param event The typed backend or window event identifier to subscribe to.
+ * @param event The typed backend event identifier to subscribe to.
  * @param handler Callback receiving the unwrapped payload when the event fires.
  * @param listenFn Optional custom listen implementation (defaults to the current window).
  */
 export async function listenWindowEvent<T>(
-  event: BackendEvent | WindowEvent,
+  event: BackendEvent,
   handler: (payload: T) => void,
   listenFn: ListenFn = listenInCurrentWindow,
 ): Promise<UnlistenFn> {

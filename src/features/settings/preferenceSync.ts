@@ -4,10 +4,13 @@
  * The theme, the interface language and the timecode format are not part of the settings
  * file. Each window reads them from web view storage once, when it loads, and the General tab
  * of the Settings window changes them. Storage is shared, but no window hears a write of
- * another, so the setter of each preference also emits `preferences:changed` with the new
- * value and the label of its window. The other window applies the value that the event
- * carries. It does not read storage again, because a read there can still return the old
- * value, and it does not emit again, so one change makes one event.
+ * another, so the setter of each preference also calls `broadcast_preference` with the new
+ * value. Rust checks the key and the value and sends `preferences:changed` to every window,
+ * with the label of the calling window. The page holds no emit permission, because an emit
+ * could send any event to the main window (`src-tauri/src/commands/preferences.rs`). The
+ * other window applies the value that the event carries. It does not read storage again,
+ * because a read there can still return the old value, and it does not broadcast again, so one
+ * change makes one event.
  *
  * The preview mute and the timeline height belong to the main window alone and are not sent.
  *
@@ -21,12 +24,13 @@ import {
   type LanguagePreference,
 } from "@/i18n";
 import {
-  WINDOW_EVENTS,
-  emitEvent,
+  BACKEND_COMMANDS,
+  BACKEND_EVENTS,
+  invokeCommand,
   listenEvent,
   startEventListener,
-  type EmitFn,
   type EventSubscribe,
+  type InvokeFn,
 } from "@/lib/ipc";
 import { isThemePreference, type ThemePreference } from "@/lib/theme";
 import type { TimecodeFormat } from "@/lib/timecode";
@@ -85,33 +89,30 @@ export function validatePreferenceChangedPayload(
   }
 }
 
-/** What a broadcast uses. A test passes fakes. */
+/** What a broadcast uses. A test passes a fake invoke. */
 export interface PreferenceBroadcastOptions {
-  /** Emits the event. Defaults to the Tauri event. */
-  readonly emit?: EmitFn;
-  /** The label of this window. Defaults to the label of the current Tauri window. */
-  readonly ownLabel?: string | null;
+  /** Calls `broadcast_preference`. Defaults to the Tauri invoke. */
+  readonly invoke?: InvokeFn;
 }
 
 /**
- * Sends a change to the other windows. Outside the Tauri shell there is no other window and
- * no label, so it sends nothing. A failed emit leaves the other window on its old value until
- * it loads again, which is the state before this module existed, so the failure is ignored.
+ * Sends a change to the other windows through Rust (`broadcast_preference`). Rust adds the
+ * label of this window as the origin. A failed call, also outside the Tauri shell, leaves the
+ * other window on its old value until it loads again, which is the state before this module
+ * existed, so the failure is ignored. Only the Settings window holds the permission of the
+ * command (ADR 038): a setter that a later change adds to the main window must also be granted
+ * `allow-broadcast-preference` there, or its broadcast is refused without a message.
  */
 export function broadcastPreferenceChange(
   change: PreferenceChange,
   options: PreferenceBroadcastOptions = {},
 ): void {
-  const origin =
-    options.ownLabel !== undefined ? options.ownLabel : getCurrentWindowLabel();
-  if (origin === null) {
-    return;
-  }
-  const payload: PreferenceChangedPayload = { ...change, origin };
+  const invoke = options.invoke ?? invokeCommand;
   try {
-    void emitEvent(WINDOW_EVENTS.PREFERENCES_CHANGED, payload, options.emit).catch(
-      () => {},
-    );
+    void invoke<unknown>(BACKEND_COMMANDS.BROADCAST_PREFERENCE, {
+      key: change.key,
+      value: change.value,
+    }).catch(() => {});
   } catch {
     // No Tauri runtime answered.
   }
@@ -214,7 +215,7 @@ export interface PreferenceSyncOptions {
 export function startPreferenceSync(options: PreferenceSyncOptions = {}): () => void {
   const subscribe =
     options.subscribe ??
-    ((handler) => listenEvent<unknown>(WINDOW_EVENTS.PREFERENCES_CHANGED, handler));
+    ((handler) => listenEvent<unknown>(BACKEND_EVENTS.PREFERENCES_CHANGED, handler));
   const ownLabel =
     options.ownLabel !== undefined ? options.ownLabel : getCurrentWindowLabel();
   const targets = options.targets ?? APPLICATION_PREFERENCE_TARGETS;

@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
-import { WINDOW_EVENTS, type EmitToFn, type EventSubscribe } from "@/lib/ipc";
+import { describe, expect, it } from "vitest";
+import { BACKEND_COMMANDS, type EventSubscribe, type InvokeFn } from "@/lib/ipc";
+import { MAX_PRESET_NAME_CHARS } from "./limits";
 import {
   createSettingsWindowDraftStore,
   reportSettingsWindowDraft,
@@ -8,24 +9,51 @@ import {
 } from "./settingsWindowDraft";
 
 /**
- * A fake of the Tauri event bus for one event. `emitTo` reaches every listener, as `listen`
- * with the default target hears an event that was sent to another window.
+ * The longest draft name that Rust sends on: `MAX_DRAFT_NAME_CHARS` in
+ * `settings_window.rs`, which is the longest preset name of ADR 013.
  */
-function createBus() {
+const MAX_DRAFT_NAME_CHARS = MAX_PRESET_NAME_CHARS;
+
+/**
+ * A fake of Tauri for the two windows. The Settings window holds no emit: its invoke stands
+ * for Rust, which takes `report_settings_draft` only from the Settings window, cuts the name,
+ * and sends the event to the main window with the label of the Settings window. A listener
+ * with the default target hears that event too.
+ */
+function createTauri() {
   const listeners = new Set<(payload: unknown) => void>();
-  const emitTo = vi.fn<EmitToFn>((_target, _event, payload) => {
+  const deliver = (payload: unknown) => {
     for (const listener of listeners) {
       listener(payload);
     }
-    return Promise.resolve();
-  });
+  };
   const subscribe: EventSubscribe = (handler) => {
     listeners.add(handler);
     return Promise.resolve(() => {
       listeners.delete(handler);
     });
   };
-  return { emitTo, subscribe };
+  const calls: { label: string; cmd: string; args?: Record<string, unknown> }[] = [];
+  const invokeAs =
+    (label: string): InvokeFn =>
+    <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+      calls.push({ label, cmd, args });
+      if (cmd !== BACKEND_COMMANDS.REPORT_SETTINGS_DRAFT) {
+        return Promise.reject(new Error(`${cmd} not allowed`));
+      }
+      if (label === "settings") {
+        const name = args?.name;
+        deliver({
+          name:
+            typeof name === "string"
+              ? [...name].slice(0, MAX_DRAFT_NAME_CHARS).join("")
+              : null,
+          origin: "settings",
+        });
+      }
+      return Promise.resolve(null as T);
+    };
+  return { subscribe, deliver, calls, invokeAs };
 }
 
 async function flushPromises(): Promise<void> {
@@ -61,30 +89,27 @@ describe("validateSettingsWindowDraftPayload", () => {
 });
 
 describe("reportSettingsWindowDraft", () => {
-  it("sends the draft to the main window with the label of this window", () => {
-    const emitTo = vi.fn<EmitToFn>(() => Promise.resolve());
-    reportSettingsWindowDraft("Web 1080p", { emitTo, ownLabel: "settings" });
-    expect(emitTo).toHaveBeenCalledWith("main", WINDOW_EVENTS.SETTINGS_WINDOW_DRAFT, {
-      name: "Web 1080p",
-      origin: "settings",
-    });
+  it("asks Rust to send the draft to the main window", () => {
+    const tauri = createTauri();
+    reportSettingsWindowDraft("Web 1080p", { invoke: tauri.invokeAs("settings") });
+    expect(tauri.calls).toEqual([
+      {
+        label: "settings",
+        cmd: BACKEND_COMMANDS.REPORT_SETTINGS_DRAFT,
+        args: { name: "Web 1080p" },
+      },
+    ]);
   });
 
-  it("sends nothing outside the Tauri shell, and survives a failed emit", async () => {
-    const emitTo = vi.fn<EmitToFn>(() => Promise.resolve());
-    reportSettingsWindowDraft("Web", { emitTo, ownLabel: null });
-    expect(emitTo).not.toHaveBeenCalled();
-
+  it("survives an invoke that rejects or throws", async () => {
     expect(() => {
       reportSettingsWindowDraft("Web", {
-        emitTo: () => Promise.reject(new Error("refused")),
-        ownLabel: "settings",
+        invoke: () => Promise.reject(new Error("refused")),
       });
       reportSettingsWindowDraft("Web", {
-        emitTo: () => {
+        invoke: () => {
           throw new Error("no runtime");
         },
-        ownLabel: "settings",
       });
     }).not.toThrow();
     await flushPromises();
@@ -92,52 +117,66 @@ describe("reportSettingsWindowDraft", () => {
 });
 
 describe("startSettingsWindowDraftMirror", () => {
-  it("mirrors each report of the Settings window, up to the cleared draft", async () => {
-    const bus = createBus();
+  it("mirrors each report of the Settings window, up to the cleared draft, with no emit", async () => {
+    const tauri = createTauri();
     const store = createSettingsWindowDraftStore();
     const stop = startSettingsWindowDraftMirror({
-      subscribe: bus.subscribe,
+      subscribe: tauri.subscribe,
       ownLabel: "main",
       store,
     });
     await flushPromises();
     expect(store.getState().unsavedPresetName).toBeNull();
 
-    reportSettingsWindowDraft("Archive", { emitTo: bus.emitTo, ownLabel: "settings" });
+    const settings = { invoke: tauri.invokeAs("settings") };
+    reportSettingsWindowDraft("Archive", settings);
     expect(store.getState().unsavedPresetName).toBe("Archive");
 
     // A new preset with no name yet still holds an unsaved edit.
-    reportSettingsWindowDraft("", { emitTo: bus.emitTo, ownLabel: "settings" });
+    reportSettingsWindowDraft("", settings);
     expect(store.getState().unsavedPresetName).toBe("");
 
+    // A name that the user is still typing past the limit still names the draft.
+    reportSettingsWindowDraft("x".repeat(500), settings);
+    expect(store.getState().unsavedPresetName).toBe("x".repeat(MAX_DRAFT_NAME_CHARS));
+
     // Rust sends this payload when it destroys the Settings window.
-    await bus.emitTo("main", WINDOW_EVENTS.SETTINGS_WINDOW_DRAFT, {
-      name: null,
-      origin: "settings",
+    tauri.deliver({ name: null, origin: "settings" });
+    expect(store.getState().unsavedPresetName).toBeNull();
+    stop();
+  });
+
+  it("takes no report that Rust refuses from the main window", async () => {
+    const tauri = createTauri();
+    const store = createSettingsWindowDraftStore();
+    const stop = startSettingsWindowDraftMirror({
+      subscribe: tauri.subscribe,
+      ownLabel: "main",
+      store,
     });
+    await flushPromises();
+
+    reportSettingsWindowDraft("Forged", { invoke: tauri.invokeAs("main") });
     expect(store.getState().unsavedPresetName).toBeNull();
     stop();
   });
 
   it("ignores its own payload, a malformed payload, and every payload after the stop", async () => {
-    const bus = createBus();
+    const tauri = createTauri();
     const store = createSettingsWindowDraftStore();
     const stop = startSettingsWindowDraftMirror({
-      subscribe: bus.subscribe,
+      subscribe: tauri.subscribe,
       ownLabel: "main",
       store,
     });
     await flushPromises();
 
-    await bus.emitTo("main", WINDOW_EVENTS.SETTINGS_WINDOW_DRAFT, {
-      name: "Mine",
-      origin: "main",
-    });
-    await bus.emitTo("main", WINDOW_EVENTS.SETTINGS_WINDOW_DRAFT, { name: 4 });
+    tauri.deliver({ name: "Mine", origin: "main" });
+    tauri.deliver({ name: 4 });
     expect(store.getState().unsavedPresetName).toBeNull();
 
     stop();
-    reportSettingsWindowDraft("Late", { emitTo: bus.emitTo, ownLabel: "settings" });
+    reportSettingsWindowDraft("Late", { invoke: tauri.invokeAs("settings") });
     expect(store.getState().unsavedPresetName).toBeNull();
   });
 });
