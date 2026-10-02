@@ -6,7 +6,7 @@ import {
   BACKEND_EXPORT_OUTPUT_ERROR_CODES,
   ExportOutputError,
   normalizeExportOutputError,
-  performExportOutputAction,
+  revealExportOutput,
 } from "./output";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -35,13 +35,13 @@ function readRustOutputErrorCodes(): string[] {
   );
 }
 
-describe("export output actions", () => {
+describe("export output", () => {
   describe("Rust vocabulary parity", () => {
-    it("names exactly the codes the Rust commands emit", () => {
+    it("names exactly the codes the Rust command emits", () => {
       const rustCodes = readRustOutputErrorCodes();
 
       // Guards the parse itself: a moved file or a renamed enum would read as empty.
-      expect(rustCodes.length).toBeGreaterThanOrEqual(5);
+      expect(rustCodes.length).toBeGreaterThanOrEqual(3);
       expect([...BACKEND_EXPORT_OUTPUT_ERROR_CODES].sort()).toEqual(
         [...rustCodes].sort(),
       );
@@ -51,13 +51,13 @@ describe("export output actions", () => {
   describe("normalizeExportOutputError", () => {
     it("keeps a known code and its detail", () => {
       const error = normalizeExportOutputError({
-        code: "openFailed",
-        detail: "no application",
+        code: "revealFailed",
+        detail: "the file manager did not answer",
       });
 
       expect(error).toBeInstanceOf(ExportOutputError);
-      expect(error.code).toBe("openFailed");
-      expect(error.detail).toBe("no application");
+      expect(error.code).toBe("revealFailed");
+      expect(error.detail).toBe("the file manager did not answer");
     });
 
     it("keeps a known code with no detail", () => {
@@ -93,11 +93,11 @@ describe("export output actions", () => {
     });
   });
 
-  describe("performExportOutputAction", () => {
+  describe("revealExportOutput", () => {
     it("sends a reveal request with the run id and no path", async () => {
       const invoke = vi.fn().mockResolvedValue(null);
 
-      await performExportOutputAction("reveal", "1-0", { invoke });
+      await revealExportOutput("1-0", { invoke });
 
       expect(invoke).toHaveBeenCalledWith(BACKEND_COMMANDS.REVEAL_EXPORT_OUTPUT, {
         runId: "1-0",
@@ -105,23 +105,12 @@ describe("export output actions", () => {
       expect(BACKEND_COMMANDS.REVEAL_EXPORT_OUTPUT).toBe("reveal_export_output");
     });
 
-    it("sends an open request with the run id and no path", async () => {
-      const invoke = vi.fn().mockResolvedValue(null);
-
-      await performExportOutputAction("open", "1-0", { invoke });
-
-      expect(invoke).toHaveBeenCalledWith(BACKEND_COMMANDS.OPEN_EXPORT_OUTPUT, {
-        runId: "1-0",
-      });
-      expect(BACKEND_COMMANDS.OPEN_EXPORT_OUTPUT).toBe("open_export_output");
-    });
-
     it("rejects with a normalized error", async () => {
       const invoke = vi.fn().mockRejectedValue({ code: "outputUnknown" });
 
-      await expect(
-        performExportOutputAction("open", "1-0", { invoke }),
-      ).rejects.toEqual(new ExportOutputError("outputUnknown"));
+      await expect(revealExportOutput("1-0", { invoke })).rejects.toEqual(
+        new ExportOutputError("outputUnknown"),
+      );
     });
   });
 });

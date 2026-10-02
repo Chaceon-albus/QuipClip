@@ -372,14 +372,12 @@ function ExportResultItem({
 }) {
   const { t } = useTranslation();
   const outputActionPending = useExportOutputActionStore((state) => state.pending);
-  const runOutputAction = useExportOutputActionStore((state) => state.run);
+  const revealOutput = useExportOutputActionStore((state) => state.reveal);
 
   const revealLabel = t(revealLabelKey(isMacOS()));
   const canReveal = kind === "finished" && runId !== null;
   const revealBusy =
-    outputActionPending !== null &&
-    outputActionPending.runId === runId &&
-    outputActionPending.action === "reveal";
+    outputActionPending !== null && outputActionPending.runId === runId;
 
   // The status bar has no room for an error message. A failed request opens the dialog,
   // which shows the message inline for this run.
@@ -387,7 +385,7 @@ function ExportResultItem({
     if (runId === null) {
       return;
     }
-    const outcome = await runOutputAction("reveal", runId);
+    const outcome = await revealOutput(runId);
     if (outcome === "failed") {
       onShow();
     }

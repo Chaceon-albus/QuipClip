@@ -39,9 +39,9 @@ describe("export output action store", () => {
     const perform = vi.fn().mockReturnValue(answer.promise);
     const store = createExportOutputActionStore({ perform });
 
-    const outcome = store.getState().run("reveal", "1-0");
-    expect(store.getState().pending).toEqual({ runId: "1-0", action: "reveal" });
-    expect(perform).toHaveBeenCalledWith("reveal", "1-0");
+    const outcome = store.getState().reveal("1-0");
+    expect(store.getState().pending).toEqual({ runId: "1-0" });
+    expect(perform).toHaveBeenCalledWith("1-0");
 
     answer.resolve();
     await expect(outcome).resolves.toBe("succeeded");
@@ -49,20 +49,20 @@ describe("export output action store", () => {
     expect(store.getState().failure).toBeNull();
   });
 
-  it("holds a failure with its run and action", async () => {
-    const perform = vi
-      .fn()
-      .mockRejectedValue({ code: "openFailed", detail: "no application" });
+  it("holds a failure with its run", async () => {
+    const perform = vi.fn().mockRejectedValue({
+      code: "revealFailed",
+      detail: "the file manager did not answer",
+    });
     const store = createExportOutputActionStore({ perform });
 
-    await expect(store.getState().run("open", "1-0")).resolves.toBe("failed");
+    await expect(store.getState().reveal("1-0")).resolves.toBe("failed");
 
     const failure = store.getState().failure;
-    expect(failure?.runId).toBe("1-0");
-    expect(failure?.action).toBe("open");
-    expect(failure?.error).toEqual(
-      new ExportOutputError("openFailed", "no application"),
-    );
+    expect(failure).toEqual({
+      runId: "1-0",
+      error: new ExportOutputError("revealFailed", "the file manager did not answer"),
+    });
     expect(store.getState().pending).toBeNull();
   });
 
@@ -71,8 +71,8 @@ describe("export output action store", () => {
     const perform = vi.fn().mockReturnValue(answer.promise);
     const store = createExportOutputActionStore({ perform });
 
-    const first = store.getState().run("reveal", "1-0");
-    await expect(store.getState().run("open", "1-0")).resolves.toBe("ignored");
+    const first = store.getState().reveal("1-0");
+    await expect(store.getState().reveal("1-0")).resolves.toBe("ignored");
     expect(perform).toHaveBeenCalledTimes(1);
 
     answer.resolve();
@@ -87,8 +87,8 @@ describe("export output action store", () => {
       .mockResolvedValueOnce(undefined);
     const store = createExportOutputActionStore({ perform });
 
-    void store.getState().run("reveal", "1-0");
-    await expect(store.getState().run("reveal", "2-1")).resolves.toBe("succeeded");
+    void store.getState().reveal("1-0");
+    await expect(store.getState().reveal("2-1")).resolves.toBe("succeeded");
     expect(perform).toHaveBeenCalledTimes(2);
     answer.resolve();
   });
@@ -100,10 +100,10 @@ describe("export output action store", () => {
       .mockResolvedValueOnce(undefined);
     const store = createExportOutputActionStore({ perform });
 
-    await store.getState().run("reveal", "1-0");
+    await store.getState().reveal("1-0");
     expect(store.getState().failure).not.toBeNull();
 
-    await expect(store.getState().run("reveal", "1-0")).resolves.toBe("succeeded");
+    await expect(store.getState().reveal("1-0")).resolves.toBe("succeeded");
     expect(store.getState().failure).toBeNull();
   });
 
@@ -112,11 +112,11 @@ describe("export output action store", () => {
     const perform = vi.fn().mockReturnValue(answer.promise);
     const store = createExportOutputActionStore({ perform });
 
-    const outcome = store.getState().run("open", "1-0");
+    const outcome = store.getState().reveal("1-0");
     store.getState().clear();
     expect(store.getState().pending).toBeNull();
 
-    answer.reject({ code: "openFailed" });
+    answer.reject({ code: "revealFailed" });
     await expect(outcome).resolves.toBe("ignored");
     expect(store.getState().failure).toBeNull();
     expect(store.getState().pending).toBeNull();
@@ -126,7 +126,7 @@ describe("export output action store", () => {
     const perform = vi.fn().mockRejectedValue({ code: "outputMissing" });
     const store = createExportOutputActionStore({ perform });
 
-    await store.getState().run("reveal", "1-0");
+    await store.getState().reveal("1-0");
     store.getState().clear();
 
     expect(store.getState().failure).toBeNull();
@@ -147,7 +147,7 @@ describe("export output action store", () => {
 
     it("clears the state when the export store resets", async () => {
       const { exportStore, outputActions } = boundStores();
-      await outputActions.getState().run("reveal", "1-0");
+      await outputActions.getState().reveal("1-0");
       expect(outputActions.getState().failure).not.toBeNull();
 
       exportStore.getState().reset();
@@ -163,18 +163,18 @@ describe("export output action store", () => {
       });
       bindOutputActionsToExportRun(exportStore, outputActions);
 
-      const outcome = outputActions.getState().run("open", "1-0");
+      const outcome = outputActions.getState().reveal("1-0");
       exportStore.getState().reset();
       expect(outputActions.getState().pending).toBeNull();
 
-      answer.reject({ code: "openFailed" });
+      answer.reject({ code: "revealFailed" });
       await expect(outcome).resolves.toBe("ignored");
       expect(outputActions.getState().failure).toBeNull();
     });
 
     it("keeps the state while the run id stays the same", async () => {
       const { exportStore, outputActions } = boundStores();
-      await outputActions.getState().run("reveal", "1-0");
+      await outputActions.getState().reveal("1-0");
 
       exportStore.setState({ frame: 300 });
 
@@ -186,7 +186,6 @@ describe("export output action store", () => {
       exportOutputActionStore.setState({
         failure: {
           runId: "9-0",
-          action: "reveal",
           error: new ExportOutputError("outputMissing"),
         },
       });
@@ -199,7 +198,7 @@ describe("export output action store", () => {
 
     it("stops clearing after the binding ends", async () => {
       const { exportStore, outputActions, unbind } = boundStores();
-      await outputActions.getState().run("reveal", "1-0");
+      await outputActions.getState().reveal("1-0");
 
       unbind();
       exportStore.getState().reset();

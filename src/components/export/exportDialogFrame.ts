@@ -34,7 +34,7 @@ export function resolveExportDialogStep(status: ExportStatus): ExportDialogStep 
  *   same two actions: the user can ask for the stop again, or hide the dialog. It offers no
  *   action that resets the store.
  * - `confirmation`: Cancel, Re-import and Export Anyway, for `sourceRevisionChanged`.
- * - `finished`: Show, Open and Done (ADR 029).
+ * - `finished`: Show File and Done (ADR 029).
  * - `result`: Close and the recovery of the error, for a run that ended without an output,
  *   or for a failure of the open step.
  */

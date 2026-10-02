@@ -23,7 +23,6 @@ export const BACKEND_COMMANDS = {
   CANCEL_EXPORT: "cancel_export",
   CANCEL_ACTIVE_EXPORT: "cancel_active_export",
   REVEAL_EXPORT_OUTPUT: "reveal_export_output",
-  OPEN_EXPORT_OUTPUT: "open_export_output",
   CONFIRM_QUIT: "confirm_quit",
 } as const;
 

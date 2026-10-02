@@ -1,6 +1,6 @@
 /**
  * Pure rules for the result of a finished export: where the file is, how long the export
- * took, and the labels of the show and open actions.
+ * took, and the text of the show action.
  */
 
 import type { ExportOutputErrorCode } from "@/features/export";
@@ -71,14 +71,21 @@ export function presentFinishedExport(
 
 export type RevealLabelKey = "export.action.revealMac" | "export.action.revealWindows";
 
-/** Finder on macOS, File Explorer everywhere else. */
+/**
+ * The name of the show action with the file manager in it: Finder on macOS, File Explorer
+ * everywhere else.
+ *
+ * The finished dialog labels its button "Show File" on both platforms and shows this text in
+ * the tooltip. The icon button of the status bar has no visible text, so this text is its
+ * accessible name.
+ */
 export function revealLabelKey(macOS: boolean): RevealLabelKey {
   return macOS ? "export.action.revealMac" : "export.action.revealWindows";
 }
 
 export type OutputActionErrorKey = `exportOutputError.${ExportOutputErrorCode}`;
 
-/** The catalog key of the message for a failed show or open request. */
+/** The catalog key of the message for a failed show request. */
 export function outputActionErrorKey(
   code: ExportOutputErrorCode,
 ): OutputActionErrorKey {

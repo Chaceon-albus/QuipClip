@@ -620,9 +620,9 @@ export const zhCN: TranslationCatalog = {
       stop: "停止导出",
       stopConfirm: "确认停止",
       hide: "隐藏（导出继续）",
+      showFile: "显示文件",
       revealMac: "在访达中显示",
       revealWindows: "在文件资源管理器中显示",
-      open: "打开",
       done: "完成",
       openSettings: "打开设置…",
       managePresets: "管理预设…",
@@ -636,11 +636,8 @@ export const zhCN: TranslationCatalog = {
   exportOutputError: {
     outputUnknown: "QuipClip 没有此次导出的文件记录。",
     outputMissing: "导出的文件已不在保存位置，可能已被移动、重命名或删除。",
-    outputNotVideo:
-      "QuipClip 只打开带有视频扩展名（MP4、MOV 或 MKV）的文件。请先在文件夹中显示该文件，再从那里打开。",
     revealFailed: "系统无法显示该文件。",
-    openFailed: "系统无法打开该文件。请确认已为此文件类型设置打开方式。",
-    unknown: "无法显示或打开导出的文件。",
+    unknown: "QuipClip 无法显示导出的文件。",
   },
   exportError: {
     appDataUnavailable: "应用程序数据目录不可用。",

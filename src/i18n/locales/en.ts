@@ -748,9 +748,12 @@ export const en = {
       stop: "Stop Export",
       stopConfirm: "Confirm Stop",
       hide: "Hide (export continues)",
+      // The button of the finished export, the same on both platforms. It shows the file in
+      // the file manager. Its tooltip is `revealMac` on macOS and `revealWindows` on
+      // Windows. The icon button of the status bar uses those two as its name.
+      showFile: "Show File",
       revealMac: "Show in Finder",
       revealWindows: "Show in File Explorer",
-      open: "Open",
       done: "Done",
       openSettings: "Open Settings…",
       // Under the preset select of the setup step. Opens the Presets tab of Settings.
@@ -766,12 +769,8 @@ export const en = {
     outputUnknown: "QuipClip has no record of the file from this export.",
     outputMissing:
       "The exported file is not in its saved location. It may have been moved, renamed, or deleted.",
-    outputNotVideo:
-      "QuipClip opens only files with a video extension (MP4, MOV, or MKV). Show the file, and then open it from its folder.",
     revealFailed: "The system could not show the file.",
-    openFailed:
-      "The system could not open the file. Make sure that an application is set to open this file type.",
-    unknown: "QuipClip could not show or open the exported file.",
+    unknown: "QuipClip could not show the exported file.",
   },
   exportError: {
     appDataUnavailable: "The application data directory is unavailable.",

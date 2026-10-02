@@ -1,9 +1,9 @@
 /**
- * State of the show and open requests for a finished export.
+ * State of the show request for a finished export.
  *
- * The export dialog and the status bar result both offer "Show in Finder" (or "Show in File
- * Explorer"). A failure must show inline in the dialog, and the status bar has no room for
- * it, so the failure is held here where both can read it. The status bar opens the dialog on a
+ * The export dialog and the status bar result both show the file in Finder (or in File
+ * Explorer). A failure must show inline in the dialog, and the status bar has no room for it,
+ * so the failure is held here where both can read it. The status bar opens the dialog on a
  * failure, and the dialog then shows the message.
  *
  * The state belongs to one run. `bindOutputActionsToExportRun` clears it each time the run id
@@ -14,8 +14,7 @@ import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import {
   normalizeExportOutputError,
-  performExportOutputAction,
-  type ExportOutputAction,
+  revealExportOutput,
   type ExportOutputError,
 } from "./output";
 import { exportStore } from "./store";
@@ -24,13 +23,11 @@ import type { ExportStoreState } from "./types";
 export type ExportOutputActionPending = {
   /** The run that the request names. */
   runId: string;
-  action: ExportOutputAction;
 };
 
 export type ExportOutputActionFailure = {
   /** The run that the failed request named. A view shows it only for that run. */
   runId: string;
-  action: ExportOutputAction;
   error: ExportOutputError;
 };
 
@@ -50,25 +47,21 @@ export type ExportOutputActionState = {
 export type ExportOutputActionOutcome = "succeeded" | "failed" | "ignored";
 
 export type ExportOutputActionStoreState = ExportOutputActionState & {
-  run: (
-    action: ExportOutputAction,
-    runId: string,
-  ) => Promise<ExportOutputActionOutcome>;
+  /** Shows the published file of the run `runId` in Finder or in File Explorer. */
+  reveal: (runId: string) => Promise<ExportOutputActionOutcome>;
   /** Removes the failure and forgets the request in flight. */
   clear: () => void;
 };
 
 export interface ExportOutputActionStoreDependencies {
-  perform?: (action: ExportOutputAction, runId: string) => Promise<void>;
+  perform?: (runId: string) => Promise<void>;
 }
 
 export function createExportOutputActionStore(
   dependencies: ExportOutputActionStoreDependencies = {},
 ): StoreApi<ExportOutputActionStoreState> {
   const perform =
-    dependencies.perform ??
-    ((action: ExportOutputAction, runId: string) =>
-      performExportOutputAction(action, runId));
+    dependencies.perform ?? ((runId: string) => revealExportOutput(runId));
   // Each `clear` starts a new generation. An answer from an older generation changes nothing,
   // so a request that answers after its run ended cannot bring back its state.
   let generation = 0;
@@ -77,16 +70,16 @@ export function createExportOutputActionStore(
     pending: null,
     failure: null,
 
-    run: async (action, runId) => {
+    reveal: async (runId) => {
       // One request per run at a time. A second click while the first request is in flight
-      // must not open the file twice.
+      // must not ask the file manager twice.
       if (get().pending?.runId === runId) {
         return "ignored";
       }
       const requestGeneration = generation;
-      set({ pending: { runId, action }, failure: null });
+      set({ pending: { runId }, failure: null });
       try {
-        await perform(action, runId);
+        await perform(runId);
         if (requestGeneration !== generation) {
           return "ignored";
         }
@@ -98,7 +91,7 @@ export function createExportOutputActionStore(
         }
         set({
           pending: null,
-          failure: { runId, action, error: normalizeExportOutputError(error) },
+          failure: { runId, error: normalizeExportOutputError(error) },
         });
         return "failed";
       }

@@ -101,17 +101,13 @@ describe("orderDialogActions", () => {
     expect(order("windows", actions)).toEqual(["save", "first", "second"]);
   });
 
-  // The finished export: Show and Open, and Done, which closes the dialog and is its
-  // default button. Done is last on both platforms, as the Close button of a WinUI dialog.
-  it("orders a footer with alternatives and Cancel and no primary action", () => {
-    const actions = [
-      action("alternative", "reveal"),
-      action("alternative", "open"),
-      action("cancel", "done"),
-    ];
+  // The finished export: Show File, and Done, which closes the dialog and is its default
+  // button. Done is last on both platforms, as the Close button of a WinUI dialog.
+  it("orders a footer with an alternative and Cancel and no primary action", () => {
+    const actions = [action("alternative", "reveal"), action("cancel", "done")];
 
-    expect(order("macos", actions)).toEqual(["reveal", "open", "done"]);
-    expect(order("windows", actions)).toEqual(["reveal", "open", "done"]);
+    expect(order("macos", actions)).toEqual(["reveal", "done"]);
+    expect(order("windows", actions)).toEqual(["reveal", "done"]);
     expect(apartIds("macos", actions)).toEqual([]);
     expect(apartIds("windows", actions)).toEqual([]);
   });

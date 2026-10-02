@@ -28,7 +28,6 @@ import {
   isExportRunLive,
   useExportOutputActionStore,
   useExportStore,
-  type ExportOutputAction,
   useExportRunTiming,
   type ExportOutputActionState,
   type ExportRunTiming,
@@ -241,7 +240,7 @@ export function ExportDialog({
   // The primary action of the finished panel. It takes the focus when that panel shows.
   const doneButtonRef = useRef<HTMLButtonElement>(null);
   const stopNoteId = useId();
-  // Done names the result and a Show or Open error as its description.
+  // Done names the result and a Show error as its description.
   const finishedNoticeId = useId();
   const outputErrorId = useId();
 
@@ -256,7 +255,7 @@ export function ExportDialog({
 
   const outputActionPending = useExportOutputActionStore((state) => state.pending);
   const outputActionFailure = useExportOutputActionStore((state) => state.failure);
-  const runOutputAction = useExportOutputActionStore((state) => state.run);
+  const revealOutput = useExportOutputActionStore((state) => state.reveal);
 
   // An armed state belongs to one run. When the run is no longer live (`isExportRunLive`),
   // clear it, so a later run can never start with the confirmation label from this one. A
@@ -515,29 +514,26 @@ export function ExportDialog({
     setChoosingDestination(false);
     setBackCheckPending(false);
     setStopArmedAt(null);
-    // The reset changes the run id, and that change clears the Show and Open state
+    // The reset changes the run id, and that change clears the Show state
     // (`bindOutputActionsToExportRun`).
     reset();
   };
 
-  // The state of Show and Open shows only for the run that it names.
+  // The state of Show shows only for the run that it names.
   const outputFailure =
     frame.failure !== null && frame.failure.runId === frame.runId
       ? frame.failure
       : null;
-  const busyOutputAction =
-    frame.pending !== null && frame.pending.runId === frame.runId
-      ? frame.pending.action
-      : null;
+  const revealBusy = frame.pending !== null && frame.pending.runId === frame.runId;
   const canActOnOutput = frame.runId !== null && frame.outputPath !== null;
 
   // The store ignores a second request for the run while one is in flight. The busy button
   // stays enabled, with `aria-busy`, so it keeps the focus.
-  const handleOutputAction = (action: ExportOutputAction) => {
+  const handleReveal = () => {
     if (runId === null) {
       return;
     }
-    void runOutputAction(action, runId);
+    void revealOutput(runId);
   };
 
   // A closed dialog has nothing to dismiss. During the exit animation, Escape can still reach
@@ -1085,39 +1081,28 @@ export function ExportDialog({
                 {
                   key: "reveal",
                   role: "alternative",
+                  // The label is the same on both platforms. The tooltip names the file
+                  // manager, and Radix makes it the description of the button while it
+                  // shows, so the accessible name stays the visible label (WCAG 2.5.3).
                   node: canActOnOutput && (
-                    <Button
-                      variant="outline"
-                      aria-busy={busyOutputAction === "reveal" || undefined}
-                      onClick={() => handleOutputAction("reveal")}
-                    >
-                      {busyOutputAction === "reveal" && (
-                        <Loader2
-                          aria-hidden="true"
-                          className="animate-spin motion-reduce:animate-none"
-                        />
-                      )}
-                      {t(revealLabelKey(isMacOS()))}
-                    </Button>
-                  ),
-                },
-                {
-                  key: "open",
-                  role: "alternative",
-                  node: canActOnOutput && (
-                    <Button
-                      variant="secondary"
-                      aria-busy={busyOutputAction === "open" || undefined}
-                      onClick={() => handleOutputAction("open")}
-                    >
-                      {busyOutputAction === "open" && (
-                        <Loader2
-                          aria-hidden="true"
-                          className="animate-spin motion-reduce:animate-none"
-                        />
-                      )}
-                      {t("export.action.open")}
-                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="outline"
+                          aria-busy={revealBusy || undefined}
+                          onClick={handleReveal}
+                        >
+                          {revealBusy && (
+                            <Loader2
+                              aria-hidden="true"
+                              className="animate-spin motion-reduce:animate-none"
+                            />
+                          )}
+                          {t("export.action.showFile")}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{t(revealLabelKey(isMacOS()))}</TooltipContent>
+                    </Tooltip>
                   ),
                 },
               ]}

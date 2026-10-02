@@ -280,8 +280,7 @@ pub async fn start_export(
         .begin(&run_id)
         .ok_or_else(|| ExportCommandError::new(ExportErrorCode::ExportAlreadyRunning))?;
     // The earlier run is over, and the interface stops showing its result when this run
-    // starts. Forget its output, so Show and Open cannot act on a file that this run can
-    // replace.
+    // starts. Forget its output, so Show cannot act on a file that this run can replace.
     published.clear();
 
     // Preparation spawns ffprobe and touches the filesystem, so it does not belong on the
@@ -642,7 +641,7 @@ fn run_export_worker(
 
     let output_path = start.output_path.clone();
     // The published path, as a path. `output_path` is its lossy string form for the event, and
-    // the show and open commands must name the file that the rename wrote.
+    // the show command must name the file that the rename wrote.
     let destination = prepared.plan.destination.clone();
     // A panic inside the run has to be turned back into a report. [`spawn_export_worker`]
     // gives the reason a lost report cannot be tolerated -- the interface sits on "exporting"
@@ -661,9 +660,9 @@ fn run_export_worker(
     }));
     match outcome {
         Ok(Ok(frames)) => {
-            // Recorded before the event, so a show or open request that follows the event
-            // finds the file. The commands take the path from this record and never from the
-            // web view (`commands::export_output`).
+            // Recorded before the event, so a show request that follows the event finds the
+            // file. The command takes the path from this record and never from the web view
+            // (`commands::export_output`).
             if let Some(published) = app.try_state::<PublishedExports>() {
                 published.record(&run_id, destination);
             }

@@ -30,7 +30,7 @@ export function getDialogPlatform(): DialogPlatform {
  *   lets it be the default. A footer has one at most.
  * - `discard`: a destructive action that throws away work, such as "Don't Save", Discard
  *   Changes, or Stop Export.
- * - `alternative`: any other action, such as Re-import, or Show and Open after an export.
+ * - `alternative`: any other action, such as Re-import, or Show File after an export.
  */
 export type DialogActionRole = "primary" | "cancel" | "discard" | "alternative";
 
