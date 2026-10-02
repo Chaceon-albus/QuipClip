@@ -39,6 +39,10 @@ test compares them with the Rust names.
   an audio stream is refused with `sourceHasNoAudio` before any process starts. That check is
   step 13 of the preflight, after the frame rate and before the sample rate of the audio,
   because a missing stream has no rate to ask about.
+- (Added on 2026-10-02.) `videoAndAudio` and `audioOnly` refuse segments that need more than
+  60 s of silence in total before the first sample of the audio, with `audioGapTooLong` (ADR 014
+  measurement 21). `audioOnly` counts only the segments that reach the first sample. `videoOnly`
+  reads no audio, so the video of such segments still exports.
 
 ### The command
 

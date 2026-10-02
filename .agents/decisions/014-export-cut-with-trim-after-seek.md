@@ -144,6 +144,34 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     fill behind `concat` left late starts under 0.1 s unfilled in a later segment, and one fill
     on the input link changed the cut on MPEG-TS by 2 samples.
 
+21. (Added on 2026-10-02.) A late first audio sample costs memory in three ways. FFmpeg 9.0.2
+    on macOS exported MP4 sources with 30 fps H.264 and AAC audio that starts 60 s or 120 s after
+    the video. The figures are the peak resident memory, in MiB:
+
+    - The fill of measurement 20 holds all of its silence in memory before it writes any of it.
+      An audio-only export of the chain took 28 MiB with no gap. With a gap of 60 s it took
+      95 MiB on 48000 Hz stereo, 215 MiB on 48000 Hz 5.1, and 532 MiB on 96000 Hz 7.1. A gap of
+      120 s on 48000 Hz 5.1 took 407 MiB. AAC decodes to 32-bit samples. A 16-bit source took
+      about half.
+    - `concat` also holds its padding in memory. It pads a segment whose audio ends early only
+      when another segment follows it. A last or only segment that lies wholly before the first
+      sample gets no audio at all. When it is the only segment, an export with video fails in
+      FFmpeg. With the audio
+      from a second input that gives only the audio (see the last item), a segment of 58.9 s
+      that ends before the first sample, followed by a segment that reaches it, took 176 MiB on
+      48000 Hz 5.1. A segment of 118.9 s took 277 MiB. The fills of segments that overlap add
+      up, because each chain builds its fill before `concat` reads it.
+    - The largest cost comes before the filters. FFmpeg configures the filter graph only when
+      each input link of the graph has a first frame. Until the first audio frame arrives, it
+      keeps each decoded video frame of the input in memory. A segment from 0 with audio 60 s
+      late took 924 MiB at 640x360 and 2.6 GiB at 1280x720, against 66 MiB with no gap. The
+      chain from before measurement 20 took 742 MiB at 640x360, so this cost is older than the
+      fill. A segment that ends before the first sample has the same cost: [0, 10) and
+      [62, 65) together took 787 MiB at 640x360, and the padded project of the item above took
+      869 MiB with one input for each segment. A second input that gives only the audio of the
+      source removes this cost. Then the segment from 0 took 255 MiB at 640x360 with 5.1 audio,
+      and 226 MiB at 1280x720 with stereo audio. The rest was the fill.
+
 ## Decision
 
 ### The boundary mechanism
@@ -231,6 +259,18 @@ the segment. The fill names the source rate, so the conversion to the output rat
 final `aformat`. The short option names `r`, `f` and `cl` need FFmpeg 4.3 or later, and keep the
 command line within the budget. The widest plan now measures 31509 bytes at the cap, which leaves
 234 bytes of the Windows budget free.
+
+(Changed on 2026-10-02.) The plan refuses an export that writes audio when the parts of its
+segments before the first sample of the source audio add up to more than 60 s (measurement 21).
+The code is `audioGapTooLong`, and `MAX_LEADING_AUDIO_SILENCE_SECONDS` holds the bound. The sum
+counts the fills and the padding of `concat` together, because FFmpeg holds both in memory, and
+the chains of overlapping segments build theirs at the same time. With video, a segment that ends
+at or before the first sample counts in full, so a cut at the first sample does not get around
+the bound. An audio-only export writes nothing for such a segment, so it counts only the segments
+that reach the sample. At the bound, the fill alone took 95 MiB on 48000 Hz stereo and 215 MiB on
+48000 Hz 5.1. A video-only export reads no audio. The probe reports only where the stream starts,
+so the bound does not apply to a gap inside the stream. This bound does not cover the decoded
+video that waits for the first audio frame (measurement 21).
 
 (Changed on 2026-10-02.) The video chain no longer ends in `format=yuv420p`. One chain at the
 start of the graph text sets the pixel format of the joined video, and `concat` writes `[vc]`:
@@ -343,7 +383,17 @@ The renderer decodes the original media. It must not decode a preview proxy.
 - (Added on 2026-10-02.) The fill of measurement 20 holds the whole of a gap in memory before it
   writes it. A leading gap of 600 s on 48 kHz 5.1 audio took 1.6 GB, against 44 MB for 10 s. A
   segment that spans a long late start or a long drop of the audio therefore needs memory in
-  proportion to the gap. QuipClip does not bound it.
+  proportion to the gap. (Changed on 2026-10-02.) The plan refuses more than 60 s of silence in
+  front of the first sample, summed over the segments (measurement 21). A gap inside the stream
+  stays unbounded, because the probe does not report it. The padding after the end of the stream
+  stays unbounded too: this change does not bound it.
+- (Added on 2026-10-02.) Until the first audio frame of an input arrives, FFmpeg keeps each
+  decoded video frame of that input in memory (measurement 21). A segment that starts long
+  before the first sample therefore needs memory in proportion to that time and to the size of
+  a frame: 2.6 GiB for 60 s at 1280x720. This cost is older than measurement 20.
+- (Added on 2026-10-02.) A last or only segment that lies wholly before the first audio sample
+  gets no audio, because `concat` pads only a segment that another segment follows. When it is
+  the only segment, an export with video fails in FFmpeg (measurement 21).
 - (Added on 2026-10-02.) A source whose audio timestamps drift from the sample count builds up an
   error. When the error passes 0.1 s, swresample drops or fills at least 0.1 s at once, in the
   middle of a segment. Timestamps that ran 2% slow gave one drop of 0.1 s in 10 s. Before
