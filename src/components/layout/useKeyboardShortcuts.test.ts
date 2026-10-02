@@ -9,13 +9,19 @@ import { runShortcutCommand } from "./useKeyboardShortcuts";
 
 type SeekActions = Pick<
   PlaybackStoreState,
-  "seekToPts" | "seekToFrameIndex" | "seekApproximate" | "playSegment" | "pause"
+  | "seekNominal"
+  | "seekToPts"
+  | "seekToFrameIndex"
+  | "seekApproximate"
+  | "playSegment"
+  | "pause"
 >;
 
 // The calls of the real command runner, on the production playback store. The seek actions are
 // replaced for each test and put back after it, so no element is needed.
 describe("runShortcutCommand", () => {
   let original: SeekActions;
+  const seekNominal = vi.fn<PlaybackStoreState["seekNominal"]>();
   const seekToPts = vi.fn<PlaybackStoreState["seekToPts"]>();
   const seekToFrameIndex = vi.fn<PlaybackStoreState["seekToFrameIndex"]>();
   const seekApproximate = vi.fn<PlaybackStoreState["seekApproximate"]>();
@@ -25,18 +31,21 @@ describe("runShortcutCommand", () => {
   beforeEach(() => {
     const state = playbackStore.getState();
     original = {
+      seekNominal: state.seekNominal,
       seekToPts: state.seekToPts,
       seekToFrameIndex: state.seekToFrameIndex,
       seekApproximate: state.seekApproximate,
       playSegment: state.playSegment,
       pause: state.pause,
     };
+    seekNominal.mockReset();
     seekToPts.mockReset();
     seekToFrameIndex.mockReset();
     seekApproximate.mockReset();
     playSegment.mockReset();
     pause.mockReset();
     playbackStore.setState({
+      seekNominal,
       seekToPts,
       seekToFrameIndex,
       seekApproximate,
@@ -47,6 +56,18 @@ describe("runShortcutCommand", () => {
 
   afterEach(() => {
     playbackStore.setState(original);
+  });
+
+  // ADR 019: a held backward step plays no cue, so the runner passes the key repeat through.
+  it("passes held to seekNominal for a key repeat, and not held for a press", () => {
+    runShortcutCommand({ kind: "seekNominal", frames: -1, held: true });
+    runShortcutCommand({ kind: "seekNominal", frames: -1, held: false });
+    runShortcutCommand({ kind: "seekNominal", frames: 10, held: true });
+    expect(seekNominal.mock.calls).toEqual([
+      [-1, { held: true }],
+      [-1, { held: false }],
+      [10, { held: true }],
+    ]);
   });
 
   it("runs End on the frame grid as seekToFrameIndex", () => {

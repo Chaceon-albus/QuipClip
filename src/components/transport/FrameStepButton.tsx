@@ -32,7 +32,10 @@ export interface FrameStepButtonProps {
  * repeat stops on release and on pointer cancel anywhere in the window, on pointer leave,
  * when the window loses the focus, when the button becomes disabled, and when it leaves the
  * tree. Enter on a focused button sends a click with a count of 0, which steps once and does
- * not start the repeat. The window shortcut layer takes Space, as for every button.
+ * not start the repeat. A held Enter repeats the key press, and each repeat is a held step
+ * (FrameStepOptions), as a key repeat of the window layer is: the button cancels the key press
+ * of the repeat, so its click does not also step. The window shortcut layer takes Space, as
+ * for every button.
  *
  * The button does not capture the pointer. Pointer leave must reach it, so a drag off the
  * button stops the repeat.
@@ -56,8 +59,9 @@ export function FrameStepButton({
   const holdRef = useRef<StepHold | null>(null);
 
   useEffect(() => {
-    const hold = createStepHold(() => {
-      playbackStore.getState().seekNominal(delta);
+    // A timer repeat is a held step, as a key repeat is (FrameStepOptions).
+    const hold = createStepHold((held) => {
+      playbackStore.getState().seekNominal(delta, { held });
     });
     holdRef.current = hold;
     // A release can land outside the button, so the end of a press is read on the window, in
@@ -115,6 +119,16 @@ export function FrameStepButton({
             }}
             onPointerLeave={() => {
               holdRef.current?.stop();
+            }}
+            onKeyDown={(event) => {
+              if (
+                event.key === "Enter" &&
+                event.repeat &&
+                !nativeContextMenuState.isOpen()
+              ) {
+                event.preventDefault();
+                playbackStore.getState().seekNominal(delta, { held: true });
+              }
             }}
             onClick={(event) => {
               if (!nativeContextMenuState.isOpen()) {

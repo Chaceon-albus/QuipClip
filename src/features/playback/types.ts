@@ -126,6 +126,19 @@ export interface SeekOptions {
 }
 
 /**
+ * Options for a frame step (`seekNominal`).
+ *
+ * `held`: true for each step that repeats a held step: a key repeat of a held arrow key, and a
+ * timer repeat of a held step button (ADR 021). False or absent for a single press, a click and
+ * the first step of a hold. A held backward step plays no cue and stops any cue that sounds,
+ * because audio does not play backwards and each backward cue would replay a forward snippet
+ * (ADR 019). A held forward step requests its cue as a single step does.
+ */
+export interface FrameStepOptions {
+  readonly held?: boolean;
+}
+
+/**
  * Status of the first-presented-frame PTS calibration.
  *
  * - "calibrating": Awaiting first RVFC callback to associate with videoStartPts.
@@ -322,8 +335,10 @@ export interface PlaybackActions {
    * frame for each press (ADR 021), and run as one step when the calibration settles. That step
    * requests the cue once, but the scrub audio element mounts only after the calibration leaves
    * "calibrating", so the controller has no element then and the step makes no sound (ADR 019).
+   * With `held`, a backward step requests no cue and stops the cue, also at the edge, where the
+   * step does not move (see FrameStepOptions).
    */
-  seekNominal: (deltaFrames: number) => void;
+  seekNominal: (deltaFrames: number, options?: FrameStepOptions) => void;
 
   /**
    * Goes to nominal frame `frameIndex` of the frame grid, counted from the calibrated first frame

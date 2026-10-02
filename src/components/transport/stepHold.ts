@@ -24,6 +24,10 @@
  * click of a later press that the button did not take. The caller therefore forgets the press
  * on every pointer down in the window, before the button sees that pointer down.
  *
+ * Each step tells whether it is a timer repeat. The step of the press and the step of a click
+ * are not, and every repeat after the delay is, as a key repeat of a held arrow key is. A held
+ * backward step plays no cue (FrameStepOptions, ADR 019).
+ *
  * The helper holds no DOM reference. The caller forwards the events, and it stops the repeat
  * on pointer up, pointer cancel, pointer leave and window blur, and cancels it when the button
  * becomes disabled or leaves the tree.
@@ -117,11 +121,12 @@ const defaultTimers: StepHoldTimers = {
 /**
  * Creates the hold state of one step button.
  *
- * @param step Performs one frame step. The button passes one `seekNominal` request.
+ * @param step Performs one frame step. The button passes one `seekNominal` request. `held` is
+ *   true for a timer repeat, and false for the step of the press and the step of a click.
  * @param timers The timers. Undefined uses `setTimeout`.
  */
 export function createStepHold(
-  step: () => void,
+  step: (held: boolean) => void,
   timers: StepHoldTimers = defaultTimers,
 ): StepHold {
   let handle: number | null = null;
@@ -139,14 +144,14 @@ export function createStepHold(
 
   const repeat = (): void => {
     handle = timers.setTimer(repeat, STEP_HOLD_INTERVAL_MS);
-    step();
+    step(true);
   };
 
   const press = (): void => {
     stop();
     pressStepped = true;
     handle = timers.setTimer(repeat, STEP_HOLD_DELAY_MS);
-    step();
+    step(false);
   };
 
   const click = (clickCount: number): void => {
@@ -154,7 +159,7 @@ export function createStepHold(
       pressStepped = false;
       return;
     }
-    step();
+    step(false);
   };
 
   const forgetPress = (): void => {

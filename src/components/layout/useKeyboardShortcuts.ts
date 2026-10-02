@@ -59,7 +59,9 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       playback.playSegment(command.inPts, command.outPts);
       return;
     case "seekNominal":
-      playback.seekNominal(command.frames);
+      // A key repeat is a held step (FrameStepOptions). A menu item plans a single press, so
+      // its step is never held.
+      playback.seekNominal(command.frames, { held: command.held });
       return;
     case "seekToPts":
       playback.seekToPts(command.pts, command.options);
@@ -210,7 +212,10 @@ export function useKeyboardShortcuts(): void {
         return;
       }
 
-      const command = planShortcutCommand(resolution.action, snapshot);
+      // The plan of a frame step reads whether the key press repeats a held key.
+      const command = planShortcutCommand(resolution.action, snapshot, {
+        repeat: event.repeat,
+      });
       if (command !== null) {
         runShortcutCommand(command);
       }

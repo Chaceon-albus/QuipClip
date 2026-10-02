@@ -29,6 +29,7 @@ import type { Pts, Rational } from "@/types/project";
 import { scrubAudioController } from "./scrubAudio";
 import type {
   CalibrationStatus,
+  FrameStepOptions,
   PlaybackErrorCode,
   PlaybackMediaElement,
   PlaybackSource,
@@ -353,9 +354,15 @@ function nominalFrameMiddleSeconds(frameIndex: number, frameRate: Rational): num
 /**
  * The frame that a frame step goes to: a step of `deltaFrames` nominal frames from the frame it
  * starts from (seekNominal), or nominal frame `frameIndex` of the grid (seekToFrameIndex).
+ * `held` is the option of seekNominal: the step repeats a held key or a held step button
+ * (FrameStepOptions).
  */
 type FrameStepRequest =
-  | { readonly kind: "relative"; readonly deltaFrames: number }
+  | {
+      readonly kind: "relative";
+      readonly deltaFrames: number;
+      readonly held: boolean;
+    }
   | { readonly kind: "absolute"; readonly frameIndex: number };
 
 /**
@@ -468,8 +475,9 @@ export function createPlaybackStore(
   // It is also the key that keeps the target while a scrub seek is the last request, and the
   // pending target for play and seekNominal.
   let lastAcceptedSeek: { mediaTime: number; scrub: boolean } | null = null;
-  // Position of the last scrub audio burst request. Tracks drag direction and skips audio on
-  // zero-distance moves (ADR 019, ADR 022).
+  // Position of the last scrub audio burst request, or of the last backward scrub sample, which
+  // stops the burst instead, or of the last exact seek when that came later. Tracks drag
+  // direction and skips audio on zero-distance moves (ADR 019, ADR 022).
   let lastScrubAudioTarget: number | null = null;
 
   return createStore<PlaybackStoreState>()((set, get) => {
@@ -505,6 +513,11 @@ export function createPlaybackStore(
      * so that the burst cadence follows the picture decoding cadence. Direction reflects
      * the sign of the movement from the last burst target (1 for forward or initial, -1 for backward).
      * Zero-distance moves are skipped.
+     *
+     * A backward sample plays no burst and stops the one that sounds. Audio does not play
+     * backwards, so each backward burst would seek and play a forward snippet over the frames the
+     * drag just left, and a backward drag would sound as a stutter. The sample still becomes the
+     * last burst target, so the direction of the next sample counts from it.
      */
     const requestScrubBurst = (mediaTime: number): void => {
       let direction: 1 | -1;
@@ -518,6 +531,10 @@ export function createPlaybackStore(
         return;
       }
       lastScrubAudioTarget = mediaTime;
+      if (direction < 0) {
+        scrubAudioController.stop();
+        return;
+      }
       // A drag keeps the sound near the pointer, so the controller applies the tight lag limit
       // of a drag (ADR 019).
       scrubAudioController.request(mediaTime, direction, "drag");
@@ -1327,6 +1344,12 @@ export function createPlaybackStore(
         grid !== null &&
         grid.frameIndexAt(currentBrowserTime) !== grid.startFrame;
       const clampedAtEnd = direction > 0 && unclampedTarget > upperBound;
+      // A held backward step plays no cue, and it stops the cue that sounds (FrameStepOptions).
+      // Audio does not play backwards, so each backward request would seek the cue and play a
+      // forward snippet over the frame just left, with no fade, and a held key or a held step
+      // button would sound as a stutter. A single backward step, and the first step of a hold,
+      // keep their cue (ADR 019).
+      const silencesCue = request.kind === "relative" && request.held && direction < 0;
       if (
         pending?.scrub !== true &&
         !leftStartFrameDuringPlayback &&
@@ -1344,9 +1367,13 @@ export function createPlaybackStore(
       ) {
         // A frame step means that the user stops to look at frames (ADR 019, ADR 022), so an
         // edge press during playback still pauses, as the seek path does. pause stops the cue
-        // and invalidates a pending play promise, and it does not touch presentedFrame.
+        // and invalidates a pending play promise, and it does not touch presentedFrame. A held
+        // backward press at the first frame also stops the cue: the step that reached that
+        // frame can still sound.
         if (state.isPlaying) {
           get().pause();
+        } else if (silencesCue) {
+          scrubAudioController.stop();
         }
         return;
       }
@@ -1357,10 +1384,12 @@ export function createPlaybackStore(
         return;
       }
 
-      // A relative step is a frame step, and it requests the cue (ADR 019). An absolute target
-      // is a jump, as a click on the ruler is, and it requests none: seekToFrameIndex stopped
-      // the cue as seekToPts does.
-      if (request.kind === "relative") {
+      // A relative step is a frame step, and it requests the cue (ADR 019), except a held
+      // backward step, which stops it (silencesCue). An absolute target is a jump, as a click on
+      // the ruler is, and it requests none: seekToFrameIndex stopped the cue as seekToPts does.
+      if (silencesCue) {
+        scrubAudioController.stop();
+      } else if (request.kind === "relative") {
         // A frame step: the default kind of the request, whose long lag limit keeps a held key
         // continuous (ADR 019).
         scrubAudioController.request(targetTime, direction > 0 ? 1 : -1);
@@ -2498,7 +2527,7 @@ export function createPlaybackStore(
         });
       },
 
-      seekNominal: (deltaFrames: number) => {
+      seekNominal: (deltaFrames: number, options?: FrameStepOptions) => {
         // A frame step ends a segment playback (ADR 026), also a step at an edge.
         dropPlaybackStop();
         if (
@@ -2547,8 +2576,11 @@ export function createPlaybackStore(
           return;
         }
 
+        // A held backward step requests no cue (FrameStepOptions). A deferred step above requests
+        // no cue when the store accepts it, held or not. It runs at the anchor as one step that
+        // is not held, and that step requests its one cue (ADR 019, ADR 022).
         stepToFrame(
-          { kind: "relative", deltaFrames },
+          { kind: "relative", deltaFrames, held: options?.held === true },
           state,
           attachedSource,
           attachedElement,

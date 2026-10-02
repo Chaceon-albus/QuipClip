@@ -2259,6 +2259,134 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().seekNominal(-1);
       expect(stopSpy).not.toHaveBeenCalled();
     });
+
+    // A held backward step plays no cue: audio does not play backwards, so each request would
+    // replay a forward snippet over the frame just left (ADR 019).
+    describe("held steps", () => {
+      /** Attaches sourceA on the approximate clock at `position`, with no seek running. */
+      function attachAt(
+        store: PlaybackStore,
+        video: ReturnType<typeof createFakeVideo>,
+        position: number,
+      ): void {
+        store.getState().attach(sourceA, video);
+        store.getState().syncReady(identityA, video);
+        // A source that never calibrates steps on the approximate clock (ADR 021).
+        store.getState().syncPresentationUnavailable(identityA, video);
+        // The element moves on after metadata loaded, so the timeline origin stays 0.
+        video.currentTime = position;
+        video.seeking = false;
+        requestSpy.mockClear();
+        stopSpy.mockClear();
+      }
+
+      it("a held backward step stops the cue and requests none, after a first step that requests -1", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachAt(store, video, 2.0);
+
+        // The first step of a hold is a single step, and it keeps its cue.
+        store.getState().seekNominal(-1);
+        expect(video.currentTime).toBe(1.96);
+        expect(requestSpy).toHaveBeenCalledExactlyOnceWith(1.96, -1);
+        expect(stopSpy).not.toHaveBeenCalled();
+
+        // Each repeat still steps, and it stops the cue instead of a request.
+        fireSeeked(store, identityA, video);
+        store.getState().seekNominal(-1, { held: true });
+        expect(video.currentTime).toBeCloseTo(1.92, 9);
+        expect(requestSpy).toHaveBeenCalledTimes(1);
+        expect(stopSpy).toHaveBeenCalledTimes(1);
+
+        // A held ten-frame step follows the same rule (ADR 026).
+        fireSeeked(store, identityA, video);
+        store.getState().seekNominal(-10, { held: true });
+        expect(video.currentTime).toBeCloseTo(1.52, 9);
+        expect(requestSpy).toHaveBeenCalledTimes(1);
+        expect(stopSpy).toHaveBeenCalledTimes(2);
+
+        // `held: false` is a single step.
+        fireSeeked(store, identityA, video);
+        store.getState().seekNominal(-1, { held: false });
+        expect(requestSpy).toHaveBeenCalledTimes(2);
+        expect(requestSpy).toHaveBeenLastCalledWith(video.currentTime, -1);
+        expect(stopSpy).toHaveBeenCalledTimes(2);
+      });
+
+      it("a held forward step requests the cue with direction 1, as a single step does", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        attachAt(store, video, 2.0);
+
+        store.getState().seekNominal(1);
+        fireSeeked(store, identityA, video);
+        store.getState().seekNominal(1, { held: true });
+        fireSeeked(store, identityA, video);
+        store.getState().seekNominal(10, { held: true });
+
+        expect(requestSpy.mock.calls).toHaveLength(3);
+        expect(requestSpy.mock.calls[0]).toEqual([2.04, 1]);
+        expect(requestSpy.mock.calls[1][0]).toBeCloseTo(2.08, 9);
+        expect(requestSpy.mock.calls[1][1]).toBe(1);
+        expect(requestSpy.mock.calls[2][0]).toBeCloseTo(2.48, 9);
+        expect(requestSpy.mock.calls[2][1]).toBe(1);
+        expect(stopSpy).not.toHaveBeenCalled();
+      });
+
+      it("a held backward step at the first frame stops the cue and seeks nothing; a single one there leaves the cue", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        store.getState().attach(sourceA, video);
+        video.readyState = 1;
+        store.getState().syncReady(identityA, video);
+        store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        const presented = store.getState().presentedFrame;
+        stopSpy.mockClear();
+
+        // A single step at the edge does nothing, as before.
+        store.getState().seekNominal(-1);
+        expect(stopSpy).not.toHaveBeenCalled();
+
+        // A held step at the edge stops the cue of the step that reached the first frame.
+        store.getState().seekNominal(-1, { held: true });
+        expect(stopSpy).toHaveBeenCalledTimes(1);
+        expect(requestSpy).not.toHaveBeenCalled();
+        expect(video.currentTimeSets).toBe(0);
+        expect(store.getState().presentedFrame).toBe(presented);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+
+        // A held forward step at the last frame changes nothing for the cue.
+        store.getState().seekToPts("250" as Pts);
+        fireSeeked(store, identityA, video);
+        store.getState().syncPresentedFrame(identityA, 9.96, 2, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("249");
+        const sets = video.currentTimeSets;
+        stopSpy.mockClear();
+        store.getState().seekNominal(1, { held: true });
+        expect(video.currentTimeSets).toBe(sets);
+        expect(stopSpy).not.toHaveBeenCalled();
+        expect(requestSpy).not.toHaveBeenCalled();
+      });
+
+      it("a held backward step at the first frame during playback pauses once, and the pause stops the cue", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        store.getState().attach(sourceA, video);
+        video.readyState = 1;
+        store.getState().syncReady(identityA, video);
+        store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+        store.getState().play();
+        expect(store.getState().isPlaying).toBe(true);
+        stopSpy.mockClear();
+
+        store.getState().seekNominal(-1, { held: true });
+        expect(store.getState().isPlaying).toBe(false);
+        expect(stopSpy).toHaveBeenCalledTimes(1);
+        expect(requestSpy).not.toHaveBeenCalled();
+        expect(video.currentTimeSets).toBe(0);
+      });
+    });
   });
 
   describe("ADR 022: Playhead Scrub Display Target and Coalesced Seeks", () => {
@@ -3857,7 +3985,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
       unsubscribe();
     });
 
-    it("the audio request happens when a scrub seek is issued, not when it is queued; the direction is correct for forward and backward moves; no request for a zero move", () => {
+    it("the audio request happens when a scrub seek is issued, not when it is queued; a forward move requests direction 1, a backward move stops the cue; no request for a zero move", () => {
       const store = createPlaybackStore();
       const video = createFakeVideo({ fastSeek: true });
       store.getState().attach(sourceA, video);
@@ -3881,16 +4009,20 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(requestSpy).toHaveBeenCalledTimes(2);
       expect(requestSpy).toHaveBeenLastCalledWith(3.0, 1, "drag");
 
-      // 4. Backward move to 1.5 -> direction -1
+      // 4. Backward move to 1.5 -> direction -1: no burst, and the burst that sounds stops,
+      // because audio does not play backwards (ADR 019)
+      stopSpy.mockClear();
       video.seeking = false;
       store.getState().seekApproximate(1.5, { scrub: true });
-      expect(requestSpy).toHaveBeenCalledTimes(3);
-      expect(requestSpy).toHaveBeenLastCalledWith(1.5, -1, "drag");
+      expect(requestSpy).toHaveBeenCalledTimes(2);
+      expect(stopSpy).toHaveBeenCalledTimes(1);
 
       // 5. Zero move: duplicate scrub request with same time is dropped, so no audio request
+      stopSpy.mockClear();
       video.seeking = false;
       store.getState().seekApproximate(1.5, { scrub: true });
-      expect(requestSpy).toHaveBeenCalledTimes(3);
+      expect(requestSpy).toHaveBeenCalledTimes(2);
+      expect(stopSpy).not.toHaveBeenCalled();
     });
 
     it("makes the zero-move audio branch reachable: issue scrub T, queue scrub U, queue scrub T, flush: no audio request", () => {
@@ -3934,11 +4066,13 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().seekApproximate(2.0, { scrub: false });
       expect(requestSpy).not.toHaveBeenCalled();
 
-      // First scrub after pointer down moves backward to 1.5 -> direction -1 from 2.0
+      // First scrub after pointer down moves backward to 1.5 -> direction -1 from 2.0, so it
+      // plays no burst and stops the cue (ADR 019)
+      stopSpy.mockClear();
       video.seeking = false;
       store.getState().seekApproximate(1.5, { scrub: true });
-      expect(requestSpy).toHaveBeenCalledTimes(1);
-      expect(requestSpy).toHaveBeenCalledWith(1.5, -1, "drag");
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(stopSpy).toHaveBeenCalledTimes(1);
 
       // Pointer down exact seek to 3.0
       video.seeking = false;
@@ -3947,8 +4081,19 @@ describe("Playback Store & PTS Presentation Engine", () => {
       // First scrub moves forward to 3.5 -> direction 1 from 3.0
       video.seeking = false;
       store.getState().seekApproximate(3.5, { scrub: true });
-      expect(requestSpy).toHaveBeenCalledTimes(2);
+      expect(requestSpy).toHaveBeenCalledTimes(1);
       expect(requestSpy).toHaveBeenLastCalledWith(3.5, 1, "drag");
+
+      // Pointer down exact seek to 1.0, then a scrub to 2.0: forward from the pointer down,
+      // although it is behind the last burst target 3.5 -> direction 1
+      video.seeking = false;
+      store.getState().seekApproximate(1.0, { scrub: false });
+      stopSpy.mockClear();
+      video.seeking = false;
+      store.getState().seekApproximate(2.0, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(2);
+      expect(requestSpy).toHaveBeenLastCalledWith(2.0, 1, "drag");
+      expect(stopSpy).not.toHaveBeenCalled();
 
       // Pointer down exact seek to 4.0
       video.seeking = false;
@@ -3958,6 +4103,50 @@ describe("Playback Store & PTS Presentation Engine", () => {
       video.seeking = false;
       store.getState().seekApproximate(4.0, { scrub: true });
       expect(requestSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it("a backward scrub sample stops the cue and requests none, also at the flush of a queued one; the next forward sample requests direction 1 from it", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ fastSeek: true });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+
+      // Pointer down: exact seek to 3.0
+      store.getState().seekApproximate(3.0);
+      fireSeeked(store, identityA, video);
+      requestSpy.mockClear();
+      stopSpy.mockClear();
+
+      // A drag back to 2.5 stops the cue at once
+      store.getState().seekApproximate(2.5, { scrub: true });
+      expect(video.fastSeek).toHaveBeenLastCalledWith(2.5);
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+
+      // A drag back to 2.0 while the seek to 2.5 runs: queued, and it stops the cue when the
+      // seek is issued, as a forward sample requests its burst then
+      store.getState().seekApproximate(2.0, { scrub: true });
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+      fireSeeked(store, identityA, video);
+      expect(video.fastSeek).toHaveBeenLastCalledWith(2.0);
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(stopSpy).toHaveBeenCalledTimes(2);
+
+      // A drag forward to 2.2: forward from the last backward sample 2.0, although it is
+      // behind the pointer down at 3.0
+      fireSeeked(store, identityA, video);
+      store.getState().seekApproximate(2.2, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledExactlyOnceWith(2.2, 1, "drag");
+      expect(stopSpy).toHaveBeenCalledTimes(2);
+
+      // A drag forward again continues with direction 1
+      fireSeeked(store, identityA, video);
+      store.getState().seekApproximate(2.4, { scrub: true });
+      expect(requestSpy).toHaveBeenCalledTimes(2);
+      expect(requestSpy).toHaveBeenLastCalledWith(2.4, 1, "drag");
+      expect(stopSpy).toHaveBeenCalledTimes(2);
     });
 
     it("an exact seekToPts / seekApproximate stops the cue (scrubAudioController.stop is called), a scrub one does not", () => {
@@ -3974,10 +4163,11 @@ describe("Playback Store & PTS Presentation Engine", () => {
       store.getState().seekApproximate(2.0, { scrub: true });
       expect(stopSpy).not.toHaveBeenCalled();
 
-      // Scrub seekToPts does not call stop()
+      // Scrub seekToPts does not call stop(). It moves forward, because a backward scrub stops
+      // the cue (ADR 019).
       stopSpy.mockClear();
       video.seeking = false;
-      store.getState().seekToPts("25" as Pts, { scrub: true });
+      store.getState().seekToPts("75" as Pts, { scrub: true });
       expect(stopSpy).not.toHaveBeenCalled();
 
       // Exact seekApproximate calls stop()
@@ -6719,6 +6909,31 @@ describe("Playback Store & PTS Presentation Engine", () => {
       const state = store.getState();
       return canMarkIn(state.calibrationStatus, state.presentedFrame, true);
     }
+
+    it("requests no cue for a held step that it defers, and the step at the anchor requests one (ADR 019)", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      attachCalibrating(store, video);
+      const stopSpy = vi.spyOn(scrubAudioController, "stop");
+      try {
+        store.getState().seekNominal(3);
+        store.getState().seekNominal(1, { held: true });
+        store.getState().seekNominal(-1, { held: true });
+        store.getState().seekNominal(-1, { held: true });
+        expect(video.currentTimeSets).toBe(0);
+        expect(displayed(store)).toBeCloseTo(0.08, 9);
+        expect(requestSpy).not.toHaveBeenCalled();
+        expect(stopSpy).not.toHaveBeenCalled();
+
+        // The net step of 2 frames runs once at the anchor. It is not held, so it requests the
+        // cue, which no element plays yet.
+        store.getState().syncPresentedFrame(identityA, 0, 1, video);
+        expect(video.currentTimeSets).toBe(1);
+        expect(requestSpy).toHaveBeenCalledExactlyOnceWith(video.currentTime, 1);
+      } finally {
+        stopSpy.mockRestore();
+      }
+    });
 
     it("defers a step, shows its target, and runs it once on the frame grid at the anchor", () => {
       const store = createPlaybackStore();

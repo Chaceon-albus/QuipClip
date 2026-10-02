@@ -5,7 +5,9 @@
  * frames so the user can hear word boundaries or audio transients.
  *
  * Amends ADR 019 via ADR 022: playhead dragging serves as a second caller for audio bursts.
- * The store, not the controller, tracks the drag direction and skips zero-distance moves.
+ * The store, not the controller, tracks the drag direction and skips zero-distance moves. The
+ * store also stops the burst, and requests none, for a backward drag sample and for a held
+ * backward frame step, because a backward burst plays forward over the frames just left.
  *
  * A burst ends on the media clock of the element, not on a wall-clock timer: the element stops
  * when its `currentTime` reaches the latest requested target plus `SCRUB_BURST_SECONDS`. The

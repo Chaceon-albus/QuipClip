@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getSourceRevisionKey } from "@/features/media";
 import {
   createPlaybackStore,
   getDisplayedElapsedSeconds,
+  scrubAudioController,
   type PlaybackMediaElement,
   type PlaybackSource,
 } from "@/features/playback";
@@ -16,6 +17,7 @@ import {
   planShortcutCommand,
   TRIM_LOCKED_ACTIONS,
   type ShortcutCommand,
+  type ShortcutPress,
   type ShortcutProbe,
   type ShortcutSnapshot,
 } from "./shortcutCommands";
@@ -226,7 +228,7 @@ function createStoreHarness({
           .seekApproximate(command.seconds, APPROXIMATE_SHORTCUT_SEEK_OPTIONS);
         return;
       case "seekNominal":
-        playback.getState().seekNominal(command.frames);
+        playback.getState().seekNominal(command.frames, { held: command.held });
         return;
       case "markIn":
         timeline.getState().markIn(command.pts);
@@ -242,8 +244,11 @@ function createStoreHarness({
     }
   };
 
-  const press = (action: ShortcutAction): ShortcutCommand | null => {
-    const command = planShortcutCommand(action, snapshot());
+  const press = (
+    action: ShortcutAction,
+    keyPress?: ShortcutPress,
+  ): ShortcutCommand | null => {
+    const command = planShortcutCommand(action, snapshot(), keyPress);
     if (command !== null) {
       run(command);
     }
@@ -417,10 +422,12 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("stepBackOneFrame", createSnapshot())).toEqual({
         kind: "seekNominal",
         frames: -1,
+        held: false,
       });
       expect(planShortcutCommand("stepForwardOneFrame", createSnapshot())).toEqual({
         kind: "seekNominal",
         frames: 1,
+        held: false,
       });
     });
 
@@ -429,11 +436,61 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("stepBackTenFrames", createSnapshot())).toEqual({
         kind: "seekNominal",
         frames: -10,
+        held: false,
       });
       expect(planShortcutCommand("stepForwardTenFrames", createSnapshot())).toEqual({
         kind: "seekNominal",
         frames: 10,
+        held: false,
       });
+    });
+
+    // ADR 019: a held backward step plays no cue, so the plan tells a key repeat from a press.
+    it("marks the step of a key repeat as held, and a press or no press as not held", () => {
+      const steps = [
+        ["stepBackOneFrame", -1],
+        ["stepForwardOneFrame", 1],
+        ["stepBackTenFrames", -10],
+        ["stepForwardTenFrames", 10],
+      ] as const;
+      for (const [action, frames] of steps) {
+        expect(planShortcutCommand(action, createSnapshot(), { repeat: true })).toEqual(
+          {
+            kind: "seekNominal",
+            frames,
+            held: true,
+          },
+        );
+        expect(
+          planShortcutCommand(action, createSnapshot(), { repeat: false }),
+        ).toEqual({
+          kind: "seekNominal",
+          frames,
+          held: false,
+        });
+        // A menu item plans no press: a single step.
+        expect(planShortcutCommand(action, createSnapshot())).toEqual({
+          kind: "seekNominal",
+          frames,
+          held: false,
+        });
+      }
+    });
+
+    it("plans the same command for a repeat and a press of an action that is not a step", () => {
+      for (const action of SHORTCUT_ACTIONS) {
+        if (
+          action === "stepBackOneFrame" ||
+          action === "stepForwardOneFrame" ||
+          action === "stepBackTenFrames" ||
+          action === "stepForwardTenFrames"
+        ) {
+          continue;
+        }
+        expect(planShortcutCommand(action, createSnapshot(), { repeat: true })).toEqual(
+          planShortcutCommand(action, createSnapshot()),
+        );
+      }
     });
 
     it("steps on a source that never calibrates, as the step buttons do (ADR 021)", () => {
@@ -443,10 +500,12 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("stepForwardOneFrame", uncalibrated)).toEqual({
         kind: "seekNominal",
         frames: 1,
+        held: false,
       });
       expect(planShortcutCommand("stepBackTenFrames", uncalibrated)).toEqual({
         kind: "seekNominal",
         frames: -10,
+        held: false,
       });
     });
 
@@ -1440,6 +1499,54 @@ describe("planShortcutCommand", () => {
   // store would clear presentedFrame, and ADR 022 says that such a seek may bring no frame
   // callback, so the edit actions would stay disabled.
   describe("key sequences on the real stores", () => {
+    // ADR 019: audio does not play backwards, so a held ← sounds only its first step.
+    it("a held ← cues its first step only, and a held → cues every step", () => {
+      const request = vi.spyOn(scrubAudioController, "request");
+      const stop = vi.spyOn(scrubAudioController, "stop");
+      try {
+        const h = createStoreHarness();
+        // The browser presents the frame that a step aims at, from its start (PTS = frame).
+        const presentFrame = (frame: number): void => {
+          h.presentSeekedFrame(frame / 25);
+        };
+        h.clickRulerAt("50");
+        request.mockClear();
+        stop.mockClear();
+
+        // The key down of a held ←, then two key repeats.
+        h.press("stepBackOneFrame", { repeat: false });
+        expect(request).toHaveBeenCalledExactlyOnceWith(49.5 / 25, -1);
+        expect(stop).not.toHaveBeenCalled();
+        presentFrame(49);
+        h.press("stepBackOneFrame", { repeat: true });
+        presentFrame(48);
+        h.press("stepBackTenFrames", { repeat: true });
+        presentFrame(38);
+        expect(request).toHaveBeenCalledOnce();
+        expect(stop).toHaveBeenCalledTimes(2);
+        // The silent steps still move the frames of each press, to the middle of the frame.
+        expect(h.element.currentTime).toBeCloseTo(38.5 / 25, 9);
+        expect(h.shownPts()).toBe("38");
+
+        // A held → cues the key down and each repeat.
+        request.mockClear();
+        stop.mockClear();
+        h.press("stepForwardOneFrame", { repeat: false });
+        presentFrame(39);
+        h.press("stepForwardOneFrame", { repeat: true });
+        presentFrame(40);
+        expect(request.mock.calls).toEqual([
+          [39.5 / 25, 1],
+          [40.5 / 25, 1],
+        ]);
+        expect(stop).not.toHaveBeenCalled();
+        expect(h.shownPts()).toBe("40");
+      } finally {
+        request.mockRestore();
+        stop.mockRestore();
+      }
+    });
+
     it("shows why: a seek onto the frame on screen clears the presented frame", () => {
       const h = createStoreHarness();
       expect(h.shownPts()).toBe("0");
@@ -1632,10 +1739,12 @@ describe("planShortcutCommand", () => {
       expect(h.press("stepForwardOneFrame")).toEqual({
         kind: "seekNominal",
         frames: 1,
+        held: false,
       });
       expect(h.press("stepForwardTenFrames")).toEqual({
         kind: "seekNominal",
         frames: 10,
+        held: false,
       });
       expect(h.element.currentTimeSets).toBe(seeks);
       expect(h.shownPts()).toBe("249");
@@ -1703,6 +1812,7 @@ describe("planShortcutCommand", () => {
       expect(h.press("stepForwardOneFrame")).toEqual({
         kind: "seekNominal",
         frames: 1,
+        held: false,
       });
       // The step past the last frame changes nothing: the playhead stays on frame 249.
       expect(h.playheadSeconds()).toBeCloseTo(249 / 25, 9);
@@ -1838,6 +1948,7 @@ describe("planShortcutCommand", () => {
         expect(h.press("stepForwardOneFrame")).toEqual({
           kind: "seekNominal",
           frames: 1,
+          held: false,
         });
       }
       expect(h.playback.getState().seekTargetSeconds).toBeCloseTo(0.12, 9);
@@ -2061,6 +2172,7 @@ describe("planShortcutCommand", () => {
         expect(h.press("stepForwardOneFrame")).toEqual({
           kind: "seekNominal",
           frames: 1,
+          held: false,
         });
         expect(h.playback.getState().playbackStop).toBeNull();
         expect(h.playback.getState().isPlaying).toBe(false);

@@ -129,12 +129,29 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
   ["markIn", "markOut", "deleteSegment", "undo", "redo"],
 );
 
+/**
+ * The key press that a plan reads, beside the snapshot. A caller that is not a key press, such
+ * as a menu item, passes none, which plans a single press.
+ */
+export interface ShortcutPress {
+  /** True for a key repeat of a held key (`KeyboardEvent.repeat`). */
+  readonly repeat: boolean;
+}
+
 /** The store call that one shortcut action makes. */
 export type ShortcutCommand =
   | { readonly kind: "togglePlayback" }
   | { readonly kind: "pause" }
   | { readonly kind: "playSegment"; readonly inPts: Pts; readonly outPts: Pts }
-  | { readonly kind: "seekNominal"; readonly frames: number }
+  | {
+      readonly kind: "seekNominal";
+      readonly frames: number;
+      /**
+       * True for a key repeat of a held step key, the `held` option of `seekNominal`: a held
+       * backward step plays no cue (FrameStepOptions, ADR 019).
+       */
+      readonly held: boolean;
+    }
   | {
       readonly kind: "seekToPts";
       readonly pts: Pts;
@@ -563,10 +580,13 @@ function planPlaySegment(
 
 /**
  * Returns the store call that the action makes now, or null when its condition is false.
+ *
+ * @param press The key press, or undefined for a single press. Only the frame steps read it.
  */
 export function planShortcutCommand(
   action: ShortcutAction,
   snapshot: ShortcutSnapshot,
+  press?: ShortcutPress,
 ): ShortcutCommand | null {
   const { probe, playback, timeline, viewport } = snapshot;
   const hasMedia = probe !== null;
@@ -601,8 +621,9 @@ export function planShortcutCommand(
       const sign =
         action === "stepBackOneFrame" || action === "stepBackTenFrames" ? -1 : 1;
       // One request with all the frame intervals, never one request for each frame: ADR 019
-      // then sounds one cue for the step.
-      return { kind: "seekNominal", frames: sign * size };
+      // then sounds one cue for the step. A key repeat is a held step, whose backward cue is
+      // silent (FrameStepOptions).
+      return { kind: "seekNominal", frames: sign * size, held: press?.repeat === true };
     }
 
     case "goToStart": {

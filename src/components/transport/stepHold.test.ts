@@ -51,7 +51,7 @@ function createManualTimers(): StepHoldTimers & {
 
 function setup() {
   const timers = createManualTimers();
-  const step = vi.fn();
+  const step = vi.fn<(held: boolean) => void>();
   const hold = createStepHold(step, timers);
   return { timers, step, hold };
 }
@@ -96,6 +96,35 @@ describe("createStepHold", () => {
     timers.advance(1000);
     expect(step.mock.calls.length - 11).toBeGreaterThanOrEqual(29);
     expect(step.mock.calls.length - 11).toBeLessThanOrEqual(31);
+  });
+
+  // ADR 019: a held backward step plays no cue, so the button tells a repeat from a press.
+  it("reports the step of the press as not held, and every repeat as held", () => {
+    const { timers, step, hold } = setup();
+
+    hold.press();
+    expect(step.mock.calls).toEqual([[false]]);
+
+    timers.advance(STEP_HOLD_DELAY_MS + STEP_HOLD_INTERVAL_MS * 2);
+    expect(step.mock.calls).toEqual([[false], [true], [true], [true]]);
+
+    // A new press after a release starts with a step that is not held again.
+    hold.stop();
+    hold.click(1);
+    hold.press();
+    expect(step).toHaveBeenLastCalledWith(false);
+    timers.advance(STEP_HOLD_DELAY_MS);
+    expect(step).toHaveBeenLastCalledWith(true);
+  });
+
+  it("reports the step of a click as not held", () => {
+    const { step, hold } = setup();
+
+    // A click that no pointer press started, and a pointer click whose press the button did
+    // not take.
+    hold.click(0);
+    hold.click(1);
+    expect(step.mock.calls).toEqual([[false], [false]]);
   });
 
   it("stops on release, and the click of that release takes no step", () => {
