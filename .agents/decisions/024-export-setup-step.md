@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-22
 - Deciders: capric98
-- Amended by: ADR 038
+- Amended by: ADR 038, ADR 036
 
 ## Context
 
@@ -89,6 +89,9 @@ check answers. That run replaces a step for the same file that still waits, for 
 check of an earlier Back; otherwise that step would hold the guard, and the return would get
 no check. A close of the dialog while such a check waits leaves Export unavailable until the
 check answers, at most 3 seconds.
+
+(Changed on 2026-10-02.) The preset summary carries a switch for the video and one for the
+audio, and the save dialog proposes the extension of the chosen output (ADR 036).
 
 (Changed on 2026-10-02.) Settings is its own window (ADR 038). Manage Presets… and Open
 Settings… open that window on the Presets tab with the preset of the step, and the export

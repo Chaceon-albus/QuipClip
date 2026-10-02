@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-02
 - Deciders: capric98
-- Amends: ADR 014, ADR 016, ADR 023, ADR 025
+- Amends: ADR 014, ADR 016, ADR 023, ADR 024, ADR 025
 
 ## Context
 
@@ -11,8 +11,7 @@ Every export wrote a video stream, and it wrote an audio stream whenever the sou
 The user asked for an export of the video only and an export of the audio only. The user chose
 to make this a choice of the export dialog, not a field of the preset: the video and the audio
 are both on by default, the user can turn one of them off, and the user can never turn both
-off. This record states the backend and the wire contract. The control in the export dialog is
-a later unit, and until it lands every request asks for the video and the audio.
+off. This record states the backend and the wire contract, and the control in the export dialog.
 
 The export plan already had optional parts after a refactor: `video: Option<PlannedVideo>` and
 `audio: Option<PlannedAudio>`. The graph and the arguments already rendered a plan without
@@ -119,6 +118,25 @@ segments, both graph shapes, output rates from 8 kHz to 192 kHz, stereo and mono
 - In 24 pairs, the audio-only output decoded to the same samples as the audio of a video and
   audio export of the same plan. The audio-only cut uses the same `atrim` ticks. An export with
   video can pad a segment other than the last with silence in `concat` when its video is longer.
+
+### The control in the export dialog
+
+(Added on 2026-10-02.) The preset summary of the setup step (ADR 024) shows a small switch at the
+end of the Video heading and of the Audio heading. Both are on by default. A group whose switch is
+off shows one line, "Not exported", in place of its rows. The last switch that is on cannot be
+turned off: it is `aria-disabled`, and its tooltip says that the export writes at least the video
+or the audio. With a source that has no audio, the audio switch is off and locked, the video
+switch is locked with a tooltip that names the missing audio, and the request asks for the video
+only. The switches do not change while the save panel is open, because the request already holds
+the choice. The choice lasts for the session, and it goes back to both streams when the open media
+changes. Nothing stores it.
+
+The container row, the size estimate, the blockers and the marks of the encoders follow the
+choice. The MOV preset with FLAC or Opus is blocked only when the export writes both streams,
+because an audio-only export of a MOV preset uses the `mp4` muxer. The save panel proposes the
+extension of the output, `.m4a` or `.mka` for the audio only, and the filter names Audio Files or
+Video Files. A name that the user types with another extension is kept, as for an export with
+video; the muxer is set explicitly, so the file is still valid.
 
 ## Consequences
 
