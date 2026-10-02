@@ -43,6 +43,15 @@ and it deletes the file on every path. It runs at `-loglevel level+warning`.
 - The child process starts with no console window on Windows (ADR 018), and a time-out kills and
   reaps it.
 
+(Changed on 2026-10-02.) The black source carries `setparams=range=tv`. Without a colour
+range, `h264_videotoolbox` warned on every test of an 8-bit format, so every such preset read as
+passed with a warning. The response also says whether Rust stored the result: not when an export
+overlapped the test, when the binary has no cache key, or when the write of the cache failed.
+Before each test, the command deletes the temporary files of other processes that are older than
+60 s, which a quit during a test can leave behind. A test of the command compares the encoder,
+pixel format, option and muxer arguments with what the export renders for the same preset, for
+every seed.
+
 ### The result
 
 The result is one of `passed`, `passedWithWarnings`, `failed` and `timedOut`, with one line of
