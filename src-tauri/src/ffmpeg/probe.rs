@@ -106,6 +106,11 @@ pub struct AudioProbe {
     /// would bind stream 1 (ADR 014).
     pub index: u32,
     pub codec: Option<String>,
+    /// The sample rate of this stream in hertz, or `None` when ffprobe reports none or `0`.
+    ///
+    /// ffprobe reports `0` for the audio of an MPEG-TS or MPEG-PS source whose first packet comes
+    /// after its analysis. An export that writes audio then reads the rate from that packet
+    /// ([`probe_audio_sample_rate_at`]).
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
     /// The time of the first sample of this stream, in seconds on the timeline of the container,
@@ -217,9 +222,10 @@ pub enum ProbeError {
     },
     /// The caller's cancel flag was set while `ffprobe` ran, and the run killed it.
     ///
-    /// Only [`probe_output_audio`] and [`probe_first_audio_packet`] take a cancel flag: they run
-    /// while an export holds the export slot, where a user's Stop and an application quit
-    /// (ADR 017) must not wait out [`PROBE_TIMEOUT`]. [`probe_media`] never reports this.
+    /// Only [`probe_output_audio`], [`probe_first_audio_packet`] and
+    /// [`probe_audio_sample_rate_at`] take a cancel flag: they run while an export holds the
+    /// export slot, where a user's Stop and an application quit (ADR 017) must not wait out
+    /// [`PROBE_TIMEOUT`]. [`probe_media`] never reports this.
     Canceled,
 }
 
@@ -504,24 +510,37 @@ fn parse_decimal_seconds(value: Option<&str>) -> Option<Rational> {
     Rational::from_decimal_str(text)
 }
 
-/// Run the resolved ffprobe executable to read the time of the first packet of the stream
-/// `stream_index` of `media_path`, within [`PROBE_TIMEOUT`], and stop it when `cancel` is set.
+/// What [`probe_first_audio_packet`] reads about the first packet of one stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstAudioPacket {
+    /// The `pts` of the packet times the `time_base` of the stream, exact, or `None` when the
+    /// packet has no usable `pts` or the stream no positive time base.
+    pub time: Option<Rational>,
+    /// The byte position of the packet in the file, or `None` when ffprobe reports none.
+    pub position: Option<u64>,
+    /// The id of the stream in its container, such as the PID of an MPEG-TS stream, or `None`
+    /// when the container gives its streams no id, as Matroska does.
+    pub stream_id: Option<u32>,
+}
+
+/// Run the resolved ffprobe executable to read the first packet of the stream `stream_index` of
+/// `media_path`, within [`PROBE_TIMEOUT`], and stop it when `cancel` is set.
 ///
-/// [`probe_media`] analyzes about the first 5 s of a file. In a Matroska or MPEG-TS source whose
-/// audio starts later than that, it reports the start of the container as the start of the audio
-/// (ADR 014 measurement 22). After the same analysis, this run reads packets until the first
+/// [`probe_media`] analyzes about the first 5 s of a file. In a Matroska, MPEG-TS or MPEG-PS source
+/// whose audio starts later than that, it reports the start of the container as the start of the
+/// audio (ADR 014 measurements 22 and 24). After the same analysis, this run reads packets until the first
 /// packet of the one stream, and decodes none of them, so it finds that start at any distance.
-/// [`AudioProbe::take_first_packet`] applies the answer.
+/// [`AudioProbe::take_first_packet`] applies its time. Its position and the id of the stream let
+/// [`probe_audio_sample_rate_at`] read a sample rate that the analysis missed.
 ///
-/// The answer is `Some` with the `pts` of that packet times the `time_base` of the stream, exact,
-/// and `None` when the stream has no packet or the packet has no `pts`. The runner, the deadline
-/// and the cancel rule are those of [`probe_output_audio`] (`procutil`, ADR 018).
+/// The answer is `None` when the stream has no packet. The runner, the deadline and the cancel
+/// rule are those of [`probe_output_audio`] (`procutil`, ADR 018).
 pub fn probe_first_audio_packet(
     ffprobe_path: &Path,
     media_path: &Path,
     stream_index: u32,
     cancel: &AtomicBool,
-) -> Result<Option<Rational>, ProbeError> {
+) -> Result<Option<FirstAudioPacket>, ProbeError> {
     let stream = stream_index.to_string();
     let arguments = [
         OsStr::new("-v"),
@@ -529,7 +548,7 @@ pub fn probe_first_audio_packet(
         OsStr::new("-select_streams"),
         OsStr::new(&stream),
         OsStr::new("-show_entries"),
-        OsStr::new("packet=pts:stream=time_base"),
+        OsStr::new("packet=pts,pos:stream=id,time_base"),
         // Stop after one packet of the selected stream. The packets of the other streams in
         // front of it are read and dropped, not decoded.
         OsStr::new("-read_intervals"),
@@ -552,25 +571,48 @@ pub fn probe_first_audio_packet(
 
 /// Read the answer of [`probe_first_audio_packet`].
 ///
-/// Only malformed JSON fails. No packet, a packet without a usable `pts`, and a missing or
-/// non-positive time base all read as `None`: the caller then keeps what [`probe_media`]
-/// reported.
-pub fn parse_first_packet_json(json: &[u8]) -> Result<Option<Rational>, ProbeParseError> {
+/// Only malformed JSON fails. An answer without a packet reads as `None`. A packet without a
+/// usable `pts`, `pos` or stream `id`, and a missing or non-positive time base, leave that field
+/// `None`: the caller then keeps what [`probe_media`] reported for it.
+pub fn parse_first_packet_json(json: &[u8]) -> Result<Option<FirstAudioPacket>, ProbeParseError> {
     let raw: RawFirstPacket = serde_json::from_slice(json)?;
-    let pts = raw.packets.first().and_then(|packet| {
-        parse_optional_i64_value(packet.pts.as_ref(), "packets.pts")
-            .ok()
-            .flatten()
-    });
-    let time_base = raw
-        .streams
-        .first()
+    let Some(packet) = raw.packets.first() else {
+        return Ok(None);
+    };
+    let stream = raw.streams.first();
+    let pts = parse_optional_i64_value(packet.pts.as_ref(), "packets.pts")
+        .ok()
+        .flatten();
+    let time_base = stream
         .and_then(|stream| stream.time_base.as_deref())
         .and_then(Rational::from_ffprobe)
         .filter(|value| value.num() > 0);
-    Ok(pts
-        .zip(time_base)
-        .and_then(|(pts, time_base)| pts_seconds(Pts::new(pts), time_base)))
+    let position = parse_optional_i64_value(packet.pos.as_ref(), "packets.pos")
+        .ok()
+        .flatten()
+        .and_then(|position| u64::try_from(position).ok());
+    Ok(Some(FirstAudioPacket {
+        time: pts
+            .zip(time_base)
+            .and_then(|(pts, time_base)| pts_seconds(Pts::new(pts), time_base)),
+        position,
+        stream_id: stream.and_then(|stream| parse_stream_id(stream.id.as_deref())),
+    }))
+}
+
+/// Parse a stream `id` as ffprobe writes it, `0x` and hexadecimal digits, or decimal digits.
+fn parse_stream_id(value: Option<&str>) -> Option<u32> {
+    let text = value?.trim();
+    match text.strip_prefix("0x") {
+        Some(hex) if !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+            u32::from_str_radix(hex, 16).ok()
+        }
+        Some(_) => None,
+        None if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) => {
+            text.parse().ok()
+        }
+        None => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -584,11 +626,94 @@ struct RawFirstPacket {
 #[derive(Deserialize)]
 struct RawPacket {
     pts: Option<Value>,
+    pos: Option<Value>,
 }
 
 #[derive(Deserialize)]
 struct RawPacketStream {
+    id: Option<String>,
     time_base: Option<String>,
+}
+
+/// Run the resolved ffprobe executable to read the sample rate of the stream with the id
+/// `stream_id`, with the file read from the byte `position`, within [`PROBE_TIMEOUT`], and stop it
+/// when `cancel` is set.
+///
+/// In an MPEG-TS or MPEG-PS source whose audio starts after the analysis of [`probe_media`], the
+/// probe reads no packet of the audio stream and reports a sample rate of 0 (ADR 014 measurements
+/// 22 and 24). Only the packets of the stream carry the rate. This run starts its own analysis at the
+/// position of the first of them, which [`probe_first_audio_packet`] read, so it reads that
+/// packet within its first 5 s however late the audio starts (measurement 24). The demuxer finds
+/// the program tables again after the skip, but it can number the streams in another order, so
+/// the stream is selected by its id and not by its index.
+///
+/// The answer is `None` when no stream with that id reports a positive rate. The runner, the
+/// deadline and the cancel rule are those of [`probe_output_audio`] (`procutil`, ADR 018).
+pub fn probe_audio_sample_rate_at(
+    ffprobe_path: &Path,
+    media_path: &Path,
+    position: u64,
+    stream_id: u32,
+    cancel: &AtomicBool,
+) -> Result<Option<u32>, ProbeError> {
+    let position = position.to_string();
+    let stream = format!("i:{stream_id}");
+    let arguments = [
+        OsStr::new("-v"),
+        OsStr::new("error"),
+        OsStr::new("-skip_initial_bytes"),
+        OsStr::new(&position),
+        OsStr::new("-select_streams"),
+        OsStr::new(&stream),
+        OsStr::new("-show_entries"),
+        OsStr::new("stream=id,sample_rate"),
+        OsStr::new("-of"),
+        OsStr::new("json"),
+        OsStr::new("-i"),
+        media_path.as_os_str(),
+    ];
+    let run = run_probe_process(
+        ffprobe_path,
+        &arguments,
+        PROBE_TIMEOUT,
+        PROBE_POLL_INTERVAL,
+        Some(cancel),
+    )
+    .map_err(|source| ProbeError::Spawn { source })?;
+    finish_probe_run_with(run, PROBE_TIMEOUT, |json| {
+        parse_sample_rate_json(json, stream_id)
+    })
+}
+
+/// Read the answer of [`probe_audio_sample_rate_at`] for the stream with the id `stream_id`.
+///
+/// Only malformed JSON fails. No stream with that id, and a rate that is absent, `0`, or not an
+/// integer that fits a `u32`, read as `None`.
+pub fn parse_sample_rate_json(json: &[u8], stream_id: u32) -> Result<Option<u32>, ProbeParseError> {
+    let raw: RawSampleRate = serde_json::from_slice(json)?;
+    Ok(raw
+        .streams
+        .iter()
+        .find(|stream| parse_stream_id(stream.id.as_deref()) == Some(stream_id))
+        .and_then(|stream| {
+            parse_optional_text_i64(stream.sample_rate.as_deref(), "streams.sample_rate")
+                .ok()
+                .flatten()
+        })
+        .and_then(|rate| u32::try_from(rate).ok())
+        .filter(|rate| *rate > 0))
+}
+
+#[derive(Deserialize)]
+struct RawSampleRate {
+    #[serde(default)]
+    streams: Vec<RawSampleRateStream>,
+}
+
+#[derive(Deserialize)]
+struct RawSampleRateStream {
+    id: Option<String>,
+    sample_rate: Option<String>,
 }
 
 /// Turn one finished run into a probe or into the failure it reports.
@@ -1826,63 +1951,163 @@ mod tests {
 
     // -- the first packet of the source audio stream ------------------------------------------
 
-    fn parse_first_packet(value: Value) -> Option<Rational> {
+    fn parse_first_packet(value: Value) -> Option<FirstAudioPacket> {
         parse_first_packet_json(&serde_json::to_vec(&value).unwrap()).unwrap()
     }
 
     #[test]
-    fn the_first_packet_is_its_pts_in_the_time_base_of_the_stream_exactly() {
+    fn the_first_packet_is_its_pts_in_the_time_base_its_position_and_the_id_of_its_stream() {
         // The answers ffprobe 9.0.2 wrote for sources whose audio starts 60 s after the video:
-        // Matroska at 1/1000, MPEG-TS at 1/90000 with its program, and MP4 at 1/48000.
+        // Matroska at 1/1000 without stream ids, MPEG-TS at 1/90000 with its program and the PID,
+        // MPEG-PS with its stream id, and MP4 at 1/48000.
         let matroska = parse_first_packet(serde_json::json!({
-            "packets": [{ "pts": 59979, "side_data_list": [{}] }],
+            "packets": [{ "pts": 59979, "pos": "137779244", "side_data_list": [{}] }],
             "programs": [],
             "stream_groups": [],
             "streams": [{ "time_base": "1/1000" }]
         }));
-        assert_eq!(matroska, Some(seconds("59.979")));
+        assert_eq!(
+            matroska,
+            Some(FirstAudioPacket {
+                time: Some(seconds("59.979")),
+                position: Some(137_779_244),
+                stream_id: None,
+            })
+        );
         let transport = parse_first_packet(serde_json::json!({
-            "packets": [{ "pts": 5524080, "side_data_list": [{}] }],
-            "programs": [{ "streams": [{ "time_base": "1/90000" }] }],
+            "packets": [{ "pts": 5524080, "pos": "141608932", "side_data_list": [{}] }],
+            "programs": [{ "streams": [{ "id": "0x101", "time_base": "1/90000" }] }],
             "stream_groups": [],
-            "streams": [{ "time_base": "1/90000" }]
+            "streams": [{ "id": "0x101", "time_base": "1/90000" }]
         }));
-        assert_eq!(transport, Rational::new(5_524_080, 90_000));
+        assert_eq!(
+            transport,
+            Some(FirstAudioPacket {
+                time: Rational::new(5_524_080, 90_000),
+                position: Some(141_608_932),
+                stream_id: Some(0x101),
+            })
+        );
+        let program = parse_first_packet(serde_json::json!({
+            "packets": [{ "pts": 5447098, "pos": "48171022" }],
+            "programs": [],
+            "stream_groups": [],
+            "streams": [{ "id": "0x1c0", "time_base": "1/90000" }]
+        }))
+        .unwrap();
+        assert_eq!(program.stream_id, Some(0x1c0));
         let mp4 = parse_first_packet(serde_json::json!({
             "packets": [{ "pts": 2878976 }],
             "streams": [{ "time_base": "1/48000" }]
-        }));
-        assert_eq!(mp4, Rational::new(2_878_976, 48_000));
+        }))
+        .unwrap();
+        assert_eq!(mp4.time, Rational::new(2_878_976, 48_000));
+        assert_eq!(mp4.position, None);
         // The priming of an encoder puts the first packet before zero.
         let primed = parse_first_packet(serde_json::json!({
             "packets": [{ "pts": -1024 }],
             "streams": [{ "time_base": "1/48000" }]
-        }));
-        assert_eq!(primed, Rational::new(-1024, 48_000));
+        }))
+        .unwrap();
+        assert_eq!(primed.time, Rational::new(-1024, 48_000));
     }
 
     #[test]
-    fn an_answer_without_a_usable_packet_or_time_base_reads_as_none_and_only_bad_json_fails() {
+    fn an_answer_without_a_packet_reads_as_none_and_only_bad_json_fails() {
         for answer in [
             serde_json::json!({}),
-            serde_json::json!({ "packets": [], "streams": [{ "time_base": "1/1000" }] }),
-            serde_json::json!({ "packets": [{}], "streams": [{ "time_base": "1/1000" }] }),
-            serde_json::json!({
-                "packets": [{ "pts": "N/A" }],
-                "streams": [{ "time_base": "1/1000" }]
-            }),
-            serde_json::json!({
-                "packets": [{ "pts": "x" }],
-                "streams": [{ "time_base": "1/1000" }]
-            }),
-            serde_json::json!({ "packets": [{ "pts": 12 }], "streams": [] }),
-            serde_json::json!({ "packets": [{ "pts": 12 }], "streams": [{ "time_base": "0/1" }] }),
-            serde_json::json!({ "packets": [{ "pts": 12 }], "streams": [{}] }),
+            serde_json::json!({ "packets": [], "streams": [{ "id": "0x101", "time_base": "1/1000" }] }),
         ] {
             assert_eq!(parse_first_packet(answer.clone()), None, "{answer}");
         }
         assert!(matches!(
             parse_first_packet_json(b"{"),
+            Err(ProbeParseError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn a_packet_field_that_does_not_parse_reads_as_none_and_keeps_the_others() {
+        let time_base = |value: Value| serde_json::json!([{ "id": "0x101", "time_base": value }]);
+        for (packet, streams) in [
+            (serde_json::json!({}), time_base("1/1000".into())),
+            (
+                serde_json::json!({ "pts": "N/A" }),
+                time_base("1/1000".into()),
+            ),
+            (
+                serde_json::json!({ "pts": "x" }),
+                time_base("1/1000".into()),
+            ),
+            (serde_json::json!({ "pts": 12 }), time_base("0/1".into())),
+            (
+                serde_json::json!({ "pts": 12 }),
+                serde_json::json!([{ "id": "0x101" }]),
+            ),
+        ] {
+            let answer = serde_json::json!({ "packets": [packet], "streams": streams });
+            let packet = parse_first_packet(answer.clone()).unwrap();
+            assert_eq!(packet.time, None, "{answer}");
+            assert_eq!(packet.stream_id, Some(0x101), "{answer}");
+        }
+        for position in [
+            serde_json::json!("N/A"),
+            serde_json::json!("-1"),
+            serde_json::json!("x"),
+        ] {
+            let packet = parse_first_packet(serde_json::json!({
+                "packets": [{ "pts": 12, "pos": position }],
+                "streams": [{ "time_base": "1/1000" }]
+            }))
+            .unwrap();
+            assert_eq!(packet.position, None, "{position}");
+            assert_eq!(packet.time, Some(seconds("0.012")));
+        }
+    }
+
+    #[test]
+    fn a_stream_id_parses_as_ffprobe_writes_it_and_nothing_else() {
+        assert_eq!(parse_stream_id(Some("0x101")), Some(0x101));
+        assert_eq!(parse_stream_id(Some("0x1c0")), Some(0x1c0));
+        assert_eq!(parse_stream_id(Some("257")), Some(257));
+        for refused in ["", "0x", "0xg1", "-1", "1.5", "a:1", "0x100000000"] {
+            assert_eq!(parse_stream_id(Some(refused)), None, "{refused:?}");
+        }
+        assert_eq!(parse_stream_id(None), None);
+    }
+
+    #[test]
+    fn the_sample_rate_is_read_from_the_stream_with_the_id_and_only_a_positive_rate_counts() {
+        // The answer ffprobe 9.0.2 wrote for an MPEG-TS source with AAC 60 s late, read from the
+        // position of its first audio packet: the stream appears in its program too.
+        let answer = serde_json::json!({
+            "programs": [{ "streams": [{ "id": "0x101", "sample_rate": "48000" }] }],
+            "stream_groups": [],
+            "streams": [{ "id": "0x101", "sample_rate": "48000" }]
+        });
+        let parse = |value: &Value, id| {
+            parse_sample_rate_json(&serde_json::to_vec(value).unwrap(), id).unwrap()
+        };
+        assert_eq!(parse(&answer, 0x101), Some(48_000));
+        // Another stream's rate is not this stream's.
+        assert_eq!(parse(&answer, 0x100), None);
+        for streams in [
+            serde_json::json!([]),
+            serde_json::json!([{ "id": "0x101" }]),
+            serde_json::json!([{ "id": "0x101", "sample_rate": "0" }]),
+            serde_json::json!([{ "id": "0x101", "sample_rate": "-48000" }]),
+            serde_json::json!([{ "id": "0x101", "sample_rate": "N/A" }]),
+            serde_json::json!([{ "id": "0x101", "sample_rate": "4294967296" }]),
+            serde_json::json!([{ "sample_rate": "48000" }]),
+        ] {
+            assert_eq!(
+                parse(&serde_json::json!({ "streams": streams }), 0x101),
+                None,
+                "{streams}"
+            );
+        }
+        assert!(matches!(
+            parse_sample_rate_json(b"{", 0x101),
             Err(ProbeParseError::Json(_))
         ));
     }
@@ -1907,7 +2132,8 @@ mod tests {
                 PROBE_TIMEOUT,
                 parse_first_packet_json
             )
-            .unwrap(),
+            .unwrap()
+            .and_then(|packet| packet.time),
             Some(seconds("12"))
         );
         assert!(matches!(

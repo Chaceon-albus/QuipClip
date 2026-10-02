@@ -17,6 +17,7 @@ pub use locate::{
     discover, discover_with_path, ExecutableOrigin, FfmpegPaths, InspectedLocation, LocateError,
 };
 pub use probe::{
-    parse_probe_json, probe_first_audio_packet, probe_media, probe_output_audio, AudioProbe,
-    MediaProbe, OutputAudioProbe, ProbeDataError, ProbeError, ProbeParseError,
+    parse_probe_json, probe_audio_sample_rate_at, probe_first_audio_packet, probe_media,
+    probe_output_audio, AudioProbe, FirstAudioPacket, MediaProbe, OutputAudioProbe, ProbeDataError,
+    ProbeError, ProbeParseError,
 };
