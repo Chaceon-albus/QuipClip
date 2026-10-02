@@ -1,16 +1,29 @@
 import type { DOMAttributes, ReactNode } from "react";
 import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
-import { calculatePlayheadLayout } from "@/features/timeline";
+import { calculatePlayheadLayout, useTimelineStore } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
 import { calculatePlayheadFrameBand } from "./frameBand";
 import { usePlayheadTimecode } from "./playheadTimecode";
+import { selectSelectedFillCanBeUnderPlayhead } from "./playheadRing";
 import { useDisplayedPlaybackPosition } from "./useDisplayedPlaybackPosition";
 
 const selectSeekTargetSeconds = (state: PlaybackStoreState) => state.seekTargetSeconds;
 const selectPresentedFrame = (state: PlaybackStoreState) => state.presentedFrame;
 const selectCalibrationStatus = (state: PlaybackStoreState) => state.calibrationStatus;
+
+/**
+ * The ring of the track playhead line: 1px in the timeline background colour on the left, the
+ * right and the lower edge. It is one drop-shadow filter for each edge, so it takes no layout
+ * space.
+ */
+const TRACK_PLAYHEAD_RING_CLASS =
+  "drop-shadow-[1px_0_0,-1px_0_0,0_1px_0] drop-shadow-timeline-background";
+
+/** The ring of the frame band: 1px in the timeline background colour outside each edge. */
+const FRAME_BAND_RING_CLASS =
+  "shadow-[-1px_0_0_var(--timeline-background),1px_0_0_var(--timeline-background)]";
 
 /*
  * The layers in this file draw the displayed playback position. Each one subscribes to it,
@@ -55,12 +68,13 @@ export interface RulerPlayheadProps extends PositionLayerProps {
  * line, so its edges and its tip fall on the same pixel boundaries as the line. It is 12px
  * tall, so it leaves most of a timecode label under the playhead visible.
  *
- * The outline is a 1px ring in the timeline background colour, so the line stays visible
- * over a fill of a similar colour, such as the selected segment. It is a drop-shadow filter
- * on this wrapper, and not a box-shadow, for two reasons: clip-path removes the head's own
- * shadow, and one filter outlines the head and the line as one shape, with no gap below the
- * tip. The ring has a left, a right and a lower edge only, the same ring as the track
- * playhead.
+ * The wrapper has no width, and its `left` is the playhead position P. Each part is placed
+ * from that point by a negative `left` of half its width: the line covers [P − 1px, P + 1px]
+ * and the head [P − 6px, P + 6px]. The parts are centred by layout and not by a translation
+ * (see above), so the line lies on the pixels of the track playhead line.
+ *
+ * The playhead has no outline here. The ruler holds no segment fill, and against the ruler
+ * the playhead colour keeps 4.53:1 in the light theme and 9.85:1 in the dark theme.
  */
 export function RulerPlayhead({
   videoStartPts,
@@ -76,13 +90,13 @@ export function RulerPlayhead({
 
   return (
     <div
-      className="pointer-events-none absolute inset-y-0 z-30 -translate-x-1/2 drop-shadow-[1px_0_0,-1px_0_0,0_1px_0] drop-shadow-timeline-background"
+      className="pointer-events-none absolute inset-y-0 z-30 w-0"
       style={{ left: playhead.left }}
       aria-label={ariaLabel}
       data-approximate={isApproximate}
     >
-      <div className="h-full w-0.5 bg-timeline-playhead" />
-      <div className="absolute top-0 left-1/2 h-3 w-3 -translate-x-1/2 bg-timeline-playhead [clip-path:polygon(0_0,100%_0,100%_50%,50%_100%,0_50%)]" />
+      <div className="absolute inset-y-0 -left-px w-0.5 bg-timeline-playhead" />
+      <div className="absolute top-0 -left-1.5 h-3 w-3 bg-timeline-playhead [clip-path:polygon(0_0,100%_0,100%_50%,50%_100%,0_50%)]" />
     </div>
   );
 }
@@ -93,17 +107,30 @@ export interface TrackPlayheadProps extends PositionLayerProps {
 }
 
 /**
- * Track playhead layer. The panel places it after the segment group at z-30, so the 9px
- * hit area is grabbable above segments.
+ * Track playhead layer. The panel places it after the segment group at z-30, so the hit area
+ * is grabbable above segments.
  *
  * The layer spans the full track height, and `-top-px` pulls it up over the 1px divider,
  * so it meets the ruler playhead and the two read as one line from the top of the ruler to
  * the bottom of the track.
  *
- * The line has the same outline as the ruler playhead: a drop-shadow ring in the timeline
- * background colour on the left, the right and the lower edge. It has no upper edge on
- * purpose. That edge would paint over the lowest pixel of the ruler line, and the one line
- * would show a gap.
+ * As in the ruler, the wrapper has no width and its `left` is the playhead position P. The hit
+ * area keeps its width of 9px and covers [P − 4px, P + 5px]: an odd width cannot be centred on
+ * a whole pixel, and a wider area would take more of a segment edge that the playhead stands
+ * on. The line is 2px wide inside it and covers [P − 1px, P + 1px], the pixels of the ruler
+ * line. No part is placed by a translation, so no part lies at a half pixel.
+ *
+ * The line has a ring only while the selected segment fill can lie under it
+ * (`selectSelectedFillCanBeUnderPlayhead`). On that fill the playhead colour keeps only 1.11:1
+ * in the light theme and 1.21:1 in the dark theme. The ring is 1px in the timeline background
+ * colour, 4.34:1 and 8.45:1 there. With no ring, the line keeps 3.07:1 or more against the
+ * track, an unselected segment and its hover fill, and it does not hide the stroke of a
+ * pending In mark next to it. Inside the frame band (high zoom only) the faint band fill lowers
+ * that on the band side of the line: 2.92:1 on an unselected segment and 2.58:1 on its hover
+ * fill in the light theme, and 2.84:1 on the hover fill in the dark theme. The other side keeps
+ * 3.07:1 or more. The ring has a left, a right and a lower edge. It has no upper
+ * edge on purpose. That edge would paint over the lowest pixel of the ruler line, and the one
+ * line would show a gap.
  */
 export function TrackPlayhead({
   videoStartPts,
@@ -117,19 +144,22 @@ export function TrackPlayhead({
     videoTimeBase,
   );
   const playhead = calculatePlayheadLayout(elapsedSeconds, totalDurationSeconds);
+  const hasRing = useTimelineStore(selectSelectedFillCanBeUnderPlayhead);
 
   return (
     <div className="pointer-events-none absolute inset-x-0 -top-px bottom-0 z-30">
       <div
-        className="pointer-events-none absolute inset-y-0 flex -translate-x-1/2 flex-col items-center"
+        className="pointer-events-none absolute inset-y-0 w-0"
         style={{ left: playhead.left }}
         data-approximate={isApproximate}
       >
         <div
           {...scrubHandlers}
-          className={`flex h-full w-[9px] touch-none items-center justify-center ${canSeek ? "pointer-events-auto cursor-ew-resize" : "pointer-events-none"}`}
+          className={`absolute inset-y-0 -left-1 w-[9px] touch-none ${canSeek ? "pointer-events-auto cursor-ew-resize" : "pointer-events-none"}`}
         >
-          <div className="h-full w-0.5 bg-timeline-playhead drop-shadow-[1px_0_0,-1px_0_0,0_1px_0] drop-shadow-timeline-background" />
+          <div
+            className={`absolute inset-y-0 left-[3px] w-0.5 bg-timeline-playhead ${hasRing ? TRACK_PLAYHEAD_RING_CLASS : ""}`}
+          />
         </div>
       </div>
     </div>
@@ -160,9 +190,11 @@ export interface TrackFrameBandProps extends PositionLayerProps {
  * - Each edge is a 1px line in the foreground colour at 70%. Against the track, the unselected
  *   fill and the hover fill it keeps 6.0:1, 4.8:1 and 4.5:1 in the light theme and 7.8:1,
  *   4.5:1 and 3.6:1 in the dark theme.
- * - On the selected fill that line keeps only 2.4:1 and 1.6:1, so each edge also has a 1px
- *   ring outside it in the timeline background colour, 4.3:1 and 8.5:1 there. The playhead
- *   line has the same ring for the same reason.
+ * - On the selected fill that line keeps only 2.4:1 and 1.6:1. So while that fill can lie
+ *   under the band (`selectSelectedFillCanBeUnderPlayhead`), each edge also has a 1px ring
+ *   outside it in the timeline background colour, 4.3:1 and 8.5:1 there. The playhead line
+ *   has the same ring under the same condition. With no ring, an edge does not hide the
+ *   stroke of a pending In mark next to it.
  *
  * The playhead usually stands on the left edge, at the start of the frame, and covers it. The
  * right edge, at the start of the next frame, shows the width of the frame.
@@ -182,6 +214,7 @@ export function TrackFrameBand({
   const seekTargetSeconds = usePlaybackStore(selectSeekTargetSeconds);
   const presentedFrame = usePlaybackStore(selectPresentedFrame);
   const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
+  const hasRing = useTimelineStore(selectSelectedFillCanBeUnderPlayhead);
   const band = calculatePlayheadFrameBand(
     { seekTargetSeconds, presentedFrame, calibrationStatus },
     videoStartPts,
@@ -195,7 +228,7 @@ export function TrackFrameBand({
   return (
     <div
       aria-hidden="true"
-      className="pointer-events-none absolute inset-y-0 z-30 border-x border-foreground/70 bg-foreground/10 shadow-[-1px_0_0_var(--timeline-background),1px_0_0_var(--timeline-background)]"
+      className={`pointer-events-none absolute inset-y-0 z-30 border-x border-foreground/70 bg-foreground/10 ${hasRing ? FRAME_BAND_RING_CLASS : ""}`}
       style={{ left: band.left, width: band.width }}
     />
   );

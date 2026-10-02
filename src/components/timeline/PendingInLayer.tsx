@@ -6,6 +6,7 @@ import {
   type TimelineStoreState,
 } from "@/features/timeline";
 import type { Pts, Rational } from "@/types/project";
+import { calculatePendingInRegionBox } from "./pendingInGeometry";
 import { useDisplayedPlaybackPosition } from "./useDisplayedPlaybackPosition";
 
 const selectPendingInPts = (state: TimelineStoreState) => state.pendingInPts;
@@ -73,13 +74,15 @@ export const PendingInTrackMarks = memo(function PendingInTrackMarks({
       />
 
       {/*
-       * Pending In mark: a "[" bracket whose left edge is the In boundary. The In PTS is the
-       * inclusive left edge of its frame (ADR 002), so the bracket opens to the right of the
-       * position and is not centred on it. The shape keeps it apart from the playhead, a
-       * centred line that the z-30 layer draws above it.
+       * Pending In mark: a "[" bracket on the In boundary. `-ml-px` centres its 2px left
+       * stroke on the boundary, as the 2px playhead line is centred on its position, so the
+       * stroke covers the pixels that the playhead covers when it stands on the In. The In
+       * PTS is the inclusive left edge of its frame (ADR 002), so the bracket opens to the
+       * right. Right after Mark In the playhead, a plain line that the z-30 layer draws above
+       * the bracket, covers the stroke, and the upper and lower arms show to its right.
        */}
       <div
-        className="pointer-events-none absolute inset-y-0 z-20 w-1.5 rounded-l-[2px] border-y-2 border-l-2 border-primary"
+        className="pointer-events-none absolute inset-y-0 z-20 -ml-px w-1.5 rounded-l-[2px] border-y-2 border-l-2 border-primary"
         style={{ left: `${pendingInPercent}%` }}
       />
     </>
@@ -104,6 +107,10 @@ interface PendingInRegionProps extends PendingInLayerProps {
  * of an unselected segment in the light theme. At 80% opacity it did not. It does not keep
  * 3:1 against the selected fill, which is also the brand colour. But the region never lies
  * over the selected segment: while a segment is current, no In mark is pending (ADR 007).
+ *
+ * Each 2px side border is centred on its edge (`calculatePendingInRegionBox`). The left border
+ * then lies on the left stroke of the bracket, and the right border lies under the playhead
+ * line.
  */
 function PendingInRegion({
   pendingInPts,
@@ -122,14 +129,12 @@ function PendingInRegion({
   if (!pendingRegion || !pendingRegion.isVisible) {
     return null;
   }
+  const box = calculatePendingInRegionBox(pendingRegion);
 
   return (
     <div
       className="pointer-events-none absolute inset-y-1 z-20 rounded-md border-2 border-dashed border-primary bg-primary/15"
-      style={{
-        left: pendingRegion.left,
-        width: pendingRegion.width,
-      }}
+      style={{ left: box.left, width: box.width }}
     />
   );
 }
