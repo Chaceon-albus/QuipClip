@@ -27,7 +27,8 @@
  *   the end, and do not refuse the entry. A relative step past either end stops at that end, as a
  *   held arrow key does.
  * - A seek to the frame on screen does nothing (ADR 022, ADR 026): a seek that lands on the frame
- *   already on screen may bring no frame callback, and Mark In would then stay disabled.
+ *   already on screen may bring no frame callback. The `seeked` event restores that frame in
+ *   most cases, and in the others Mark In would stay disabled.
  */
 
 import { isSourceActive } from "@/components/layout/actionConditions";

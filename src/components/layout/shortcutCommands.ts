@@ -181,10 +181,12 @@ function currentSegmentOf(
  * while no seek is pending.
  *
  * Such a seek changes nothing the user can see, and it can harm the state: `seekToPts` clears
- * `presentedFrame`, and a seek onto the frame on screen may bring no frame callback (ADR 022),
- * so Mark In, Mark Out and Split would stay disabled. ADR 026 therefore owns the key press
- * and performs nothing. A pending seek (a set `seekTargetSeconds`) means that the element is
- * moving away from the presented frame, so the seek still runs then.
+ * `presentedFrame`, and a seek onto the frame on screen may bring no frame callback (ADR 022).
+ * The `seeked` event restores that frame in most cases, but not off the grid inside a frame,
+ * with a tick of 4 µs or less, or without a nominal rate, and Mark In, Mark Out and Split then
+ * stay disabled. ADR 026 therefore owns the key press and performs nothing. A pending seek (a
+ * set `seekTargetSeconds`) means that the element is moving away from the presented frame, so
+ * the seek still runs then.
  *
  * The comparison is exact, with `BigInt`, on two parsed PTS values.
  *

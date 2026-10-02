@@ -405,7 +405,10 @@ export interface PlaybackActions {
    * Dispatches the next queued seek if one is pending. Otherwise, unless the last seek was a
    * scrub or a navigation is deferred, it clears the display target: when not in the ready
    * state, and in the ready state when the presented frame holds the position of the element,
-   * because the frame callback of the seek can run before the seek ends (ADR 022).
+   * because the frame callback of the seek can run before the seek ends (ADR 022). In the ready
+   * state, a paused element with no presented frame gets back the last frame that a frame
+   * callback confirmed when that frame holds the position, because a seek that lands on the frame
+   * on screen may bring no frame callback.
    */
   syncSeeked: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 

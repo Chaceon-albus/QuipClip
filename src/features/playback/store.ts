@@ -35,6 +35,7 @@ import type {
   PlaybackState,
   PlaybackStop,
   PlaybackStoreState,
+  PresentedFrame,
   SeekOptions,
 } from "./types";
 
@@ -1889,18 +1890,23 @@ export function createPlaybackStore(
     };
 
     /**
-     * True when the frame that RVFC reported last holds the position of the element, on a
-     * calibrated source (ADR 022). syncSeeked reads it in the "ready" state. The HTML
+     * True when `frame`, a frame that RVFC reported, holds the position of the element, on a
+     * calibrated source (ADR 022). syncSeeked reads it in the "ready" state, for presentedFrame,
+     * and, when that is null, for the last frame that a frame callback confirmed. The HTML
      * specification does not order the frame callback of a seek against the end of the seek, so
      * the only callback of a paused seek can run while the element still reports `seeking`. That
      * callback sets presentedFrame and keeps the display target, and a paused element may present
-     * no later frame to clear it.
+     * no later frame to clear it. A seek that lands on the frame on screen may bring no callback
+     * at all, and every seek sets presentedFrame to null.
      *
      * The test reads the position, not the order of the callbacks. After the seek the browser
      * shows the frame that holds the position, so a frame that holds it is the frame on screen,
      * whether its callback came from this seek or from an earlier one. A late callback of a frame
      * from before the seek therefore counts only when the seek landed on that same frame, and
-     * then no later callback may come.
+     * then no later callback may come. syncSeeked applies the same test to the last frame that a
+     * callback confirmed when presentedFrame is null, and a frame that passes becomes
+     * presentedFrame again. Each wrong result below then also enables the edit actions on a frame
+     * that is not on screen, until the callback of the frame on screen arrives.
      *
      * The times carry the rounding of the web view (SEEKED_FRAME_TOLERANCE_SECONDS). The result
      * is false when one tick of the video time base is not longer than twice the tolerance: a
@@ -1928,9 +1934,10 @@ export function createPlaybackStore(
      *   holds. A position of a later index does not count: the extent can
      *   leave out frames of the source (isLastFrameOnScreen), and a seek past the extent can show
      *   one of them. Such a frame in the index after the extent is the one case left where the
-     *   late callback of the last frame of the extent clears the target on a frame that is not
-     *   on screen. The callback of the frame that the seek shows then comes, because it is
-     *   another frame, and it corrects presentedFrame.
+     *   late callback of the last frame of the extent clears the target, or where that frame is
+     *   restored as the last confirmed frame, on a frame that is not on screen. The callback of
+     *   the frame that the seek shows then comes, because it is another frame, and it corrects
+     *   presentedFrame.
      * - Off the grid no frame boundary is known, and a frame can be shorter than the nominal
      *   interval: at a variable rate, and on a coarse time base, where two frames can start one
      *   tick apart. Every frame starts on a tick of the video time base, and no two frames start
@@ -1944,10 +1951,10 @@ export function createPlaybackStore(
      */
     const presentedFrameHoldsPosition = (
       state: PlaybackState,
+      frame: PresentedFrame | null,
       source: PlaybackSource,
       position: number,
     ): boolean => {
-      const frame = state.presentedFrame;
       const origin = calibratedMediaTime;
       const fps = getNominalFrameRate(source);
       const tolerance = SEEKED_FRAME_TOLERANCE_SECONDS;
@@ -3007,9 +3014,46 @@ export function createPlaybackStore(
           const state = get();
           if (
             state.calibrationStatus !== "ready" ||
-            presentedFrameHoldsPosition(state, attachedSource, element.currentTime)
+            presentedFrameHoldsPosition(
+              state,
+              state.presentedFrame,
+              attachedSource,
+              element.currentTime,
+            )
           ) {
             set({ seekTargetSeconds: null });
+          } else if (
+            state.presentedFrame === null &&
+            !state.isPlaying &&
+            element.paused !== false &&
+            lastPresentedMediaTime !== null &&
+            lastInferredPts !== null
+          ) {
+            // A paused seek that lands on the frame on screen may bring no frame callback, and
+            // the seek set presentedFrame to null, so the edit actions would stay disabled until
+            // the next seek. The last frame that a frame callback confirmed is restored when it
+            // holds the position that the seek reached, by the same rule. After the seek the
+            // browser shows the frame that holds the position, so that frame is the frame on
+            // screen. Its PTS was inferred from its mediaTime when its callback ran, and nothing
+            // here infers a PTS from currentTime (ADR 003). The bookkeeping of the distinct
+            // frames is not touched: a later callback of the same frame repeats its mediaTime and
+            // is not a distinct frame. Neither the store nor the element may report playback:
+            // during playback the frame on screen moves on, and the callbacks of the playback
+            // report it.
+            const lastFrame: PresentedFrame = {
+              mediaTime: lastPresentedMediaTime,
+              inferredSourcePts: lastInferredPts,
+            };
+            if (
+              presentedFrameHoldsPosition(
+                state,
+                lastFrame,
+                attachedSource,
+                element.currentTime,
+              )
+            ) {
+              set({ presentedFrame: lastFrame, seekTargetSeconds: null });
+            }
           }
         }
       },

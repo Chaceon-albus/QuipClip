@@ -3211,6 +3211,336 @@ describe("Playback Store & PTS Presentation Engine", () => {
       expect(store.getState().seekTargetSeconds).toBeNull();
       expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
     });
+
+    describe("A Seek That Lands on the Frame on Screen and Brings No Frame Callback", () => {
+      // Every seek sets presentedFrame to null. A paused seek that lands on the frame on screen
+      // may bring no frame callback, and the edit actions would stay disabled until the next
+      // seek. At seeked, the store restores the last frame that a frame callback confirmed when
+      // that frame holds the position of the element, by the rule above.
+
+      /** True when Mark In is enabled with no current segment. */
+      function markInEnabled(store: PlaybackStore): boolean {
+        const state = store.getState();
+        return canMarkIn(state.calibrationStatus, state.presentedFrame, true);
+      }
+
+      it.each([
+        {
+          label: "a click inside it",
+          seek: (store: PlaybackStore) => store.getState().seekApproximate(2.01),
+        },
+        {
+          label: "a click near its end",
+          seek: (store: PlaybackStore) => store.getState().seekApproximate(2.035),
+        },
+        {
+          label: "Go to In on its PTS",
+          seek: (store: PlaybackStore) => store.getState().seekToPts("50" as Pts),
+        },
+      ])(
+        "on the frame grid, $label restores the frame on screen at seeked, clears the target and enables Mark In",
+        ({ seek }) => {
+          const { store, video, key } = settledOn(sourceA, "50");
+
+          seek(store);
+          expect(video.seeking).toBe(true);
+          expect(store.getState().presentedFrame).toBeNull();
+          expect(markInEnabled(store)).toBe(false);
+
+          // The frame on screen does not change, so no frame callback comes.
+          fireSeeked(store, key, video);
+          expect(store.getState().presentedFrame).toEqual({
+            mediaTime: 2.0,
+            inferredSourcePts: "50",
+          });
+          expect(store.getState().seekTargetSeconds).toBeNull();
+          expect(store.getState().calibrationStatus).toBe("ready");
+          expect(markInEnabled(store)).toBe(true);
+          // The playhead shows the frame on screen.
+          expect(
+            getDisplayedElapsedSeconds(
+              store.getState(),
+              sourceA.videoStartPts,
+              sourceA.videoTimeBase,
+            ),
+          ).toBe(2.0);
+        },
+      );
+
+      it("off the frame grid, restores the frame for a seek to its exact PTS", () => {
+        const { store, video, key } = settledOn(offGridSource, "93000");
+
+        store.getState().seekToPts("93000" as Pts);
+        expect(store.getState().presentedFrame).toBeNull();
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("93000");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(markInEnabled(store)).toBe(true);
+      });
+
+      it("on the frame grid, a seek to the end of the extent from its last frame restores that frame by the rule of the index after it", () => {
+        // Go to Out on an Out at the end of the extent, or a click at the right end of the ruler,
+        // while the last frame of the extent is on screen. The position has the index of the end
+        // of the extent, which the last frame also holds.
+        const { store, video, key } = settledOn(gridExtentSource, "249");
+
+        store.getState().seekToPts("250" as Pts);
+        expect(video.currentTime).toBe(10);
+        expect(store.getState().presentedFrame).toBeNull();
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("249");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(markInEnabled(store)).toBe(true);
+      });
+
+      it("on the frame grid, a seek past the index after the extent does not restore its last frame", () => {
+        // The extent can leave out frames of the source, and a seek past it can show one of
+        // them, so the last frame of the extent does not hold that position.
+        const { store, video, key } = settledOn(gridExtentSource, "249");
+
+        store.getState().seekToPts("260" as Pts);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame).toBeNull();
+        expect(store.getState().seekTargetSeconds).toBe(10.4);
+        expect(markInEnabled(store)).toBe(false);
+      });
+
+      it("off the frame grid, keeps presentedFrame null and the target for a seek into the middle of the frame, and the frame callback still confirms it", () => {
+        const { store, video, key, frame } = settledOn(offGridSource, "93000");
+
+        // The next frame starts at PTS 96000, but off the grid no frame boundary is known, so a
+        // position more than one tick after the start of the frame keeps the target.
+        store.getState().seekToPts("94500" as Pts);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame).toBeNull();
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(94500 / 90000, 9);
+        expect(markInEnabled(store)).toBe(false);
+
+        frame(93000 / 90000);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("93000");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(store.getState().calibrationStatus).toBe("ready");
+      });
+
+      it.each([
+        {
+          label: "the start of the next frame, on the grid",
+          source: sourceA,
+          from: "50",
+          seek: (store: PlaybackStore) => store.getState().seekApproximate(2.04),
+        },
+        {
+          label: "the frame before, on the grid",
+          source: sourceA,
+          from: "50",
+          seek: (store: PlaybackStore) => store.getState().seekApproximate(1.99),
+        },
+        {
+          label: "a frame far away, on the grid",
+          source: sourceA,
+          from: "50",
+          seek: (store: PlaybackStore) => store.getState().seekToPts("75" as Pts),
+        },
+        {
+          label: "the PTS of the next frame, off the grid",
+          source: offGridSource,
+          from: "90000",
+          seek: (store: PlaybackStore) => store.getState().seekToPts("93000" as Pts),
+        },
+      ])(
+        "does not restore the frame for a position in another frame: $label",
+        ({ source, from, seek }) => {
+          const { store, video, key } = settledOn(source, from);
+
+          seek(store);
+          const target = store.getState().seekTargetSeconds;
+          expect(target).not.toBeNull();
+          fireSeeked(store, key, video);
+          expect(store.getState().presentedFrame).toBeNull();
+          expect(store.getState().seekTargetSeconds).toBe(target);
+          expect(markInEnabled(store)).toBe(false);
+        },
+      );
+
+      it("does not restore the frame while a seek is queued, and restores it at the seeked of the last seek", () => {
+        const { store, video, key } = settledOn(sourceA, "50");
+
+        store.getState().seekApproximate(2.01);
+        store.getState().seekApproximate(2.02);
+        expect(video.currentTime).toBe(2.01);
+        fireSeeked(store, key, video);
+        // The seeked of the first seek starts the queued seek.
+        expect(video.currentTime).toBe(2.02);
+        expect(store.getState().presentedFrame).toBeNull();
+        expect(store.getState().seekTargetSeconds).toBe(2.02);
+
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(markInEnabled(store)).toBe(true);
+      });
+
+      it("does not restore the frame after a scrub seek, and restores it after the exact seek of the release", () => {
+        // WebView2 has no fastSeek, so a scrub seek assigns currentTime (ADR 022).
+        const { store, video, key } = settledOn(sourceA, "50");
+
+        store.getState().seekApproximate(2.01, { scrub: true });
+        expect(video.currentTime).toBe(2.01);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame).toBeNull();
+        expect(store.getState().seekTargetSeconds).toBe(2.01);
+
+        store.getState().seekApproximate(2.01);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+      });
+
+      it("does not restore a frame while a navigation is deferred during the calibration", () => {
+        // No frame callback confirms a frame before the anchor.
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        store.getState().attach(sourceA, video);
+        video.readyState = 1;
+        store.getState().syncReady(identityA, video);
+        expect(store.getState().calibrationStatus).toBe("calibrating");
+
+        store.getState().seekApproximate(0.01);
+        expect(store.getState().hasDeferredNavigation).toBe(true);
+        fireSeeked(store, identityA, video);
+        expect(store.getState().presentedFrame).toBeNull();
+        expect(store.getState().seekTargetSeconds).toBe(0.01);
+        expect(store.getState().hasDeferredNavigation).toBe(true);
+      });
+
+      it("does not restore the frame when play started before seeked, and the frames of the playback report the frame on screen", () => {
+        const { store, video, key, frame } = settledOn(sourceA, "50");
+
+        store.getState().seekApproximate(2.01);
+        store.getState().play();
+        expect(store.getState().isPlaying).toBe(true);
+        expect(video.paused).toBe(false);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame).toBeNull();
+        expect(store.getState().seekTargetSeconds).toBe(2.01);
+
+        frame(2.04);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("51");
+        expect(store.getState().seekTargetSeconds).toBeNull();
+      });
+
+      it("does not restore the frame while the store plays, also on an element that does not report paused", () => {
+        const { store, video, key } = settledOn(sourceA, "50");
+
+        store.getState().seekApproximate(2.01);
+        store.getState().play();
+        // `paused` is optional on the element, so the play state of the store counts too.
+        Reflect.deleteProperty(video, "paused");
+        expect(video.paused).toBeUndefined();
+        expect(store.getState().isPlaying).toBe(true);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame).toBeNull();
+        expect(store.getState().seekTargetSeconds).toBe(2.01);
+      });
+
+      it("does not restore the frame when the element plays before the store reports it", () => {
+        // A media key can start the element; its play event has not run yet.
+        const { store, video, key } = settledOn(sourceA, "50");
+
+        store.getState().seekApproximate(2.01);
+        video.paused = false;
+        expect(store.getState().isPlaying).toBe(false);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame).toBeNull();
+        expect(store.getState().seekTargetSeconds).toBe(2.01);
+      });
+
+      it("does not restore the frame when the calibration is not ready, also when a frame was confirmed before the precision was denied", () => {
+        const { store, video, key, frame } = settledOn(sourceA, "50");
+
+        // A distinct mediaTime that infers the same PTS denies precise editing (ADR 003).
+        frame(2.001);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(store.getState().presentedFrame).toBeNull();
+
+        store.getState().seekApproximate(2.01);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame).toBeNull();
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        // Outside the ready state, seeked clears the target, as before.
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(markInEnabled(store)).toBe(false);
+      });
+
+      it("a late callback of the restored frame keeps precise editing, and a later frame is still checked for a distinct PTS", () => {
+        const { store, video, key, frame } = settledOn(sourceA, "50");
+
+        store.getState().seekApproximate(2.01);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+
+        // The same frame repeats its mediaTime, so it is not a distinct frame.
+        frame(2.0);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame).toEqual({
+          mediaTime: 2.0,
+          inferredSourcePts: "50",
+        });
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(markInEnabled(store)).toBe(true);
+
+        // The next frame infers the next PTS.
+        store.getState().play();
+        frame(2.04);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("51");
+
+        // A distinct mediaTime that infers the same PTS as the frame before still denies precise
+        // editing (ADR 003).
+        frame(2.041);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(store.getState().presentedFrame).toBeNull();
+      });
+
+      it("a distinct mediaTime after the restore that infers the PTS of the restored frame still denies precise editing", () => {
+        const { store, video, key, frame } = settledOn(sourceA, "50");
+
+        store.getState().seekApproximate(2.01);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+
+        frame(2.001);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(store.getState().presentedFrame).toBeNull();
+      });
+
+      it("a segment playback from the restored frame takes the late callback of that frame and stops on its last frame", () => {
+        const { store, video, key, frame } = settledOn(sourceA, "50");
+
+        store.getState().seekApproximate(2.01);
+        fireSeeked(store, key, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+
+        // The last frame of [50, 52) is frame 51.
+        store.getState().playSegment("50" as Pts, "52" as Pts);
+        expect(store.getState().isPlaying).toBe(true);
+        expect(store.getState().playbackStop?.phase).toBe("playing");
+        // The late callback of the frame on screen runs while the seek to the In runs.
+        frame(2.0);
+        fireSeeked(store, key, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().playbackStop?.phase).toBe("playing");
+        expect(video.paused).toBe(false);
+
+        frame(2.04);
+        expect(video.paused).toBe(true);
+        expect(store.getState().playbackStop).toMatchObject({
+          phase: "stopped",
+          restPts: "51",
+        });
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("51");
+      });
+    });
   });
 
   describe("Scrub Mode: Keyframe Preview & Audio (ADR 022)", () => {
