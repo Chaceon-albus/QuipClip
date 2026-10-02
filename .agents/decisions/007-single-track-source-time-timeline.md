@@ -135,6 +135,18 @@ click-to-seek surfaces, and this record requires one coordinate to map to one ti
 width on the element that holds both rows makes that true by construction, and not by
 agreement between two pieces of code. A later viewport model must keep that property.
 
+(Added on 2026-10-02.) One coordinate must also look like one time. The playhead line is 2px
+wide and centred on its position, in the ruler and in the track. Each part is placed by its
+`left` value, with no translation, so no part lies at a half pixel and the two parts meet as
+one line. The vertical strokes of the pending In marks are centred on the In in the same way:
+the left stroke of the bracket, and both side borders of the dashed region. At Mark In the
+playhead line then covers the In stroke exactly. Before this change the marks opened to the
+right of the In, and a 1px ring around the playhead covered the stroke. The In then looked
+offset from the position where the user marked it. The ring is in the timeline background
+colour, and it now shows on the track line and on the frame band only while a segment is
+current and no In is pending. Only the fill of the selected segment needs the ring for
+contrast. The ruler line has no ring.
+
 The wheel zooms, and it holds the time under the pointer in place. A gesture that is
 clearly horizontal pans instead, and so does the shift key with the wheel. The panel gives
 those gestures to the web view, which already scrolls the container.
