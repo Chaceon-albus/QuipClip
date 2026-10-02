@@ -933,14 +933,32 @@ describe("planShortcutCommand", () => {
         pts: "90000",
       });
 
-      // The playhead at the Out boundary would leave inPts === outPts.
-      const atOut = createSnapshot({
+      // The playhead at or after the Out boundary: Mark In finishes the segment and starts the
+      // next one at the frame on screen, so the key plans the same call with that PTS.
+      for (const outPts of ["90000", "60000"]) {
+        const atOrAfterOut = createSnapshot({
+          timeline: {
+            segments: [segment("a", "0", outPts)],
+            currentSegmentId: "a",
+          },
+        });
+        expect(planShortcutCommand("markIn", atOrAfterOut)).toEqual({
+          kind: "markIn",
+          pts: "90000",
+        });
+      }
+
+      // The playhead before the In boundary moves the In earlier.
+      const beforeIn = createSnapshot({
         timeline: {
-          segments: [segment("a", "0", "90000")],
+          segments: [segment("a", "120000", "180000")],
           currentSegmentId: "a",
         },
       });
-      expect(planShortcutCommand("markIn", atOut)).toBeNull();
+      expect(planShortcutCommand("markIn", beforeIn)).toEqual({
+        kind: "markIn",
+        pts: "90000",
+      });
 
       // The playhead at the In boundary would change nothing.
       const atIn = createSnapshot({
@@ -1752,6 +1770,36 @@ describe("planShortcutCommand", () => {
       expect(h.press("finishSegment")).toEqual({ kind: "finishSegment" });
       expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "50" });
       expect(h.timeline.getState().pendingInPts).toBe("50");
+    });
+
+    it("I, O, I: an I at or after the Out finishes the segment and starts the next one", () => {
+      const h = createStoreHarness();
+      expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "0" });
+      h.clickRulerAt("50");
+      expect(h.press("markOut")).toEqual({ kind: "markOut", pts: "50" });
+      expect(h.timeline.getState().currentSegmentId).toBe("segment-1");
+
+      // No Escape between the two segments: the same key, with the same PTS, does both.
+      expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "50" });
+      expect(h.timeline.getState()).toMatchObject({
+        currentSegmentId: null,
+        pendingInPts: "50",
+        segments: [{ id: "segment-1", sourceId: SOURCE_ID, inPts: "0", outPts: "50" }],
+      });
+
+      // A frame after the Out works the same way, and O then makes the next segment.
+      h.clickRulerAt("75");
+      expect(h.press("markOut")).toEqual({ kind: "markOut", pts: "75" });
+      h.clickRulerAt("90");
+      expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "90" });
+      expect(h.timeline.getState()).toMatchObject({
+        currentSegmentId: null,
+        pendingInPts: "90",
+      });
+      expect(h.timeline.getState().segments).toEqual([
+        { id: "segment-1", sourceId: SOURCE_ID, inPts: "0", outPts: "50" },
+        { id: "segment-2", sourceId: SOURCE_ID, inPts: "50", outPts: "75" },
+      ]);
     });
 
     it("I then Shift+I: the return does nothing, and the frame stays markable", () => {

@@ -13,7 +13,12 @@ import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { isPtsInsideSegment, isPtsString, isValidSegmentRange } from "@/lib/time";
 import type { Pts, Segment } from "@/types/project";
-import { findCurrentSegment, splitSegment, type CurrentSegmentRef } from "./math";
+import {
+  findCurrentSegment,
+  getCurrentSegmentTarget,
+  splitSegment,
+  type CurrentSegmentRef,
+} from "./math";
 import type { SegmentEdge, TimelineState, TimelineStoreState } from "./types";
 
 /**
@@ -133,7 +138,8 @@ export function createTimelineStore(
   /**
    * Moves one boundary of a segment of the active source, with one history entry. Mark In and
    * Mark Out on a current segment, and the commit of a trim (ADR 030), share this one rule, so
-   * the three paths accept and refuse the same values.
+   * the three paths accept and refuse the same values. A Mark In at or after the Out finishes
+   * the segment instead, and `markIn` handles that case before it calls this rule.
    *
    * A canonical PTS is a canonical decimal string (ADR 010), so string equality is exact. A
    * repeated boundary makes no change and no history entry, so a mark or a trim that ends on
@@ -227,6 +233,32 @@ export function createTimelineStore(
       // No history entry: the pending mark is not yet a canonical edit.
       if (current === null) {
         set({ pendingInPts: pts });
+        return;
+      }
+
+      // At or after the exclusive Out, a moved In would leave no frame in the segment
+      // (ADR 002). The mark instead finishes the segment and starts the next one at this
+      // frame, as one action. The bounds are those that `canMarkIn` reads, and the test
+      // at the Out comes first there too, so the two agree on every segment. A segment
+      // whose stored PTS does not parse has no bounds, so the mark goes to `moveBoundary`
+      // as before.
+      //
+      // This one action has a history entry, although a pending mark alone has none. The
+      // first Undo after it makes the segment current again with no pending mark. The next
+      // Undo then undoes the edit before it, so after a Mark Out it removes the segment, as
+      // it did before. Both fields change together, so only one segment is in progress at
+      // any time.
+      const bounds = getCurrentSegmentTarget(current).bounds;
+      if (bounds !== null && BigInt(pts) >= bounds.hi) {
+        undoStack.push(historyEntry(state));
+        redoStack = [];
+
+        set({
+          currentSegmentId: null,
+          pendingInPts: pts,
+          canUndo: true,
+          canRedo: false,
+        });
         return;
       }
 

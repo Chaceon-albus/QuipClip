@@ -19,6 +19,7 @@ import {
   getCurrentSegmentTarget,
   getSegmentBounds,
   getTimelineDurationSeconds,
+  markInFinishesSegment,
   splitSegment,
 } from "./math";
 
@@ -137,6 +138,10 @@ describe("timeline PTS editing", () => {
     });
 
     expect(canMarkIn("ready", frame("60"), true, target)).toBe(false);
+    // Not even at or after the Out: the In of the segment does not parse.
+    expect(canMarkIn("ready", frame("100"), true, target)).toBe(false);
+    expect(canMarkIn("ready", frame("120"), true, target)).toBe(false);
+    expect(markInFinishesSegment("ready", frame("120"), true, target)).toBe(false);
     expect(canMarkOut("ready", frame("60"), null, true, target)).toBe(false);
     // A pending mark cannot rescue it either: the store never holds both at once.
     expect(canMarkOut("ready", frame("60"), pts("20"), true, target)).toBe(false);
@@ -153,8 +158,6 @@ describe("timeline PTS editing", () => {
     // An earlier In point is a legal move; only an empty result is forbidden.
     expect(canMarkIn("ready", frame("-5"), true, target)).toBe(true);
     expect(canMarkIn("ready", frame("50"), true, target)).toBe(false);
-    expect(canMarkIn("ready", frame("100"), true, target)).toBe(false);
-    expect(canMarkIn("ready", frame("120"), true, target)).toBe(false);
 
     // The store invariant keeps the pending mark null while a segment is current.
     expect(canMarkOut("ready", frame("90"), null, true, target)).toBe(true);
@@ -162,6 +165,72 @@ describe("timeline PTS editing", () => {
     expect(canMarkOut("ready", frame("100"), null, true, target)).toBe(false);
     expect(canMarkOut("ready", frame("50"), null, true, target)).toBe(false);
     expect(canMarkOut("ready", frame("20"), null, true, target)).toBe(false);
+  });
+
+  it("finishes the current segment with Mark In at or after its Out", () => {
+    // The current segment is "b", the half-open interval [50, 100).
+    const target = getCurrentSegmentTarget(
+      findCurrentSegment(segments, "b", "source-a"),
+    );
+    const finishes = (value: string) =>
+      markInFinishesSegment("ready", frame(value), true, target);
+
+    // On the In boundary, nothing changes, so Mark In is disabled.
+    expect(canMarkIn("ready", frame("50"), true, target)).toBe(false);
+    expect(finishes("50")).toBe(false);
+    // Inside the segment and before it, Mark In moves the In and does not finish.
+    expect(canMarkIn("ready", frame("75"), true, target)).toBe(true);
+    expect(finishes("75")).toBe(false);
+    expect(canMarkIn("ready", frame("20"), true, target)).toBe(true);
+    expect(finishes("20")).toBe(false);
+    // The last frame of the segment is before the exclusive Out (ADR 002).
+    expect(canMarkIn("ready", frame("99"), true, target)).toBe(true);
+    expect(finishes("99")).toBe(false);
+    // At the Out, the frame on screen after Mark Out, and after it, Mark In finishes.
+    expect(canMarkIn("ready", frame("100"), true, target)).toBe(true);
+    expect(finishes("100")).toBe(true);
+    expect(canMarkIn("ready", frame("120"), true, target)).toBe(true);
+    expect(finishes("120")).toBe(true);
+
+    // The comparison is exact, with BigInt, beyond the safe integer range of a number.
+    const large = getCurrentSegmentTarget({
+      index: 0,
+      segment: {
+        id: "large",
+        sourceId: "source-a",
+        inPts: pts("9007199254740990"),
+        outPts: pts("9007199254740993"),
+      },
+    });
+    expect(markInFinishesSegment("ready", frame("9007199254740992"), true, large)).toBe(
+      false,
+    );
+    expect(markInFinishesSegment("ready", frame("9007199254740993"), true, large)).toBe(
+      true,
+    );
+  });
+
+  it("never finishes a segment while Mark In is disabled or nothing is current", () => {
+    const target = getCurrentSegmentTarget(
+      findCurrentSegment(segments, "b", "source-a"),
+    );
+    expect(markInFinishesSegment("calibrating", frame("120"), true, target)).toBe(
+      false,
+    );
+    expect(markInFinishesSegment("unavailable", frame("120"), true, target)).toBe(
+      false,
+    );
+    expect(markInFinishesSegment("ready", null, true, target)).toBe(false);
+    expect(markInFinishesSegment("ready", frame("120"), false, target)).toBe(false);
+    expect(markInFinishesSegment("ready", frame("12O"), true, target)).toBe(false);
+
+    // No current segment: Mark In starts a pending mark and is enabled at every frame.
+    const none = getCurrentSegmentTarget(null);
+    for (const value of ["20", "50", "100", "120"]) {
+      expect(canMarkIn("ready", frame(value), true, none)).toBe(true);
+      expect(markInFinishesSegment("ready", frame(value), true, none)).toBe(false);
+      expect(markInFinishesSegment("ready", frame(value), true)).toBe(false);
+    }
   });
 
   it("splits only a strict interior PTS of the current segment", () => {

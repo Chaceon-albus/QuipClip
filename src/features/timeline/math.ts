@@ -142,11 +142,19 @@ function markablePts(
  * calibration is ready, a presented frame with a valid inferred PTS is present, and an
  * active source exists.
  *
- * With a current segment, Mark In instead moves that segment's In boundary, so it is
- * enabled only while the move would change the segment and would still leave
- * `inPts < outPts` (ADR 002). A current segment whose stored PTS does not parse admits no
- * move, so Mark In is disabled: the store reads the same state as "adjust" and would
- * reject the mark.
+ * With a current segment, the frame on screen decides what Mark In does:
+ *
+ * - Before the Out boundary, Mark In moves that segment's In boundary, so it is enabled
+ *   only while the move would change the segment. A frame before the In moves it earlier,
+ *   and a frame inside the segment moves it later, and both leave `inPts < outPts`
+ *   (ADR 002). The frame on the In boundary changes nothing, so Mark In is disabled there.
+ * - At or after the Out boundary, a move would leave no frame in the segment. Mark In then
+ *   finishes the segment and starts a pending mark at that frame, as one action
+ *   (`markInFinishesSegment`), so it is enabled. Mark Out leaves the playhead on the Out,
+ *   so the next segment can start there with no Finish Segment first.
+ *
+ * A current segment whose stored PTS does not parse admits neither, so Mark In is
+ * disabled: the frame cannot be compared with its boundaries.
  */
 export function canMarkIn(
   calibrationStatus: CalibrationStatus,
@@ -165,7 +173,33 @@ export function canMarkIn(
     return false;
   }
   const value = BigInt(pts);
-  return value !== currentTarget.bounds.lo && value < currentTarget.bounds.hi;
+  // The test at the Out comes first, as it does in the store, so the two read every pair
+  // of bounds the same way. For a valid segment, a frame at or after the Out is never the
+  // frame on the In.
+  return value >= currentTarget.bounds.hi || value !== currentTarget.bounds.lo;
+}
+
+/**
+ * Checks whether Mark In, when it runs now, finishes the current segment and starts a
+ * pending mark at the frame on screen, instead of moving the In boundary.
+ *
+ * True only while Mark In is enabled, a segment is current, and the inferred PTS is at or
+ * after its exclusive Out boundary (ADR 002). The transport bar reads it to say so in the
+ * tooltip of Mark In. Costs one BigInt construction and one comparison, so it is cheap
+ * enough to run on every presented frame.
+ */
+export function markInFinishesSegment(
+  calibrationStatus: CalibrationStatus,
+  presentedFrame: PresentedFrame | null,
+  hasActiveSource: boolean,
+  currentTarget?: CurrentSegmentTarget | null,
+): boolean {
+  const pts = markablePts(calibrationStatus, presentedFrame, hasActiveSource);
+  const bounds = currentTarget?.hasSegment ? currentTarget.bounds : null;
+  if (pts === null || bounds === null) {
+    return false;
+  }
+  return BigInt(pts) >= bounds.hi;
 }
 
 /**

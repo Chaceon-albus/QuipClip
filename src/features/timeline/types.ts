@@ -83,10 +83,14 @@ export interface TimelineActions {
    * Marks an inclusive In point at the given presentation timestamp (PTS).
    *
    * With no current segment, records the pending In mark and adds no history entry.
-   * With a current segment, moves that segment's `inPts` and adds one history entry.
+   * With a current segment and `pts` before its `outPts`, moves that segment's `inPts` and
+   * adds one history entry.
+   * With a current segment and `pts` at or after its `outPts`, finishes that segment and
+   * records the pending In mark at `pts`, as one action with one history entry. Undo then
+   * makes the segment current again and clears the pending In mark.
    * Rejects silently, with no history entry, when there is no active source, `pts` is
-   * malformed, the move would not leave `inPts < outPts` (ADR 002), or `pts` already
-   * equals the stored boundary.
+   * malformed, the current segment has a stored PTS that does not parse, a boundary move would
+   * not leave `inPts < outPts` (ADR 002), or `pts` already equals the stored boundary.
    *
    * @param pts Presentation timestamp in source video time base.
    */
@@ -122,11 +126,12 @@ export interface TimelineActions {
    * Moves one boundary of a named segment to `pts`, and adds one history entry, so one undo
    * restores the old boundary. The drag trim of a segment edge commits with it (ADR 030).
    *
-   * The move has the semantics of Mark In and Mark Out on a current segment: it rejects
-   * silently, with no history entry, when there is no active source, `pts` is malformed, the
-   * move would not leave `inPts < outPts` (ADR 002), or `pts` already equals the stored
-   * boundary. It also rejects an unknown identifier and a segment of another source, as
-   * `findCurrentSegment` does.
+   * The move has the semantics of a boundary move by Mark In and Mark Out on a current
+   * segment: it rejects silently, with no history entry, when there is no active source, `pts`
+   * is malformed, the move would not leave `inPts < outPts` (ADR 002), or `pts` already equals
+   * the stored boundary. It also rejects an unknown identifier and a segment of another
+   * source, as `findCurrentSegment` does. An In edge moved to or after the Out is rejected
+   * too. Only Mark In finishes the segment there.
    *
    * The segment is named by its identifier and not through `currentSegmentId`, because the
    * selection can change between the start of a trim and the frame that commits it. The

@@ -331,17 +331,18 @@ describe("timeline store current segment", () => {
     store.getState().setSource("source-1", "revision-1");
     store.getState().markIn(pts("10"));
     store.getState().markOut(pts("30"));
-    const before = store.getState().canUndo;
 
-    // Mark In at or after the stored Out point (ADR 002 forbids the empty segment).
-    store.getState().markIn(pts("30"));
-    store.getState().markIn(pts("40"));
-    // Mark Out at or before the stored In point.
+    // Mark Out at or before the stored In point (ADR 002 forbids the empty segment). Mark In
+    // at or after the stored Out point finishes the segment instead, which a later test covers.
     store.getState().markOut(pts("10"));
     store.getState().markOut(pts("5"));
 
     expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
-    expect(store.getState().canUndo).toBe(before);
+    expect(store.getState().currentSegmentId).toBe("segment-1");
+    // No history entry: one Undo still removes the segment.
+    store.getState().undo();
+    expect(store.getState().segments).toEqual([]);
+    expect(store.getState().canUndo).toBe(false);
   });
 
   it("rejects an equal or earlier Out point while completing a pending In mark", () => {
@@ -353,6 +354,242 @@ describe("timeline store current segment", () => {
     expect(store.getState().segments).toEqual([]);
     expect(store.getState().currentSegmentId).toBeNull();
     expect(store.getState().canUndo).toBe(false);
+  });
+
+  describe("Mark In at or after the Out of the current segment", () => {
+    /** Mark In at 10 and Mark Out at 30: segment-1 = [10, 30) is current. */
+    function createMarked(): Store {
+      const store = createStore();
+      store.getState().setSource("source-1", "revision-1");
+      store.getState().markIn(pts("10"));
+      store.getState().markOut(pts("30"));
+      return store;
+    }
+
+    it("finishes the segment and starts a pending In there, as one action", () => {
+      for (const at of ["30", "45"]) {
+        const store = createMarked();
+        store.getState().markIn(pts(at));
+        expect(store.getState()).toMatchObject({
+          currentSegmentId: null,
+          pendingInPts: at,
+          canUndo: true,
+          canRedo: false,
+        });
+        // The finished segment is canonical and keeps its boundaries.
+        expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
+        expectOneInProgress(store);
+      }
+    });
+
+    it("moves the In, and does not finish, at a frame before the Out", () => {
+      const store = createMarked();
+      // The last frame of [10, 30) is before the exclusive Out (ADR 002).
+      store.getState().markIn(pts("29"));
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: "segment-1",
+        pendingInPts: null,
+      });
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "29", outPts: "30" }]);
+
+      // A frame before the In moves it earlier.
+      store.getState().markIn(pts("5"));
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "5", outPts: "30" }]);
+      expect(store.getState().currentSegmentId).toBe("segment-1");
+    });
+
+    it("compares the frame with the Out exactly, beyond the safe integer range", () => {
+      const store = createTimelineStore(
+        { generateId: () => "unused" },
+        {
+          sourceId: "source-1",
+          sourceRevisionKey: "revision-1",
+          segments: [
+            {
+              id: "a",
+              sourceId: "source-1",
+              inPts: pts("9007199254740990"),
+              outPts: pts("9007199254740993"),
+            },
+          ],
+          currentSegmentId: "a",
+        },
+      );
+      // 9007199254740992 and 9007199254740993 are the same number as a double.
+      store.getState().markIn(pts("9007199254740992"));
+      expect(store.getState().currentSegmentId).toBe("a");
+      expect(store.getState().segments[0].inPts).toBe("9007199254740992");
+
+      store.getState().markIn(pts("9007199254740993"));
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: null,
+        pendingInPts: "9007199254740993",
+      });
+    });
+
+    it("undoes in two steps: the segment is current again, then it is removed", () => {
+      const store = createMarked();
+      store.getState().markIn(pts("30"));
+
+      // The first Undo restores the state before the action: the segment is current, and
+      // no In is pending.
+      store.getState().undo();
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: "segment-1",
+        pendingInPts: null,
+        canUndo: true,
+        canRedo: true,
+      });
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
+      expectOneInProgress(store);
+
+      // The second Undo undoes Mark Out, as before: the segment is gone, and its In is pending.
+      store.getState().undo();
+      expect(store.getState()).toMatchObject({
+        segments: [],
+        currentSegmentId: null,
+        pendingInPts: "10",
+        canUndo: false,
+        canRedo: true,
+      });
+      expectOneInProgress(store);
+    });
+
+    it("redoes the action after an undo", () => {
+      const store = createMarked();
+      store.getState().markIn(pts("45"));
+      store.getState().undo();
+      store.getState().undo();
+
+      store.getState().redo();
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: "segment-1",
+        pendingInPts: null,
+        canUndo: true,
+        canRedo: true,
+      });
+
+      store.getState().redo();
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: null,
+        pendingInPts: "45",
+        canUndo: true,
+        canRedo: false,
+      });
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
+      expectOneInProgress(store);
+    });
+
+    it("clears the redo stack, as every other edit does", () => {
+      const store = createMarked();
+      store.getState().markOut(pts("40"));
+      store.getState().undo();
+      expect(store.getState().canRedo).toBe(true);
+
+      store.getState().markIn(pts("30"));
+      expect(store.getState().canRedo).toBe(false);
+      store.getState().redo();
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: null,
+        pendingInPts: "30",
+      });
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
+    });
+
+    it("lets Mark Out complete the next segment, and undo returns through both", () => {
+      const store = createMarked();
+      store.getState().markIn(pts("30"));
+      store.getState().markOut(pts("50"));
+      expect(shape(store)).toEqual([
+        { id: "segment-1", inPts: "10", outPts: "30" },
+        { id: "segment-2", inPts: "30", outPts: "50" },
+      ]);
+      expect(store.getState().currentSegmentId).toBe("segment-2");
+
+      // Undo of Mark Out keeps the pending In of the action, as after any Mark In.
+      store.getState().undo();
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: null,
+        pendingInPts: "30",
+      });
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
+
+      store.getState().undo();
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: "segment-1",
+        pendingInPts: null,
+      });
+    });
+
+    it("restores no pending In from an earlier revision, and keeps the segment", () => {
+      const store = createMarked();
+      store.getState().markIn(pts("30"));
+
+      // A revision change clears the pending In. Canonical segments survive it, so Undo
+      // still makes the segment current (ADR 007).
+      store.getState().setSource("source-1", "revision-2");
+      expect(store.getState().pendingInPts).toBeNull();
+      store.getState().undo();
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: "segment-1",
+        pendingInPts: null,
+      });
+
+      // The redo entry was captured after the revision change cleared the pending In, so it
+      // holds none. Nothing is current after the redo either.
+      store.getState().redo();
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: null,
+        pendingInPts: null,
+      });
+      expectOneInProgress(store);
+    });
+
+    it("does not redo a pending In of an earlier revision", () => {
+      const store = createMarked();
+      store.getState().markIn(pts("30"));
+
+      // Undo on the same revision captures a redo entry that holds the pending In "30".
+      store.getState().undo();
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: "segment-1",
+        pendingInPts: null,
+      });
+
+      // After a revision change, that pending In belongs to the earlier revision, so the redo
+      // does not bring it back, and nothing is current. The segment does not change.
+      store.getState().setSource("source-1", "revision-2");
+      store.getState().redo();
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: null,
+        pendingInPts: null,
+      });
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
+      expectOneInProgress(store);
+    });
+
+    it("leaves a current segment that does not parse to the boundary move", () => {
+      const store = createTimelineStore(
+        { generateId: () => "unused" },
+        {
+          sourceId: "source-1",
+          sourceRevisionKey: "revision-1",
+          segments: [
+            { id: "bad", sourceId: "source-1", inPts: pts("10"), outPts: pts("030") },
+          ],
+          currentSegmentId: "bad",
+        },
+      );
+      // The Out does not parse, so the store cannot tell whether the frame is after it, and
+      // the move to a range that is not valid changes nothing.
+      store.getState().markIn(pts("40"));
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: "bad",
+        pendingInPts: null,
+        canUndo: false,
+      });
+      expect(shape(store)).toEqual([{ id: "bad", inPts: "10", outPts: "030" }]);
+    });
   });
 
   it("records no history for a boundary equal to the stored one", () => {

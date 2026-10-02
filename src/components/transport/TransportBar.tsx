@@ -53,10 +53,12 @@ import { MarkInIcon, MarkOutIcon } from "./markPointIcons";
 import { SegmentDurationReadout } from "./SegmentDurationReadout";
 import {
   presentEditDisabledReason,
+  presentMarkInFinishesSegment,
   presentStepDisabledReason,
   settleDisabledReason,
-  type EditDisabledReason,
+  type EDIT_REASON_PENDING,
   type EditReasonContext,
+  type MarkInFinishesSegmentKey,
   type TransportDisabledReasonKey,
 } from "./transportDisabledReason";
 
@@ -96,15 +98,16 @@ const PLAY_GLYPH_HIDDEN_CLASS = "scale-80 opacity-0";
 /**
  * Returns the reason to show for an edit control, and keeps the last one while a pending seek
  * hides the reason (`settleDisabledReason`). A frame step then leaves the reason line as it
- * was until the frame callback answers, the same window in which the dimming waits.
+ * was until the frame callback answers, the same window in which the dimming waits. The
+ * description of Mark In that depends on the playhead settles the same way.
  *
  * The setter runs during the render only when the value changes, which is the React pattern
  * for state derived from the previous render.
  */
-function useSettledReason(
-  presented: EditDisabledReason,
-): TransportDisabledReasonKey | null {
-  const [shown, setShown] = useState<TransportDisabledReasonKey | null>(null);
+function useSettledReason<
+  K extends TransportDisabledReasonKey | MarkInFinishesSegmentKey,
+>(presented: K | typeof EDIT_REASON_PENDING | null): K | null {
+  const [shown, setShown] = useState<K | null>(null);
   const next = settleDisabledReason(shown, presented);
   if (next !== shown) {
     setShown(next);
@@ -190,6 +193,12 @@ export function TransportBar() {
   const splitReason = useSettledReason(
     usePlaybackStore((s) => presentEditDisabledReason("split", s, reasonContext)),
   );
+  // At or after the Out of the current segment, Mark In finishes that segment and starts the
+  // next one at the frame on screen. The selector settles on a key or null, as the reasons do,
+  // so a frame that does not change the description does not render this tree.
+  const markInFinishes = useSettledReason(
+    usePlaybackStore((s) => presentMarkInFinishesSegment(s, reasonContext)),
+  );
   const stepReason = presentStepDisabledReason(hasActiveSource, hasNominalRate);
   const reasonText = (key: TransportDisabledReasonKey | null) =>
     key === null ? null : t(key);
@@ -197,7 +206,7 @@ export function TransportBar() {
   // `aria-describedby`, so assistive technology reads the reason on the button itself. The
   // tooltip only opens on hover or focus, and a disabled button takes neither.
   const markInReasonId = useId();
-  const markInPendingId = useId();
+  const markInStateId = useId();
   const markOutReasonId = useId();
   const splitReasonId = useId();
 
@@ -205,9 +214,15 @@ export function TransportBar() {
   // not a toggle, so it takes no `aria-pressed`: a pressed state would say that a second press
   // clears the mark, and a second press moves it. The state is a description instead, which the
   // button names in `aria-describedby`, and the second line of the tooltip when no reason
-  // takes that line.
+  // takes that line. While Mark In would finish the current segment, the same description
+  // says so. The two never apply together, because the store never holds a pending In beside
+  // a current segment (ADR 007).
   const isInPending = hasActiveSource && pendingInPts !== null;
-  const markInPendingText = isInPending ? t("transport.state.inPending") : null;
+  const markInStateText = isInPending
+    ? t("transport.state.inPending")
+    : markInFinishes === null
+      ? null
+      : t(markInFinishes);
 
   const isMuted = usePreviewMutePreference((s) => s.muted);
 
@@ -354,7 +369,7 @@ export function TransportBar() {
                       "border-primary bg-primary/10 hover:bg-primary/15 active:bg-primary/20",
                   )}
                   aria-label={t("transport.action.markInAria")}
-                  aria-describedby={`${markInReasonId} ${markInPendingId}`}
+                  aria-describedby={`${markInReasonId} ${markInStateId}`}
                   aria-keyshortcuts={markInShortcut?.aria}
                 >
                   <MarkInIcon
@@ -370,15 +385,15 @@ export function TransportBar() {
                 <span id={markInReasonId} className="sr-only">
                   {reasonText(markInReason)}
                 </span>
-                <span id={markInPendingId} className="sr-only">
-                  {markInPendingText}
+                <span id={markInStateId} className="sr-only">
+                  {markInStateText}
                 </span>
               </span>
             </TooltipTrigger>
             <ShortcutTooltipContent
               label={t("transport.action.markInAria")}
               keys={markInShortcut?.keys}
-              reason={reasonText(markInReason) ?? markInPendingText}
+              reason={reasonText(markInReason) ?? markInStateText}
             />
           </Tooltip>
 

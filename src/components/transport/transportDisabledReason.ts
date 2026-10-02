@@ -18,6 +18,10 @@
  *   presenter then returns `EDIT_REASON_PENDING`, and `settleDisabledReason` keeps the last
  *   settled reason until the frame callback answers.
  *
+ * The presenter also gives the description of Mark In while a press would finish the current
+ * segment (`presentMarkInFinishesSegment`). That line depends on the playhead too, so it
+ * settles by the same rule.
+ *
  * It returns translation keys and does not call the i18n runtime (ADR 011).
  */
 
@@ -27,6 +31,7 @@ import {
   canMarkIn,
   canMarkOut,
   canSplitCurrentSegment,
+  markInFinishesSegment,
   type CurrentSegmentTarget,
 } from "@/features/timeline";
 import { isPtsString } from "@/lib/time";
@@ -40,20 +45,26 @@ export type TransportDisabledReasonKey =
   | "transport.disabledReason.markInFirst"
   | "transport.disabledReason.selectSegment"
   | "transport.disabledReason.playheadInsideSegment"
-  | "transport.disabledReason.playheadBeforeOut"
   | "transport.disabledReason.playheadAfterIn"
   | "transport.disabledReason.atInPoint"
   | "transport.disabledReason.atOutPoint"
   | "transport.disabledReason.noFrameRate";
 
+/** The description of Mark In while a press would finish the current segment. */
+export type MarkInFinishesSegmentKey = "transport.state.finishesSegment";
+
 /**
  * The value for a disabled control whose reason depends on a playhead position that a
- * pending seek has not confirmed yet. It is not a reason: the caller keeps the last one.
+ * pending seek has not confirmed yet, and for a description that depends on it in the same
+ * way. It is not a reason or a description: the caller keeps the last one.
  */
 export const EDIT_REASON_PENDING = "pending";
 
 export type EditDisabledReason =
   TransportDisabledReasonKey | typeof EDIT_REASON_PENDING | null;
+
+export type MarkInFinishesSegmentDescription =
+  MarkInFinishesSegmentKey | typeof EDIT_REASON_PENDING | null;
 
 /**
  * The playback facts that the reason reads. The playback store state satisfies it as it is,
@@ -191,13 +202,9 @@ export function presentEditDisabledReason(
       if (bounds === null) {
         return null;
       }
-      if (pts === bounds.lo) {
-        return "transport.disabledReason.atInPoint";
-      }
-      if (pts >= bounds.hi) {
-        return "transport.disabledReason.playheadBeforeOut";
-      }
-      return null;
+      // With a current segment, Mark In is disabled only on the In boundary. At or after the
+      // Out it finishes the segment and starts the next one there, so it is enabled.
+      return pts === bounds.lo ? "transport.disabledReason.atInPoint" : null;
 
     case "markOut":
       if (bounds === null) {
@@ -219,15 +226,63 @@ export function presentEditDisabledReason(
 }
 
 /**
- * Returns the reason to show, given the reason shown before and the one presented now.
+ * Returns the description of Mark In while a press would finish the current segment and
+ * start a pending In at the frame on screen (`markInFinishesSegment`). Returns
+ * `EDIT_REASON_PENDING` while a pending seek hides the frame that decides it, and null in
+ * every other state.
+ *
+ * Null without a pending seek in these states, because no playhead position can make the
+ * description true: no source is active, the calibration is not ready, no segment is
+ * current, or the current segment has a stored PTS that does not parse.
+ *
+ * A frame step from the Out point clears the presented frame until the frame callback
+ * answers (ADR 022). The pending value keeps the second line of the tooltip for that window,
+ * so the tooltip does not switch between two lines and one.
+ */
+export function presentMarkInFinishesSegment(
+  playback: TransportReasonPlayback,
+  context: EditReasonContext,
+): MarkInFinishesSegmentDescription {
+  const { calibrationStatus, presentedFrame } = playback;
+  const { hasActiveSource, currentTarget } = context;
+  if (
+    markInFinishesSegment(
+      calibrationStatus,
+      presentedFrame,
+      hasActiveSource,
+      currentTarget,
+    )
+  ) {
+    return "transport.state.finishesSegment";
+  }
+  if (
+    !hasActiveSource ||
+    calibrationStatus !== "ready" ||
+    !currentTarget.hasSegment ||
+    currentTarget.bounds === null
+  ) {
+    return null;
+  }
+  if (
+    playback.seekTargetSeconds !== null ||
+    presentedFrame === null ||
+    !isPtsString(presentedFrame.inferredSourcePts)
+  ) {
+    return EDIT_REASON_PENDING;
+  }
+  return null;
+}
+
+/**
+ * Returns the reason to show, given the reason shown before and the one presented now. The
+ * description of Mark In (`presentMarkInFinishesSegment`) settles by the same rule.
  *
  * `EDIT_REASON_PENDING` keeps the reason shown before, so a frame step does not blank the
  * reason line and does not show a reason for a position the frame callback has not
  * confirmed. Every other value replaces it.
  */
-export function settleDisabledReason(
-  shown: TransportDisabledReasonKey | null,
-  presented: EditDisabledReason,
-): TransportDisabledReasonKey | null {
+export function settleDisabledReason<
+  K extends TransportDisabledReasonKey | MarkInFinishesSegmentKey,
+>(shown: K | null, presented: K | typeof EDIT_REASON_PENDING | null): K | null {
   return presented === EDIT_REASON_PENDING ? shown : presented;
 }

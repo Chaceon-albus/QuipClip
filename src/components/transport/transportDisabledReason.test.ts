@@ -5,6 +5,7 @@ import {
   canMarkOut,
   canSplitCurrentSegment,
   getCurrentSegmentTarget,
+  markInFinishesSegment,
   type CurrentSegmentTarget,
 } from "@/features/timeline";
 import { en } from "@/i18n/locales/en";
@@ -13,11 +14,14 @@ import type { Pts } from "@/types/project";
 import {
   EDIT_REASON_PENDING,
   presentEditDisabledReason,
+  presentMarkInFinishesSegment,
   presentStepDisabledReason,
   settleDisabledReason,
   type EditDisabledReason,
   type EditReasonContext,
   type EditReasonControl,
+  type MarkInFinishesSegmentDescription,
+  type MarkInFinishesSegmentKey,
   type TransportDisabledReasonKey,
   type TransportReasonPlayback,
 } from "./transportDisabledReason";
@@ -100,8 +104,10 @@ function isEnabled(
  * Plays a sequence of presented values through `settleDisabledReason`, the way the transport
  * bar does on each render, and returns the reason shown after each one.
  */
-function settleAll(presented: readonly EditDisabledReason[]): (string | null)[] {
-  let shown: TransportDisabledReasonKey | null = null;
+function settleAll(
+  presented: readonly (EditDisabledReason | MarkInFinishesSegmentDescription)[],
+): (string | null)[] {
+  let shown: TransportDisabledReasonKey | MarkInFinishesSegmentKey | null = null;
   return presented.map((value) => {
     shown = settleDisabledReason(shown, value);
     return shown;
@@ -246,7 +252,8 @@ describe("transportDisabledReason", () => {
         ).toBe("transport.disabledReason.atInPoint");
       });
 
-      it("asks for the playhead before the Out point at or after it", () => {
+      // At or after the Out, Mark In finishes the segment and starts the next one there.
+      it("gives no reason at or after the Out point, where it starts the next segment", () => {
         for (const value of [3000, 4000]) {
           expect(
             presentEditDisabledReason(
@@ -254,7 +261,7 @@ describe("transportDisabledReason", () => {
               playbackAt(value),
               context({ currentTarget: segmentTarget }),
             ),
-          ).toBe("transport.disabledReason.playheadBeforeOut");
+          ).toBeNull();
         }
       });
 
@@ -448,6 +455,131 @@ describe("transportDisabledReason", () => {
     });
   });
 
+  describe("presentMarkInFinishesSegment", () => {
+    const FINISHES = "transport.state.finishesSegment";
+
+    it("describes Mark In at or after the Out point of the current segment", () => {
+      for (const value of [3000, 4000]) {
+        expect(
+          presentMarkInFinishesSegment(
+            playbackAt(value),
+            context({ currentTarget: segmentTarget }),
+          ),
+        ).toBe(FINISHES);
+      }
+    });
+
+    it("gives no description where Mark In moves the In point or is disabled", () => {
+      for (const value of [500, 1000, 2000, 2999]) {
+        expect(
+          presentMarkInFinishesSegment(
+            playbackAt(value),
+            context({ currentTarget: segmentTarget }),
+          ),
+        ).toBeNull();
+      }
+    });
+
+    it("gives no description with no current segment, at every frame", () => {
+      for (const value of [500, 3000, 4000]) {
+        expect(presentMarkInFinishesSegment(playbackAt(value), context())).toBeNull();
+        expect(
+          presentMarkInFinishesSegment(
+            playbackAt(value),
+            context({ pendingInPts: pts(1000) }),
+          ),
+        ).toBeNull();
+      }
+    });
+
+    it("gives no description in a state where no playhead position can need one", () => {
+      for (const playback of [playbackAt(4000), pendingSeek()]) {
+        expect(
+          presentMarkInFinishesSegment(
+            playback,
+            context({ hasActiveSource: false, currentTarget: segmentTarget }),
+          ),
+        ).toBeNull();
+        expect(
+          presentMarkInFinishesSegment(
+            playback,
+            context({ currentTarget: malformedSegment }),
+          ),
+        ).toBeNull();
+        expect(presentMarkInFinishesSegment(playback, context())).toBeNull();
+      }
+      for (const calibrationStatus of ["calibrating", "unavailable"] as const) {
+        for (const playback of [
+          playbackAt(4000, { calibrationStatus }),
+          playbackAt(null, { calibrationStatus, seekTargetSeconds: 1 }),
+        ]) {
+          expect(
+            presentMarkInFinishesSegment(
+              playback,
+              context({ currentTarget: segmentTarget }),
+            ),
+          ).toBeNull();
+        }
+      }
+    });
+
+    it("returns the pending value while a seek hides the frame that decides it", () => {
+      expect(
+        presentMarkInFinishesSegment(
+          pendingSeek(),
+          context({ currentTarget: segmentTarget }),
+        ),
+      ).toBe(EDIT_REASON_PENDING);
+      expect(
+        presentMarkInFinishesSegment(
+          playbackAt(2000, { seekTargetSeconds: 2 }),
+          context({ currentTarget: segmentTarget }),
+        ),
+      ).toBe(EDIT_REASON_PENDING);
+    });
+
+    // The description and the condition read the same facts, so the tooltip never says that
+    // Mark In finishes the segment when a press would do something else.
+    it("matches markInFinishesSegment in every state that is not pending", () => {
+      const statuses: readonly CalibrationStatus[] = [
+        "ready",
+        "calibrating",
+        "unavailable",
+      ];
+      const frames = [null, 0, 500, 1000, 2000, 2999, 3000, 4000];
+      const targets = [noSegment, segmentTarget, malformedSegment];
+      for (const calibrationStatus of statuses) {
+        for (const frame of frames) {
+          for (const seekTargetSeconds of [null, 1]) {
+            for (const hasActiveSource of [false, true]) {
+              for (const currentTarget of targets) {
+                const playback = playbackAt(frame, {
+                  calibrationStatus,
+                  seekTargetSeconds,
+                });
+                const ctx = context({ hasActiveSource, currentTarget });
+                const description = presentMarkInFinishesSegment(playback, ctx);
+                const finishes = markInFinishesSegment(
+                  calibrationStatus,
+                  playback.presentedFrame,
+                  hasActiveSource,
+                  currentTarget,
+                );
+                if (finishes) {
+                  expect(description).toBe(FINISHES);
+                  // Mark In is enabled, so it has no disabled reason beside the line.
+                  expect(isEnabled("markIn", playback, ctx)).toBe(true);
+                } else if (description !== EDIT_REASON_PENDING) {
+                  expect(description).toBeNull();
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+  });
+
   describe("settleDisabledReason", () => {
     it("keeps the reason shown before while the presented value is pending", () => {
       expect(
@@ -511,6 +643,33 @@ describe("transportDisabledReason", () => {
       );
     });
 
+    // A frame step back from the Out point of the current segment: the description of Mark
+    // In stays through the seek, and the frame inside the segment then clears it.
+    it("keeps the description of Mark In through a frame step until the frame answers", () => {
+      const ctx = context({ currentTarget: segmentTarget });
+      const presented = [
+        presentMarkInFinishesSegment(playbackAt(3000), ctx),
+        presentMarkInFinishesSegment(pendingSeek(), ctx),
+        presentMarkInFinishesSegment(playbackAt(null), ctx),
+        presentMarkInFinishesSegment(playbackAt(2960), ctx),
+      ];
+      expect(settleAll(presented)).toStrictEqual([
+        "transport.state.finishesSegment",
+        "transport.state.finishesSegment",
+        "transport.state.finishesSegment",
+        null,
+      ]);
+      // A step forward from the Out keeps the line on screen at every render.
+      const forward = [
+        presentMarkInFinishesSegment(playbackAt(3000), ctx),
+        presentMarkInFinishesSegment(pendingSeek(), ctx),
+        presentMarkInFinishesSegment(playbackAt(3040), ctx),
+      ];
+      expect(settleAll(forward)).toStrictEqual(
+        Array(3).fill("transport.state.finishesSegment"),
+      );
+    });
+
     it("shows no reason during a step from an enabled position", () => {
       const presented = [
         presentEditDisabledReason("markIn", playbackAt(2000), context()),
@@ -541,7 +700,6 @@ describe("transportDisabledReason", () => {
       "transport.disabledReason.markInFirst",
       "transport.disabledReason.selectSegment",
       "transport.disabledReason.playheadInsideSegment",
-      "transport.disabledReason.playheadBeforeOut",
       "transport.disabledReason.playheadAfterIn",
       "transport.disabledReason.atInPoint",
       "transport.disabledReason.atOutPoint",
@@ -564,6 +722,13 @@ describe("transportDisabledReason", () => {
 
     it("hold the pending value apart from every key", () => {
       expect(keys).not.toContain(EDIT_REASON_PENDING);
+    });
+
+    it("name the description of Mark In in both catalogs", () => {
+      const key: MarkInFinishesSegmentKey = "transport.state.finishesSegment";
+      expect(typeof lookup(en, key)).toBe("string");
+      expect(typeof lookup(zhCN, key)).toBe("string");
+      expect(key).not.toBe(EDIT_REASON_PENDING);
     });
   });
 });

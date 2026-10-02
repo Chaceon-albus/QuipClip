@@ -226,10 +226,14 @@ export const en = {
       // It silences the preview and the frame step sound, not the export.
       mute: "Mute Audio",
     },
-    // The description of Mark In while an In point waits for its Out point. It is the second
-    // line of the tooltip, and assistive technology reads it on the button.
+    // The descriptions of Mark In. Each is the second line of its tooltip, and assistive
+    // technology reads it on the button. `inPending` shows while an In point waits for its
+    // Out point. `finishesSegment` shows while a segment is current and the frame on screen is
+    // at or after its Out point. A press of Mark In then finishes that segment and marks an In
+    // point at the frame on screen.
     state: {
       inPending: "An In point is pending. Mark an Out point to make a segment.",
+      finishesSegment: "Finishes this segment and marks an In point at the playhead.",
     },
     // The label above the duration at the right end of the transport bar. `segment` names the
     // current segment. {{index}} is its number, as in `timeline.segment`. `pending` names the
@@ -243,7 +247,6 @@ export const en = {
       markInFirst: "Mark an In point first.",
       selectSegment: "Select a segment first.",
       playheadInsideSegment: "Move the playhead between the In and Out points.",
-      playheadBeforeOut: "Move the playhead before the Out point.",
       playheadAfterIn: "Move the playhead after the In point.",
       atInPoint: "The playhead is already at the In point.",
       atOutPoint: "The playhead is already at the Out point.",
