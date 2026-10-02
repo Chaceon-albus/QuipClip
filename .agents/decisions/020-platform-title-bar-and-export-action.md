@@ -94,6 +94,24 @@ bar keeps the focus in the dialog and does not close it. On Windows the three wi
 work, and the close button takes the quit path of ADR 027. The Settings window sets the height
 to 0, because it has the title bar of the system (ADR 038).
 
+(Changed on 2026-10-02.) On Windows the undecorated main window keeps a 1 px border that the
+system draws for its shadow. Its colour follows the dark mode flag of the window: light gray on
+Windows 11 in the light theme, and dark on Windows 10 in the dark theme, where it stood out
+against the light title bar. On Windows 11, build 22000 and later, the main window now sets
+`DWMWA_BORDER_COLOR` to the `--border` token of the resolved theme of the application, `#c8d3d4`
+in the light theme and `#263031` in the dark theme. The theme sync calls the command
+`set_window_border_theme` at start and at each change of the resolved theme, also when the
+system appearance changes under the System theme. The command takes only `light` or `dark` and
+acts only on the main window. The Windows calls `DwmSetWindowAttribute` and `RtlGetVersion` are
+declared by hand, as ADR 018 does for its calls, so no dependency is added.
+
+- The colour replaces the setting of Windows 11 that shows the accent colour on window borders,
+  for the active and the inactive window.
+- Until the page runs its first theme sync, a few hundred milliseconds after start, the border
+  has the colour of the system.
+- Windows 10 has no attribute for the colour of the border. Its border does not change.
+- The links to `dwmapi` and `ntdll` are not checked on macOS. A build on Windows checks them.
+
 ## Consequences
 
 - The platform test reads the user agent. Everything that is not macOS takes the

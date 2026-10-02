@@ -95,7 +95,8 @@ manifest existed, so every page could call every command.
 
 - The main window may call `start_capability_probe`, `start_export`, `cancel_export`,
   `cancel_active_export`, `reveal_export_output`, `import_media`, `read_source_revision`,
-  `confirm_quit`, `load_settings`, `save_settings` and `open_settings_window`. It keeps
+  `confirm_quit`, `load_settings`, `save_settings` and `open_settings_window`, and (added on
+2026-10-02) `set_window_border_theme` of ADR 020. It keeps
   `core:default` and its window, dialog and progress permissions.
 - The Settings window may call `load_settings`, `save_settings`, `restore_default_presets`,
   `reset_settings`, `start_capability_probe`, `take_settings_window_request` and
