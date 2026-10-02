@@ -74,6 +74,23 @@ Clicking a segment on the timeline makes it current. **Delete Segment** removes 
 nothing current, because selecting a neighbour automatically would make an unseen segment the
 operand of the next Delete or Split, which is the ambiguity this rule removes.
 
+(Changed on 2026-10-02.) Mark In at or after the Out of the current segment finishes that
+segment and marks an In point at the frame on screen. Mark Out makes the segment that it
+completes current, and the playhead then stands on the Out of that segment. Before this change,
+Mark In, Mark Out and Split were all disabled in that state, and the user had to press Finish
+Segment first. A user reported that state as a fault. Mark In now acts as follows when a segment
+is current:
+
+- The frame is at or after the Out: Mark In finishes the segment and sets the pending In to the
+  frame. This is one action, and it adds one history entry. The first Undo makes the segment
+  current again with no pending In. A second Undo removes the segment, as before.
+- The frame is before the Out and is not the In: Mark In moves the In, as before.
+- The frame is the In: Mark In is disabled, because the move changes nothing.
+- A stored PTS of the segment does not parse: Mark In is disabled.
+
+A pending In alone still adds no history entry. The tooltip of Mark In says when a press
+finishes the segment.
+
 While a current segment resolves for the active source, there is no pending In mark. The two
 fields describe the same thing — the segment being built — so they never both hold a value.
 
