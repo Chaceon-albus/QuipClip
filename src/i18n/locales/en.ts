@@ -290,7 +290,6 @@ export const en = {
       notIncluded: "(not in the segment)",
       duration: "Duration",
     },
-    pendingInFlag: "In",
     // The label of the hover line in the ruler. {{time}} is the time under the pointer, as a
     // timecode such as "00:01:23:04". It comes from a pixel position, so "≈" marks it as
     // approximate.

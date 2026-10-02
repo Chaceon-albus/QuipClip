@@ -58,7 +58,7 @@ import {
   type EdgeAutoScrollGeometry,
 } from "./edgeAutoScroll";
 import { resolveFrameBandRate } from "./frameBand";
-import { PendingInFlag, PendingInTrackMarks } from "./PendingInLayer";
+import { PendingInTrackMarks } from "./PendingInLayer";
 import { PlayheadFollow } from "./PlayheadFollow";
 import {
   RulerPlayhead,
@@ -168,7 +168,7 @@ function readVisibleLane(scrollEl: HTMLElement): ClientRange {
  * the displayed position subscribe to it themselves: RulerPlayhead, TrackPlayhead, the
  * `aria-valuenow` of TimelineSeekSlider, the pending In region, the frame band at a high zoom
  * (TrackFrameBand), and PlayheadFollow, which holds the follow effects. SegmentLayer, the
- * segment summary in the gutter, the pending In flag and bracket, and the ruler ticks do not
+ * segment summary in the gutter, the pending In bracket, and the ruler ticks do not
  * subscribe to it. So a presented frame renders only those small layers again.
  * A layer that renders per frame takes its label as a prop, and a layer that does not
  * reads the catalog itself.
@@ -1393,13 +1393,6 @@ export function TimelinePanel({
                   {t("timeline.durationUnknown")}
                 </div>
               )}
-
-              {/* Pending In flag (see PendingInFlag) */}
-              <PendingInFlag
-                videoStartPts={videoStartPts}
-                videoTimeBase={videoTimeBase}
-                totalDurationSeconds={totalDurationSeconds}
-              />
 
               {/* Playhead in the ruler (see RulerPlayhead) */}
               {media && !isIndeterminate && (

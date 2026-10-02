@@ -36,9 +36,8 @@ export interface RulerHoverLineProps {
  *
  * The line is 1px in the foreground colour at a low opacity, so it stays quieter than the
  * playhead. The label is a small chip in the tooltip colours at the top of the ruler, the band
- * of the playhead head and the pending In flag, so it does not cover the tick labels. It sits
- * to the right of the line, or to the left of it near the right edge of the view
- * (`resolveHoverLabelSide`).
+ * of the playhead head, so it does not cover the tick labels. It sits to the right of the
+ * line, or to the left of it near the right edge of the view (`resolveHoverLabelSide`).
  *
  * The label is decorative. The time it shows is a pixel position, which the accessible seek
  * slider does not need.

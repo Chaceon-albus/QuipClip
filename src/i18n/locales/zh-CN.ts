@@ -220,7 +220,6 @@ export const zhCN: TranslationCatalog = {
       notIncluded: "（不在片段内）",
       duration: "时长",
     },
-    pendingInFlag: "入点",
     hoverTime: "≈ {{time}}",
     trimNotApplied: "未应用此次修剪。",
     // Chinese selects the `other` plural category for every count, so it has no `_one` form.

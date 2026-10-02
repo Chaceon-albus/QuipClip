@@ -28,10 +28,10 @@ type BoundaryBadgeKind = "in" | "out";
  * One badge: the bracket glyph of its mark, as the transport bar and the timeline draw it,
  * and the short name of the mark.
  *
- * The In badge is filled with the brand colour, as a segment and the pending In flag are:
- * its frame is in the segment. The Out badge is only outlined on the dark ground of the
- * preview, and its glyph puts the segment block before the bracket, with the name after it:
- * its frame is the first frame after the segment, outside it (ADR 002).
+ * The In badge is filled with the brand colour, as the selected segment is: its frame is in
+ * the segment. The Out badge is only outlined on the dark ground of the preview, and its
+ * glyph puts the segment block before the bracket, with the name after it: its frame is the
+ * first frame after the segment, outside it (ADR 002).
  *
  * The tooltip gives one line for each boundary that the frame is. The badge takes the pointer
  * for its tooltip only. It is not a control and takes no focus, because it comes and goes with

@@ -41,8 +41,8 @@ type RulerIntervalStyle = CSSProperties & { "--ruler-minor-period"?: string };
  * WCAG 1.4.11 asks of a graphic that carries information (see `--timeline-tick-minor`).
  *
  * Each label box is 10 px tall and sits on its major tick, at the bottom of the ruler. The
- * ruler content is 27 px tall, so the box starts 13 px below its top. The pending In flag
- * and the playhead head take the top 12 px, so they do not overlap a label box.
+ * ruler content is 27 px tall, so the box starts 13 px below its top. The playhead head
+ * takes the top 12 px, so it does not overlap a label box.
  *
  * The tick count rises from a few to as many as 400. TimelinePanel does not render per
  * presented frame, but it does render for changes that keep the ticks, such as a change of
