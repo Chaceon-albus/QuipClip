@@ -88,8 +88,7 @@ identical with and without that flag for libx264, libx265 and ProRes.
 
 ### The editor
 
-(Added on 2026-10-02.) 
-The preset editor of the Settings window has a group Extra Parameters with a text area in the
+(Added on 2026-10-02.) The preset editor of the Settings window has a group Extra Parameters with a text area in the
 syntax of the ffmpeg command line. Apply reads the text:
 
 - Double and single quotes, and line continuations with `\`, `^` and `` ` ``, as a shell, the
@@ -107,6 +106,35 @@ syntax of the ffmpeg command line. Apply reads the text:
 The text area shows the canonical text of the two lists, one option on each line. A Save reads
 any text that was not applied. Text typed while a save runs keeps the draft unsaved, so a switch
 to another preset or a close asks first.
+
+### The seeds
+
+(Added on 2026-10-02.) The seeded presets follow the five blocks that the user gave. Each one
+writes AAC at 320 kbps, at the rate and with the channels of the source, into MP4.
+
+| Id | Platform | Video | Options |
+| --- | --- | --- | --- |
+| `default-h264-mp4` (active) | every | libx264, CRF 20, yuv420p | `preset slow`, the `x264-params` of the user |
+| `default-av1-mp4` | every | libsvtav1, CRF 38, yuv420p10le | `preset 5`, `g 250`, the `svtav1-params` of the user |
+| `default-hevc-videotoolbox-mp4` | macOS | hevc_videotoolbox, quality 80, p010le | `profile main10`, `prio_speed 0`, `spatial_aq 1`, `bf 3`, `g 300`, `tag hvc1` |
+| `default-nvenc-mp4` | Windows | h264_nvenc, CQ 25, yuv420p | `preset p7`, `rc vbr`, `multipass fullres`, `rc-lookahead 32`, `spatial-aq 1`, `temporal-aq 1`, `bf 3`, `b_ref_mode middle`, `g 250` |
+| `default-hevc-nvenc-mp4` | Windows | hevc_nvenc, CQ 25, p010le | the same, and `tag hvc1` |
+
+- The NVENC seeds use pure constant quality, with no `-maxrate` and no `-bufsize`, as the user
+  chose.
+- A seed leaves out an option that repeats the default of its encoder, because an option that
+  an older FFmpeg does not know ends the export: `-realtime 0`, `-allow_sw 0` and
+  `-power_efficient 0` of VideoToolbox, and `-tune hq` and `-aq-strength 8` of NVENC. The NVENC
+  seeds keep `-g 250`, because the FFmpeg default of `g` for NVENC is -1, which takes the GOP
+  length of the NVIDIA preset.
+- `-q:v` of VideoToolbox works only with an FFmpeg for Apple silicon, and `-spatial_aq` needs
+  FFmpeg 8.0 or later. On an Intel Mac or with FFmpeg 7.1, the VideoToolbox seed fails.
+- `default-hevc-mp4`, the x265 seed, and `default-videotoolbox-mp4`, the VideoToolbox H.264 seed,
+  are retired. No seed uses those ids again. A restore replaces each seed by id and appends a
+  seed that is absent (ADR 013), so a retired seed stays in a library as a preset of the user. A
+  seed that keeps the id of an earlier seed keeps its codec.
+- A real encode on this Mac with FFmpeg 9.0.2 wrote H.264 High with `avc1` and key frames 250
+  frames apart, AV1 Main 10-bit, and HEVC Main 10 with `hvc1` and key frames 300 frames apart.
 
 ## Consequences
 

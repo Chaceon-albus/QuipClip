@@ -92,7 +92,8 @@ missing file produce the same document.
 
 The seeds are H.264 in MP4, HEVC in MP4, and one hardware preset for the platform. The
 hardware preset selects a bitrate, because every hardware encoder accepts a bitrate and only
-some accept a quality scale.
+some accept a quality scale. (Changed on 2026-10-02: ADR 040 gives the seeds of schema version 2, and the
+hardware seeds use constant quality.)
 
 **Restore.** The restore action replaces each seeded preset by identifier, or appends it
 when it is absent. It keeps every other preset. It keeps `ffmpegPath`. A restore that
