@@ -12,6 +12,7 @@
 use super::{
     ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PlannedAudio, PlannedSegment,
     PlannedVideo, MAX_EXPORT_SEGMENTS, MAX_LEADING_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
+    SEPARATE_AUDIO_INPUT_LEAD_MILLISECONDS,
 };
 use crate::ffmpeg::probe::MediaProbe;
 use crate::settings::{AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting};
@@ -411,6 +412,22 @@ pub fn build_plan(
     let audio_start = source_audio.and_then(|audio| audio.start_time);
     let max_leading_silence = max_leading_audio_silence_rational();
     let mut leading_silence = zero;
+    // A plan with video and audio waits for the first audio frame before its graph runs, and
+    // keeps the decoded video until then (`ExportPlan::separate_audio_input`). Without video
+    // there is nothing to keep, and without audio nothing to wait for.
+    let waits_for_audio = streams.writes_video() && source_audio.is_some();
+    let separate_audio_lead = separate_audio_input_lead_rational();
+    // The last sample of the source audio, when the probe reports where the stream starts and
+    // how long it is.
+    let audio_end = source_audio
+        .and_then(|audio| audio.start_time.zip(audio.duration))
+        .and_then(|(start, length)| start.add(length));
+    // The latest point at which an input of a segment starts to read: its seek, or the start of
+    // the container when the seek clamped to zero.
+    let mut latest_read_start: Option<Rational> = None;
+    // The latest Out point of a segment that another segment follows in concat order.
+    let mut latest_followed_out: Option<Rational> = None;
+    let last_index = segments.len() - 1;
 
     let mut planned_segments = Vec::with_capacity(segments.len());
     let mut total_duration = zero;
@@ -419,7 +436,7 @@ pub fn build_plan(
     // An overflow of the overlap sum falls back to the planned duration instead of an error.
     let mut expected_audio_overflowed = false;
 
-    for segment in segments {
+    for (index, segment) in segments.iter().enumerate() {
         // Every `Option`-returning step below can fail for more reasons than one segment's
         // own PTS values overflowing. `probe.video_time_base` is not re-validated here: a
         // `MediaProbe` built outside `probe::normalize` (a test, or a future caller) could
@@ -471,6 +488,18 @@ pub fn build_plan(
         // the numerator: `num() > 0` is an exact "is this strictly positive" test, so an
         // exact zero clamps to `None` exactly like a negative value does.
         let seek_seconds = (raw_seek.num() > 0).then_some(raw_seek);
+        let read_start = match seek_seconds {
+            Some(seek) => format_start_time
+                .add(seek)
+                .ok_or(ExportErrorCode::InvalidSegment)?,
+            None => format_start_time,
+        };
+        latest_read_start =
+            Some(latest_read_start.map_or(read_start, |latest| latest.max(read_start)));
+        if index < last_index {
+            latest_followed_out =
+                Some(latest_followed_out.map_or(out_seconds, |latest| latest.max(out_seconds)));
+        }
 
         let (audio_in_tick, audio_out_tick) = match &audio {
             Some(audio) => {
@@ -530,6 +559,43 @@ pub fn build_plan(
         });
     }
 
+    // An input reads from the keyframe at or before its seek, which the plan does not know, so
+    // any segment can start to read at the start of the container. Its graph waits for the
+    // first audio sample when the audio starts late, and until the end of the file when the
+    // input starts to read after the last sample. Under one input, a segment whose Out point
+    // lies after the last sample also waits until the end of the file for the end of its
+    // audio, and `concat` holds the video that `split` gives the segments behind it. Each way,
+    // the rule is one for the whole plan: a second input for every segment, or for none.
+    let separate_audio_input = waits_for_audio && {
+        let starts_late = match audio_start {
+            Some(start) => {
+                start
+                    .sub(format_start_time)
+                    .ok_or(ExportErrorCode::InvalidSegment)?
+                    > separate_audio_lead
+            }
+            None => false,
+        };
+        let reads_after_the_end = match audio_end.zip(latest_read_start) {
+            Some((end, read_start)) => {
+                read_start
+                    .add(separate_audio_lead)
+                    .ok_or(ExportErrorCode::InvalidSegment)?
+                    > end
+            }
+            None => false,
+        };
+        let ends_after_the_end_with_more_behind = match audio_end.zip(latest_followed_out) {
+            Some((end, out)) => {
+                out.add(separate_audio_lead)
+                    .ok_or(ExportErrorCode::InvalidSegment)?
+                    > end
+            }
+            None => false,
+        };
+        starts_late || reads_after_the_end || ends_after_the_end_with_more_behind
+    };
+
     let resolution = match preset.resolution {
         ResolutionSetting::Source => None,
         ResolutionSetting::Custom(resolution) => Some(resolution),
@@ -569,6 +635,7 @@ pub fn build_plan(
         segments: planned_segments,
         container: preset.container,
         total_duration,
+        separate_audio_input,
     })
 }
 
@@ -613,6 +680,13 @@ fn seek_margin_rational() -> Rational {
 fn max_leading_audio_silence_rational() -> Rational {
     Rational::new(MAX_LEADING_AUDIO_SILENCE_SECONDS, 1)
         .expect("MAX_LEADING_AUDIO_SILENCE_SECONDS/1 always reduces to a valid Rational")
+}
+
+/// [`SEPARATE_AUDIO_INPUT_LEAD_MILLISECONDS`] as a [`Rational`] number of seconds, for the
+/// same reason as [`zero_rational`].
+fn separate_audio_input_lead_rational() -> Rational {
+    Rational::new(SEPARATE_AUDIO_INPUT_LEAD_MILLISECONDS, 1000)
+        .expect("SEPARATE_AUDIO_INPUT_LEAD_MILLISECONDS/1000 always reduces to a valid Rational")
 }
 
 /// Convert one source PTS into an audio tick at `sample_rate`, as `round(pts * time_base *
@@ -2339,6 +2413,177 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, ExportErrorCode::SourceAudioRateUnknown);
+    }
+
+    /// `ExportPlan::separate_audio_input` of a plan of `segments` from `probe`, for `streams`.
+    fn separate_audio(
+        streams: ExportStreams,
+        probe: &MediaProbe,
+        segments: &[SegmentBoundary],
+    ) -> bool {
+        plan_streams(
+            streams,
+            segments,
+            probe,
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap()
+        .separate_audio_input
+    }
+
+    /// The sample probe with audio from `start` for `length` seconds, in a container that
+    /// starts at `container_start`.
+    fn probe_in_container(container_start: &str, start: &str, length: Option<&str>) -> MediaProbe {
+        let mut probe = probe_with_audio_extent(Some(start), length);
+        probe.format_start_time = Some(decimal(container_start));
+        probe
+    }
+
+    #[test]
+    fn audio_that_starts_late_gives_every_segment_a_second_input() {
+        // The audio starts at 30 s. An input reads from the keyframe at or before its seek, which
+        // can lie before the first sample even when the seek does not, so [36, 40), which seeks
+        // to 31 s, takes its audio from a second input too.
+        let probe = probe_with_audio_extent(Some("30"), Some("100"));
+        for segments in [
+            &[seconds_boundary("0", "31")][..],
+            &[seconds_boundary("36", "40")][..],
+            &[seconds_boundary("36", "40"), seconds_boundary("0", "10")][..],
+        ] {
+            assert!(separate_audio(
+                ExportStreams::VideoAndAudio,
+                &probe,
+                segments
+            ));
+            // Without video nothing waits for the audio, and without audio nothing is waited for.
+            for streams in [ExportStreams::AudioOnly, ExportStreams::VideoOnly] {
+                assert!(!separate_audio(streams, &probe, segments), "{streams:?}");
+            }
+        }
+        // A probe that reports neither end of the stream asks for no second input.
+        assert!(!separate_audio(
+            ExportStreams::VideoAndAudio,
+            &probe_with_audio_extent(None, None),
+            &[seconds_boundary("0", "31")]
+        ));
+    }
+
+    #[test]
+    fn a_second_input_needs_audio_more_than_half_a_second_after_the_start_of_the_container() {
+        let segment = [seconds_boundary("1.4", "3")];
+        for (container, start, separate) in [
+            ("0", "0.3", false),
+            ("0", "0.5", false),
+            ("0", "0.6", true),
+            ("0", "-1", false),
+            // MPEG-TS often starts at 1.4 s, so the time counts from there, not from 0.
+            ("1.4", "1.8", false),
+            ("1.4", "2", true),
+            ("-1", "-0.6", false),
+            ("-1", "-0.4", true),
+        ] {
+            assert_eq!(
+                separate_audio(
+                    ExportStreams::VideoAndAudio,
+                    &probe_in_container(container, start, Some("100")),
+                    &segment
+                ),
+                separate,
+                "container from {container} s, audio from {start} s"
+            );
+        }
+    }
+
+    #[test]
+    fn an_input_that_starts_to_read_after_the_last_audio_sample_gives_every_segment_a_second_input()
+    {
+        // The audio covers [0, 20). [25, 27) seeks to 20 s, so its input finds no audio packet
+        // and the graph would wait until the end of the file. [24, 26) seeks to 19 s, more than
+        // half a second before the end. One late segment decides for the whole plan.
+        let probe = probe_with_audio_extent(Some("0"), Some("20"));
+        for (segments, separate) in [
+            (&[seconds_boundary("10", "12")][..], false),
+            (&[seconds_boundary("24", "26")][..], false),
+            (&[seconds_boundary("25", "27")][..], true),
+            (
+                &[seconds_boundary("10", "12"), seconds_boundary("60", "65")][..],
+                true,
+            ),
+        ] {
+            assert_eq!(
+                separate_audio(ExportStreams::VideoAndAudio, &probe, segments),
+                separate,
+                "{segments:?}"
+            );
+        }
+        // The read starts at the start of the container plus the seek.
+        assert!(separate_audio(
+            ExportStreams::VideoAndAudio,
+            &probe_in_container("1.4", "1.4", Some("18.6")),
+            &[seconds_boundary("25", "27")]
+        ));
+        // A clamped seek reads from the start of the container, here at -1 s, so [1, 3) reads
+        // from -1 s, more than half a second before the end of audio that covers [-1, 0.4).
+        assert!(!separate_audio(
+            ExportStreams::VideoAndAudio,
+            &probe_in_container("-1", "-1", Some("1.4")),
+            &[seconds_boundary("1", "3")]
+        ));
+        assert!(separate_audio(
+            ExportStreams::VideoAndAudio,
+            &probe_in_container("-1", "-1", Some("0.4")),
+            &[seconds_boundary("1", "3")]
+        ));
+        // A stream of unknown length bounds nothing at its end.
+        assert!(!separate_audio(
+            ExportStreams::VideoAndAudio,
+            &probe_with_audio_extent(Some("0"), None),
+            &[seconds_boundary("60", "65")]
+        ));
+    }
+
+    #[test]
+    fn a_segment_that_ends_after_the_last_audio_sample_with_another_behind_it_gets_a_second_input()
+    {
+        // The audio covers [0, 20). [17, 22) seeks to 12 s and ends after the last sample, so
+        // under one input its audio ends only at the end of the file, and `concat` holds the
+        // video of [23, 83) until then. As the last segment, it holds nothing behind it.
+        let probe = probe_with_audio_extent(Some("0"), Some("20"));
+        for (segments, separate) in [
+            (
+                &[seconds_boundary("17", "22"), seconds_boundary("23", "83")][..],
+                true,
+            ),
+            (
+                &[seconds_boundary("23", "83"), seconds_boundary("17", "22")][..],
+                true,
+            ),
+            (
+                &[
+                    seconds_boundary("15", "19.5"),
+                    seconds_boundary("19.5", "21"),
+                ][..],
+                false,
+            ),
+            (
+                &[
+                    seconds_boundary("15", "19.6"),
+                    seconds_boundary("19.5", "21"),
+                ][..],
+                true,
+            ),
+            (
+                &[seconds_boundary("10", "12"), seconds_boundary("17", "22")][..],
+                false,
+            ),
+        ] {
+            assert_eq!(
+                separate_audio(ExportStreams::VideoAndAudio, &probe, segments),
+                separate,
+                "{segments:?}"
+            );
+        }
     }
 
     #[test]

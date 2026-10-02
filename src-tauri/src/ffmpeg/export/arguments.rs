@@ -35,7 +35,7 @@
 //!
 //! That last rule is why [`choose_graph_shape`] lives here rather than in [`super::graph`].
 //! Only this module can measure the assembled command, so only this module can decide which of
-//! ADR 014's two [`GraphShape`] variants an export can afford. See [`WINDOWS_COMMAND_LINE_LIMIT`]
+//! the three [`GraphShape`] variants an export can afford. See [`WINDOWS_COMMAND_LINE_LIMIT`]
 //! for the budget, and the tests for the one assertion that keeps
 //! [`MAX_EXPORT_SEGMENTS`](super::MAX_EXPORT_SEGMENTS) and that limit from drifting apart.
 //!
@@ -156,7 +156,11 @@ pub const COMMAND_LINE_BUDGET: usize = UNIX_COMMAND_LINE_BUDGET;
 /// separately would let the budget describe a command that [`build_arguments`] never builds.
 ///
 /// The rule is ADR 014's: prefer one input for each segment, and fall back to one input for
-/// the whole source when the first shape does not fit. `SingleInput` is a fallback, never a
+/// the whole source when the first shape does not fit. A plan whose segments take their audio
+/// from a second input ([`ExportPlan::separate_audio_input`]) has one more step:
+/// when the one input and its second input for the audio do not fit either, the shape is
+/// [`GraphShape::SingleInputSharedAudio`], which drops the second input and so writes the
+/// command of a plan without it. `SingleInput` is a fallback, never a
 /// default. What it saves lies outside the graph: it writes the source path and its input
 /// flags once instead of once for each segment. Measurement 15 puts the graphs themselves
 /// close together and on both sides of the line -- `SingleInput` holds the larger graph for
@@ -165,8 +169,10 @@ pub const COMMAND_LINE_BUDGET: usize = UNIX_COMMAND_LINE_BUDGET;
 ///
 /// # This function cannot fail
 ///
-/// There is no third shape, so a plan too large for both is simply rendered in the one that
-/// reaches furthest. Nothing here reports that condition, and nothing needs to: ADR 014 makes
+/// The last shape is the one that reaches furthest -- [`GraphShape::SingleInput`], or
+/// [`GraphShape::SingleInputSharedAudio`] for a plan with a second input for the audio -- so a
+/// plan too large for every shape is simply rendered in it. Nothing here reports that condition,
+/// and nothing needs to: ADR 014 makes
 /// [`super::MAX_EXPORT_SEGMENTS`] the guarantee, and [`super::plan::build_plan`] enforces that
 /// cap before an [`ExportPlan`] exists at all. The test
 /// `a_full_length_plan_on_a_long_windows_path_fits_the_windows_command_line` is what holds the
@@ -190,12 +196,16 @@ pub fn choose_graph_shape(plan: &ExportPlan, output: &Path) -> GraphShape {
 /// [`choose_graph_shape`] against an explicit budget, so a test can ask the Windows question
 /// on a host that is not Windows.
 fn choose_graph_shape_within(plan: &ExportPlan, output: &Path, budget: usize) -> GraphShape {
-    let graph = build_filter_graph(plan, GraphShape::InputPerSegment);
-    let arguments = build_arguments(plan, GraphShape::InputPerSegment, &graph, output);
-    if command_line_length(&arguments) <= budget {
+    let fits = |shape: GraphShape| {
+        let graph = build_filter_graph(plan, shape);
+        command_line_length(&build_arguments(plan, shape, &graph, output)) <= budget
+    };
+    if fits(GraphShape::InputPerSegment) {
         GraphShape::InputPerSegment
-    } else {
+    } else if !plan.separate_audio_input || fits(GraphShape::SingleInput) {
         GraphShape::SingleInput
+    } else {
+        GraphShape::SingleInputSharedAudio
     }
 }
 
@@ -229,7 +239,7 @@ fn command_line_length(arguments: &[String]) -> usize {
 /// [`super::plan::build_plan`] rejects an empty request with
 /// [`ExportErrorCode::NoSegments`](super::ExportErrorCode::NoSegments), so an empty plan cannot
 /// arise from it, and a debug assertion catches a hand-built one: it would produce a command
-/// with no `-i` at all. The two shapes disagree about how many `-i` arguments the graph's input
+/// with no `-i` at all. The shapes disagree about how many `-i` arguments the graph's input
 /// labels refer to, so mismatching them produces a command ffmpeg rejects while parsing the
 /// graph.
 ///
@@ -293,17 +303,26 @@ pub fn build_arguments(
             for segment in &plan.segments {
                 push_input(&mut arguments, segment.seek_seconds, &plan.source);
             }
+            // The second inputs that give only the audio, after the inputs of the segments and
+            // in segment order: input `n + i` gives the audio of segment `i`, as
+            // `build_filter_graph` reads it. Each has the seek of its segment, so its audio is the
+            // audio that the input of the segment would give.
+            if plan.separate_audio_input {
+                for segment in &plan.segments {
+                    push_input(&mut arguments, segment.seek_seconds, &plan.source);
+                }
+            }
         }
         // One input, seeked once before the earliest frame any segment needs. This must be
         // `single_input_seek_seconds`, not `segments[0].seek_seconds`: concat order need not
         // match source order, so the first array element is not necessarily the earliest one,
         // and seeking to it would skip material a later array element still needs.
-        GraphShape::SingleInput => {
-            push_input(
-                &mut arguments,
-                plan.single_input_seek_seconds(),
-                &plan.source,
-            );
+        GraphShape::SingleInput | GraphShape::SingleInputSharedAudio => {
+            let seek = plan.single_input_seek_seconds();
+            push_input(&mut arguments, seek, &plan.source);
+            if shape == GraphShape::SingleInput && plan.separate_audio_input {
+                push_input(&mut arguments, seek, &plan.source);
+            }
         }
     }
 
@@ -644,6 +663,7 @@ mod tests {
             segments: fixture_segments(count),
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
+            separate_audio_input: false,
         }
     }
 
@@ -704,6 +724,109 @@ mod tests {
                 "mp4",
                 "/export/.out.mp4.tmp-4242-0",
             ]
+        );
+    }
+
+    /// The input arguments of a command: everything between `-copyts` and `-filter_complex`.
+    fn input_arguments(plan: &ExportPlan, shape: GraphShape) -> Vec<String> {
+        let all = arguments(plan, shape);
+        let start = all.iter().position(|a| a == "-copyts").unwrap() + 1;
+        let end = all.iter().position(|a| a == "-filter_complex").unwrap();
+        all[start..end].to_vec()
+    }
+
+    /// `fixture_plan(count)` with `separate_audio_input` set.
+    fn plan_with_separate_audio(count: usize) -> ExportPlan {
+        ExportPlan {
+            separate_audio_input: true,
+            ..fixture_plan(count)
+        }
+    }
+
+    #[test]
+    fn opens_the_second_inputs_for_the_audio_after_the_segments_with_the_seek_of_each() {
+        // The graph reads the audio of segment `i` from input `3 + i`.
+        assert_eq!(
+            input_arguments(&plan_with_separate_audio(3), GraphShape::InputPerSegment),
+            [
+                "-ss", "6.6", "-i", SOURCE, "-ss", "5", "-i", SOURCE, "-ss", "15", "-i", SOURCE,
+                "-ss", "6.6", "-i", SOURCE, "-ss", "5", "-i", SOURCE, "-ss", "15", "-i", SOURCE,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_input_opens_one_second_input_for_the_audio_with_the_one_seek() {
+        // The earliest segment seeks to 5 s, and that is the seek of the one input.
+        let plan = plan_with_separate_audio(3);
+        assert_eq!(
+            input_arguments(&plan, GraphShape::SingleInput),
+            ["-ss", "5", "-i", SOURCE, "-ss", "5", "-i", SOURCE]
+        );
+        assert_eq!(
+            input_arguments(&plan, GraphShape::SingleInputSharedAudio),
+            ["-ss", "5", "-i", SOURCE]
+        );
+        assert_eq!(
+            input_arguments(&fixture_plan(3), GraphShape::SingleInput),
+            ["-ss", "5", "-i", SOURCE]
+        );
+    }
+
+    #[test]
+    fn every_input_that_the_graph_reads_is_on_the_command_line() {
+        // For every shape and both values of the flag, the highest input index in the graph is
+        // below the number of `-i` arguments, and every input is read.
+        for count in 1..=3 {
+            for plan in [fixture_plan(count), plan_with_separate_audio(count)] {
+                for shape in [
+                    GraphShape::InputPerSegment,
+                    GraphShape::SingleInput,
+                    GraphShape::SingleInputSharedAudio,
+                ] {
+                    let graph = build_filter_graph(&plan, shape);
+                    let inputs = build_arguments(&plan, shape, &graph, Path::new(OUTPUT))
+                        .iter()
+                        .filter(|argument| *argument == "-i")
+                        .count();
+                    let read: std::collections::BTreeSet<usize> = graph
+                        .split('[')
+                        .filter_map(|label| label.split_once(':'))
+                        .filter_map(|(input, _)| input.parse().ok())
+                        .collect();
+                    let context =
+                        format!("{count} segments, {shape:?}, {}", plan.separate_audio_input);
+                    assert_eq!(read, (0..inputs).collect(), "{context}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_shape_falls_back_to_the_shared_audio_only_when_the_second_input_does_not_fit() {
+        let output = Path::new(OUTPUT);
+        let plan = plan_with_separate_audio(3);
+        let per_segment = measured_length(&plan, GraphShape::InputPerSegment, OUTPUT);
+        let single = measured_length(&plan, GraphShape::SingleInput, OUTPUT);
+        let shared = measured_length(&plan, GraphShape::SingleInputSharedAudio, OUTPUT);
+        assert!(shared < single && single < per_segment);
+        for (budget, shape) in [
+            (per_segment, GraphShape::InputPerSegment),
+            (per_segment - 1, GraphShape::SingleInput),
+            (single, GraphShape::SingleInput),
+            (single - 1, GraphShape::SingleInputSharedAudio),
+            (0, GraphShape::SingleInputSharedAudio),
+        ] {
+            assert_eq!(
+                choose_graph_shape_within(&plan, output, budget),
+                shape,
+                "{budget}"
+            );
+        }
+        // A plan that asks for no second input never reaches the third shape.
+        assert_eq!(
+            choose_graph_shape_within(&fixture_plan(3), output, 0),
+            GraphShape::SingleInput
         );
     }
 
@@ -1876,15 +1999,23 @@ mod tests {
         }
     }
 
-    /// Every plan and shape the guard tests below sweep: both shapes, every container, with
-    /// and without audio, without video, every quality kind, an audio bitrate, a clamped seek,
-    /// and a sub-microsecond seek.
+    /// Every plan and shape the guard tests below sweep: the three shapes, every container,
+    /// with and without audio, without video, every quality kind, an audio bitrate, a clamped
+    /// seek, a sub-microsecond seek, and a second input for the audio.
     fn guard_matrix() -> Vec<(ExportPlan, GraphShape)> {
         let mut cases: Vec<(ExportPlan, GraphShape)> = Vec::new();
-        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+        for shape in [
+            GraphShape::InputPerSegment,
+            GraphShape::SingleInput,
+            GraphShape::SingleInputSharedAudio,
+        ] {
             for count in [1, 3] {
                 cases.push((fixture_plan(count), shape));
+                cases.push((plan_with_separate_audio(count), shape));
             }
+            let mut clamped_with_separate_audio = plan_with_separate_audio(3);
+            clamped_with_separate_audio.segments[1].seek_seconds = None;
+            cases.push((clamped_with_separate_audio, shape));
             for container in [Container::Mp4, Container::Mov, Container::Mkv] {
                 let mut plan = fixture_plan(2);
                 plan.container = container;
@@ -2165,6 +2296,7 @@ mod tests {
                 30_000,
             )
             .expect("the fixture duration is representable"),
+            separate_audio_input: false,
         }
     }
 
@@ -2183,7 +2315,7 @@ mod tests {
         // this reason and this reason only.
         //
         // Note what is asserted: not that the preferred shape fits, but that the shape
-        // `choose_graph_shape` *returns* fits. There is no third shape, so the fallback's own
+        // `choose_graph_shape` *returns* fits. The last fallback reaches furthest, so its own
         // length is the real limit of the renderer.
         //
         // This plan measures 28386 of the 31743 available bytes. Do not read that gap as the
@@ -2211,6 +2343,25 @@ mod tests {
             measured_length(&plan, GraphShape::InputPerSegment, WINDOWS_OUTPUT)
                 > WINDOWS_COMMAND_LINE_BUDGET
         );
+    }
+
+    #[test]
+    fn a_full_length_plan_on_a_long_windows_path_keeps_its_second_input_for_the_audio() {
+        // The audio of the source starts late, so every segment takes its audio from a second
+        // input. One input for each segment would need 200 inputs. The one input and its second
+        // input for the audio still fit, so the graph does not wait for the audio (ADR 014
+        // measurement 22).
+        let plan = ExportPlan {
+            separate_audio_input: true,
+            ..windows_plan(MAX_EXPORT_SEGMENTS)
+        };
+        let shape = choose_graph_shape_within(
+            &plan,
+            Path::new(WINDOWS_OUTPUT),
+            WINDOWS_COMMAND_LINE_BUDGET,
+        );
+        assert_eq!(shape, GraphShape::SingleInput);
+        assert!(measured_length(&plan, shape, WINDOWS_OUTPUT) <= WINDOWS_COMMAND_LINE_BUDGET);
     }
 
     /// The longest path Windows accepts without the extended-length prefix, counting the
@@ -2282,8 +2433,9 @@ mod tests {
     /// `-pix_fmt` both carry, the widest option lists [`widest_options`] names, MP4 for its extra
     /// `-movflags +faststart`, an NTSC rate, two-digit stream indices, the widest audio format
     /// [`widest_audio`] names, the longest audio bitrate (`-b:a 1536k`, the top of ADR 023's
-    /// range), eleven-digit PTS values, twelve-digit audio ticks, and a seek that fills every
-    /// decimal place [`SEEK_DECIMALS`] allows.
+    /// range), eleven-digit PTS values, twelve-digit audio ticks, a seek that fills every
+    /// decimal place [`SEEK_DECIMALS`] allows, and a second input for the audio of every segment
+    /// (`ExportPlan::separate_audio_input`).
     fn widest_plan(count: usize) -> ExportPlan {
         let segments = (0..count)
             .map(|index| {
@@ -2328,6 +2480,7 @@ mod tests {
                 30_000,
             )
             .expect("the fixture duration is representable"),
+            separate_audio_input: true,
         }
     }
 
@@ -2337,6 +2490,9 @@ mod tests {
         // the widest command the settings can produce -- not against a plausible one. This scans
         // for the largest segment count that still fits, on the fixture above, choosing the
         // shape the way production does.
+        //
+        // It takes the audio of its segments from second inputs, which the last fallback of
+        // `choose_graph_shape` drops at the cap; see the test below.
         //
         // Measured at the time of writing: the widest permitted plan needs 31509 of the 31743
         // available bytes at the cap, so 234 bytes of slack remain, and 100 segments fit while
@@ -2408,7 +2564,11 @@ mod tests {
                         bitrate: audio_bitrate,
                         ..widest_audio()
                     });
-                    for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+                    for shape in [
+                        GraphShape::InputPerSegment,
+                        GraphShape::SingleInput,
+                        GraphShape::SingleInputSharedAudio,
+                    ] {
                         assert!(
                             measured_length(&plan, shape, &reservation) <= widest_length(shape),
                             "{output_sample_rate} Hz, {output_channels:?}, {audio_bitrate:?} \
@@ -2426,7 +2586,12 @@ mod tests {
         // so it contributes nothing to the difference.
         let output = Path::new(&reservation);
         let shape = choose_graph_shape_within(&widest, output, WINDOWS_COMMAND_LINE_BUDGET);
-        assert_eq!(shape, GraphShape::SingleInput);
+        // The widest plan takes the audio of its segments from second inputs. On the longest
+        // path, that input costs 288 bytes, and the one input with it needs 31797, 54 over the
+        // budget at the cap. So the shape is the last fallback, which drops the second input and
+        // measures what the plan measured before it (ADR 014 measurement 22).
+        assert_eq!(shape, GraphShape::SingleInputSharedAudio);
+        assert!(widest_length(GraphShape::SingleInput) > WINDOWS_COMMAND_LINE_BUDGET);
         let mut legacy = widest_plan(MAX_EXPORT_SEGMENTS);
         legacy.audio = Some(PlannedAudio {
             output_sample_rate: 48_000,

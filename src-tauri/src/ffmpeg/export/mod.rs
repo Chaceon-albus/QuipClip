@@ -10,7 +10,8 @@
 //! computes each segment's exact duration and seek position, and converts video PTS into
 //! audio ticks. [`ExportPlan`] also
 //! exposes [`ExportPlan::single_input_seek_seconds`], the one extra value ADR 014's second
-//! graph shape (one input for the whole source) needs beyond the per-segment plan.
+//! graph shape (one input for the whole source) needs beyond the per-segment plan, and
+//! [`ExportPlan::separate_audio_input`], which gives the audio a second input of the source.
 //!
 //! [`fsinspect`] is the one production implementation of that injected closure: it turns a real
 //! path into the [`PathFacts`] the planner reads, and it reports a file only when it could also
@@ -19,7 +20,7 @@
 //!
 //! [`graph`] renders a finished plan into ADR 014's inline `-filter_complex` string: one
 //! `trim`/`atrim` chain for each segment, cut on absolute stream indices at integer
-//! `start_pts`/`end_pts` boundaries, joined by `concat` in plan order, in whichever of the two
+//! `start_pts`/`end_pts` boundaries, joined by `concat` in plan order, in whichever of the three
 //! [`GraphShape`] variants the argument builder's command-line budget allows.
 //!
 //! [`arguments`] builds the ffmpeg argument vector from a plan, a rendered graph, and the
@@ -168,6 +169,24 @@ pub const MAX_EXPORT_SEGMENTS: usize = 100;
 /// [`ExportErrorCode::AudioGapTooLong`]. The bound does not cover the decoded video that FFmpeg
 /// keeps until the first audio frame arrives, which measurement 21 also records.
 pub const MAX_LEADING_AUDIO_SILENCE_SECONDS: i64 = 60;
+
+/// The time, in milliseconds, between the start of the container and the first sample of the
+/// source audio, above which every segment takes its audio from a second input of the source.
+///
+/// FFmpeg configures the filter graph only when each input link has a first frame, and until
+/// then it keeps each decoded video frame in memory (ADR 014 measurement 21). An input reads
+/// from the keyframe at or before its seek, and the plan does not know where that keyframe is:
+/// one group of pictures can be seconds long. So an input of any segment can start to read up to
+/// this time before the first audio sample, and hold the video of that time: 2.6 GiB for 60 s at
+/// 1280x720. A second input of the same file, with the same seek, that gives only the audio
+/// reaches the first audio sample without decoding the video, so the graph starts at once
+/// (measurement 22). Below this time the cost is small, and the command line stays as it was: a
+/// source whose audio starts a few frames after the video, as many do, opens no second input.
+/// The same time also bounds the other side. An input that starts to read after the last audio
+/// sample waits until the end of the file, and so does the audio of a segment whose Out point
+/// lies after that sample. Under one input, `concat` then holds the video that `split` gives the
+/// segments behind it.
+pub const SEPARATE_AUDIO_INPUT_LEAD_MILLISECONDS: i64 = 500;
 
 /// The seek margin ADR 014 selects, in whole seconds.
 ///
@@ -395,6 +414,19 @@ pub struct ExportPlan {
     pub container: Container,
     /// The exact total output duration: the rational sum of every segment's duration.
     pub total_duration: Rational,
+    /// True when every segment takes its audio from a second input of the source, with the
+    /// seek of the segment, so the graph does not wait for the audio with the decoded video in
+    /// memory (ADR 014 measurements 21 and 22).
+    ///
+    /// [`plan::build_plan`] sets it for a plan with video and audio when the first sample of the
+    /// source audio comes more than [`SEPARATE_AUDIO_INPUT_LEAD_MILLISECONDS`] after the start
+    /// of the container, when a segment's input starts to read later than that time before the
+    /// last audio sample, or when a segment that another segment follows in concat order ends
+    /// later than that time before the last sample. Under [`GraphShape::InputPerSegment`] the
+    /// second inputs follow the
+    /// inputs of the segments, in segment order. Under [`GraphShape::SingleInput`] there is one
+    /// second input, with the one seek. [`GraphShape::SingleInputSharedAudio`] ignores it.
+    pub separate_audio_input: bool,
 }
 
 impl ExportPlan {

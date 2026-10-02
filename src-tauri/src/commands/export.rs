@@ -37,7 +37,7 @@
 //!    never `plan.destination`. ffmpeg writes the reservation, and the rename that publishes
 //!    the destination happens after the process has exited.
 //! 3. [`choose_graph_shape`] is called once and its result is passed to **both**
-//!    [`build_filter_graph`] and [`build_arguments`]. The two shapes disagree about how many
+//!    [`build_filter_graph`] and [`build_arguments`]. The shapes disagree about how many
 //!    inputs the graph's labels refer to, so a mismatch produces a command ffmpeg rejects.
 //! 4. A zero exit status is not a successful export. `reserve` creates the reserved file
 //!    before ffmpeg starts, so ADR 014 requires `-y`; without it ffmpeg refuses the existing
@@ -1191,6 +1191,7 @@ mod tests {
             }],
             container: Container::Mp4,
             total_duration: Rational::new(1, 1).unwrap(),
+            separate_audio_input: false,
         }
     }
 
