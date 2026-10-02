@@ -121,6 +121,10 @@ or change nothing:
 - A seek to the frame that is already on screen, when no seek is pending. ADR 022 says
   that such a seek may bring no frame callback. Mark In and Mark Out would then stay
   disabled. Go to the start, and go to the In or Out point, do nothing in this case.
+  (Changed on 2026-10-02.) The `seeked` event of ADR 022 now restores that frame in most
+  cases. It does not restore the frame in three cases: off the grid inside a frame, with a
+  tick of 4 µs or less, and without a nominal rate. The rule stays, because the seek changes
+  nothing that the user can see.
   (Changed on 2026-09-24.) End does nothing in this case too, by the rule of its target.
   On the frame grid of ADR 022, End does nothing when the ADR 028 index of the frame on
   screen is the index of the last frame or a later index. Off the grid, End does nothing

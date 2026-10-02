@@ -98,6 +98,11 @@ or indistinguishable timestamps makes calibration unavailable. Playback remains
 available. Browser `currentTime` can drive an approximate clock, but it cannot create an
 edit point.
 
+(Changed on 2026-10-02.) The `seeked` rule of ADR 022 reads `currentTime` to decide whether
+the last frame that a frame callback confirmed is still the frame on screen. When it is, that
+frame becomes the presented frame again. The PTS of that frame still comes from its own
+callback, so `currentTime` still creates no edit point.
+
 QuipClip does not use `seekable.start(0)` as a source timestamp origin.
 
 (Changed on 2026-09-24.) While calibration is `calibrating`, no action of the playback store

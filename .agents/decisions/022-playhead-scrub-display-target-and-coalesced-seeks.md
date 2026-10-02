@@ -48,7 +48,10 @@ The field is for display only. It is never an edit position. `canMarkIn`, `canMa
 and `canSplitCurrentSegment` read their PTS from `presentedFrame` only, and they do not
 read this field. Each seek action still sets `presentedFrame` to null. The edit actions
 therefore stay disabled until RVFC reports the frame that the browser presented. This is
-the ADR 003 rule. This decision does not change it.
+the ADR 003 rule. This decision does not change it. (Changed on 2026-10-02.) The `seeked`
+event can now also restore a frame that RVFC reported before the seek, when that frame
+holds the position of the element (the `seeked` rule below). The PTS of an edit still comes
+only from a frame callback.
 
 The store clears the field when the seek settles:
 
@@ -87,6 +90,25 @@ The store clears the field when the seek settles:
   does not use seconds alone: a container that rounds each PTS can start the next frame
   less than one interval after a frame start, so the late callback of the frame before a
   stored PTS would clear the field.
+
+  (Added on 2026-10-02.) The `seeked` event can also restore the frame on screen. A seek
+  that lands on the frame on screen may bring no frame callback, and every seek sets
+  `presentedFrame` to null. Mark In, Mark Out and Split then stayed disabled until the next
+  seek, and a user reported that fault. The store records the last frame that a frame
+  callback confirmed: its `mediaTime` and the PTS that the store inferred from it. When the
+  test above does not clear the field, and all of these conditions are true, the store tests
+  that frame with the same rule:
+  - The calibration is ready.
+  - `presentedFrame` is null.
+  - The store does not report playback, and the element reports that it is paused.
+  - The conditions of the clear also hold: no seek is queued, the last seek was not a scrub
+    seek, and no navigation is deferred.
+
+  When that frame holds the position of the element, the store sets `presentedFrame` to it
+  and clears the field in the same update. The PTS of that frame came from its own callback,
+  so the store infers no PTS from `currentTime`, and ADR 003 still holds. The store does not
+  change its record of distinct frames. A later callback of the same frame repeats its
+  `mediaTime`, so it is not a distinct frame.
 - In all other states, it clears the field on the `seeked` event when no seek is queued.
   The same event updates the approximate clock.
 - A scrub seek (see below) that settles does not clear the field. `fastSeek` lands on a
@@ -482,7 +504,17 @@ where the indicator showed.
   position of the element.
   The `presentedFrame` can be null or not null in that condition:
   - It is null when no frame arrived after the last request. The edit actions then stay
-    disabled, as they did before this decision.
+    disabled, as they did before this decision. (Changed on 2026-10-02.) In the `ready`
+    state, on a paused element, the `seeked` event now restores the last confirmed frame
+    when that frame holds the position (the `seeked` rule above). The edit actions are then
+    enabled, and a mark writes the PTS of that frame. The frame stays null when the rule
+    keeps the target: off the grid inside a frame, with a tick of 4 µs or less, and with no
+    nominal rate. The restore is wrong in the same rare cases as the wrong clears listed
+    below. There, the wrong frame can also be marked until the callback of the frame on
+    screen arrives. These cases are now more frequent. A wrong clear needs a late callback
+    that runs during the seek. A wrong restore needs only a frame that was the last one
+    confirmed before the seek. An example is a click at the right end of the ruler, on a grid
+    whose extent leaves out a real frame, while the last frame of the extent is on screen.
   - It is not null when an RVFC callback for an earlier seek arrived while the last seek
     ran. The last seek then landed on that same frame. The edit actions are enabled, and a
     mark writes the PTS of that frame, which is the frame on screen. (Changed on
