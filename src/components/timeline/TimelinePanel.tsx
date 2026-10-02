@@ -137,6 +137,7 @@ const selectMediaStatus = (state: MediaStoreState) => state.status;
 const selectCalibrationStatus = (state: PlaybackStoreState) => state.calibrationStatus;
 const selectIsAttached = (state: PlaybackStoreState) => state.isAttached;
 const selectIsReady = (state: PlaybackStoreState) => state.isReady;
+const selectIsDecodeStalled = (state: PlaybackStoreState) => state.decodeStall !== null;
 const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
 
 const selectSetSource = (state: TimelineStoreState) => state.setSource;
@@ -202,6 +203,7 @@ export function TimelinePanel({
   const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
   const isAttached = usePlaybackStore(selectIsAttached);
   const isReady = usePlaybackStore(selectIsReady);
+  const isDecodeStalled = usePlaybackStore(selectIsDecodeStalled);
   const seekToPts = usePlaybackStore(selectSeekToPts);
 
   const setSource = useTimelineStore(selectSetSource);
@@ -252,8 +254,10 @@ export function TimelinePanel({
   // A drag on a segment edge trims it only on the exact frame grid (ADR 030), where the frame of
   // the release target can be recognized when it arrives. On any other source the edge press is
   // the click of ADR 007. The press, the resize cursor of the edges and the trim start all read
-  // this one condition.
-  const canTrimEdges = exactGridRate !== null;
+  // this one condition. During a decode stall the edge press is the click too: the first sample
+  // of a trim would reload the preview, and the trim could then not commit, while the click
+  // seeks to the boundary and reloads the preview there.
+  const canTrimEdges = exactGridRate !== null && !isDecodeStalled;
 
   const zoom = useTimelineViewportStore(selectZoom);
   // The zoom factor of the last commit. The layout effect that applies an anchor reads it as

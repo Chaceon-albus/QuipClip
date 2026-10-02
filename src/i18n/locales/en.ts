@@ -137,6 +137,15 @@ export const en = {
       },
       openAnother: "Open Another File…",
     },
+    // The notice over the video when the web view stops in the middle of a file that it played
+    // until then, because it cannot decode the next part. Play and the frame steps stay disabled
+    // until the next seek, which loads the video again and removes the notice. The notice does
+    // not leave by itself. {{time}} is the approximate position of the stop in the timecode
+    // format of the playhead, such as "00:00:10:00" or "00:00:10.000".
+    decodeStall: {
+      message:
+        "Preview stopped at about {{time}}. The preview cannot decode this part of the file (the picture size or the codec may change here). Move the playhead to another part to continue.",
+    },
     // The notices over an open video. An import error stays until the user dismisses it or
     // opens another file. A playback error leaves by itself after a few seconds. `dismiss`
     // is the accessible name of the close button of a notice.
@@ -251,6 +260,10 @@ export const en = {
       atInPoint: "The playhead is already at the In point.",
       atOutPoint: "The playhead is already at the Out point.",
       noFrameRate: "The source reports no frame rate.",
+      // On Play and the two frame step buttons while the preview is stopped at a part that it
+      // cannot decode (`preview.decodeStall`). The next seek loads the video again.
+      decodeStalled:
+        "The preview stopped at a part it cannot decode. Move the playhead to another part to continue.",
     },
   },
   // The names of the keys that are words, for the key chips of the tooltips and menus. Each

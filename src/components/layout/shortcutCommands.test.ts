@@ -531,6 +531,47 @@ describe("planShortcutCommand", () => {
         expect(planShortcutCommand(action, noRate)).toBeNull();
       }
     });
+
+    it("plays, plays a segment and steps nothing during a decode stall, and still seeks", () => {
+      // The stalled element shows no frame, and a seek reloads the preview.
+      const stalled = createSnapshot({
+        playback: { decodeStall: { atSeconds: 1 }, presentedFrame: null },
+        timeline: {
+          segments: [segment("seg-1", "0", "180000")],
+          currentSegmentId: "seg-1",
+        },
+      });
+      for (const action of [
+        "togglePlayback",
+        "playSegment",
+        "stepBackOneFrame",
+        "stepForwardOneFrame",
+        "stepBackTenFrames",
+        "stepForwardTenFrames",
+      ] as const) {
+        expect(planShortcutCommand(action, stalled)).toBeNull();
+      }
+      expect(planShortcutCommand("goToStart", stalled)).toEqual({
+        kind: "seekToPts",
+        pts: pts("0"),
+      });
+      expect(planShortcutCommand("goToSegmentOut", stalled)).not.toBeNull();
+      expect(planShortcutCommand("goToEnd", stalled)).not.toBeNull();
+
+      // The same snapshot with no stall plays the segment.
+      const playable = createSnapshot({
+        playback: { decodeStall: null },
+        timeline: {
+          segments: [segment("seg-1", "0", "180000")],
+          currentSegmentId: "seg-1",
+        },
+      });
+      expect(planShortcutCommand("playSegment", playable)).toEqual({
+        kind: "playSegment",
+        inPts: pts("0"),
+        outPts: pts("180000"),
+      });
+    });
   });
 
   describe("the time jumps", () => {

@@ -65,8 +65,26 @@ export function importErrorHintKey(
   return isFfmpegSetupImportError(code) ? "preview.importError.ffmpegHint" : null;
 }
 
-/** The kind of a preview notice. */
-export type PreviewNoticeKind = "import" | "playback";
+/**
+ * The kind of a preview notice.
+ *
+ * - `import`: an import that failed.
+ * - `playback`: a play or a seek that failed.
+ * - `decodeStall`: the video stopped in the middle of the file, because the web view cannot
+ *   decode the next part (`decodeStall` of the playback store).
+ */
+export type PreviewNoticeKind = "import" | "playback" | "decodeStall";
+
+/**
+ * The colour of a notice. A failed import, play or seek is an error. A decode stall is a
+ * warning: the preview continues at the next seek, and the export does not depend on it.
+ */
+export type PreviewNoticeTone = "destructive" | "warning";
+
+/** The colour of a notice of each kind. */
+export function previewNoticeTone(kind: PreviewNoticeKind): PreviewNoticeTone {
+  return kind === "decodeStall" ? "warning" : "destructive";
+}
 
 /**
  * The phase of a notice that can remove itself: on screen, or in its exit animation.
@@ -93,9 +111,11 @@ export type NoticeTimerStep = {
  * The next timed step of a notice, or null when no timer runs.
  *
  * An import error stays until the user dismisses it or starts another import, so it never
- * gets a timer. A playback error leaves after `PLAYBACK_NOTICE_DURATION_MS`. While the pointer
- * is over it or the focus is in it, it is paused and gets no timer. When the pause ends, the
- * full duration starts again, so the user always has the whole time to read it.
+ * gets a timer. The notice of a decode stall stays while the stall holds, so it gets no timer
+ * either: it says what to do, and the stall ends only when the user does it. A playback error
+ * leaves after `PLAYBACK_NOTICE_DURATION_MS`. While the pointer is over it or the focus is in
+ * it, it is paused and gets no timer. When the pause ends, the full duration starts again, so
+ * the user always has the whole time to read it.
  *
  * @param paused True while the pointer is over the notice or the focus is in it.
  */
@@ -104,7 +124,7 @@ export function resolveNoticeTimer(
   phase: PreviewNoticePhase,
   paused: boolean,
 ): NoticeTimerStep | null {
-  if (kind === "import" || paused) {
+  if (kind !== "playback" || paused) {
     return null;
   }
   return phase === "shown"

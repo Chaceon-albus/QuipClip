@@ -15,6 +15,7 @@ import {
   EDIT_REASON_PENDING,
   presentEditDisabledReason,
   presentMarkInFinishesSegment,
+  presentPlayDisabledReason,
   presentStepDisabledReason,
   settleDisabledReason,
   type EditDisabledReason,
@@ -682,15 +683,44 @@ describe("transportDisabledReason", () => {
 
   describe("presentStepDisabledReason", () => {
     it("says the source reports no frame rate for an active source without one", () => {
-      expect(presentStepDisabledReason(true, false)).toBe(
+      expect(presentStepDisabledReason(true, false, false)).toBe(
+        "transport.disabledReason.noFrameRate",
+      );
+      // The rate holds for the whole session, so its reason comes before a stall.
+      expect(presentStepDisabledReason(true, false, true)).toBe(
         "transport.disabledReason.noFrameRate",
       );
     });
 
+    it("says that the preview stopped during a decode stall", () => {
+      expect(presentStepDisabledReason(true, true, true)).toBe(
+        "transport.disabledReason.decodeStalled",
+      );
+    });
+
     it("gives no reason when the step is enabled or no source is active", () => {
-      expect(presentStepDisabledReason(true, true)).toBeNull();
-      expect(presentStepDisabledReason(false, false)).toBeNull();
-      expect(presentStepDisabledReason(false, true)).toBeNull();
+      expect(presentStepDisabledReason(true, true, false)).toBeNull();
+      for (const hasNominalRate of [false, true]) {
+        for (const isDecodeStalled of [false, true]) {
+          expect(
+            presentStepDisabledReason(false, hasNominalRate, isDecodeStalled),
+          ).toBeNull();
+        }
+      }
+    });
+  });
+
+  describe("presentPlayDisabledReason", () => {
+    it("says that the preview stopped during a decode stall", () => {
+      expect(presentPlayDisabledReason(true, true)).toBe(
+        "transport.disabledReason.decodeStalled",
+      );
+    });
+
+    it("gives no reason when play is enabled or no source is active", () => {
+      expect(presentPlayDisabledReason(true, false)).toBeNull();
+      expect(presentPlayDisabledReason(false, true)).toBeNull();
+      expect(presentPlayDisabledReason(false, false)).toBeNull();
     });
   });
 
@@ -704,6 +734,7 @@ describe("transportDisabledReason", () => {
       "transport.disabledReason.atInPoint",
       "transport.disabledReason.atOutPoint",
       "transport.disabledReason.noFrameRate",
+      "transport.disabledReason.decodeStalled",
     ];
 
     it("name a message in both catalogs", () => {

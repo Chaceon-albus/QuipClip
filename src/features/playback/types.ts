@@ -186,6 +186,24 @@ export interface PresentedFrame {
 }
 
 /**
+ * A decode error that stopped an element in the middle of the source (`syncDecodeStall`).
+ *
+ * The source presented frames, and then the element reported an error that it does not recover
+ * from: a file whose middle part does not decode, such as a join of two files with different
+ * picture sizes by stream copy. A media element does not play or seek again after
+ * such an error, so the preview loads a new element for the same source at the next seek
+ * (`reloadGeneration`).
+ */
+export interface DecodeStall {
+  /**
+   * The position of the element when the error arrived, in seconds from the start of the
+   * browser media timeline: the axis of the ruler and of the approximate clock. It comes from
+   * `currentTime`, so it is approximate. It is display state only, never an edit position.
+   */
+  readonly atSeconds: number;
+}
+
+/**
  * Stable error codes for local playback and seek errors.
  */
 export const PLAYBACK_ERROR_CODES = ["playbackFailed", "seekFailed"] as const;
@@ -267,6 +285,37 @@ export interface PlaybackState {
   readonly isReady: boolean;
   /** Local playback or seek error code, or null. */
   readonly error: PlaybackErrorCode | null;
+  /**
+   * The decode stall of the attached element, or null while the element can play
+   * (`syncDecodeStall`). While it is set:
+   *
+   * - The element is paused and never moves again. No frame is on screen (`presentedFrame` is
+   *   null), and the frame callbacks, `seeked`, `play` and `timeupdate` of the element change
+   *   nothing.
+   * - The store stays attached and ready, so the timeline can still seek.
+   * - `seekToPts`, `seekApproximate` and `seekToFrameIndex` do not touch the element. Each one
+   *   keeps its request as the request of a reload, and the latest request wins. The display
+   *   target shows that request (`seekTargetSeconds`), and the first request of the stall
+   *   raises `reloadGeneration`.
+   * - `play`, `playSegment` and `seekNominal` do nothing.
+   *
+   * An attach, a detach, a loss of readiness (`syncUnready`) and a reset clear it.
+   */
+  readonly decodeStall: DecodeStall | null;
+  /**
+   * The count of the reloads that a decode stall started. The preview keys its media elements
+   * on the source revision and on this count, so a higher count replaces the stalled element
+   * with a new element for the same source. The count only goes up: a seek during a stall
+   * raises it once for that stall, and so does a new import of the same file during a stall
+   * (`reloadStalledPreview`).
+   *
+   * The new element calibrates from the start of the source, as a new source does (ADR 003). The
+   * request of the reload waits for its metadata, and then for the calibration anchor, as a
+   * navigation deferred during calibration does (ADR 022). Only a user request reloads, so a
+   * reload that seeks into the part that does not decode stalls again and does not reload by
+   * itself.
+   */
+  readonly reloadGeneration: number;
 }
 
 /**
@@ -297,6 +346,35 @@ export interface PlaybackActions {
   syncUnready: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 
   /**
+   * Records a decode stall of the matching element (`decodeStall`): the source presented a
+   * frame, and then the element reported a media error that it does not recover from. The
+   * preview decides that (`classifyDecodeFailure`).
+   *
+   * The store pauses the element, stops the cue, and drops the queued seek, a deferred
+   * navigation and the stop point of a segment playback. `presentedFrame` becomes null and
+   * `isPlaying` false, and the approximate clock takes the position of the element. The store
+   * stays attached and ready. A second call for the same stall changes nothing.
+   *
+   * Returns true when the store holds a stall of the element after the call. Returns false, and
+   * changes nothing, when the element or the source is not the attached one, or the store does
+   * not report the element ready. The caller then treats the error as a failure of the source.
+   */
+  syncDecodeStall: (
+    sourceRevisionKey: string,
+    element: PlaybackMediaElement,
+  ) => boolean;
+
+  /**
+   * Starts the reload of a stalled element of the matching source with no navigation: the new
+   * element loads at the start of the source. The preview calls it when the user imports the
+   * open file again during a stall, because the element of that file keeps its key and is not
+   * replaced otherwise. It does nothing without a stall, and it raises `reloadGeneration` at
+   * most once for each stall. A seek during the stall already raised it, and its request is
+   * kept.
+   */
+  reloadStalledPreview: (sourceRevisionKey: string) => void;
+
+  /**
    * Toggles playback. Synchronously invokes video.play() to preserve user activation.
    * Catches async promise rejection to set a localized error code.
    */
@@ -306,6 +384,7 @@ export interface PlaybackActions {
    * Explicitly starts playback. Synchronously calls video.play().
    * Drops a navigation deferred during calibration and plays from where the element stands,
    * because a seek before the calibration anchor would refuse the calibration (ADR 003).
+   * Does nothing during a decode stall (`decodeStall`).
    */
   play: () => void;
 
@@ -349,9 +428,9 @@ export interface PlaybackActions {
    * ends the playback at the end of the media, and a `timeupdate` far past the Out stops a
    * playback that presents no frames, as a hidden window does.
    *
-   * It needs an attached, ready element, a ready calibration, and a segment that holds a frame
-   * (canPlaySegment): on the frame grid, a last frame at or after the frame of the In. Otherwise
-   * it does nothing. When the seek to `inPts` fails, it does not play.
+   * It needs an attached, ready element, a ready calibration, no decode stall, and a segment
+   * that holds a frame (canPlaySegment): on the frame grid, a last frame at or after the frame
+   * of the In. Otherwise it does nothing. When the seek to `inPts` fails, it does not play.
    */
   playSegment: (inPts: Pts, outPts: Pts) => void;
 
@@ -366,6 +445,8 @@ export interface PlaybackActions {
    * the target, does nothing (see SeekOptions).
    * A seek pauses playback, except a seek with `keepPlaying` while the store plays, which plays
    * on from the target (see SeekOptions).
+   * During a decode stall the request becomes the request of a reload, as an exact seek
+   * (`decodeStall`).
    */
   seekToPts: (targetPts: Pts, options?: SeekOptions) => void;
 
@@ -385,6 +466,8 @@ export interface PlaybackActions {
    * "calibrating", so the controller has no element then and the step makes no sound (ADR 019).
    * With `held`, a backward step requests no cue and stops the cue, also at the edge, where the
    * step does not move (see FrameStepOptions).
+   * Does nothing during a decode stall, because no frame is on screen to step from
+   * (`decodeStall`).
    */
   seekNominal: (deltaFrames: number, options?: FrameStepOptions) => void;
 
@@ -410,6 +493,9 @@ export interface PlaybackActions {
    * With `keepPlaying`, a jump while the store plays does not pause (SeekOptions): it seeks and
    * plays on. A target that is the frame on screen, while the element is still inside that
    * frame, then does nothing at all.
+   *
+   * During a decode stall, on a ready calibration, the request becomes the request of a reload
+   * in the form of the deferred request above (`decodeStall`).
    */
   seekToFrameIndex: (frameIndex: number, options?: FrameIndexSeekOptions) => void;
 
@@ -422,6 +508,8 @@ export interface PlaybackActions {
    * when it is unavailable.
    * A seek pauses playback, except a seek with `keepPlaying` while the store plays, which plays
    * on from the target (see SeekOptions).
+   * During a decode stall the request becomes the request of a reload, as an exact seek
+   * (`decodeStall`).
    */
   seekApproximate: (seconds: number, options?: SeekOptions) => void;
 

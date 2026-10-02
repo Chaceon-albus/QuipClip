@@ -36,16 +36,23 @@ describe("actionConditions", () => {
     }
   });
 
-  it("lets playback toggle with an active source only", () => {
-    expect(canTogglePlayback(true)).toBe(true);
-    expect(canTogglePlayback(false)).toBe(false);
+  it("lets playback toggle with an active source and no decode stall", () => {
+    expect(canTogglePlayback(true, false)).toBe(true);
+    expect(canTogglePlayback(false, false)).toBe(false);
+    expect(canTogglePlayback(true, true)).toBe(false);
+    expect(canTogglePlayback(false, true)).toBe(false);
   });
 
-  it("lets a frame step run with an active source and a nominal rate", () => {
-    expect(canStepFrames(true, true)).toBe(true);
-    expect(canStepFrames(true, false)).toBe(false);
-    expect(canStepFrames(false, true)).toBe(false);
-    expect(canStepFrames(false, false)).toBe(false);
+  it("lets a frame step run with an active source, a nominal rate and no decode stall", () => {
+    for (const hasActiveSource of BOOLEANS) {
+      for (const hasNominalRate of BOOLEANS) {
+        for (const isDecodeStalled of BOOLEANS) {
+          expect(canStepFrames(hasActiveSource, hasNominalRate, isDecodeStalled)).toBe(
+            hasActiveSource && hasNominalRate && !isDecodeStalled,
+          );
+        }
+      }
+    }
   });
 
   it("lets undo and redo run with an active source and a history entry", () => {

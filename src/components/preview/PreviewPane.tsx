@@ -53,6 +53,14 @@ import {
   reportAnchorWaitExpired,
 } from "./anchorWait";
 import {
+  classifyDecodeFailure,
+  NO_DECODE_EVIDENCE,
+  presentDecodeStall,
+  provesPartialDecode,
+  stepDecodeEvidence,
+  type DecodeEvidence,
+} from "./decodeRecovery";
+import {
   INITIAL_PREVIEW_FRAME_RATIO_STATE,
   previewFrameAspectRatio,
   previewFrameStyle,
@@ -64,6 +72,7 @@ import { formatSupportedVideoFormats } from "./previewEmptyState";
 import { PreviewBoundaryBadges } from "./PreviewBoundaryBadges";
 import { PreviewBufferingIndicator } from "./PreviewBufferingIndicator";
 import {
+  DecodeStallBanner,
   ImportErrorBanner,
   ImportErrorEmptyState,
   PlaybackErrorBanner,
@@ -85,6 +94,8 @@ const {
   syncPlay,
   syncPause,
   syncEnded,
+  syncDecodeStall,
+  reloadStalledPreview,
   reset: resetPlayback,
   dismissError: dismissPlaybackError,
 } = playbackStore.getState();
@@ -230,6 +241,10 @@ export function PreviewPane() {
   const attachedSourceRevisionKey = usePlaybackStore(
     (s) => s.attachedSourceRevisionKey,
   );
+  // The decode stall of the element, and the count of the reloads after a stall. A higher count
+  // replaces the media elements with new ones for the same source (see `elementKey`).
+  const decodeStall = usePlaybackStore((s) => s.decodeStall);
+  const reloadGeneration = usePlaybackStore((s) => s.reloadGeneration);
 
   // The mute toggle of the transport bar. Both media elements take it as the `muted`
   // property, which React sets when it creates the node, so a stored value applies before the
@@ -238,6 +253,10 @@ export function PreviewPane() {
   const isMuted = usePreviewMutePreference((s) => s.muted);
 
   const sourceRevisionKey = getSourceRevisionKey(media);
+  // The key of the media elements and of the components that follow the video element. A new
+  // source, and a reload after a decode stall, give a new key, so React builds new elements. A
+  // media element does not play or seek again after a decode error, and a new one does.
+  const elementKey = `${sourceRevisionKey}:${reloadGeneration}`;
   const [previousMedia, setPreviousMedia] = useState(media);
   // What made the web view fail to play the source, or null while it plays: the element
   // fired `error`, or the picture check found no picture. The pane then shows the
@@ -246,11 +265,37 @@ export function PreviewPane() {
     null,
   );
   const decodeFailed = failureTrigger !== null;
+  // The stall whose notice the user closed. The notice stays hidden for that stall only, so a
+  // later stall shows it again.
+  const [dismissedStall, setDismissedStall] = useState<typeof decodeStall>(null);
   // The picture ratio that the video element last reported. The frame takes it while it holds
   // the element (see `stepPreviewFrameRatio` and `previewFrameAspectRatio`).
   const [frameRatio, setFrameRatio] = useState(INITIAL_PREVIEW_FRAME_RATIO_STATE);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // What each video element has shown of its source, and the revision keys of the sources that
+  // an element proved to decode in part (`provesPartialDecode`). A decode error of such a source
+  // stops a file that decodes in part (`classifyDecodeFailure`). The record holds for the
+  // source, not for one element: the new element of a reload can seek before its own first
+  // frame, when the calibration is unavailable, and an error of that seek is a stall too. A new
+  // media object, also a new import of the same file, starts the record again.
+  const [decodeEvidence] = useState(
+    () => new WeakMap<HTMLVideoElement, DecodeEvidence>(),
+  );
+  const [decodedSources] = useState(() => new Set<string>());
+  const recordDecodeEvidence = useCallback(
+    (element: HTMLVideoElement, revisionKey: string, event: "frame" | "seeking") => {
+      const next = stepDecodeEvidence(
+        decodeEvidence.get(element) ?? NO_DECODE_EVIDENCE,
+        event,
+      );
+      decodeEvidence.set(element, next);
+      if (provesPartialDecode(next)) {
+        decodedSources.add(revisionKey);
+      }
+    },
+    [decodeEvidence, decodedSources],
+  );
 
   // The focus target when a notice that held the focus leaves: the user closed it, or the
   // store removed it. The section holds the notices, so the focus stays where the user was,
@@ -326,6 +371,21 @@ export function PreviewPane() {
       resetPlayback();
     }
   }, [media]);
+
+  // A new media object starts the record of the sources that decode in part again, so an error
+  // of a new element is a stall only after this load proved it. The element on screen keeps its
+  // own evidence, which came from the same file.
+  //
+  // A new import of the open file keeps the revision key, so the stalled element keeps its key
+  // and React does not replace it. During a decode stall the import therefore reloads the
+  // element, at the start of the source. Without a stall, and for another file, the reload does
+  // nothing.
+  useEffect(() => {
+    decodedSources.clear();
+    if (media) {
+      reloadStalledPreview(getSourceRevisionKey(media));
+    }
+  }, [media, decodedSources]);
 
   // Synchronously activate / deactivate source identity before browser paint (ADR 003)
   useLayoutEffect(() => {
@@ -448,7 +508,10 @@ export function PreviewPane() {
     scrubOwnerRef.current(element);
   }, []);
 
-  // Register requestVideoFrameCallback lifecycle loop (ADR 003)
+  // Register requestVideoFrameCallback lifecycle loop (ADR 003). The loop starts again for each
+  // new video element: a new source, and a reload after a decode stall, which replaces the
+  // element with no change of the source. Without `reloadGeneration` the new element of a
+  // reload would get no frame callback and never calibrate.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !media || decodeFailed) {
@@ -482,6 +545,9 @@ export function PreviewPane() {
         if (cancelled || !sourceGuard.isActive(expectedRevisionKey)) {
           return;
         }
+
+        // A second frame proves that the source decodes in part.
+        recordDecodeEvidence(video, expectedRevisionKey, "frame");
 
         // A presented frame proves a picture. A pending picture check takes the ready path
         // before the store sees the frame, so the calibration anchor is checked against the
@@ -533,7 +599,14 @@ export function PreviewPane() {
         }
       }
     };
-  }, [sourceRevisionKey, media, decodeFailed, sourceGuard]);
+  }, [
+    sourceRevisionKey,
+    reloadGeneration,
+    media,
+    decodeFailed,
+    sourceGuard,
+    recordDecodeEvidence,
+  ]);
 
   const handleTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>) => {
     if (!sourceGuard.isActive(sourceRevisionKey) || !media) {
@@ -572,6 +645,30 @@ export function PreviewPane() {
     }
     syncUnready(sourceRevisionKey, element);
     setFailureTrigger(trigger);
+  };
+
+  // A decode error of a source that decodes in part stops the preview in the middle of the file:
+  // the store keeps the timeline and the element, the notice says where the preview stopped, and
+  // the next seek replaces the element (`decodeStall`). Every other error, and a stall that the
+  // store refuses, takes the path of a failure.
+  const handleMediaError = (element: HTMLVideoElement) => {
+    if (!sourceGuard.isActive(sourceRevisionKey)) {
+      return;
+    }
+    const trigger: DecodeFailureTrigger = {
+      kind: "mediaError",
+      code: element.error?.code ?? null,
+    };
+    const decodesInPart =
+      decodedSources.has(sourceRevisionKey) ||
+      provesPartialDecode(decodeEvidence.get(element) ?? NO_DECODE_EVIDENCE);
+    if (
+      classifyDecodeFailure(trigger, decodesInPart) === "stall" &&
+      syncDecodeStall(sourceRevisionKey, element)
+    ) {
+      return;
+    }
+    handleDecodeFailure(element, trigger);
   };
 
   // The ready path of a loaded element. `loadedmetadata` takes it at once when the element
@@ -676,7 +773,12 @@ export function PreviewPane() {
   // the two banners, and the In and Out badges hide while it shows one.
   const hasImportError = status === "error" && error !== null;
   const showsPlaybackErrorBanner = playbackError !== null && !decodeFailed;
-  const hasNotice = showLoading || hasImportError || showsPlaybackErrorBanner;
+  const shownStall =
+    decodeStall !== null && decodeStall !== dismissedStall && !decodeFailed
+      ? decodeStall
+      : null;
+  const hasNotice =
+    showLoading || hasImportError || showsPlaybackErrorBanner || shownStall !== null;
 
   const totalTimeDisplay = media
     ? formatPreviewTotalDuration(
@@ -761,7 +863,7 @@ export function PreviewPane() {
                 ) : (
                   <video
                     ref={videoRefCallback}
-                    key={sourceRevisionKey}
+                    key={elementKey}
                     playsInline
                     muted={isMuted}
                     preload="metadata"
@@ -798,6 +900,13 @@ export function PreviewPane() {
                     onTimeUpdate={handleTimeUpdate}
                     onSeeking={(e) => {
                       if (sourceGuard.isActive(sourceRevisionKey)) {
+                        // A seek after the first frame moves the element away from a part
+                        // that decoded.
+                        recordDecodeEvidence(
+                          e.currentTarget,
+                          sourceRevisionKey,
+                          "seeking",
+                        );
                         syncSeeking(sourceRevisionKey, e.currentTarget);
                       }
                     }}
@@ -830,10 +939,7 @@ export function PreviewPane() {
                       });
                     }}
                     onError={(e) => {
-                      handleDecodeFailure(e.currentTarget, {
-                        kind: "mediaError",
-                        code: e.currentTarget.error?.code ?? null,
-                      });
+                      handleMediaError(e.currentTarget);
                     }}
                   />
                 )}
@@ -860,7 +966,7 @@ export function PreviewPane() {
                   calibrationStatus !== "calibrating" && (
                     <audio
                       ref={scrubAudioRefCallback}
-                      key={`scrub-${sourceRevisionKey}`}
+                      key={`scrub-${elementKey}`}
                       muted={isMuted}
                       preload="auto"
                       src={videoSrc}
@@ -927,10 +1033,11 @@ export function PreviewPane() {
               )}
 
               {/* The buffering spinner, in the bottom-right corner, clear of the notices.
-                  Keyed on the source, so a source change starts it again. */}
+                  Keyed on the video element, so a source change and a reload start it again
+                  with the listeners on the new element. */}
               {!decodeFailed && (
                 <PreviewBufferingIndicator
-                  key={`buffering-${sourceRevisionKey}`}
+                  key={`buffering-${elementKey}`}
                   videoRef={videoRef}
                 />
               )}
@@ -972,6 +1079,13 @@ export function PreviewPane() {
                       key={playbackError}
                       code={playbackError}
                       onDismiss={dismissPlaybackError}
+                      onReturnFocus={returnFocusToPreview}
+                    />
+                  )}
+                  {shownStall !== null && (
+                    <DecodeStallBanner
+                      notice={presentDecodeStall(shownStall, timecodeDisplay)}
+                      onDismiss={() => setDismissedStall(shownStall)}
                       onReturnFocus={returnFocusToPreview}
                     />
                   )}

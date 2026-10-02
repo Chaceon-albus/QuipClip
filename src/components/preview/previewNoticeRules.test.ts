@@ -9,6 +9,7 @@ import {
   importErrorActions,
   importErrorHintKey,
   isFfmpegSetupImportError,
+  previewNoticeTone,
   resolveNoticeTimer,
 } from "./previewNoticeRules";
 
@@ -103,6 +104,12 @@ describe("resolveNoticeTimer", () => {
     expect(resolveNoticeTimer("import", "leaving", false)).toBeNull();
   });
 
+  it("never removes the notice of a decode stall by itself", () => {
+    expect(resolveNoticeTimer("decodeStall", "shown", false)).toBeNull();
+    expect(resolveNoticeTimer("decodeStall", "shown", true)).toBeNull();
+    expect(resolveNoticeTimer("decodeStall", "leaving", false)).toBeNull();
+  });
+
   it("starts the exit of a playback error after about five seconds", () => {
     expect(PLAYBACK_NOTICE_DURATION_MS).toBe(5000);
     expect(resolveNoticeTimer("playback", "shown", false)).toEqual({
@@ -128,5 +135,16 @@ describe("resolveNoticeTimer", () => {
     // The pause ends, and the notice is shown again: the next step is the full wait.
     const afterPause = resolveNoticeTimer("playback", "shown", false);
     expect(afterPause?.delayMs).toBe(PLAYBACK_NOTICE_DURATION_MS);
+  });
+});
+
+describe("previewNoticeTone", () => {
+  it("shows a failed import, play or seek as an error", () => {
+    expect(previewNoticeTone("import")).toBe("destructive");
+    expect(previewNoticeTone("playback")).toBe("destructive");
+  });
+
+  it("shows a decode stall as a warning, because the preview continues at the next seek", () => {
+    expect(previewNoticeTone("decodeStall")).toBe("warning");
   });
 });

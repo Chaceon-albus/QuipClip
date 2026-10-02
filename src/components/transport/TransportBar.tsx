@@ -54,6 +54,7 @@ import { SegmentDurationReadout } from "./SegmentDurationReadout";
 import {
   presentEditDisabledReason,
   presentMarkInFinishesSegment,
+  presentPlayDisabledReason,
   presentStepDisabledReason,
   settleDisabledReason,
   type EDIT_REASON_PENDING,
@@ -142,6 +143,9 @@ export function TransportBar() {
     isSourceActive(hasMedia, s.isAttached, s.isReady),
   );
   const isPlaying = usePlaybackStore((s) => s.isPlaying);
+  // A stalled preview element does not play or step again, and a seek reloads it. The notice of
+  // the preview says so.
+  const isDecodeStalled = usePlaybackStore((s) => s.decodeStall !== null);
   const togglePlayback = playbackStore.getState().togglePlayback;
 
   const hasNominalRate = hasNominalFrameRate(media?.probe);
@@ -199,7 +203,12 @@ export function TransportBar() {
   const markInFinishes = useSettledReason(
     usePlaybackStore((s) => presentMarkInFinishesSegment(s, reasonContext)),
   );
-  const stepReason = presentStepDisabledReason(hasActiveSource, hasNominalRate);
+  const stepReason = presentStepDisabledReason(
+    hasActiveSource,
+    hasNominalRate,
+    isDecodeStalled,
+  );
+  const playReason = presentPlayDisabledReason(hasActiveSource, isDecodeStalled);
   const reasonText = (key: TransportDisabledReasonKey | null) =>
     key === null ? null : t(key);
   // Each disabled-reason element is always in the document, and its button names it in
@@ -209,6 +218,7 @@ export function TransportBar() {
   const markInStateId = useId();
   const markOutReasonId = useId();
   const splitReasonId = useId();
+  const playReasonId = useId();
 
   // While an In mark waits for its Out mark, Mark In shows it in the primary tint. The button is
   // not a toggle, so it takes no `aria-pressed`: a pressed state would say that a second press
@@ -248,8 +258,12 @@ export function TransportBar() {
     pendingInPts,
   );
   const isDeleteSegmentDisabled = !canDeleteSegment(hasActiveSource, currentSegment);
-  const isStepDisabled = !canStepFrames(hasActiveSource, hasNominalRate);
-  const isPlayDisabled = !canTogglePlayback(hasActiveSource);
+  const isStepDisabled = !canStepFrames(
+    hasActiveSource,
+    hasNominalRate,
+    isDecodeStalled,
+  );
+  const isPlayDisabled = !canTogglePlayback(hasActiveSource, isDecodeStalled);
 
   /*
    * The bar is three columns. The play group sits in the centre column, so Play is in the
@@ -494,36 +508,45 @@ export function TransportBar() {
             motion drops that scale too. A scale moves nothing around the button. */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button
-              size="tool-icon-lg"
-              disabled={isPlayDisabled}
-              onMouseDown={preventFocusOnMouseDown}
-              onClick={togglePlayback}
-              className="shadow-xs transition-[color,background-color,border-color,box-shadow,opacity,scale] motion-safe:enabled:active:scale-[0.96]"
-              aria-label={
-                isPlaying ? t("transport.action.pause") : t("transport.action.play")
-              }
-              aria-keyshortcuts={playShortcut?.aria}
-            >
-              <span className="grid place-items-center">
-                <Play
-                  className={cn(
-                    PLAY_GLYPH_CLASS,
-                    isPlaying ? PLAY_GLYPH_HIDDEN_CLASS : PLAY_GLYPH_SHOWN_CLASS,
-                  )}
-                />
-                <Pause
-                  className={cn(
-                    PLAY_GLYPH_CLASS,
-                    isPlaying ? PLAY_GLYPH_SHOWN_CLASS : PLAY_GLYPH_HIDDEN_CLASS,
-                  )}
-                />
+            {/* The span is the tooltip trigger while the button is disabled, as for the edit
+                buttons, so the reason of a decode stall can show. */}
+            <span className="inline-flex">
+              <Button
+                size="tool-icon-lg"
+                disabled={isPlayDisabled}
+                onMouseDown={preventFocusOnMouseDown}
+                onClick={togglePlayback}
+                className="shadow-xs transition-[color,background-color,border-color,box-shadow,opacity,scale] motion-safe:enabled:active:scale-[0.96]"
+                aria-label={
+                  isPlaying ? t("transport.action.pause") : t("transport.action.play")
+                }
+                aria-describedby={playReasonId}
+                aria-keyshortcuts={playShortcut?.aria}
+              >
+                <span className="grid place-items-center">
+                  <Play
+                    className={cn(
+                      PLAY_GLYPH_CLASS,
+                      isPlaying ? PLAY_GLYPH_HIDDEN_CLASS : PLAY_GLYPH_SHOWN_CLASS,
+                    )}
+                  />
+                  <Pause
+                    className={cn(
+                      PLAY_GLYPH_CLASS,
+                      isPlaying ? PLAY_GLYPH_SHOWN_CLASS : PLAY_GLYPH_HIDDEN_CLASS,
+                    )}
+                  />
+                </span>
+              </Button>
+              <span id={playReasonId} className="sr-only">
+                {reasonText(playReason)}
               </span>
-            </Button>
+            </span>
           </TooltipTrigger>
           <ShortcutTooltipContent
             label={isPlaying ? t("transport.action.pause") : t("transport.action.play")}
             keys={playShortcut?.keys}
+            reason={reasonText(playReason)}
           />
         </Tooltip>
 

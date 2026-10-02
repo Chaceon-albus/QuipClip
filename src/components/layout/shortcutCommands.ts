@@ -103,6 +103,11 @@ export interface ShortcutSnapshot {
   > & {
     /** The stop point of a segment playback (ADR 026). Absent means none. */
     readonly playbackStop?: PlaybackState["playbackStop"];
+    /**
+     * The decode stall of the preview element. While it is set, play, Play Segment and the
+     * frame steps do nothing, and a seek reloads the preview. Absent means none.
+     */
+    readonly decodeStall?: PlaybackState["decodeStall"];
   };
   readonly timeline: Pick<
     TimelineState,
@@ -198,6 +203,11 @@ export type BoundarySeekPlayback = Pick<
   ShortcutSnapshot["playback"],
   "calibrationStatus" | "presentedFrame" | "seekTargetSeconds"
 >;
+
+/** True while the preview element is stopped by a decode stall (`decodeStall`). */
+function isDecodeStalled(playback: ShortcutSnapshot["playback"]): boolean {
+  return playback.decodeStall != null;
+}
 
 function currentSegmentOf(
   timeline: ShortcutSnapshot["timeline"],
@@ -665,7 +675,8 @@ function planPlaySegment(
   hasActiveSource: boolean,
 ): ShortcutCommand | null {
   const { probe, playback } = snapshot;
-  if (!hasActiveSource || probe === null) {
+  // A stalled preview element does not play again (decodeStall).
+  if (!hasActiveSource || probe === null || isDecodeStalled(playback)) {
     return null;
   }
   if (playback.playbackStop?.phase === "playing") {
@@ -704,7 +715,9 @@ export function planShortcutCommand(
 
   switch (action) {
     case "togglePlayback":
-      return canTogglePlayback(hasActiveSource) ? { kind: "togglePlayback" } : null;
+      return canTogglePlayback(hasActiveSource, isDecodeStalled(playback))
+        ? { kind: "togglePlayback" }
+        : null;
 
     case "playSegment":
       return planPlaySegment(snapshot, hasActiveSource);
@@ -713,7 +726,13 @@ export function planShortcutCommand(
     case "stepForwardOneFrame":
     case "stepBackTenFrames":
     case "stepForwardTenFrames": {
-      if (!canStepFrames(hasActiveSource, hasNominalFrameRate(probe))) {
+      if (
+        !canStepFrames(
+          hasActiveSource,
+          hasNominalFrameRate(probe),
+          isDecodeStalled(playback),
+        )
+      ) {
         return null;
       }
       const size =

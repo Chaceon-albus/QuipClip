@@ -28,22 +28,30 @@ export function isSourceActive(
   return hasMedia && isAttached && isReady;
 }
 
-/** Play and pause need an active source, and nothing more. */
-export function canTogglePlayback(hasActiveSource: boolean): boolean {
-  return hasActiveSource;
+/**
+ * Play and pause need an active source whose preview element can play: no decode stall
+ * (`decodeStall` of the playback store). A stalled element does not play again, and a seek
+ * reloads the preview.
+ */
+export function canTogglePlayback(
+  hasActiveSource: boolean,
+  isDecodeStalled: boolean,
+): boolean {
+  return hasActiveSource && !isDecodeStalled;
 }
 
 /**
- * A nominal frame step needs an active source and a valid nominal frame rate (ADR 021). It
- * does not need a calibrated source. `seekNominal` aims at the frame grid when a calibration
- * holds and the grid applies, and otherwise it moves the position by one nominal interval
- * (ADR 022).
+ * A nominal frame step needs an active source, a valid nominal frame rate (ADR 021), and no
+ * decode stall: a stalled element shows no frame to step from. It does not need a calibrated
+ * source. `seekNominal` aims at the frame grid when a calibration holds and the grid applies,
+ * and otherwise it moves the position by one nominal interval (ADR 022).
  */
 export function canStepFrames(
   hasActiveSource: boolean,
   hasNominalRate: boolean,
+  isDecodeStalled: boolean,
 ): boolean {
-  return hasActiveSource && hasNominalRate;
+  return hasActiveSource && hasNominalRate && !isDecodeStalled;
 }
 
 /** Undo needs an active source and an entry in the edit history. */

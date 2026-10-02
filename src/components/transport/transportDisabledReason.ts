@@ -1,11 +1,11 @@
 /**
  * Pure presenter for the reason that a transport control is disabled.
  *
- * The tooltip of Mark In, Mark Out, Split and the two frame step buttons shows a second line
- * while the control is disabled, so the user learns what to do. The presenter reads the same
- * facts as the conditions of those controls (`canMarkIn`, `canMarkOut`,
- * `canSplitCurrentSegment` and `canStepFrames`) and first asks each condition itself, so it
- * never gives a reason for an enabled control.
+ * The tooltip of Mark In, Mark Out, Split, the two frame step buttons and the play button shows
+ * a second line while the control is disabled, so the user learns what to do. The presenter
+ * reads the same facts as the conditions of those controls (`canMarkIn`, `canMarkOut`,
+ * `canSplitCurrentSegment`, `canStepFrames` and `canTogglePlayback`) and first asks each
+ * condition itself, so it never gives a reason for an enabled control.
  *
  * Every seek clears `presentedFrame` until the frame callback answers it (ADR 022), which
  * disables the three edit controls for a few frames, and the transport bar delays the dimming
@@ -25,7 +25,7 @@
  * It returns translation keys and does not call the i18n runtime (ADR 011).
  */
 
-import { canStepFrames } from "@/components/layout/actionConditions";
+import { canStepFrames, canTogglePlayback } from "@/components/layout/actionConditions";
 import type { PlaybackState } from "@/features/playback";
 import {
   canMarkIn,
@@ -48,7 +48,8 @@ export type TransportDisabledReasonKey =
   | "transport.disabledReason.playheadAfterIn"
   | "transport.disabledReason.atInPoint"
   | "transport.disabledReason.atOutPoint"
-  | "transport.disabledReason.noFrameRate";
+  | "transport.disabledReason.noFrameRate"
+  | "transport.disabledReason.decodeStalled";
 
 /** The description of Mark In while a press would finish the current segment. */
 export type MarkInFinishesSegmentKey = "transport.state.finishesSegment";
@@ -87,17 +88,39 @@ export interface EditReasonContext {
  * Returns the reason that the two frame step buttons are disabled, or null when they are
  * enabled or no source is active.
  *
- * The condition of a step is an active source and a valid nominal frame rate (ADR 021). The
- * frame rate comes from the probe, so the reason holds for the whole session.
+ * The condition of a step is an active source, a valid nominal frame rate (ADR 021), and no
+ * decode stall (`canStepFrames`). The frame rate comes from the probe, so its reason holds for
+ * the whole session, and it comes first. A decode stall ends at the next seek, and its reason
+ * says so. The notice of the preview says the same, but the user can close it.
  */
 export function presentStepDisabledReason(
   hasActiveSource: boolean,
   hasNominalRate: boolean,
+  isDecodeStalled: boolean,
 ): TransportDisabledReasonKey | null {
-  if (!hasActiveSource || canStepFrames(hasActiveSource, hasNominalRate)) {
+  if (
+    !hasActiveSource ||
+    canStepFrames(hasActiveSource, hasNominalRate, isDecodeStalled)
+  ) {
     return null;
   }
-  return "transport.disabledReason.noFrameRate";
+  return hasNominalRate
+    ? "transport.disabledReason.decodeStalled"
+    : "transport.disabledReason.noFrameRate";
+}
+
+/**
+ * Returns the reason that the play button is disabled, or null when it is enabled or no source
+ * is active. With an active source, only a decode stall disables it (`canTogglePlayback`).
+ */
+export function presentPlayDisabledReason(
+  hasActiveSource: boolean,
+  isDecodeStalled: boolean,
+): TransportDisabledReasonKey | null {
+  if (!hasActiveSource || canTogglePlayback(hasActiveSource, isDecodeStalled)) {
+    return null;
+  }
+  return "transport.disabledReason.decodeStalled";
 }
 
 function isEnabled(

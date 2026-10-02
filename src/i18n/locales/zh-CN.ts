@@ -106,6 +106,10 @@ export const zhCN: TranslationCatalog = {
       },
       openAnother: "打开其他文件…",
     },
+    decodeStall: {
+      message:
+        "预览在约 {{time}} 处中断：预览无法解码这部分内容（画面尺寸或编码可能在此变化）。把播放头移到别处即可继续。",
+    },
     notice: {
       dismiss: "关闭提示",
     },
@@ -184,6 +188,7 @@ export const zhCN: TranslationCatalog = {
       atInPoint: "播放头已位于入点。",
       atOutPoint: "播放头已位于出点。",
       noFrameRate: "源未报告帧率。",
+      decodeStalled: "预览停在无法解码的位置。把播放头移到别处即可继续。",
     },
   },
   // A key keeps the label that is printed on its key cap. The space bar has no printed

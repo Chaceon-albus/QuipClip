@@ -469,6 +469,23 @@ export function createPlaybackStore(
   // while that field is true, the preview bounds the wait for the first frame, and at the
   // bound it reports frame callbacks as unavailable (syncPresentationUnavailable).
   let deferredNavigation: DeferredNavigation | null = null;
+  // The reload of the preview after a decode stall (decodeStall, reloadGeneration), or null.
+  // A media element does not play or seek again after a decode error, so the preview replaces
+  // it with a new element for the same source. `request` is the latest navigation request of
+  // the stall, in the form of a deferred navigation, or null when the new element loads at the
+  // start. The phase follows the reload:
+  // - "requested": the generation rose for this stall. The stalled element is still attached,
+  //   or the detach of that element kept the reload for the new element.
+  // - "loading": the new element of the same source is attached, and the request waits for its
+  //   metadata. syncReady then moves the request into deferredNavigation, so it runs at the
+  //   calibration anchor (ADR 003, ADR 022), or at once when the calibration is unavailable.
+  // An attach of another source, a detach outside the stall, a reset, a loss of readiness and a
+  // failed seek drop the reload or its request.
+  let reload: {
+    readonly sourceRevisionKey: string;
+    readonly request: DeferredNavigation | null;
+    readonly phase: "requested" | "loading";
+  } | null = null;
   // Source revision keys that lost precise editing. ADR 003 denies precision per source, so the
   // denial must outlive the attachment that detected it.
   const precisionDeniedSources = new Set<string>();
@@ -930,6 +947,33 @@ export function createPlaybackStore(
         presentedFrame: null,
         seekTargetSeconds: deferredDisplaySeconds(entry),
         hasDeferredNavigation: deferredNavigation !== null,
+      });
+    };
+
+    /**
+     * Keeps a navigation request during a decode stall as the request of a reload, in place of
+     * a seek (decodeStall). The stalled element does not seek again, so the store does not
+     * touch it. The latest request wins, as a deferred seek does (ADR 022). The display target
+     * shows where the request goes, and presentedFrame stays null.
+     *
+     * The first request of a stall raises reloadGeneration, and the preview then replaces the
+     * element. A later request before the detach only replaces the request. The request runs on
+     * the new element at its calibration anchor (syncReady).
+     */
+    const requestReload = (entry: DeferredNavigation): void => {
+      if (activeSourceRevisionKey === null) {
+        return;
+      }
+      const raises = reload === null;
+      reload = {
+        sourceRevisionKey: activeSourceRevisionKey,
+        request: entry,
+        phase: "requested",
+      };
+      set({
+        error: null,
+        seekTargetSeconds: deferredDisplaySeconds(entry),
+        ...(raises ? { reloadGeneration: get().reloadGeneration + 1 } : {}),
       });
     };
 
@@ -2102,6 +2146,8 @@ export function createPlaybackStore(
       attachedSourceRevisionKey: initialState?.attachedSourceRevisionKey ?? null,
       isReady: initialState?.isReady ?? false,
       error: initialState?.error ?? null,
+      decodeStall: initialState?.decodeStall ?? null,
+      reloadGeneration: initialState?.reloadGeneration ?? 0,
 
       attach: (source: PlaybackSource, element: PlaybackMediaElement) => {
         // 1. Validate basic element and source existence
@@ -2178,13 +2224,28 @@ export function createPlaybackStore(
         queuedSeek = null;
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
+        // The new element of a reload after a decode stall keeps the request of the reload and
+        // its display target, and the request waits for the metadata of the element
+        // (syncReady). The element calibrates from the start, as for a new source. Any other
+        // attach drops the reload.
+        let keptTarget: number | null = null;
+        if (
+          reload !== null &&
+          reload.phase === "requested" &&
+          reload.sourceRevisionKey === newIdentity
+        ) {
+          reload = { ...reload, phase: "loading" };
+          keptTarget = reload.request === null ? null : get().seekTargetSeconds;
+        } else {
+          reload = null;
+        }
 
         set({
           presentedFrame: null,
           calibrationStatus: initialCalibrationStatus,
           runtimeBrowserDurationSeconds: null,
           approximateBrowserTimeSeconds: null,
-          seekTargetSeconds: null,
+          seekTargetSeconds: keptTarget,
           hasDeferredNavigation: false,
           playbackStop: null,
           isPlaying: false,
@@ -2192,6 +2253,7 @@ export function createPlaybackStore(
           attachedSourceRevisionKey: newIdentity,
           isReady: isElementReady,
           error: null,
+          decodeStall: null,
         });
       },
 
@@ -2231,19 +2293,35 @@ export function createPlaybackStore(
         deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
+        // Two detaches keep the reload and its display target for the next attach of the same
+        // source, and every other detach drops the reload:
+        // - The detach of a stalled element whose reload started. The preview attaches the new
+        //   element next.
+        // - The detach of the new element of a reload before its metadata loads. React in
+        //   StrictMode detaches and attaches again the ref of a node that it has just placed, and
+        //   the request would be lost there.
+        // An attach of another source, a loss of readiness and a reset still drop the reload.
+        const keepsReload =
+          reload !== null &&
+          reload.sourceRevisionKey === currentIdentity &&
+          (reload.phase === "loading" ||
+            (reload.phase === "requested" && get().decodeStall !== null));
+        reload =
+          keepsReload && reload !== null ? { ...reload, phase: "requested" } : null;
 
         set({
           presentedFrame: null,
           calibrationStatus: "unavailable",
           runtimeBrowserDurationSeconds: null,
           approximateBrowserTimeSeconds: null,
-          seekTargetSeconds: null,
+          seekTargetSeconds: keepsReload ? get().seekTargetSeconds : null,
           hasDeferredNavigation: false,
           playbackStop: null,
           isPlaying: false,
           isAttached: false,
           attachedSourceRevisionKey: null,
           isReady: false,
+          decodeStall: null,
         });
       },
 
@@ -2279,6 +2357,30 @@ export function createPlaybackStore(
         }
 
         set({ isReady: true });
+
+        // The new element of a reload after a decode stall has its metadata. The request of the
+        // reload becomes the deferred navigation, so it runs at the calibration anchor exactly
+        // as a request that arrived before the anchor (ADR 022): the element stays at the start
+        // until the first frame callback, and a target in the anchor frame is dropped there.
+        // When the calibration is not open, the request runs at once on the approximate path.
+        if (reload !== null && reload.phase === "loading") {
+          const request = reload.request;
+          reload = null;
+          if (request === null) {
+            return;
+          }
+          deferredNavigation = request;
+          if (get().calibrationStatus === "calibrating") {
+            // The origin of the browser media timeline is known now, so the target shows on the
+            // axis of the new element.
+            set({
+              hasDeferredNavigation: true,
+              seekTargetSeconds: deferredDisplaySeconds(request),
+            });
+          } else {
+            runDeferredNavigation();
+          }
+        }
       },
 
       syncUnready: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
@@ -2297,8 +2399,10 @@ export function createPlaybackStore(
         queuedSeek = null;
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
-        // A deferred navigation needs a ready element to run on.
+        // A deferred navigation needs a ready element to run on, and so does the request of a
+        // reload.
         deferredNavigation = null;
+        reload = null;
         playSessionId++;
         try {
           attachedElement.pause();
@@ -2312,7 +2416,72 @@ export function createPlaybackStore(
           seekTargetSeconds: null,
           hasDeferredNavigation: false,
           playbackStop: null,
+          decodeStall: null,
         });
+      },
+
+      syncDecodeStall: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
+        if (
+          !attachedSource ||
+          !attachedElement ||
+          attachedElement !== element ||
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
+          !get().isReady
+        ) {
+          return false;
+        }
+        if (get().decodeStall !== null) {
+          return true;
+        }
+
+        // The element does not play or seek again, so nothing may wait for it: the cue, the
+        // queued seek, a deferred navigation and the stop of a segment playback all go. A
+        // reload of an earlier stall has already run, so the reload starts again with this one.
+        scrubAudioController.stop();
+        lastScrubAudioTarget = null;
+        queuedSeek = null;
+        lastAcceptedSeek = null;
+        deferredNavigation = null;
+        reload = null;
+        playSessionId++;
+        try {
+          element.pause();
+        } catch {
+          // Ignore DOM exception
+        }
+
+        // The position where the element stopped, on the axis of the approximate clock, which
+        // the playhead then shows. An element that reports no position keeps the last reading
+        // of that clock.
+        const time = element.currentTime;
+        const atSeconds =
+          typeof time === "number" && Number.isFinite(time) && time >= 0
+            ? Math.max(0, time - browserTimelineOriginSeconds)
+            : (get().approximateBrowserTimeSeconds ?? 0);
+
+        set({
+          decodeStall: { atSeconds },
+          presentedFrame: null,
+          isPlaying: false,
+          seekTargetSeconds: null,
+          hasDeferredNavigation: false,
+          playbackStop: null,
+          approximateBrowserTimeSeconds: atSeconds,
+        });
+        return true;
+      },
+
+      reloadStalledPreview: (sourceRevisionKey: string) => {
+        if (
+          get().decodeStall === null ||
+          reload !== null ||
+          activeSourceRevisionKey === null ||
+          activeSourceRevisionKey !== sourceRevisionKey
+        ) {
+          return;
+        }
+        reload = { sourceRevisionKey, request: null, phase: "requested" };
+        set({ reloadGeneration: get().reloadGeneration + 1 });
       },
 
       togglePlayback: () => {
@@ -2328,7 +2497,13 @@ export function createPlaybackStore(
         // its stop point after this call.
         dropPlaybackStop();
         const state = get();
-        if (!attachedSource || !attachedElement || !state.isReady) {
+        // A stalled element does not play again (decodeStall). A seek reloads the preview.
+        if (
+          !attachedSource ||
+          !attachedElement ||
+          !state.isReady ||
+          state.decodeStall !== null
+        ) {
           return;
         }
 
@@ -2481,10 +2656,13 @@ export function createPlaybackStore(
 
       playSegment: (inPts: Pts, outPts: Pts) => {
         const state = get();
+        // A stalled element does not play again (decodeStall), and the seek to the In alone
+        // would reload the preview.
         if (
           !attachedSource ||
           !attachedElement ||
           !state.isReady ||
+          state.decodeStall !== null ||
           state.calibrationStatus !== "ready" ||
           calibratedMediaTime === null ||
           !canPlaySegment(attachedSource, inPts, outPts)
@@ -2516,12 +2694,16 @@ export function createPlaybackStore(
         }
 
         // A failed request is the latest request, so it also drops the pending ones: the queued
-        // seek and a navigation deferred during calibration (ADR 022).
+        // seek, a navigation deferred during calibration (ADR 022), and the request of a reload
+        // after a decode stall. A reload that started still loads the new element, at the start.
         const failSeek = (): void => {
           queuedSeek = null;
           lastAcceptedSeek = null;
           lastScrubAudioTarget = null;
           deferredNavigation = null;
+          if (reload !== null) {
+            reload = { ...reload, request: null };
+          }
           playSessionId++;
           try {
             attachedElement?.pause();
@@ -2565,6 +2747,19 @@ export function createPlaybackStore(
 
         if (rawElapsed === null) {
           failSeek();
+          return;
+        }
+
+        if (state.decodeStall !== null) {
+          // The stalled element does not seek again, so the request reloads the preview. It runs
+          // as an exact seek on the new element: the drag that a scrub sample belongs to ends
+          // with the reload, so no exact seek at its release would follow a keyframe. The
+          // timeline cannot seek from the attach of the new element until its metadata loads, so
+          // it cancels the gesture then, and the request is the last sample before that window.
+          requestReload({
+            seek: { kind: "pts", pts: targetPts, scrub: false },
+            frames: 0,
+          });
           return;
         }
 
@@ -2658,7 +2853,14 @@ export function createPlaybackStore(
         }
 
         const state = get();
-        if (!attachedSource || !attachedElement || !state.isReady) {
+        // A step counts from the frame on screen or from the position of the element, and a
+        // stalled element has neither (decodeStall).
+        if (
+          !attachedSource ||
+          !attachedElement ||
+          !state.isReady ||
+          state.decodeStall !== null
+        ) {
           return;
         }
 
@@ -2729,7 +2931,12 @@ export function createPlaybackStore(
           return;
         }
 
-        if (state.calibrationStatus === "calibrating") {
+        // During a decode stall with a calibration, the request takes the form of a deferred
+        // request below, and it becomes the request of the reload (decodeStall). The new element
+        // calibrates again, so the request runs at its anchor as a deferred request does.
+        const stalled =
+          state.decodeStall !== null && state.calibrationStatus !== "unavailable";
+        if (state.calibrationStatus === "calibrating" || stalled) {
           // The anchor is still open, so the request is deferred (ADR 003). Frame `frameIndex` of
           // the grid lies that many frames after the calibrated first frame, so the request is a
           // seek to the first frame followed by that many steps. At the anchor the seek to the
@@ -2755,12 +2962,17 @@ export function createPlaybackStore(
           if (!Number.isSafeInteger(frames) || frames < 0) {
             return;
           }
-          deferNavigation({ seek, frames });
+          if (stalled) {
+            requestReload({ seek, frames });
+          } else {
+            deferNavigation({ seek, frames });
+          }
           return;
         }
 
-        // Without a calibration the grid has no frame 0.
-        if (state.calibrationStatus !== "ready") {
+        // Without a calibration the grid has no frame 0. A stalled element of such a source does
+        // not seek again either.
+        if (state.calibrationStatus !== "ready" || state.decodeStall !== null) {
           return;
         }
         stepToFrame(
@@ -2795,6 +3007,21 @@ export function createPlaybackStore(
         // on before the element is moved.
         const target = approximateSeekTarget(seconds);
         if (target === null) {
+          return;
+        }
+
+        if (state.decodeStall !== null) {
+          // The stalled element does not seek again, so the request reloads the preview, as an
+          // exact seek (see seekToPts).
+          requestReload({
+            seek: {
+              kind: "approximate",
+              seconds,
+              scrub: false,
+              keepBrowserTimeline: options?.keepBrowserTimeline === true,
+            },
+            frames: 0,
+          });
           return;
         }
 
@@ -2851,6 +3078,12 @@ export function createPlaybackStore(
         }
 
         if (attachedElement !== element) {
+          return;
+        }
+
+        // A late callback of a stalled element names a frame from before the error, which the
+        // element may no longer show, so no edit may read it (decodeStall).
+        if (get().decodeStall !== null) {
           return;
         }
 
@@ -3073,10 +3306,13 @@ export function createPlaybackStore(
       },
 
       syncBrowserTime: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
+        // The clock of a stalled element keeps the position of the stall, which the notice of
+        // the preview names (decodeStall).
         if (
           !attachedSource ||
           attachedElement !== element ||
-          getSourceRevisionKey(attachedSource) !== sourceRevisionKey
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
+          get().decodeStall !== null
         ) {
           return;
         }
@@ -3118,10 +3354,13 @@ export function createPlaybackStore(
       },
 
       syncSeeked: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
+        // A late `seeked` of a stalled element must not clear the display target of a reload,
+        // or restore a frame that the element may no longer show (decodeStall).
         if (
           !attachedSource ||
           attachedElement !== element ||
-          getSourceRevisionKey(attachedSource) !== sourceRevisionKey
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
+          get().decodeStall !== null
         ) {
           return;
         }
@@ -3242,7 +3481,9 @@ export function createPlaybackStore(
           return;
         }
 
-        if (!get().isReady) {
+        // A stalled element does not play again, so a late `play` event changes nothing
+        // (decodeStall).
+        if (!get().isReady || get().decodeStall !== null) {
           return;
         }
 
@@ -3361,8 +3602,10 @@ export function createPlaybackStore(
         deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
+        reload = null;
         // precisionDeniedSources is kept: ADR 003 denies precise editing for the source, and a
-        // source keeps the same revision key until the file on disk changes.
+        // source keeps the same revision key until the file on disk changes. reloadGeneration is
+        // kept too: it only goes up, so a key of the preview elements is never used twice.
 
         set({
           presentedFrame: null,
@@ -3377,6 +3620,7 @@ export function createPlaybackStore(
           attachedSourceRevisionKey: null,
           isReady: false,
           error: null,
+          decodeStall: null,
         });
       },
     };

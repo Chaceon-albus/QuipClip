@@ -16,9 +16,11 @@ import type { ImportMediaError } from "@/features/media";
 import type { PlaybackErrorCode } from "@/features/playback";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { cn } from "@/lib/utils";
+import type { DecodeStallNotice } from "./decodeRecovery";
 import {
   importErrorActions,
   importErrorHintKey,
+  previewNoticeTone,
   resolveNoticeTimer,
   type ImportErrorAction,
   type PreviewNoticeKind,
@@ -84,15 +86,16 @@ function ImportErrorDetails({ text }: { text: string }) {
 }
 
 /**
- * One notice of the preview's notification area: a destructive icon and the message, the
- * controls of the notice under the message, and a close button.
+ * One notice of the preview's notification area: an icon in the colour of the notice
+ * (`previewNoticeTone`) and the message, the controls of the notice under the message, and a
+ * close button.
  *
  * Only the icon and the message are in the `alert`, so a screen reader announces the message
  * and not the names of the controls.
  *
  * A playback notice leaves by itself (`resolveNoticeTimer`). The pointer over it, or the focus
- * in it, pauses it, and a pause stops an exit that has started. An import notice stays until
- * the user dismisses it or the store clears it.
+ * in it, pauses it, and a pause stops an exit that has started. An import notice and the notice
+ * of a decode stall stay until the user dismisses them or the store clears them.
  */
 function NoticeBanner({
   kind,
@@ -113,6 +116,7 @@ function NoticeBanner({
   children?: ReactNode;
 }) {
   const { t } = useTranslation();
+  const isWarning = previewNoticeTone(kind) === "warning";
   const [phase, setPhase] = useState<PreviewNoticePhase>("shown");
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -175,7 +179,8 @@ function NoticeBanner({
   return (
     <div
       className={cn(
-        "pointer-events-auto flex items-start gap-2 rounded-md border border-destructive/50 bg-preview-background/95 px-3 py-2 text-xs text-preview-foreground shadow-floating",
+        "pointer-events-auto flex items-start gap-2 rounded-md border bg-preview-background/95 px-3 py-2 text-xs text-preview-foreground shadow-floating",
+        isWarning ? "border-warning/50" : "border-destructive/50",
         phase === "leaving"
           ? "animate-out fade-out-0 fill-mode-forwards"
           : "animate-in fade-in-0 slide-in-from-top-1",
@@ -192,7 +197,10 @@ function NoticeBanner({
         <div role="alert" className="flex items-start gap-2">
           <AlertCircle
             aria-hidden="true"
-            className="mt-px size-4 shrink-0 text-destructive"
+            className={cn(
+              "mt-px size-4 shrink-0",
+              isWarning ? "text-warning" : "text-destructive",
+            )}
           />
           <p className="min-w-0 flex-1 pt-px font-medium wrap-break-word">{message}</p>
         </div>
@@ -275,6 +283,32 @@ export function PlaybackErrorBanner({
         defaultValue: t("playbackError.playbackFailed"),
       })}
       onDismiss={() => onDismiss(code)}
+      onReturnFocus={onReturnFocus}
+    />
+  );
+}
+
+/**
+ * The notice of a decode stall over an open video: the web view stopped in the middle of the
+ * file, because it cannot decode the next part. It says where and why, and that a move of the
+ * playhead continues the preview. It stays while the stall holds. The close button hides it for
+ * this stall only, and the next stall shows it again.
+ */
+export function DecodeStallBanner({
+  notice,
+  onDismiss,
+  onReturnFocus,
+}: {
+  notice: DecodeStallNotice;
+  onDismiss: () => void;
+  onReturnFocus: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <NoticeBanner
+      kind="decodeStall"
+      message={t(notice.key, notice.values)}
+      onDismiss={onDismiss}
       onReturnFocus={onReturnFocus}
     />
   );
