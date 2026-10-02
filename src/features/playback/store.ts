@@ -29,6 +29,7 @@ import type { Pts, Rational } from "@/types/project";
 import { scrubAudioController } from "./scrubAudio";
 import type {
   CalibrationStatus,
+  FrameIndexSeekOptions,
   FrameStepOptions,
   PlaybackErrorCode,
   PlaybackMediaElement,
@@ -355,7 +356,8 @@ function nominalFrameMiddleSeconds(frameIndex: number, frameRate: Rational): num
  * The frame that a frame step goes to: a step of `deltaFrames` nominal frames from the frame it
  * starts from (seekNominal), or nominal frame `frameIndex` of the grid (seekToFrameIndex).
  * `held` is the option of seekNominal: the step repeats a held key or a held step button
- * (FrameStepOptions).
+ * (FrameStepOptions). `keepPlaying` is the option of seekToFrameIndex (SeekOptions). A relative
+ * step always pauses, because a frame step means that the user stops to look at frames.
  */
 type FrameStepRequest =
   | {
@@ -363,7 +365,11 @@ type FrameStepRequest =
       readonly deltaFrames: number;
       readonly held: boolean;
     }
-  | { readonly kind: "absolute"; readonly frameIndex: number };
+  | {
+      readonly kind: "absolute";
+      readonly frameIndex: number;
+      readonly keepPlaying: boolean;
+    };
 
 /**
  * The absolute seek of a navigation that the store deferred during calibration.
@@ -564,23 +570,55 @@ export function createPlaybackStore(
       return Math.max(0, lastAcceptedSeek.mediaTime - browserTimelineOriginSeconds);
     };
 
+    /**
+     * True when a seek keeps the playback running (SeekOptions.keepPlaying): the caller asked for
+     * it, the seek is not a scrub seek, the store plays, and the element does not report that it
+     * is paused. A scrub seek always pauses, because the picture of a drag samples the pointer
+     * and does not play. An element that paused on its own before its `pause` event ran, as at
+     * the end of the media, gets the pause of an ordinary seek, so the store reports the pause at
+     * once.
+     *
+     * An engine that sets `paused` only inside the queued task of the end makes the `paused` test
+     * a no-op: the seek then keeps playing. That is still correct, because that task tests the
+     * end again when it runs, and the seek has moved the position away from the end, so the task
+     * does not pause the element.
+     */
+    const seekKeepsPlaying = (
+      element: PlaybackMediaElement,
+      scrub: boolean,
+      keepPlaying: boolean | undefined,
+    ): boolean =>
+      keepPlaying === true && !scrub && get().isPlaying && element.paused !== true;
+
     // A media element aborts a running seek when currentTime is assigned again, so a fast series
     // of seeks never presents a frame; one seek in flight with the latest request winning makes
     // each seek complete (ADR 022).
+    //
+    // `keepPlaying` is the result of seekKeepsPlaying. The seek then does not pause the element
+    // and keeps the play session, so the pending play promise still counts. A playing element
+    // that gets a new currentTime seeks and plays on from there, and a queued seek that seeked
+    // starts later plays on in the same way, because issueSeek never pauses. The caller keeps
+    // isPlaying true in its own update.
     const dispatchSeek = (
       element: PlaybackMediaElement,
       mediaTime: number,
       scrub: boolean,
+      keepPlaying = false,
     ): boolean => {
       // Duplicate rule (ADR 022): drop a SCRUB request (no dispatch, no state change)
       // when its mediaTime equals the last accepted request's mediaTime, whether that
       // request was a scrub or exact.
       // An exact request is NEVER dropped, even when its time equals the previous
       // scrub target, because fastSeek lands on a keyframe rather than the target frame.
+      // While the store plays, a scrub request is never dropped either. The rule assumes a
+      // paused element that stands at the last request, but after a seek that kept playing
+      // (SeekOptions.keepPlaying) the element plays on from it. The first scrub sample of a drag
+      // must pause that playback and bring the picture back to the pointer.
       if (
         scrub &&
         lastAcceptedSeek !== null &&
-        lastAcceptedSeek.mediaTime === mediaTime
+        lastAcceptedSeek.mediaTime === mediaTime &&
+        !get().isPlaying
       ) {
         return false;
       }
@@ -593,11 +631,13 @@ export function createPlaybackStore(
         lastScrubAudioTarget = mediaTime;
       }
 
-      playSessionId++;
-      try {
-        element.pause();
-      } catch {
-        // Ignore DOM exception
+      if (!keepPlaying) {
+        playSessionId++;
+        try {
+          element.pause();
+        } catch {
+          // Ignore DOM exception
+        }
       }
 
       if (element.seeking === true) {
@@ -612,6 +652,16 @@ export function createPlaybackStore(
         queuedSeek = null;
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
+        if (keepPlaying) {
+          // A failed seek leaves the element paused, as every failed seek does, so the store
+          // does not report a pause while the element plays on.
+          playSessionId++;
+          try {
+            element.pause();
+          } catch {
+            // Ignore DOM exception
+          }
+        }
         set({
           isPlaying: false,
           error: "seekFailed",
@@ -855,9 +905,12 @@ export function createPlaybackStore(
      * Keeps a navigation request while the calibration anchor is open, in place of a seek.
      *
      * The request stops playback, as a seek does, because a navigation means that the user
-     * stops to look at frames. A pause does not move the element, so the anchor keeps its
-     * baseline. The display target shows where the request goes (ADR 022). presentedFrame stays
-     * null: no frame is confirmed before the anchor (ADR 003).
+     * stops to look at frames. A seek with keepPlaying stops it too. The request cannot move the
+     * element before the anchor, so a playback that ran on would move the picture away from the
+     * display target of the request. The first frame of a playback takes the anchor, so such a
+     * request is rare. A pause does not move the element, so the anchor keeps its baseline. The
+     * display target shows where the request goes (ADR 022). presentedFrame stays null: no frame
+     * is confirmed before the anchor (ADR 003).
      */
     const deferNavigation = (entry: DeferredNavigation): void => {
       if (!attachedElement) {
@@ -1141,6 +1194,10 @@ export function createPlaybackStore(
      * seek, does nothing. During playback that rule still holds while the element is inside the
      * start frame, and the request only pauses. Once the element has left the start frame, an
      * absolute request seeks back to it.
+     *
+     * An absolute request with `keepPlaying`, while the store plays, never pauses: its seek plays
+     * on, and its edge no-op does nothing at all (seekKeepsPlaying). A relative step always
+     * pauses.
      */
     const stepToFrame = (
       request: FrameStepRequest,
@@ -1350,6 +1407,11 @@ export function createPlaybackStore(
       // button would sound as a stutter. A single backward step, and the first step of a hold,
       // keep their cue (ADR 019).
       const silencesCue = request.kind === "relative" && request.held && direction < 0;
+      // A jump with keepPlaying while the store plays seeks and plays on (seekKeepsPlaying). A
+      // jump is an exact seek, never a scrub seek.
+      const keepsPlaying =
+        request.kind === "absolute" &&
+        seekKeepsPlaying(element, false, request.keepPlaying);
       if (
         pending?.scrub !== true &&
         !leftStartFrameDuringPlayback &&
@@ -1369,7 +1431,11 @@ export function createPlaybackStore(
         // edge press during playback still pauses, as the seek path does. pause stops the cue
         // and invalidates a pending play promise, and it does not touch presentedFrame. A held
         // backward press at the first frame also stops the cue: the step that reached that
-        // frame can still sound.
+        // frame can still sound. A jump that keeps playing moves nothing here, so the playback
+        // goes on: the element is still inside the frame that the jump names.
+        if (keepsPlaying) {
+          return;
+        }
         if (state.isPlaying) {
           get().pause();
         } else if (silencesCue) {
@@ -1380,7 +1446,7 @@ export function createPlaybackStore(
 
       // The step stays exact: it assigns currentTime through the helper with scrub false
       // (ADR 019, ADR 022).
-      if (!dispatchSeek(element, targetTime, false)) {
+      if (!dispatchSeek(element, targetTime, false, keepsPlaying)) {
         return;
       }
 
@@ -1431,7 +1497,7 @@ export function createPlaybackStore(
         );
       }
       set({
-        isPlaying: false,
+        isPlaying: keepsPlaying,
         error: null,
         presentedFrame: null,
         seekTargetSeconds,
@@ -1722,7 +1788,7 @@ export function createPlaybackStore(
       }
       const state = get();
       stepToFrame(
-        { kind: "absolute", frameIndex: target.lastFrame },
+        { kind: "absolute", frameIndex: target.lastFrame, keepPlaying: false },
         framePts === null ? { ...state, presentedFrame: null } : state,
         attachedSource,
         attachedElement,
@@ -2366,6 +2432,53 @@ export function createPlaybackStore(
         pauseElement();
       },
 
+      resumeAfterSeek: () => {
+        const state = get();
+        if (
+          !attachedSource ||
+          !attachedElement ||
+          !state.isReady ||
+          state.isPlaying ||
+          deferredNavigation !== null
+        ) {
+          return;
+        }
+        // The position that play starts from: the pending seek that play starts as an exact
+        // seek, or else the seek that runs, or else the position of the element. WebKit and
+        // Chromium report the target of a running seek as the position, but an engine that
+        // moves the position only when the seek runs would still report the end of an ended
+        // element there. The target of the running seek is therefore read from the store, and
+        // `ended` counts only when no seek is pending or running.
+        const pending =
+          queuedSeek ?? (lastAcceptedSeek?.scrub === true ? lastAcceptedSeek : null);
+        const running =
+          pending === null && attachedElement.seeking === true
+            ? lastAcceptedSeek
+            : null;
+        if (pending === null && running === null && attachedElement.ended === true) {
+          return;
+        }
+        const start =
+          pending?.mediaTime ?? running?.mediaTime ?? attachedElement.currentTime;
+        const elementDuration = attachedElement.duration;
+        const duration =
+          typeof elementDuration === "number" && Number.isFinite(elementDuration)
+            ? elementDuration
+            : state.runtimeBrowserDurationSeconds;
+        // play on an element at its end seeks to the start of the media in WebKit and in
+        // Chromium, so the playback would start again from the first frame. The playback stays
+        // paused at the end instead.
+        if (
+          duration !== null &&
+          typeof start === "number" &&
+          Number.isFinite(start) &&
+          start >= duration - NOMINAL_STEP_EDGE_TOLERANCE_SECONDS
+        ) {
+          return;
+        }
+        get().play();
+      },
+
       playSegment: (inPts: Pts, outPts: Pts) => {
         const state = get();
         if (
@@ -2456,7 +2569,8 @@ export function createPlaybackStore(
         }
 
         if (deferring) {
-          // The display target needs no anchor: it is the elapsed time from videoStartPts.
+          // The display target needs no anchor: it is the elapsed time from videoStartPts. A
+          // deferred seek pauses also with keepPlaying, and it runs without the option.
           deferNavigation({ seek: { kind: "pts", pts: targetPts, scrub }, frames: 0 });
           return;
         }
@@ -2511,7 +2625,12 @@ export function createPlaybackStore(
           }
         }
 
-        if (!dispatchSeek(attachedElement, targetMediaTime, scrub)) {
+        const keepsPlaying = seekKeepsPlaying(
+          attachedElement,
+          scrub,
+          options?.keepPlaying,
+        );
+        if (!dispatchSeek(attachedElement, targetMediaTime, scrub, keepsPlaying)) {
           return;
         }
 
@@ -2520,7 +2639,7 @@ export function createPlaybackStore(
         // Do not update inferred PTS optimistically after assigning currentTime.
         // Inferred PTS will update when RVFC fires for the newly presented frame.
         set({
-          isPlaying: false,
+          isPlaying: keepsPlaying,
           error: null,
           presentedFrame: null,
           seekTargetSeconds,
@@ -2588,7 +2707,7 @@ export function createPlaybackStore(
         );
       },
 
-      seekToFrameIndex: (frameIndex: number) => {
+      seekToFrameIndex: (frameIndex: number, options?: FrameIndexSeekOptions) => {
         dropPlaybackStop();
         if (
           typeof frameIndex !== "number" ||
@@ -2618,7 +2737,8 @@ export function createPlaybackStore(
           // nominal step from it, which on the grid aims at the middle of frame `frameIndex`, as
           // this action does (ADR 022). A later step adds to the count, and a later seek replaces
           // it. The count stays inside the frames that the deferred steps can reach, as
-          // seekNominal keeps it.
+          // seekNominal keeps it. The request pauses also with keepPlaying, as every deferred
+          // request does.
           const startPts = attachedSource.videoStartPts;
           if (startPts === null || !isPtsString(startPts)) {
             return;
@@ -2644,7 +2764,7 @@ export function createPlaybackStore(
           return;
         }
         stepToFrame(
-          { kind: "absolute", frameIndex },
+          { kind: "absolute", frameIndex, keepPlaying: options?.keepPlaying === true },
           state,
           attachedSource,
           attachedElement,
@@ -2681,7 +2801,8 @@ export function createPlaybackStore(
         if (state.calibrationStatus === "calibrating") {
           // The ruler takes a click as soon as metadata loads, which is before the anchor, so
           // the seek is deferred until the anchor is taken (ADR 003). A scrub sample replaces the
-          // one before it, and the audio of the drag starts with the first seek that runs.
+          // one before it, and the audio of the drag starts with the first seek that runs. A
+          // deferred seek pauses also with keepPlaying, and it runs without the option.
           deferNavigation({
             seek: {
               kind: "approximate",
@@ -2694,7 +2815,12 @@ export function createPlaybackStore(
           return;
         }
 
-        if (!dispatchSeek(attachedElement, target, scrub)) {
+        const keepsPlaying = seekKeepsPlaying(
+          attachedElement,
+          scrub,
+          options?.keepPlaying,
+        );
+        if (!dispatchSeek(attachedElement, target, scrub, keepsPlaying)) {
           return;
         }
 
@@ -2703,7 +2829,7 @@ export function createPlaybackStore(
         // reports the position it reached.
         const seekTargetSeconds = Math.max(0, target - browserTimelineOriginSeconds);
         set({
-          isPlaying: false,
+          isPlaying: keepsPlaying,
           error: null,
           presentedFrame: null,
           seekTargetSeconds,
@@ -3008,6 +3134,9 @@ export function createPlaybackStore(
         }
 
         if (queuedSeek !== null) {
+          // A queued seek that kept the playback running (SeekOptions.keepPlaying) starts on the
+          // element that still plays, and issueSeek never pauses, so the playback goes on from
+          // its target.
           const nextEntry = queuedSeek;
           queuedSeek = null;
           try {
@@ -3015,6 +3144,16 @@ export function createPlaybackStore(
           } catch {
             lastAcceptedSeek = null;
             lastScrubAudioTarget = null;
+            if (get().isPlaying) {
+              // The queued seek kept the playback running. A failed seek leaves the element
+              // paused, as every failed seek does.
+              playSessionId++;
+              try {
+                element.pause();
+              } catch {
+                // Ignore DOM exception
+              }
+            }
             set({
               isPlaying: false,
               error: "seekFailed",
@@ -3151,6 +3290,15 @@ export function createPlaybackStore(
           } else if (element.paused !== false) {
             set({ playbackStop: null });
           }
+        }
+
+        // The event runs as a task after the pause. An element that plays again had a play
+        // after that pause: Play Segment and the release of a drag during playback seek, which
+        // pauses, and then play (ADR 026, ADR 035). The playback runs, so isPlaying and the
+        // session of the pending play stay. Without this, the play button showed Play until
+        // the `play` event, and the session of that play was dropped.
+        if (element.paused === false) {
+          return;
         }
 
         playSessionId++;

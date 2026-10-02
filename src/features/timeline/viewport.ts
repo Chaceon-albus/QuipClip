@@ -713,8 +713,10 @@ export type PlaybackFollowDecision =
  *
  * - With playback stopped, the paused follow owns the view (`calculatePausedFollow`).
  * - While a pointer gesture is active, the drag owns the view: its edge auto-scroll moves it,
- *   and a page would move the lane under the pointer. A drag pauses playback at its first
- *   seek, but a play key can start playback again before the next sample pauses it.
+ *   and a page would move the lane under the pointer. The seek at pointer down keeps a running
+ *   playback, and the first scrub sample of a drag pauses it, but a play key can start playback
+ *   again before the next sample pauses it. A press that does not move yet keeps the playback,
+ *   and the follow pages again after the release.
  * - A playhead in view ends a suspension from an earlier pan.
  * - A playhead outside the view pages it, unless a pan by the user suspends the follow.
  */

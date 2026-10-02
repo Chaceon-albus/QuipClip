@@ -13,6 +13,9 @@
  *   PTS of the boundary. Without a precise seek the request is in seconds on the approximate
  *   clock, and nothing snaps (ADR 003).
  * - The pixel path requests the PTS nearest to the pixel, as before the snap existed.
+ * - The seek at pointer down keeps a running playback (`keepPlaying`), so a click during
+ *   playback plays on from the new position, as a media player does. The samples of a drag do
+ *   not keep it: the picture of a drag follows the pointer.
  *
  * The calibration gate stays with the caller, in the one path that seeks from a pointer
  * position, so a later rule about seeks during calibration applies to that path once.
@@ -87,6 +90,13 @@ export interface ScrubSeekPlan {
   readonly request: ScrubSeekRequest | null;
   /** The `scrub` option of the seek. */
   readonly scrub: boolean;
+  /**
+   * The `keepPlaying` option of the seek: true for the seek at pointer down only. A click during
+   * playback then plays on from the new position (ADR 035). Every sample of a drag is false: a
+   * scrub sample pauses the playback, and the exact seek at release or cancel seeks the paused
+   * element. The panel resumes the playback after the release (`shouldResumeAfterGesture`).
+   */
+  readonly keepPlaying: boolean;
   /** The boundary that the sample snapped to, or null. */
   readonly snap: SnapBoundary | null;
   /** The lane position of this sample, for the next one. */
@@ -98,11 +108,14 @@ export interface ScrubSeekPlan {
 /** Plans the seek of one sample. See the module comment for the rules. */
 export function planScrubSeek(input: ScrubSeekPlanInput): ScrubSeekPlan {
   const scrub = input.phase === "scrub";
+  // The exact sample that is not a sample of a drag is the seek at pointer down.
+  const keepPlaying = !scrub && !input.isDragSample;
   const total = input.totalDurationSeconds;
   if (!input.canSeek || total === null) {
     return {
       request: null,
       scrub,
+      keepPlaying,
       snap: null,
       laneX: input.previousLaneX,
       direction: input.previousDirection,
@@ -147,6 +160,7 @@ export function planScrubSeek(input: ScrubSeekPlanInput): ScrubSeekPlan {
         return {
           request: { kind: "pts", pts: snap.pts },
           scrub,
+          keepPlaying,
           snap,
           laneX,
           direction,
@@ -164,6 +178,7 @@ export function planScrubSeek(input: ScrubSeekPlanInput): ScrubSeekPlan {
     return {
       request: pts === null ? null : { kind: "pts", pts },
       scrub,
+      keepPlaying,
       snap: null,
       laneX,
       direction,
@@ -171,7 +186,7 @@ export function planScrubSeek(input: ScrubSeekPlanInput): ScrubSeekPlan {
   }
 
   if (!input.canSeekApproximately) {
-    return { request: null, scrub, snap: null, laneX, direction };
+    return { request: null, scrub, keepPlaying, snap: null, laneX, direction };
   }
   const seconds = calculateTimelineSecondsFromClientX(
     targetX,
@@ -182,6 +197,7 @@ export function planScrubSeek(input: ScrubSeekPlanInput): ScrubSeekPlan {
   return {
     request: seconds === null ? null : { kind: "seconds", seconds },
     scrub,
+    keepPlaying,
     snap: null,
     laneX,
     direction,

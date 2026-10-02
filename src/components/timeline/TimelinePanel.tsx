@@ -110,8 +110,10 @@ import { calculateRulerScale, generateRulerTicks } from "./timelineMarkers";
 import { TimelineRuler } from "./TimelineRuler";
 import { TimelineZoomControls } from "./TimelineZoomControls";
 import {
+  createPressPlaybackRecord,
   createSegmentClickGuard,
   planPointerRelease,
+  shouldResumeAfterGesture,
   type TrimPress,
 } from "./timelinePointerRelease";
 import {
@@ -306,6 +308,9 @@ export function TimelinePanel({
   // did the click of the edge, or it ended a drag.
   const trimPointerIdRef = useRef<number | null>(null);
   const [segmentClickGuard] = useState(createSegmentClickGuard);
+  // The playback state at the scrub-mode press of the active gesture. The release of a drag
+  // resumes the playback when the store played then (`shouldResumeAfterGesture`).
+  const [pressPlayback] = useState(createPressPlaybackRecord);
 
   const hoverRef = useRef<TimelineHoverLine | null>(null);
   const autoScrollRef = useRef<EdgeAutoScroll | null>(null);
@@ -614,6 +619,10 @@ export function TimelinePanel({
    * sample follows the same rule, and the store drops a scrub sample that repeats the time of
    * the last request, so a pointer that rests on a snap sends no new seek.
    *
+   * The seek at pointer down also passes `keepPlaying`, so a click during playback plays on from
+   * the new position. A scrub sample pauses the playback, and the release of the drag resumes it
+   * (handlePointerUp).
+   *
    * The snap indicator shows while the playhead is drawn on the snapped boundary after the
    * seek (`resolveSnapIndicatorRatio`), so a refused seek hides it and a dropped repeat keeps
    * it.
@@ -672,7 +681,9 @@ export function TimelinePanel({
       hideSnapIndicator(snapElements());
       return;
     }
-    const options: SeekOptions = { scrub: plan.scrub };
+    const options: SeekOptions = plan.keepPlaying
+      ? { scrub: plan.scrub, keepPlaying: true }
+      : { scrub: plan.scrub };
     if (request.kind === "pts") {
       seekToPts(request.pts, options);
     } else {
@@ -809,10 +820,11 @@ export function TimelinePanel({
         }
         gestureModeRef.current = "scrub";
         trimPressRef.current = null;
+        pressPlayback.finish();
       },
     });
     return gestureRef.current;
-  }, []);
+  }, [pressPlayback]);
 
   /**
    * The edge auto-scroll of a drag. Each step writes scrollLeft and reads the kept value back
@@ -1021,6 +1033,9 @@ export function TimelinePanel({
       // A trim-mode press whose release never arrived, such as one that went to another
       // application, no longer names this pointer.
       trimPointerIdRef.current = null;
+      // Read before the seek at pointer down. That seek keeps a playback running, and the
+      // first scrub sample of a drag pauses it, so the release reads this value.
+      pressPlayback.pressScrub(playbackStore.getState().isPlaying);
     }
     gesture.begin(event.pointerId, event.clientX);
   };
@@ -1086,6 +1101,8 @@ export function TimelinePanel({
     gestureModeRef.current = "trim";
     trimPressRef.current = { segmentId, edge };
     trimPointerIdRef.current = event.pointerId;
+    // A trim never resumes the playback, also when it stops and the rest of the drag scrubs.
+    pressPlayback.pressTrim();
     isSnapSuppressedRef.current = event.altKey;
     getHover().hide();
     getAutoScroll().begin(event.clientX);
@@ -1147,12 +1164,16 @@ export function TimelinePanel({
     if (gesture.isActive()) {
       isSnapSuppressedRef.current = event.altKey;
     }
-    // The plan reads the gesture before its end, because the end clears the trim-mode press.
+    // The plan reads the gesture before its end, because the end clears the trim-mode press
+    // and the playback state of the press.
+    const wasGestureActive = gesture.isActive();
+    const isDragging = gesture.isDragging();
+    const wasPlayingAtPress = pressPlayback.wasPlayingAtPress();
     const release = planPointerRelease({
       pointerId: event.pointerId,
       mode: gestureModeRef.current,
-      isGestureActive: gesture.isActive(),
-      isDragging: gesture.isDragging(),
+      isGestureActive: wasGestureActive,
+      isDragging,
       trimPress: trimPressRef.current,
       trimPointerId: trimPointerIdRef.current,
     });
@@ -1168,6 +1189,23 @@ export function TimelinePanel({
     }
     if (release.edgeClick !== null) {
       clickSegmentEdge(release.edgeClick.segmentId, release.edgeClick.edge);
+    }
+    // A drag during playback resumes it after the exact seek of the release (ADR 035). The play
+    // runs in the handler of the release, as the play button and the keys run it in theirs. The
+    // gesture ends only for its own pointer, so the pointer up of another pointer resumes nothing.
+    // The store refuses a resume at the end of the media (`resumeAfterSeek`).
+    const playback = playbackStore.getState();
+    if (
+      shouldResumeAfterGesture({
+        release: release.kind,
+        endsGesture: wasGestureActive && !gesture.isActive(),
+        isDragging,
+        wasPlayingAtPress,
+        isSeekDeferred: playback.hasDeferredNavigation,
+        hasSeekFailed: playback.error === "seekFailed",
+      })
+    ) {
+      playback.resumeAfterSeek();
     }
   };
 

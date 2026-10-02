@@ -72,6 +72,30 @@ describe("planScrubSeek", () => {
     expect(plan.snap?.pts).toBe("2000");
   });
 
+  it("keeps a running playback for the seek at pointer down only", () => {
+    // The seek of a click: a click during playback plays on from the new position.
+    const down = planScrubSeek(input({ phase: "final", isDragSample: false }));
+    expect(down.keepPlaying).toBe(true);
+    expect(down.scrub).toBe(false);
+    // A scrub sample of a drag pauses the playback.
+    expect(planScrubSeek(input()).keepPlaying).toBe(false);
+    // The exact seek at the release or the cancel of a drag seeks the paused element.
+    const release = planScrubSeek(input({ phase: "final", isDragSample: true }));
+    expect(release.keepPlaying).toBe(false);
+    expect(release.scrub).toBe(false);
+  });
+
+  it("keeps a running playback for the seek at pointer down on the approximate clock", () => {
+    const down = planScrubSeek(
+      input({ phase: "final", isDragSample: false, canSeekExactly: false }),
+    );
+    expect(down.request?.kind).toBe("seconds");
+    expect(down.keepPlaying).toBe(true);
+    const scrub = planScrubSeek(input({ canSeekExactly: false }));
+    expect(scrub.request?.kind).toBe("seconds");
+    expect(scrub.keepPlaying).toBe(false);
+  });
+
   it("never snaps in the approximate mode, and seeks in seconds there", () => {
     const plan = planScrubSeek(input({ canSeekExactly: false }));
     expect(plan.snap).toBeNull();
@@ -96,6 +120,7 @@ describe("planScrubSeek", () => {
     expect(plan).toEqual({
       request: null,
       scrub: true,
+      keepPlaying: false,
       snap: null,
       laneX: 150,
       direction: -1,

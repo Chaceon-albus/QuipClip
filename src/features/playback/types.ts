@@ -38,7 +38,9 @@ export interface PlaybackMediaElement {
    * `HTMLMediaElement.paused`. The stop of a segment playback reads it at a `pause` event, to
    * tell a pause that still holds from the late `pause` event of a seek that play followed. It
    * also reads it in a frame callback in the "stopped" phase: an element that plays again was
-   * started from outside the store, before its `play` event ran.
+   * started from outside the store, before its `play` event ran. syncPause reads it to keep the
+   * playback state at the late `pause` event of a pause that a play followed, and a seek with
+   * `keepPlaying` reads it to pause an element that already paused on its own (SeekOptions).
    */
   paused?: boolean;
   /**
@@ -123,7 +125,33 @@ export interface SeekOptions {
    * without the option: at the anchor the element stands at the first frame.
    */
   readonly extentEnd?: boolean;
+  /**
+   * True when the seek keeps the playback running, as a media player does: the timeline sets it
+   * for the seek at pointer down, so a click on the ruler or on the track while the video plays
+   * plays on from the new position (ADR 035). It applies only when the store plays, the element
+   * does not report `paused`, and the seek is not a scrub seek. The store then does not pause the
+   * element, and `isPlaying` stays true: an element that plays seeks when it gets a new
+   * `currentTime`, and it plays on from there.
+   *
+   * Every other rule of the seek holds. The seeks still run one at a time, and the latest request
+   * wins: a seek that waits while another seek runs is queued, and `seeked` starts it on the
+   * element that still plays. The display target, `presentedFrame` and the frame callbacks
+   * follow the rules of any seek. A segment playback ends, and the playback goes on as a normal
+   * playback with no stop point (ADR 026). A failed seek pauses the element, as every failed seek
+   * does.
+   *
+   * The option changes nothing while the store does not play, and nothing for a scrub seek. A
+   * request that the store defers while the calibration is "calibrating" pauses as before, and
+   * it runs without the option when the calibration settles (ADR 003, ADR 022).
+   */
+  readonly keepPlaying?: boolean;
 }
+
+/**
+ * Options for a jump to a frame of the grid (`seekToFrameIndex`). `keepPlaying` is the option of
+ * SeekOptions.
+ */
+export type FrameIndexSeekOptions = Pick<SeekOptions, "keepPlaying">;
 
 /**
  * Options for a frame step (`seekNominal`).
@@ -287,6 +315,24 @@ export interface PlaybackActions {
   pause: () => void;
 
   /**
+   * Resumes playback after a seek that paused it, as the release of a drag during playback does
+   * (ADR 035). It plays as `play` does, so a pending seek starts at once as an exact seek and the
+   * playback starts at its target (ADR 022).
+   *
+   * It does nothing in these cases:
+   *
+   * - The store plays already, or no ready element is attached.
+   * - A navigation waits for the calibration anchor (`hasDeferredNavigation`). `play` would drop
+   *   it, and the playback would start from where the element stands.
+   * - The playback would start at or after the end of the element: the target of the pending
+   *   seek, or else the position of the element, lies at or after its duration, within
+   *   NOMINAL_STEP_EDGE_TOLERANCE_SECONDS, or the element reports `ended` with no pending seek.
+   *   `play` on an element at its end starts again from the start of the media, in WebKit and in
+   *   Chromium, so a drag that ends at the end of the media would restart the video.
+   */
+  resumeAfterSeek: () => void;
+
+  /**
    * Plays the half-open segment `[inPts, outPts)` of the attached source and stops on its last
    * frame, the frame before `outPts` (Play Segment, ADR 026). It seeks to `inPts` with
    * `seekToPts`, plays as `play` does, so the sound and the mute preference are those of normal
@@ -318,6 +364,8 @@ export interface PlaybackActions {
    * approximate clock when the calibration is unavailable.
    * With `extentEnd`, a seek from the end of the extent, where the frame on screen already holds
    * the target, does nothing (see SeekOptions).
+   * A seek pauses playback, except a seek with `keepPlaying` while the store plays, which plays
+   * on from the target (see SeekOptions).
    */
   seekToPts: (targetPts: Pts, options?: SeekOptions) => void;
 
@@ -358,8 +406,12 @@ export interface PlaybackActions {
    * as every deferred step does, and no scrub audio element is mounted yet to sound it (ADR 019).
    * Elsewhere, and for an index that is not a non-negative safe integer, it does nothing: off the
    * grid the caller seeks by time (`planTimecodeEntrySeek`).
+   *
+   * With `keepPlaying`, a jump while the store plays does not pause (SeekOptions): it seeks and
+   * plays on. A target that is the frame on screen, while the element is still inside that
+   * frame, then does nothing at all.
    */
-  seekToFrameIndex: (frameIndex: number) => void;
+  seekToFrameIndex: (frameIndex: number, options?: FrameIndexSeekOptions) => void;
 
   /**
    * Requests a checked browser-time seek without creating a canonical edit position.
@@ -368,6 +420,8 @@ export interface PlaybackActions {
    * deferred request. It runs when the calibration settles: on the calibrated mapping when the
    * calibration is ready, unless `keepBrowserTimeline` is set, and on the approximate clock
    * when it is unavailable.
+   * A seek pauses playback, except a seek with `keepPlaying` while the store plays, which plays
+   * on from the target (see SeekOptions).
    */
   seekApproximate: (seconds: number, options?: SeekOptions) => void;
 
@@ -434,6 +488,12 @@ export interface PlaybackActions {
 
   /**
    * Synchronizes pause state when the matching video element emits an onPause event.
+   *
+   * The event runs as a task after the pause. When it finds the element playing again
+   * (`paused` is false), a play followed the pause in the same call, as Play Segment and the
+   * release of a drag during playback do (a seek, then play). The store then keeps `isPlaying`
+   * and the pending play promise, so the play button does not show Play for one frame. The rule
+   * of the segment playback at this event runs first, unchanged (ADR 026).
    */
   syncPause: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
 

@@ -2808,6 +2808,639 @@ describe("Playback Store & PTS Presentation Engine", () => {
     });
   });
 
+  describe("A Seek That Keeps Playing (keepPlaying, ADR 035)", () => {
+    /** sourceA, calibrated on its first frame at 0 s and playing: 25 fps on 1/25. */
+    function attachAndPlay(options?: Parameters<typeof createFakeVideo>[0]) {
+      const store = createPlaybackStore();
+      const video = createFakeVideo(options);
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      store.getState().play();
+      expect(store.getState().isPlaying).toBe(true);
+      expect(video.paused).toBe(false);
+      return { store, video };
+    }
+
+    /** The public state that a seek can change. */
+    function snapshot(store: PlaybackStore) {
+      const state = store.getState();
+      return {
+        presentedFrame: state.presentedFrame,
+        calibrationStatus: state.calibrationStatus,
+        seekTargetSeconds: state.seekTargetSeconds,
+        hasDeferredNavigation: state.hasDeferredNavigation,
+        playbackStop: state.playbackStop,
+        isPlaying: state.isPlaying,
+        error: state.error,
+      };
+    }
+
+    it("seeks without a pause, keeps isPlaying, and the next frame of the playback settles the target", async () => {
+      const { store, video } = attachAndPlay();
+      const pauses = video.pauseCalls;
+
+      store.getState().seekToPts("100" as Pts, { keepPlaying: true });
+      expect(video.pauseCalls).toBe(pauses);
+      expect(video.paused).toBe(false);
+      expect(video.currentTime).toBe(4);
+      expect(store.getState().isPlaying).toBe(true);
+      expect(store.getState().error).toBeNull();
+      // The display target and the null presented frame follow the rules of any seek (ADR 003).
+      expect(store.getState().seekTargetSeconds).toBe(4);
+      expect(store.getState().presentedFrame).toBeNull();
+
+      // The play session of the playback still counts.
+      await flushAsync();
+      expect(store.getState().isPlaying).toBe(true);
+
+      // seeked keeps the target: no frame of the seek has arrived yet.
+      fireSeeked(store, identityA, video);
+      expect(store.getState().seekTargetSeconds).toBe(4);
+      expect(store.getState().presentedFrame).toBeNull();
+
+      store.getState().syncPresentedFrame(identityA, 4.0, 2, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("100");
+      expect(store.getState().isPlaying).toBe(true);
+      expect(video.pauseCalls).toBe(pauses);
+    });
+
+    it("restores no frame at seeked, because the frames of the playback report the frame on screen", () => {
+      const { store, video } = attachAndPlay();
+      // A seek to the frame that a frame callback confirmed last, which holds the position.
+      store.getState().seekToPts("0" as Pts, { keepPlaying: true });
+      fireSeeked(store, identityA, video);
+      expect(store.getState().presentedFrame).toBeNull();
+      expect(store.getState().seekTargetSeconds).toBe(0);
+      store.getState().syncPresentedFrame(identityA, 0.04, 2, video);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1");
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().isPlaying).toBe(true);
+    });
+
+    it("queues a second seek while the first runs, and seeked starts it on the element that still plays", () => {
+      const { store, video } = attachAndPlay();
+      const pauses = video.pauseCalls;
+
+      store.getState().seekToPts("50" as Pts, { keepPlaying: true });
+      expect(video.seeking).toBe(true);
+      expect(video.currentTimeSets).toBe(1);
+      store.getState().seekToPts("100" as Pts, { keepPlaying: true });
+      // One seek at a time: the second waits, and the target shows it.
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(2);
+      expect(store.getState().seekTargetSeconds).toBe(4);
+      expect(store.getState().isPlaying).toBe(true);
+
+      // A frame of the first seek arrives while the second waits, and keeps the target.
+      store.getState().syncPresentedFrame(identityA, 2.0, 2, video);
+      expect(store.getState().seekTargetSeconds).toBe(4);
+
+      fireSeeked(store, identityA, video);
+      expect(video.currentTimeSets).toBe(2);
+      expect(video.currentTime).toBe(4);
+      expect(video.seeking).toBe(true);
+      expect(video.paused).toBe(false);
+      expect(store.getState().isPlaying).toBe(true);
+
+      fireSeeked(store, identityA, video);
+      store.getState().syncPresentedFrame(identityA, 4.0, 3, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().isPlaying).toBe(true);
+      expect(video.pauseCalls).toBe(pauses);
+    });
+
+    it("pauses for a seek without the option that replaces a queued seek that kept playing", () => {
+      const { store, video } = attachAndPlay();
+      const pauses = video.pauseCalls;
+      store.getState().seekToPts("50" as Pts, { keepPlaying: true });
+      store.getState().seekToPts("100" as Pts, { keepPlaying: true });
+      store.getState().seekToPts("75" as Pts);
+      expect(video.pauseCalls).toBe(pauses + 1);
+      expect(store.getState().isPlaying).toBe(false);
+
+      fireSeeked(store, identityA, video);
+      expect(video.currentTime).toBe(3);
+      expect(video.paused).toBe(true);
+      expect(store.getState().isPlaying).toBe(false);
+    });
+
+    it("ignores the option for a scrub seek, which pauses", () => {
+      for (const seek of [
+        (store: PlaybackStore) =>
+          store.getState().seekToPts("50" as Pts, { scrub: true, keepPlaying: true }),
+        (store: PlaybackStore) =>
+          store.getState().seekApproximate(2, { scrub: true, keepPlaying: true }),
+      ]) {
+        const { store, video } = attachAndPlay({ fastSeek: true });
+        const pauses = video.pauseCalls;
+        seek(store);
+        expect(video.pauseCalls).toBe(pauses + 1);
+        expect(video.paused).toBe(true);
+        expect(store.getState().isPlaying).toBe(false);
+      }
+    });
+
+    it("pauses as an ordinary seek when the element paused on its own before its pause event ran", () => {
+      const { store, video } = attachAndPlay();
+      // The element reached its end, and its `pause` and `ended` events wait in the queue.
+      video.paused = true;
+      video.ended = true;
+      const pauses = video.pauseCalls;
+      store.getState().seekToPts("50" as Pts, { keepPlaying: true });
+      expect(video.pauseCalls).toBe(pauses + 1);
+      expect(video.currentTime).toBe(2);
+      expect(store.getState().isPlaying).toBe(false);
+    });
+
+    it("keeps playing for a seek on the approximate clock", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 10 });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncBrowserDuration(identityA, video);
+      store.getState().syncPresentationUnavailable(identityA, video);
+      store.getState().play();
+      const pauses = video.pauseCalls;
+
+      store.getState().seekApproximate(3, { keepPlaying: true });
+      expect(video.currentTime).toBe(3);
+      expect(video.pauseCalls).toBe(pauses);
+      expect(video.paused).toBe(false);
+      expect(store.getState().isPlaying).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBe(3);
+
+      fireSeeked(store, identityA, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().isPlaying).toBe(true);
+    });
+
+    it("keeps playing for a jump to a frame index, and does nothing for the frame on screen", () => {
+      const { store, video } = attachAndPlay();
+      const pauses = video.pauseCalls;
+
+      store.getState().seekToFrameIndex(50, { keepPlaying: true });
+      // The middle of frame 50, and the display shows its nominal start (ADR 022).
+      expect(video.currentTime).toBeCloseTo(50.5 / 25, 12);
+      expect(store.getState().seekTargetSeconds).toBe(2);
+      expect(store.getState().isPlaying).toBe(true);
+      expect(video.pauseCalls).toBe(pauses);
+      fireSeeked(store, identityA, video);
+      store.getState().syncPresentedFrame(identityA, 2.0, 2, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+
+      // The element is still inside frame 50: the jump moves nothing, and the playback goes on.
+      const seeks = video.currentTimeSets;
+      store.getState().seekToFrameIndex(50, { keepPlaying: true });
+      expect(video.currentTimeSets).toBe(seeks);
+      expect(video.pauseCalls).toBe(pauses);
+      expect(store.getState().isPlaying).toBe(true);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("50");
+
+      // Without the option the same request pauses, as before.
+      store.getState().seekToFrameIndex(50);
+      expect(video.currentTimeSets).toBe(seeks);
+      expect(video.pauseCalls).toBe(pauses + 1);
+      expect(store.getState().isPlaying).toBe(false);
+    });
+
+    it("behaves exactly as a seek without the option while paused", () => {
+      const run = (keepPlaying: boolean) => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        store.getState().attach(sourceA, video);
+        video.readyState = 1;
+        store.getState().syncReady(identityA, video);
+        store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+        const options = keepPlaying ? { keepPlaying: true } : undefined;
+        const states: ReturnType<typeof snapshot>[] = [];
+
+        store.getState().seekToPts("50" as Pts, options);
+        states.push(snapshot(store));
+        // A second seek while the first runs is queued.
+        store.getState().seekToPts("60" as Pts, options);
+        states.push(snapshot(store));
+        fireSeeked(store, identityA, video);
+        fireSeeked(store, identityA, video);
+        store.getState().syncPresentedFrame(identityA, 2.4, 2, video);
+        states.push(snapshot(store));
+        store.getState().seekToFrameIndex(75, options);
+        fireSeeked(store, identityA, video);
+        store.getState().syncPresentedFrame(identityA, 3.0, 3, video);
+        states.push(snapshot(store));
+        // The frame on screen: the edge no-op.
+        store.getState().seekToFrameIndex(75, options);
+        states.push(snapshot(store));
+        store.getState().seekApproximate(1, options);
+        states.push(snapshot(store));
+        return {
+          states,
+          pauseCalls: video.pauseCalls,
+          currentTimeSets: video.currentTimeSets,
+          currentTime: video.currentTime,
+        };
+      };
+      expect(run(true)).toEqual(run(false));
+    });
+
+    it("defers and pauses while the calibration is open, and the seek runs on the paused element at the anchor", () => {
+      for (const seek of [
+        (store: PlaybackStore) =>
+          store.getState().seekToPts("50" as Pts, { keepPlaying: true }),
+        (store: PlaybackStore) =>
+          store.getState().seekApproximate(2, { keepPlaying: true }),
+        (store: PlaybackStore) =>
+          store.getState().seekToFrameIndex(50, { keepPlaying: true }),
+      ]) {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        store.getState().attach(sourceA, video);
+        video.readyState = 1;
+        store.getState().syncReady(identityA, video);
+        expect(store.getState().calibrationStatus).toBe("calibrating");
+        store.getState().play();
+        expect(store.getState().isPlaying).toBe(true);
+        const pauses = video.pauseCalls;
+
+        seek(store);
+        expect(video.pauseCalls).toBe(pauses + 1);
+        expect(video.paused).toBe(true);
+        expect(video.currentTimeSets).toBe(0);
+        expect(store.getState().isPlaying).toBe(false);
+        expect(store.getState().hasDeferredNavigation).toBe(true);
+        expect(store.getState().seekTargetSeconds).toBe(2);
+
+        // The first frame takes the anchor, and the deferred seek runs without the option.
+        store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBeGreaterThanOrEqual(2);
+        expect(video.currentTime).toBeLessThan(2.04);
+        expect(video.paused).toBe(true);
+        expect(store.getState().isPlaying).toBe(false);
+      }
+    });
+
+    it("pauses the element when the seek fails, as every failed seek does", () => {
+      const { store, video } = attachAndPlay();
+      video.throwOnCurrentTimeSet = true;
+      const pauses = video.pauseCalls;
+      store.getState().seekToPts("50" as Pts, { keepPlaying: true });
+      expect(store.getState().error).toBe("seekFailed");
+      expect(store.getState().isPlaying).toBe(false);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(video.pauseCalls).toBe(pauses + 1);
+      expect(video.paused).toBe(true);
+    });
+
+    it("pauses the element when a queued seek that kept playing fails at seeked", () => {
+      const { store, video } = attachAndPlay();
+      const pauses = video.pauseCalls;
+      store.getState().seekToPts("50" as Pts, { keepPlaying: true });
+      store.getState().seekToPts("100" as Pts, { keepPlaying: true });
+      expect(video.pauseCalls).toBe(pauses);
+
+      video.throwOnCurrentTimeSet = true;
+      fireSeeked(store, identityA, video);
+      expect(store.getState().error).toBe("seekFailed");
+      expect(store.getState().isPlaying).toBe(false);
+      expect(video.pauseCalls).toBe(pauses + 1);
+      expect(video.paused).toBe(true);
+    });
+
+    it("keeps the play session, so a play that fails after the seek still reports its failure", async () => {
+      let rejectPlay!: (err: unknown) => void;
+      const playPromise = new Promise<void>((_, rej) => {
+        rejectPlay = rej;
+      });
+      const { store } = attachAndPlay({ playImpl: () => playPromise });
+
+      store.getState().seekToPts("50" as Pts, { keepPlaying: true });
+      expect(store.getState().isPlaying).toBe(true);
+
+      rejectPlay(
+        new DOMException("The element has no supported sources.", "NotSupportedError"),
+      );
+      try {
+        await playPromise;
+      } catch {
+        // Expected
+      }
+      await flushAsync();
+      expect(store.getState().isPlaying).toBe(false);
+      expect(store.getState().error).toBe("playbackFailed");
+    });
+
+    it("runs the seeks of a drag during playback: the press plays on, a scrub pauses, and play after the release starts at its target", () => {
+      const { store, video } = attachAndPlay({ fastSeek: true });
+
+      // Pointer down.
+      store.getState().seekToPts("50" as Pts, { keepPlaying: true });
+      expect(store.getState().isPlaying).toBe(true);
+
+      // The first scrub sample waits for the seek of the press, and it pauses.
+      store.getState().seekToPts("60" as Pts, { scrub: true });
+      expect(video.paused).toBe(true);
+      expect(store.getState().isPlaying).toBe(false);
+      store.getState().syncPause(identityA, video);
+      expect(store.getState().isPlaying).toBe(false);
+      fireSeeked(store, identityA, video);
+      expect(video.fastSeek).toHaveBeenCalledWith(2.4);
+
+      // The release: its exact seek waits for the scrub seek, and play starts it at once.
+      store.getState().seekToPts("75" as Pts);
+      expect(store.getState().isPlaying).toBe(false);
+      store.getState().play();
+      expect(video.currentTime).toBe(3);
+      expect(video.paused).toBe(false);
+      expect(store.getState().isPlaying).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBe(3);
+
+      fireSeeked(store, identityA, video);
+      store.getState().syncPresentedFrame(identityA, 3.0, 2, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().isPlaying).toBe(true);
+    });
+
+    it("does not drop a scrub sample that repeats the time of a press that kept playing", () => {
+      const { store, video } = attachAndPlay({ fastSeek: true });
+      store.getState().seekToPts("50" as Pts, { keepPlaying: true });
+      const pauses = video.pauseCalls;
+
+      // The first scrub sample of the drag lands on the pixel of the press. The element plays on
+      // from the press, so the sample must pause it.
+      store.getState().seekToPts("50" as Pts, { scrub: true });
+      expect(video.pauseCalls).toBe(pauses + 1);
+      expect(video.paused).toBe(true);
+      expect(store.getState().isPlaying).toBe(false);
+      // It waits for the seek of the press, and then brings the picture back to the pointer.
+      fireSeeked(store, identityA, video);
+      expect(video.fastSeek).toHaveBeenCalledWith(2);
+
+      // While paused, the same sample again is a repeat, and the store drops it as before.
+      fireSeeked(store, identityA, video);
+      const fastSeeks = video.fastSeek?.mock.calls.length;
+      store.getState().seekToPts("50" as Pts, { scrub: true });
+      expect(video.fastSeek?.mock.calls.length).toBe(fastSeeks);
+      expect(video.pauseCalls).toBe(pauses + 1);
+    });
+
+    it("runs a burst of seeks that keep playing one at a time, with no pause, and the last one lands", () => {
+      const { store, video } = attachAndPlay();
+      const pauses = video.pauseCalls;
+      let issued = 0;
+      for (let i = 1; i <= 30; i++) {
+        const setsBefore = video.currentTimeSets;
+        const wasSeeking = video.seeking;
+        store.getState().seekToPts(String(i * 5) as Pts, { keepPlaying: true });
+        // One seek at a time: a request while a seek runs is queued and moves nothing.
+        expect(video.currentTimeSets).toBe(wasSeeking ? setsBefore : setsBefore + 1);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(i / 5, 12);
+        expect(store.getState().isPlaying).toBe(true);
+        if (i % 4 === 0) {
+          // The running seek ends, and seeked starts the latest queued request.
+          fireSeeked(store, identityA, video);
+          issued++;
+          expect(video.currentTime).toBeCloseTo(i / 5, 12);
+        }
+      }
+      // The first request, and one for each seeked that found a queued request.
+      expect(video.currentTimeSets).toBe(1 + issued);
+
+      // The queued request of the last press starts, and its frame settles the target.
+      fireSeeked(store, identityA, video);
+      expect(video.currentTime).toBe(6);
+      fireSeeked(store, identityA, video);
+      expect(video.currentTimeSets).toBe(2 + issued);
+      store.getState().syncPresentedFrame(identityA, 6.0, 2, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("150");
+      expect(store.getState().isPlaying).toBe(true);
+      expect(video.paused).toBe(false);
+      expect(video.pauseCalls).toBe(pauses);
+    });
+  });
+
+  describe("Resume After the Seek of a Drag (resumeAfterSeek, ADR 035)", () => {
+    /**
+     * sourceA on an element of 10 s that plays, calibrated on its first frame at 0 s. `play` on
+     * the element at its end seeks to the start of the media, as WebKit and Chromium do, and the
+     * element stops a seek at its duration. WebView2 has no fastSeek, so the scrub seeks assign
+     * currentTime.
+     */
+    function attachPlayingToEnd() {
+      const store = createPlaybackStore();
+      const video: ReturnType<typeof createFakeVideo> = createFakeVideo({
+        duration: 10,
+        clampToDuration: true,
+        playImpl: () => {
+          if (video.currentTime >= (video.duration ?? Number.NaN)) {
+            video.currentTime = 0;
+            video.ended = false;
+          }
+          return Promise.resolve();
+        },
+      });
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncBrowserDuration(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      store.getState().play();
+      return { store, video };
+    }
+
+    /** The seeks of a drag during playback from 2 s to `scrubPts`, up to its last scrub sample. */
+    function dragTo(
+      store: PlaybackStore,
+      video: ReturnType<typeof createFakeVideo>,
+      scrubPts: string,
+    ): void {
+      store.getState().seekToPts("50" as Pts, { keepPlaying: true });
+      store.getState().seekToPts(scrubPts as Pts, { scrub: true });
+      expect(store.getState().isPlaying).toBe(false);
+      fireSeeked(store, identityA, video);
+    }
+
+    it("stays paused at the end when the release seeks to the end of the media", () => {
+      const { store, video } = attachPlayingToEnd();
+      dragTo(store, video, "240");
+      const plays = video.playCalls;
+
+      // The release: the pointer clamps to the end of the lane. Its exact seek waits for the
+      // scrub seek that runs.
+      store.getState().seekToPts("250" as Pts);
+      store.getState().resumeAfterSeek();
+      expect(video.playCalls).toBe(plays);
+      expect(store.getState().isPlaying).toBe(false);
+
+      fireSeeked(store, identityA, video);
+      expect(video.currentTime).toBe(10);
+      expect(video.paused).toBe(true);
+    });
+
+    it("resumes from the target of a running release seek, also in an engine that still reports the end there", () => {
+      const { store, video } = attachPlayingToEnd();
+      // The scrub seeks reached the end, and the element ended there.
+      dragTo(store, video, "250");
+      fireSeeked(store, identityA, video);
+      video.ended = true;
+      const plays = video.playCalls;
+
+      // The pointer flicks back within one animation frame, so the release seek to 4 s starts at
+      // once. An engine that moves the position only when the seek runs still reports the end and
+      // `ended` while the element seeks.
+      store.getState().seekToPts("100" as Pts);
+      expect(video.seeking).toBe(true);
+      video.currentTime = 10;
+      store.getState().resumeAfterSeek();
+      expect(video.playCalls).toBe(plays + 1);
+    });
+
+    it("stays paused when the release seek has started at the end, and when the element reports ended", () => {
+      const { store, video } = attachPlayingToEnd();
+      // The scrub seeks reached the end, and the element ended there.
+      dragTo(store, video, "250");
+      fireSeeked(store, identityA, video);
+      video.ended = true;
+      const plays = video.playCalls;
+
+      // The release seek starts at once, at the end.
+      store.getState().seekToPts("250" as Pts);
+      expect(video.currentTime).toBe(10);
+      store.getState().resumeAfterSeek();
+      expect(video.playCalls).toBe(plays);
+
+      // An element that reports ended with no pending seek stays paused too.
+      fireSeeked(store, identityA, video);
+      video.currentTime = 9.5;
+      video.seeking = false;
+      video.ended = true;
+      store.getState().resumeAfterSeek();
+      expect(video.playCalls).toBe(plays);
+      expect(store.getState().isPlaying).toBe(false);
+    });
+
+    it("resumes from a release target just before the end", () => {
+      const { store, video } = attachPlayingToEnd();
+      dragTo(store, video, "240");
+      const plays = video.playCalls;
+
+      // The last frame: 9.96 s.
+      store.getState().seekToPts("249" as Pts);
+      store.getState().resumeAfterSeek();
+      expect(video.playCalls).toBe(plays + 1);
+      expect(video.currentTime).toBeCloseTo(9.96, 12);
+      expect(video.paused).toBe(false);
+      expect(store.getState().isPlaying).toBe(true);
+    });
+
+    it("resumes from a queued release target inside the media while the element stands at its end", () => {
+      const { store, video } = attachPlayingToEnd();
+      dragTo(store, video, "250");
+      video.ended = true;
+      const plays = video.playCalls;
+
+      // The scrub seek to the end still runs, and the release seek to 4 s waits for it. play
+      // starts that seek at once, so the playback starts at 4 s.
+      store.getState().seekToPts("100" as Pts);
+      store.getState().resumeAfterSeek();
+      expect(video.playCalls).toBe(plays + 1);
+      expect(video.currentTime).toBe(4);
+      expect(store.getState().isPlaying).toBe(true);
+    });
+
+    it("does nothing while the store plays, or while a navigation waits for the anchor", () => {
+      const { store, video } = attachPlayingToEnd();
+      const plays = video.playCalls;
+      store.getState().resumeAfterSeek();
+      expect(video.playCalls).toBe(plays);
+
+      const calibrating = createPlaybackStore();
+      const element = createFakeVideo({ duration: 10 });
+      calibrating.getState().attach(sourceA, element);
+      element.readyState = 1;
+      calibrating.getState().syncReady(identityA, element);
+      calibrating.getState().seekToPts("50" as Pts);
+      expect(calibrating.getState().hasDeferredNavigation).toBe(true);
+      calibrating.getState().resumeAfterSeek();
+      expect(element.playCalls).toBe(0);
+      expect(calibrating.getState().hasDeferredNavigation).toBe(true);
+    });
+  });
+
+  describe("A pause Event After a Play (syncPause)", () => {
+    function attachCalibrated(options?: Parameters<typeof createFakeVideo>[0]) {
+      const store = createPlaybackStore();
+      const video = createFakeVideo(options);
+      store.getState().attach(sourceA, video);
+      video.readyState = 1;
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0.0, 1, video);
+      return { store, video };
+    }
+
+    it("keeps isPlaying and the play session when the event finds the element playing again", async () => {
+      let rejectPlay!: (err: unknown) => void;
+      const playPromise = new Promise<void>((_, rej) => {
+        rejectPlay = rej;
+      });
+      const { store, video } = attachCalibrated({ playImpl: () => playPromise });
+
+      // A seek, then play, as Play Segment and the release of a drag do. The `pause` event of
+      // the seek arrives after the play.
+      store.getState().seekToPts("50" as Pts);
+      store.getState().play();
+      expect(video.paused).toBe(false);
+      store.getState().syncPause(identityA, video);
+      expect(store.getState().isPlaying).toBe(true);
+
+      // The session of that play still counts: its failure is reported.
+      rejectPlay(
+        new DOMException("The element has no supported sources.", "NotSupportedError"),
+      );
+      try {
+        await playPromise;
+      } catch {
+        // Expected
+      }
+      await flushAsync();
+      expect(store.getState().isPlaying).toBe(false);
+      expect(store.getState().error).toBe("playbackFailed");
+    });
+
+    it("reports the pause when the event finds the element paused", async () => {
+      const { store, video } = attachCalibrated();
+      store.getState().play();
+      video.pause();
+      store.getState().syncPause(identityA, video);
+      expect(store.getState().isPlaying).toBe(false);
+      // The resolution of the play promise does not report playback again.
+      await flushAsync();
+      expect(store.getState().isPlaying).toBe(false);
+    });
+
+    it("reports the pause for an element that does not report paused, as before", () => {
+      const store = createPlaybackStore();
+      const video: PlaybackMediaElement = {
+        play: () => Promise.resolve(),
+        pause: () => {},
+        currentTime: 0,
+        readyState: 1,
+      };
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      store.getState().play();
+      expect(store.getState().isPlaying).toBe(true);
+      store.getState().syncPause(identityA, video);
+      expect(store.getState().isPlaying).toBe(false);
+    });
+  });
+
   describe("A Frame Callback That Runs Before seeked (ADR 022)", () => {
     // The HTML specification does not order the frame callback of a seek against the end of the
     // seek. In the ready state, a callback that runs while the element still reports `seeking`
@@ -8899,6 +9532,26 @@ describe("Play Segment (ADR 026)", () => {
         seek(h);
         expect(h.store.getState().playbackStop).toBeNull();
       }
+    });
+
+    it("a click that keeps playing clears it, and the playback goes on with no stop point", () => {
+      const h = midSegment();
+      const pauses = h.video.pauseCalls;
+      // A click on the ruler during the segment playback, inside the segment.
+      h.store.getState().seekToPts("60" as Pts, { keepPlaying: true });
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.store.getState().isPlaying).toBe(true);
+      expect(h.video.paused).toBe(false);
+      expect(h.video.pauseCalls).toBe(pauses);
+      expect(h.video.seeks).toBe(2);
+
+      // The playback passes the Out of the segment and does not stop there.
+      h.seeked("60");
+      playFrames(h, 61, 110);
+      expect(h.store.getState().isPlaying).toBe(true);
+      expect(h.store.getState().playbackStop).toBeNull();
+      expect(h.video.pauseCalls).toBe(pauses);
+      expect(h.video.seeks).toBe(2);
     });
 
     it("a second segment replaces the first", () => {
