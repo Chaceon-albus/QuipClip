@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-03
 - Deciders: capric98
-- Amended by: ADR 023
+- Amended by: ADR 023, ADR 038
 
 ## Context
 
@@ -185,6 +185,8 @@ prevents.
 
 The write that follows the rename does go through the guarded path, so the fresh document is
 still written safely.
+
+(Changed on 2026-10-02.) Two windows of one process write this file (ADR 038). Each successful write sends `settings:changed` with the document and the label of the writer. A window takes a newer revision only, and a draft built on an older revision than the other window's write gets `settingsConflict` and does not overwrite it.
 
 ## Consequences
 

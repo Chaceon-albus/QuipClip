@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-24
 - Deciders: capric98
+- Amended by: ADR 038
 
 ## Context
 
@@ -34,6 +35,8 @@ to 1200 kB. That is about 40 percent above the entry chunk of 2026-09-24.
 
 The limit is an alarm for an unexpected size increase, such as an import that pulls in a
 full icon set. When the warning shows, find the part that grew before you raise the limit.
+
+(Changed on 2026-10-02.) The Settings window loads the same chunk and renders its own root, chosen by the label of the window (ADR 038).
 
 ## Consequences
 

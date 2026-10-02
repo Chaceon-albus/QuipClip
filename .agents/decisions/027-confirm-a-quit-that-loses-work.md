@@ -4,6 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 017
+- Amended by: ADR 038
 
 ## Context
 
@@ -29,6 +30,10 @@ A close or a quit asks for a confirmation when it would lose one of these:
 - an export that is preparing, running or finishing, or that failed to stop and still
   encodes (ADR 025);
 - an unsaved preset draft in the Settings dialog.
+
+(Changed on 2026-10-02.) Settings is its own window (ADR 038). It sends the name of an unsaved
+preset draft to the main window, and the quit guard reads that mirror. The quit prompt brings the
+main window forward. Closing the Settings window with a draft asks in that window.
 
 When nothing would be lost, the close or the quit continues at once, with no dialog.
 

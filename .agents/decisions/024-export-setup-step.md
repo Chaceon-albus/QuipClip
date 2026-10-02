@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-22
 - Deciders: capric98
+- Amended by: ADR 038
 
 ## Context
 
@@ -88,6 +89,12 @@ check answers. That run replaces a step for the same file that still waits, for 
 check of an earlier Back; otherwise that step would hold the guard, and the return would get
 no check. A close of the dialog while such a check waits leaves Export unavailable until the
 check answers, at most 3 seconds.
+
+(Changed on 2026-10-02.) Settings is its own window (ADR 038). Manage Presets… and Open
+Settings… open that window on the Presets tab with the preset of the step, and the export
+dialog stays open. The return to the setup step and its second source check are removed. The
+list of presets of the step follows each write of the settings file, and a preset selected in
+Settings does not become the choice of the step.
 
 ## Consequences
 

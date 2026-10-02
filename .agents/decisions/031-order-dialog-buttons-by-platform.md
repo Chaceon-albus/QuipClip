@@ -4,6 +4,7 @@
 - Date: 2026-09-24
 - Deciders: capric98
 - Amends: ADR 025, ADR 027
+- Amended by: ADR 038
 
 ## Context
 
@@ -61,7 +62,8 @@ The footers of the export dialog use these roles:
   run and result steps focus the dialog itself.
 
 The close control of the export and settings dialogs comes after the footer in the
-document, so it is the last Tab stop.
+document, so it is the last Tab stop. (Changed on 2026-10-02: Settings is a window with the
+title bar of the system, ADR 038, and has no close control of its own.)
 
 ## Consequences
 

@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-21
 - Deciders: capric98
+- Amended by: ADR 038
 
 ## Context
 
@@ -80,6 +81,8 @@ duplicate a rule that already exists, and the two copies would disagree.
 a user agent string. It has a second function that reads the environment. The
 pure function has unit tests. The title bar component held that logic before this
 decision, as a private function, and no unit test covered it.
+
+(Changed on 2026-10-02.) The Settings window has the title bar of the system on both platforms (ADR 038). This record still governs the title bar of the main window.
 
 ## Consequences
 

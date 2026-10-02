@@ -58,6 +58,7 @@ document summarizes them and shows how the parts fit together.
 | [`035-keep-playback-across-a-pointer-seek.md`](../.agents/decisions/035-keep-playback-across-a-pointer-seek.md)                             | A click or a drag on the timeline during playback keeps playing            |
 | [`036-choose-the-output-streams-at-export.md`](../.agents/decisions/036-choose-the-output-streams-at-export.md)                             | Export the video and the audio, the video only, or the audio only          |
 | [`037-player-first-navigation-keys.md`](../.agents/decisions/037-player-first-navigation-keys.md)                                           | The arrows jump in time, `,` and `.` step frames, ↑ and ↓ find edit points |
+| [`038-settings-in-its-own-window.md`](../.agents/decisions/038-settings-in-its-own-window.md)                                               | Settings opens in its own window, with a grant for each command            |
 
 ## Shape
 
@@ -388,6 +389,13 @@ lossless encoders `flac` and `alac`. It refuses a preset that pairs `mov` with `
 A missing file seeds presets in memory and writes them on the first save. The seeded
 identifiers are constants. The restore action replaces a seeded preset by identifier and
 keeps everything else, including the ffmpeg path.
+
+The settings are edited in their own window, labelled `settings`, with the title bar of the
+system (ADR 038). Both windows load one chunk and render different roots. Each write of the
+file sends `settings:changed`, and a window takes only a newer revision, so the two windows
+never overwrite each other. Tauri checks each command against the capability of the window
+that calls it, and the Settings window may call only the settings commands, the probe, and
+the close of its own window.
 
 A damaged file fails the read, and a save refuses to write over a file it could not read.
 Losing a preset library is not the same as losing a cache entry. A separate permissive

@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-29
 - Deciders: capric98
-- Amended by: ADR 033
+- Amended by: ADR 033, ADR 038
 
 ## Context
 
@@ -92,6 +92,8 @@ must check each proposed correction before it accepts it.
 An earlier version of this record also required a Gemini language review through `agy`.
 ADR 033 removed that requirement. Run another agent tool for this check only when the user
 asks for it.
+
+(Changed on 2026-10-02.) The language, like the theme and the timecode format, reaches the Settings window and the main window through `preferences:changed` (ADR 038). The receiver applies the value and writes no storage.
 
 ## Consequences
 
