@@ -89,6 +89,13 @@ Matroska muxer of FFmpeg writes it. A file from another muxer that writes the le
 track in that tag gives an end that is too early by the start of the audio. For audio that
 starts late by more than 0.5 s, a correct export of such a file can then fail.
 
+(Added on 2026-10-02.) The probe misses an audio start that is more than about 5 s late in MKV
+and MPEG-TS. It then reports the start and the length of the container. The export therefore reads
+the first packet of the audio stream and moves the start to it. The end of the stream stays where
+it was: the reported start plus the reported length. The `DURATION` tag gives the end only when
+that end is unknown or does not lie after the packet, because the tag can hold a length, as the
+paragraph above says. ADR 014 measurement 23 gives the rule and its measurements.
+
 A failed FFprobe of the output is a wrong output, not a fault of the source. An exit failure or a
 parse failure gives `outputStreamsMismatch` with the stderr of FFmpeg as its detail. A probe that
 cannot start or that times out keeps its own code.

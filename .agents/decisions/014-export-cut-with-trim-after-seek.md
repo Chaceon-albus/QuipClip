@@ -209,6 +209,61 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     start of the container. In one MPEG-TS source with audio 12 s late, it reported no sample
     rate either. An MP4 file has an index, so its probe reported each start correctly.
 
+23. (Added on 2026-10-02.) The first packet of the audio stream gives the start that the probe of
+    measurement 22 misses. FFmpeg and FFprobe 9.0.2 on macOS read sources of 120 s at 1280x720
+    and 30 fps, H.264 at 20 Mb/s with AAC at 48 kHz stereo. The audio started at 0 s, 12 s and
+    60 s, in MP4, MKV and MPEG-TS. One more MKV source of 630 s had its audio at 600 s. After the
+    usual analysis of FFprobe, this command reads packets until it has one packet of the selected
+    stream. It decodes none of those packets:
+
+    ```
+    ffprobe -v error -select_streams <audioStreamIndex> -show_entries packet=pts:stream=time_base \
+      -read_intervals %+#1 -of json -i <source>
+    ```
+
+    | Source | Probe: start, length | First packet | Full analysis: start |
+    | --- | --- | --- | --- |
+    | MKV, audio at 0 s | 0, 120.021 s | −0.021 s | 0 |
+    | MKV, audio at 60 s | 0, 120.010 s | 59.979 s | 60.000 s |
+    | MPEG-TS, audio at 0 s | 1.400 s, 120.000 s | 1.400 s | 1.400 s |
+    | MPEG-TS, audio at 60 s | 1.400 s, 120.000 s | 61.379 s | 61.379 s |
+    | MP4, audio at 60 s | 59.979 s, 60.011 s | 59.979 s | 59.979 s |
+
+    The full analysis is `-analyzeduration 200M -probesize 2G`. The sources with audio at 12 s
+    gave the same pattern. When the probe reads no packet of a stream, FFmpeg gives that stream
+    the start and the duration of the container. In the MKV source with audio at 60 s,
+    `duration_ts` was therefore 120.010 s, which is the duration of the container. The `DURATION`
+    tag held the end of the track. If that `duration_ts` stays a length after the start moves, the
+    audio ends at 180 s in a file of 120 s. In the MPEG-TS sources with late audio, the probe also
+    reported a sample rate of 0. The packet does not give the rate.
+
+    The full analysis skips the priming of the encoder. In MKV, the first packet of AAC therefore
+    comes 21 ms before the start that the full analysis reports. In each source that the probe read
+    correctly, the first packet came at the reported start or before it.
+
+    The table gives the time of each command. Each value is the median of 15 runs with the file in
+    the page cache.
+
+    | Source | Probe | First packet |
+    | --- | --- | --- |
+    | MP4, audio at 0 s | 48 ms | 53 ms |
+    | MKV, audio at 0 s | 54 ms | 53 ms |
+    | MPEG-TS, audio at 0 s | 61 ms | 60 ms |
+    | MKV, audio at 60 s | 54 ms | 62 ms |
+    | MPEG-TS, audio at 60 s | 61 ms | 74 ms |
+    | MKV, audio at 600 s, 1.4 GB | 98 ms | 198 ms |
+
+    Most of that time is the analysis that FFprobe does before it reads a packet, as in the probe.
+    The full analysis also found the start. But it decodes, and it took 912 ms on the MPEG-TS
+    source with audio at 60 s.
+
+    The export of [0, 65 s) of the MKV source with audio at 60 s then used the start from the first
+    packet. It took its audio from a second input. With libx264, the peak memory fell from 2042 MiB
+    to 443 MiB, and the framemd5 of the video and the audio did not change. Without the first
+    packet, an audio-only export of [0, 30 s) of the same source expected 30 s of audio. FFmpeg
+    exited 0 with a file that had no audio stream. With the first packet, the plan refuses that
+    export with `sourceHasNoAudio`.
+
 ## Decision
 
 ### The boundary mechanism
@@ -445,6 +500,28 @@ after a success.
 
 The renderer decodes the original media. It must not decode a preview proxy.
 
+(Added on 2026-10-02.) After the re-probe, an export that writes audio reads the first packet of
+the selected audio stream with the command of measurement 23. The time of that packet becomes the
+start of the audio only when the packet comes after the reported start. It also becomes the start
+when the probe reports no start. The plan of a source that the probe reads correctly therefore
+does not change.
+
+When the start moves, the end of the stream stays where it was. That end is the reported start
+plus the reported length. When that end is unknown or does not lie after the packet, the end is the
+`DURATION` tag, if the tag lies after the packet. The length becomes that end less the new start.
+The reported end comes first, because a muxer other than FFmpeg's can write the length of the track
+in the tag (ADR 036). Read as an end, such a tag ends the audio too early. When the probe reports a
+start, the end therefore never moves earlier than the end that the export used before this change.
+When the probe reports no start, the export had no end before, and the tag can give one.
+
+The read uses the runner, the deadline and the cancel flag of the probe of an export output
+(ADR 036). When the read cannot start, fails, finds no packet, or does not finish in time, the plan
+uses the values of the probe, and the export continues. A cancel ends the run.
+
+The start can be early by the priming of the encoder, which is 21 ms for AAC at 48 kHz. The read
+does not correct a sample rate of 0. It does not run when the probe reports no sample rate, because
+the plan then refuses the audio with `sourceAudioRateUnknown`.
+
 ## Consequences
 
 - (Added on 2026-10-02.) The fill of measurement 20 holds the whole of a gap in memory before it
@@ -462,10 +539,27 @@ The renderer decodes the original media. It must not decode a preview proxy.
   wait stays in these cases:
   - the third shape of the budget;
   - an MKV or MPEG-TS source whose probe misses a late start of the audio, which then also
-    takes the length of the audio from the container, so the end of the audio is wrong too;
+    takes the length of the audio from the container, so the end of the audio is wrong too
+    (changed on 2026-10-02: the first packet now gives the start and keeps the end, measurement
+    23, so this case stays only when that read fails);
   - a probe that reports no length of the audio, so the conditions at its end do not apply;
   - a seek into a gap inside the audio stream, which the probe does not report;
   - a wait shorter than 0.5 s.
+- (Added on 2026-10-02.) An export that writes audio runs FFprobe twice before FFmpeg starts
+  (measurement 23). The second run reads the file up to the first audio packet. On a slow disk or
+  a share, a source whose audio starts late can make that read last up to the probe timeout of
+  30 s. Preparation then lasts up to 60 s. A cancel stops the read. When the read fails, the plan
+  uses the values of the probe. The three decisions that read the audio start then do not apply,
+  as before this change. They are the bound of measurement 21, the second input of measurement 22,
+  and the expected duration of ADR 036.
+- (Added on 2026-10-02.) An MPEG-TS source whose audio starts more than about 5 s late still has
+  no sample rate in the probe (measurement 22). The plan refuses its audio with
+  `sourceAudioRateUnknown`, and only a video-only export of it works. The export does not read the
+  first packet of such a stream.
+- (Added on 2026-10-02.) When the probe misses a late start in MKV, the end of the audio stays at
+  the end of the container, as before measurement 23. The `DURATION` tag of FFmpeg's muxer can give
+  an earlier end, but the tag of another muxer can hold a length, so the export does not prefer
+  the tag.
 - (Added on 2026-10-02.) Under one input, `split` can give a segment its video before the
   segments ahead of it in concat order have finished, and `concat` then holds that decoded
   video. This happens when the segments are out of source order or overlap, and it has nothing

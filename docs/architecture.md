@@ -272,6 +272,11 @@ normalizes the streams (ADR 014 measurement 20). The fill holds its silence in m
 plan refuses segments that need more than 60 s of silence in total before the first audio sample
 (`audioGapTooLong`, measurement 21). The chains end in `concat`, in project array order.
 
+The export probes the source again before it plans. The probe analyzes about the first 5 s of the
+file, so it misses a later audio start in MKV and MPEG-TS. An export that writes audio therefore
+also reads the first packet of the audio stream, and the plan takes a later start from it. When
+that read fails, the plan uses the probe, and the export continues (ADR 014 measurement 23).
+
 The renderer has three graph shapes. It opens one input for each segment while the assembled
 command line stays inside the platform budget. It otherwise opens one input, seeks once, and
 divides that input with `split` and `asplit`. When the source audio starts more than 0.5 s
