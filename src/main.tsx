@@ -5,7 +5,7 @@ import { themePreferenceStore } from "./features/settings/themePreference";
 import { initI18n } from "./i18n";
 import { applyPlatformAttribute } from "./lib/platform";
 import { startThemeSync } from "./lib/theme";
-import { getCurrentWindowRole } from "./lib/windowRole";
+import { applyWindowRoleAttribute, getCurrentWindowRole } from "./lib/windowRole";
 import App from "./App";
 import "./styles/globals.css";
 
@@ -29,6 +29,9 @@ async function bootstrap(): Promise<void> {
   // The main window and the Settings window load this same page. The label of the window
   // decides which view it renders, and an unknown label renders the editor.
   const role = getCurrentWindowRole();
+  // The rules of `globals.css` that differ by window read the role on <html>, such as the top
+  // edge of a modal overlay. The attribute is there before the first render.
+  applyWindowRoleAttribute(role);
   const rootElement = document.getElementById("root");
   if (rootElement) {
     ReactDOM.createRoot(rootElement).render(

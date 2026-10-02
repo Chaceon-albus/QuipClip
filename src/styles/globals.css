@@ -578,6 +578,26 @@
 }
 
 /* =========================================================
+   Title bar
+   ========================================================= */
+
+/* The height of the title bar that the page draws. The main window draws one, `h-10` in
+ * `TitleBar.tsx` (`TITLE_BAR_HEIGHT_PX` in `titleBarLayout.ts`, and a test compares the two).
+ * The Settings window has the title bar of the system (ADR 038), so the page draws none and
+ * the height is 0. `main.tsx` writes the role of the window on <html> before the first render.
+ *
+ * A modal overlay starts below this height, and a dialog centres in the area under it
+ * (`components/ui/dialog.tsx`, `ConfirmDialog`). The user can therefore still move the main
+ * window while a dialog is open. */
+:root {
+  --title-bar-height: 0px;
+}
+
+:root[data-window-role="main"] {
+  --title-bar-height: 2.5rem;
+}
+
+/* =========================================================
    Dark Theme
    ========================================================= */
 

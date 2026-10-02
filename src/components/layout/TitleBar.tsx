@@ -1,7 +1,8 @@
-import { useCallback, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useId, useMemo, useRef, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useStore } from "zustand";
 import { ChevronDown, FileOutput, Loader2 } from "lucide-react";
 import appIcon from "@/assets/brand/app-icon.svg";
 import { Button } from "@/components/ui/button";
@@ -31,10 +32,13 @@ import {
 } from "@/features/timeline";
 import { splitFileName } from "@/lib/fileName";
 import { isMacOS } from "@/lib/platform";
+import { TITLE_BAR_MARKER } from "@/lib/titleBar";
 import { cn } from "@/lib/utils";
 import { presentExportAction, type ExportActionLabel } from "./exportActionPresenter";
 import { runExportFlow } from "./exportFlowController";
+import { quitGuard } from "./quitGuardController";
 import { resolveTitleBarPadding } from "./titleBarLayout";
+import { keepsFocusOnPress, presentTitleBarModal } from "./titleBarModal";
 import { useWindowState } from "./useWindowState";
 import { CloseGlyph, MaximizeGlyph, MinimizeGlyph, RestoreGlyph } from "./WindowGlyphs";
 import { resolveMaximizeControl } from "./windowStateSync";
@@ -113,6 +117,10 @@ export function TitleBar() {
   const exportTracking = useExportStore((state) => state.tracking);
   const exportDialogOpen = useExportPanelStore((state) => state.open);
   const setExportDialogOpen = useExportPanelStore((state) => state.setOpen);
+  const quitPromptOpen = useStore(quitGuard.store, (state) => state.prompt !== null);
+  // While a dialog of this window is open, the bar takes the pointer for the window drag and
+  // the window buttons, and the File menu and Export do not (`titleBarModal.ts`).
+  const modal = presentTitleBarModal({ exportDialogOpen, quitPromptOpen });
   // The key names come from the binding table (ADR 026).
   const shortcutOf = useShortcutLabels();
   const openMediaShortcut = shortcutOf("openMedia");
@@ -189,22 +197,35 @@ export function TitleBar() {
     void getCurrentWindow().close();
   };
 
+  // While a dialog is open, a press on the bar leaves the focus in the dialog. The click of a
+  // window button still happens, and the drag script of Tauri still moves the window.
+  const handleBarMouseDown = (event: MouseEvent<HTMLElement>) => {
+    if (keepsFocusOnPress(modal, event.target)) {
+      event.preventDefault();
+    }
+  };
+
   return (
     // The window buttons and the title text dim while the window does not have the focus.
     // `useWindowState` writes that state on <html>, and the `window-inactive:` classes read it.
+    // The marker lets a dialog tell a press on the bar from a press outside the dialog.
     <header
+      {...TITLE_BAR_MARKER}
       data-tauri-drag-region="deep"
+      onMouseDown={handleBarMouseDown}
       className={cn(
         // The position of the macOS window buttons depends on this height and this border.
         // `src-tauri/src/traffic_lights.rs` computes it when the application starts, from
         // `TITLE_BAR_CONTENT_HEIGHT` (39, this height less the border), and
         // `titleBarLayout.ts` holds the same numbers and the fallback. A change to either one
-        // must change both files.
+        // must change both files. A modal overlay starts below this height
+        // (`--title-bar-height` in globals.css), so a change of the height changes it too.
         "relative flex h-10 shrink-0 items-center justify-between border-b border-border bg-chrome text-xs select-none",
         // The reserved width for the native macOS window buttons, which
         // titleBarStyle: "Overlay" draws over the top left of the web view. It is free again
         // in full screen, where macOS hides them.
         resolveTitleBarPadding({ isMac, fullscreen }),
+        modal.barClass,
       )}
     >
       {/* Left: File menu (constant), plus app icon, title, and separator on non-macOS platforms */}
@@ -238,7 +259,10 @@ export function TitleBar() {
             <Button
               variant="chrome"
               size="xs"
-              className="px-1.5 window-inactive:text-muted-foreground-inactive"
+              className={cn(
+                "px-1.5 window-inactive:text-muted-foreground-inactive",
+                modal.appControlClass,
+              )}
             >
               {t("titleBar.menu.file")}
               <ChevronDown className="size-3" />
@@ -281,10 +305,14 @@ export function TitleBar() {
       {/* Centre: the open file and its segment count. With no media, macOS shows the
           application name here, because its left zone does not (ADR 020). Every other
           platform shows the name in the left zone, so the centre stays empty. */}
+      {/* While a dialog is open, the file title takes no pointer either: its path tooltip would
+          become the top layer, and the first Escape would close the tooltip, not the dialog. A
+          press falls through to the bar and moves the window. */}
       <div
         className={cn(
           "absolute left-1/2 flex max-w-[min(42vw,560px)] -translate-x-1/2 items-center text-xs text-muted-foreground",
           INACTIVE_MUTED_TEXT_CLASS,
+          modal.appControlClass,
         )}
       >
         {media ? (
@@ -306,10 +334,14 @@ export function TitleBar() {
             is disabled, and the events of an enabled button reach it by bubbling. The span
             has no tabIndex, so the Tab order does not change. The span is not a control, so
             it opts out of the window drag: a press on the disabled button does not move the
-            window (ADR 020). */}
+            window (ADR 020). While a dialog is open, the span takes no pointer, so a press
+            there reaches the bar and moves the window. */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="inline-flex" data-tauri-drag-region="false">
+            <span
+              className={cn("inline-flex", modal.appControlClass)}
+              data-tauri-drag-region="false"
+            >
               <Button
                 size="sm"
                 variant="default"

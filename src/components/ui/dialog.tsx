@@ -2,6 +2,8 @@ import * as React from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { cn } from "@/lib/utils";
+// QuipClip: hand-edited — added, for the outside press rule of `DialogContent`.
+import { isInTitleBar } from "@/lib/titleBar";
 import { Button } from "@/components/ui/button";
 import { XIcon } from "lucide-react";
 
@@ -35,7 +37,11 @@ function DialogOverlay({
       className={cn(
         // QuipClip: hand-edited — the shadcn bg-black/10 scrim is not visible in the
         // dark theme, so the scrim is black/25 in light and black/50 in dark.
-        "fixed inset-0 isolate z-50 bg-black/25 duration-100 supports-backdrop-filter:backdrop-blur-xs dark:bg-black/50 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        // QuipClip: hand-edited — the scrim starts below the title bar that the page draws
+        // (`--title-bar-height`, globals.css), so the user can still move the main window
+        // while a dialog is open. It has no backdrop blur: a blur reads past the edge of the
+        // window and can draw a dark band there.
+        "fixed inset-x-0 top-(--title-bar-height) bottom-0 isolate z-50 bg-black/25 duration-100 dark:bg-black/50 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className,
       )}
       {...props}
@@ -47,6 +53,8 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  // QuipClip: hand-edited — taken out of the props, so the handler below wraps it.
+  onInteractOutside,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean;
@@ -59,9 +67,20 @@ function DialogContent({
         className={cn(
           // QuipClip: hand-edited — shadow-dialog (globals.css) gives the top layer the
           // highest elevation. The shadcn output has a ring and no shadow.
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground shadow-dialog ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          // QuipClip: hand-edited — the dialog centres in the area below the title bar that
+          // the page draws, the area that the scrim covers (`--title-bar-height`).
+          "fixed top-[calc(50%+var(--title-bar-height)/2)] left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground shadow-dialog ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className,
         )}
+        // QuipClip: hand-edited — added. The scrim leaves the title bar free so that the user
+        // can move the window, so a press there is not a press outside the dialog and does not
+        // close it. A press on a window button of Windows is in the bar too.
+        onInteractOutside={(event) => {
+          onInteractOutside?.(event);
+          if (isInTitleBar(event.target)) {
+            event.preventDefault();
+          }
+        }}
         {...props}
       >
         {children}

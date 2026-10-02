@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getCurrentWindowRole, resolveWindowRole } from "./windowRole";
+import {
+  applyWindowRoleAttribute,
+  getCurrentWindowRole,
+  resolveWindowRole,
+  WINDOW_ROLE_ATTRIBUTE,
+  type WindowRoleRoot,
+} from "./windowRole";
 
 // `getCurrentWindow` reads the window metadata that Tauri injects. The fake returns a label,
 // or throws as the real function does outside the Tauri shell.
@@ -44,5 +50,32 @@ describe("getCurrentWindowRole", () => {
 
   it("gives the editor outside the Tauri shell", () => {
     expect(getCurrentWindowRole()).toBe("main");
+  });
+});
+
+describe("applyWindowRoleAttribute", () => {
+  function fakeRoot(): WindowRoleRoot & { attributes: Map<string, string> } {
+    const attributes = new Map<string, string>();
+    return {
+      attributes,
+      setAttribute: (name, value) => {
+        attributes.set(name, value);
+      },
+    };
+  }
+
+  it("writes the role on the root", () => {
+    const root = fakeRoot();
+    applyWindowRoleAttribute("main", root);
+    expect(WINDOW_ROLE_ATTRIBUTE).toBe("data-window-role");
+    expect(root.attributes.get(WINDOW_ROLE_ATTRIBUTE)).toBe("main");
+
+    applyWindowRoleAttribute("settings", root);
+    expect(root.attributes.get(WINDOW_ROLE_ATTRIBUTE)).toBe("settings");
+  });
+
+  it("does nothing with a null root or outside a document", () => {
+    expect(() => applyWindowRoleAttribute("main", null)).not.toThrow();
+    expect(() => applyWindowRoleAttribute("main")).not.toThrow();
   });
 });

@@ -25,3 +25,34 @@ export function resolveWindowRole(label: string | null): WindowRole {
 export function getCurrentWindowRole(): WindowRole {
   return resolveWindowRole(getCurrentWindowLabel());
 }
+
+/**
+ * The attribute on <html> that names the role of the window. A CSS rule that differs by window
+ * reads it, such as the height of the title bar that the page draws (`globals.css`).
+ */
+export const WINDOW_ROLE_ATTRIBUTE = "data-window-role";
+
+/** The part of the document root that the role attribute writes. */
+export interface WindowRoleRoot {
+  setAttribute(name: string, value: string): void;
+}
+
+/**
+ * Writes the role of the window on the document root. `main.tsx` calls it before the first
+ * render, so no dialog draws with the layout of the other window.
+ *
+ * @param role The role of the window.
+ * @param root The document root. Undefined uses `document.documentElement`; null does nothing.
+ */
+export function applyWindowRoleAttribute(
+  role: WindowRole,
+  root?: WindowRoleRoot | null,
+): void {
+  const target =
+    root !== undefined
+      ? root
+      : typeof document !== "undefined"
+        ? document.documentElement
+        : null;
+  target?.setAttribute(WINDOW_ROLE_ATTRIBUTE, role);
+}

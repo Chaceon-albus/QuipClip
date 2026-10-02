@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { WINDOW_ROLE_ATTRIBUTE } from "@/lib/windowRole";
 import {
   MAC_DEFAULT_TITLE_BAR_HEIGHT,
   MAC_TITLE_BAR_RESERVE_PX,
@@ -119,5 +120,43 @@ describe("the title bar reserve", () => {
     expect(resolveTitleBarPadding({ isMac: false, fullscreen: true })).toBe(
       "pr-0 pl-3",
     );
+  });
+});
+
+/**
+ * Reads the value of `--title-bar-height` in the rule of `globals.css` that starts with
+ * `selector`, or null when the rule or the property is missing.
+ */
+function readTitleBarHeightRule(selector: string): string | null {
+  const source = readFileSync(
+    fileURLToPath(new URL("../../styles/globals.css", import.meta.url)),
+    "utf8",
+  );
+  for (const match of source.matchAll(/^(\S[^{\n]*)\{([^}]*)\}/gm)) {
+    if (match[1].trim() !== selector) {
+      continue;
+    }
+    const property = /--title-bar-height:\s*([^;]+);/.exec(match[2]);
+    if (property !== null) {
+      return property[1].trim();
+    }
+  }
+  return null;
+}
+
+describe("the top edge of a modal overlay", () => {
+  it("is the height of the title bar in the main window", () => {
+    // The overlay starts at `--title-bar-height`, so the user can still move the window while
+    // a dialog is open. A height that differed from the bar would leave a strip of the window
+    // uncovered, or cover the lower edge of the bar. The rule reads the attribute that
+    // `main.tsx` writes, so a rename on one side only would also cover the bar again.
+    expect(readTitleBarHeightRule(`:root[${WINDOW_ROLE_ATTRIBUTE}="main"]`)).toBe(
+      `${TITLE_BAR_HEIGHT_PX / 16}rem`,
+    );
+  });
+
+  it("is the top of the window in every other window", () => {
+    // The Settings window has the title bar of the system and draws none (ADR 038).
+    expect(readTitleBarHeightRule(":root")).toBe("0px");
   });
 });

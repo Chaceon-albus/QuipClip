@@ -42,7 +42,10 @@
  * then ends at 66, and the gap before the File menu is 18 there.
  */
 
-/** The height of the title bar in CSS pixels, `h-10` in `TitleBar.tsx`. */
+/**
+ * The height of the title bar in CSS pixels, `h-10` in `TitleBar.tsx`. A modal overlay of the
+ * main window starts there, `--title-bar-height` in `globals.css`, and a test compares the two.
+ */
 export const TITLE_BAR_HEIGHT_PX = 40;
 
 /** The bottom border of the title bar, `border-b`, inside `TITLE_BAR_HEIGHT_PX`. */
