@@ -1,5 +1,5 @@
 /**
- * Pure ffmpeg path controller for the settings dialog.
+ * Pure ffmpeg path controller for the Settings window.
  *
  * Choosing an ffmpeg path is not one action: it opens a native picker, writes the whole
  * settings document, and then re-runs the capability probe so the status bar reflects the new

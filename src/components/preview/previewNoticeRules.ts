@@ -30,7 +30,7 @@ export function isFfmpegSetupImportError(code: ImportMediaErrorCode): boolean {
 /**
  * An action that an import error offers.
  *
- * - `openSettings`: opens the Settings dialog on its FFmpeg tab.
+ * - `openSettings`: opens the Settings window on its FFmpeg tab.
  * - `chooseFile`: runs the Open Media action, so the user can choose a file.
  */
 export type ImportErrorAction = "openSettings" | "chooseFile";

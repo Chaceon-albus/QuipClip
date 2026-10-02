@@ -88,10 +88,10 @@ export interface DialogAncestorProbe {
  * True when `element` is inside a dialog that is open (`OPEN_DIALOG_SELECTOR`).
  *
  * A dialog that closes gives the focus back to its opener when its content unmounts. When
- * another dialog opened meanwhile and took the focus, that dialog keeps it. The settings
- * dialog and the export dialog read this rule, because the export dialog opens again as the
- * settings dialog closes (`exportSettingsReturn.ts`). Without it, the closing dialog moves the
- * focus out of the open dialog, and the focus trap of the open dialog pulls it back.
+ * another dialog opened meanwhile and took the focus, that dialog keeps it. The export dialog
+ * reads this rule, so a dialog above it, such as the quit guard, keeps the focus. Without it,
+ * the closing dialog moves the focus out of the open dialog, and the focus trap of the open
+ * dialog pulls it back.
  */
 export function isInOpenDialog(element: DialogAncestorProbe | null): boolean {
   return element !== null && element.closest(OPEN_DIALOG_SELECTOR) !== null;

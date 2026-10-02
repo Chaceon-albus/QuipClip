@@ -203,6 +203,17 @@ export type CapabilityProbeEvent =
   | CapabilityProbeFailedEvent;
 
 /**
+ * The payload of `ffmpeg:capability-probe-forced`: what `start_capability_probe` answered the
+ * window that forced a probe. `origin` is the label of that window.
+ *
+ * - `started`: the start payload. Every later event of the run carries its `runId`.
+ * - `failed`: the rejection of a discovery that found no ffmpeg.
+ */
+export type CapabilityProbeForcedEvent =
+  | { outcome: "started"; origin: string; start: CapabilityProbeStart }
+  | { outcome: "failed"; origin: string; error: CapabilityProbeError };
+
+/**
  * Pair of canonical paths to located ffmpeg and ffprobe executables.
  */
 export type FfmpegExecutablePaths = {

@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { isMediaFileDialogOpen } from "@/features/media";
-import { BACKEND_EVENTS, listenEvent, type UnlistenFn } from "@/lib/ipc";
+import { BACKEND_EVENTS, listenWindowEvent, type UnlistenFn } from "@/lib/ipc";
 import { isPageOverlayOpen } from "./nativeContextMenuState";
 import { planNativeMenuCommand } from "./nativeMenuActions";
 import { readShortcutSnapshot, runShortcutCommand } from "./useKeyboardShortcuts";
@@ -81,8 +81,9 @@ export function runNativeMenuAction(payload: unknown): void {
 }
 
 /**
- * Runs the command items of the macOS application menu: Settings, Open Media and Export. Mount
- * it once, in the application shell.
+ * Runs the command items of the macOS application menu that send their action: Open Media and
+ * Export. The Settings item opens the Settings window in Rust. Mount it once, in the
+ * application shell.
  *
  * Only the macOS menu sends these events. On Windows the subscription exists and receives
  * nothing, which is cheaper to keep than a second platform test that could disagree with the
@@ -91,8 +92,9 @@ export function runNativeMenuAction(payload: unknown): void {
 export function useNativeMenuActions(): void {
   useEffect(
     () =>
+      // Rust sends the menu actions to the main window alone (`menu.rs`).
       startNativeMenuActionListener(runNativeMenuAction, (handler) =>
-        listenEvent<unknown>(BACKEND_EVENTS.MENU_ACTION, handler),
+        listenWindowEvent<unknown>(BACKEND_EVENTS.MENU_ACTION, handler),
       ),
     [],
   );

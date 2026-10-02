@@ -3,6 +3,7 @@ import { createFfmpegStore, ffmpegStore } from "./store";
 import {
   CapabilityProbeError,
   type CapabilityProbeEvent,
+  type CapabilityProbeForcedEvent,
   type CapabilityProbeStart,
   type CapabilityReport,
   type EncoderResult,
@@ -897,6 +898,164 @@ describe("FFmpeg Capability Probe Store", () => {
       expect(res1).toBeNull();
       expect(store.getState().runId).toBe("run-2");
       expect(store.getState().paths?.ffmpeg).toBe("/usr/bin/ffmpeg");
+    });
+  });
+
+  describe("A probe that another window forced", () => {
+    const START: CapabilityProbeStart = {
+      runId: "run-own",
+      ffmpeg: "/usr/bin/ffmpeg",
+      ffprobe: "/usr/bin/ffprobe",
+      origin: "path",
+    };
+    const FORCED_START: CapabilityProbeStart = {
+      runId: "run-forced",
+      ffmpeg: "/opt/ffmpeg/bin/ffmpeg",
+      ffprobe: "/opt/ffmpeg/bin/ffprobe",
+      origin: "configured",
+    };
+
+    /** A store with fake subscriptions that the test drives. */
+    function createHarness(
+      start: () => Promise<CapabilityProbeStart> = () => Promise.resolve(START),
+    ) {
+      let probe: (event: CapabilityProbeEvent) => void = () => undefined;
+      let forced: (event: CapabilityProbeForcedEvent) => void = () => undefined;
+      const unlistenForced = vi.fn();
+      const startCapabilityProbe = vi.fn(start);
+      const store = createFfmpegStore({
+        subscribeCapabilityProbe: (handler) => {
+          probe = handler;
+          return Promise.resolve(() => {});
+        },
+        subscribeForcedCapabilityProbe: (handler) => {
+          forced = handler;
+          return Promise.resolve(unlistenForced);
+        },
+        startCapabilityProbe,
+      });
+      return {
+        store,
+        startCapabilityProbe,
+        unlistenForced,
+        sendProbe: (event: CapabilityProbeEvent) => {
+          probe(event);
+        },
+        sendForced: (event: CapabilityProbeForcedEvent) => {
+          forced(event);
+        },
+      };
+    }
+
+    function finished(runId: string): CapabilityProbeEvent {
+      return { event: "finished", runId, report: createValidReport(), source: "probe" };
+    }
+
+    it("takes the run over and follows its events, and drops its own run", async () => {
+      const harness = createHarness();
+      await harness.store.getState().startProbe();
+      harness.sendProbe(finished("run-own"));
+      expect(harness.store.getState().status).toBe("ready");
+
+      harness.sendForced({
+        outcome: "started",
+        origin: "settings",
+        start: FORCED_START,
+      });
+      expect(harness.store.getState()).toMatchObject({
+        status: "probing",
+        runId: "run-forced",
+        paths: { ffmpeg: FORCED_START.ffmpeg, ffprobe: FORCED_START.ffprobe },
+        origin: "configured",
+        results: [],
+        error: null,
+      });
+
+      // A late event of the old run changes nothing.
+      harness.sendProbe({
+        event: "result",
+        runId: "run-own",
+        result: createValidEncoderResult("libx264"),
+        done: 1,
+        total: 2,
+      });
+      expect(harness.store.getState().results).toEqual([]);
+
+      harness.sendProbe(finished("run-forced"));
+      expect(harness.store.getState().status).toBe("ready");
+      expect(harness.store.getState().runId).toBe("run-forced");
+    });
+
+    it("supersedes a start of this window that has not resolved yet", async () => {
+      const own = createDeferred<CapabilityProbeStart>();
+      const harness = createHarness(() => own.promise);
+      const starting = harness.store.getState().startProbe();
+      await vi.waitFor(() => {
+        expect(harness.startCapabilityProbe).toHaveBeenCalled();
+      });
+
+      harness.sendForced({
+        outcome: "started",
+        origin: "settings",
+        start: FORCED_START,
+      });
+      own.resolve(START);
+      expect(await starting).toBeNull();
+      expect(harness.store.getState().runId).toBe("run-forced");
+
+      harness.sendProbe(finished("run-forced"));
+      expect(harness.store.getState().status).toBe("ready");
+    });
+
+    it("shows a forced discovery that found no ffmpeg as its own start would", async () => {
+      const harness = createHarness();
+      await harness.store.getState().startProbe();
+      harness.sendProbe(finished("run-own"));
+
+      const error = new CapabilityProbeError({
+        code: "ffmpegPairMissing",
+        inspected: [
+          { ffmpeg: "/bad/ffmpeg", ffprobe: "/bad/ffprobe", origin: "configured" },
+        ],
+      });
+      harness.sendForced({ outcome: "failed", origin: "settings", error });
+
+      expect(harness.store.getState()).toMatchObject({
+        status: "missing",
+        runId: null,
+        error,
+        inspected: error.inspected,
+        results: [],
+      });
+      // The old run is no longer followed.
+      harness.sendProbe(finished("run-own"));
+      expect(harness.store.getState().status).toBe("missing");
+    });
+
+    it("hears forced probes only after it subscribed, and stops with unsubscribe", async () => {
+      const harness = createHarness();
+      harness.sendForced({
+        outcome: "started",
+        origin: "settings",
+        start: FORCED_START,
+      });
+      expect(harness.store.getState().status).toBe("idle");
+
+      await harness.store.getState().ensureSubscribed();
+      harness.store.getState().unsubscribe();
+      expect(harness.unlistenForced).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps its own probe when the forced subscription is refused", async () => {
+      const store = createFfmpegStore({
+        subscribeCapabilityProbe: () => Promise.resolve(() => {}),
+        subscribeForcedCapabilityProbe: () =>
+          Promise.reject(new Error("listen refused")),
+        startCapabilityProbe: () => Promise.resolve(START),
+      });
+      const started = await store.getState().startProbe();
+      expect(started?.runId).toBe("run-own");
+      expect(store.getState().status).toBe("probing");
     });
   });
 

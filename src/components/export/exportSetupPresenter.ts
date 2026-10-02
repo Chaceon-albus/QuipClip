@@ -842,7 +842,7 @@ export function resolveExportSetupStepState(state: {
  * null when it can.
  *
  * - "empty": the library holds no preset, and the Presets tab adds one.
- * - "error": the settings file did not load. The settings dialog shows the read error and
+ * - "error": the settings file did not load. The Settings window shows the read error and
  *   its reset control above every tab, and the Presets tab holds what the export needs.
  * - "loading" and "ready" need no way out.
  */

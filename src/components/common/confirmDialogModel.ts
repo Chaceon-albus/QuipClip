@@ -85,8 +85,8 @@ export interface ConfirmFocusReturn {
  *
  * WAI-ARIA returns the focus to the element that opened a dialog. `ConfirmDialog` has no
  * Radix trigger, so Radix has no element to focus on close, and the focus would fall to the
- * body. A keyboard user would then lose their place in the dialog underneath, such as the
- * settings dialog.
+ * body. A keyboard user would then lose their place in the view underneath, such as the
+ * Settings window.
  *
  * The opener is a poor target after a confirm. The confirmed action usually starts a write,
  * and the preset library disables its buttons while a write is in flight. A delete also
@@ -97,9 +97,8 @@ export interface ConfirmFocusReturn {
  *   can name one, and the last fallback is the enclosing dialog, which takes the focus and
  *   keeps it inside that dialog's focus trap.
  *
- * Unlike the settings dialog (see `dialogFocusReturn.ts`), this rule returns the focus after a
- * pointer close as well. That exception exists for an opener whose tooltip opens on every
- * focus. The toolbar buttons of the preset list have a tooltip, but it opens on a focus only
+ * This rule returns the focus after a pointer close as well. A focus return after a pointer
+ * close is a fault only for an opener whose tooltip opens on every focus. The toolbar buttons of the preset list have a tooltip, but it opens on a focus only
  * while the focus ring shows, so a focus return after a pointer close does not open it.
  */
 export function createConfirmFocusReturn(): ConfirmFocusReturn {

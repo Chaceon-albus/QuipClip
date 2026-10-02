@@ -11,13 +11,11 @@ import {
   decideLeaveRequest,
   decidePromptSaveOutcome,
   isFocusLost,
-  isInsideLeavePrompt,
   isUnsavedPresetRow,
   pickCreateFailureFocus,
   pickPromptCancelFocus,
   pickPromptOpenFocus,
   pickPromptReturnFocus,
-  PRESET_LEAVE_PROMPT_ATTRIBUTE,
   presentPresetDraftStatus,
   presentSaveAndLeaveLabel,
   presentUnsavedDraftPrompt,
@@ -176,7 +174,7 @@ describe("decideCloseRequest", () => {
   });
 
   // The prompt clears itself once the draft is clean, but a request in the same tick can
-  // still see it open. There is nothing left to lose, so the request closes the dialog.
+  // still see it open. There is nothing left to lose, so the request closes the window.
   it("closes when the draft became clean while the prompt was still open", () => {
     expect(decideCloseRequest(status({ dirty: false }), true)).toBe("close");
   });
@@ -194,18 +192,15 @@ describe("decideCloseRequest", () => {
     expect(decideCloseRequest(status({ pending: true }), false)).toBe("raise");
   });
 
-  it("cancels the open prompt, as its Cancel button does", () => {
-    expect(decideCloseRequest(status(), true)).toBe("cancel");
-    expect(decideCloseRequest(status({ canSave: false }), true)).toBe("cancel");
-  });
-
-  // Cancel is disabled while a save is in flight, so the request must not do what it cannot.
-  it("holds the open prompt while a save is in flight", () => {
+  // A second click on the window button is no answer to the prompt.
+  it("holds the open prompt on a second close request", () => {
+    expect(decideCloseRequest(status(), true)).toBe("hold");
+    expect(decideCloseRequest(status({ canSave: false }), true)).toBe("hold");
     expect(decideCloseRequest(status({ pending: true }), true)).toBe("hold");
   });
 
-  // Only one prompt at a time: Escape from a row, the header close button, and the footer
-  // Close button all go to the prompt of the preset library while it is open.
+  // Only one prompt at a time: the window button, Close Window and Alt+F4 all go to the
+  // prompt of the preset library while it is open.
   it("defers to the prompt of the preset library while it is open", () => {
     expect(decideCloseRequest(status(), false, true)).toBe("defer");
     expect(decideCloseRequest(status({ canSave: false }), false, true)).toBe("defer");
@@ -237,7 +232,7 @@ describe("decideLeaveRequest", () => {
   });
 
   // Only one prompt at a time: the footer prompt already asks about this draft.
-  it("defers to the prompt of the settings dialog while it is open", () => {
+  it("defers to the prompt of the Settings window while it is open", () => {
     expect(decideLeaveRequest({ dirty: true, pending: false }, true)).toBe("defer");
   });
 });
@@ -256,25 +251,6 @@ describe("decideLeavePromptKey", () => {
 
   it.each(["Enter", " ", "Tab", "ArrowDown"])("ignores %s", (key) => {
     expect(decideLeavePromptKey(key, { choicesDisabled: false })).toBe("ignore");
-  });
-});
-
-describe("isInsideLeavePrompt", () => {
-  it("asks the target for an ancestor with the prompt attribute", () => {
-    const selectors: string[] = [];
-    const inside = {
-      closest: (selector: string) => {
-        selectors.push(selector);
-        return {};
-      },
-    };
-    expect(isInsideLeavePrompt(inside)).toBe(true);
-    expect(selectors).toStrictEqual([`[${PRESET_LEAVE_PROMPT_ATTRIBUTE}]`]);
-  });
-
-  it("is false for a target outside the prompt, or for no target", () => {
-    expect(isInsideLeavePrompt({ closest: () => null })).toBe(false);
-    expect(isInsideLeavePrompt(null)).toBe(false);
   });
 });
 

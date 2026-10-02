@@ -1,9 +1,9 @@
 /**
  * Pure rules that keep an unsaved preset draft from being lost when the user leaves it.
  *
- * The preset library reports its draft to the settings dialog as a `PresetDraftGuard`. The
- * dialog asks `decideCloseRequest` what a close request does. When the request cannot close
- * the dialog, the dialog shows the prompt that `presentUnsavedDraftPrompt` describes. The
+ * The preset library reports its draft to the Settings window as a `PresetDraftGuard`. The
+ * window asks `decideCloseRequest` what a close request does. When the request cannot close
+ * the window, the window shows the prompt that `presentUnsavedDraftPrompt` describes. The
  * preset library shows the same prompt when the user selects another preset or adds one.
  *
  * The rules have no DOM and no React, so the tests need no document. They read elements
@@ -17,7 +17,7 @@ import { canTakeFocus, type PromptFocusTarget } from "@/components/common/focusT
 import type { PresetLibraryView } from "./presetLibraryController";
 import type { MessageView } from "./presetPresenter";
 
-/** The state of the preset draft that the settings dialog reads. */
+/** The state of the preset draft that the Settings window reads. */
 export type PresetDraftStatus = {
   /** True while the draft holds an edit that is not saved. */
   readonly dirty: boolean;
@@ -30,8 +30,8 @@ export type PresetDraftStatus = {
 };
 
 /**
- * The draft state together with the two actions that settle the draft, so the settings
- * dialog can save or discard the draft from its own prompt, and the state of the preset
+ * The draft state together with the two actions that settle the draft, so the Settings
+ * window can save or discard the draft from its own prompt, and the state of the preset
  * library's own prompt, so that only one of the two prompts is open at a time.
  */
 export type PresetDraftGuard = PresetDraftStatus & {
@@ -53,7 +53,7 @@ export type PresetDraftGuard = PresetDraftStatus & {
 
 /**
  * The guard of a preset library that holds no unsaved edit. The preset library reports it
- * when it unmounts, so the dialog never keeps the guard of a draft that no longer exists.
+ * when it unmounts, so the window never keeps the guard of a draft that no longer exists.
  */
 export const CLEAN_PRESET_DRAFT_GUARD: PresetDraftGuard = {
   dirty: false,
@@ -88,7 +88,7 @@ export function presentPresetDraftStatus(view: PresetLibraryView): PresetDraftSt
   };
 }
 
-/** The unsaved-changes prompt of the settings dialog footer and of the preset library. */
+/** The unsaved-changes prompt of the Settings window footer and of the preset library. */
 export type UnsavedDraftPromptView = {
   message: MessageView;
   /** Disables the button that saves the draft. */
@@ -132,28 +132,6 @@ export function isUnsavedPresetRow(view: PresetLibraryView, presetId: string): b
 }
 
 /**
- * The attribute that marks the unsaved-changes prompt of the preset library. Escape inside
- * that prompt means "Keep Editing", as Escape means Cancel on a macOS sheet, so the settings
- * dialog does not take it as a request to close. See `isInsideLeavePrompt`.
- */
-export const PRESET_LEAVE_PROMPT_ATTRIBUTE = "data-preset-leave-prompt";
-
-/** The narrow view of a key event target that `isInsideLeavePrompt` reads. */
-export interface LeavePromptProbe {
-  closest: (selector: string) => unknown;
-}
-
-/**
- * True when `target` is inside the unsaved-changes prompt of the preset library. The settings
- * dialog then leaves Escape to that prompt.
- */
-export function isInsideLeavePrompt(target: LeavePromptProbe | null): boolean {
-  return (
-    target !== null && target.closest(`[${PRESET_LEAVE_PROMPT_ATTRIBUTE}]`) !== null
-  );
-}
-
-/**
  * What a key press inside the unsaved-changes prompt of the preset library does.
  *
  * - `keepEditing`: Escape. The prompt closes as "Keep Editing" closes it.
@@ -181,7 +159,7 @@ export function decideLeavePromptKey(
  *   request now would either move the prompt to a target that the running save then ignores,
  *   or select a preset under that save.
  * - `leave`: the draft holds no unsaved edit, so the request runs at once.
- * - `defer`: the settings dialog already shows its unsaved-changes prompt about this draft.
+ * - `defer`: the Settings window already shows its unsaved-changes prompt about this draft.
  *   The request opens no second prompt. The focus goes to the prompt that is open.
  * - `raise`: the preset library shows its own prompt, or changes the target of the prompt
  *   that is open.
@@ -221,20 +199,19 @@ export function presentSaveAndLeaveLabel(request: PendingLeave): string {
 }
 
 /**
- * What the settings dialog does with a request to close it: from Escape, from the close
- * button in the header, or from the Close button in the footer.
+ * What the Settings window does with a request to close it: from the window button, from
+ * Close Window of the File menu, or from Alt+F4.
  *
- * - `close`: the dialog closes. The draft holds no unsaved edit.
- * - `raise`: the dialog stays open and shows the unsaved-changes prompt.
- * - `cancel`: the prompt is already open, and the request dismisses it as its Cancel button
- *   does. A second Escape backs out of the prompt, as it does on a macOS save sheet.
- * - `hold`: the prompt is already open and a save is in flight, so Cancel is disabled. The
- *   prompt stays, and the dialog keeps the focus inside it.
+ * - `close`: the window closes. The draft holds no unsaved edit.
+ * - `raise`: the window stays open and shows the unsaved-changes prompt.
+ * - `hold`: the prompt is already open. A window button is no answer to it, so the prompt
+ *   stays, and the window gives the focus back to it, as a macOS document window does while
+ *   its save sheet shows.
  * - `defer`: the preset library shows its own unsaved-changes prompt (`leavePromptOpen`). The
- *   dialog opens no second prompt about the same draft. The focus goes to the prompt that is
- *   open, and the dialog stays open.
+ *   window opens no second prompt about the same draft. The focus goes to the prompt that is
+ *   open, and the window stays open.
  */
-export type CloseRequestDecision = "close" | "raise" | "cancel" | "hold" | "defer";
+export type CloseRequestDecision = "close" | "raise" | "hold" | "defer";
 
 export function decideCloseRequest(
   draft: PresetDraftStatus,
@@ -248,20 +225,17 @@ export function decideCloseRequest(
   if (leavePromptOpen) {
     return "defer";
   }
-  if (!promptOpen) {
-    return "raise";
-  }
-  return prompt.choicesDisabled ? "hold" : "cancel";
+  return promptOpen ? "hold" : "raise";
 }
 
 /**
- * What the settings dialog does when a save from its unsaved-changes prompt settles.
+ * What the Settings window does when a save from its unsaved-changes prompt settles.
  *
  * - `close`: the save succeeded and nothing unsaved remains.
- * - `revealError`: the save failed. The dialog stays open and scrolls its body to the top,
+ * - `revealError`: the save failed. The window stays open and scrolls its body to the top,
  *   where the error notice is. The user can be far down in the preset editor, and the notice
  *   would then be out of view.
- * - `stay`: the save did not fail, but an edit arrived while it was in flight. The dialog
+ * - `stay`: the save did not fail, but an edit arrived while it was in flight. The window
  *   stays open on the prompt, and there is no error to show.
  */
 export type PromptSaveOutcome = "close" | "revealError" | "stay";
@@ -277,8 +251,8 @@ export function decidePromptSaveOutcome(
 }
 
 /**
- * Returns the element that takes the focus when the unsaved-changes prompt of the settings
- * dialog opens, or when a close request arrives while it is open.
+ * Returns the element that takes the focus when the unsaved-changes prompt of the Settings
+ * window opens, or when a close request arrives while it is open.
  *
  * That is Cancel, as in `ConfirmDialog`, so Enter picks the choice that changes nothing.
  * While a save is in flight Cancel is disabled, and the prompt message takes the focus, so
@@ -298,16 +272,12 @@ export function pickPromptOpenFocus<T extends PromptFocusTarget>(
 
 /**
  * Returns the element that takes the focus when the user cancels the unsaved-changes prompt
- * of the settings dialog.
+ * of the Settings window.
  *
  * That is the element that held the focus when the close request raised the prompt, such as
- * the field the user was editing. The fallback, the Close button that the footer shows again,
- * takes the focus when that element cannot:
- *
- * - The prompt replaces the footer Close button, so a close request from that button leaves
- *   a detached element.
- * - A close request from the General or the FFmpeg tab switches to the preset tab, and the
- *   element then sits in a panel that is not rendered.
+ * the field the user was editing. The fallback, the active tab, takes the focus when that
+ * element cannot: a close request from the General or the FFmpeg tab switches to the preset
+ * tab, and the element then sits in a panel that is not rendered.
  *
  * The prompt of the preset library applies the same rule to "Keep Editing". The element that
  * held the focus is the row the user was on, for a switch from the list, or the field the
@@ -343,7 +313,7 @@ export interface FocusHolderProbe {
 }
 
 /**
- * True when the focus rests on no control of the dialog:
+ * True when the focus rests on no control of the view:
  *
  * - No element, or the document body, holds the focus. The browser moves the focus to the
  *   body when the focused button becomes disabled.

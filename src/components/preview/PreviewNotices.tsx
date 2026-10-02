@@ -14,7 +14,7 @@ import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
 import type { ImportMediaError } from "@/features/media";
 import type { PlaybackErrorCode } from "@/features/playback";
-import { settingsPanelStore } from "@/features/settings/panelStore";
+import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { cn } from "@/lib/utils";
 import {
   importErrorActions,
@@ -25,9 +25,9 @@ import {
   type PreviewNoticePhase,
 } from "./previewNoticeRules";
 
-/** Opens the Settings dialog on its FFmpeg tab. */
+/** Opens the Settings window on its FFmpeg tab. */
 function openFfmpegSettings(): void {
-  settingsPanelStore.getState().show("ffmpeg");
+  void openSettingsWindow("ffmpeg");
 }
 
 /**

@@ -45,48 +45,49 @@ export function pickDefaultPresetId(
 }
 
 /**
- * Returns the preset that the tab selects when the dialog opens: the preset that the opener
- * named, when the library has it, and otherwise the default preset (`pickDefaultPresetId`).
+ * Returns the preset that a new session of the tab selects, or null to keep the selection.
  *
- * "Manage Presets…" of the export setup step names the preset that the step shows, so the
- * tab opens on the preset that the user looked at (`SettingsPanelState.openingPresetId`).
- */
-export function pickOpeningPresetId(
-  presets: readonly Pick<Preset, "id">[],
-  activePresetId: string | null,
-  openingPresetId: string | null,
-): string | null {
-  if (
-    openingPresetId !== null &&
-    presets.some((preset) => preset.id === openingPresetId)
-  ) {
-    return openingPresetId;
-  }
-  return pickDefaultPresetId(presets, activePresetId);
-}
-
-/**
- * Returns the preset that a new session of the dialog selects, or null to keep the selection.
- *
- * The session opens on `pickOpeningPresetId`. The rule of the unsaved draft applies
- * (`decideLeaveRequest`): a draft with an unsaved edit, or a write in flight, keeps the
- * selection. The dialog mounts the tab when it opens, and no draft exists then. A dialog that
- * opens again during its exit animation keeps the tab mounted, with the selection of the last
- * session, and a close leaves no unsaved edit.
+ * The session opens on the default preset (`pickDefaultPresetId`). An opening of the window
+ * that names a preset selects it afterwards (`pickRequestedSelection`). The rule of the unsaved
+ * draft applies (`decideLeaveRequest`): a draft with an unsaved edit, or a write in flight,
+ * keeps the selection. The Settings window mounts the tab with the window, and no draft exists
+ * then.
  */
 export function pickSessionSelection(
   view: Pick<
     PresetLibraryView,
     "presets" | "activePresetId" | "selectedPresetId" | "dirty" | "pending"
   >,
-  openingPresetId: string | null,
 ): string | null {
-  const id = pickOpeningPresetId(view.presets, view.activePresetId, openingPresetId);
+  const id = pickDefaultPresetId(view.presets, view.activePresetId);
   if (id === null || id === view.selectedPresetId) {
     return null;
   }
   // No prompt is open at the start of a session, so `defer` cannot come back.
   return decideLeaveRequest(view, false) === "leave" ? id : null;
+}
+
+/**
+ * Returns the preset that an opening of the Settings window selects, or null to keep the
+ * selection.
+ *
+ * "Manage Presets…" of the export setup step opens the window on the preset that the step
+ * shows, so the tab shows the preset that the user looked at. The window can already be open,
+ * with an edit in progress, so the rule of the unsaved draft applies (`decideLeaveRequest`): a
+ * draft with an unsaved edit, or a write in flight, keeps the selection, and so does a preset
+ * that the library does not have. An opening never shows a prompt about the draft.
+ */
+export function pickRequestedSelection(
+  view: Pick<PresetLibraryView, "presets" | "selectedPresetId" | "dirty" | "pending">,
+  presetId: string,
+): string | null {
+  if (
+    presetId === view.selectedPresetId ||
+    !view.presets.some((preset) => preset.id === presetId)
+  ) {
+    return null;
+  }
+  return decideLeaveRequest(view, false) === "leave" ? presetId : null;
 }
 
 /**

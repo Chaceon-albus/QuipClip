@@ -6,6 +6,12 @@
 //! Every mutating command returns the document [`crate::settings`] actually wrote to disk, so
 //! the interface renders what Rust stored rather than what it guessed.
 //!
+//! Every mutating command that succeeds also sends that document to every window as
+//! [`SETTINGS_CHANGED_EVENT`], with the label of the window that asked for the write. The
+//! main window and the Settings window each hold a copy of the document, and the event keeps
+//! the other copy current. The window that wrote ignores its own event, because the command
+//! result already gave it the document, and the event and the result arrive in no fixed order.
+//!
 //! [`SettingsCommandErrorCode`] is a pinned contract: `src/features/settings` on the frontend
 //! will mirror this exact set of strings. Adding, removing, or renaming a variant without
 //! telling the frontend is the silent-runtime-failure class ADR 011 exists to prevent, which is
@@ -16,7 +22,30 @@ use crate::settings::{self, LoadedSettings, Settings, SettingsFileError, Setting
 use serde::Serialize;
 use std::io;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+
+/// The event that carries the document a write reached the disk with. Its payload is
+/// [`SettingsChanged`].
+///
+/// `src/lib/ipc.ts` holds the same name in `BACKEND_EVENTS.SETTINGS_CHANGED`, and
+/// `src/lib/ipc.test.ts` reads this line to compare the two.
+pub const SETTINGS_CHANGED_EVENT: &str = "settings:changed";
+
+/// The payload of [`SETTINGS_CHANGED_EVENT`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsChanged<'a> {
+    /// The document that reached the disk, the same value the command returns.
+    pub settings: &'a Settings,
+    /// The label of the window that asked for the write.
+    pub origin: &'a str,
+}
+
+/// Sends the document that a write stored to every window. A failed emit means that no window
+/// listens, so it changes nothing that the command result does not already report.
+fn emit_settings_changed(app: &AppHandle, origin: &str, settings: &Settings) {
+    let _ = app.emit(SETTINGS_CHANGED_EVENT, SettingsChanged { settings, origin });
+}
 
 // A fifth private copy of the JavaScript `Number.MAX_SAFE_INTEGER` bound; see the comment on
 // `settings::JAVASCRIPT_MAX_SAFE_INTEGER` for why each of these copies stays local rather than
@@ -138,12 +167,17 @@ fn load_settings_with(
 #[tauri::command]
 pub async fn save_settings(
     app: AppHandle,
+    window: WebviewWindow,
     settings: Settings,
 ) -> Result<Settings, SettingsCommandError> {
     let app_data_directory = app_data_dir(&app)?;
-    tauri::async_runtime::spawn_blocking(move || save_settings_with(&app_data_directory, settings))
-        .await
-        .map_err(|_| generated_error(SettingsCommandErrorCode::CommandExecutionFailed))?
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        save_settings_with(&app_data_directory, settings)
+    })
+    .await
+    .map_err(|_| generated_error(SettingsCommandErrorCode::CommandExecutionFailed))??;
+    emit_settings_changed(&app, window.label(), &saved);
+    Ok(saved)
 }
 
 /// The body of [`save_settings`]. `settings::save` writes the document it validates with one
@@ -162,11 +196,18 @@ fn save_settings_with(
 /// Restore every ADR 013 seed preset over the current library, keeping every other preset,
 /// `ffmpegPath`, and `activePresetId` intact, and return the document that reached disk.
 #[tauri::command]
-pub async fn restore_default_presets(app: AppHandle) -> Result<Settings, SettingsCommandError> {
+pub async fn restore_default_presets(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<Settings, SettingsCommandError> {
     let app_data_directory = app_data_dir(&app)?;
-    tauri::async_runtime::spawn_blocking(move || restore_default_presets_with(&app_data_directory))
-        .await
-        .map_err(|_| generated_error(SettingsCommandErrorCode::CommandExecutionFailed))?
+    let restored = tauri::async_runtime::spawn_blocking(move || {
+        restore_default_presets_with(&app_data_directory)
+    })
+    .await
+    .map_err(|_| generated_error(SettingsCommandErrorCode::CommandExecutionFailed))??;
+    emit_settings_changed(&app, window.label(), &restored);
+    Ok(restored)
 }
 
 fn restore_default_presets_with(
@@ -186,11 +227,17 @@ fn restore_default_presets_with(
 /// Move a damaged settings file aside and write fresh seeds, returning the document that
 /// reached disk.
 #[tauri::command]
-pub async fn reset_settings(app: AppHandle) -> Result<Settings, SettingsCommandError> {
+pub async fn reset_settings(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<Settings, SettingsCommandError> {
     let app_data_directory = app_data_dir(&app)?;
-    tauri::async_runtime::spawn_blocking(move || reset_settings_with(&app_data_directory))
-        .await
-        .map_err(|_| generated_error(SettingsCommandErrorCode::CommandExecutionFailed))?
+    let reset =
+        tauri::async_runtime::spawn_blocking(move || reset_settings_with(&app_data_directory))
+            .await
+            .map_err(|_| generated_error(SettingsCommandErrorCode::CommandExecutionFailed))??;
+    emit_settings_changed(&app, window.label(), &reset);
+    Ok(reset)
 }
 
 fn reset_settings_with(app_data_directory: &Path) -> Result<Settings, SettingsCommandError> {
@@ -491,6 +538,22 @@ mod tests {
         assert!(!object.contains_key("value"));
         assert!(!object.contains_key("foundSchemaVersion"));
         assert!(!object.contains_key("supportedSchemaVersion"));
+    }
+
+    #[test]
+    fn the_settings_changed_payload_carries_the_document_and_the_writing_window() {
+        // `validateSettingsChangedPayload` in the frontend reads exactly these two keys, and
+        // it reads the document with the validator that reads a command result.
+        let settings = sample_settings(vec![sample_preset("preset-1")]);
+        let value = serde_json::to_value(SettingsChanged {
+            settings: &settings,
+            origin: "settings",
+        })
+        .unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 2);
+        assert_eq!(value["origin"], "settings");
+        assert_eq!(value["settings"], serde_json::to_value(&settings).unwrap());
     }
 
     #[test]

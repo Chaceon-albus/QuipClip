@@ -647,7 +647,7 @@ export class PresetLibraryController {
 
   /**
    * Saves the draft before the user leaves it: for a switch to another preset, or for a close
-   * of the settings dialog.
+   * of the Settings window.
    *
    * Resolves true only when the write succeeded AND no unsaved edit remains, so the caller can
    * leave without losing work. An edit made while the write was in flight is not in the write,

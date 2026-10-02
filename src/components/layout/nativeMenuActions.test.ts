@@ -74,34 +74,41 @@ const SNAPSHOTS: readonly [string, ShortcutSnapshot][] = [
   ["playback runs", createSnapshot(PROBE, { isPlaying: true })],
 ];
 
-/** The command items that `src-tauri/src/menu.rs` declares. */
+/**
+ * The command items that `src-tauri/src/menu.rs` declares. `action` is the action of the key
+ * table that the item stands for. `sent` is true for an item that sends that action to the
+ * frontend, and false for the Settings item, which Rust answers itself.
+ */
 function readRustCommandItems(): {
   label: string;
   accelerator: string;
   action: string;
+  sent: boolean;
 }[] {
   const source = readFileSync(
     fileURLToPath(new URL("../../../src-tauri/src/menu.rs", import.meta.url)),
     "utf8",
   );
   const pattern =
-    /CommandItem \{\s*id: "[^"]+",\s*label: "([^"]+)",\s*accelerator: "([^"]+)",\s*action: "([^"]+)",\s*\}/g;
+    /CommandItem \{\s*id: "[^"]+",\s*label: "([^"]+)",\s*accelerator: "([^"]+)",\s*action: MenuAction::(?:Frontend\("([^"]+)"\)|(OpenSettingsWindow)),\s*\}/g;
   return Array.from(source.matchAll(pattern), (match) => ({
     label: match[1],
     accelerator: match[2],
-    action: match[3],
+    action: match[3] ?? "openSettings",
+    sent: match[4] === undefined,
   }));
 }
 
 describe("parseNativeMenuAction", () => {
-  it("accepts the action of each command item", () => {
+  it("accepts the action of each command item that sends one", () => {
     expect(parseNativeMenuAction("openMedia")).toBe("openMedia");
     expect(parseNativeMenuAction("export")).toBe("export");
-    expect(parseNativeMenuAction("openSettings")).toBe("openSettings");
   });
 
   it("refuses every other payload", () => {
-    // An action of the key table that no menu item sends is not a menu action.
+    // An action of the key table that no menu item sends is not a menu action. The Settings
+    // item opens its window in Rust and sends nothing.
+    expect(parseNativeMenuAction("openSettings")).toBeNull();
     expect(parseNativeMenuAction("markIn")).toBeNull();
     expect(parseNativeMenuAction("undo")).toBeNull();
     expect(parseNativeMenuAction("OpenMedia")).toBeNull();
@@ -115,12 +122,9 @@ describe("parseNativeMenuAction", () => {
 });
 
 describe("planNativeMenuCommand", () => {
-  it("opens media and Settings with no condition", () => {
+  it("opens media with no condition", () => {
     expect(planNativeMenuCommand("openMedia", FREE, createSnapshot(null))).toEqual({
       kind: "openMedia",
-    });
-    expect(planNativeMenuCommand("openSettings", FREE, createSnapshot(null))).toEqual({
-      kind: "openSettings",
     });
   });
 
@@ -165,16 +169,23 @@ describe("planNativeMenuCommand", () => {
 describe("the command items of the Rust menu", () => {
   it("send exactly the actions that the frontend runs", () => {
     const items = readRustCommandItems();
-    // Guards the parse itself: a reformatted item would otherwise read as no item.
-    expect(items).toHaveLength(NATIVE_MENU_ACTIONS.length);
-    expect(items.map((item) => item.action).sort()).toEqual(
-      [...NATIVE_MENU_ACTIONS].sort(),
-    );
+    // Guards the parse itself: a reformatted item would otherwise read as no item. The
+    // Settings item is the one item that sends nothing.
+    expect(items).toHaveLength(NATIVE_MENU_ACTIONS.length + 1);
+    expect(items.filter((item) => !item.sent).map((item) => item.action)).toEqual([
+      "openSettings",
+    ]);
+    expect(
+      items
+        .filter((item) => item.sent)
+        .map((item) => item.action)
+        .sort(),
+    ).toEqual([...NATIVE_MENU_ACTIONS].sort());
   });
 
   it("carry the macOS key of their action in the key table", () => {
     for (const item of readRustCommandItems()) {
-      const action = parseNativeMenuAction(item.action);
+      const action = item.sent ? parseNativeMenuAction(item.action) : "openSettings";
       expect(action).not.toBeNull();
       const binding = action === null ? null : shortcutFor(action, "macos");
       expect(binding).not.toBeNull();

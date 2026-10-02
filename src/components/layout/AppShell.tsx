@@ -12,22 +12,30 @@ import { useNativeMenuActions } from "@/components/layout/useNativeMenuActions";
 import { useQuitGuard } from "@/components/layout/useQuitGuard";
 import { startWindowTitleSync } from "@/components/layout/windowTitleSync";
 import { PreviewPane } from "@/components/preview/PreviewPane";
-import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { TimelinePanel } from "@/components/timeline/TimelinePanel";
 import { TransportBar } from "@/components/transport/TransportBar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { usePlaybackStore } from "@/features/playback";
+import { usePreferenceSync } from "@/features/settings/preferenceSync";
+import { useSettingsChangedSync } from "@/features/settings/settingsSync";
+import { useSettingsWindowDraftMirror } from "@/features/settings/settingsWindowDraft";
 
 export function AppShell() {
   useKeyboardShortcuts();
   // The web view opens its context menu only in a text field. A development build keeps it
   // everywhere except on the preview media.
   useContextMenuPolicy();
-  // The Settings, Open Media and Export items of the macOS menu run the commands of their
-  // keys, under the same conditions.
+  // The Open Media and Export items of the macOS menu run the commands of their keys, under
+  // the same conditions.
   useNativeMenuActions();
   // Every close request and every held-back exit request runs the quit decision (ADR 027).
   useQuitGuard();
+  // The Settings window is a window of its own. These keep this window on the settings
+  // document and the preferences that it writes, and on the name of its unsaved preset
+  // draft, which the quit decision reads.
+  useSettingsChangedSync();
+  usePreferenceSync();
+  useSettingsWindowDraftMirror();
 
   // Mirror the export progress on the Dock and the task bar (ADR 025).
   useEffect(() => startTaskbarProgressSync(), []);
@@ -63,19 +71,13 @@ export function AppShell() {
         </TimelineArea>
         <StatusBar />
         {/*
-         * The one mount of the settings dialog. The settings panel store opens it, so any
-         * component can open it on a given tab. It is mounted here and not in the status bar,
-         * because the status bar only holds one of its openers.
-         */}
-        <SettingsDialog />
-        {/*
          * The one subscription to file drops on the window. The overlay holds the drag state
          * itself, so a drag renders the overlay and not the whole shell.
          */}
         <DropOverlay />
         {/*
          * The one mount of the quit guard dialog. Its portal opens after any dialog that is
-         * already open, so it draws above a settings dialog that holds an unsaved draft.
+         * already open, so it draws above the export dialog.
          */}
         <QuitGuardDialog />
       </div>

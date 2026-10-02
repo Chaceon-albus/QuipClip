@@ -37,6 +37,41 @@ use super::next_run_id;
 /// The Tauri event every capability-probe run reports through.
 const EVENT_NAME: &str = "ffmpeg:capability-probe";
 
+/// The event that announces a forced probe to every window, with the label of the window that
+/// forced it. Its payload is [`CapabilityProbeForcedEvent`].
+///
+/// A forced probe follows a change of the ffmpeg path, which the Settings window makes. The
+/// main window shows the capabilities in its status bar and its export setup, so it takes over
+/// the forced run: it follows that run id as if it had started the run itself. The command
+/// sends this after discovery and before the worker starts, so a window that takes over the run
+/// has its run id before the first [`EVENT_NAME`] event of that run. An unforced probe sends
+/// nothing, and every other window keeps its own run.
+///
+/// `src/lib/ipc.ts` holds the same name in `BACKEND_EVENTS.CAPABILITY_PROBE_FORCED`, and
+/// `src/lib/ipc.test.ts` reads this line to compare the two.
+pub const CAPABILITY_PROBE_FORCED_EVENT: &str = "ffmpeg:capability-probe-forced";
+
+/// The payload of [`CAPABILITY_PROBE_FORCED_EVENT`]: the result of the command in the window
+/// that forced the probe. `started` carries the start payload that the command resolves with,
+/// and `failed` carries the rejection of a discovery that found no ffmpeg, so another window
+/// also shows that the new path holds none.
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "outcome",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CapabilityProbeForcedEvent {
+    Started {
+        origin: String,
+        start: CapabilityProbeStart,
+    },
+    Failed {
+        origin: String,
+        error: CapabilityProbeError,
+    },
+}
+
 /// The immediate payload `start_capability_probe` resolves with when it accepts a run.
 ///
 /// This is not an event: it is the command's own return value, resolved before the worker
@@ -170,6 +205,7 @@ pub enum CapabilityProbeEvent {
 #[tauri::command]
 pub async fn start_capability_probe(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     force: bool,
 ) -> Result<CapabilityProbeStart, CapabilityProbeError> {
     let app_data_directory = app
@@ -178,12 +214,27 @@ pub async fn start_capability_probe(
         .map_err(|_| CapabilityProbeError::new(CapabilityProbeErrorCode::AppDataUnavailable))?;
 
     let discovery_app_data_directory = app_data_directory.clone();
-    let paths = tauri::async_runtime::spawn_blocking(move || {
+    let discovered = tauri::async_runtime::spawn_blocking(move || {
         discover_for_probe(&discovery_app_data_directory)
     })
     .await
     .map_err(|_| CapabilityProbeError::new(CapabilityProbeErrorCode::CommandExecutionFailed))?
-    .map_err(map_locate_error)?;
+    .map_err(map_locate_error);
+    let paths = match discovered {
+        Ok(paths) => paths,
+        Err(error) => {
+            if force {
+                emit_forced(
+                    &app,
+                    CapabilityProbeForcedEvent::Failed {
+                        origin: window.label().to_owned(),
+                        error: error.clone(),
+                    },
+                );
+            }
+            return Err(error);
+        }
+    };
 
     let run_id = next_run_id();
     let start = CapabilityProbeStart {
@@ -193,9 +244,26 @@ pub async fn start_capability_probe(
         origin: paths.origin,
     };
 
+    // Before the worker starts, so that no event of this run precedes the announcement.
+    if force {
+        emit_forced(
+            &app,
+            CapabilityProbeForcedEvent::Started {
+                origin: window.label().to_owned(),
+                start: start.clone(),
+            },
+        );
+    }
+
     spawn_probe_worker(app, run_id, paths, app_data_directory, force);
 
     Ok(start)
+}
+
+/// Sends [`CAPABILITY_PROBE_FORCED_EVENT`]. A failed emit means that no window listens, so a
+/// window that could take over the run is gone, and the failure is discarded.
+fn emit_forced(app: &tauri::AppHandle, event: CapabilityProbeForcedEvent) {
+    let _ = app.emit(CAPABILITY_PROBE_FORCED_EVENT, event);
 }
 
 /// Resolve the ffmpeg executable pair `start_capability_probe` reports to the frontend: the
@@ -682,6 +750,52 @@ mod tests {
         assert_eq!(value["runId"], "42-7");
         assert!(value.get("run_id").is_none());
         assert_eq!(value["origin"], "appData");
+    }
+
+    #[test]
+    fn a_forced_start_names_the_window_and_carries_the_start_payload_unchanged() {
+        // `validateCapabilityProbeForcedEvent` in the frontend reads `start` with the same
+        // validator as the command result, so the nested object must be that payload exactly.
+        let start = CapabilityProbeStart {
+            run_id: "42-7".to_owned(),
+            ffmpeg: "/usr/bin/ffmpeg".to_owned(),
+            ffprobe: "/usr/bin/ffprobe".to_owned(),
+            origin: ExecutableOrigin::Configured,
+        };
+        let value = serde_json::to_value(CapabilityProbeForcedEvent::Started {
+            origin: "settings".to_owned(),
+            start: start.clone(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "outcome": "started",
+                "origin": "settings",
+                "start": serde_json::to_value(&start).unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_forced_discovery_failure_carries_the_rejection_payload_unchanged() {
+        let error = CapabilityProbeError::new(CapabilityProbeErrorCode::FfmpegPairMissing);
+        let value = serde_json::to_value(CapabilityProbeForcedEvent::Failed {
+            origin: "settings".to_owned(),
+            error: error.clone(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "outcome": "failed",
+                "origin": "settings",
+                "error": serde_json::to_value(&error).unwrap(),
+            })
+        );
+        assert_eq!(value["error"]["code"], "ffmpegPairMissing");
     }
 
     #[test]

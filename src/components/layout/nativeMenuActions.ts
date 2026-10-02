@@ -3,10 +3,11 @@
  * does.
  *
  * `src-tauri/src/menu.rs` builds three command items: Settings, Open Media and Export. A click
- * on an item, or its key equivalent, sends `BACKEND_EVENTS.MENU_ACTION` with the name of its
- * action. The name is an action of the key table (ADR 026), and this module plans the same
- * command for it as the window keyboard layer plans for the key, from the same predicates in
- * `actionConditions.ts`.
+ * on Open Media or Export, or its key equivalent, sends `BACKEND_EVENTS.MENU_ACTION` to the
+ * main window with the name of its action. The name is an action of the key table (ADR 026),
+ * and this module plans the same command for it as the window keyboard layer plans for the
+ * key, from the same predicates in `actionConditions.ts`. The Settings item sends no event:
+ * Rust opens the Settings window itself.
  *
  * # One key press, one action
  *
@@ -49,7 +50,6 @@ import {
 export const NATIVE_MENU_ACTIONS = [
   "openMedia",
   "export",
-  "openSettings",
 ] as const satisfies readonly ShortcutAction[];
 
 export type NativeMenuAction = (typeof NATIVE_MENU_ACTIONS)[number];

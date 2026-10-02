@@ -33,13 +33,9 @@ import {
   type ExportRunTiming,
   type ExportState,
 } from "@/features/export";
-import { mediaStore, openMediaFileDialog } from "@/features/media";
-import {
-  settingsPanelStore,
-  settingsStore,
-  useSettingsStore,
-  type SettingsSection,
-} from "@/features/settings";
+import { openMediaFileDialog } from "@/features/media";
+import { useSettingsStore, type SettingsSection } from "@/features/settings";
+import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { isMacOS } from "@/lib/platform";
 import { ExportErrorDetails } from "./ExportErrorDetails";
 import { ExportRunPanel } from "./ExportRunPanel";
@@ -48,7 +44,6 @@ import {
   canGoBackToSetup,
   createOpenStepGeneration,
   runOpenStepAgain,
-  type OpenStepEffects,
 } from "./exportBackToSetup";
 import { resolveExportDismissal } from "./exportCancelState";
 import {
@@ -75,11 +70,6 @@ import {
   selectExportProgressFields,
   type ExportProgressFields,
 } from "./exportRunPresenter";
-import {
-  createSettingsCloseListener,
-  createSettingsReturnSlot,
-  planSettingsReturn,
-} from "./exportSettingsReturn";
 import { presentSetupBlocker, resolveSetupPresetId } from "./exportSetupPresenter";
 import {
   decideStopClick,
@@ -186,9 +176,9 @@ export function ExportDialog({
   // True while the open step that Back runs again has not answered. The setup step shows
   // meanwhile, and Export stays disabled, so no export starts before the checks end.
   const [backCheckPending, setBackCheckPending] = useState(false);
-  // One generation for each open step that the dialog runs again: after Back, and after the
-  // return from the settings dialog. A close invalidates it, so a step that answers after the
-  // close changes nothing (`exportBackToSetup.ts`).
+  // One generation for each open step that the dialog runs again after Back. A close
+  // invalidates it, so a step that answers after the close changes nothing
+  // (`exportBackToSetup.ts`).
   const [backStep] = useState(createOpenStepGeneration);
   // Counts the clicks on Back. The Back button leaves the document with the failed panel, so
   // the effect below gives the focus to the first control of the setup step once per click.
@@ -202,18 +192,8 @@ export function ExportDialog({
   // rule can.
   const contentRef = useRef<HTMLDivElement>(null);
   // The element that held the focus when the dialog opened, or null. It takes the focus back
-  // when the dialog closes. The settings dialog also gives the focus back to it, because the
-  // "Open Settings…" button is gone by then.
+  // when the dialog closes.
   const openerRef = useRef<HTMLElement | null>(null);
-  // What the setup step showed while the settings dialog that it opened is open. The dialog
-  // opens again on the setup step when that settings dialog closes (`exportSettingsReturn.ts`).
-  const [settingsReturn] = useState(() => createSettingsReturnSlot<HTMLElement>());
-  // True from a return until the dialog places its first focus. The return sets `openerRef` to
-  // the opener that it carried, and `onOpenAutoFocus` then keeps it: the element that holds the
-  // focus at that time is a control of the closing settings dialog. When the return opens the
-  // dialog during its exit animation, `onOpenAutoFocus` does not run, and the effect of the
-  // footer focus below clears the flag instead.
-  const keepOpenerRef = useRef(false);
   // The time of the click that armed Stop Export, or null when it is not armed. The time is
   // from `performance.now()`, which is monotonic, so a change of the system clock cannot
   // shorten or lengthen the window.
@@ -307,53 +287,6 @@ export function ExportDialog({
     }
   }, [open, status]);
 
-  // Opens the dialog again on the setup step when the settings dialog that the setup step
-  // opened closes, by any path (`createSettingsCloseListener`). The listener drops the return
-  // for a settings dialog that another control opened, for a live run, and for a source that
-  // closed or changed. The dialog opens in the same update as the close, so the two dialogs
-  // cross-fade, and `onOpenAutoFocus` places the focus on the setup step.
-  //
-  // Each return runs the open step of ADR 024 again, as Back does, and Export stays disabled
-  // until it answers. The settings dialog can close a Back step before its source check
-  // answered, and the file can change while the settings dialog is open. The step replaces a
-  // stale step for the same file, which would otherwise hold the guard of `runExportFlow`
-  // and leave this return with no check. A check that fails shows its own panel.
-  useEffect(
-    () =>
-      settingsPanelStore.subscribe(
-        createSettingsCloseListener({
-          slot: settingsReturn,
-          readExportState: () => exportStore.getState(),
-          readMedia: () => mediaStore.getState().media,
-          readPresets: () => settingsStore.getState().settings?.presets ?? [],
-          onReturn: (decision) => {
-            setRequestedPresetId(decision.requestedPresetId);
-            setChoosingDestination(false);
-            setStopArmedAt(null);
-            openerRef.current = decision.opener;
-            keepOpenerRef.current = true;
-            onOpenChange(true);
-            void runOpenStepAgain({
-              generation: backStep,
-              effects: {
-                setModalOpen: onOpenChange,
-                reportError: (err) => {
-                  exportStore.getState().reportError(err);
-                },
-              },
-              setPending: setBackCheckPending,
-              run: (effects: OpenStepEffects) =>
-                runExportFlow(
-                  { ...effects, filterName: t("dialog.videoFilter") },
-                  { replace: true },
-                ),
-            });
-          },
-        }),
-      ),
-    [settingsReturn, backStep, onOpenChange, t],
-  );
-
   // Runs once for each click on Back, after the commit that the click made. That commit holds
   // the reset and any failure that the open step reported before its first await, such as
   // `sourceNotFound`, so the status read here is the one on the screen. When it is idle, the
@@ -437,21 +370,16 @@ export function ExportDialog({
   // open auto focus again. It acts only while no control of the dialog has the focus: the
   // control that had it left with the old footer, the closing dialog was inert, or the focus
   // is on the element outside that opened the dialog again. The dialog itself, the body, and
-  // a control of a dialog in its exit animation count as no control. The last one is the
-  // settings dialog that this dialog returns from (`exportSettingsReturn.ts`), when this dialog
-  // opens again before its own exit animation ends. A control of the dialog that has the focus
-  // keeps it. That is the case after Back, because the effect of Back above runs first and
-  // gives the focus to the first control of the setup step. A dialog above this one, such as
-  // the quit guard, also keeps the focus. A dialog that is not mounted gets its focus from
-  // `onOpenAutoFocus` below, when Radix mounts it.
+  // a control of a dialog in its exit animation count as no control. A control of the dialog
+  // that has the focus keeps it. That is the case after Back, because the effect of Back above
+  // runs first and gives the focus to the first control of the setup step. A dialog above this
+  // one, such as the quit guard, also keeps the focus. A dialog that is not mounted gets its
+  // focus from `onOpenAutoFocus` below, when Radix mounts it.
   useEffect(() => {
     const dialog = contentRef.current;
     if (!open || dialog === null) {
       return;
     }
-    // The content is mounted, so `onOpenAutoFocus` either ran already or does not run for
-    // this opening. A return from the settings dialog set the opener already.
-    keepOpenerRef.current = false;
     const active = document.activeElement;
     if (active !== dialog && isInOpenDialog(active)) {
       return;
@@ -582,10 +510,9 @@ export function ExportDialog({
   // flow proceeds past the source revision check to the setup step with no stale confirmation behind it;
   // the flow re-opens the modal itself at the setup step.
   //
-  // The preset choice survives the confirmation, as it survives Back and the return from the
-  // settings dialog, which can both raise the confirmation. `closeAndReset` clears the choice,
-  // and the call after it sets the saved value again. React batches the two updates, so the
-  // saved value is the one that renders.
+  // The preset choice survives the confirmation, as it survives Back, which can raise the
+  // confirmation. `closeAndReset` clears the choice, and the call after it sets the saved value
+  // again. React batches the two updates, so the saved value is the one that renders.
   const handleExportAnyway = () => {
     const kept = requestedPresetId;
     closeAndReset();
@@ -610,46 +537,14 @@ export function ExportDialog({
     void openMediaFileDialog({ filterName: t("dialog.videoFilter") });
   };
 
-  // Closes this dialog before the settings dialog opens, so the two modal dialogs are never
-  // open together. They show together only while one fades out and the other fades in. The
-  // failed panel and the setup step offer this, and neither holds a live run.
-  // The store is read at the click and not at the render, so a run that became live since
-  // the render is hidden and not reset, the same as a dismissal (ADR 025).
-  //
-  // From the setup step, the dialog keeps the preset choice, and the settings dialog opens on
-  // the preset that the step shows. The dialog opens again on the setup step when the
-  // settings dialog closes, and runs the open step again (`exportSettingsReturn.ts`). A Back
-  // step that runs now becomes stale with the close below, and the return runs its own. The
-  // recovery of a failed run does not return.
-  const handleOpenSettings = (section: SettingsSection, fromSetup: boolean) => {
-    const exportState = exportStore.getState();
-    const opener = openerRef.current;
-    // Read before the reset below, which clears the choice.
-    const kept = fromSetup
-      ? planSettingsReturn({
-          exportState,
-          media: mediaStore.getState().media,
-          requestedPresetId,
-          shownPresetId: effectivePresetId,
-          opener,
-        })
-      : null;
-    if (resolveExportDismissal(exportState) === "hide") {
-      hideDialog();
-    } else {
-      closeAndReset();
-    }
-    if (kept !== null) {
-      settingsReturn.hold(kept);
-    }
-    // The settings dialog gives the focus back to the element that opened this dialog. It
-    // skips an opener that left the document, such as the status bar indicator, which
-    // hides while this dialog shows.
-    settingsPanelStore.getState().show(section, {
-      returnFocus: opener,
-      selectPresetId: kept?.shownPresetId ?? null,
-      returnTo: kept !== null ? "exportSetup" : null,
-    });
+  // Opens the Settings window on `section`, or brings it forward. The Settings window is a
+  // window of its own, so this dialog stays open with its state: the preset choice of the
+  // setup step, and the failed panel with its Back. A change in Settings reaches this window
+  // (`settings:changed`), and the setup step lists the presets as they are now. From the setup
+  // step, the Presets tab selects the preset that the step shows, unless Settings holds an
+  // unsaved edit. The recovery of a failed run names no preset.
+  const handleOpenSettings = (section: SettingsSection, presetId: string | null) => {
+    void openSettingsWindow(section, presetId);
   };
 
   // Goes back to the setup step after a failure. The store is reset to idle, and the open
@@ -865,7 +760,7 @@ export function ExportDialog({
             blocker={blocker}
             onSelect={setRequestedPresetId}
             onOpenSettings={(section) => {
-              handleOpenSettings(section, true);
+              handleOpenSettings(section, effectivePresetId);
             }}
             firstControlRef={setupFirstControlRef}
           />
@@ -900,15 +795,10 @@ export function ExportDialog({
         inert={!open}
         onOpenAutoFocus={(event) => {
           // Radix dispatches this before it moves the focus, so the active element is still
-          // the element that opened the dialog. After a return from the settings dialog, it
-          // is a control of that closing dialog, and the return already set the opener.
-          if (keepOpenerRef.current) {
-            keepOpenerRef.current = false;
-          } else {
-            const opener = document.activeElement;
-            openerRef.current =
-              opener instanceof HTMLElement && opener !== document.body ? opener : null;
-          }
+          // the element that opened the dialog.
+          const opener = document.activeElement;
+          openerRef.current =
+            opener instanceof HTMLElement && opener !== document.body ? opener : null;
           // Radix would focus the first tabbable element. The footer names the control
           // instead (`resolveExportDialogFocusOrder`): "Export…" on the setup step, Cancel
           // on the confirmation, Done on a finished run, and else the dialog itself, so Tab
@@ -926,17 +816,13 @@ export function ExportDialog({
         // holds no frame then shows the live content and never an old frame.
         onCloseAutoFocus={(event) => {
           setHeldFrame(null);
-          keepOpenerRef.current = false;
-          // A dialog that opened meanwhile keeps the focus, such as the settings dialog that
-          // this dialog opened.
+          // A dialog that opened meanwhile keeps the focus, such as the quit guard.
           if (isInOpenDialog(document.activeElement)) {
             event.preventDefault();
             return;
           }
-          // Radix would focus the element that held the focus when the content mounted.
-          // After a return from the settings dialog, that element left the document with the
-          // settings dialog, so the opener that the return carried takes the focus. In every
-          // other case the opener is that same element. With no opener, Radix does as before.
+          // Radix would focus the element that held the focus when the content mounted, which
+          // is the opener. With no opener, Radix does as before.
           const opener = openerRef.current;
           if (opener !== null && opener.isConnected) {
             event.preventDefault();
@@ -1135,7 +1021,7 @@ export function ExportDialog({
               primary={
                 recoverySettingsSection !== null ? (
                   <Button
-                    onClick={() => handleOpenSettings(recoverySettingsSection, false)}
+                    onClick={() => handleOpenSettings(recoverySettingsSection, null)}
                   >
                     {t("export.action.openSettings")}
                   </Button>

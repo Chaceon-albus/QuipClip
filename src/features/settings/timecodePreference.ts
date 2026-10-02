@@ -92,6 +92,12 @@ export interface TimecodePreferenceState {
    * Stores the format and applies it at once. A value that is not a format is ignored.
    */
   readonly setFormat: (format: TimecodeFormat) => void;
+  /**
+   * Applies a format that another window stored (`preferenceSync.ts`). It does not write
+   * storage: the other window wrote it, and a read of storage here can still return the old
+   * value. A value that is not a format is ignored.
+   */
+  readonly adoptFormat: (format: TimecodeFormat) => void;
 }
 
 export interface TimecodePreferenceStoreOptions {
@@ -114,6 +120,11 @@ export function createTimecodePreferenceStore(
       }
       writeStoredTimecodeFormat(format, storage);
       if (get().format !== format) {
+        set({ format });
+      }
+    },
+    adoptFormat: (format: TimecodeFormat) => {
+      if (isTimecodeFormat(format) && get().format !== format) {
         set({ format });
       }
     },

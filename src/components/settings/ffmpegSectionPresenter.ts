@@ -1,5 +1,5 @@
 /**
- * Pure rules for the FFmpeg tab of the settings dialog: where the FFmpeg in use comes from,
+ * Pure rules for the FFmpeg tab of the Settings window: where the FFmpeg in use comes from,
  * which controls the tab shows, where the focus goes when a control finishes its action,
  * which icon the status line carries, what the screen reader announcement says, and which
  * install instructions a missing FFmpeg gets.

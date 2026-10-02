@@ -15,11 +15,15 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
-/// The label of the one window, as the configuration files and `capabilities/default.json`
+/// The label of the main window, as the configuration files and `capabilities/default.json`
 /// name it. On macOS, `traffic_lights` builds this window, and the command items of `menu`
-/// send their events to it.
-#[cfg(target_os = "macos")]
-const MAIN_WINDOW_LABEL: &str = "main";
+/// send their events to it. The exit handler sends the quit request to it alone, because only
+/// its frontend runs the quit decision (ADR 027).
+pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
+
+/// The label of the Settings window, which Rust builds on request. See
+/// `commands::settings_window`.
+pub(crate) const SETTINGS_WINDOW_LABEL: &str = commands::settings_window::SETTINGS_WINDOW_LABEL;
 
 /// How long an application exit waits for a running export to stop.
 ///
@@ -84,11 +88,42 @@ pub fn run() {
         // here, so the web view names a run and never a path.
         .manage(commands::export_output::PublishedExports::default())
         // Whether the user confirmed the quit (ADR 027). The exit handler below reads it.
-        .manage(commands::quit::QuitGate::default());
+        .manage(commands::quit::QuitGate::default())
+        // The request that the page of the Settings window takes when it loads or navigates.
+        .manage(commands::settings_window::SettingsWindowState::default())
+        // The Settings window does not outlive the main window. A main window closes only
+        // through `confirm_quit`, which ends the application, or with no frontend to cancel
+        // the close, for example because its page never loaded. In the second case the
+        // Settings window would stay open alone, and the application would keep running
+        // behind a window that cannot open a video or export one. The destroy closes the window
+        // with no close request, so an unsaved preset draft asks nothing: the window that
+        // runs the quit decision is gone.
+        //
+        // When the Settings window is destroyed, its page cannot report that its preset draft
+        // is gone, so Rust does it for the quit guard of the main window (ADR 027).
+        .on_window_event(|window, event| {
+            if window.label() == SETTINGS_WINDOW_LABEL
+                && matches!(event, tauri::WindowEvent::Destroyed)
+            {
+                commands::settings_window::report_draft_cleared(window.app_handle());
+            }
+            if window.label() == MAIN_WINDOW_LABEL && matches!(event, tauri::WindowEvent::Destroyed)
+            {
+                if let Some(settings) = window
+                    .app_handle()
+                    .get_webview_window(SETTINGS_WINDOW_LABEL)
+                {
+                    if let Err(error) = settings.destroy() {
+                        eprintln!("window: the settings window was not closed: {error}");
+                    }
+                }
+            }
+        });
 
     // The default macOS menu with a Quit item that raises `ExitRequested` (ADR 027). The
     // default Quit item raises only `Exit`, which cannot be prevented. The menu also holds the
-    // Settings, Open Media and Export items, which send their action to the frontend. See `menu`.
+    // Open Media and Export items, which send their action to the frontend, and the Settings
+    // item, which opens the Settings window. See `menu`.
     #[cfg(target_os = "macos")]
     let builder = builder
         .menu(menu::build_app_menu)
@@ -118,7 +153,10 @@ pub fn run() {
             commands::settings::load_settings,
             commands::settings::save_settings,
             commands::settings::restore_default_presets,
-            commands::settings::reset_settings
+            commands::settings::reset_settings,
+            commands::settings_window::open_settings_window,
+            commands::settings_window::take_settings_window_request,
+            commands::settings_window::close_settings_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -145,8 +183,12 @@ pub fn run() {
                 || handle
                     .try_state::<commands::quit::QuitGate>()
                     .is_none_or(|gate| gate.is_confirmed());
-            if commands::quit::should_prevent_exit(confirmed, handle.webview_windows().len()) {
-                match handle.emit(commands::quit::QUIT_REQUESTED_EVENT, ()) {
+            // Only the main window runs the decision, so only an open main window can answer,
+            // and the request goes to it alone. The Settings window neither holds the exit nor
+            // answers it.
+            let main_window_open = handle.get_webview_window(MAIN_WINDOW_LABEL).is_some();
+            if commands::quit::should_prevent_exit(confirmed, main_window_open) {
+                match handle.emit_to(MAIN_WINDOW_LABEL, commands::quit::QUIT_REQUESTED_EVENT, ()) {
                     Ok(()) => {
                         api.prevent_exit();
                         return;
@@ -405,36 +447,240 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 
-    #[cfg(target_os = "macos")]
+    /// The labels of the windows that a configuration file builds.
+    fn configured_labels(source: &str) -> Vec<String> {
+        let config: serde_json::Value =
+            serde_json::from_str(source).expect("the configuration is JSON");
+        config["app"]["windows"]
+            .as_array()
+            .expect("the configuration lists windows")
+            .iter()
+            .map(|window| window["label"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// The `windows` list of a capability file.
+    fn capability_windows(source: &str) -> serde_json::Value {
+        let capability: serde_json::Value =
+            serde_json::from_str(source).expect("the capability is JSON");
+        capability["windows"].clone()
+    }
+
+    const CONFIGURATIONS: [&str; 3] = [
+        include_str!("../tauri.conf.json"),
+        include_str!("../tauri.macos.conf.json"),
+        include_str!("../tauri.windows.conf.json"),
+    ];
+
     #[test]
     fn every_configuration_names_the_main_window_with_one_label() {
-        // `traffic_lights` finds the configuration of the window by this label, and `menu`
-        // sends its events to the window with this label. The capability must grant its
-        // permissions to the same window.
-        let labels_of = |source: &str| -> Vec<String> {
-            let config: serde_json::Value =
-                serde_json::from_str(source).expect("the configuration is JSON");
-            config["app"]["windows"]
-                .as_array()
-                .expect("the configuration lists windows")
-                .iter()
-                .map(|window| window["label"].as_str().unwrap_or_default().to_owned())
-                .collect()
-        };
-        for labels in [
-            labels_of(include_str!("../tauri.conf.json")),
-            labels_of(include_str!("../tauri.macos.conf.json")),
-            labels_of(include_str!("../tauri.windows.conf.json")),
-        ] {
-            assert_eq!(labels, [MAIN_WINDOW_LABEL]);
+        // `traffic_lights` finds the configuration of the window by this label, `menu` and the
+        // exit handler send their events to the window with this label, and the capability
+        // must grant its permissions to the same window.
+        for source in CONFIGURATIONS {
+            assert_eq!(configured_labels(source), [MAIN_WINDOW_LABEL]);
         }
-
-        let capability: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json"))
-                .expect("the capability is JSON");
         assert_eq!(
-            capability["windows"],
+            capability_windows(include_str!("../capabilities/default.json")),
             serde_json::json!([MAIN_WINDOW_LABEL])
+        );
+    }
+
+    #[test]
+    fn the_settings_window_has_a_capability_of_its_own_and_no_configuration() {
+        // Rust builds the Settings window on request, so no configuration file may build it
+        // at start as well: the second build would fail on the label.
+        assert_ne!(SETTINGS_WINDOW_LABEL, MAIN_WINDOW_LABEL);
+        for source in CONFIGURATIONS {
+            assert!(!configured_labels(source)
+                .iter()
+                .any(|label| label == SETTINGS_WINDOW_LABEL));
+        }
+        // Its permissions are its own. The main window capability must not reach it, and its
+        // capability must not reach the main window.
+        assert_eq!(
+            capability_windows(include_str!("../capabilities/settings.json")),
+            serde_json::json!([SETTINGS_WINDOW_LABEL])
+        );
+    }
+
+    /// The `permissions` of a capability file.
+    fn capability_permissions(source: &str) -> Vec<String> {
+        let capability: serde_json::Value =
+            serde_json::from_str(source).expect("the capability is JSON");
+        capability["permissions"]
+            .as_array()
+            .expect("the capability lists permissions")
+            .iter()
+            .map(|permission| permission.as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// The commands that `tauri::generate_handler!` registers in `run`, by their last path
+    /// segment.
+    fn registered_commands() -> Vec<String> {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find(".invoke_handler(tauri::generate_handler![")
+            .expect("run registers its commands");
+        let list = &source[start..];
+        let list = &list[list.find('[').expect("the list opens") + 1..];
+        let list = &list[..list.find(']').expect("the list closes")];
+        list.split(',')
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(|path| path.rsplit("::").next().unwrap_or(path).to_owned())
+            .collect()
+    }
+
+    /// The names of `APP_COMMANDS` in `build.rs`, the commands that get a permission.
+    fn manifest_commands() -> Vec<String> {
+        let source = include_str!("../build.rs");
+        let start = source
+            .find("const APP_COMMANDS: &[&str] = &[")
+            .expect("build.rs lists the app commands");
+        let list = &source[start..];
+        let list = &list[..list.find("];").expect("the list closes")];
+        list.split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The permission that `tauri-build` generates for an app command.
+    fn allow(command: &str) -> String {
+        format!("allow-{}", command.replace('_', "-"))
+    }
+
+    /// The commands that the page of the main window calls. Each has its caller in `src/`:
+    /// the ffmpeg status (`features/ffmpeg/client.ts`), the export and its Show File button
+    /// (`features/export/client.ts`, `output.ts`), the import and the source check
+    /// (`features/media/client.ts`), the quit guard (`quitGuardController.ts`), the settings
+    /// file that the export setup reads and the default preset that an export writes
+    /// (`features/settings/client.ts`), and the openers of Settings
+    /// (`settingsWindowClient.ts`).
+    const MAIN_WINDOW_COMMANDS: &[&str] = &[
+        "start_capability_probe",
+        "start_export",
+        "cancel_export",
+        "cancel_active_export",
+        "reveal_export_output",
+        "import_media",
+        "read_source_revision",
+        "confirm_quit",
+        "load_settings",
+        "save_settings",
+        "open_settings_window",
+    ];
+
+    /// The commands that the page of the Settings window calls: the settings file, its
+    /// restore and its reset (`features/settings/client.ts`), the probe of the FFmpeg tab
+    /// (`features/ffmpeg/client.ts`), and its own request and close
+    /// (`settingsWindowClient.ts`, `SettingsWindow.tsx`). It cannot quit, export, import, or
+    /// open a window.
+    const SETTINGS_WINDOW_COMMANDS: &[&str] = &[
+        "load_settings",
+        "save_settings",
+        "restore_default_presets",
+        "reset_settings",
+        "start_capability_probe",
+        "take_settings_window_request",
+        "close_settings_window",
+    ];
+
+    /// Registered commands that no window may call: no frontend code calls them. Version 1
+    /// keeps no project file (ADR 010).
+    const UNGRANTED_COMMANDS: &[&str] = &["load_project", "save_project"];
+
+    #[test]
+    fn every_registered_command_is_in_the_app_manifest() {
+        // A command that is registered but not in the manifest gets no permission. With an
+        // app manifest, Tauri then refuses it in every window.
+        let mut registered = registered_commands();
+        let mut manifest = manifest_commands();
+        // Guards the two parses: a reformatted list would otherwise read as empty.
+        assert!(registered.len() > 10, "{registered:?}");
+        registered.sort();
+        manifest.sort();
+        assert_eq!(registered, manifest);
+    }
+
+    #[test]
+    fn every_registered_command_has_a_permission_decision() {
+        // A new command must be granted to the window that calls it, or listed as granted to
+        // none, here. Without the decision it is refused at run time with no failing test.
+        let mut decided: Vec<String> = MAIN_WINDOW_COMMANDS
+            .iter()
+            .chain(SETTINGS_WINDOW_COMMANDS)
+            .chain(UNGRANTED_COMMANDS)
+            .map(|command| (*command).to_owned())
+            .collect();
+        decided.sort();
+        decided.dedup();
+        let mut registered = registered_commands();
+        registered.sort();
+        assert_eq!(registered, decided);
+        for command in UNGRANTED_COMMANDS {
+            assert!(!MAIN_WINDOW_COMMANDS.contains(command), "{command}");
+            assert!(!SETTINGS_WINDOW_COMMANDS.contains(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn the_main_window_holds_the_permissions_that_its_page_uses() {
+        let mut expected: Vec<String> = [
+            "core:default",
+            "core:window:allow-start-dragging",
+            "core:window:allow-minimize",
+            "core:window:allow-toggle-maximize",
+            "core:window:allow-close",
+            "core:window:allow-set-progress-bar",
+            "core:window:allow-request-user-attention",
+            "core:window:allow-set-title",
+            "core:window:allow-set-theme",
+            "core:window:allow-set-focus",
+            "dialog:allow-open",
+            "dialog:allow-save",
+        ]
+        .iter()
+        .map(|permission| (*permission).to_owned())
+        .collect();
+        expected.extend(MAIN_WINDOW_COMMANDS.iter().map(|command| allow(command)));
+        assert_eq!(
+            capability_permissions(include_str!("../capabilities/default.json")),
+            expected
+        );
+    }
+
+    #[test]
+    fn the_settings_window_holds_only_the_permissions_that_its_page_uses() {
+        // Each one has a caller in the page: the events of the window sync, the localized
+        // title, the theme of the system title bar, the show and the focus after the first
+        // render, and the ffmpeg path picker. The page holds no `core:default`: that set
+        // includes the menu commands, which could replace the macOS menu that holds the Quit
+        // item of ADR 027. It holds no window destroy either: the window commands act on any
+        // label that the caller names, so the page closes its window through
+        // `close_settings_window`.
+        let mut expected: Vec<String> = [
+            "core:event:default",
+            "core:window:allow-set-title",
+            "core:window:allow-set-theme",
+            "core:window:allow-show",
+            "core:window:allow-set-focus",
+            "dialog:allow-open",
+        ]
+        .iter()
+        .map(|permission| (*permission).to_owned())
+        .collect();
+        expected.extend(
+            SETTINGS_WINDOW_COMMANDS
+                .iter()
+                .map(|command| allow(command)),
+        );
+        assert_eq!(
+            capability_permissions(include_str!("../capabilities/settings.json")),
+            expected
         );
     }
 }

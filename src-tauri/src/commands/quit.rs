@@ -7,9 +7,10 @@
 //!
 //! The sequence is:
 //!
-//! 1. An application exit arrives as `RunEvent::ExitRequested` while a window is open and the
-//!    quit is not confirmed. On macOS, `Cmd+Q` and the menu Quit raise it through the Quit
-//!    item of `menu`. The handler calls `prevent_exit` and emits [`QUIT_REQUESTED_EVENT`].
+//! 1. An application exit arrives as `RunEvent::ExitRequested` while the main window is open and
+//!    the quit is not confirmed. On macOS, `Cmd+Q` and the menu Quit raise it through the Quit
+//!    item of `menu`. The handler calls `prevent_exit` and emits [`QUIT_REQUESTED_EVENT`] to the
+//!    main window.
 //! 2. The frontend decides. When nothing would be lost, or when the user confirms its dialog,
 //!    it calls [`confirm_quit`].
 //! 3. [`confirm_quit`] sets the bit and calls `exit(0)`. That raises `ExitRequested` again. The
@@ -21,6 +22,11 @@
 //! not stack a second dialog. Rust does not suppress the second event, because it cannot know
 //! when the user cancels the dialog: a suppression would need a second command to clear it,
 //! and a missed clear would refuse every later quit with no dialog at all.
+//!
+//! Only the main window runs the decision. The Settings window has no quit guard: its close
+//! closes that window alone, and the main window stays open, so the application does not exit.
+//! The Settings window reports the name of an unsaved preset draft to the main window, which
+//! names it in its dialog (`commands::settings_window::DRAFT_EVENT`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, State};
@@ -55,13 +61,14 @@ impl QuitGate {
 
 /// Whether the exit handler must prevent an exit and ask the frontend first.
 ///
-/// It prevents the exit only when the quit is not confirmed and at least one web view window
-/// is open. With no window open, nothing can answer the question, so a prevented exit would
-/// never continue. That is the case when the last window closed without the frontend
-/// listening, for example because its page never loaded.
+/// It prevents the exit only when the quit is not confirmed and the main window is open. Only
+/// the main window answers the question, so with no main window a prevented exit would never
+/// continue. That is the case when the main window closed without the frontend listening, for
+/// example because its page never loaded, and the Settings window is still open: the exit
+/// must go on although a window is open.
 #[must_use]
-pub fn should_prevent_exit(confirmed: bool, window_count: usize) -> bool {
-    !confirmed && window_count > 0
+pub fn should_prevent_exit(confirmed: bool, main_window_open: bool) -> bool {
+    !confirmed && main_window_open
 }
 
 /// Confirms the quit and ends the application.
@@ -83,21 +90,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unconfirmed_exit_with_a_window_open_is_prevented() {
-        assert!(should_prevent_exit(false, 1));
-        assert!(should_prevent_exit(false, 2));
+    fn an_unconfirmed_exit_with_the_main_window_open_is_prevented() {
+        assert!(should_prevent_exit(false, true));
     }
 
     #[test]
     fn a_confirmed_exit_is_never_prevented() {
-        assert!(!should_prevent_exit(true, 1));
-        assert!(!should_prevent_exit(true, 0));
+        assert!(!should_prevent_exit(true, true));
+        assert!(!should_prevent_exit(true, false));
     }
 
     #[test]
-    fn an_exit_with_no_window_open_is_never_prevented() {
-        // Nothing could answer the question, so a prevented exit would never continue.
-        assert!(!should_prevent_exit(false, 0));
+    fn an_exit_with_no_main_window_is_never_prevented() {
+        // Only the main window could answer the question, so a prevented exit would never
+        // continue, also while the Settings window is still open.
+        assert!(!should_prevent_exit(false, false));
     }
 
     #[test]

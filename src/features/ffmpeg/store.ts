@@ -5,17 +5,30 @@
  * - Pre-invocation subscription to prevent losing early located/result events.
  * - Monotonic counter & active runId matching for latest-request-wins semantics.
  * - Idempotent, memoized event subscription holding a Tauri listener for the process lifetime.
+ * - Takeover of a probe that another window forced, so a new ffmpeg path set in the Settings
+ *   window shows in the main window too.
  * - ADR 005, ADR 006, and ADR 011.
+ *
+ * # Two windows
+ *
+ * The main window and the Settings window each run this store, and each starts an unforced
+ * probe when it mounts. An unforced probe is a cache hit in the usual case, and each window
+ * keeps its own run. A forced probe follows a change of the ffmpeg path, and Rust announces it
+ * to every window (`ffmpeg:capability-probe-forced`). A window that did not force it takes the
+ * run over: it follows that run id exactly as if its own start had returned it, and it drops
+ * its own run, so the newest probe wins in every window. When the forced discovery found no
+ * ffmpeg, the window shows that failure as its own start would.
  */
 
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import type { UnlistenFn } from "@/lib/ipc";
 import { startCapabilityProbe } from "./client";
-import { subscribeCapabilityProbe } from "./events";
+import { subscribeCapabilityProbe, subscribeForcedCapabilityProbe } from "./events";
 import {
   CapabilityProbeError,
   type CapabilityProbeEvent,
+  type CapabilityProbeForcedEvent,
   type CapabilityProbeStart,
   type FfmpegState,
   type FfmpegStoreState,
@@ -36,6 +49,13 @@ export interface FfmpegStoreDependencies {
   subscribeCapabilityProbe?: (
     handler: (event: CapabilityProbeEvent) => void,
   ) => Promise<UnlistenFn>;
+  /**
+   * Function to subscribe to the forced probes of the other windows. Defaults to
+   * `subscribeForcedCapabilityProbe`, which drops the forced probes of this window.
+   */
+  subscribeForcedCapabilityProbe?: (
+    handler: (event: CapabilityProbeForcedEvent) => void,
+  ) => Promise<UnlistenFn>;
 }
 
 /**
@@ -52,11 +72,15 @@ export function createFfmpegStore(
     dependencies.startCapabilityProbe ?? startCapabilityProbe;
   const subscribeCapabilityProbeFn =
     dependencies.subscribeCapabilityProbe ?? subscribeCapabilityProbe;
+  const subscribeForcedFn =
+    dependencies.subscribeForcedCapabilityProbe ?? subscribeForcedCapabilityProbe;
 
   let latestRequestId = 0;
   let activeRunId: string | null = initialState?.runId ?? null;
   let subscriptionPromise: Promise<UnlistenFn> | null = null;
   let activeUnlisten: UnlistenFn | null = null;
+  let forcedSubscription: Promise<UnlistenFn | null> | null = null;
+  let forcedUnlisten: UnlistenFn | null = null;
   let pendingEvents: CapabilityProbeEvent[] = [];
   let awaitingRunId = false;
 
@@ -137,7 +161,98 @@ export function createFfmpegStore(
       }
     }
 
+    // Takes over a probe that another window forced (see the module comment). The takeover is
+    // a newer request, so a start of this window that has not resolved yet finds itself
+    // superseded and changes nothing.
+    function takeOverForcedRun(event: CapabilityProbeForcedEvent): void {
+      latestRequestId++;
+      awaitingRunId = false;
+      const buffered = pendingEvents;
+      pendingEvents = [];
+
+      if (event.outcome === "failed") {
+        activeRunId = null;
+        set({
+          status: event.error.code === "ffmpegPairMissing" ? "missing" : "failed",
+          runId: null,
+          paths: null,
+          origin: null,
+          version: null,
+          license: null,
+          hwaccels: [],
+          results: [],
+          done: 0,
+          total: 0,
+          source: null,
+          error: event.error,
+          inspected: event.error.inspected ?? null,
+        });
+        return;
+      }
+
+      const { start } = event;
+      activeRunId = start.runId;
+      set({
+        status: "probing",
+        runId: start.runId,
+        paths: {
+          ffmpeg: start.ffmpeg,
+          ffprobe: start.ffprobe,
+        },
+        origin: start.origin,
+        version: null,
+        license: null,
+        hwaccels: [],
+        results: [],
+        done: 0,
+        total: 0,
+        source: null,
+        error: null,
+        inspected: null,
+      });
+      // Rust announces the run before its worker starts, so no event of the run should be
+      // buffered. An event of the run that arrived first anyway still counts; every other
+      // buffered event belonged to the start of this window and is dropped.
+      for (const e of buffered) {
+        handleEvent(e);
+      }
+    }
+
+    // Best effort: a window that cannot hear the forced probes of the other window keeps its
+    // own run, which is the behaviour of a single window.
+    function ensureForcedSubscribed(): void {
+      if (forcedSubscription) {
+        return;
+      }
+      let subscription: Promise<UnlistenFn>;
+      try {
+        subscription = subscribeForcedFn((event) => {
+          takeOverForcedRun(event);
+        });
+      } catch {
+        return;
+      }
+      const currentPromise: Promise<UnlistenFn | null> = subscription.then(
+        (unlisten) => {
+          if (forcedSubscription !== currentPromise) {
+            unlisten();
+            return null;
+          }
+          forcedUnlisten = unlisten;
+          return unlisten;
+        },
+        () => {
+          if (forcedSubscription === currentPromise) {
+            forcedSubscription = null;
+          }
+          return null;
+        },
+      );
+      forcedSubscription = currentPromise;
+    }
+
     async function ensureSubscribed(): Promise<void> {
+      ensureForcedSubscribed();
       if (!subscriptionPromise) {
         const currentPromise = subscribeCapabilityProbeFn((event) => {
           handleEvent(event);
@@ -168,6 +283,11 @@ export function createFfmpegStore(
         activeUnlisten = null;
       }
       subscriptionPromise = null;
+      if (forcedUnlisten) {
+        forcedUnlisten();
+        forcedUnlisten = null;
+      }
+      forcedSubscription = null;
       latestRequestId++;
       awaitingRunId = false;
       pendingEvents = [];

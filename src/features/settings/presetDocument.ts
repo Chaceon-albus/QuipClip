@@ -1,7 +1,7 @@
 /**
  * Pure document operations for the export preset library.
  *
- * The settings dialog has no per-preset command: every change to the preset library goes to
+ * The Settings window has no per-preset command: every change to the preset library goes to
  * Rust as a whole replacement `Settings` document through `save_settings` (ADR 013). This
  * module is the algebra that builds the next document. It performs no IO and never mutates
  * its input, so the dangerous cases -- chiefly repairing `activePresetId` after a delete --

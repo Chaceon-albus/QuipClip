@@ -89,6 +89,12 @@ export interface ThemePreferenceState {
    * ignored.
    */
   readonly setPreference: (preference: ThemePreference) => void;
+  /**
+   * Applies a preference that another window stored (`preferenceSync.ts`). It does not write
+   * storage: the other window wrote it, and a read of storage here can still return the old
+   * value. A value that is not a preference is ignored.
+   */
+  readonly adoptPreference: (preference: ThemePreference) => void;
 }
 
 export interface ThemePreferenceStoreOptions {
@@ -111,6 +117,11 @@ export function createThemePreferenceStore(
       }
       writeStoredThemePreference(preference, storage);
       if (get().preference !== preference) {
+        set({ preference });
+      }
+    },
+    adoptPreference: (preference: ThemePreference) => {
+      if (isThemePreference(preference) && get().preference !== preference) {
         set({ preference });
       }
     },

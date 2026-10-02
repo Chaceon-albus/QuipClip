@@ -1,7 +1,7 @@
 /**
- * Pure presenter for translating a settings error into an i18next key for the settings dialog.
+ * Pure presenter for translating a settings error into an i18next key for the Settings window.
  *
- * `SettingsDialog.tsx` used to build the translation key inline with a template literal and a
+ * The Settings view used to build the translation key inline with a template literal and a
  * cast (`` (t as (key: string) => string)(`settingsError.${error.code}`) ``), an untestable
  * transformation of store output embedded in a `.tsx` file that this repository cannot
  * render-test. This module isolates that transformation as a pure function, following the same

@@ -15,11 +15,17 @@
 //!
 //! # The command items
 //!
-//! A command item is an ordinary item. It sends [`MENU_ACTION_EVENT`] with the name of its
-//! action, and Rust decides nothing else. The frontend runs that action with the conditions of
-//! the window keyboard layer (ADR 026), and it does nothing while a dialog or a menu of the
-//! page is open. The items stay enabled, as the Quit item does, because only the frontend knows
-//! whether the action can run.
+//! A command item is an ordinary item. Open Media and Export bring the main window forward
+//! and send it [`MENU_ACTION_EVENT`] with the name of their action, and Rust decides nothing
+//! else. The frontend runs that action with the conditions of the window keyboard layer (ADR
+//! 026), and it does nothing while a dialog or a menu of the page is open. The items stay
+//! enabled, as the Quit item does, because only the frontend knows whether the action can run.
+//! The main window comes forward first, because the items also work while the Settings window
+//! has the focus, and the action runs in the main window.
+//!
+//! The Settings item opens the Settings window itself, or brings it forward
+//! (`commands::settings_window`). That window is independent of the main window, so a dialog
+//! of the main window does not stop it from opening, and the item needs no frontend.
 //!
 //! Each item carries the accelerator of its row in the key table of ADR 026. The key press
 //! goes to the page first. `WKWebView` takes every key equivalent while it is the first
@@ -42,7 +48,7 @@ use tauri::menu::{
     AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
     WINDOW_SUBMENU_ID,
 };
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// The identifier of the Quit item. [`handle_menu_event`] matches events on it.
 const QUIT_MENU_ITEM_ID: &str = "quipclip.quit";
@@ -51,13 +57,23 @@ const QUIT_MENU_ITEM_ID: &str = "quipclip.quit";
 const QUIT_ACCELERATOR: &str = "CmdOrCtrl+Q";
 
 /// The event that a command item sends to the frontend. Its payload is the name of the action,
-/// one of the `action` values of [`COMMAND_ITEMS`].
+/// one of the [`MenuAction::Frontend`] values of [`COMMAND_ITEMS`].
 ///
 /// `src/lib/ipc.ts` holds the same name in `BACKEND_EVENTS.MENU_ACTION`, and
 /// `src/lib/ipc.test.ts` reads this line to compare the two.
 pub const MENU_ACTION_EVENT: &str = "app:menu-action";
 
-/// One menu item that runs a command of the frontend.
+/// What a command item does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    /// Opens the Settings window, or brings it forward, in Rust.
+    OpenSettingsWindow,
+    /// Sends [`MENU_ACTION_EVENT`] to the main window with this action name. It is the name of
+    /// the action in `src/components/layout/shortcutBindings.ts`.
+    Frontend(&'static str),
+}
+
+/// One menu item that runs a command of the application.
 struct CommandItem {
     /// The identifier of the item. [`handle_menu_event`] matches events on it.
     id: &'static str,
@@ -66,9 +82,7 @@ struct CommandItem {
     label: &'static str,
     /// The accelerator. It is the key of the same action in the key table of ADR 026.
     accelerator: &'static str,
-    /// The name of the action in the payload of [`MENU_ACTION_EVENT`]. It is the name of the
-    /// action in `src/components/layout/shortcutBindings.ts`.
-    action: &'static str,
+    action: MenuAction,
 }
 
 /// Settings, in the application submenu.
@@ -76,7 +90,7 @@ const SETTINGS_ITEM: CommandItem = CommandItem {
     id: "quipclip.settings",
     label: "Settings…",
     accelerator: "CmdOrCtrl+,",
-    action: "openSettings",
+    action: MenuAction::OpenSettingsWindow,
 };
 
 /// Open Media, in the File submenu.
@@ -84,7 +98,7 @@ const OPEN_MEDIA_ITEM: CommandItem = CommandItem {
     id: "quipclip.open-media",
     label: "Open Media…",
     accelerator: "CmdOrCtrl+O",
-    action: "openMedia",
+    action: MenuAction::Frontend("openMedia"),
 };
 
 /// Export, in the File submenu.
@@ -92,7 +106,7 @@ const EXPORT_ITEM: CommandItem = CommandItem {
     id: "quipclip.export",
     label: "Export…",
     accelerator: "CmdOrCtrl+E",
-    action: "export",
+    action: MenuAction::Frontend("export"),
 };
 
 /// Every command item. [`menu_action_for`] reads this list.
@@ -222,8 +236,9 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
     )
 }
 
-/// Answers a menu event. The Quit item asks for an exit, which raises `ExitRequested`. A
-/// command item sends [`MENU_ACTION_EVENT`] with the name of its action.
+/// Answers a menu event. The Quit item asks for an exit, which raises `ExitRequested`. The
+/// Settings item opens the Settings window. Every other command item brings the main window
+/// forward and sends it [`MENU_ACTION_EVENT`] with the name of its action.
 ///
 /// A click and a key equivalent raise the same event, so this function cannot tell them apart.
 /// It does not need to, because the frontend applies the same conditions to both.
@@ -233,13 +248,24 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
         app.exit(0);
         return;
     }
-    if let Some(action) = menu_action_for(id) {
-        // The event goes to the main window only, because its frontend runs the commands. An
-        // event that cannot be sent loses one click or one key press. The user can do it
-        // again, so the failure goes to the log only.
-        if let Err(error) = app.emit_to(crate::MAIN_WINDOW_LABEL, MENU_ACTION_EVENT, action) {
-            eprintln!("menu: the {action} action was not sent: {error}");
+    match menu_action_for(id) {
+        Some(MenuAction::OpenSettingsWindow) => {
+            crate::commands::settings_window::open_from_menu(app);
         }
+        Some(MenuAction::Frontend(action)) => {
+            // Best effort: an action that runs behind the Settings window still runs.
+            if let Some(main) = app.get_webview_window(crate::MAIN_WINDOW_LABEL) {
+                let _ = main.unminimize();
+                let _ = main.set_focus();
+            }
+            // The event goes to the main window only, because its frontend runs the
+            // commands. An event that cannot be sent loses one click or one key press. The
+            // user can do it again, so the failure goes to the log only.
+            if let Err(error) = app.emit_to(crate::MAIN_WINDOW_LABEL, MENU_ACTION_EVENT, action) {
+                eprintln!("menu: the {action} action was not sent: {error}");
+            }
+        }
+        None => {}
     }
 }
 
@@ -248,8 +274,8 @@ fn is_quit_item(id: &str) -> bool {
     id == QUIT_MENU_ITEM_ID
 }
 
-/// The action name of the command item with this identifier, or `None` for every other item.
-fn menu_action_for(id: &str) -> Option<&'static str> {
+/// The action of the command item with this identifier, or `None` for every other item.
+fn menu_action_for(id: &str) -> Option<MenuAction> {
     COMMAND_ITEMS
         .iter()
         .find(|item| item.id == id)
@@ -279,9 +305,24 @@ mod tests {
     fn each_command_item_sends_the_action_of_its_key() {
         // The names are the actions of the key table in `shortcutBindings.ts`, so the frontend
         // runs the same command for the item as for the key.
-        assert_eq!(menu_action_for(OPEN_MEDIA_ITEM.id), Some("openMedia"));
-        assert_eq!(menu_action_for(EXPORT_ITEM.id), Some("export"));
-        assert_eq!(menu_action_for(SETTINGS_ITEM.id), Some("openSettings"));
+        assert_eq!(
+            menu_action_for(OPEN_MEDIA_ITEM.id),
+            Some(MenuAction::Frontend("openMedia"))
+        );
+        assert_eq!(
+            menu_action_for(EXPORT_ITEM.id),
+            Some(MenuAction::Frontend("export"))
+        );
+    }
+
+    #[test]
+    fn the_settings_item_opens_the_settings_window_and_sends_nothing() {
+        // The frontend opens no Settings window for a menu event, so an `openSettings` action
+        // would reach no handler.
+        assert_eq!(
+            menu_action_for(SETTINGS_ITEM.id),
+            Some(MenuAction::OpenSettingsWindow)
+        );
     }
 
     #[test]

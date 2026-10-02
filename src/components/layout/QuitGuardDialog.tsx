@@ -33,8 +33,9 @@ const handleOpenChange = (open: boolean) => {
  * (ADR 027). Mount it once, in the application shell.
  *
  * Cancel takes the focus when the dialog opens, so Enter never confirms by accident. The
- * dialog opens above any other dialog, such as the settings dialog with an unsaved preset
- * draft, and Cancel returns to that dialog with no change.
+ * dialog opens above any other dialog, such as the export dialog, and Cancel returns to that
+ * dialog with no change. An unsaved preset draft is in the Settings window, which stays as it
+ * is.
  */
 export function QuitGuardDialog() {
   const { t } = useTranslation();

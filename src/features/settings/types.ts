@@ -271,6 +271,13 @@ export type SettingsActions = {
    */
   resetSettings: () => Promise<Settings | null>;
   /**
+   * Takes a document that another window wrote (`settings:changed`). A document that is not
+   * newer than the last confirmed one changes nothing. A newer one becomes the confirmed
+   * document, and it shows at once unless a request of this store is in flight, which then
+   * shows it when it settles.
+   */
+  adoptExternal: (settings: Settings) => void;
+  /**
    * Reports an error to the settings store.
    */
   reportError: (error: unknown) => void;

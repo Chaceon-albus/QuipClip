@@ -7,6 +7,7 @@ import {
   type ExportStart,
 } from "@/features/export";
 import type { ImportMediaResult } from "@/features/media";
+import { settingsWindowDraftStore } from "@/features/settings/settingsWindowDraft";
 import type { Pts, Segment } from "@/types/project";
 import { decideQuit, type QuitGuardInput } from "./quitGuard";
 import {
@@ -97,6 +98,19 @@ describe("requestQuit", () => {
         unsavedPreset: "Archive",
       },
     });
+  });
+
+  // A quit can start while the Settings window has the focus, for example from Cmd+Q.
+  it("brings the main window forward when the quit prompt opens, and only then", () => {
+    const focusWindow = vi.fn();
+    const asking = setup(WITH_SEGMENTS, { focusWindow });
+    asking.guard.requestQuit();
+    expect(focusWindow).toHaveBeenCalledTimes(1);
+
+    const quiet = vi.fn();
+    const quitting = setup(createInput(), { focusWindow: quiet });
+    quitting.guard.requestQuit();
+    expect(quiet).not.toHaveBeenCalled();
   });
 
   it("does not replace an open quit prompt on a second request", () => {
@@ -445,5 +459,17 @@ describe("readQuitGuardInput", () => {
       exportStatus: "idle",
       exportTracking: false,
     });
+  });
+
+  it("reads the unsaved preset draft that the Settings window reported", () => {
+    settingsWindowDraftStore.setState({ unsavedPresetName: "Web 1080p" });
+    try {
+      const input = readQuitGuardInput();
+      expect(input.unsavedPresetName).toBe("Web 1080p");
+      expect(decideQuit(input).loss.unsavedPreset).toBe("Web 1080p");
+    } finally {
+      settingsWindowDraftStore.setState({ unsavedPresetName: null });
+    }
+    expect(readQuitGuardInput().unsavedPresetName).toBeNull();
   });
 });

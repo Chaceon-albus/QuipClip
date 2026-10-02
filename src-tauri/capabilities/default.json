@@ -13,7 +13,19 @@
     "core:window:allow-request-user-attention",
     "core:window:allow-set-title",
     "core:window:allow-set-theme",
+    "core:window:allow-set-focus",
     "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "allow-start-capability-probe",
+    "allow-start-export",
+    "allow-cancel-export",
+    "allow-cancel-active-export",
+    "allow-reveal-export-output",
+    "allow-import-media",
+    "allow-read-source-revision",
+    "allow-confirm-quit",
+    "allow-load-settings",
+    "allow-save-settings",
+    "allow-open-settings-window"
   ]
 }

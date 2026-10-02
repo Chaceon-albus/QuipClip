@@ -9,12 +9,18 @@
  *
  * The prompt is in a store, so the one dialog in `QuitGuardDialog` shows it, and any caller
  * can raise it. The decisions themselves are the pure rules in `quitGuard.ts`.
+ *
+ * The guard runs in the main window. An unsaved preset draft lives in the Settings window,
+ * which reports its name to this window (`settingsWindowDraft.ts`). A quit can start while
+ * the Settings window has the focus, for example from `Cmd+Q`, so the quit prompt brings the
+ * main window forward first.
  */
 
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { exportStore } from "@/features/export";
 import { mediaStore, type ImportMediaResult } from "@/features/media";
-import { settingsPanelStore } from "@/features/settings/panelStore";
+import { settingsWindowDraftStore } from "@/features/settings/settingsWindowDraft";
 import { timelineStore } from "@/features/timeline";
 import { BACKEND_COMMANDS, invokeCommand } from "@/lib/ipc";
 import {
@@ -48,6 +54,11 @@ export interface QuitGuardDependencies {
   confirmQuit?: () => Promise<unknown>;
   /** Opens a video. Defaults to `importPath` of the media store. */
   importPath?: (path: string) => Promise<ImportMediaResult | null>;
+  /**
+   * Brings the main window forward when the quit prompt opens. Defaults to `setFocus` of the
+   * current Tauri window, best effort.
+   */
+  focusWindow?: () => void;
 }
 
 export interface QuitGuard {
@@ -85,7 +96,7 @@ export function readQuitGuardInput(): QuitGuardInput {
     },
     exportStatus: exportState.status,
     exportTracking: exportState.tracking,
-    unsavedPresetName: settingsPanelStore.getState().unsavedPresetName,
+    unsavedPresetName: settingsWindowDraftStore.getState().unsavedPresetName,
     openMediaPath: mediaStore.getState().media?.path ?? null,
   };
 }
@@ -94,12 +105,27 @@ async function invokeConfirmQuit(): Promise<unknown> {
   return await invokeCommand<unknown>(BACKEND_COMMANDS.CONFIRM_QUIT);
 }
 
+/**
+ * Gives the focus to the current window. A window that does not come forward still shows the
+ * prompt, so a failure, and the missing Tauri shell of a test, change nothing.
+ */
+function focusCurrentWindow(): void {
+  try {
+    void getCurrentWindow()
+      .setFocus()
+      .catch(() => {});
+  } catch {
+    // No Tauri window exists.
+  }
+}
+
 export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitGuard {
   const readInput = dependencies.readInput ?? readQuitGuardInput;
   const confirmQuit = dependencies.confirmQuit ?? invokeConfirmQuit;
   const importPath =
     dependencies.importPath ??
     ((path: string) => mediaStore.getState().importPath(path));
+  const focusWindow = dependencies.focusWindow ?? focusCurrentWindow;
 
   const store = createStore<QuitGuardState>()(() => ({ prompt: null }));
 
@@ -144,6 +170,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         return;
       }
       store.setState({ prompt: { kind: "quit", loss: decision.loss } });
+      focusWindow();
     },
 
     requestOpen: (path: string) => {

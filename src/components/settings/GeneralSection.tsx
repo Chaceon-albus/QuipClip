@@ -9,19 +9,24 @@ import {
 } from "@/components/ui/select";
 import { createLanguageMenuController } from "@/components/layout/languageMenuController";
 import {
-  themePreferenceStore,
-  useThemePreference,
-} from "@/features/settings/themePreference";
+  broadcastLanguagePreference,
+  changeThemePreference,
+  changeTimecodeFormat,
+} from "@/features/settings/preferenceSync";
+import { useThemePreference } from "@/features/settings/themePreference";
 import {
   isTimecodeFormat,
-  timecodePreferenceStore,
   useTimecodePreference,
 } from "@/features/settings/timecodePreference";
-import { getLanguagePreference, type LanguagePreference } from "@/i18n";
+import {
+  getLanguagePreference,
+  setLanguagePreference,
+  type LanguagePreference,
+} from "@/i18n";
 import { isThemePreference } from "@/lib/theme";
 
 /**
- * The General tab of the settings dialog. It holds the settings that belong to the
+ * The General tab of the Settings window. It holds the settings that belong to the
  * application as a whole. Each setting is one field component, so a later setting adds a
  * field and does not touch the wiring of the others.
  */
@@ -38,7 +43,8 @@ export function GeneralSection() {
 /**
  * The interface language (ADR 011). The language lives in web view storage, not in the
  * settings file, so this field does not read the settings store and a damaged settings file
- * does not disable it.
+ * does not disable it. A change that applied here goes to the other windows too
+ * (`preferenceSync.ts`).
  */
 function LanguageField() {
   const { t, i18n } = useTranslation();
@@ -53,6 +59,10 @@ function LanguageField() {
         instance: i18n,
         initialPreference: getLanguagePreference(),
         onPreferenceChange: setPreference,
+        applyPreference: async (next) => {
+          await setLanguagePreference(next, { instance: i18n });
+          broadcastLanguagePreference(next);
+        },
       }),
     [i18n],
   );
@@ -93,11 +103,10 @@ function LanguageField() {
   );
 }
 
-const { setPreference: setThemePreference } = themePreferenceStore.getState();
-
 /**
  * The colour theme. Like the language, it lives in web view storage and not in the settings
- * file. A change applies at once: `main.tsx` connects the store to the document root.
+ * file. A change applies at once: `main.tsx` connects the store to the document root. It goes
+ * to the other windows too (`preferenceSync.ts`).
  */
 function AppearanceField() {
   const { t } = useTranslation();
@@ -106,7 +115,7 @@ function AppearanceField() {
 
   const handlePreferenceChange = (value: string) => {
     if (isThemePreference(value)) {
-      setThemePreference(value);
+      changeThemePreference(value);
     }
   };
 
@@ -129,11 +138,10 @@ function AppearanceField() {
   );
 }
 
-const { setFormat: setTimecodeFormat } = timecodePreferenceStore.getState();
-
 /**
  * The timecode format (ADR 028). Like the language, it lives in web view storage and not in
- * the settings file. A change applies at once to every timecode that reads the preference.
+ * the settings file. A change applies at once to every timecode that reads the preference, in
+ * every window (`preferenceSync.ts`).
  */
 function TimecodeField() {
   const { t } = useTranslation();
@@ -143,7 +151,7 @@ function TimecodeField() {
 
   const handleFormatChange = (value: string) => {
     if (isTimecodeFormat(value)) {
-      setTimecodeFormat(value);
+      changeTimecodeFormat(value);
     }
   };
 

@@ -368,7 +368,7 @@ describe("presentExportErrorRecovery", () => {
     );
   });
 
-  it("opens a settings section that the settings dialog has", () => {
+  it("opens a settings section that the Settings window has", () => {
     for (const code of EXPORT_ERROR_CODES) {
       const recovery = presentExportErrorRecovery(new ExportError({ code }));
       if (recovery?.kind === "openSettings") {

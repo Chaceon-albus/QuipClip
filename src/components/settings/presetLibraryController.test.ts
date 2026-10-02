@@ -637,7 +637,7 @@ describe("PresetLibraryController", () => {
     });
   });
 
-  // The settings dialog closes, and the preset library switches presets, only when this
+  // The Settings window closes, and the preset library switches presets, only when this
   // resolves true. A true result must therefore mean that no edit is left unsaved.
   describe("saveDraftBeforeLeaving", () => {
     it("resolves true and clears dirty when the save succeeds", async () => {

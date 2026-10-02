@@ -8,7 +8,26 @@
  * - Optimistic save with rollback to last confirmed document on failure.
  * - Compare-and-swap revision re-based onto the last confirmed document at send time, and one
  *   re-read after a `settingsConflict` so the session is not left on a spent revision.
+ * - Adoption of a document that another window wrote (`adoptExternal`), with a re-base floor
+ *   so that an edit built before that write is refused as a conflict and never overwrites it.
  * - public serializable store state with closure-held queue and counters.
+ *
+ * # Two windows
+ *
+ * The main window and the Settings window each run this store, and each one writes the same
+ * file. Rust sends every stored document to both (`settings:changed`), and the window that did
+ * not write it calls `adoptExternal`. A document whose revision is not above the last
+ * confirmed one is old news and changes nothing, so an event that arrives late, or twice, is
+ * harmless. The revisions are compared as numbers: the u32 counter of ADR 013 wraps only after
+ * four billion saves.
+ *
+ * The re-base at send time exists for this window's own writes that overlap, and it must not
+ * reach past a write of the other window. A save of a document built on revision 5, sent after
+ * this store took revision 6 from the other window, would otherwise go out as revision 6 and
+ * replace the other window's write with no conflict. So the store keeps a floor: the revision
+ * of the newest document that it took from outside its own writes, by an adoption or by a
+ * read. A document built below the floor goes out with its own revision, and Rust refuses it
+ * with `settingsConflict`, which re-reads the file as any conflict does.
  */
 
 import { useStore } from "zustand";
@@ -65,8 +84,78 @@ export function createSettingsStore(
   let latestRequestId = 0;
   let writeQueue: Promise<unknown> = Promise.resolve();
   let lastConfirmedSettings: Settings | null = initialState?.settings ?? null;
+  // The requests in the queue that have not settled: loads, re-reads and writes. While one is
+  // pending, an adopted document waits for it, because the request publishes a document when
+  // it settles and that document would replace the adopted one.
+  let pendingRequests = 0;
+  // The re-base floor (see the module comment), or null before the store took any document
+  // from outside its own writes.
+  let rebaseFloor: number | null = null;
+  // Counts the adopted documents, so that a request can tell whether an adoption happened
+  // while it was in flight.
+  let adoptions = 0;
+  // An adopted document that waits for the pending requests, or null.
+  let deferredAdoption: Settings | null = null;
 
-  return createStore<SettingsStoreState>()((set) => {
+  // A document that a read returned. It moves the floor when it is not the document this
+  // store already held, because the file then changed without a write of this window.
+  const noteRead = (settings: Settings): void => {
+    if (
+      lastConfirmedSettings === null ||
+      lastConfirmedSettings.revision !== settings.revision
+    ) {
+      rebaseFloor = settings.revision;
+    }
+  };
+
+  // The document that a request publishes when it succeeds: the document it read or wrote,
+  // except when the store adopted a newer document while the request was in flight. A read
+  // then reports the file from before the other window's write, and the result of a write and
+  // the event of the other window arrive in no fixed order.
+  const newestSince = (document: Settings, adoptionsAtStart: number): Settings =>
+    adoptions !== adoptionsAtStart &&
+    lastConfirmedSettings !== null &&
+    lastConfirmedSettings.revision > document.revision
+      ? lastConfirmedSettings
+      : document;
+
+  return createStore<SettingsStoreState>()((set, get) => {
+    // Shows an adopted document. A failed write keeps its error: the message describes an
+    // edit of this window that did not reach the disk. A failed load has no document, and the
+    // adopted document replaces its error, because the file is readable again.
+    const publishAdopted = (next: Settings): void => {
+      const state = get();
+      if (state.status === "error" && state.settings !== null) {
+        set({ settings: next, seeded: false });
+        return;
+      }
+      set({ status: "ready", settings: next, seeded: false, error: null });
+    };
+
+    // Queues a request behind every earlier one, and counts it as pending until it settles.
+    // When the last pending request settles, an adopted document that no request showed
+    // shows now. A request that a newer request or `reset` superseded publishes nothing.
+    const enqueue = <T>(run: () => Promise<T>): Promise<T> => {
+      pendingRequests++;
+      const settle = async (): Promise<T> => {
+        try {
+          return await run();
+        } finally {
+          pendingRequests--;
+          const waiting = deferredAdoption;
+          if (pendingRequests === 0 && waiting !== null) {
+            deferredAdoption = null;
+            if (lastConfirmedSettings === waiting && get().settings !== waiting) {
+              publishAdopted(waiting);
+            }
+          }
+        }
+      };
+      const task = writeQueue.then(settle, settle);
+      writeQueue = task.catch(() => {});
+      return task;
+    };
+
     // A `settingsConflict` leaves `lastConfirmedSettings` holding a revision the file has
     // moved past, so every later write in the session would rebuild from it and be refused
     // again. This queues one re-read to put the session back on the document the other writer
@@ -81,6 +170,7 @@ export function createSettingsStore(
         return;
       }
 
+      const adoptionsAtStart = adoptions;
       const runRebase = async (): Promise<void> => {
         try {
           const result = validateLoadSettingsResult(await loadSettingsFn());
@@ -92,11 +182,13 @@ export function createSettingsStore(
             return;
           }
 
-          lastConfirmedSettings = result.settings;
+          const newest = newestSince(result.settings, adoptionsAtStart);
+          noteRead(newest);
+          lastConfirmedSettings = newest;
           set({
             status: "error",
-            settings: result.settings,
-            seeded: result.seeded,
+            settings: newest,
+            seeded: newest === result.settings ? result.seeded : false,
             error,
           });
         } catch {
@@ -105,11 +197,12 @@ export function createSettingsStore(
         }
       };
 
-      writeQueue = writeQueue.then(runRebase, runRebase).catch(() => {});
+      void enqueue(runRebase);
     };
 
     const load = async (): Promise<LoadSettingsResult | null> => {
       const requestId = ++latestRequestId;
+      const adoptionsAtStart = adoptions;
       set({
         status: "loading",
         error: null,
@@ -124,15 +217,19 @@ export function createSettingsStore(
             return null;
           }
 
-          lastConfirmedSettings = result.settings;
+          const newest = newestSince(result.settings, adoptionsAtStart);
+          const published: LoadSettingsResult =
+            newest === result.settings ? result : { settings: newest, seeded: false };
+          noteRead(newest);
+          lastConfirmedSettings = newest;
           set({
             status: "ready",
-            settings: result.settings,
-            seeded: result.seeded,
+            settings: published.settings,
+            seeded: published.seeded,
             error: null,
           });
 
-          return result;
+          return published;
         } catch (err) {
           const normalized = normalizeSettingsError(err);
 
@@ -140,10 +237,13 @@ export function createSettingsStore(
             return null;
           }
 
-          lastConfirmedSettings = null;
+          // A document that another window wrote while this read was in flight stays: Rust
+          // read the file without fault to write it. The error still shows.
+          const kept = adoptions !== adoptionsAtStart ? lastConfirmedSettings : null;
+          lastConfirmedSettings = kept;
           set({
             status: "error",
-            settings: null,
+            settings: kept,
             error: normalized,
           });
 
@@ -151,9 +251,7 @@ export function createSettingsStore(
         }
       };
 
-      const task = writeQueue.then(runLoad, runLoad);
-      writeQueue = task.catch(() => {});
-      return task;
+      return enqueue(runLoad);
     };
 
     const save = async (next: Settings): Promise<Settings | null> => {
@@ -176,6 +274,7 @@ export function createSettingsStore(
       }
 
       const requestId = ++latestRequestId;
+      const adoptionsAtStart = adoptions;
 
       // Optimistically update store state immediately
       set({
@@ -194,10 +293,15 @@ export function createSettingsStore(
           // write. The queue serializes writes, so by the time this runs
           // `lastConfirmedSettings` holds the revision the file really has. A genuine
           // cross-process conflict still fails, which is the whole point of the token.
+          //
+          // A document built below the re-base floor predates a write that this window did
+          // not make, so it goes out with its own revision and Rust refuses it. A re-base
+          // there would replace the other write with no conflict.
+          const confirmed = lastConfirmedSettings;
           const payload =
-            lastConfirmedSettings === null
-              ? next
-              : { ...next, revision: lastConfirmedSettings.revision };
+            confirmed !== null && (rebaseFloor === null || next.revision >= rebaseFloor)
+              ? { ...next, revision: confirmed.revision }
+              : next;
 
           // `saved`, not `payload`. Rust bumps `revision` -- the ADR 013 compare-and-swap
           // token -- inside the document it returns, so adopting the return value is what
@@ -206,12 +310,13 @@ export function createSettingsStore(
           // and the next save would be refused.
           const saved = await saveSettingsFn(payload);
           const validated = validateSettings(saved);
-          lastConfirmedSettings = validated;
+          const newest = newestSince(validated, adoptionsAtStart);
+          lastConfirmedSettings = newest;
 
           if (requestId === latestRequestId) {
             set({
               status: "ready",
-              settings: validated,
+              settings: newest,
               seeded: false,
               error: null,
             });
@@ -237,13 +342,12 @@ export function createSettingsStore(
       };
 
       // Chain onto writeQueue so writes never fire concurrently
-      const task = writeQueue.then(runWrite, runWrite);
-      writeQueue = task.catch(() => {});
-      return task;
+      return enqueue(runWrite);
     };
 
     const restoreDefaults = async (): Promise<Settings | null> => {
       const requestId = ++latestRequestId;
+      const adoptionsAtStart = adoptions;
 
       set({
         status: "saving",
@@ -254,12 +358,13 @@ export function createSettingsStore(
         try {
           const restored = await restoreDefaultPresetsFn();
           const validated = validateSettings(restored);
-          lastConfirmedSettings = validated;
+          const newest = newestSince(validated, adoptionsAtStart);
+          lastConfirmedSettings = newest;
 
           if (requestId === latestRequestId) {
             set({
               status: "ready",
-              settings: validated,
+              settings: newest,
               error: null,
             });
           }
@@ -282,13 +387,12 @@ export function createSettingsStore(
         }
       };
 
-      const task = writeQueue.then(runRestore, runRestore);
-      writeQueue = task.catch(() => {});
-      return task;
+      return enqueue(runRestore);
     };
 
     const resetSettingsAction = async (): Promise<Settings | null> => {
       const requestId = ++latestRequestId;
+      const adoptionsAtStart = adoptions;
 
       set({
         status: "saving",
@@ -299,12 +403,13 @@ export function createSettingsStore(
         try {
           const resetDoc = await resetSettingsFn();
           const validated = validateSettings(resetDoc);
-          lastConfirmedSettings = validated;
+          const newest = newestSince(validated, adoptionsAtStart);
+          lastConfirmedSettings = newest;
 
           if (requestId === latestRequestId) {
             set({
               status: "ready",
-              settings: validated,
+              settings: newest,
               seeded: false,
               error: null,
             });
@@ -328,14 +433,37 @@ export function createSettingsStore(
         }
       };
 
-      const task = writeQueue.then(runReset, runReset);
-      writeQueue = task.catch(() => {});
-      return task;
+      return enqueue(runReset);
+    };
+
+    const adoptExternal = (next: Settings): void => {
+      if (!isSettings(next)) {
+        return;
+      }
+      if (
+        lastConfirmedSettings !== null &&
+        next.revision <= lastConfirmedSettings.revision
+      ) {
+        return;
+      }
+      adoptions++;
+      lastConfirmedSettings = next;
+      rebaseFloor = next.revision;
+      if (pendingRequests > 0) {
+        // The pending request publishes when it settles: the adopted document, through
+        // `newestSince` or a rollback to `lastConfirmedSettings`, or a newer document of its
+        // own. `enqueue` publishes it when no request did.
+        deferredAdoption = next;
+        return;
+      }
+      publishAdopted(next);
     };
 
     const reset = (): void => {
       latestRequestId++;
       lastConfirmedSettings = null;
+      rebaseFloor = null;
+      deferredAdoption = null;
       set({
         status: "idle",
         settings: null,
@@ -363,6 +491,7 @@ export function createSettingsStore(
       saveSettings: save,
       restoreDefaultPresets: restoreDefaults,
       resetSettings: resetSettingsAction,
+      adoptExternal,
       reportError,
       reset,
     };

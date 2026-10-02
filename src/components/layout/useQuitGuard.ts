@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { BACKEND_EVENTS, listenEvent, type UnlistenFn } from "@/lib/ipc";
+import { BACKEND_EVENTS, listenWindowEvent, type UnlistenFn } from "@/lib/ipc";
 import { quitGuard } from "./quitGuardController";
 
 /** The close request of the window, reduced to the one method the listener calls. */
@@ -32,8 +32,10 @@ export function createTauriQuitRequestSources(): QuitRequestSources | null {
   }
   return {
     onCloseRequested: (handler) => appWindow.onCloseRequested(handler),
+    // Rust sends the request to the main window alone, and only this window listens for it,
+    // so no other window can answer a quit with `confirm_quit` (ADR 027).
     onQuitRequested: (handler) =>
-      listenEvent<unknown>(BACKEND_EVENTS.QUIT_REQUESTED, () => {
+      listenWindowEvent<unknown>(BACKEND_EVENTS.QUIT_REQUESTED, () => {
         handler();
       }),
   };

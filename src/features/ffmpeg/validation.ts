@@ -14,6 +14,7 @@ import {
   type BackendCapabilityProbeErrorCode,
   type CapabilityProbeErrorCode,
   type CapabilityProbeEvent,
+  type CapabilityProbeForcedEvent,
   type CapabilityProbeStart,
   type CapabilityReport,
   type CodecKind,
@@ -333,4 +334,35 @@ export function normalizeCapabilityProbeError(error: unknown): CapabilityProbeEr
   }
 
   return new CapabilityProbeError({ code: "unknown" });
+}
+
+/**
+ * Reads a `ffmpeg:capability-probe-forced` payload, or returns null when it does not match
+ * the Rust shape: an `origin` window label, and either a valid start payload or a rejection
+ * with a code that Rust generates. The rejection becomes a `CapabilityProbeError` through
+ * `normalizeCapabilityProbeError`, as the command rejection does.
+ */
+export function validateCapabilityProbeForcedEvent(
+  value: unknown,
+): CapabilityProbeForcedEvent | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const e = value as Record<string, unknown>;
+  const origin = e.origin;
+  if (typeof origin !== "string" || origin.length === 0) {
+    return null;
+  }
+  if (e.outcome === "started" && isCapabilityProbeStart(e.start)) {
+    return { outcome: "started", origin, start: e.start };
+  }
+  if (
+    e.outcome === "failed" &&
+    typeof e.error === "object" &&
+    e.error !== null &&
+    isBackendCapabilityProbeErrorCode((e.error as Record<string, unknown>).code)
+  ) {
+    return { outcome: "failed", origin, error: normalizeCapabilityProbeError(e.error) };
+  }
+  return null;
 }

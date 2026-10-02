@@ -25,9 +25,8 @@ export type ExportErrorView = {
 /**
  * The action that the failed panel offers beside Close.
  *
- * - `openSettings`: the fix is in the settings. The export dialog closes first, and the
- *   settings dialog then opens at `section`, so the two modal dialogs are never open together.
- *   They show together only while one fades out and the other fades in.
+ * - `openSettings`: the fix is in the settings. The Settings window opens at `section`, and
+ *   the export dialog stays on the failed panel.
  * - `backToSetup`: another file name, another folder, another preset, or a second attempt
  *   can succeed. The export dialog goes back to the setup step of ADR 024.
  * - `null`: no action in the export dialog or in the settings can repair the cause, so the
@@ -46,7 +45,7 @@ const BACK_TO_SETUP = { kind: "backToSetup" } as const;
  */
 const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecovery>> = {
   // The settings file holds the presets, and Rust reads the preset of the export from it.
-  // The settings dialog shows the read error and its reset control above every tab, and
+  // The Settings window shows the read error and its reset control above every tab, and
   // the Presets tab holds what the export needs.
   settingsUnreadable: OPEN_PRESET_SETTINGS,
   presetNotFound: OPEN_PRESET_SETTINGS,

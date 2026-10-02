@@ -3,7 +3,7 @@ import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
 import { exportPanelStore } from "@/features/export";
 import { mediaStore, openMediaFileDialog } from "@/features/media";
 import { playbackStore } from "@/features/playback";
-import { settingsPanelStore } from "@/features/settings/panelStore";
+import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { timelineStore, timelineViewportStore } from "@/features/timeline";
 import { i18n } from "@/i18n";
 import { runExportFlow } from "./exportFlowController";
@@ -117,8 +117,9 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       });
       return;
     case "openSettings":
-      // The call of the settings button of the status bar.
-      settingsPanelStore.getState().show();
+      // The call of the settings button of the status bar. The Settings window is a window
+      // of its own, and Rust opens it or brings it forward.
+      void openSettingsWindow();
       return;
     case "zoomIn":
       // The calls of the zoom buttons of the timeline. Each one anchors on the playhead when

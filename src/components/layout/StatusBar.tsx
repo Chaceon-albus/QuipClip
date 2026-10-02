@@ -12,7 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useFfmpegStore } from "@/features/ffmpeg";
 import { useMediaStore } from "@/features/media";
 import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
-import { useSettingsPanelStore } from "@/features/settings/panelStore";
+import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { getResolvedLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { presentFfmpegStatus, selectFfmpegState } from "./ffmpegStatusPresenter";
@@ -31,8 +31,6 @@ const itemSeparatorClass = "h-4 bg-border data-vertical:self-center";
 export function StatusBar() {
   const { t, i18n } = useTranslation();
   const media = useMediaStore((state) => state.media);
-  const settingsOpen = useSettingsPanelStore((state) => state.open);
-  const showSettings = useSettingsPanelStore((state) => state.show);
   // The key name comes from the binding table (ADR 026).
   const shortcutOf = useShortcutLabels();
   const settingsShortcut = shortcutOf("openSettings");
@@ -222,18 +220,17 @@ export function StatusBar() {
          */}
         <Tooltip>
           <TooltipTrigger asChild>
-            {/* No aria-expanded: the gear carries the open state of the shared dialog, and
-                two controls that report one dialog as expanded contradict each other. */}
+            {/* No `aria-haspopup`: Settings is a window of its own, not a popup of this
+                page. */}
             <button
               type="button"
-              aria-haspopup="dialog"
               className={statusBarItem({
                 tone: ffmpegWarning ? "warning" : "neutral",
                 interactive: true,
               })}
               data-tone={statusView.tone}
               onClick={() => {
-                showSettings("ffmpeg");
+                void openSettingsWindow("ffmpeg");
               }}
             >
               {ffmpegWarning ? (
@@ -280,13 +277,13 @@ export function StatusBar() {
         {/*
          * Status bar sizing rule: a standalone icon button is a 24px box with a 16px glyph,
          * and an icon inline with text is 14px. The 24px controls fit the 28px bar without
-         * making it taller. The chrome variant gives hover and the open dialog the chrome
-         * accent in both themes, like the export indicator next to this button, and an inset
-         * focus ring, because the bar sits against the window edge.
+         * making it taller. The chrome variant gives hover the chrome accent in both themes,
+         * like the export indicator next to this button, and an inset focus ring, because the
+         * bar sits against the window edge.
          *
-         * The button opens the settings dialog directly. The dialog is mounted in AppShell,
-         * so this button is not a Radix DialogTrigger and sets the two attributes that a
-         * DialogTrigger would set.
+         * The button opens the Settings window, or brings it forward. The window is not a
+         * popup of this page, so the button sets neither `aria-haspopup` nor
+         * `aria-expanded`.
          */}
         <Tooltip>
           <TooltipTrigger asChild>
@@ -295,11 +292,9 @@ export function StatusBar() {
               size="icon-xs"
               className="window-inactive:text-muted-foreground-inactive"
               aria-label={t("statusBar.settings")}
-              aria-haspopup="dialog"
-              aria-expanded={settingsOpen}
               aria-keyshortcuts={settingsShortcut?.aria}
               onClick={() => {
-                showSettings();
+                void openSettingsWindow();
               }}
             >
               <Settings className="size-4" strokeWidth={1.75} />

@@ -6,9 +6,9 @@
  * `decidePresetListKey` says what to do with it. The rules have no DOM and no React, so the
  * tests need no document.
  *
- * The window keyboard layer (ADR 021, ADR 026) does not act on these keys. It does nothing
- * while a modal dialog is open, and the list is inside the settings dialog. It also does
- * nothing for a target inside a `listbox` or an `option`.
+ * The window keyboard layer (ADR 021, ADR 026) does not act on these keys. It runs in the
+ * main window only, and the list is in the Settings window. It also does nothing for a target
+ * inside a `listbox` or an `option`.
  */
 
 /** The fields of a key press that the rules read. `KeyboardEvent` satisfies it. */

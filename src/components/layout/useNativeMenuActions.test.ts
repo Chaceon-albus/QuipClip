@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { open as tauriOpen } from "@tauri-apps/plugin-dialog";
 import { exportPanelStore } from "@/features/export";
 import { openMediaFileDialog } from "@/features/media";
-import { settingsPanelStore } from "@/features/settings/panelStore";
 import type { UnlistenFn } from "@/lib/ipc";
 import { nativeContextMenuState } from "./nativeContextMenuState";
 import {
@@ -9,6 +9,12 @@ import {
   startNativeMenuActionListener,
   type NativeMenuSubscribe,
 } from "./useNativeMenuActions";
+
+// The Open Media item opens the native file dialog. The fake answers with no file, so the
+// call shows that the item ran and imports nothing.
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn().mockResolvedValue(null),
+}));
 
 /** A subscription whose promise the test settles, so a test can order it after a release. */
 function createSubscription() {
@@ -99,14 +105,17 @@ describe("startNativeMenuActionListener", () => {
 });
 
 describe("runNativeMenuAction", () => {
-  afterEach(() => {
-    settingsPanelStore.getState().hide();
+  afterEach(async () => {
+    // Lets each Open Media dialog that a test opened answer, so no dialog stays open for the
+    // next test.
+    await flushPromises();
+    vi.mocked(tauriOpen).mockClear();
     exportPanelStore.getState().setOpen(false);
   });
 
-  it("opens Settings from the Settings item", () => {
-    runNativeMenuAction("openSettings");
-    expect(settingsPanelStore.getState().open).toBe(true);
+  it("opens the Open Media dialog from the Open Media item", () => {
+    runNativeMenuAction("openMedia");
+    expect(tauriOpen).toHaveBeenCalledTimes(1);
   });
 
   it("does not export while no media is open, as the Export button does not", () => {
@@ -117,20 +126,23 @@ describe("runNativeMenuAction", () => {
   it("ignores a payload that names no command item", () => {
     runNativeMenuAction("markIn");
     runNativeMenuAction(undefined);
-    expect(settingsPanelStore.getState().open).toBe(false);
+    // The Settings item opens its window in Rust, so this action is not a menu event.
+    runNativeMenuAction("openSettings");
+    expect(tauriOpen).not.toHaveBeenCalled();
+    expect(exportPanelStore.getState().open).toBe(false);
   });
 
   it("does nothing while a native context menu of the page is open", () => {
     // The menu of a timeline segment marks itself open from the right-click until it closes.
     const mark = nativeContextMenuState.open();
     try {
-      runNativeMenuAction("openSettings");
-      expect(settingsPanelStore.getState().open).toBe(false);
+      runNativeMenuAction("openMedia");
+      expect(tauriOpen).not.toHaveBeenCalled();
     } finally {
       mark.close();
     }
-    runNativeMenuAction("openSettings");
-    expect(settingsPanelStore.getState().open).toBe(true);
+    runNativeMenuAction("openMedia");
+    expect(tauriOpen).toHaveBeenCalledTimes(1);
   });
 
   it("does nothing while the native Open Media dialog is open", async () => {
@@ -143,12 +155,12 @@ describe("runNativeMenuAction", () => {
       openDialog: vi.fn().mockReturnValue(dialog),
     });
 
-    runNativeMenuAction("openSettings");
-    expect(settingsPanelStore.getState().open).toBe(false);
+    runNativeMenuAction("openMedia");
+    expect(tauriOpen).not.toHaveBeenCalled();
 
     close(null);
     await running;
-    runNativeMenuAction("openSettings");
-    expect(settingsPanelStore.getState().open).toBe(true);
+    runNativeMenuAction("openMedia");
+    expect(tauriOpen).toHaveBeenCalledTimes(1);
   });
 });

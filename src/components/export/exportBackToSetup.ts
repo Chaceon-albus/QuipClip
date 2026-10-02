@@ -19,10 +19,6 @@
  *    late would otherwise open the closed dialog again, or report a failure into the store
  *    that the close reset.
  *
- * The return from the settings dialog runs the same open step (`runOpenStepAgain`), because
- * the settings dialog can close a Back step before its check answered, and the file can
- * change while the settings dialog is open.
- *
  * The module has no React and no document, so the tests need neither.
  */
 
@@ -116,8 +112,7 @@ export interface OpenStepAgain {
 }
 
 /**
- * Runs the open step of ADR 024 again while the dialog shows the setup step: after Back, and
- * when the dialog opens again after the settings dialog (`exportSettingsReturn.ts`).
+ * Runs the open step of ADR 024 again while the dialog shows the setup step, after Back.
  *
  * Export stays disabled until the step answers, so no export starts before the source check
  * ends, and a check that fails shows its own panel. A step that another step or a close made

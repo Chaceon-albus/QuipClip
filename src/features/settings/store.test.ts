@@ -826,6 +826,276 @@ describe("Settings Store", () => {
     });
   });
 
+  describe("A document that another window wrote", () => {
+    /** A deferred promise that the test settles. */
+    function deferred<T>() {
+      let resolve: (value: T) => void = () => undefined;
+      let reject: (error: unknown) => void = () => undefined;
+      const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      });
+      return { promise, resolve, reject };
+    }
+
+    /**
+     * A fake of the settings file with the compare-and-swap of ADR 013: a save is refused
+     * with `settingsConflict` unless it carries the revision on disk, and it stores the
+     * document at the next revision.
+     */
+    function createDisk(initial: Settings) {
+      let onDisk = initial;
+      const saveSettings = vi.fn((next: Settings) => {
+        if (next.revision !== onDisk.revision) {
+          return Promise.reject(new SettingsError({ code: "settingsConflict" }));
+        }
+        onDisk = { ...next, revision: next.revision + 1 };
+        return Promise.resolve(onDisk);
+      });
+      const loadSettings = vi.fn(() =>
+        Promise.resolve({ settings: onDisk, seeded: false }),
+      );
+      return {
+        saveSettings,
+        loadSettings,
+        read: () => onDisk,
+        // The write of the other window: the same rule, as Rust applies it to both.
+        writeFromOtherWindow: (next: Settings): Settings => {
+          onDisk = { ...next, revision: onDisk.revision + 1 };
+          return onDisk;
+        },
+      };
+    }
+
+    it("adopts a newer document and shows it at once when nothing is in flight", () => {
+      const store = createSettingsStore(
+        {},
+        { status: "ready", settings: createValidSettings({ revision: 3 }) },
+      );
+      const foreign = createValidSettings({ revision: 4, ffmpegPath: "/opt/ffmpeg" });
+
+      store.getState().adoptExternal(foreign);
+
+      expect(store.getState().settings).toEqual(foreign);
+      expect(store.getState().status).toBe("ready");
+      expect(store.getState().seeded).toBe(false);
+    });
+
+    it("ignores a document that is not newer than the confirmed one", () => {
+      const confirmed = createValidSettings({ revision: 5 });
+      const store = createSettingsStore({}, { status: "ready", settings: confirmed });
+
+      store
+        .getState()
+        .adoptExternal(createValidSettings({ revision: 5, activePresetId: undefined }));
+      store
+        .getState()
+        .adoptExternal(createValidSettings({ revision: 4, activePresetId: undefined }));
+
+      expect(store.getState().settings).toBe(confirmed);
+    });
+
+    it("ignores a document that fails validation", () => {
+      const confirmed = createValidSettings({ revision: 1 });
+      const store = createSettingsStore({}, { status: "ready", settings: confirmed });
+
+      store.getState().adoptExternal({
+        ...createValidSettings({ revision: 2 }),
+        presets: "none",
+      } as unknown as Settings);
+
+      expect(store.getState().settings).toBe(confirmed);
+    });
+
+    it("adopts into a store that never loaded, and replaces the error of a failed load", async () => {
+      const idle = createSettingsStore();
+      const foreign = createValidSettings({ revision: 2 });
+      idle.getState().adoptExternal(foreign);
+      expect(idle.getState().status).toBe("ready");
+      expect(idle.getState().settings).toEqual(foreign);
+
+      const failed = createSettingsStore({
+        loadSettings: vi
+          .fn()
+          .mockRejectedValue(new SettingsError({ code: "invalidJson" })),
+      });
+      await failed.getState().loadSettings();
+      expect(failed.getState().status).toBe("error");
+      failed.getState().adoptExternal(foreign);
+      expect(failed.getState().status).toBe("ready");
+      expect(failed.getState().error).toBeNull();
+      expect(failed.getState().settings).toEqual(foreign);
+    });
+
+    it("keeps the error of a failed write of this window", async () => {
+      const confirmed = createValidSettings({ revision: 1 });
+      const store = createSettingsStore(
+        {
+          saveSettings: vi
+            .fn()
+            .mockRejectedValue(new SettingsError({ code: "permissionDenied" })),
+        },
+        { status: "ready", settings: confirmed },
+      );
+      await store.getState().saveSettings({ ...confirmed, ffmpegPath: "/x" });
+      expect(store.getState().error?.code).toBe("permissionDenied");
+
+      const foreign = createValidSettings({ revision: 2 });
+      store.getState().adoptExternal(foreign);
+
+      expect(store.getState().settings).toEqual(foreign);
+      expect(store.getState().status).toBe("error");
+      expect(store.getState().error?.code).toBe("permissionDenied");
+    });
+
+    it("does not show an adopted document while a save is in flight, and the save settles it", async () => {
+      const confirmed = createValidSettings({ revision: 1 });
+      const pendingSave = deferred<Settings>();
+      const store = createSettingsStore(
+        { saveSettings: vi.fn().mockReturnValue(pendingSave.promise) },
+        { status: "ready", settings: confirmed },
+      );
+      const edit = { ...confirmed, ffmpegPath: "/mine" };
+      const saving = store.getState().saveSettings(edit);
+      await Promise.resolve();
+
+      const foreign = createValidSettings({ revision: 2, ffmpegPath: "/theirs" });
+      store.getState().adoptExternal(foreign);
+      // The optimistic edit stays on screen while its write is in flight.
+      expect(store.getState().status).toBe("saving");
+      expect(store.getState().settings).toEqual(edit);
+
+      // The disk moved, so Rust refuses the write, and the rollback shows the adopted
+      // document. The re-read of the conflict follows.
+      pendingSave.reject(new SettingsError({ code: "settingsConflict" }));
+      await saving;
+      expect(store.getState().settings).toEqual(foreign);
+      expect(store.getState().error?.code).toBe("settingsConflict");
+    });
+
+    it("shows an adopted document after a superseded request settles, when no request showed it", async () => {
+      const confirmed = createValidSettings({ revision: 1 });
+      const pendingLoad = deferred<LoadSettingsResult>();
+      const store = createSettingsStore(
+        { loadSettings: vi.fn().mockReturnValue(pendingLoad.promise) },
+        { status: "ready", settings: confirmed },
+      );
+      const loading = store.getState().loadSettings();
+      // `reset` supersedes the load, which then publishes nothing.
+      store.getState().reset();
+      const foreign = createValidSettings({ revision: 2 });
+      store.getState().adoptExternal(foreign);
+      expect(store.getState().settings).toBeNull();
+
+      pendingLoad.resolve(createValidLoadResult());
+      await loading;
+      expect(store.getState().settings).toEqual(foreign);
+      expect(store.getState().status).toBe("ready");
+    });
+
+    it("keeps an adopted document over a read that started before the other window wrote", async () => {
+      const confirmed = createValidSettings({ revision: 1 });
+      const pendingLoad = deferred<LoadSettingsResult>();
+      const store = createSettingsStore(
+        { loadSettings: vi.fn().mockReturnValue(pendingLoad.promise) },
+        { status: "ready", settings: confirmed },
+      );
+      const loading = store.getState().loadSettings();
+      await Promise.resolve();
+
+      const foreign = createValidSettings({ revision: 2, ffmpegPath: "/theirs" });
+      store.getState().adoptExternal(foreign);
+      // The read answers with the file as it was before the other window wrote.
+      pendingLoad.resolve({ settings: confirmed, seeded: false });
+      await loading;
+
+      expect(store.getState().settings).toEqual(foreign);
+      expect(store.getState().status).toBe("ready");
+    });
+
+    it("keeps an adopted document that is newer than the result of a write in flight", async () => {
+      // The other window took this window's write, wrote again, and its event arrived before
+      // the result of this window's write.
+      const confirmed = createValidSettings({ revision: 1 });
+      const pendingRestore = deferred<Settings>();
+      const store = createSettingsStore(
+        { restoreDefaultPresets: vi.fn().mockReturnValue(pendingRestore.promise) },
+        { status: "ready", settings: confirmed },
+      );
+      const restoring = store.getState().restoreDefaultPresets();
+      await Promise.resolve();
+
+      const foreign = createValidSettings({ revision: 3, ffmpegPath: "/theirs" });
+      store.getState().adoptExternal(foreign);
+      pendingRestore.resolve(createValidSettings({ revision: 2 }));
+      await restoring;
+
+      expect(store.getState().settings).toEqual(foreign);
+      expect(store.getState().status).toBe("ready");
+    });
+
+    it("refuses an edit built before the other window wrote, instead of overwriting that write", async () => {
+      const disk = createDisk(createValidSettings({ revision: 5 }));
+      const store = createSettingsStore(
+        { saveSettings: disk.saveSettings, loadSettings: disk.loadSettings },
+        { status: "ready", settings: disk.read() },
+      );
+      // An edit of this window, built on revision 5.
+      const staleEdit = { ...disk.read(), ffmpegPath: "/mine" };
+
+      // The other window writes revision 6, and this window adopts it.
+      const theirs = disk.writeFromOtherWindow({
+        ...disk.read(),
+        activePresetId: undefined,
+      });
+      store.getState().adoptExternal(theirs);
+
+      const result = await store.getState().saveSettings(staleEdit);
+
+      // The edit went out with its own revision, and Rust refused it. Re-basing it onto
+      // revision 6 would have dropped the other window's change with no conflict.
+      expect(result).toBeNull();
+      expect(disk.saveSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({ revision: 5 }),
+      );
+      expect(disk.read()).toEqual(theirs);
+      expect(store.getState().error?.code).toBe("settingsConflict");
+      await vi.waitFor(() => {
+        expect(disk.loadSettings).toHaveBeenCalled();
+      });
+    });
+
+    it("still re-bases an edit built on the adopted document while its own write is in flight", async () => {
+      const disk = createDisk(createValidSettings({ revision: 5 }));
+      const store = createSettingsStore(
+        { saveSettings: disk.saveSettings, loadSettings: disk.loadSettings },
+        { status: "ready", settings: disk.read() },
+      );
+      store
+        .getState()
+        .adoptExternal(
+          disk.writeFromOtherWindow({ ...disk.read(), ffmpegPath: "/theirs" }),
+        );
+      const adopted = store.getState().settings ?? disk.read();
+      expect(adopted.revision).toBe(6);
+
+      // Two edits inside one round trip, both built on revision 6 (ADR 013, test 4d).
+      const first = store
+        .getState()
+        .saveSettings({ ...adopted, activePresetId: undefined });
+      const optimistic = store.getState().settings ?? adopted;
+      const second = store
+        .getState()
+        .saveSettings({ ...optimistic, ffmpegPath: "/mine" });
+      await Promise.all([first, second]);
+
+      expect(store.getState().error).toBeNull();
+      expect(disk.read().revision).toBe(8);
+      expect(disk.read().ffmpegPath).toBe("/mine");
+      expect(disk.read().activePresetId).toBeUndefined();
+    });
+  });
+
   describe("useSettingsStore and singleton", () => {
     it("exports useSettingsStore hook function", () => {
       expect(typeof useSettingsStore).toBe("function");

@@ -12,7 +12,7 @@ import {
   findTabStopRow,
   pickDefaultPresetId,
   pickListTabStopId,
-  pickOpeningPresetId,
+  pickRequestedSelection,
   pickSelectionAfterDelete,
   pickSessionSelection,
   PRESET_ROW_ID_ATTRIBUTE,
@@ -75,28 +75,6 @@ describe("pickDefaultPresetId", () => {
   });
 });
 
-describe("pickOpeningPresetId", () => {
-  const presets = [createPreset("a"), createPreset("b"), createPreset("c")];
-
-  it("selects the preset that the opener named", () => {
-    expect(pickOpeningPresetId(presets, "b", "c")).toBe("c");
-  });
-
-  it("selects the default preset when the opener named none", () => {
-    expect(pickOpeningPresetId(presets, "b", null)).toBe("b");
-    expect(pickOpeningPresetId(presets, null, null)).toBe("a");
-  });
-
-  it("selects the default preset when no preset has the named id", () => {
-    expect(pickOpeningPresetId(presets, "b", "gone")).toBe("b");
-    expect(pickOpeningPresetId(presets, "gone", "gone")).toBe("a");
-  });
-
-  it("returns null for an empty library", () => {
-    expect(pickOpeningPresetId([], "a", "a")).toBeNull();
-  });
-});
-
 describe("pickSessionSelection", () => {
   const presets = [createPreset("a"), createPreset("b"), createPreset("c")];
   const clean = {
@@ -107,34 +85,61 @@ describe("pickSessionSelection", () => {
     pending: false,
   };
 
-  it("selects the named preset, or the default, when the tab mounts", () => {
-    expect(pickSessionSelection(clean, "c")).toBe("c");
-    expect(pickSessionSelection(clean, null)).toBe("a");
+  it("selects the default preset when the tab mounts", () => {
+    expect(pickSessionSelection(clean)).toBe("a");
+    expect(pickSessionSelection({ ...clean, activePresetId: null })).toBe("a");
+    expect(pickSessionSelection({ ...clean, activePresetId: "gone" })).toBe("a");
+    expect(pickSessionSelection({ ...clean, activePresetId: "b" })).toBe("b");
   });
 
-  // The dialog opened again during its exit animation, and the tab stayed mounted.
-  it("moves the selection of the last session to the named preset", () => {
-    expect(pickSessionSelection({ ...clean, selectedPresetId: "b" }, "c")).toBe("c");
-    expect(pickSessionSelection({ ...clean, selectedPresetId: "b" }, null)).toBe("a");
+  // A session that begins while a preset is already selected.
+  it("moves the selection of the last session to the default preset", () => {
+    expect(pickSessionSelection({ ...clean, selectedPresetId: "b" })).toBe("a");
   });
 
-  it("keeps a selection that is already the preset of the session", () => {
-    expect(pickSessionSelection({ ...clean, selectedPresetId: "c" }, "c")).toBeNull();
+  it("keeps a selection that is already the default preset", () => {
+    expect(pickSessionSelection({ ...clean, selectedPresetId: "a" })).toBeNull();
   });
 
   it("never discards an unsaved edit, and never selects under a write in flight", () => {
     expect(
-      pickSessionSelection({ ...clean, selectedPresetId: "b", dirty: true }, "c"),
+      pickSessionSelection({ ...clean, selectedPresetId: "b", dirty: true }),
     ).toBeNull();
     expect(
-      pickSessionSelection({ ...clean, selectedPresetId: "b", pending: true }, "c"),
+      pickSessionSelection({ ...clean, selectedPresetId: "b", pending: true }),
     ).toBeNull();
   });
 
   it("selects nothing in an empty library", () => {
     expect(
-      pickSessionSelection({ ...clean, presets: [], activePresetId: null }, "c"),
+      pickSessionSelection({ ...clean, presets: [], activePresetId: null }),
     ).toBeNull();
+  });
+});
+
+describe("pickRequestedSelection", () => {
+  const presets = [createPreset("a"), createPreset("b"), createPreset("c")];
+  const clean = {
+    presets,
+    selectedPresetId: "a",
+    dirty: false,
+    pending: false,
+  };
+
+  it("selects the preset that an opening of the window names", () => {
+    expect(pickRequestedSelection(clean, "c")).toBe("c");
+    expect(pickRequestedSelection({ ...clean, selectedPresetId: null }, "b")).toBe("b");
+  });
+
+  it("keeps the selection for the preset that already shows and for an unknown preset", () => {
+    expect(pickRequestedSelection(clean, "a")).toBeNull();
+    expect(pickRequestedSelection(clean, "gone")).toBeNull();
+  });
+
+  // The window was open with an edit in progress when the export setup step opened it.
+  it("never discards an unsaved edit, and never selects under a write in flight", () => {
+    expect(pickRequestedSelection({ ...clean, dirty: true }, "c")).toBeNull();
+    expect(pickRequestedSelection({ ...clean, pending: true }, "c")).toBeNull();
   });
 });
 

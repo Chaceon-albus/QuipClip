@@ -51,7 +51,6 @@ import {
   pickPromptCancelFocus,
   pickPromptOpenFocus,
   pickPromptReturnFocus,
-  PRESET_LEAVE_PROMPT_ATTRIBUTE,
   presentPresetDraftStatus,
   presentSaveAndLeaveLabel,
   presentUnsavedDraftPrompt,
@@ -68,6 +67,7 @@ import {
   findListFocusRow,
   findPresetRow,
   pickDefaultPresetId,
+  pickRequestedSelection,
   pickSessionSelection,
   pickSelectionAfterDelete,
   presentAddPresetAction,
@@ -119,7 +119,7 @@ import {
  * - The fieldset has `min-w-0`. By default a fieldset is never narrower than its `min-content`
  *   width. This rule limits the fieldset only. The column rule above limits the grid inside it.
  *
- * The legend has the style of the section headings of the settings dialog, so it reads as the
+ * The legend has the style of the section headings of the Settings window, so it reads as the
  * heading of its group and not as one more row label.
  */
 function FormGroup({ legend, children }: { legend: string; children: ReactNode }) {
@@ -948,20 +948,28 @@ function PresetEditorFooter({
  */
 type FocusReturnTarget = "add" | "more" | "list";
 
+/**
+ * A request to select a preset, from an opening of the Settings window that named one. Each
+ * request is a new object, and the section handles each object once.
+ */
+export interface PresetSelectionRequest {
+  readonly presetId: string;
+}
+
 export interface PresetLibrarySectionProps {
   /**
    * Receives the state of the draft and the actions that settle it, each time the state
-   * changes, and `CLEAN_PRESET_DRAFT_GUARD` when the section unmounts. The settings dialog
+   * changes, and `CLEAN_PRESET_DRAFT_GUARD` when the section unmounts. The Settings window
    * reads it to keep a close request from dropping an unsaved draft. Pass a stable function,
    * such as a state setter.
    */
   onDraftChange?: (guard: PresetDraftGuard) => void;
   /**
-   * True while the settings dialog shows its own unsaved-changes prompt. A switch to another
+   * True while the Settings window shows its own unsaved-changes prompt. A switch to another
    * preset, or Add, then opens no second prompt, and calls `onFocusClosePrompt` instead.
    */
   closePromptOpen?: boolean;
-  /** Moves the focus to the unsaved-changes prompt of the settings dialog. */
+  /** Moves the focus to the unsaved-changes prompt of the Settings window. */
   onFocusClosePrompt?: () => void;
   /**
    * True while the Export Presets tab is the visible tab. The panels stay mounted when they
@@ -969,39 +977,25 @@ export interface PresetLibrarySectionProps {
    */
   visible?: boolean;
   /**
-   * True while the settings dialog is open. Each change to true begins a new session, also
-   * when the dialog opens again during its exit animation and the section stays mounted.
-   * Default true.
+   * The newest request to select a preset, or null. The section selects that preset once the
+   * library is ready, unless the draft holds an unsaved edit (`pickRequestedSelection`), so a
+   * request never discards a draft.
    */
-  open?: boolean;
-  /**
-   * The preset that the tab selects when a session begins, or null for the default preset.
-   * The section reads it once in each session, when the library is ready
-   * (`pickSessionSelection`). A later value in the same session changes nothing, so it never
-   * discards an unsaved draft.
-   */
-  openingPresetId?: string | null;
-  /**
-   * Receives the selected preset, or null, each time the selection changes, and null when the
-   * section unmounts. Pass a stable function.
-   */
-  onSelectionChange?: (presetId: string | null) => void;
+  selectionRequest?: PresetSelectionRequest | null;
 }
 
 /**
  * The Export Presets tab. It has two panes: the preset list with its toolbar on the left, and
  * the editor of the selected preset on the right. The section fills the height that the
- * settings dialog gives the tab, and each pane scrolls on its own, so the dialog keeps its
- * height when the selection changes.
+ * Settings window gives the tab, and each pane scrolls on its own, so the window keeps its
+ * layout when the selection changes.
  */
 export function PresetLibrarySection({
   onDraftChange,
   closePromptOpen = false,
   onFocusClosePrompt,
   visible = true,
-  open = true,
-  openingPresetId = null,
-  onSelectionChange,
+  selectionRequest = null,
 }: PresetLibrarySectionProps) {
   const { t, i18n } = useTranslation();
   const translate = t as (
@@ -1032,7 +1026,7 @@ export function PresetLibrarySection({
   const promptReturnFocusRef = useRef<HTMLElement | null>(null);
   const promptCancelRef = useRef<HTMLButtonElement>(null);
   const promptMessageRef = useRef<HTMLSpanElement>(null);
-  // Counts the requests of the settings dialog to move the focus to the prompt. See
+  // Counts the requests of the Settings window to move the focus to the prompt. See
   // `PresetDraftGuard.focusLeavePrompt`.
   const [leavePromptFocusRequests, setLeavePromptFocusRequests] = useState(0);
 
@@ -1094,46 +1088,46 @@ export function PresetLibrarySection({
     };
   }, [controller]);
 
-  // Each session of the dialog opens on the preset that the opener named, such as the preset
-  // of the export setup step, and otherwise on the default (active) preset, or on the first
-  // preset when no preset has the active id (see `pickSessionSelection`). This runs once for
-  // each session. The dialog mounts this section when it opens, and a dialog that opens again
-  // during its exit animation keeps it mounted, so a close ends the session here too. The rule
-  // of the unsaved draft applies, so the selection never discards an unsaved edit. It does not
-  // run again when a later change clears the selection: a delete selects the neighbour itself,
-  // and a restore of the built-in presets selects the default (active) preset itself (see
-  // `confirmDelete` and `restoreDefaults`).
+  // The tab opens on the default (active) preset, or on the first preset when no preset has
+  // the active id (see `pickSessionSelection`). This runs once, when the library is first
+  // ready. The Settings window mounts this section with the window, so the session is the life
+  // of the window. The rule of the unsaved draft applies, so the selection never discards an
+  // unsaved edit. It does not run again when a later change clears the selection: a delete
+  // selects the neighbour itself, and a restore of the built-in presets selects the default
+  // (active) preset itself (see `confirmDelete` and `restoreDefaults`).
   const sessionSelectionDoneRef = useRef(false);
   useEffect(() => {
-    if (!open) {
-      sessionSelectionDoneRef.current = false;
-      return;
-    }
     if (sessionSelectionDoneRef.current || !view.ready) {
       return;
     }
     sessionSelectionDoneRef.current = true;
-    const id = pickSessionSelection(view, openingPresetId);
+    const id = pickSessionSelection(view);
     if (id !== null) {
       controller.select(id);
     }
-  }, [open, controller, view, openingPresetId]);
+  }, [controller, view]);
 
-  // Report the selection upward. The export setup step reads the last selection when the
-  // dialog closes, and selects the same preset if the user changed the selection here
-  // (`exportSettingsReturn.ts`). The unmount comes after the close, so the null that it
-  // reports comes after that read.
+  // An opening of the window that named a preset, such as "Manage Presets…" of the export
+  // setup step, selects that preset. It runs after the session selection above, so on a new
+  // window the named preset wins over the default. It reads the live view of the controller,
+  // because the session selection can have changed it in the same commit. A request that
+  // finds an unsaved edit keeps the selection, and is not tried again later
+  // (`pickRequestedSelection`).
+  const handledSelectionRequestRef = useRef<PresetSelectionRequest | null>(null);
   useEffect(() => {
-    onSelectionChange?.(view.selectedPresetId);
-  }, [onSelectionChange, view.selectedPresetId]);
-  useEffect(() => {
-    if (onSelectionChange === undefined) {
-      return undefined;
+    if (
+      selectionRequest === null ||
+      handledSelectionRequestRef.current === selectionRequest ||
+      !view.ready
+    ) {
+      return;
     }
-    return () => {
-      onSelectionChange(null);
-    };
-  }, [onSelectionChange]);
+    handledSelectionRequestRef.current = selectionRequest;
+    const id = pickRequestedSelection(controller.getView(), selectionRequest.presetId);
+    if (id !== null) {
+      controller.select(id);
+    }
+  }, [controller, selectionRequest, view.ready]);
 
   // The row that takes the selection after the delete in flight, or null. See
   // `findListFocusRow`.
@@ -1184,7 +1178,7 @@ export function PresetLibrarySection({
   }, [findListFocusTarget, focusReturn, view.pending]);
 
   // Report the draft upward. The guard is rebuilt only when one of its values changes, so the
-  // dialog renders again only then. The actions call the controller, which owns the draft.
+  // window renders again only then. The actions call the controller, which owns the draft.
   const { dirty, presetName, canSave, pending } = presentPresetDraftStatus(view);
   // The prompt shows while a request waits and the draft holds an unsaved edit, which is when
   // `presentUnsavedDraftPrompt` presents one.
@@ -1208,11 +1202,11 @@ export function PresetLibrarySection({
   );
   const unsavedPrompt = presentUnsavedDraftPrompt(draftGuard);
 
-  // The prompt takes the focus when it opens, as the prompt of the settings dialog does: "Keep
+  // The prompt takes the focus when it opens, as the prompt of the Settings window does: "Keep
   // Editing", so Enter picks the choice that changes nothing. A request from the list thus
   // takes a keyboard user from the row to the prompt. A new request while the prompt is open
-  // only changes its target, and the focus stays where it is. A close request of the settings
-  // dialog while the prompt is open brings the focus back to it (`focusLeavePrompt`). That
+  // only changes its target, and the focus stays where it is. A close request of the Settings
+  // window while the prompt is open brings the focus back to it (`focusLeavePrompt`). That
   // request can also switch to this tab, and the effect runs after the tab is visible.
   useEffect(() => {
     if (leavePromptShown) {
@@ -1227,7 +1221,7 @@ export function PresetLibrarySection({
     onDraftChange?.(draftGuard);
   }, [onDraftChange, draftGuard]);
 
-  // The draft ends with this section, because the dialog unmounts its content when it closes.
+  // The draft ends with this section, which unmounts with the Settings window.
   useEffect(() => {
     if (onDraftChange === undefined) {
       return undefined;
@@ -1369,7 +1363,7 @@ export function PresetLibrarySection({
   const handleSaveAndLeave = async (request: PendingLeave) => {
     // The save disables every choice while it runs, and a disabled button drops the focus to
     // the document body. The message keeps the focus inside the prompt, as in the prompt of the
-    // settings dialog.
+    // Settings window.
     promptMessageRef.current?.focus();
     if (await controller.saveDraftBeforeLeaving()) {
       leave(request);
@@ -1454,10 +1448,8 @@ export function PresetLibrarySection({
         <Notice
           tone="warning"
           role="alert"
-          {...{ [PRESET_LEAVE_PROMPT_ATTRIBUTE]: "" }}
           onKeyDown={(event) => {
-            // The settings dialog leaves Escape inside this prompt to it. See
-            // `decideLeavePromptKey`.
+            // Escape inside this prompt answers it. See `decideLeavePromptKey`.
             switch (decideLeavePromptKey(event.key, unsavedPrompt)) {
               case "keepEditing":
                 event.preventDefault();
@@ -1472,7 +1464,7 @@ export function PresetLibrarySection({
           }}
         >
           {/* The order, the layout, and the styles match the unsaved-changes prompt in the
-              settings dialog footer. Discard Changes is a discard: at the far left of the
+              Settings window footer. Discard Changes is a discard: at the far left of the
               buttons on macOS, and after the save on Windows. Outline and ghost buttons
               inherit the text color, so they reset it and do not take the warning color of
               the box. */}

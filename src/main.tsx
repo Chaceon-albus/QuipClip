@@ -1,9 +1,11 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { SettingsWindowRoot } from "./components/settings/SettingsWindowRoot";
 import { themePreferenceStore } from "./features/settings/themePreference";
 import { initI18n } from "./i18n";
 import { applyPlatformAttribute } from "./lib/platform";
 import { startThemeSync } from "./lib/theme";
+import { getCurrentWindowRole } from "./lib/windowRole";
 import App from "./App";
 import "./styles/globals.css";
 
@@ -24,11 +26,14 @@ async function bootstrap(): Promise<void> {
     console.error("Failed to initialize localization:", error);
   }
 
+  // The main window and the Settings window load this same page. The label of the window
+  // decides which view it renders, and an unknown label renders the editor.
+  const role = getCurrentWindowRole();
   const rootElement = document.getElementById("root");
   if (rootElement) {
     ReactDOM.createRoot(rootElement).render(
       <React.StrictMode>
-        <App />
+        {role === "settings" ? <SettingsWindowRoot /> : <App />}
       </React.StrictMode>,
     );
   }

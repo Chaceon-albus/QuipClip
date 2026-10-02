@@ -145,7 +145,7 @@ export const en = {
     },
     // An import that failed. With no video open, the error takes the place of the empty
     // state: `title`, then the `mediaError` message, then `ffmpegHint` for an error that the
-    // FFmpeg settings can correct, then the actions. `ffmpegHint` names the Settings dialog
+    // FFmpeg settings can correct, then the actions. `ffmpegHint` names the Settings window
     // and its FFmpeg tab (`settings.title`, `settings.tab.ffmpeg`), and the button
     // `chooseAnother` with its label. Running text names a label without its ellipsis.
     // `details.show` and `details.hide` label the disclosure of the diagnostic text from the
