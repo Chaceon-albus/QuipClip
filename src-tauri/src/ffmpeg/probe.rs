@@ -122,16 +122,15 @@ pub struct AudioProbe {
     /// its video, such as a recording that opened the microphone late, has a value above the
     /// video's start here.
     ///
-    /// The export reads this and [`Self::duration`] only to know how much audio its segments can
-    /// take from the stream (`PlannedAudio::expected_duration`), and this to bound the silence
-    /// that its segments need in front of the first sample (`MAX_LEADING_AUDIO_SILENCE_SECONDS`
-    /// of the export module) and to choose a second input for the audio
-    /// (`ExportPlan::separate_audio_input`). Neither is an edit boundary (ADR 002), and neither is
-    /// on the import wire: the interface does not read them.
+    /// The export reads this and [`Self::duration`] only to decide whether its segments take
+    /// their audio from a second input (`ExportPlan::separate_audio_input`), and this to bound
+    /// the silence that its segments need in front of the first sample
+    /// (`MAX_LEADING_AUDIO_SILENCE_SECONDS` of the export module). Neither is an edit boundary
+    /// (ADR 002), and neither is on the import wire: the interface does not read them.
     ///
     /// ffprobe can report the start of the container here when the audio starts more than about
-    /// 5 s into a Matroska or MPEG-TS file. An export that writes audio therefore corrects this
-    /// value, and [`Self::duration`] with it, from the first packet of the stream
+    /// 5 s into a Matroska, MPEG-TS or MPEG-PS file. An export that writes audio therefore
+    /// corrects this value, and [`Self::duration`] with it, from the first packet of the stream
     /// ([`Self::take_first_packet`]).
     #[serde(skip)]
     pub start_time: Option<Rational>,
@@ -528,8 +527,9 @@ pub struct FirstAudioPacket {
 ///
 /// [`probe_media`] analyzes about the first 5 s of a file. In a Matroska, MPEG-TS or MPEG-PS source
 /// whose audio starts later than that, it reports the start of the container as the start of the
-/// audio (ADR 014 measurements 22 and 24). After the same analysis, this run reads packets until the first
-/// packet of the one stream, and decodes none of them, so it finds that start at any distance.
+/// audio (ADR 014 measurements 22 and 25). After the same analysis, this run reads packets until
+/// the first packet of the one stream, and decodes none of them, so it finds that start at any
+/// distance.
 /// [`AudioProbe::take_first_packet`] applies its time. Its position and the id of the stream let
 /// [`probe_audio_sample_rate_at`] read a sample rate that the analysis missed.
 ///
@@ -641,9 +641,9 @@ struct RawPacketStream {
 ///
 /// In an MPEG-TS or MPEG-PS source whose audio starts after the analysis of [`probe_media`], the
 /// probe reads no packet of the audio stream and reports a sample rate of 0 (ADR 014 measurements
-/// 22 and 24). Only the packets of the stream carry the rate. This run starts its own analysis at the
-/// position of the first of them, which [`probe_first_audio_packet`] read, so it reads that
-/// packet within its first 5 s however late the audio starts (measurement 24). The demuxer finds
+/// 22 and 25). Only the packets of the stream carry the rate. This run starts its own analysis at
+/// the position of the first of them, which [`probe_first_audio_packet`] read, so it reads that
+/// packet within its first 5 s however late the audio starts (measurement 25). The demuxer finds
 /// the program tables again after the skip, but it can number the streams in another order, so
 /// the stream is selected by its id and not by its index.
 ///
@@ -1050,8 +1050,9 @@ fn audio_time_base(raw: &RawStream) -> Option<Rational> {
 /// `start_time`.
 ///
 /// A value that does not parse reads as unknown and never fails the probe. The import needs the
-/// video stream only, and the export reads this as a bound on what it can check, not as an edit
-/// point, so a malformed audio field must not refuse a file that imported before.
+/// video stream only, and the export reads this only to bound the leading silence and to decide
+/// the second input for the audio, not as an edit point, so a malformed audio field must not
+/// refuse a file that imported before.
 fn audio_start_time(raw: &RawStream) -> Option<Rational> {
     let exact = parse_optional_i64_value(raw.start_pts.as_ref(), "streams.audio.start_pts")
         .ok()

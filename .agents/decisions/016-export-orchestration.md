@@ -173,7 +173,7 @@ answering. A retry inside that window is still refused with `exportAlreadyRunnin
 decision accepts that. Bounding discovery is separate work.
 
 (Changed on 2026-10-02.) An export that writes audio can run up to two more reads of FFprobe after
-the re-probe (ADR 014 measurements 23 and 24). Each read has `PROBE_TIMEOUT` and polls the flag
+the re-probe (ADR 014 measurements 24 and 25). Each read has `PROBE_TIMEOUT` and polls the flag
 while it runs, so a cancel stops it at once. Preparation can therefore last up to three times
 `PROBE_TIMEOUT` when no cancel arrives.
 

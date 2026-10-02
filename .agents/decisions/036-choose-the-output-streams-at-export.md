@@ -84,17 +84,27 @@ as many phone and screen recordings do. Only an audio-only plan computes this va
 audio-only export whose segments the audio stream does not reach at all is refused in the plan
 with `sourceHasNoAudio`, because it would write an empty file that a check against 0 s passes.
 
+(Changed on 2026-10-02.) The expected duration is now the planned duration. ADR 014 measurement
+23 adds `apad` to every audio chain of an export without video. So each segment writes its full
+length. A segment that the audio does not reach becomes silence, and so does the part of a
+segment after the last sample. The plan therefore reads no extent of the audio for this value.
+The plan no longer refuses an export whose segments the audio does not reach. That export now
+writes silence for the whole duration, as the export with video does. Only a source without an
+audio stream gives `sourceHasNoAudio`. The measurement used sources whose audio starts late, ends
+early or has a gap. In 592 runs, the duration of the file minus the planned duration was
+−0.0007 s to +0.0233 s.
+
 In a Matroska file the probe reads the end of the track from its `DURATION` tag, as the
 Matroska muxer of FFmpeg writes it. A file from another muxer that writes the length of the
 track in that tag gives an end that is too early by the start of the audio. For audio that
-starts late by more than 0.5 s, a correct export of such a file can then fail.
+starts late by more than 0.5 s, a correct export of such a file can then fail. (Changed on
+2026-10-02: the check no longer reads the end of the track, so it cannot fail for this reason.)
 
-(Added on 2026-10-02.) The probe misses an audio start that is more than about 5 s late in MKV
-and MPEG-TS. It then reports the start and the length of the container. The export therefore reads
-the first packet of the audio stream and moves the start to it. The end of the stream stays where
-it was: the reported start plus the reported length. The `DURATION` tag gives the end only when
-that end is unknown or does not lie after the packet, because the tag can hold a length, as the
-paragraph above says. ADR 014 measurement 23 gives the rule and its measurements.
+(Added on 2026-10-02.) The probe misses an audio start that is more than about 5 s late in MKV,
+MPEG-TS and MPEG-PS. It then reports the start and the length of the container. The export
+therefore reads the first packet of the audio stream and moves the start to it (ADR 014
+measurement 24). The expected duration above does not read the start or the end of the audio, so
+this correction does not change the check of this record.
 
 A failed FFprobe of the output is a wrong output, not a fault of the source. An exit failure or a
 parse failure gives `outputStreamsMismatch` with the stderr of FFmpeg as its detail. A probe that
@@ -161,7 +171,12 @@ video; the muxer is set explicitly, so the file is still valid.
   and the audio-only export writes nothing for it, so its later segments come earlier in the
   file. Near an Out point, an error in the probed start of the audio can therefore move the
   expected duration by the whole segment and fail a correct export. A segment wholly inside a
-  gap of the stream counts in full and writes nothing, which also fails the check.
+  gap of the stream counts in full and writes nothing, which also fails the check. (Changed on
+  2026-10-02: ADR 014 measurement 23 removes the difference. Both exports write silence for such
+  a segment, and the check expects the planned duration, so neither failure can occur.)
+- (Added on 2026-10-02.) An audio-only export can now write a file that holds only silence,
+  when the audio of the source reaches none of its segments. The plan does not refuse it, as it
+  does not refuse the same segments with video.
 
 - An audio-only export has no progress percentage, no speed and no time estimate.
 - A loss of audio shorter than 0.10 s plus the overhang of the output passes the check: about

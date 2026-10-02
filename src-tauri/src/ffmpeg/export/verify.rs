@@ -14,7 +14,7 @@
 //! 2. no video stream, and
 //! 3. a duration within [`AUDIO_DURATION_SHORT_TOLERANCE_MS`] below and
 //!    [`AUDIO_DURATION_LONG_TOLERANCE_MS`] above [`super::PlannedAudio::expected_duration`], the
-//!    audio that the segments write from the source stream.
+//!    planned duration of the segments.
 //!
 //! The function is pure, like the rest of the renderer's checks: it runs no process and reads no
 //! file, so every outcome is testable without ffmpeg installed.
@@ -96,6 +96,17 @@ use crate::time::Rational;
 // the late sources measured +0.043 to +0.323 s, which the tolerance below still passes, but
 // only by its margin.
 //
+// ADR 014 measurement 23, on ffmpeg and ffprobe 9.0.2 on macOS, changed the expected duration
+// again. Every audio chain of an export without video now ends at the length of its segment
+// (`graph::audio_end_pad`), so a segment that the audio ends inside, or does not reach at all,
+// writes silence for the rest, and `PlannedAudio::expected_duration` is the planned duration.
+// The sources were 40 s of 30 fps H.264 with AAC that starts 3 s or 30 s late, ends at 20 s, or
+// has no packets for 0.5 s, in MP4, MKV and MPEG-TS. The plans held a segment wholly before the
+// first sample or wholly after the last one, alone and beside a covered segment in both orders,
+// a segment that the audio ends inside, and three segments of each kind, in both graph shapes, at
+// the source rate and at 48000 Hz, into `aac` `.m4a`, and `aac`, `libopus` and `flac` `.mka`: 592
+// runs. Against the planned duration, every run measured -0.0007 to +0.0233 s.
+//
 // The tolerance below keeps a margin over the worst case on each side. Long: +0.50 s against
 // +0.324 s. It also covers an estimate of the worst case for `aac_at` at 8000 Hz that this
 // measurement did not reach: the usual AAC priming of 2112 samples and one fully padded frame of
@@ -135,9 +146,8 @@ pub enum AudioOutputMismatch {
 /// Decide whether the finished file of an export without video holds the audio that was planned.
 ///
 /// `expected` is [`super::PlannedAudio::expected_duration`]: the exact length of audio the
-/// segments write from the source stream, which is the planned duration when the stream reaches
-/// the end of every segment. The stream set is checked first, because a duration says nothing
-/// about a file that holds the wrong streams.
+/// segments write, which is their planned duration. The stream set is checked first, because a
+/// duration says nothing about a file that holds the wrong streams.
 ///
 /// The comparison is exact. The measured duration is the decimal ffprobe writes, read as a
 /// [`Rational`], and the bounds are whole milliseconds, so no step here rounds (ADR 002).

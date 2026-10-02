@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -58,8 +58,14 @@ describe("SettingsWindowRoot", () => {
   const reached = reachableModules(
     join(SOURCE_ROOT, "components/settings/SettingsWindowRoot.tsx"),
   );
+  // On Windows the walk gives paths with backslashes. The module names below use slashes.
   const relative = new Set(
-    Array.from(reached, (file) => file.slice(SOURCE_ROOT.length + 1)),
+    Array.from(reached, (file) =>
+      file
+        .slice(SOURCE_ROOT.length + 1)
+        .split(sep)
+        .join("/"),
+    ),
   );
 
   it("reaches the Settings view", () => {

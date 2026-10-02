@@ -62,6 +62,7 @@ document summarizes them and shows how the parts fit together.
 | [`039-recover-the-preview-after-a-decode-error.md`](../.agents/decisions/039-recover-the-preview-after-a-decode-error.md)                   | A decode error mid-file stalls the preview, and the next seek reloads it   |
 | [`040-preset-schema-2-encoder-options.md`](../.agents/decisions/040-preset-schema-2-encoder-options.md)                                     | Encoder options, constant quality and a pixel format in each preset        |
 | [`041-test-a-preset-on-this-machine.md`](../.agents/decisions/041-test-a-preset-on-this-machine.md)                                         | A preset can be tested on this machine with its own arguments              |
+| [`042-mark-a-release-as-a-pre-release.md`](../.agents/decisions/042-mark-a-release-as-a-pre-release.md)                                     | The maintainer marks a published release as a pre-release                  |
 
 ## Shape
 
@@ -270,14 +271,17 @@ in front of `asplit`, because the chains share one input link. Each chain then r
 timestamps to its In point, fills a late start or a gap of the audio with silence, and
 normalizes the streams (ADR 014 measurement 20). The fill holds its silence in memory, so the
 plan refuses segments that need more than 60 s of silence in total before the first audio sample
-(`audioGapTooLong`, measurement 21). The chains end in `concat`, in project array order.
+(`audioGapTooLong`, measurement 21). An export with video pads the audio of its last chain with
+silence to the length of the segment. An export without video pads the audio of each chain in the
+same way. A segment that the audio of the source does not reach then gets silence (measurement
+23). The chains end in `concat`, in project array order.
 
 The export probes the source again before it plans. The probe analyzes about the first 5 s of the
 file, so it misses a later audio start in MKV, MPEG-TS and MPEG-PS. An export that writes audio
 therefore also reads the first packet of the audio stream, and the plan takes a later start from
 it. When that read fails, the plan uses the probe, and the export continues (ADR 014 measurement
-23). In MPEG-TS and MPEG-PS, the probe also reports no sample rate for such audio. The export then
-reads the rate again from the position of that packet (measurement 24).
+24). In MPEG-TS and MPEG-PS, the probe also reports no sample rate for such audio. The export then
+reads the rate again from the position of that packet (measurement 25).
 
 The renderer has three graph shapes. It opens one input for each segment while the assembled
 command line stays inside the platform budget. It otherwise opens one input, seeks once, and
@@ -580,7 +584,7 @@ TypeScript is held at 5.9, because `typescript-eslint` caps its peer range below
 
 ## Version and release
 
-See ADR 034.
+See ADR 034 and ADR 042.
 
 `src-tauri/Cargo.toml` holds the only copy of the application version. `tauri.conf.json`
 and `package.json` have no `version` field, so Tauri reads the version from `Cargo.toml`.
@@ -594,4 +598,5 @@ names and their SHA-256 digests against `scripts/release-assets.mjs`. The last j
 in the `release` environment. It checks the draft and the tag again, and publishes the
 draft as an immutable release. `tauri.macos.conf.json` gives the macOS bundle an ad-hoc
 signature. `docs/releasing.md` gives the setup, the steps of a release, and what to do
-when a job fails.
+when a job fails. After the publish, the maintainer can mark a release with the GitHub
+pre-release flag. Its version does not change (ADR 042).

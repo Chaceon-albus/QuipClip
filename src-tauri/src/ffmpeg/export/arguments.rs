@@ -1737,7 +1737,7 @@ mod tests {
                     "fps=30000/1001[v0];",
                     "[0:2]aformat=r=48000,atrim=start_pts=256000:end_pts=304048,",
                     "asetpts=PTS-256000,aresample=48000:first_pts=0,",
-                    "aformat=f=fltp:r=48000:cl=stereo[a0];",
+                    "apad=whole_len=48048,asetpts=N,aformat=f=fltp:r=48000:cl=stereo[a0];",
                     "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
                 ),
                 "-map",
@@ -2318,9 +2318,9 @@ mod tests {
         // `choose_graph_shape` *returns* fits. The last fallback reaches furthest, so its own
         // length is the real limit of the renderer.
         //
-        // This plan measures 28386 of the 31743 available bytes. Do not read that gap as the
+        // This plan measures 28419 of the 31743 available bytes. Do not read that gap as the
         // margin the cap has: this fixture uses a 106-character path, ordinary encoder names,
-        // and no encoder options, and the widest plan the settings actually permit needs 31509
+        // and no encoder options, and the widest plan the settings actually permit needs 31547
         // at the same count. `the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap` measures
         // that one, and it is the test that justifies the cap. This one is about the realistic
         // case, and about the fallback being reached at all.
@@ -2436,9 +2436,15 @@ mod tests {
     /// range), eleven-digit PTS values, twelve-digit audio ticks, a seek that fills every
     /// decimal place [`SEEK_DECIMALS`] allows, and a second input for the audio of every segment
     /// (`ExportPlan::separate_audio_input`).
+    ///
+    /// The last segment ends at the largest twelve-digit tick, so the end pad of its audio chain
+    /// (`graph::audio_end_pad`) carries a twelve-digit length too. A length is longer than its Out
+    /// tick only when the In tick is negative, and a negative In tick of fewer than about 10^11
+    /// ticks shortens `start_pts` and the reset by at least as many bytes as it adds to the length.
     fn widest_plan(count: usize) -> ExportPlan {
         let segments = (0..count)
             .map(|index| {
+                let last = index + 1 == count;
                 let index = i64::try_from(index).expect("the segment count fits in an i64");
                 let in_pts = 10_000_000_000 + index * 100_000_000;
                 let in_tick = 100_000_000_000 + index * 1_000_000_000;
@@ -2447,7 +2453,11 @@ mod tests {
                     out_pts: Pts::new(in_pts + 900_900),
                     seek_seconds: Rational::new(100_000 + index, 3),
                     audio_in_tick: Some(in_tick),
-                    audio_out_tick: Some(in_tick + 4_804_800),
+                    audio_out_tick: Some(if last {
+                        WIDEST_AUDIO_TICK
+                    } else {
+                        in_tick + 4_804_800
+                    }),
                 }
             })
             .collect();
@@ -2484,6 +2494,25 @@ mod tests {
         }
     }
 
+    /// The largest audio tick of twelve digits, which [`widest_plan`] assumes as the widest.
+    const WIDEST_AUDIO_TICK: i64 = 999_999_999_999;
+
+    /// The widest plan of an export without video, over `count` segments: [`widest_plan`]
+    /// without its video part and without a second input, which only a plan with video takes.
+    ///
+    /// Every audio chain of a graph without video ends in the end pad (`graph::audio_end_pad`),
+    /// so every segment here ends at [`WIDEST_AUDIO_TICK`], and every pad carries a twelve-digit
+    /// length.
+    fn widest_audio_only_plan(count: usize) -> ExportPlan {
+        let mut plan = widest_plan(count);
+        plan.video = None;
+        plan.separate_audio_input = false;
+        for segment in &mut plan.segments {
+            segment.audio_out_tick = Some(WIDEST_AUDIO_TICK);
+        }
+        plan
+    }
+
     #[test]
     fn the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap() {
         // The cap is a byte budget, so the value that justifies it has to be measured against
@@ -2494,10 +2523,14 @@ mod tests {
         // It takes the audio of its segments from second inputs, which the last fallback of
         // `choose_graph_shape` drops at the cap; see the test below.
         //
-        // Measured at the time of writing: the widest permitted plan needs 31509 of the 31743
-        // available bytes at the cap, so 234 bytes of slack remain, and 100 segments fit while
-        // 101 do not. (A realistic plan on a 106-character path measures 28386 at the same
-        // count.) The audio chain that starts at the In point (`graph::audio_chain`) gave back
+        // Measured at the time of writing: the widest permitted plan needs 31547 of the 31743
+        // available bytes at the cap, so 196 bytes of slack remain, and 100 segments fit while
+        // 101 do not. (A realistic plan on a 106-character path measures 28419 at the same
+        // count.) The end pad of the last audio chain (`graph::audio_end_pad`) took 38 of the 234
+        // bytes that were free before it: `,apad=whole_len=`, a twelve-digit length, and
+        // `,asetpts=N`, once, because only the last chain of a graph with video carries it. A pad
+        // in every chain would take up to 3800 bytes at the cap, which this budget does not have.
+        // The audio chain that starts at the In point (`graph::audio_chain`) gave back
         // 111 bytes: the timestamp reset with a 12-digit tick and the gap fill at 192000 Hz add
         // 33 bytes to each chain, and the short option names of `aformat` take 34 from each
         // chain and 11 from the one input pin. Before that chain, 123 bytes were free.
@@ -2531,6 +2564,30 @@ mod tests {
             largest >= MAX_EXPORT_SEGMENTS,
             "the widest permitted plan fits {largest} segments, under the cap of \
              {MAX_EXPORT_SEGMENTS}; lower the cap or shorten the command"
+        );
+    }
+
+    #[test]
+    fn the_widest_plan_without_video_still_fits_at_the_segment_cap() {
+        // A graph without video pads every audio chain (`graph::audio_end_pad`), so its growth
+        // for each segment carries the pad too. It has no video chain and no second input, so
+        // it is still far below the plan with video: 21323 bytes at the cap, as `SingleInput`,
+        // and 151 segments fit. The assertion is one-sided for the reason the test above gives.
+        let reservation = longest_windows_path(".m4a.tmp-13724-0");
+        let output = Path::new(&reservation);
+        let plan = widest_audio_only_plan(MAX_EXPORT_SEGMENTS);
+        let graph = build_filter_graph(&plan, GraphShape::SingleInput);
+        assert_eq!(
+            graph.matches("apad=whole_len=").count(),
+            MAX_EXPORT_SEGMENTS,
+            "every chain of a graph without video ends in the pad"
+        );
+        let shape = choose_graph_shape_within(&plan, output, WINDOWS_COMMAND_LINE_BUDGET);
+        let length = measured_length(&plan, shape, &reservation);
+        assert!(
+            length <= WINDOWS_COMMAND_LINE_BUDGET,
+            "the widest plan without video at {MAX_EXPORT_SEGMENTS} segments as {shape:?} needs \
+             {length} bytes, over the {WINDOWS_COMMAND_LINE_BUDGET}-byte budget"
         );
     }
 
@@ -2587,7 +2644,7 @@ mod tests {
         let output = Path::new(&reservation);
         let shape = choose_graph_shape_within(&widest, output, WINDOWS_COMMAND_LINE_BUDGET);
         // The widest plan takes the audio of its segments from second inputs. On the longest
-        // path, that input costs 288 bytes, and the one input with it needs 31797, 54 over the
+        // path, that input costs 288 bytes, and the one input with it needs 31835, 92 over the
         // budget at the cap. So the shape is the last fallback, which drops the second input and
         // measures what the plan measured before it (ADR 014 measurement 22).
         assert_eq!(shape, GraphShape::SingleInputSharedAudio);

@@ -175,9 +175,9 @@ pub struct ExportCommandError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub measured_duration_us: Option<u64>,
     /// The duration the plan expected, in whole microseconds, for `audioDurationMismatch`: the
-    /// audio the segments can take from the source stream. It equals `totalDurationUs` in
-    /// [`ExportStart`] when the source audio covers every segment, and is shorter when it does
-    /// not. Absent on every other code.
+    /// planned duration of the segments, which equals `totalDurationUs` in [`ExportStart`]. The
+    /// graph writes the audio of every segment at its whole length, whatever part of it the
+    /// source audio covers (`graph::audio_end_pad`). Absent on every other code.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_duration_us: Option<u64>,
 }
@@ -589,7 +589,7 @@ where
 }
 
 /// Whether the demuxer of `format_names` gives a stream an id that [`correct_audio_probe`] can read
-/// a sample rate the re-probe missed by: `mpegts` and `mpeg`, the two that ADR 014 measurement 24
+/// a sample rate the re-probe missed by: `mpegts` and `mpeg`, the two that ADR 014 measurement 25
 /// measured.
 ///
 /// The plan refuses audio without a sample rate whatever its start. In any other container, the
@@ -607,10 +607,10 @@ fn rate_readable_from_packets(format_names: &[String]) -> bool {
 ///
 /// The re-probe analyzes about the first 5 s of the file. In a Matroska, MPEG-TS or MPEG-PS
 /// source whose audio starts later, it reports the start of the container as the start of the
-/// audio, and in MPEG-TS and MPEG-PS a sample rate of 0 (ADR 014 measurements 22 to 24). The plan
-/// reads the start for three decisions: the expected duration of an audio-only export, the bound
-/// on the silence in front of the audio, and the second input for the audio. It refuses audio
-/// without a sample rate with `sourceAudioRateUnknown`.
+/// audio, and in MPEG-TS and MPEG-PS a sample rate of 0 (ADR 014 measurements 22, 24 and 25). The
+/// plan reads the start for two decisions: the bound on the silence in front of the audio, and
+/// the second input for the audio. It refuses audio without a sample rate with
+/// `sourceAudioRateUnknown`.
 ///
 /// 1. `first_audio_packet` reads the first packet of the stream.
 /// 2. Only when the re-probe reported no sample rate, and the packet has a position and the stream
@@ -1066,8 +1066,8 @@ fn verified_frame_count(
 ///    - The run was canceled while ffprobe ran: `canceled`.
 /// 3. [`verify_audio_output`] compares the answer with the plan: one audio stream, no video
 ///    stream, and `expected` within its tolerance. `expected` is
-///    [`crate::ffmpeg::export::PlannedAudio::expected_duration`], the audio the segments can take
-///    from the source. A wrong stream set reports `outputStreamsMismatch`. A duration outside the
+///    [`crate::ffmpeg::export::PlannedAudio::expected_duration`], the planned duration of the
+///    segments. A wrong stream set reports `outputStreamsMismatch`. A duration outside the
 ///    tolerance, or none, reports `audioDurationMismatch`, with the measured and the expected
 ///    duration as named values.
 ///
@@ -1956,7 +1956,8 @@ mod tests {
                     "[vc]format=yuv420p[v];",
                     "[0:0]trim=start_pts=0:end_pts=90000,setpts=PTS-STARTPTS,fps=30/1[v0];",
                     "[0:1]aformat=r=48000,atrim=start_pts=0:end_pts=48000,asetpts=PTS-0,",
-                    "aresample=48000:first_pts=0,aformat=f=fltp:r=48000[a0];",
+                    "aresample=48000:first_pts=0,apad=whole_len=48000,asetpts=N,",
+                    "aformat=f=fltp:r=48000[a0];",
                     "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
                 ),
                 "-map",
@@ -2797,7 +2798,7 @@ mod tests {
 
     /// The sample probe as the re-probe reads a Matroska source of 120 s whose audio starts
     /// after its first 5 s: the start and the length of the container, and the tag of the track
-    /// (ADR 014 measurement 23).
+    /// (ADR 014 measurement 24).
     fn sample_probe_with_a_missed_audio_start() -> MediaProbe {
         let mut probe = MediaProbe {
             video_duration_ticks: Some(TickCount::new(120 * 90_000).unwrap()),
@@ -2811,7 +2812,6 @@ mod tests {
         probe
     }
 
-    /// A read of the first audio packet that finds it at `seconds`.
     /// The first packet of an MPEG-TS audio stream with the PID 0x101, at `seconds`.
     fn packet_at(seconds: i64) -> FirstAudioPacket {
         FirstAudioPacket {
@@ -2909,39 +2909,65 @@ mod tests {
     }
 
     #[test]
-    fn an_audio_only_export_counts_its_audio_from_the_corrected_start() {
-        // A segment that ends before the first packet writes no audio. The plan refuses it rather
-        // than expect 10 s of audio and fail the check after the encode.
+    fn an_audio_only_export_bounds_the_silence_in_front_of_the_corrected_start() {
+        // Without video, only a segment that reaches the first sample counts toward the bound
+        // (ADR 014 measurement 21). A segment from 0 s to 75 s reaches audio that starts at 70 s
+        // after 70 s of silence. The re-probe alone puts the audio at 0 s and bounds nothing.
         let directory = TestDirectory::new();
         let error = match prepare_reading_first_packet(
             &directory,
             ExportStreams::AudioOnly,
             sample_probe_with_a_missed_audio_start(),
-            &[(0, 10)],
+            &[(0, 75)],
             &AtomicBool::new(false),
-            first_packet_at(12),
+            first_packet_at(70),
         ) {
             Err(error) => error,
-            Ok(_) => panic!("the audio starts after the segment"),
+            Ok(_) => panic!("70 s of silence is over the bound"),
         };
-        assert_eq!(error.code, ExportErrorCode::SourceHasNoAudio);
+        assert_eq!(error.code, ExportErrorCode::AudioGapTooLong);
+        let directory = TestDirectory::new();
+        assert!(prepare_reading_first_packet(
+            &directory,
+            ExportStreams::AudioOnly,
+            sample_probe_with_a_missed_audio_start(),
+            &[(0, 75)],
+            &AtomicBool::new(false),
+            no_first_packet,
+        )
+        .is_ok());
 
-        // A segment that reaches the first packet counts from its In point, and the audio still
-        // ends at 120 s, not at 12 s + 120 s: the length of the container is not kept as a length.
+        // A segment from 0 s to 65 s ends before audio that starts at 70 s. Without video it does
+        // not reach the first sample, so it counts nothing, and its chain writes 65 s of silence
+        // frame by frame (ADR 014 measurement 23). With video, `concat` can pad it in memory, so it
+        // counts in full, and 65 s is over the bound.
         let directory = TestDirectory::new();
         let prepared = prepare_reading_first_packet(
             &directory,
             ExportStreams::AudioOnly,
             sample_probe_with_a_missed_audio_start(),
-            &[(10, 20), (110, 130)],
+            &[(0, 65)],
             &AtomicBool::new(false),
-            first_packet_at(12),
+            first_packet_at(70),
         )
         .unwrap();
         assert_eq!(
             prepared.plan.audio.unwrap().expected_duration,
-            Rational::new(20, 1).unwrap()
+            Rational::new(65, 1).unwrap()
         );
+        let directory = TestDirectory::new();
+        let error = match prepare_reading_first_packet(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_a_missed_audio_start(),
+            &[(0, 65)],
+            &AtomicBool::new(false),
+            first_packet_at(70),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("65 s of silence is over the bound with video"),
+        };
+        assert_eq!(error.code, ExportErrorCode::AudioGapTooLong);
     }
 
     #[test]
@@ -3025,7 +3051,7 @@ mod tests {
 
     /// The sample probe as the re-probe reads an MPEG-TS source of 120 s whose audio starts after
     /// its first 5 s: the start and the length of the container, and no sample rate (ADR 014
-    /// measurement 24).
+    /// measurement 25).
     fn sample_probe_with_a_missed_audio_rate() -> MediaProbe {
         let mut probe = MediaProbe {
             format_names: vec!["mpegts".to_owned()],

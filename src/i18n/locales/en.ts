@@ -952,7 +952,7 @@ export const en = {
     sourceAudioRateUnknown:
       "QuipClip could not determine the sample rate of the source audio, so it cannot cut the audio exactly.",
     sourceHasNoAudio:
-      "The source video has no audio in the marked segments, so QuipClip cannot export its audio.",
+      "The source video has no audio, so QuipClip cannot export its audio.",
     // 60 is MAX_LEADING_AUDIO_SILENCE_SECONDS of the Rust export module. Each part of a
     // segment before the first audio sample becomes silence, and the parts add up.
     audioGapTooLong:
