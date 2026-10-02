@@ -55,6 +55,7 @@ document summarizes them and shows how the parts fit together.
 | [`032-one-frontend-chunk-and-its-size-limit.md`](../.agents/decisions/032-one-frontend-chunk-and-its-size-limit.md)                         | One frontend chunk, with a size warning above 1200 kB           |
 | [`033-main-agent-writes-the-code.md`](../.agents/decisions/033-main-agent-writes-the-code.md)                                               | The main agent writes, and another tool runs only on request    |
 | [`034-one-application-version-and-its-release-tag.md`](../.agents/decisions/034-one-application-version-and-its-release-tag.md)             | One version in `Cargo.toml`, and one `v` tag for each release   |
+| [`035-keep-playback-across-a-pointer-seek.md`](../.agents/decisions/035-keep-playback-across-a-pointer-seek.md)                             | A click or a drag on the timeline during playback keeps playing |
 
 ## Shape
 

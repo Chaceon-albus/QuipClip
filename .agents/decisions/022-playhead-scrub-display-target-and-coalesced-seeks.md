@@ -4,6 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 019
+- Amended by: ADR 035
 
 ## Context
 
@@ -568,6 +569,8 @@ where the indicator showed.
   nothing while the element reports `seeking`. The `seeked` event of the running seek
   starts the queued seek.
 - A drag during playback pauses it. The playback stays paused after the release.
+  (Changed on 2026-10-02: ADR 035 supersedes this. A click during playback keeps playing, and
+  a drag resumes playback at its release when it played at pointer down.)
 - The timeline does not scroll when a drag goes past the visible edge. That is a possible
   later step. (Changed on 2026-09-24: the auto-scroll above does this now.)
 - The pending In region follows the same displayed position as the playhead: the seek

@@ -4,6 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 021
+- Amended by: ADR 035
 
 ## Context
 
