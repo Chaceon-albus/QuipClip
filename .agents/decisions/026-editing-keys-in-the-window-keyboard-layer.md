@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 021
-- Amended by: ADR 035
+- Amended by: ADR 035, ADR 037
 
 ## Context
 
@@ -61,6 +61,9 @@ action. `primary` is `Cmd` on macOS and `Ctrl` on Windows.
 
 "Taken, no act" means that the layer owns a repeated key press and performs nothing, as
 ADR 021 does for a held `Space`.
+
+(Changed on 2026-10-02.) ADR 037 replaces the two rows of the arrow keys. The arrows jump in
+time, `,` and `.` step frames, and `ArrowUp` and `ArrowDown` go to the edit points.
 
 (Added on 2026-09-23.) The rows for `+`, and for `=` and `+` with `Shift`, serve keyboard
 layouts where `=` needs `Shift`, such as JIS and German, and layouts with a `+` key. On a US
@@ -253,7 +256,9 @@ Windows.
 
 - The keyboard path covers the whole editing loop: open, move, mark, delete, undo, zoom,
   export.
-- `Shift` with an arrow now steps ten frames. ADR 021 held `Shift` free for this.
+- `Shift` with an arrow now steps ten frames. ADR 021 held `Shift` free for this. (Changed on
+  2026-10-02: ADR 037 moves the ten-frame step to `Shift` with `,` and `.`, and `Shift` with an
+  arrow jumps one second.)
 - `Ctrl`, `Cmd` and `Alt` stay with the system and the web view, except for the combinations
   in the table. `primary` with `=` or `-` is not claimed. Tauri turns off the zoom keys of the
   web view by default, so these combinations do nothing.

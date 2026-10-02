@@ -4,6 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 022, ADR 026
+- Amended by: ADR 037
 
 ## Context
 
@@ -25,8 +26,8 @@ in this respect. The user chose this rule:
 
 The store could keep playing in two ways. It could seek and then call `play`, or it could seek
 without a pause. `play` starts a queued seek at once, as an exact seek (ADR 022). A fast series
-of seeks, such as a held time-jump key of the keyboard, would then cancel each running seek
-before it ends,
+of seeks, such as a held time-jump key of ADR 037, would then cancel each running seek before
+it ends,
 and the picture would not change until the key is released. A seek that does not pause keeps
 the rule of ADR 022 that each seek that starts also completes.
 
@@ -100,7 +101,7 @@ play session. The play button no longer shows the paused state for one frame in 
 ### Which actions keep playing
 
 - A pointer seek on the ruler or on the track, by this record.
-- The time jumps of the keyboard, which a later record adds.
+- The time jumps of the keyboard (ADR 037).
 
 Every other navigation pauses, as before: a frame step, Home, End, Go to In, Go to Out, a jump to
 an edit point, a typed timecode, a trim, and the seek back of a segment playback.

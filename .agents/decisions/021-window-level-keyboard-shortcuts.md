@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-21
 - Deciders: capric98
-- Amended by: ADR 026
+- Amended by: ADR 026, ADR 037
 
 ## Context
 
@@ -215,7 +215,8 @@ is the fault this record removes.
 - `ArrowUp` and `ArrowDown` no longer step a frame. They stepped one only while the
   slider held the focus, and that state is the fault this record removes. Those two
   keys stay with the containers that scroll and with the menus that move a
-  selection.
+  selection. (Changed on 2026-10-02: ADR 037 binds them to the edit points. A menu
+  trigger and a marked container that overflows keep them.)
 - `Home` no longer seeks to the start of the source. It did so only under the
   calibration test. `seekToPts` reports a failed seek on a source that never
   calibrates, so a global `Home` needs a second branch on the approximate clock.
