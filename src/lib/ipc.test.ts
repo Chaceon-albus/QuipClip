@@ -136,6 +136,14 @@ describe("Backend event parity", () => {
       ),
     ).toBe(BACKEND_EVENTS.CAPABILITY_PROBE_FORCED);
   });
+
+  it("names the preset-tested event exactly as the Rust constant does", () => {
+    // A rename on one side only leaves the other window on the stored results from before
+    // the test.
+    expect(
+      readRustEventConstant("commands/preset_test.rs", "PRESET_TESTED_EVENT"),
+    ).toBe(BACKEND_EVENTS.PRESET_TESTED);
+  });
 });
 
 /** Reads the value of `pub const <name>: &str = "...";` from a file under `src-tauri/src`. */

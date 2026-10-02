@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { Ellipsis, Minus, Plus } from "lucide-react";
+import { useShallow } from "zustand/react/shallow";
 import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import { Button } from "@/components/ui/button";
@@ -20,6 +21,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { FfmpegState } from "@/features/ffmpeg/types";
+import {
+  latestPresetTestResult,
+  usePresetTestStore,
+} from "@/features/settings/presetTestStore";
 import { cn } from "@/lib/utils";
 import { DefaultBadge } from "./DefaultBadge";
 import { isUnsavedPresetRow } from "./presetDraftGuard";
@@ -37,6 +42,8 @@ import {
   presentPresetEncoderMark,
   presentPresetRowSummary,
 } from "./presetPresenter";
+import { PresetTestGlyph } from "./PresetTestStatus";
+import { presentPresetTestMark } from "./presetTestPresenter";
 
 type Translate = (key: string, options?: Record<string, string | number>) => string;
 
@@ -67,7 +74,8 @@ export interface PresetListProps {
 /**
  * The preset list: a single-select `listbox` with one Tab stop. See `presetListKeyboard.ts`
  * for its keys. Each row shows the stored name of the preset, not the draft name, and a second
- * line with its container, video encoder, and quality.
+ * line with its container, video encoder, and quality, and the mark of its newest test result
+ * on this machine when it has one.
  */
 export function PresetList({
   view,
@@ -85,6 +93,13 @@ export function PresetList({
   const presetIds = view.presets.map((preset) => preset.id);
   const tabStopId = pickListTabStopId(presetIds, view.selectedPresetId);
   const canDelete = canStartPresetDelete(view);
+  const testState = usePresetTestStore(
+    useShallow((state) => ({
+      stored: state.stored,
+      runs: state.runs,
+      generation: state.generation,
+    })),
+  );
 
   // Keep the selected row in view when the selection changes: after Add and Duplicate, which
   // select a row at the end of the list, and when the tab opens on a preset far down the list.
@@ -152,6 +167,10 @@ export function PresetList({
       {view.presets.map((preset) => {
         const selected = preset.id === view.selectedPresetId;
         const encoderMark = presentPresetEncoderMark(ffmpegState, preset);
+        // A row shows the stored preset, so its test is the test of the stored preset.
+        const testMark = presentPresetTestMark(
+          latestPresetTestResult(testState, preset, preset),
+        );
         const summary = presentPresetRowSummary(preset, numberFormatter);
         const summaryText = translate(summary.key, summary.values);
         return (
@@ -228,6 +247,35 @@ export function PresetList({
                       {translate(encoderMark.titleKey, encoderMark.titleValues)}
                     </p>
                     <p>{translate(encoderMark.reasonKey)}</p>
+                  </TooltipContent>
+                </Tooltip>
+              ) : null}
+              {testMark ? (
+                <Tooltip>
+                  {/* The mark follows the rule of the encoder badge: it cannot take the
+                      focus, and the `sr-only` label carries its meaning into the row's
+                      accessible name. The FFmpeg line is in the tooltip only; the status line
+                      of the editor shows it for the selected row. */}
+                  <TooltipTrigger asChild>
+                    <span
+                      className={cn(
+                        "inline-flex shrink-0",
+                        encoderMark ? "" : "ml-auto",
+                      )}
+                    >
+                      <PresetTestGlyph
+                        icon={testMark.icon}
+                        tone={testMark.tone}
+                        className="size-3.5"
+                      />
+                      <span className="sr-only">{` ${translate(testMark.label.key)}`}</span>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-80 flex-col items-start gap-1">
+                    <p className="font-semibold">{translate(testMark.label.key)}</p>
+                    {testMark.line !== null ? (
+                      <p className="font-mono wrap-anywhere">{testMark.line}</p>
+                    ) : null}
                   </TooltipContent>
                 </Tooltip>
               ) : null}

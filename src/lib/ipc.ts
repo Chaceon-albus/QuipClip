@@ -16,6 +16,8 @@ export const BACKEND_COMMANDS = {
   IMPORT_MEDIA: "import_media",
   READ_SOURCE_REVISION: "read_source_revision",
   START_CAPABILITY_PROBE: "start_capability_probe",
+  TEST_PRESET: "test_preset",
+  PRESET_TEST_RESULTS: "preset_test_results",
   LOAD_SETTINGS: "load_settings",
   SAVE_SETTINGS: "save_settings",
   RESTORE_DEFAULT_PRESETS: "restore_default_presets",
@@ -51,6 +53,12 @@ export const BACKEND_EVENTS = {
    * forced it (`src/features/ffmpeg/events.ts`).
    */
   CAPABILITY_PROBE_FORCED: "ffmpeg:capability-probe-forced",
+  /**
+   * A preset test stored its result, with the label of the window that ran it
+   * (`src/features/settings/presetTestStore.ts`). The other window reads the stored results
+   * again.
+   */
+  PRESET_TESTED: "ffmpeg:preset-tested",
   /**
    * The settings document that a write stored, with the label of the window that asked for
    * the write (`src/features/settings/settingsSync.ts`).

@@ -637,6 +637,45 @@ export const en = {
           "-b:v 0 is not needed with this quality type, so QuipClip left it out.",
       },
     },
+    // The test of a preset on this machine: a short encode with the encoder settings of the
+    // preset. The FFmpeg line of a result shows under the message as FFmpeg wrote it, and it is
+    // never translated. {{seconds}} is the timeout of one test, 10. {{code}} is an exit code of
+    // FFmpeg, such as 1 or 234. `summaryLabel` names the row of the export setup step. The
+    // `mark` messages name the icon of a preset list row.
+    presetTest: {
+      test: "Test",
+      testAgain: "Test Again",
+      summaryLabel: "Preset Test",
+      notTested: "Not tested on this machine.",
+      running: "Testing on this machine…",
+      passed: "Passed on this machine.",
+      passedWithWarnings: "Passed on this machine, with a warning from FFmpeg.",
+      failed: "Failed on this machine.",
+      timedOut: "The test did not finish in {{seconds}} seconds.",
+      exitCode: "Exit code {{code}}",
+      blocked: "Fix the problems of this preset to test it.",
+      markPassed: "Passed the test on this machine",
+      markWarning: "Passed the test on this machine, with a warning",
+      markFailed: "Failed the test on this machine",
+      markTimedOut: "Did not finish the test on this machine in time",
+      error: {
+        appDataUnavailable:
+          "The test did not run, because the application data directory is unavailable.",
+        invalidPreset:
+          "The test did not run, because this preset has a problem. Fix it, and then test again.",
+        exportRunning:
+          "The test did not run, because an export is running. Test again when the export ends.",
+        ffmpegPairMissing:
+          "The test did not run, because QuipClip could not find FFmpeg.",
+        ffmpegSpawnFailed:
+          "The test did not run, because QuipClip could not start FFmpeg.",
+        temporaryFileUnavailable:
+          "The test did not run, because QuipClip could not make its temporary file.",
+        settingsUnreadable: "QuipClip could not read the settings file.",
+        commandExecutionFailed: "The test process stopped unexpectedly.",
+        unknown: "The test did not complete because of an unknown error.",
+      },
+    },
     quality: {
       crf: "Constant Quality (CRF)",
       cq: "NVENC Constant Quality (CQ)",

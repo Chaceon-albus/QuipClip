@@ -14,8 +14,16 @@ import {
   type MessageView,
   type PresetEncoderMarkView,
 } from "@/components/settings/presetPresenter";
-import type { ExportStreams } from "@/features/export/types";
+import {
+  presentPresetTestStatus,
+  type PresetTestStatusView,
+} from "@/components/settings/presetTestPresenter";
+import type { ExportStatus, ExportStreams } from "@/features/export/types";
 import type { FfmpegState } from "@/features/ffmpeg/types";
+import type {
+  PresetTestView,
+  StoredPresetTestsStatus,
+} from "@/features/settings/presetTestStore";
 import type { MediaProbe } from "@/features/media";
 import { getNominalFrameRate } from "@/features/playback";
 import {
@@ -983,4 +991,84 @@ export function presentSetupEncoderMark(
     video: streams !== "audioOnly",
     audio: streams !== "videoOnly",
   });
+}
+
+/**
+ * True while an export of this window holds the export slot. A preset test does not start
+ * then: Rust refuses it, because the two would compete for the encoder (ADR 016).
+ */
+export function isExportBusy(status: ExportStatus): boolean {
+  return status === "preparing" || status === "running" || status === "publishing";
+}
+
+/** The preset test row of the setup step: the status line and its action. */
+export type SetupPresetTestView = {
+  status: PresetTestStatusView;
+  /** "Test" before the preset has a result or a refusal, "Test Again" after. */
+  actionKey: "settings.presetTest.test" | "settings.presetTest.testAgain";
+  /** True while the test of the preset runs, and while an export runs. */
+  actionDisabled: boolean;
+};
+
+/**
+ * Presents the preset test row of the setup step, for the selected preset. The result is
+ * information: no state of it disables "Export…" (ADR 006).
+ */
+export function presentSetupPresetTest(
+  view: PresetTestView,
+  exportStatus: ExportStatus,
+): SetupPresetTestView {
+  return {
+    status: presentPresetTestStatus(view),
+    actionKey:
+      view.kind === "none"
+        ? "settings.presetTest.test"
+        : "settings.presetTest.testAgain",
+    actionDisabled: view.kind === "running" || isExportBusy(exportStatus),
+  };
+}
+
+/** What the setup step does about the test of its preset when it opens. */
+export type SetupAutoTestDecision = "wait" | "skip" | "run";
+
+/**
+ * Decides the background test of one preset in the setup step: the step reads the stored
+ * results when it opens, and tests a preset once when the results hold no stored result for it.
+ * The step keeps one decision for each fingerprint of the preset on each binary, so a preset
+ * that the user selects later is tested once too, and so is a preset after a change of binary.
+ *
+ * - `wait` until the read that the opening started has published (`reads` above
+ *   `readsAtOpen`), and while a read for a new binary runs (`storedStatus` `loading`), so a
+ *   result from an earlier opening or of the binary before never decides.
+ * - `skip` when the read failed, for example with no FFmpeg, when an export runs, when a test
+ *   of the preset runs, and when the preset has a result that Rust stored.
+ * - `run` otherwise: no result, a result that Rust did not store (an export overlapped it), or
+ *   a refusal of an earlier test.
+ *
+ * The step asks again until the answer is `skip` or `run`, and then never again for that
+ * preset and binary in that opening.
+ */
+export function decideSetupAutoTest(input: {
+  readonly readsAtOpen: number;
+  readonly reads: number;
+  readonly storedStatus: StoredPresetTestsStatus;
+  readonly view: PresetTestView;
+  readonly exportStatus: ExportStatus;
+}): SetupAutoTestDecision {
+  if (
+    input.reads <= input.readsAtOpen ||
+    input.storedStatus === "idle" ||
+    input.storedStatus === "loading"
+  ) {
+    return "wait";
+  }
+  if (
+    input.storedStatus === "error" ||
+    isExportBusy(input.exportStatus) ||
+    input.view.kind === "running" ||
+    (input.view.kind === "result" && input.view.stored)
+  ) {
+    return "skip";
+  }
+  return "run";
 }

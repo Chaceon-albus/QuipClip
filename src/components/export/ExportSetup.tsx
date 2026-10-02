@@ -1,4 +1,12 @@
-import { Fragment, useCallback, useId, useMemo, type Ref } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  type Ref,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { CheckIcon } from "lucide-react";
 import { Select as SelectPrimitive } from "radix-ui";
@@ -13,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useExportStore } from "@/features/export/store";
 import {
   resolveExportStreams,
   sourceHasAudio,
@@ -23,6 +32,12 @@ import { useFfmpegStore } from "@/features/ffmpeg";
 import { useMediaStore } from "@/features/media";
 import { resolveTimecodeDisplay } from "@/features/playback";
 import { useSettingsStore, type SettingsSection } from "@/features/settings";
+import { presetTestFingerprint } from "@/features/settings/presetTest";
+import {
+  presetTestStore,
+  selectPresetTestView,
+  usePresetTestStore,
+} from "@/features/settings/presetTestStore";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import {
   selectActiveSourceSegmentCount,
@@ -34,14 +49,22 @@ import { getResolvedLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { DefaultBadge } from "@/components/settings/DefaultBadge";
 import { joinDescribedBy } from "@/components/settings/presetPresenter";
+import {
+  PresetTestAnnouncement,
+  PresetTestStatus,
+} from "@/components/settings/PresetTestStatus";
+import { usePresetTestSync } from "@/components/settings/presetTestSync";
+import { usePresetTestAction } from "@/components/settings/usePresetTestAction";
 import { presentSettingsError } from "@/components/settings/settingsErrorPresenter";
 import type { Preset } from "@/features/settings/types";
 import {
   activeSourceDurationTicks,
+  decideSetupAutoTest,
   presentExportSummarySentence,
   presentPresetOptions,
   presentPresetSummary,
   presentSetupEncoderMark,
+  presentSetupPresetTest,
   presentSetupSettingsSection,
   presentSizeEstimate,
   resolveExportSetupStepState,
@@ -115,6 +138,102 @@ function SummaryRows({
           </dd>
         </Fragment>
       ))}
+    </dl>
+  );
+}
+
+/**
+ * The test of the selected preset on this machine: one summary row with the status line, the
+ * FFmpeg line of a result that did not pass cleanly, and "Test" or "Test Again".
+ *
+ * When the step opens, it reads the stored results, and it tests the selected preset once in
+ * the background when that read finds no stored result for it (`decideSetupAutoTest`). It
+ * decides once for each fingerprint of a preset on each binary, so a preset that the user selects
+ * later is tested once as well. A background test is not announced; "Test Again" is. A result is
+ * information: no state of it disables "Export…" (ADR 006).
+ */
+function PresetTestRow({
+  preset,
+  translate,
+}: {
+  preset: Preset;
+  translate: Translate;
+}) {
+  usePresetTestSync();
+  const testState = usePresetTestStore(
+    useShallow((state) => ({
+      stored: state.stored,
+      runs: state.runs,
+      storedStatus: state.storedStatus,
+      storedReads: state.storedReads,
+      generation: state.generation,
+    })),
+  );
+  const exportStatus = useExportStore((state) => state.status);
+  const view = selectPresetTestView(testState, preset, preset);
+  const row = presentSetupPresetTest(view, exportStatus);
+  const statusId = useId();
+  const { announcement, start } = usePresetTestAction();
+
+  // The count of published reads when the step opened. The read that the sync above starts is
+  // the first one with a higher count.
+  const readsAtOpenRef = useRef<number | null>(null);
+  if (readsAtOpenRef.current === null) {
+    readsAtOpenRef.current = presetTestStore.getState().storedReads;
+  }
+  // The presets that this opening decided about, by binary generation and fingerprint.
+  const decidedRef = useRef(new Set<string>());
+  const decisionKey = `${testState.generation}:${presetTestFingerprint(preset)}`;
+  useEffect(() => {
+    if (decidedRef.current.has(decisionKey)) {
+      return;
+    }
+    const decision = decideSetupAutoTest({
+      readsAtOpen: readsAtOpenRef.current ?? 0,
+      reads: testState.storedReads,
+      storedStatus: testState.storedStatus,
+      view,
+      exportStatus,
+    });
+    if (decision === "wait") {
+      return;
+    }
+    decidedRef.current.add(decisionKey);
+    if (decision === "run") {
+      void presetTestStore.getState().runTest(preset);
+    }
+  }, [
+    decisionKey,
+    exportStatus,
+    preset,
+    testState.storedReads,
+    testState.storedStatus,
+    view,
+  ]);
+
+  return (
+    <dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-1">
+      <dt className="text-muted-foreground">
+        {translate("settings.presetTest.summaryLabel")}
+      </dt>
+      <dd className="min-w-0 space-y-1">
+        <PresetTestStatus id={statusId} view={row.status} />
+        {/* The negative margin keeps the text on the left edge of the column, as Manage
+            Presets does under the select. */}
+        <Button
+          variant="link"
+          size="xs"
+          className="-mx-1 h-auto px-1 py-0.5"
+          disabled={row.actionDisabled}
+          aria-describedby={statusId}
+          onClick={() => {
+            start(preset);
+          }}
+        >
+          {translate(row.actionKey)}
+        </Button>
+        <PresetTestAnnouncement text={announcement} />
+      </dd>
     </dl>
   );
 }
@@ -368,6 +487,9 @@ export interface ExportSetupProps {
  *   estimate, the encoder marks and the blocker follow the choice.
  * - Estimates the output size when the bitrate of each stream that the export writes is
  *   known.
+ * - Shows the test of the selected preset on this machine at the top of the summary, and
+ *   tests each preset that the step shows once in the background when no stored result
+ *   exists for it. The result does not block the export.
  */
 export function ExportSetup({
   selectedPresetId,
@@ -599,6 +721,9 @@ export function ExportSetup({
       {/* Preset summary: the container, then the Video and the Audio groups */}
       {summary ? (
         <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3 text-xs">
+          {selectedPreset ? (
+            <PresetTestRow preset={selectedPreset} translate={translate} />
+          ) : null}
           <SummaryRows rows={[summary.container]} translate={translate} />
           {summary.groups.map((group) => (
             <SummaryGroup

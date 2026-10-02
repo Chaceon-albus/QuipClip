@@ -13,20 +13,24 @@ import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import { MILLISECONDS_TIMECODE_DISPLAY, type TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational, Segment } from "@/types/project";
+import { PresetTestError } from "@/features/settings/presetTest";
 import {
   SUMMARY_FILE_NAME_MAX_GRAPHEMES,
   activeSourceDurationTicks,
+  decideSetupAutoTest,
   estimateExportBytes,
   formatEstimatedSize,
   formatFps,
   formatFrameRate,
   isBelowOneKilobyte,
+  isExportBusy,
   isolateText,
   presentExportSummarySentence,
   presentPresetOptions,
   presentPresetSummary,
   presentSetupBlocker,
   presentSetupEncoderMark,
+  presentSetupPresetTest,
   presentSetupSettingsSection,
   presentSizeEstimate,
   resolveExportSetupStepState,
@@ -1540,5 +1544,143 @@ describe("exportSetupPresenter", () => {
         expect(markedName(working, streams)).toBeNull();
       },
     );
+  });
+});
+
+describe("the preset test row of the setup step", () => {
+  const passed = {
+    kind: "result" as const,
+    result: { status: "passed" as const, testedAt: 1_790_000_000 },
+    stored: true,
+  };
+  const failed = {
+    kind: "result" as const,
+    result: {
+      status: "failed" as const,
+      line: "[mp4] [error] Tag hvc1 incompatible with output codec id '27' (avc1)",
+      exitCode: 183,
+      testedAt: 1_790_000_000,
+    },
+    stored: true,
+  };
+
+  it("counts an export as busy only while it holds the export slot", () => {
+    expect(isExportBusy("preparing")).toBe(true);
+    expect(isExportBusy("running")).toBe(true);
+    expect(isExportBusy("publishing")).toBe(true);
+    for (const status of ["idle", "finished", "canceled", "failed"] as const) {
+      expect(isExportBusy(status), status).toBe(false);
+    }
+  });
+
+  it("offers Test before a result and Test Again after a result or a refusal", () => {
+    expect(presentSetupPresetTest({ kind: "none" }, "idle")).toEqual({
+      status: {
+        tone: "neutral",
+        icon: null,
+        message: { key: "settings.presetTest.notTested" },
+        line: null,
+        lineMessage: null,
+      },
+      actionKey: "settings.presetTest.test",
+      actionDisabled: false,
+    });
+    expect(presentSetupPresetTest(passed, "idle").actionKey).toBe(
+      "settings.presetTest.testAgain",
+    );
+    expect(
+      presentSetupPresetTest(
+        { kind: "error", error: new PresetTestError("ffmpegPairMissing") },
+        "idle",
+      ).actionKey,
+    ).toBe("settings.presetTest.testAgain");
+  });
+
+  it("shows the first line of a failure under its sentence", () => {
+    expect(presentSetupPresetTest(failed, "idle").status).toEqual({
+      tone: "destructive",
+      icon: "failed",
+      message: { key: "settings.presetTest.failed" },
+      line: "[mp4] [error] Tag hvc1 incompatible with output codec id '27' (avc1)",
+      lineMessage: null,
+    });
+  });
+
+  it("turns the action off while the test runs and while an export runs", () => {
+    expect(presentSetupPresetTest({ kind: "running" }, "idle").actionDisabled).toBe(
+      true,
+    );
+    expect(presentSetupPresetTest(passed, "running").actionDisabled).toBe(true);
+    expect(presentSetupPresetTest(passed, "finished").actionDisabled).toBe(false);
+  });
+
+  it("never blocks the export, whatever the result", () => {
+    // The blocker of the step reads the preset and the streams only (ADR 006: a result is
+    // information).
+    const preset: Preset = {
+      id: "p",
+      name: "P",
+      container: "mp4",
+      videoEncoder: "libx264",
+      audioEncoder: "aac",
+      audioSampleRate: "source",
+      audioChannels: "source",
+      quality: { kind: "crf", value: 20 },
+      resolution: "source",
+      frameRate: "source",
+      pixelFormat: "yuv420p",
+      videoOptions: [{ name: "tag", value: "hvc1" }],
+      audioOptions: [],
+    };
+    expect(presentSetupBlocker(preset, "videoAndAudio")).toBeNull();
+  });
+});
+
+describe("decideSetupAutoTest", () => {
+  const base = {
+    readsAtOpen: 3,
+    reads: 4,
+    storedStatus: "ready" as const,
+    view: { kind: "none" as const },
+    exportStatus: "idle" as const,
+  };
+  const storedPass = {
+    kind: "result" as const,
+    result: { status: "passed" as const, testedAt: 1_790_000_000 },
+    stored: true,
+  };
+
+  it("tests the preset once the read of this opening finds no stored result for it", () => {
+    expect(decideSetupAutoTest(base)).toBe("run");
+  });
+
+  it("tests again a preset whose result Rust did not store, or whose last test was refused", () => {
+    // An export overlapped the earlier test, so Rust did not store its result.
+    expect(
+      decideSetupAutoTest({ ...base, view: { ...storedPass, stored: false } }),
+    ).toBe("run");
+    expect(
+      decideSetupAutoTest({
+        ...base,
+        view: { kind: "error", error: new PresetTestError("exportRunning") },
+      }),
+    ).toBe("run");
+  });
+
+  it("waits for the read that this opening started, and for a read after a new binary", () => {
+    expect(decideSetupAutoTest({ ...base, reads: 3 })).toBe("wait");
+    expect(decideSetupAutoTest({ ...base, reads: 2 })).toBe("wait");
+    expect(decideSetupAutoTest({ ...base, storedStatus: "loading" })).toBe("wait");
+    expect(decideSetupAutoTest({ ...base, storedStatus: "idle" })).toBe("wait");
+  });
+
+  it("skips a preset that has a stored result or a test that runs", () => {
+    expect(decideSetupAutoTest({ ...base, view: storedPass })).toBe("skip");
+    expect(decideSetupAutoTest({ ...base, view: { kind: "running" } })).toBe("skip");
+  });
+
+  it("skips when the stored results could not be read, and while an export runs", () => {
+    expect(decideSetupAutoTest({ ...base, storedStatus: "error" })).toBe("skip");
+    expect(decideSetupAutoTest({ ...base, exportStatus: "running" })).toBe("skip");
   });
 });

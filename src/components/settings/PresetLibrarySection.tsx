@@ -26,6 +26,10 @@ import {
 import { useFfmpegStore } from "@/features/ffmpeg";
 import type { FfmpegState } from "@/features/ffmpeg/types";
 import { PRESET_NAME_SLOT } from "@/features/settings/presetNaming";
+import {
+  selectPresetTestView,
+  usePresetTestStore,
+} from "@/features/settings/presetTestStore";
 import { settingsStore } from "@/features/settings/store";
 import {
   PRESET_CONTAINERS,
@@ -63,6 +67,13 @@ import {
   type PresetLibraryView,
 } from "./presetLibraryController";
 import { PresetList, PresetListToolbar } from "./PresetList";
+import { PresetTestAnnouncement, PresetTestStatus } from "./PresetTestStatus";
+import {
+  presentEditorTestAction,
+  presentPresetTestStatus,
+} from "./presetTestPresenter";
+import { usePresetTestSync } from "./presetTestSync";
+import { usePresetTestAction } from "./usePresetTestAction";
 import {
   findListFocusRow,
   findPresetRow,
@@ -1048,6 +1059,84 @@ function PresetEditor({
 }
 
 /**
+ * The test of the draft on this machine: Test, and the status line of the newest test of the
+ * draft. The section puts it between `PresetEditor` and `PresetEditorFooter`, outside the
+ * scrolling fields, so the result stays in view.
+ *
+ * Test runs the draft as it is on screen, saved or not. A text of the extra parameters that is
+ * not applied yet is applied first, as Save applies it, so the test holds what the field shows.
+ * The status line shows the result of the stored preset while the fields of the draft that
+ * reach the test equal the stored ones (`selectPresetTestView`).
+ */
+function PresetTestBar({
+  draft,
+  view,
+  controller,
+}: {
+  draft: Preset;
+  view: PresetLibraryView;
+  controller: PresetLibraryController;
+}) {
+  const { t } = useTranslation();
+  const translate = t as (
+    key: string,
+    options?: Record<string, string | number>,
+  ) => string;
+  const testState = usePresetTestStore(
+    useShallow((state) => ({
+      stored: state.stored,
+      runs: state.runs,
+      generation: state.generation,
+    })),
+  );
+  const { announcement, start } = usePresetTestAction();
+  const saved = view.presets.find((preset) => preset.id === draft.id) ?? null;
+  const testView = selectPresetTestView(testState, draft, saved);
+  const action = presentEditorTestAction({
+    issueCount: view.issues.length,
+    optionsErrorCount: view.optionsErrors.length,
+    running: testView.kind === "running",
+  });
+  const statusId = useId();
+
+  return (
+    <div className="flex shrink-0 items-start gap-3 border-t border-border px-3 py-2">
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={action.disabled}
+        aria-describedby={statusId}
+        onClick={() => {
+          // The import of a pending text can fail, and its errors then show at the field.
+          if (!controller.applyOptionsText()) {
+            return;
+          }
+          const current = controller.getView();
+          if (current.draft === null || current.issues.length > 0) {
+            return;
+          }
+          start(current.draft);
+        }}
+      >
+        {t("settings.presetTest.test")}
+      </Button>
+      {action.blocked !== null ? (
+        <p id={statusId} className="min-w-0 pt-1.5 text-xs text-muted-foreground">
+          {translate(action.blocked.key)}
+        </p>
+      ) : (
+        <PresetTestStatus
+          id={statusId}
+          view={presentPresetTestStatus(testView)}
+          className="pt-1.5"
+        />
+      )}
+      <PresetTestAnnouncement text={announcement} />
+    </div>
+  );
+}
+
+/**
  * The footer of the editor pane: Save and Cancel, the lines that say the draft is unsaved or
  * why Save is off, and Set as Default. The section puts it under `PresetEditor`, outside the
  * scrolling fields, so it stays at the bottom of the pane at every scroll position. Duplicate
@@ -1188,6 +1277,9 @@ export function PresetLibrarySection({
     key: string,
     options?: Record<string, string | number>,
   ) => string;
+  // The stored test results of the list rows and of the editor, read when the tab mounts and
+  // again for each change that can change them.
+  usePresetTestSync();
 
   const resolvedLanguage = getResolvedLanguage(i18n);
   const numberFormatter = useMemo(
@@ -1776,6 +1868,7 @@ export function PresetLibrarySection({
                 focusName={focusNameId === view.draft.id}
                 onNameFocused={handleNameFocused}
               />
+              <PresetTestBar draft={view.draft} view={view} controller={controller} />
               <PresetEditorFooter
                 draft={view.draft}
                 view={view}
