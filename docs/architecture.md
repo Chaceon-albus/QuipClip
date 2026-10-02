@@ -273,9 +273,11 @@ plan refuses segments that need more than 60 s of silence in total before the fi
 (`audioGapTooLong`, measurement 21). The chains end in `concat`, in project array order.
 
 The export probes the source again before it plans. The probe analyzes about the first 5 s of the
-file, so it misses a later audio start in MKV and MPEG-TS. An export that writes audio therefore
-also reads the first packet of the audio stream, and the plan takes a later start from it. When
-that read fails, the plan uses the probe, and the export continues (ADR 014 measurement 23).
+file, so it misses a later audio start in MKV, MPEG-TS and MPEG-PS. An export that writes audio
+therefore also reads the first packet of the audio stream, and the plan takes a later start from
+it. When that read fails, the plan uses the probe, and the export continues (ADR 014 measurement
+23). In MPEG-TS and MPEG-PS, the probe also reports no sample rate for such audio. The export then
+reads the rate again from the position of that packet (measurement 24).
 
 The renderer has three graph shapes. It opens one input for each segment while the assembled
 command line stays inside the platform budget. It otherwise opens one input, seeks once, and

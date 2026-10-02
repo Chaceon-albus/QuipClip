@@ -264,6 +264,52 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     exited 0 with a file that had no audio stream. With the first packet, the plan refuses that
     export with `sourceHasNoAudio`.
 
+24. (Added on 2026-10-02.) The position of the first audio packet gives the sample rate that the
+    probe misses. FFmpeg and FFprobe 9.0.2 on macOS read MPEG-TS sources of 120 s at 1280x720 and
+    30 fps, H.264 at 20 Mb/s, with 48 kHz stereo audio that starts 12 s or 60 s late. The audio
+    was AAC, MP2 or AC-3. One more source of 630 s had AAC at 600 s. One source was M2TS, with
+    packets of 192 bytes and AAC at 60 s. One source was MPEG-PS, with MPEG-2 video and MP2 at
+    60 s. For each of these sources, the probe reported a sample rate of 0. For MP2 in MPEG-TS, it
+    also reported the codec as `mp3`. In the MPEG-PS source, the probe also reported the start of
+    the container, 0.533 s, as the start of the audio, and the first packet came at 60.523 s.
+
+    The command of measurement 23 also reads `pos` and the stream `id`. This command then starts
+    its analysis at that byte, and it selects the stream by its id:
+
+    ```
+    ffprobe -v error -skip_initial_bytes <pos> -select_streams i:<id> \
+      -show_entries stream=id,sample_rate -of json -i <source>
+    ```
+
+    It reported 48000 for each source, the same rate as an analysis of 200M. After the skip, the
+    demuxer can give the streams other indices, so the id selects the stream. In MPEG-TS the id is
+    the PID, and in MPEG-PS it is the stream id. A Matroska stream has no id, but its header holds
+    the rate. The H.264 decoder writes errors to stderr after the skip, because the read starts
+    between two keyframes. The rate does not change because of them.
+
+    The time of each command, as the median of 9 runs with the file in the page cache:
+
+    | Source | Probe | First packet | Rate from `pos` | Analysis to the first packet |
+    | --- | --- | --- | --- | --- |
+    | MPEG-TS, AAC at 12 s | 64 ms | 67 ms | 62 ms | 95 ms |
+    | MPEG-TS, AAC at 60 s | 62 ms | 76 ms | 62 ms | 234 ms |
+    | MPEG-TS, MP2 at 60 s | 62 ms | 76 ms | 62 ms | 237 ms |
+    | MPEG-TS, AC-3 at 60 s | 63 ms | 77 ms | 63 ms | 242 ms |
+    | M2TS, AAC at 60 s | 65 ms | 86 ms | 72 ms | 270 ms |
+    | MPEG-TS, AAC at 600 s, 1.5 GB | 69 ms | 227 ms | 64 ms | 1877 ms |
+
+    The last column is a probe with `-analyzeduration` set to the time of the first packet plus
+    1 s. Its time grows with the gap. The read from `pos` takes the same time at any gap.
+
+    With that rate, each of these sources exported with video and audio through a second input,
+    and FFmpeg exited 0. The first sound of each output came where it comes when FFmpeg decodes the
+    source alone. For AAC at 60 s in MPEG-TS, that is 59.987 s after the start of the video, and
+    11.987 s for AAC at 12 s. A segment that starts 30 s before the audio at 600 s had its first
+    sound at 29.987 s. MP2 and AC-3 gave 59.999 s. MPEG-TS has no field for the priming of the AAC
+    encoder, so its sound starts 13 ms earlier than in the MKV source. An audio-only export of 80 s
+    from the start of the video wrote 80.000 s against an expected 80.000 s. Before this change,
+    the plan refused each of these exports with `sourceAudioRateUnknown`.
+
 ## Decision
 
 ### The boundary mechanism
@@ -520,7 +566,18 @@ uses the values of the probe, and the export continues. A cancel ends the run.
 
 The start can be early by the priming of the encoder, which is 21 ms for AAC at 48 kHz. The read
 does not correct a sample rate of 0. It does not run when the probe reports no sample rate, because
-the plan then refuses the audio with `sourceAudioRateUnknown`.
+the plan then refuses the audio with `sourceAudioRateUnknown`. (Changed on 2026-10-02: the next
+paragraph reads that rate. The export now reads the first packet of a stream without a rate too,
+because the read of the rate starts at the position of that packet.)
+
+(Added on 2026-10-02.) When the probe reports no sample rate, the export reads the rate again with
+the command of measurement 24. That read needs the position of the first packet and the id of its
+stream. It uses the runner, the deadline and the cancel flag of the read of the first packet. The
+rate that it reports becomes the source rate of the plan. When the read cannot start, fails, finds
+no positive rate, or does not finish in time, the rate stays unknown. The plan then refuses the
+audio with `sourceAudioRateUnknown`, as before. A cancel ends the run. The export reads the first
+packet of a stream without a rate only in MPEG-TS and MPEG-PS, the demuxers `mpegts` and `mpeg`.
+In another container, the reads cannot give the rate, and the plan refuses the audio at once.
 
 ## Consequences
 
@@ -551,11 +608,14 @@ the plan then refuses the audio with `sourceAudioRateUnknown`.
   30 s. Preparation then lasts up to 60 s. A cancel stops the read. When the read fails, the plan
   uses the values of the probe. The three decisions that read the audio start then do not apply,
   as before this change. They are the bound of measurement 21, the second input of measurement 22,
-  and the expected duration of ADR 036.
+  and the expected duration of ADR 036. (Changed on 2026-10-02: a source whose probe reports no
+  sample rate runs FFprobe three times, measurement 24, so its preparation lasts up to 90 s.)
 - (Added on 2026-10-02.) An MPEG-TS source whose audio starts more than about 5 s late still has
   no sample rate in the probe (measurement 22). The plan refuses its audio with
   `sourceAudioRateUnknown`, and only a video-only export of it works. The export does not read the
-  first packet of such a stream.
+  first packet of such a stream. (Changed on 2026-10-02: the export reads the rate from the
+  position of the first packet, measurement 24. The plan refuses the audio only when that read
+  fails, and in MPEG-PS too.)
 - (Added on 2026-10-02.) When the probe misses a late start in MKV, the end of the audio stays at
   the end of the container, as before measurement 23. The `DURATION` tag of FFmpeg's muxer can give
   an earlier end, but the tag of another muxer can hold a length, so the export does not prefer
