@@ -24,6 +24,7 @@
     "allow-import-media",
     "allow-read-source-revision",
     "allow-confirm-quit",
+    "allow-set-window-border-theme",
     "allow-load-settings",
     "allow-save-settings",
     "allow-open-settings-window"

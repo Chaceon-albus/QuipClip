@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   THEME_PREFERENCE_STORAGE_KEY,
   createThemePreferenceStore,
@@ -9,6 +9,8 @@ import {
 } from "@/features/settings/themePreference";
 import type { PreferenceStorage } from "@/i18n/types";
 import capability from "../../src-tauri/capabilities/default.json";
+import settingsCapability from "../../src-tauri/capabilities/settings.json";
+import { BACKEND_COMMANDS } from "./ipc";
 import {
   DARK_COLOR_SCHEME_QUERY,
   THEME_PREFERENCES,
@@ -25,21 +27,27 @@ import {
   type ThemeRoot,
 } from "./theme";
 
-// The default native setter reads `isTauri()` and `getCurrentWindow()`. Both are replaced,
-// so a test can run the default wiring inside and outside Tauri.
+// The default native setters read `isTauri()`, `getCurrentWindow()` and its label, and call
+// `invoke`. All are replaced, so a test can run the default wiring inside and outside Tauri,
+// and in each window.
 const tauri = vi.hoisted(() => ({
   inside: false,
+  label: "main",
   setTheme: vi.fn<(theme: "light" | "dark" | null) => Promise<void>>(() =>
+    Promise.resolve(),
+  ),
+  invoke: vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<void>>(() =>
     Promise.resolve(),
   ),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => tauri.inside,
+  invoke: tauri.invoke,
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ setTheme: tauri.setTheme }),
+  getCurrentWindow: () => ({ setTheme: tauri.setTheme, label: tauri.label }),
 }));
 
 interface FakeRoot extends ThemeRoot {
@@ -513,6 +521,160 @@ describe("startThemeSync native window theme", () => {
   it("has the permission that setTheme needs in the main window capability", () => {
     expect(capability.windows).toContain("main");
     expect(capability.permissions).toContain("core:window:allow-set-theme");
+  });
+});
+
+describe("startThemeSync window border", () => {
+  beforeEach(() => {
+    tauri.invoke.mockClear();
+  });
+
+  afterEach(() => {
+    tauri.inside = false;
+    tauri.label = "main";
+  });
+
+  /** Starts a sync that sends only the border theme, to `border`. */
+  function startBorderSync(
+    source: ThemePreferenceSource,
+    query: ColorSchemeQuery,
+    border: ReturnType<typeof deferredSetter>,
+  ): () => void {
+    return startThemeSync(source, {
+      root: fakeRoot(),
+      query,
+      setWindowTheme: null,
+      setWindowBorderTheme: border.setter,
+    });
+  }
+
+  it("sends the resolved theme at start, also for system", async () => {
+    for (const [stored, systemPrefersDark, expected] of [
+      ["system", false, "light"],
+      ["system", true, "dark"],
+      ["light", true, "light"],
+      ["dark", false, "dark"],
+    ] as const) {
+      const border = deferredSetter();
+      const stop = startBorderSync(
+        manualSource(stored),
+        fakeQuery(systemPrefersDark),
+        border,
+      );
+      await border.settle();
+      stop();
+
+      expect(border.calls()).toEqual([expected]);
+    }
+  });
+
+  it("follows the system appearance under system, and ignores it otherwise", async () => {
+    const border = deferredSetter();
+    const query = fakeQuery(false);
+    const source = manualSource("system");
+    startBorderSync(source, query, border);
+    await border.settle();
+
+    query.change(true);
+    await border.settle();
+    source.emit("light");
+    await border.settle();
+    query.change(false);
+    query.change(true);
+    await flushPromises();
+    source.emit("dark");
+    await border.settle();
+
+    expect(border.calls()).toEqual(["light", "dark", "light", "dark"]);
+  });
+
+  it("does not send a resolved theme that did not change", async () => {
+    // The preference changes, and the theme that the page shows stays dark.
+    const border = deferredSetter();
+    const source = manualSource("system");
+    startBorderSync(source, fakeQuery(true), border);
+    await border.settle();
+
+    source.emit("dark");
+    await flushPromises();
+
+    expect(border.calls()).toEqual(["dark"]);
+  });
+
+  it("keeps one call in flight and then sends only the latest theme", async () => {
+    const border = deferredSetter();
+    const source = manualSource("dark");
+    startBorderSync(source, fakeQuery(false), border);
+
+    source.emit("light");
+    source.emit("system");
+    source.emit("light");
+    expect(border.calls()).toEqual(["dark"]);
+
+    await border.settle();
+    expect(border.calls()).toEqual(["dark", "light"]);
+  });
+
+  it("sends nothing after stop", async () => {
+    const border = deferredSetter();
+    const query = fakeQuery(false);
+    const source = manualSource("system");
+    const stop = startBorderSync(source, query, border);
+
+    stop();
+    await border.settle();
+    query.change(true);
+    source.emit("dark");
+    await flushPromises();
+
+    expect(border.calls()).toEqual(["light"]);
+  });
+
+  it("calls the border command by default in the main window, and nowhere else", async () => {
+    const outside = startThemeSync(manualSource("dark"), {
+      root: fakeRoot(),
+      query: fakeQuery(false),
+      setWindowTheme: null,
+    });
+    await flushPromises();
+    outside();
+    expect(tauri.invoke).not.toHaveBeenCalled();
+
+    // The Settings window has the frame of the system and no grant of the command.
+    tauri.inside = true;
+    tauri.label = "settings";
+    const settings = startThemeSync(manualSource("dark"), {
+      root: fakeRoot(),
+      query: fakeQuery(false),
+      setWindowTheme: null,
+    });
+    await flushPromises();
+    settings();
+    expect(tauri.invoke).not.toHaveBeenCalled();
+
+    tauri.label = "main";
+    const source = manualSource("dark");
+    const main = startThemeSync(source, {
+      root: fakeRoot(),
+      query: fakeQuery(false),
+      setWindowTheme: null,
+    });
+    await flushPromises();
+    source.emit("light");
+    await flushPromises();
+    main();
+
+    expect(tauri.invoke.mock.calls).toEqual([
+      [BACKEND_COMMANDS.SET_WINDOW_BORDER_THEME, { theme: "dark" }],
+      [BACKEND_COMMANDS.SET_WINDOW_BORDER_THEME, { theme: "light" }],
+    ]);
+  });
+
+  it("has the grant of the border command in the main window capability only", () => {
+    expect(capability.permissions).toContain("allow-set-window-border-theme");
+    expect(settingsCapability.permissions).not.toContain(
+      "allow-set-window-border-theme",
+    );
   });
 });
 

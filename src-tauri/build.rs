@@ -20,6 +20,7 @@ const APP_COMMANDS: &[&str] = &[
     "load_project",
     "save_project",
     "confirm_quit",
+    "set_window_border_theme",
     "load_settings",
     "save_settings",
     "restore_default_presets",

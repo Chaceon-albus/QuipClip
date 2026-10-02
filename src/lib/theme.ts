@@ -13,10 +13,17 @@
  * Inside Tauri, the sync also sets the native window theme, so native context menus, file
  * dialogs and the macOS window buttons match an explicit preference. `system` sets no native
  * theme, and the window follows the system again.
+ *
+ * In the main window, the sync also sends the resolved theme to `set_window_border_theme`, so
+ * the 1 pixel border that Windows 11 draws around the undecorated window takes the `--border`
+ * colour of the theme that the page shows. Rust maps the theme to the colour, and does nothing
+ * on Windows 10 and on macOS. The Settings window has the frame of the system (ADR 038).
  */
 
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { BACKEND_COMMANDS, invokeCommand } from "./ipc";
+import { getCurrentWindowRole } from "./windowRole";
 
 /** The theme that the user selects in Settings. */
 export type ThemePreference = "system" | "light" | "dark";
@@ -102,16 +109,22 @@ export interface ThemeController {
  *
  * The controller listens to the media query only while the preference is `system`. A null
  * query reads as a light system.
+ *
+ * @param onApply Runs after each write with the resolved theme, also when the theme did not
+ *   change, so a change of the system appearance reaches it too.
  */
 export function createThemeController(
   root: ThemeRoot,
   query: ColorSchemeQuery | null,
+  onApply?: (theme: ResolvedTheme) => void,
 ): ThemeController {
   let preference: ThemePreference = "system";
   let listening = false;
 
   const apply = () => {
-    applyResolvedTheme(root, resolveTheme(preference, query?.matches ?? false));
+    const theme = resolveTheme(preference, query?.matches ?? false);
+    applyResolvedTheme(root, theme);
+    onApply?.(theme);
   };
 
   const listen = (enabled: boolean) => {
@@ -163,6 +176,12 @@ export function nativeWindowThemeFor(preference: ThemePreference): NativeWindowT
   return preference === "system" ? null : preference;
 }
 
+/**
+ * Sets the colour of the native window border to the border colour of a resolved theme. The
+ * command `set_window_border_theme` satisfies it.
+ */
+export type SetWindowBorderTheme = (theme: ResolvedTheme) => Promise<void>;
+
 export interface ThemeSyncOptions {
   /** The document root. Undefined uses `document.documentElement`; null does nothing. */
   root?: ThemeRoot | null;
@@ -173,6 +192,12 @@ export interface ThemeSyncOptions {
    * and nothing outside it; null sets nothing.
    */
   setWindowTheme?: SetWindowTheme | null;
+  /**
+   * Sets the colour of the native window border. Undefined uses `set_window_border_theme`
+   * inside Tauri in the main window, and nothing in the Settings window or outside Tauri; null
+   * sets nothing.
+   */
+  setWindowBorderTheme?: SetWindowBorderTheme | null;
 }
 
 function getDefaultRoot(): ThemeRoot | null {
@@ -200,21 +225,33 @@ function getDefaultSetWindowTheme(): SetWindowTheme | null {
   return (theme) => getCurrentWindow().setTheme(theme);
 }
 
+function getDefaultSetWindowBorderTheme(): SetWindowBorderTheme | null {
+  // Only the main window holds the grant of the command (`capabilities/default.json`).
+  if (!isTauri() || getCurrentWindowRole() !== "main") {
+    return null;
+  }
+  return (theme) =>
+    invokeCommand<void>(BACKEND_COMMANDS.SET_WINDOW_BORDER_THEME, { theme });
+}
+
 /**
- * Sends the native window theme through an async command.
+ * Sends a theme of the native window, such as the native window theme or the border theme,
+ * through an async command.
  *
  * Two calls sent back to back have no guaranteed order, so at most one call is in flight.
  * When it settles, the latest theme is sent if it differs from the theme of the settled
  * call. A failure, such as a missing permission, is ignored and is not sent again: the
  * interface theme does not depend on the native one.
  */
-function createWindowThemeSender(setWindowTheme: SetWindowTheme): {
-  send(theme: NativeWindowTheme): void;
+function createWindowThemeSender<T extends NativeWindowTheme>(
+  setWindowTheme: (theme: T) => Promise<void>,
+): {
+  send(theme: T): void;
   stop(): void;
 } {
   // Undefined means that no theme was requested or sent yet. Null is a real theme.
-  let latest: NativeWindowTheme | undefined;
-  let sent: NativeWindowTheme | undefined;
+  let latest: T | undefined;
+  let sent: T | undefined;
   let inFlight = false;
   let stopped = false;
 
@@ -256,12 +293,16 @@ function createWindowThemeSender(setWindowTheme: SetWindowTheme): {
 
 /**
  * Applies the preference of a source to the document root at once, and again on each
- * change of the source. Inside Tauri it also sets the native window theme.
+ * change of the source. Inside Tauri it also sets the native window theme, and in the main
+ * window the colour of the window border.
  *
  * `public/theme-init.js` already wrote the same theme before the first paint, so the first
  * write here changes nothing on screen. The native theme is sent once at start, also for
  * `system`: a web view reload keeps the native theme of the last session, and a preference
  * that storage did not keep can now read as `system`.
+ *
+ * The border follows the resolved theme and not the preference: under `system`, a change of
+ * the system appearance changes the border too. It is also sent once at start.
  *
  * On macOS the native theme also sets the appearance that the web view reports to
  * `prefers-color-scheme`. The controller ignores the media query while the preference is
@@ -283,8 +324,17 @@ export function startThemeSync(
     options?.setWindowTheme !== undefined
       ? options.setWindowTheme
       : getDefaultSetWindowTheme();
-  const controller = createThemeController(root, query);
+  const setWindowBorderTheme =
+    options?.setWindowBorderTheme !== undefined
+      ? options.setWindowBorderTheme
+      : getDefaultSetWindowBorderTheme();
   const windowTheme = setWindowTheme ? createWindowThemeSender(setWindowTheme) : null;
+  const borderTheme = setWindowBorderTheme
+    ? createWindowThemeSender(setWindowBorderTheme)
+    : null;
+  const controller = createThemeController(root, query, (theme) => {
+    borderTheme?.send(theme);
+  });
 
   const apply = (preference: ThemePreference) => {
     controller.setPreference(preference);
@@ -300,5 +350,6 @@ export function startThemeSync(
     unsubscribe();
     controller.dispose();
     windowTheme?.stop();
+    borderTheme?.stop();
   };
 }

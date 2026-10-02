@@ -150,6 +150,7 @@ pub fn run() {
             commands::project::load_project,
             commands::project::save_project,
             commands::quit::confirm_quit,
+            commands::window_border::set_window_border_theme,
             commands::settings::load_settings,
             commands::settings::save_settings,
             commands::settings::restore_default_presets,
@@ -558,10 +559,10 @@ mod tests {
     /// The commands that the page of the main window calls. Each has its caller in `src/`:
     /// the ffmpeg status (`features/ffmpeg/client.ts`), the export and its Show File button
     /// (`features/export/client.ts`, `output.ts`), the import and the source check
-    /// (`features/media/client.ts`), the quit guard (`quitGuardController.ts`), the settings
-    /// file that the export setup reads and the default preset that an export writes
-    /// (`features/settings/client.ts`), and the openers of Settings
-    /// (`settingsWindowClient.ts`).
+    /// (`features/media/client.ts`), the quit guard (`quitGuardController.ts`), the border
+    /// colour of the window (`lib/theme.ts`), the settings file that the export setup reads and
+    /// the default preset that an export writes (`features/settings/client.ts`), and the openers
+    /// of Settings (`settingsWindowClient.ts`).
     const MAIN_WINDOW_COMMANDS: &[&str] = &[
         "start_capability_probe",
         "start_export",
@@ -571,6 +572,7 @@ mod tests {
         "import_media",
         "read_source_revision",
         "confirm_quit",
+        "set_window_border_theme",
         "load_settings",
         "save_settings",
         "open_settings_window",
