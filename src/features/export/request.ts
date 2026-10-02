@@ -9,7 +9,7 @@
 
 import { getActiveSourceSegmentEntries } from "@/features/timeline/math";
 import type { Segment } from "@/types/project";
-import type { ExportRequest, ExportSegmentBoundary } from "./types";
+import type { ExportRequest, ExportSegmentBoundary, ExportStreams } from "./types";
 
 /**
  * Parameters for assembling an `ExportRequest`.
@@ -40,6 +40,11 @@ export interface BuildExportRequestOptions {
    * Optional preset identifier configuring the encoder.
    */
   presetId?: string;
+  /**
+   * The streams of the source that the export writes. Required: the backend refuses a
+   * request without it, so each caller states the choice rather than inheriting a default.
+   */
+  streams: ExportStreams;
 }
 
 /**
@@ -50,6 +55,7 @@ export interface BuildExportRequestOptions {
  * - Multi-source aware: filters segments to `activeSourceId` while strictly PRESERVING ARRAY ORDER (ADR 007).
  * - Never sorts segments; array order is export order.
  * - Maps each Segment to `{ inPts, outPts }`, dropping `id` and `sourceId`.
+ * - Forwards `streams` unchanged.
  * - Returns `null` when there is no media, no output path, or no segments for the active source.
  *
  * @param options Export assembly parameters.
@@ -94,6 +100,7 @@ export function buildExportRequest(
     sourcePath: resolvedSourcePath,
     outputPath: options.outputPath.trim(),
     segments,
+    streams: options.streams,
   };
 
   if (options.presetId !== undefined && options.presetId.trim().length > 0) {

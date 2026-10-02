@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BACKEND_EXPORT_ERROR_CODES,
   EXPORT_ERROR_CODES,
+  EXPORT_STREAMS,
   ExportError,
   type ExportProgressEvent,
   type ExportStart,
@@ -11,6 +12,7 @@ import {
   isExportErrorCode,
   isExportProgressEvent,
   isExportStart,
+  isExportStreams,
   normalizeExportError,
   validateExportProgressEvent,
   validateExportStart,
@@ -20,6 +22,7 @@ function createValidStart(overrides: Partial<ExportStart> = {}): ExportStart {
   return {
     runId: "run-export-1",
     presetId: "preset-default-mp4",
+    streams: "videoAndAudio",
     outputPath: "/Users/capric98/Movies/out.mp4",
     segmentCount: 3,
     totalDurationUs: 15_000_000,
@@ -78,6 +81,28 @@ describe("Export Validation & Normalization", () => {
       expect(isExportStart({ ...valid, totalDurationUs: 100.5 })).toBe(false);
       expect(isExportStart({ ...valid, expectedFrames: -1 })).toBe(false);
       expect(isExportStart({ ...valid, expectedFrames: 10.5 })).toBe(false);
+    });
+
+    it("validates the stream choice of a start payload", () => {
+      for (const streams of EXPORT_STREAMS) {
+        expect(isExportStreams(streams)).toBe(true);
+        expect(isExportStart(createValidStart({ streams }))).toBe(true);
+      }
+
+      // An audio-only run writes no frames, so its start payload carries no frame goal.
+      expect(
+        isExportStart(
+          createValidStart({ streams: "audioOnly", expectedFrames: undefined }),
+        ),
+      ).toBe(true);
+
+      // The backend always echoes the choice, so a payload without it is not a start payload.
+      const { streams: _omitted, ...withoutStreams } = createValidStart();
+      expect(isExportStart(withoutStreams)).toBe(false);
+      for (const invalid of ["audio", "VideoOnly", "video_only", "", null, 1, {}]) {
+        expect(isExportStreams(invalid)).toBe(false);
+        expect(isExportStart({ ...createValidStart(), streams: invalid })).toBe(false);
+      }
     });
 
     it("validates isExportProgressEvent type guard", () => {
@@ -232,6 +257,48 @@ describe("Export Validation & Normalization", () => {
         encoder: "libx264",
       };
       expect(validateExportProgressEvent(fullFailed)).toEqual(fullFailed);
+    });
+
+    it("accepts the two named durations of a failed audio check, and only whole microseconds", () => {
+      const mismatch: ExportProgressEvent = {
+        event: "failed",
+        runId: "run-1",
+        code: "audioDurationMismatch",
+        detail: "stderr tail",
+        measuredDurationUs: 9_500_000,
+        expectedDurationUs: 10_000_000,
+      };
+      expect(validateExportProgressEvent(mismatch)).toEqual(mismatch);
+
+      // ffprobe can report no duration at all, and the event then carries the expected one only.
+      const unmeasured: ExportProgressEvent = {
+        event: "failed",
+        runId: "run-1",
+        code: "audioDurationMismatch",
+        expectedDurationUs: 10_000_000,
+      };
+      expect(validateExportProgressEvent(unmeasured)).toEqual(unmeasured);
+
+      for (const field of ["measuredDurationUs", "expectedDurationUs"]) {
+        for (const invalid of [
+          -1,
+          1.5,
+          "10000000",
+          null,
+          Number.MAX_SAFE_INTEGER + 1,
+        ]) {
+          expect(
+            isExportProgressEvent({ ...mismatch, [field]: invalid }),
+            `${field}: ${String(invalid)}`,
+          ).toBe(false);
+        }
+      }
+
+      for (const code of ["sourceHasNoAudio", "outputStreamsMismatch"]) {
+        expect(isExportProgressEvent({ event: "failed", runId: "run-1", code })).toBe(
+          true,
+        );
+      }
     });
 
     it("rejects event when runId is missing or non-string", () => {
@@ -750,6 +817,25 @@ describe("Export Validation & Normalization", () => {
           encoder: 123,
         }).encoder,
       ).toBeUndefined();
+    });
+
+    it("preserves the two durations ONLY when each is a whole number of microseconds", () => {
+      const normalized = normalizeExportError({
+        code: "audioDurationMismatch",
+        measuredDurationUs: 9_500_000,
+        expectedDurationUs: 10_000_000,
+      });
+      expect(normalized.code).toBe("audioDurationMismatch");
+      expect(normalized.measuredDurationUs).toBe(9_500_000);
+      expect(normalized.expectedDurationUs).toBe(10_000_000);
+
+      const malformed = normalizeExportError({
+        code: "audioDurationMismatch",
+        measuredDurationUs: -1,
+        expectedDurationUs: "10000000",
+      });
+      expect("measuredDurationUs" in malformed).toBe(false);
+      expect("expectedDurationUs" in malformed).toBe(false);
     });
   });
 });

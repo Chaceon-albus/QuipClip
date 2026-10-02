@@ -277,6 +277,7 @@ describe("startExportAttentionSync", () => {
         Promise.resolve({
           runId: "run-1",
           presetId: "mp4-h264",
+          streams: "videoAndAudio",
           outputPath: "/media/output.mp4",
           segmentCount: 1,
           totalDurationUs: 5_000_000,
@@ -302,6 +303,7 @@ describe("startExportAttentionSync", () => {
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
       presetId: "mp4-h264",
+      streams: "videoAndAudio",
     });
     emit({
       event: "started",
@@ -354,6 +356,7 @@ describe("startExportAttentionSync", () => {
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
       presetId: "mp4-h264",
+      streams: "videoAndAudio",
     });
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();
@@ -367,6 +370,7 @@ describe("startExportAttentionSync", () => {
     answerStart({
       runId: "run-kept",
       presetId: "mp4-h264",
+      streams: "videoAndAudio",
       outputPath: "/media/output.mp4",
       segmentCount: 1,
       totalDurationUs: 5_000_000,
@@ -405,6 +409,7 @@ describe("startExportAttentionSync", () => {
         outputPath: "/media/output.mp4",
         segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
         presetId: "mp4-h264",
+        streams: "videoAndAudio",
       });
       return { store, isFocused, requestAttention, stop, started };
     }

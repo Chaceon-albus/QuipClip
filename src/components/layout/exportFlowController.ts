@@ -387,6 +387,9 @@ export class ExportFlowController {
       segments: currentSegments,
       activeSourceId: currentSourceId,
       presetId,
+      // The setup step does not offer the stream choice yet, so every export writes the video
+      // and the audio, as every export did before the backend took the choice.
+      streams: "videoAndAudio",
     });
 
     if (!request) {

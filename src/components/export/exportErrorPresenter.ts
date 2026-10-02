@@ -69,6 +69,11 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   // The encode: another preset, or a second attempt, can succeed.
   ffmpegProcessFailed: BACK_TO_SETUP,
   frameCountMismatch: BACK_TO_SETUP,
+  audioDurationMismatch: BACK_TO_SETUP,
+  outputStreamsMismatch: BACK_TO_SETUP,
+
+  // The stream choice: an export that writes the video can succeed from the same source.
+  sourceHasNoAudio: BACK_TO_SETUP,
 
   // A condition that can clear by itself: a share that stopped answering, a command that
   // did not reach the backend, a slot that a stopped run has not released yet (ADR 016),

@@ -336,6 +336,7 @@ describe("numberSegmentsInExportOrder", () => {
       outputPath: "/out.mp4",
       activeSourceId: "B",
       segments,
+      streams: "videoAndAudio",
     });
     expect(request?.segments).toHaveLength(numbering.total);
   });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Pts, Segment } from "@/types/project";
 import { buildExportRequest } from "./request";
+import { EXPORT_STREAMS } from "./types";
 
 describe("Export Request Builder", () => {
   const activeSourceId = "source-1";
@@ -33,6 +34,7 @@ describe("Export Request Builder", () => {
       sourcePath,
       outputPath,
       activeSourceId,
+      streams: "videoAndAudio",
       segments,
       presetId: "h264-mp4",
     });
@@ -41,6 +43,7 @@ describe("Export Request Builder", () => {
       sourcePath: "/media/input.mp4",
       outputPath: "/media/output.mp4",
       presetId: "h264-mp4",
+      streams: "videoAndAudio",
       segments: [
         { inPts: "100", outPts: "200" },
         { inPts: "500", outPts: "600" },
@@ -60,6 +63,7 @@ describe("Export Request Builder", () => {
       sourcePath,
       outputPath,
       activeSourceId,
+      streams: "videoAndAudio",
       segments,
     });
 
@@ -78,6 +82,7 @@ describe("Export Request Builder", () => {
       media: { path: "/media/from-media-store.mp4" },
       outputPath,
       activeSourceId,
+      streams: "videoAndAudio",
       segments,
     });
 
@@ -85,6 +90,7 @@ describe("Export Request Builder", () => {
       sourcePath: "/media/from-media-store.mp4",
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0", outPts: "1000" }],
+      streams: "videoAndAudio",
     });
   });
 
@@ -96,6 +102,7 @@ describe("Export Request Builder", () => {
       media: { path: "/media/from-media.mp4" },
       outputPath,
       activeSourceId,
+      streams: "videoAndAudio",
       segments,
     });
 
@@ -110,6 +117,7 @@ describe("Export Request Builder", () => {
       media: { path: "/media/fallback.mp4" },
       outputPath,
       activeSourceId,
+      streams: "videoAndAudio",
       segments,
     });
 
@@ -124,6 +132,7 @@ describe("Export Request Builder", () => {
       sourcePath,
       outputPath: "  /media/trimmed-output.mp4  ",
       activeSourceId,
+      streams: "videoAndAudio",
       segments,
     });
 
@@ -138,6 +147,7 @@ describe("Export Request Builder", () => {
       sourcePath,
       outputPath,
       activeSourceId,
+      streams: "videoAndAudio",
       segments,
     });
     expect(resUndefined?.presetId).toBeUndefined();
@@ -146,10 +156,25 @@ describe("Export Request Builder", () => {
       sourcePath,
       outputPath,
       activeSourceId,
+      streams: "videoAndAudio",
       segments,
       presetId: "   ",
     });
     expect(resEmpty?.presetId).toBeUndefined();
+  });
+
+  it.each(EXPORT_STREAMS)("forwards the stream choice '%s' unchanged", (streams) => {
+    const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
+
+    const result = buildExportRequest({
+      sourcePath,
+      outputPath,
+      activeSourceId,
+      segments,
+      streams,
+    });
+
+    expect(result?.streams).toBe(streams);
   });
 
   describe("Returns null when requirements are not met", () => {
@@ -164,6 +189,7 @@ describe("Export Request Builder", () => {
           media: null,
           outputPath,
           activeSourceId,
+          streams: "videoAndAudio",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -173,6 +199,7 @@ describe("Export Request Builder", () => {
           sourcePath: "",
           outputPath,
           activeSourceId,
+          streams: "videoAndAudio",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -184,6 +211,7 @@ describe("Export Request Builder", () => {
           sourcePath,
           outputPath: null,
           activeSourceId,
+          streams: "videoAndAudio",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -193,6 +221,7 @@ describe("Export Request Builder", () => {
           sourcePath,
           outputPath: "   ",
           activeSourceId,
+          streams: "videoAndAudio",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -204,6 +233,7 @@ describe("Export Request Builder", () => {
           sourcePath,
           outputPath,
           activeSourceId: null,
+          streams: "videoAndAudio",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -213,6 +243,7 @@ describe("Export Request Builder", () => {
           sourcePath,
           outputPath,
           activeSourceId: "",
+          streams: "videoAndAudio",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -224,6 +255,7 @@ describe("Export Request Builder", () => {
           sourcePath,
           outputPath,
           activeSourceId,
+          streams: "videoAndAudio",
           segments: [],
         }),
       ).toBeNull();
@@ -233,6 +265,7 @@ describe("Export Request Builder", () => {
           sourcePath,
           outputPath,
           activeSourceId,
+          streams: "videoAndAudio",
           segments: null,
         }),
       ).toBeNull();
@@ -248,6 +281,7 @@ describe("Export Request Builder", () => {
           sourcePath,
           outputPath,
           activeSourceId,
+          streams: "videoAndAudio",
           segments: otherSegments,
         }),
       ).toBeNull();

@@ -158,6 +158,8 @@ export function createExportStore(
             detail: event.detail,
             exitCode: event.exitCode,
             encoder: event.encoder,
+            measuredDurationUs: event.measuredDurationUs,
+            expectedDurationUs: event.expectedDurationUs,
           });
           setTrackedRun(null, {
             status: event.code === "canceled" ? "canceled" : "failed",
@@ -265,6 +267,8 @@ export function createExportStore(
           detail: normalized.detail,
           exitCode: normalized.exitCode,
           encoder: normalized.encoder,
+          measuredDurationUs: normalized.measuredDurationUs,
+          expectedDurationUs: normalized.expectedDurationUs,
         }),
       });
     }

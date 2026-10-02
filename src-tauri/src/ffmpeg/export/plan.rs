@@ -10,8 +10,8 @@
 //! doc comment for why that distinction is load-bearing.
 
 use super::{
-    ExportErrorCode, ExportPlan, OutputTiming, PlannedAudio, PlannedSegment, PlannedVideo,
-    MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
+    ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PlannedAudio, PlannedSegment,
+    PlannedVideo, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::probe::MediaProbe;
 use crate::settings::{AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting};
@@ -52,6 +52,9 @@ pub struct PlanRequest<'a> {
     /// The export preset selecting the container, the encoders, the quality, and the two
     /// output settings.
     pub preset: &'a Preset,
+    /// Which streams of the source the export writes, as the user chose them. This decides
+    /// which parts of [`ExportPlan`] exist; see [`ExportStreams`].
+    pub streams: ExportStreams,
 }
 
 /// An opaque, comparable identity for one file on disk, used only to detect that two
@@ -162,11 +165,19 @@ pub enum PathFacts {
 ///     [`ExportErrorCode::OutputEqualsSource`].
 /// 11. `destination` exists as a regular file the user protected against writing --
 ///     [`ExportErrorCode::OutputReadOnly`].
-/// 12. The preset's frame rate is [`FrameRateSetting::Source`] but the probe has neither a
-///     valid `avg_frame_rate` nor `r_frame_rate`, or the resolved rate is not strictly
-///     positive -- [`ExportErrorCode::SourceFrameRateUnknown`].
-/// 13. The probe reports an audio stream whose sample rate is absent, not positive, or
-///     larger than `u32` -- [`ExportErrorCode::SourceAudioRateUnknown`].
+/// 12. The export writes video ([`ExportStreams::writes_video`]), and the preset's frame rate
+///     is [`FrameRateSetting::Source`] but the probe has neither a valid `avg_frame_rate` nor
+///     `r_frame_rate`, or the resolved rate is not strictly positive --
+///     [`ExportErrorCode::SourceFrameRateUnknown`]. An audio-only export times no frames, so
+///     it skips this check.
+/// 13. The export is [`ExportStreams::AudioOnly`], and the probe reports no audio stream --
+///     [`ExportErrorCode::SourceHasNoAudio`]. This check opens the audio step, because it is
+///     the one question about the audio that comes before its sample rate: a stream that is
+///     absent has no rate to ask about.
+/// 14. The export writes audio ([`ExportStreams::writes_audio`]), and the probe reports an
+///     audio stream whose sample rate is absent, not positive, or larger than `u32` --
+///     [`ExportErrorCode::SourceAudioRateUnknown`]. A video-only export never reads the
+///     audio stream, so it skips this check.
 ///
 /// `destination` must be absolute for the same reason `source` must: a CWD-relative path
 /// would carry an ambiguous location into a pipeline that spawns a child process and later
@@ -187,9 +198,16 @@ pub enum PathFacts {
 /// rational sum of every segment's duration, and [`PlannedVideo::expected_frames`] rounds
 /// each segment's frame count individually before summing -- never the reverse, since
 /// rounding the total instead can produce a different, and wrong, expected count.
+/// [`PlannedAudio::expected_duration`] sums each segment's overlap with the probed extent of the
+/// source audio stream, for the success check of an export without video.
 ///
-/// The plan always carries [`ExportPlan::video`]. It carries [`ExportPlan::audio`] exactly
-/// when the probe reports an audio stream.
+/// The plan carries [`ExportPlan::video`] exactly when the export writes video. It carries
+/// [`ExportPlan::audio`] exactly when the export writes audio and the probe reports an audio
+/// stream. Check 13 makes the two rules leave no plan with neither part: the one choice
+/// without video is refused when there is no audio to write.
+///
+/// [`ExportStreams::VideoAndAudio`] plans exactly what every export planned before the choice
+/// existed, so a request with that value renders the same command as before, byte for byte.
 ///
 /// No step here uses floating point. Every quantity is either an integer or a [`Rational`],
 /// per ADR 002.
@@ -289,29 +307,42 @@ pub fn build_plan(
 
     let probe = request.probe;
     let preset = request.preset;
-    let output_frame_rate = match preset.frame_rate {
-        FrameRateSetting::Rate(rate) => rate,
-        FrameRateSetting::Source => probe
-            .avg_frame_rate
-            .or(probe.r_frame_rate)
-            .ok_or(ExportErrorCode::SourceFrameRateUnknown)?,
+    let streams = request.streams;
+    // Only an export that writes video times frames. An audio-only export reads neither rate,
+    // so a source whose frame rate is unknown can still export its audio.
+    let output_frame_rate = if streams.writes_video() {
+        let rate = match preset.frame_rate {
+            FrameRateSetting::Rate(rate) => rate,
+            FrameRateSetting::Source => probe
+                .avg_frame_rate
+                .or(probe.r_frame_rate)
+                .ok_or(ExportErrorCode::SourceFrameRateUnknown)?,
+        };
+        // A non-positive frame rate cannot time anything (the graph builder would have to emit
+        // `fps=0` or worse). `settings::validate_settings` already rejects a non-positive rate
+        // for a saved preset, and `probe::normalize` already filters the probe's own rates to
+        // strictly positive ones, but `PlanRequest` accepts any `&Preset` and any `&MediaProbe`,
+        // so this function re-checks cheaply here rather than trusting either precondition
+        // silently. There is no dedicated "invalid frame rate" code, so this reuses
+        // `SourceFrameRateUnknown`: whichever path produced the value, the renderer still has no
+        // usable rate to time the output with.
+        if rate.num() <= 0 {
+            return Err(ExportErrorCode::SourceFrameRateUnknown);
+        }
+        Some(rate)
+    } else {
+        None
     };
-    // A non-positive frame rate cannot time anything (the graph builder would have to emit
-    // `fps=0` or worse). `settings::validate_settings` already rejects a non-positive rate
-    // for a saved preset, and `probe::normalize` already filters the probe's own rates to
-    // strictly positive ones, but `PlanRequest` accepts any `&Preset` and any `&MediaProbe`,
-    // so this function re-checks cheaply here rather than trusting either precondition
-    // silently. There is no dedicated "invalid frame rate" code, so this reuses
-    // `SourceFrameRateUnknown`: whichever path produced the value, the renderer still has no
-    // usable rate to time the output with.
-    if output_frame_rate.num() <= 0 {
-        return Err(ExportErrorCode::SourceFrameRateUnknown);
-    }
 
     let video_time_base = probe.video_time_base;
     let zero = zero_rational();
     let format_start_time = probe.format_start_time.unwrap_or(zero);
     let margin = seek_margin_rational();
+    // An audio-only export of a source with no audio would write nothing at all, so it is
+    // refused here, before the rate question below can be asked of a stream that is absent.
+    if streams == ExportStreams::AudioOnly && probe.audio.is_none() {
+        return Err(ExportErrorCode::SourceHasNoAudio);
+    }
     // An audio stream with no usable sample rate is refused, not dropped. ADR 014 cuts audio
     // at integer ticks of `1 / sample_rate` and forbids the microsecond `atrim` fallback, so
     // there is no exact way to cut this track. Planning it away instead would set `concat=a=0`
@@ -319,13 +350,18 @@ pub fn build_plan(
     // video-only file for a source whose audio the preview played -- the same silent failure
     // ADR 014 rules out for the short stream specifier one paragraph earlier.
     //
+    // A video-only export is the one exception, and it is not the silent failure: the user
+    // asked for a file without sound, so the audio stream is never read and its rate is never
+    // needed.
+    //
     // The output format is resolved here too, so the graph renders numbers and never reads the
     // preset. `source` for the rate becomes the source stream's own rate. `source` for the
     // channels stays as it is, because the probe reports a channel count and not a layout; see
     // `PlannedAudio::output_channels`. The rate range and the bitrate range are not re-checked
     // here: `settings::validate_settings` bounds both, and `commands::export` plans only from a
     // preset it read out of the settings document through the validating `settings::load`.
-    let audio = match probe.audio.as_ref() {
+    let source_audio = probe.audio.as_ref().filter(|_| streams.writes_audio());
+    let audio = match source_audio {
         None => None,
         Some(audio) => {
             let sample_rate = audio
@@ -342,13 +378,32 @@ pub fn build_plan(
                 output_channels: preset.audio_channels,
                 encoder: preset.audio_encoder.clone(),
                 bitrate: preset.audio_bitrate,
+                // Summed over the segments below.
+                expected_duration: zero,
             })
         }
     };
+    // The extent of the source audio stream on the segments' timeline, for
+    // `PlannedAudio::expected_duration`. A side the probe does not report bounds nothing, and
+    // the end is known only when the start is: a length with no start has no place. Only an
+    // audio-only export reads the expected duration (ADR 036), so no other plan computes it
+    // and no other plan can fail on it.
+    let audio_extent = source_audio
+        .filter(|_| streams == ExportStreams::AudioOnly)
+        .map(|audio| {
+            let end = audio
+                .start_time
+                .zip(audio.duration)
+                .and_then(|(start, length)| start.add(length));
+            (audio.start_time, end)
+        });
 
     let mut planned_segments = Vec::with_capacity(segments.len());
     let mut total_duration = zero;
     let mut total_frames: u64 = 0;
+    let mut expected_audio_duration = zero;
+    // An overflow of the overlap sum falls back to the planned duration instead of an error.
+    let mut expected_audio_overflowed = false;
 
     for segment in segments {
         // Every `Option`-returning step below can fail for more reasons than one segment's
@@ -390,25 +445,41 @@ pub fn build_plan(
                     .ok_or(ExportErrorCode::InvalidSegment)?;
                 (Some(in_tick), Some(out_tick))
             }
-            // `ExportPlan::audio` is `None`, which now means one thing only: the source
-            // reports no audio stream. Both ticks stay `None` too, distinct from an
-            // overflow above, which is reported as an error rather than silently `None`.
+            // `ExportPlan::audio` is `None`: the source reports no audio stream, or the
+            // export is video only. Both ticks stay `None` too, distinct from an overflow
+            // above, which is reported as an error rather than silently `None`.
             None => (None, None),
         };
 
-        let segment_frames_exact = duration
-            .mul(output_frame_rate)
-            .ok_or(ExportErrorCode::InvalidSegment)?;
-        let segment_frames = round_rational_to_i128(segment_frames_exact)
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(ExportErrorCode::InvalidSegment)?;
-        total_frames = total_frames
-            .checked_add(segment_frames)
-            .ok_or(ExportErrorCode::InvalidSegment)?;
+        if let Some(rate) = output_frame_rate {
+            let segment_frames_exact = duration.mul(rate).ok_or(ExportErrorCode::InvalidSegment)?;
+            let segment_frames = round_rational_to_i128(segment_frames_exact)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(ExportErrorCode::InvalidSegment)?;
+            total_frames = total_frames
+                .checked_add(segment_frames)
+                .ok_or(ExportErrorCode::InvalidSegment)?;
+        }
 
         total_duration = total_duration
             .add(duration)
             .ok_or(ExportErrorCode::InvalidSegment)?;
+
+        if let Some((audio_start, audio_end)) = audio_extent {
+            // The part of `[in, out)` the audio stream covers, which is empty when the stream
+            // starts after the Out point or ends before the In point.
+            let from = audio_start.map_or(in_seconds, |start| start.max(in_seconds));
+            let to = audio_end.map_or(out_seconds, |end| end.min(out_seconds));
+            if to > from && !expected_audio_overflowed {
+                match to
+                    .sub(from)
+                    .and_then(|covered| expected_audio_duration.add(covered))
+                {
+                    Some(sum) => expected_audio_duration = sum,
+                    None => expected_audio_overflowed = true,
+                }
+            }
+        }
 
         planned_segments.push(PlannedSegment {
             in_pts: segment.in_pts,
@@ -423,13 +494,30 @@ pub fn build_plan(
         ResolutionSetting::Source => None,
         ResolutionSetting::Custom(resolution) => Some(resolution),
     };
+    if expected_audio_overflowed {
+        expected_audio_duration = total_duration;
+    }
+    // An audio-only export whose segments the audio stream does not reach at all would write
+    // an empty file, and a duration check against 0 s would pass it. The plan refuses it with
+    // the code of a source without audio, whose text names the marked segments.
+    if audio_extent.is_some() && expected_audio_duration == zero {
+        return Err(ExportErrorCode::SourceHasNoAudio);
+    }
+    let audio = audio.map(|audio| PlannedAudio {
+        expected_duration: if audio_extent.is_some() {
+            expected_audio_duration
+        } else {
+            total_duration
+        },
+        ..audio
+    });
 
     Ok(ExportPlan {
         source: source.to_path_buf(),
         destination: destination.to_path_buf(),
-        video: Some(PlannedVideo {
+        video: output_frame_rate.map(|rate| PlannedVideo {
             stream_index: probe.video_stream_index,
-            timing: OutputTiming::ConstantFrameRate(output_frame_rate),
+            timing: OutputTiming::ConstantFrameRate(rate),
             resolution,
             encoder: preset.video_encoder.clone(),
             quality: preset.quality,
@@ -724,12 +812,26 @@ mod tests {
         move |path: &Path| facts.get(path).copied().unwrap_or(PathFacts::Absent)
     }
 
-    /// The video part of a plan [`build_plan`] produced, which always carries one.
+    /// The video part of a plan that [`build_plan`] produced for an export that writes video.
     fn video(plan: &ExportPlan) -> &PlannedVideo {
-        plan.video.as_ref().expect("build_plan always plans video")
+        plan.video
+            .as_ref()
+            .expect("an export that writes video plans video")
     }
 
     fn plan_with(
+        segments: &[SegmentBoundary],
+        probe: &MediaProbe,
+        preset: &Preset,
+        facts: HashMap<PathBuf, PathFacts>,
+    ) -> Result<ExportPlan, ExportErrorCode> {
+        plan_streams(ExportStreams::VideoAndAudio, segments, probe, preset, facts)
+    }
+
+    /// [`plan_with`] for an explicit stream choice. Every test that does not name one plans
+    /// video and audio, which is what every export planned before the choice existed.
+    fn plan_streams(
+        streams: ExportStreams,
         segments: &[SegmentBoundary],
         probe: &MediaProbe,
         preset: &Preset,
@@ -743,6 +845,7 @@ mod tests {
             segments,
             probe,
             preset,
+            streams,
         };
         build_plan(&request, inspect_from(facts))
     }
@@ -811,6 +914,7 @@ mod tests {
                 segments: &[boundary(0, 1)],
                 probe: &sample_probe(),
                 preset: &sample_preset(),
+                streams: ExportStreams::VideoAndAudio,
             };
             let error = build_plan(&request, inspect_from(valid_path_facts())).unwrap_err();
             assert_eq!(
@@ -865,6 +969,7 @@ mod tests {
                 segments: &[boundary(0, 1)],
                 probe: &sample_probe(),
                 preset: &sample_preset(),
+                streams: ExportStreams::VideoAndAudio,
             };
             let error = build_plan(&request, inspect_from(valid_path_facts())).unwrap_err();
             assert_eq!(
@@ -940,6 +1045,7 @@ mod tests {
             segments: &[boundary(0, 1)],
             probe: &sample_probe(),
             preset: &sample_preset(),
+            streams: ExportStreams::VideoAndAudio,
         };
         let mut facts = valid_path_facts();
         facts.insert(PathBuf::from(SOURCE), present_file(1));
@@ -1300,6 +1406,8 @@ mod tests {
             codec: Some("aac".to_owned()),
             sample_rate: Some(44_100),
             channels: Some(2),
+            start_time: None,
+            duration: None,
         });
         // 1001 ticks * 1/30000 s = 1001/30000 s; * 44100 = 44144100/30000 = 1471.47,
         // which rounds to 1471.
@@ -1319,6 +1427,8 @@ mod tests {
                 output_channels: AudioChannels::Stereo,
                 encoder: "aac".to_owned(),
                 bitrate: None,
+                // The probe reports no extent, so the whole segment is expected.
+                expected_duration: Rational::new(1001, 30_000).unwrap(),
             })
         );
         assert_eq!(plan.segments[0].audio_in_tick, Some(0));
@@ -1334,6 +1444,8 @@ mod tests {
             codec: Some("aac".to_owned()),
             sample_rate: Some(48_000),
             channels: Some(2),
+            start_time: None,
+            duration: None,
         });
         // 1001 ticks * 1/30000 s = 1001/30000 s; * 48000 = 48048000/30000 = 1601.6,
         // which rounds to 1602.
@@ -1353,6 +1465,8 @@ mod tests {
                 output_channels: AudioChannels::Stereo,
                 encoder: "aac".to_owned(),
                 bitrate: None,
+                // The probe reports no extent, so the whole segment is expected.
+                expected_duration: Rational::new(1001, 30_000).unwrap(),
             })
         );
         assert_eq!(plan.segments[0].audio_in_tick, Some(0));
@@ -1378,6 +1492,8 @@ mod tests {
             codec: Some("aac".to_owned()),
             sample_rate: Some(48_000),
             channels: Some(2),
+            start_time: None,
+            duration: None,
         });
         let plan = plan_with(
             &[boundary(128_000, 140_800)],
@@ -1414,6 +1530,8 @@ mod tests {
             codec: Some("ac3".to_owned()),
             sample_rate: None,
             channels: Some(6),
+            start_time: None,
+            duration: None,
         });
         let error = plan_with(
             &[boundary(0, 1001)],
@@ -1441,6 +1559,8 @@ mod tests {
             codec: Some("ac3".to_owned()),
             sample_rate: Some(44_100),
             channels: Some(6),
+            start_time: None,
+            duration: None,
         });
         probe
     }
@@ -1468,6 +1588,8 @@ mod tests {
                 output_channels: AudioChannels::Source,
                 encoder: "aac".to_owned(),
                 bitrate: None,
+                // The probe reports no extent, so the whole segment is expected.
+                expected_duration: Rational::new(1001, 30_000).unwrap(),
             })
         );
         assert_eq!(plan.segments[0].audio_out_tick, Some(1471));
@@ -1561,6 +1683,8 @@ mod tests {
             codec: Some("aac".to_owned()),
             sample_rate: Some(2),
             channels: Some(1),
+            start_time: None,
+            duration: None,
         });
         // in_pts = -3s: seek = -3 - 0 - 5 margin = -8, clamps to None.
         // audio_in_tick = round(-3s * 2 Hz) = -6.
@@ -1645,11 +1769,456 @@ mod tests {
             codec: Some("aac".to_owned()),
             sample_rate: Some(48_000),
             channels: Some(2),
+            start_time: None,
+            duration: None,
         });
         let with_audio =
             plan_with(&[boundary(0, 90_000)], &probe, &preset, valid_path_facts()).unwrap();
         assert!(with_audio.audio.is_some());
         assert_eq!(with_audio.video.as_ref(), Some(&expected));
         assert_eq!(with_audio.expected_frames(), Some(30));
+    }
+
+    // -- the stream choice -----------------------------------------------------------------
+
+    /// A probe with a 48000 Hz stereo audio stream at index 1, beside the sample video.
+    fn probe_with_audio() -> MediaProbe {
+        let mut probe = sample_probe();
+        probe.audio = Some(AudioProbe {
+            index: 1,
+            codec: Some("aac".to_owned()),
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            start_time: None,
+            duration: None,
+        });
+        probe
+    }
+
+    /// A probe whose audio stream reports no sample rate.
+    fn probe_with_unknown_audio_rate() -> MediaProbe {
+        let mut probe = sample_probe();
+        probe.audio = Some(AudioProbe {
+            index: 1,
+            codec: Some("ac3".to_owned()),
+            sample_rate: None,
+            channels: Some(6),
+            start_time: None,
+            duration: None,
+        });
+        probe
+    }
+
+    #[test]
+    fn video_and_audio_plans_both_parts_as_every_export_did_before_the_choice() {
+        // The default choice. `plan_with` plans it, so every other test in this module is a
+        // test of this choice too; this one states the two parts side by side.
+        let plan = plan_streams(
+            ExportStreams::VideoAndAudio,
+            &[boundary(0, 90_000)],
+            &probe_with_audio(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+        assert!(plan.video.is_some());
+        assert_eq!(plan.audio.as_ref().map(|audio| audio.stream_index), Some(1));
+        assert_eq!(plan.expected_frames(), Some(30));
+        assert_eq!(plan.segments[0].audio_out_tick, Some(48_000));
+    }
+
+    #[test]
+    fn audio_only_plans_the_audio_part_and_no_video_part() {
+        let segments = [boundary(900_000, 990_000), boundary(90_000, 180_000)];
+        let both = plan_streams(
+            ExportStreams::VideoAndAudio,
+            &segments,
+            &probe_with_audio(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+        let audio_only = plan_streams(
+            ExportStreams::AudioOnly,
+            &segments,
+            &probe_with_audio(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+
+        assert_eq!(audio_only.video, None);
+        // No video part, so no frame count to predict or to check.
+        assert_eq!(audio_only.expected_frames(), None);
+        // Everything that does not belong to the video part is the plan of both parts: the
+        // audio, every segment with its seek and its ticks, the container, and the duration.
+        assert_eq!(audio_only.audio, both.audio);
+        assert_eq!(audio_only.segments, both.segments);
+        assert_eq!(audio_only.container, both.container);
+        assert_eq!(audio_only.total_duration, Rational::new(2, 1).unwrap());
+        assert_eq!(audio_only.total_duration, both.total_duration);
+    }
+
+    #[test]
+    fn audio_only_of_a_source_without_audio_is_refused_with_source_has_no_audio() {
+        let error = plan_streams(
+            ExportStreams::AudioOnly,
+            &[boundary(0, 90_000)],
+            &sample_probe(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap_err();
+        assert_eq!(error, ExportErrorCode::SourceHasNoAudio);
+    }
+
+    #[test]
+    fn the_missing_audio_check_comes_after_the_path_checks() {
+        // Check 13 sits in the stream checks, behind every path check: a source that is not
+        // there is reported as missing, not as a source without audio.
+        let mut facts = valid_path_facts();
+        facts.insert(PathBuf::from(SOURCE), absent());
+        let error = plan_streams(
+            ExportStreams::AudioOnly,
+            &[boundary(0, 90_000)],
+            &sample_probe(),
+            &sample_preset(),
+            facts,
+        )
+        .unwrap_err();
+        assert_eq!(error, ExportErrorCode::SourceNotFound);
+
+        let mut facts = valid_path_facts();
+        facts.insert(PathBuf::from(DESTINATION), present_read_only_file(7));
+        let error = plan_streams(
+            ExportStreams::AudioOnly,
+            &[boundary(0, 90_000)],
+            &sample_probe(),
+            &sample_preset(),
+            facts,
+        )
+        .unwrap_err();
+        assert_eq!(error, ExportErrorCode::OutputReadOnly);
+    }
+
+    #[test]
+    fn audio_only_still_refuses_an_audio_stream_with_no_sample_rate() {
+        // The audio part needs the rate exactly as before: it is the unit of the ticks.
+        let error = plan_streams(
+            ExportStreams::AudioOnly,
+            &[boundary(0, 90_000)],
+            &probe_with_unknown_audio_rate(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap_err();
+        assert_eq!(error, ExportErrorCode::SourceAudioRateUnknown);
+    }
+
+    #[test]
+    fn audio_only_needs_no_frame_rate() {
+        // A source whose frame rate is unknown cannot export video, and it can still export its
+        // audio: the audio part times no frames. A preset rate of zero is ignored the same way.
+        let mut probe = probe_with_audio();
+        probe.avg_frame_rate = None;
+        probe.r_frame_rate = None;
+        for frame_rate in [
+            FrameRateSetting::Source,
+            FrameRateSetting::Rate(Rational::new(0, 1).unwrap()),
+        ] {
+            let mut preset = sample_preset();
+            preset.frame_rate = frame_rate;
+            let plan = plan_streams(
+                ExportStreams::AudioOnly,
+                &[boundary(0, 90_000)],
+                &probe,
+                &preset,
+                valid_path_facts(),
+            )
+            .unwrap();
+            assert_eq!(plan.video, None);
+            assert!(plan.audio.is_some());
+        }
+
+        // The same source and preset refuse an export that writes video.
+        let error = plan_streams(
+            ExportStreams::VideoAndAudio,
+            &[boundary(0, 90_000)],
+            &probe,
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap_err();
+        assert_eq!(error, ExportErrorCode::SourceFrameRateUnknown);
+    }
+
+    #[test]
+    fn video_only_plans_no_audio_part_and_no_audio_ticks() {
+        let plan = plan_streams(
+            ExportStreams::VideoOnly,
+            &[boundary(0, 90_000)],
+            &probe_with_audio(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+        assert_eq!(plan.audio, None);
+        assert_eq!(plan.segments[0].audio_in_tick, None);
+        assert_eq!(plan.segments[0].audio_out_tick, None);
+        assert_eq!(plan.expected_frames(), Some(30));
+
+        // The video part is the one an export of both parts plans.
+        let both = plan_streams(
+            ExportStreams::VideoAndAudio,
+            &[boundary(0, 90_000)],
+            &probe_with_audio(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+        assert_eq!(plan.video, both.video);
+        assert_eq!(plan.total_duration, both.total_duration);
+    }
+
+    #[test]
+    fn video_only_accepts_a_source_without_audio_and_one_whose_audio_rate_is_unknown() {
+        // Neither condition can affect a file without sound. Check 14 refuses the second one
+        // for every export that writes audio, and a video-only export never reads the stream.
+        for probe in [sample_probe(), probe_with_unknown_audio_rate()] {
+            let plan = plan_streams(
+                ExportStreams::VideoOnly,
+                &[boundary(0, 90_000)],
+                &probe,
+                &sample_preset(),
+                valid_path_facts(),
+            )
+            .unwrap();
+            assert_eq!(plan.audio, None);
+            assert_eq!(plan.expected_frames(), Some(30));
+        }
+    }
+
+    #[test]
+    fn video_only_still_refuses_an_unknown_frame_rate() {
+        let mut probe = probe_with_audio();
+        probe.avg_frame_rate = None;
+        probe.r_frame_rate = None;
+        let error = plan_streams(
+            ExportStreams::VideoOnly,
+            &[boundary(0, 90_000)],
+            &probe,
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap_err();
+        assert_eq!(error, ExportErrorCode::SourceFrameRateUnknown);
+    }
+
+    #[test]
+    fn no_stream_choice_plans_an_export_with_neither_part() {
+        // The graph and the argument builder both reject a plan with neither part. The
+        // planner is the place that keeps one from existing: every choice either plans a part
+        // or refuses.
+        for streams in [
+            ExportStreams::VideoAndAudio,
+            ExportStreams::VideoOnly,
+            ExportStreams::AudioOnly,
+        ] {
+            for probe in [sample_probe(), probe_with_audio()] {
+                let has_audio = probe.audio.is_some();
+                match plan_streams(
+                    streams,
+                    &[boundary(0, 90_000)],
+                    &probe,
+                    &sample_preset(),
+                    valid_path_facts(),
+                ) {
+                    Ok(plan) => {
+                        assert!(plan.video.is_some() || plan.audio.is_some());
+                        assert_eq!(plan.video.is_some(), streams.writes_video());
+                        assert_eq!(plan.audio.is_some(), streams.writes_audio() && has_audio);
+                    }
+                    Err(error) => {
+                        assert_eq!(
+                            (streams, has_audio, error),
+                            (
+                                ExportStreams::AudioOnly,
+                                false,
+                                ExportErrorCode::SourceHasNoAudio
+                            )
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // -- the audio the segments can take from the source ------------------------------------
+
+    /// [`probe_with_audio`] with an audio stream that starts at `start` seconds and runs for
+    /// `length` seconds, either side unknown when `None`.
+    fn probe_with_audio_extent(start: Option<&str>, length: Option<&str>) -> MediaProbe {
+        let mut probe = probe_with_audio();
+        let audio = probe.audio.as_mut().unwrap();
+        audio.start_time = start.map(|text| Rational::from_decimal_str(text).unwrap());
+        audio.duration = length.map(|text| Rational::from_decimal_str(text).unwrap());
+        probe
+    }
+
+    /// A segment from `from` to `to` seconds, at the sample probe's time base of 1/90000.
+    fn seconds_boundary(from: &str, to: &str) -> SegmentBoundary {
+        let ticks = |text: &str| {
+            let value = Rational::from_decimal_str(text)
+                .unwrap()
+                .mul(Rational::new(90_000, 1).unwrap())
+                .unwrap();
+            assert_eq!(value.den(), 1, "{text} s is a whole number of ticks");
+            value.num()
+        };
+        boundary(ticks(from), ticks(to))
+    }
+
+    /// The expected audio of an audio-only export of `segments` from `probe`.
+    fn expected_audio(probe: &MediaProbe, segments: &[SegmentBoundary]) -> (Rational, Rational) {
+        let plan = plan_streams(
+            ExportStreams::AudioOnly,
+            segments,
+            probe,
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+        (
+            plan.audio
+                .expect("audio only plans audio")
+                .expected_duration,
+            plan.total_duration,
+        )
+    }
+
+    fn decimal(text: &str) -> Rational {
+        Rational::from_decimal_str(text).unwrap()
+    }
+
+    #[test]
+    fn audio_that_covers_every_segment_is_expected_for_the_whole_planned_duration() {
+        let segments = [seconds_boundary("0", "2"), seconds_boundary("60", "62.5")];
+        let (expected, total) =
+            expected_audio(&probe_with_audio_extent(Some("0"), Some("130")), &segments);
+        assert_eq!(expected, decimal("4.5"));
+        assert_eq!(expected, total);
+    }
+
+    #[test]
+    fn audio_that_starts_late_is_expected_only_from_its_first_sample() {
+        // A recording that opened the microphone 0.3 s after the camera. The first segment can
+        // take 1.7 s of audio, and the second, which the audio covers, all of its 2 s.
+        let segments = [seconds_boundary("0", "2"), seconds_boundary("60", "62")];
+        let (expected, total) = expected_audio(
+            &probe_with_audio_extent(Some("0.3"), Some("129.7")),
+            &segments,
+        );
+        assert_eq!(expected, decimal("3.7"));
+        assert_eq!(total, decimal("4"));
+    }
+
+    #[test]
+    fn audio_that_ends_early_is_expected_only_up_to_its_last_sample() {
+        // A phone recording whose audio stops 1 s before its video. A segment wholly after the
+        // audio ends can take no audio at all.
+        let segments = [
+            seconds_boundary("128", "130"),
+            seconds_boundary("60", "61"),
+            seconds_boundary("129.3", "129.9"),
+        ];
+        let (expected, total) =
+            expected_audio(&probe_with_audio_extent(Some("0"), Some("129")), &segments);
+        assert_eq!(expected, decimal("2"));
+        assert_eq!(total, decimal("3.6"));
+    }
+
+    #[test]
+    fn a_side_of_the_extent_that_the_probe_does_not_report_bounds_nothing() {
+        let segments = [seconds_boundary("0", "2"), seconds_boundary("128", "130")];
+
+        // A start with no length, as a stream without a duration reports it: only the start
+        // bounds the audio.
+        let (expected, _) = expected_audio(&probe_with_audio_extent(Some("0.3"), None), &segments);
+        assert_eq!(expected, decimal("3.7"));
+
+        // A length with no start has no place on the timeline, so nothing is bounded.
+        let (expected, total) =
+            expected_audio(&probe_with_audio_extent(None, Some("129")), &segments);
+        assert_eq!(expected, total);
+
+        // No extent at all: the planned duration, as before the extent was read.
+        let (expected, total) = expected_audio(&probe_with_audio_extent(None, None), &segments);
+        assert_eq!(expected, total);
+        assert_eq!(total, decimal("4"));
+    }
+
+    #[test]
+    fn an_audio_only_export_whose_segments_hold_no_audio_is_refused() {
+        // Every segment lies after the end of the audio, so the export would write an empty
+        // file, and a check against 0 s would pass it.
+        let segments = [
+            seconds_boundary("129.2", "129.8"),
+            seconds_boundary("129.5", "130"),
+        ];
+        let error = plan_streams(
+            ExportStreams::AudioOnly,
+            &segments,
+            &probe_with_audio_extent(Some("0"), Some("129")),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap_err();
+        assert_eq!(error, ExportErrorCode::SourceHasNoAudio);
+
+        // The same segments with video export as before: their audio chains are cut by the
+        // ticks, and no check reads the expected duration.
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::VideoOnly] {
+            let plan = plan_streams(
+                streams,
+                &segments,
+                &probe_with_audio_extent(Some("0"), Some("129")),
+                &sample_preset(),
+                valid_path_facts(),
+            )
+            .unwrap();
+            if let Some(audio) = plan.audio {
+                assert_eq!(audio.expected_duration, plan.total_duration);
+            }
+        }
+    }
+
+    #[test]
+    fn the_extent_changes_the_expected_audio_and_nothing_that_the_graph_reads() {
+        // The ticks are the ticks of the boundaries, as for every export: the extent bounds the
+        // check of the output, never the cut.
+        let segments = [seconds_boundary("0", "2")];
+        let plan = |probe: &MediaProbe| {
+            plan_streams(
+                ExportStreams::AudioOnly,
+                &segments,
+                probe,
+                &sample_preset(),
+                valid_path_facts(),
+            )
+            .unwrap()
+        };
+        let late = plan(&probe_with_audio_extent(Some("0.3"), Some("129.7")));
+        let unknown = plan(&probe_with_audio_extent(None, None));
+        assert_eq!(late.segments, unknown.segments);
+        assert_eq!(late.total_duration, unknown.total_duration);
+        let (late, unknown) = (late.audio.unwrap(), unknown.audio.unwrap());
+        assert_eq!(
+            PlannedAudio {
+                expected_duration: unknown.expected_duration,
+                ..late.clone()
+            },
+            unknown
+        );
+        assert_ne!(late.expected_duration, unknown.expected_duration);
     }
 }

@@ -26,6 +26,7 @@ function createValidRequest(overrides: Partial<ExportRequest> = {}): ExportReque
       },
     ],
     presetId: "mp4-h264",
+    streams: "videoAndAudio",
     ...overrides,
   };
 }
@@ -34,6 +35,7 @@ function createValidStartResult(overrides: Partial<ExportStart> = {}): ExportSta
   return {
     runId: "export-run-123",
     presetId: "mp4-h264",
+    streams: "videoAndAudio",
     outputPath: "/media/output.mp4",
     segmentCount: 1,
     totalDurationUs: 5_000_000,

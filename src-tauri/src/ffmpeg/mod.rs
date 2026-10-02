@@ -10,13 +10,13 @@ pub use capabilities::{
     Candidate, CodecKind, EncoderStatus, LicenseFlags, ListedCodec, VersionInfo, TESTED_ENCODERS,
 };
 pub use export::{
-    build_plan, ExportErrorCode, ExportPlan, OutputTiming, PathFacts, PathIdentity, PlanRequest,
-    PlannedSegment, SegmentBoundary, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
+    build_plan, ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PathFacts, PathIdentity,
+    PlanRequest, PlannedSegment, SegmentBoundary, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
 };
 pub use locate::{
     discover, discover_with_path, ExecutableOrigin, FfmpegPaths, InspectedLocation, LocateError,
 };
 pub use probe::{
-    parse_probe_json, probe_media, AudioProbe, MediaProbe, ProbeDataError, ProbeError,
-    ProbeParseError,
+    parse_probe_json, probe_media, probe_output_audio, AudioProbe, MediaProbe, OutputAudioProbe,
+    ProbeDataError, ProbeError, ProbeParseError,
 };

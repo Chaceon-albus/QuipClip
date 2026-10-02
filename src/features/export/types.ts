@@ -14,6 +14,22 @@ import type { Pts, Rational } from "@/types/project";
 export type ExportSegmentBoundary = { inPts: Pts; outPts: Pts };
 
 /**
+ * The streams of the source that an export writes, as the user chooses them.
+ *
+ * The wire strings of the Rust `ExportStreams` enum, in its order. `types.test.ts` reads the
+ * Rust enum and asserts that this list names the same strings.
+ *
+ * - `videoAndAudio`: the video, and the audio when the source has an audio stream.
+ * - `videoOnly`: the video only.
+ * - `audioOnly`: the audio only. A source without audio is refused with `sourceHasNoAudio`.
+ *   The export writes no frames, so `expectedFrames` is absent and the progress is
+ *   indeterminate (ADR 025).
+ */
+export const EXPORT_STREAMS = ["videoAndAudio", "videoOnly", "audioOnly"] as const;
+
+export type ExportStreams = (typeof EXPORT_STREAMS)[number];
+
+/**
  * Request payload sent to the backend `start_export` command.
  */
 export type ExportRequest = {
@@ -21,6 +37,8 @@ export type ExportRequest = {
   outputPath: string;
   segments: ExportSegmentBoundary[];
   presetId?: string;
+  /** Required. The backend refuses a request without it, and has no default for it. */
+  streams: ExportStreams;
 };
 
 /**
@@ -29,6 +47,8 @@ export type ExportRequest = {
 export type ExportStart = {
   runId: string;
   presetId: string;
+  /** The stream choice of the request, echoed as the run uses it. */
+  streams: ExportStreams;
   outputPath: string;
   segmentCount: number;
   totalDurationUs: number;
@@ -61,10 +81,13 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "outputReadOnly",
   "sourceFrameRateUnknown",
   "sourceAudioRateUnknown",
+  "sourceHasNoAudio",
   "encoderUnavailable",
   "ffmpegSpawnFailed",
   "ffmpegProcessFailed",
   "frameCountMismatch",
+  "audioDurationMismatch",
+  "outputStreamsMismatch",
   "outputRenameFailed",
   "canceled",
   "commandExecutionFailed",
@@ -111,6 +134,8 @@ export type ExportErrorOptions = {
   detail?: string;
   exitCode?: number;
   encoder?: string;
+  measuredDurationUs?: number;
+  expectedDurationUs?: number;
 };
 
 /**
@@ -125,6 +150,13 @@ export class ExportError extends Error {
   declare readonly exitCode?: number;
   /** Optional encoder name if failure was related to a specific encoder. */
   declare readonly encoder?: string;
+  /**
+   * For `audioDurationMismatch`: the duration that ffprobe measured on the finished file, in
+   * whole microseconds. Absent when ffprobe reported no duration.
+   */
+  declare readonly measuredDurationUs?: number;
+  /** For `audioDurationMismatch`: the duration that the plan expected, in whole microseconds. */
+  declare readonly expectedDurationUs?: number;
 
   constructor(options: ExportErrorOptions) {
     super(options.detail ? `${options.code}: ${options.detail}` : options.code);
@@ -138,6 +170,12 @@ export class ExportError extends Error {
     }
     if (options.encoder !== undefined) {
       this.encoder = options.encoder;
+    }
+    if (options.measuredDurationUs !== undefined) {
+      this.measuredDurationUs = options.measuredDurationUs;
+    }
+    if (options.expectedDurationUs !== undefined) {
+      this.expectedDurationUs = options.expectedDurationUs;
     }
     Object.setPrototypeOf(this, new.target.prototype);
   }
@@ -175,8 +213,9 @@ export type ExportProgressUpdateEvent = {
 /**
  * Event emitted when ffmpeg execution has completed and the output file is being published.
  *
- * This phase begins after ffmpeg has exited successfully, the frame count has been verified,
- * and the cancel flag has been re-checked. Nothing is being encoded or processed at this stage.
+ * This phase begins after ffmpeg has exited successfully, the success check has passed (the
+ * frame count, or for an export without video the ffprobe check of the finished file), and the
+ * cancel flag has been re-checked. Nothing is being encoded or processed at this stage.
  * All that remains is renaming the finished temporary file over the destination, which on
  * Windows can wait seconds while a virus scanner reads back a multi-gigabyte file.
  *
@@ -217,6 +256,8 @@ export type ExportFailedEvent = {
   detail?: string;
   exitCode?: number;
   encoder?: string;
+  measuredDurationUs?: number;
+  expectedDurationUs?: number;
 };
 
 /**

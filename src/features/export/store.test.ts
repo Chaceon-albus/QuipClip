@@ -34,6 +34,7 @@ function createValidRequest(overrides: Partial<ExportRequest> = {}): ExportReque
       },
     ],
     presetId: "mp4-h264",
+    streams: "videoAndAudio",
     ...overrides,
   };
 }
@@ -42,6 +43,7 @@ function createValidStartResult(overrides: Partial<ExportStart> = {}): ExportSta
   return {
     runId: "run-export-1",
     presetId: "mp4-h264",
+    streams: "videoAndAudio",
     outputPath: "/media/output.mp4",
     segmentCount: 1,
     totalDurationUs: 5_000_000,
@@ -498,6 +500,42 @@ describe("Media Export Store", () => {
       expect(store.getState().error?.detail).toBe("VideoToolbox failed to initialize");
       expect(store.getState().error?.exitCode).toBe(1);
       expect(store.getState().error?.encoder).toBe("h264_videotoolbox");
+    });
+
+    it("keeps the two named durations of a failed audio check on the error", async () => {
+      let eventHandler!: (event: ExportProgressEvent) => void;
+
+      const store = createExportStore({
+        subscribeExportProgress: (handler) => {
+          eventHandler = handler;
+          return Promise.resolve(() => {});
+        },
+        startExport: () =>
+          Promise.resolve(
+            createValidStartResult({
+              runId: "run-audio",
+              streams: "audioOnly",
+              expectedFrames: undefined,
+            }),
+          ),
+      });
+
+      await store.getState().startExport(createValidRequest({ streams: "audioOnly" }));
+      // An audio-only run has no frame goal, so its progress is indeterminate.
+      expect(store.getState().expectedFrames).toBeNull();
+
+      eventHandler({
+        event: "failed",
+        runId: "run-audio",
+        code: "audioDurationMismatch",
+        measuredDurationUs: 9_500_000,
+        expectedDurationUs: 10_000_000,
+      });
+
+      expect(store.getState().status).toBe("failed");
+      expect(store.getState().error?.code).toBe("audioDurationMismatch");
+      expect(store.getState().error?.measuredDurationUs).toBe(9_500_000);
+      expect(store.getState().error?.expectedDurationUs).toBe(10_000_000);
     });
 
     it("sets status to 'canceled' when failed event has code 'canceled'", async () => {

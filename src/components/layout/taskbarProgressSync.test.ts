@@ -295,6 +295,7 @@ describe("startTaskbarProgressSync", () => {
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
       presetId: "mp4-h264",
+      streams: "videoAndAudio",
     });
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();
@@ -306,6 +307,7 @@ describe("startTaskbarProgressSync", () => {
     answerStart({
       runId: "run-kept",
       presetId: "mp4-h264",
+      streams: "videoAndAudio",
       outputPath: "/media/output.mp4",
       segmentCount: 1,
       totalDurationUs: 4_000_000,

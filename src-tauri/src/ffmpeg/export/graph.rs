@@ -192,24 +192,26 @@ pub enum GraphShape {
 /// [`GraphShape::SingleInput`]), which ffmpeg rejects.
 ///
 /// The plan must also carry at least one of its two parts. A plan with neither would render
-/// `concat=v=0:a=0`, which ffmpeg rejects too; `build_plan` always plans video, and a debug
-/// assertion catches a hand-built plan that has neither.
+/// `concat=v=0:a=0`, which ffmpeg rejects too; `build_plan` never produces one, because it
+/// refuses an audio-only export of a source without audio, and a debug assertion catches a
+/// hand-built plan that has neither.
 ///
 /// # Video
 ///
 /// A plan with no video produces no video anywhere: no `trim` chain, no `split`, no `format`,
 /// `v=0` on `concat`, and `[a]` as the only output label. This is the rule for audio below,
 /// applied to the other part, so each part is one decision for the whole graph.
-/// [`build_plan`](super::plan::build_plan) plans video for every export today, so no plan
-/// that reaches this function lacks it.
+/// [`build_plan`](super::plan::build_plan) plans no video for an audio-only export, and that is
+/// the plan that reaches this branch.
 ///
 /// # Audio
 ///
 /// A plan with no audio produces no audio anywhere: no `atrim` chain, no `asplit`, `a=0` on
-/// `concat`, and `[v]` as the only output label. ADR 014 records why version 1 needs no
-/// silence generation here -- it exports one source, so a segment without audio cannot occur
-/// between segments with audio -- and ADR 004's silence generation belongs to the
-/// multi-source work.
+/// `concat`, and `[v]` as the only output label. That plan comes from a source without audio,
+/// and from a video-only export of any source; the two render the same graph. ADR 014 records
+/// why version 1 needs no silence generation here -- it exports one source, so a segment
+/// without audio cannot occur between segments with audio -- and ADR 004's silence generation
+/// belongs to the multi-source work.
 ///
 /// This function treats audio as one decision for the whole graph rather than one per
 /// segment. [`build_plan`](super::plan::build_plan) is the only producer of an
@@ -452,6 +454,7 @@ fn concat_chain(count: usize, has_video: bool, has_audio: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffmpeg::export::ExportStreams;
     use crate::settings::{Container, Quality, QualityKind};
     use crate::time::{Pts, Rational};
     use std::path::PathBuf;
@@ -545,6 +548,8 @@ mod tests {
             output_channels: AudioChannels::Stereo,
             encoder: "aac".to_owned(),
             bitrate: None,
+            // The graph does not read it; any value renders the same graph.
+            expected_duration: Rational::new(1, 1).unwrap(),
         }
     }
 
@@ -996,7 +1001,7 @@ mod tests {
 
     #[test]
     fn a_plan_without_video_renders_no_video_chain_and_one_output_label_in_both_shapes() {
-        // `build_plan` always plans video today. The rule for a plan without it is the rule
+        // An audio-only export plans no video. The rule for a plan without it is the rule
         // for a plan without audio, applied to the other part: nothing of the part anywhere,
         // `v=0` on `concat`, no `format`, and `[a]` as the only output label.
         let mut plan = fixture_plan(2);
@@ -1026,11 +1031,203 @@ mod tests {
         );
     }
 
+    // -- The stream choice, through the planner -------------------------------------------
+
+    // Absolute on the platform the tests run on, as `build_plan` requires. The graph never
+    // shows a path, so only the planner reads these.
+    #[cfg(windows)]
+    const PLANNED_SOURCE: &str = r"C:\media\source.mp4";
+    #[cfg(windows)]
+    const PLANNED_DESTINATION: &str = r"C:\export\out.mp4";
+    #[cfg(not(windows))]
+    const PLANNED_SOURCE: &str = "/media/source.mp4";
+    #[cfg(not(windows))]
+    const PLANNED_DESTINATION: &str = "/export/out.mp4";
+
+    /// [`build_plan`] over the first two fixture segments, for a source laid out as the fixture
+    /// plan describes it: video stream 1 at time base 1/12800 and 25 fps, and, when `with_audio`
+    /// holds, audio stream 2 at 44100 Hz. The preset writes 25 fps H.264 and 48000 Hz stereo AAC.
+    ///
+    /// [`build_plan`]: crate::ffmpeg::export::plan::build_plan
+    fn planned(
+        streams: ExportStreams,
+        with_audio: bool,
+    ) -> Result<ExportPlan, crate::ffmpeg::export::ExportErrorCode> {
+        use crate::ffmpeg::export::plan::{
+            build_plan, PathFacts, PathIdentity, PlanRequest, SegmentBoundary,
+        };
+        use crate::ffmpeg::probe::{AudioProbe, MediaProbe};
+        use crate::settings::{
+            AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting,
+        };
+        use std::path::Path;
+
+        let probe = MediaProbe {
+            format_names: vec!["mov,mp4,m4a,3gp,3g2,mj2".to_owned()],
+            format_long_name: None,
+            format_start_time: None,
+            video_codec: "h264".to_owned(),
+            video_profile: None,
+            pixel_format: None,
+            bit_depth: None,
+            width: 1920,
+            height: 1080,
+            video_stream_index: 1,
+            video_time_base: Rational::new(1, 12_800).unwrap(),
+            video_start_pts: None,
+            video_duration_ticks: None,
+            approximate_duration_seconds: None,
+            avg_frame_rate: Some(Rational::new(25, 1).unwrap()),
+            r_frame_rate: Some(Rational::new(25, 1).unwrap()),
+            reported_frame_count: None,
+            audio: with_audio.then(|| AudioProbe {
+                index: 2,
+                codec: Some("aac".to_owned()),
+                sample_rate: Some(44_100),
+                channels: Some(2),
+                start_time: None,
+                duration: None,
+            }),
+        };
+        let preset = Preset {
+            id: "preset-1".to_owned(),
+            name: "Test preset".to_owned(),
+            container: Container::Mp4,
+            video_encoder: "libx264".to_owned(),
+            audio_encoder: "aac".to_owned(),
+            audio_bitrate: None,
+            audio_sample_rate: AudioSampleRateSetting::Fixed(48_000),
+            audio_channels: AudioChannels::Stereo,
+            quality: Quality {
+                kind: QualityKind::Crf,
+                value: 20,
+            },
+            resolution: ResolutionSetting::Source,
+            frame_rate: FrameRateSetting::Source,
+        };
+        let segments: Vec<SegmentBoundary> = fixture_segments(2)
+            .iter()
+            .map(|segment| SegmentBoundary {
+                in_pts: segment.in_pts,
+                out_pts: segment.out_pts,
+            })
+            .collect();
+        let source = Path::new(PLANNED_SOURCE);
+        let destination = Path::new(PLANNED_DESTINATION);
+        let parent = destination.parent().unwrap().to_path_buf();
+        build_plan(
+            &PlanRequest {
+                source,
+                destination,
+                segments: &segments,
+                probe: &probe,
+                preset: &preset,
+                streams,
+            },
+            move |path: &Path| {
+                if path == Path::new(PLANNED_SOURCE) {
+                    PathFacts::File {
+                        identity: PathIdentity::new(1),
+                        read_only: false,
+                    }
+                } else if path == parent {
+                    PathFacts::Directory
+                } else {
+                    PathFacts::Absent
+                }
+            },
+        )
+    }
+
+    #[test]
+    fn video_and_audio_from_the_planner_renders_the_graph_of_every_earlier_export() {
+        // The default choice changes nothing: the planned plan renders exactly the fixture plan's
+        // graph, which the pinned strings above hold, in both shapes.
+        let plan = planned(ExportStreams::VideoAndAudio, true).unwrap();
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            assert_eq!(
+                build_filter_graph(&plan, shape),
+                build_filter_graph(&fixture_plan(2), shape)
+            );
+        }
+    }
+
+    #[test]
+    fn video_only_from_the_planner_renders_no_audio_in_both_shapes_with_and_without_source_audio() {
+        let input_per_segment = concat!(
+            "[vc]format=yuv420p[v];",
+            "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
+            "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
+            "[v0][v1]concat=n=2:v=1:a=0[vc]",
+        );
+        let single_input = concat!(
+            "[vc]format=yuv420p[v];",
+            "[0:1]split=2[sv0][sv1];",
+            "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
+            "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
+            "[v0][v1]concat=n=2:v=1:a=0[vc]",
+        );
+        // A video-only export of a source with audio, of a source without it, and an export of
+        // both parts from a source without audio all render the one silent graph.
+        for (streams, with_audio) in [
+            (ExportStreams::VideoOnly, true),
+            (ExportStreams::VideoOnly, false),
+            (ExportStreams::VideoAndAudio, false),
+        ] {
+            let plan = planned(streams, with_audio).unwrap();
+            assert_eq!(
+                build_filter_graph(&plan, GraphShape::InputPerSegment),
+                input_per_segment,
+                "{streams:?}, source audio {with_audio}"
+            );
+            assert_eq!(
+                build_filter_graph(&plan, GraphShape::SingleInput),
+                single_input,
+                "{streams:?}, source audio {with_audio}"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_only_from_the_planner_renders_no_video_in_both_shapes() {
+        let plan = planned(ExportStreams::AudioOnly, true).unwrap();
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::InputPerSegment),
+            concat!(
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
+                "asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[a0][a1]concat=n=2:v=0:a=1[a]",
+            )
+        );
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::SingleInput),
+            concat!(
+                "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[a0][a1]concat=n=2:v=0:a=1[a]",
+            )
+        );
+
+        // Without audio in the source there is no graph to render: the planner refuses.
+        assert_eq!(
+            planned(ExportStreams::AudioOnly, false),
+            Err(crate::ffmpeg::export::ExportErrorCode::SourceHasNoAudio)
+        );
+    }
+
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "video, audio, or both")]
     fn a_plan_with_neither_part_trips_the_debug_assertion() {
-        // `build_plan` always plans video, so this is unreachable through the pipeline.
+        // `build_plan` refuses the one request that could produce this plan, an audio-only
+        // export of a source without audio, so this is unreachable through the pipeline.
         // Rendered anyway it would produce `concat=n=1:v=0:a=0`, which ffmpeg rejects.
         let mut plan = fixture_plan(1);
         plan.video = None;

@@ -20,7 +20,9 @@
 //!   documents the measurement; this module is the one that has to act on it.
 //! - **`-f <muxer>` is mandatory.** The reserved name ends in `.tmp-<pid>-<sequence>`, not in
 //!   `.mp4`, so ffmpeg has no extension to infer a muxer from. [`Container::Mkv`] selects the
-//!   muxer named `matroska`, not `mkv`; the other two names match their enum variants.
+//!   muxer named `matroska`, not `mkv`; the other two names match their enum variants, except
+//!   that an audio-only export of a MOV preset writes an `.m4a` through the `mp4` muxer (see
+//!   `muxer_of`).
 //! - **`-ss` is omitted, never zeroed.** ADR 014's "The seek" section clamps a negative seek at
 //!   zero and reports it as [`None`], and measurement 7 records that the legacy trailing
 //!   `-ss 0` idiom has had no effect since ffmpeg 2.1. A literal zero would be dead weight, so
@@ -235,8 +237,13 @@ fn command_line_length(arguments: &[String]) -> usize {
 ///
 /// `-map "[v]"`, `-c:v`, and the quality flag appear exactly when [`ExportPlan::video`] is
 /// [`Some`], which is exactly when [`build_filter_graph`] writes a `[v]` output label.
-/// [`super::plan::build_plan`] plans video for every export, so every command it leads to
-/// carries all three.
+/// [`super::plan::build_plan`] plans video for every export that writes it, so every such
+/// command carries all three, and an audio-only command carries none of them.
+///
+/// A plan without video also changes the muxer. An audio-only export writes an audio file, an
+/// `.m4a` beside an MP4 or a MOV preset and an `.mka` beside an MKV preset. The frontend will
+/// name the destination with that extension; this module never renames it. See [`muxer_of`]
+/// for the choice.
 ///
 /// # Audio
 ///
@@ -317,7 +324,7 @@ pub fn build_arguments(
         }
     }
 
-    let (muxer, faststart) = muxer_of(plan.container);
+    let (muxer, faststart) = muxer_of(plan.container, plan.video.is_some());
     if faststart {
         push_pair(&mut arguments, "-movflags", "+faststart");
     }
@@ -363,18 +370,29 @@ fn quality_arguments(quality: Quality) -> (&'static str, String) {
     }
 }
 
-/// The muxer name for one container, and whether `-movflags +faststart` applies to it.
+/// The muxer name for one container, and whether `-movflags +faststart` applies to it, for a
+/// command that writes video (`with_video`) or one that writes audio only.
 ///
 /// The two answers come from one `match` because they are one decision. `+faststart` is an
 /// option of the mov/mp4 muxer family and nothing else; pairing it with the muxer name here
 /// means a container added later cannot pick up a muxer without also stating whether the flag
 /// belongs on it. `Mkv` maps to `matroska`, which is the muxer's real name -- `ffmpeg -f mkv`
 /// is not a muxer at all.
-const fn muxer_of(container: Container) -> (&'static str, bool) {
-    match container {
-        Container::Mp4 => ("mp4", true),
-        Container::Mov => ("mov", true),
-        Container::Mkv => ("matroska", false),
+///
+/// An audio-only export writes an audio file. Beside an MP4 or a MOV preset that file is an
+/// `.m4a`, written by the `mp4` muxer, with `+faststart` for the same reason as an MP4 video.
+/// `mov` is not used for it: the `mov` muxer refuses `flac` and `opus` (ADR 023 measurement 2),
+/// and the `mp4` muxer accepts both, so a MOV preset whose audio encoder only the `mp4` muxer
+/// takes still exports its audio. Nor is `ipod`, the muxer ffmpeg itself infers from an `.m4a`
+/// name: on ffmpeg 9.0.2 it refuses `flac` as well ("codec not currently supported in
+/// container"). A custom PCM encoder from a MOV preset may need a newer ffmpeg in the `mp4` muxer.
+/// Beside an MKV preset the file is an `.mka`, which the `matroska` muxer writes as it writes an
+/// `.mkv`.
+const fn muxer_of(container: Container, with_video: bool) -> (&'static str, bool) {
+    match (container, with_video) {
+        (Container::Mp4, _) | (Container::Mov, false) => ("mp4", true),
+        (Container::Mov, true) => ("mov", true),
+        (Container::Mkv, _) => ("matroska", false),
     }
 }
 
@@ -531,6 +549,8 @@ mod tests {
             output_channels: AudioChannels::Stereo,
             encoder: "aac".to_owned(),
             bitrate: None,
+            // The command does not read it; any value renders the same command.
+            expected_duration: Rational::new(1, 1).unwrap(),
         }
     }
 
@@ -758,7 +778,7 @@ mod tests {
 
     #[test]
     fn a_plan_without_video_maps_and_encodes_audio_only() {
-        // `build_plan` always plans video today. The rule for a plan without it mirrors the
+        // An audio-only export plans no video. The rule for a plan without it mirrors the
         // rule above: `build_filter_graph` writes no `[v]` label for such a plan, so neither
         // `-map "[v]"` nor `-c:v` nor the quality flag may appear.
         let mut plan = fixture_plan(1);
@@ -789,6 +809,193 @@ mod tests {
                 "+faststart",
                 "-f",
                 "mp4",
+                "/export/.out.mp4.tmp-4242-0",
+            ]
+        );
+    }
+
+    /// The fixture plan without its video part, as an audio-only export plans it.
+    fn audio_only_plan(count: usize, container: Container) -> ExportPlan {
+        let mut plan = fixture_plan(count);
+        plan.video = None;
+        plan.container = container;
+        plan
+    }
+
+    /// The fixture plan without its audio part, as a video-only export plans it.
+    fn video_only_plan(count: usize, container: Container) -> ExportPlan {
+        let mut plan = fixture_plan(count);
+        plan.audio = None;
+        for segment in &mut plan.segments {
+            segment.audio_in_tick = None;
+            segment.audio_out_tick = None;
+        }
+        plan.container = container;
+        plan
+    }
+
+    #[test]
+    fn an_audio_only_mov_plan_writes_an_m4a_through_the_mp4_muxer() {
+        // The one container whose muxer changes. The `mov` muxer refuses `flac` and `opus`
+        // (ADR 023 measurement 2), and an audio file beside a MOV preset is an `.m4a`, which the
+        // `mp4` muxer writes. `+faststart` stays, as for every MP4.
+        let mut plan = audio_only_plan(2, Container::Mov);
+        audio_mut(&mut plan).bitrate = Some(320);
+        assert_eq!(
+            arguments(&plan, GraphShape::InputPerSegment),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-ss",
+                "6.6",
+                "-i",
+                "/media/source.mp4",
+                "-ss",
+                "5",
+                "-i",
+                "/media/source.mp4",
+                "-filter_complex",
+                "<graph>",
+                "-map",
+                "[a]",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "320k",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "/export/.out.mp4.tmp-4242-0",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_audio_only_single_input_mkv_plan_writes_an_mka_through_the_matroska_muxer() {
+        assert_eq!(
+            arguments(&audio_only_plan(3, Container::Mkv), GraphShape::SingleInput),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-ss",
+                "5",
+                "-i",
+                "/media/source.mp4",
+                "-filter_complex",
+                "<graph>",
+                "-map",
+                "[a]",
+                "-c:a",
+                "aac",
+                "-f",
+                "matroska",
+                "/export/.out.mp4.tmp-4242-0",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_audio_only_muxer_follows_the_container_in_both_shapes() {
+        // MP4 and MOV write an `.m4a` through `mp4`, with `+faststart`; MKV writes an `.mka`
+        // through `matroska`, without it. No video flag of any kind reaches the line.
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            for (container, muxer, faststart) in [
+                (Container::Mp4, "mp4", true),
+                (Container::Mov, "mp4", true),
+                (Container::Mkv, "matroska", false),
+            ] {
+                let emitted = arguments(&audio_only_plan(2, container), shape);
+                let position = emitted
+                    .iter()
+                    .position(|argument| argument == "-f")
+                    .expect("every command names a muxer");
+                assert_eq!(emitted[position + 1], muxer, "{container:?} {shape:?}");
+                assert_eq!(
+                    emitted.iter().any(|argument| argument == "+faststart"),
+                    faststart,
+                    "{container:?} {shape:?}: {emitted:?}"
+                );
+                for flag in ["[v]", "-c:v", "-crf", "-b:v", "-q:v"] {
+                    assert!(
+                        !emitted.iter().any(|argument| argument == flag),
+                        "{flag} in an audio-only command: {emitted:?}"
+                    );
+                }
+                assert!(emitted.iter().any(|argument| argument == "[a]"));
+                assert!(emitted.iter().any(|argument| argument == "-c:a"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_video_only_plan_keeps_the_container_muxer_and_names_no_audio_flag_in_both_shapes() {
+        // The muxer of a video-only export is the muxer of every video export: `mov` stays
+        // `mov`. The audio part is absent, so its map, its encoder and its bitrate are too.
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            for (container, muxer) in [
+                (Container::Mp4, "mp4"),
+                (Container::Mov, "mov"),
+                (Container::Mkv, "matroska"),
+            ] {
+                let emitted = arguments(&video_only_plan(2, container), shape);
+                let position = emitted
+                    .iter()
+                    .position(|argument| argument == "-f")
+                    .expect("every command names a muxer");
+                assert_eq!(emitted[position + 1], muxer, "{container:?} {shape:?}");
+                for flag in ["[a]", "-c:a", "-b:a"] {
+                    assert!(
+                        !emitted.iter().any(|argument| argument == flag),
+                        "{flag} in a video-only command: {emitted:?}"
+                    );
+                }
+                assert!(emitted.iter().any(|argument| argument == "[v]"));
+                assert!(emitted.iter().any(|argument| argument == "-c:v"));
+            }
+        }
+        assert_eq!(
+            arguments(&video_only_plan(2, Container::Mov), GraphShape::SingleInput),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-ss",
+                "5",
+                "-i",
+                "/media/source.mp4",
+                "-filter_complex",
+                "<graph>",
+                "-map",
+                "[v]",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "20",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mov",
                 "/export/.out.mp4.tmp-4242-0",
             ]
         );
@@ -1339,8 +1546,8 @@ mod tests {
     }
 
     /// Every plan and shape the guard tests below sweep: both shapes, every container, with
-    /// and without audio, every quality kind, an audio bitrate, a clamped seek, and a
-    /// sub-microsecond seek.
+    /// and without audio, without video, every quality kind, an audio bitrate, a clamped seek,
+    /// and a sub-microsecond seek.
     fn guard_matrix() -> Vec<(ExportPlan, GraphShape)> {
         let mut cases: Vec<(ExportPlan, GraphShape)> = Vec::new();
         for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
@@ -1351,6 +1558,8 @@ mod tests {
                 let mut plan = fixture_plan(2);
                 plan.container = container;
                 cases.push((plan, shape));
+                cases.push((audio_only_plan(2, container), shape));
+                cases.push((video_only_plan(2, container), shape));
             }
             for kind in [
                 QualityKind::Crf,
@@ -1702,6 +1911,8 @@ mod tests {
             output_channels: AudioChannels::Stereo,
             encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
             bitrate: Some(MAX_AUDIO_BITRATE_KBPS),
+            // The command does not read it; any value renders the same command.
+            expected_duration: Rational::new(1, 1).unwrap(),
         }
     }
 

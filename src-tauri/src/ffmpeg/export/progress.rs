@@ -75,6 +75,13 @@ use crate::time::Rational;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressSnapshot {
     /// The number of frames written so far. This is the one field ADR 014 trusts.
+    ///
+    /// An export without video never fills it: ffmpeg writes no `frame` key at all into a block
+    /// of a command that maps no video stream (measurement M5, recorded in `verify`). Every
+    /// snapshot of such a run therefore reads `None` here, the command layer sends no progress
+    /// event for it, and the interface shows the run as indeterminate (ADR 025). The output-time
+    /// keys cannot stand in for the count, for the reason below, so the success check of that
+    /// export reads the finished file instead (`super::verify`).
     pub frame: Option<u64>,
     /// The instantaneous encoding rate in frames per second, exact.
     pub fps: Option<Rational>,

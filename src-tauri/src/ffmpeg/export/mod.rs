@@ -53,6 +53,11 @@
 //! status that the caller must **not** read as a successful export on its own -- see
 //! [`process::ExportProcessStatus::Exited`] for the measured case where `ffmpeg` writes no frames
 //! and still exits zero.
+//!
+//! [`verify`] is the success check of an export that writes no video. The frame count cannot
+//! verify such an export, so [`verify::verify_audio_output`] reads the finished file back through
+//! ffprobe instead: one audio stream, no video stream, and a duration inside a measured tolerance
+//! of the plan's.
 
 pub mod arguments;
 pub mod fsinspect;
@@ -62,6 +67,7 @@ pub mod plan;
 pub mod process;
 pub mod progress;
 pub mod registry;
+pub mod verify;
 
 pub use arguments::{build_arguments, choose_graph_shape};
 pub use fsinspect::inspect_path;
@@ -73,12 +79,56 @@ pub use process::{
 };
 pub use progress::{ProgressReader, ProgressSnapshot};
 pub use registry::{ExportRegistry, ExportSlot};
+pub use verify::{verify_audio_output, AudioOutputMismatch};
 
 use crate::project::Resolution;
 use crate::settings::{AudioChannels, Container, Quality};
 use crate::time::{Pts, Rational};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Which streams of the source an export writes.
+///
+/// The user chooses this in the export dialog, and it crosses the wire on every export request.
+/// [`plan::build_plan`] reads it, and it decides which of the two optional parts of an
+/// [`ExportPlan`] exist:
+///
+/// - [`ExportStreams::VideoAndAudio`] plans video, and audio when the source has an audio stream.
+///   This is the behaviour of every export before the choice existed.
+/// - [`ExportStreams::VideoOnly`] plans video and never audio. A source without audio, or with an
+///   audio stream that reports no sample rate, exports as it would with sound removed.
+/// - [`ExportStreams::AudioOnly`] plans audio and never video. A source without an audio stream
+///   is refused with [`ExportErrorCode::SourceHasNoAudio`].
+///
+/// Each variant names its wire string explicitly, rather than through `rename_all`, so the
+/// frontend's parity test can read the strings from this file
+/// (`src/features/export/types.test.ts`), as it reads the error codes below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExportStreams {
+    /// The video, and the audio when the source has an audio stream.
+    #[serde(rename = "videoAndAudio")]
+    VideoAndAudio,
+    /// The video only.
+    #[serde(rename = "videoOnly")]
+    VideoOnly,
+    /// The audio only.
+    #[serde(rename = "audioOnly")]
+    AudioOnly,
+}
+
+impl ExportStreams {
+    /// Whether an export with this choice writes the source's video.
+    #[must_use]
+    pub const fn writes_video(self) -> bool {
+        matches!(self, Self::VideoAndAudio | Self::VideoOnly)
+    }
+
+    /// Whether an export with this choice writes the source's audio, when the source has any.
+    #[must_use]
+    pub const fn writes_audio(self) -> bool {
+        matches!(self, Self::VideoAndAudio | Self::AudioOnly)
+    }
+}
 
 /// The largest number of segments [`plan::build_plan`] accepts in one export request.
 ///
@@ -252,6 +302,23 @@ pub struct PlannedAudio {
     ///
     /// The argument builder writes it as `-b:a <n>k` directly after `-c:a` (ADR 023).
     pub bitrate: Option<u32>,
+    /// The length of audio the segments can take from the source stream, in seconds, exact.
+    ///
+    /// This is the sum, over the segments, of each segment's overlap with the stream's probed
+    /// extent ([`AudioProbe::start_time`] and [`AudioProbe::duration`]). It is
+    /// [`ExportPlan::total_duration`] when the stream covers every segment, and it is shorter when
+    /// the audio of the source starts after a segment's In point or ends before its Out point:
+    /// `atrim` then finds no samples for that part, and an audio-only export writes none.
+    /// [`verify::verify_audio_output`] compares the finished file with this value, so a correct
+    /// export of such a source is not reported as truncated. A side of the extent that the probe
+    /// does not report bounds nothing: with no extent at all, this is the total duration.
+    ///
+    /// The graph does not read it. It is a bound for the success check, and never an edit
+    /// boundary (ADR 002).
+    ///
+    /// [`AudioProbe::start_time`]: crate::ffmpeg::probe::AudioProbe::start_time
+    /// [`AudioProbe::duration`]: crate::ffmpeg::probe::AudioProbe::duration
+    pub expected_duration: Rational,
 }
 
 /// A fully resolved, ready-to-render export: one source, its segments in concat order, and
@@ -263,8 +330,8 @@ pub struct PlannedAudio {
 ///
 /// Both parts are optional, and each one is a whole decision for the graph: a part that is
 /// `None` writes no chain, no label, no map, and no encoder flag anywhere. [`plan::build_plan`]
-/// always plans video today, and it plans audio exactly when the source reports an audio
-/// stream.
+/// plans each part from the [`ExportStreams`] choice of the request, and it never produces a
+/// plan with neither part.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportPlan {
     /// The source media file every segment cuts from.
@@ -274,11 +341,12 @@ pub struct ExportPlan {
     pub destination: PathBuf,
     /// The video this plan writes, or `None` for a plan with no video.
     ///
-    /// [`plan::build_plan`] always fills this part, so every plan it produces writes video.
+    /// [`plan::build_plan`] fills this part exactly when [`ExportStreams::writes_video`] holds
+    /// for the request. A plan without it is an audio-only export, and the frame count cannot
+    /// verify that export; [`verify`] holds the check that does.
     pub video: Option<PlannedVideo>,
     /// The audio stream this plan addresses, together with the sample rate every audio
-    /// tick in [`PlannedSegment`] is measured in, or `None` when the source reports no
-    /// audio stream at all.
+    /// tick in [`PlannedSegment`] is measured in, or `None` when the plan writes no audio.
     ///
     /// ADR 014 requires an exact `atrim` boundary in ticks of `1 / sample_rate`, and
     /// forbids the imprecise fallback of `atrim`'s `start`/`end` options, which ffmpeg
@@ -287,8 +355,9 @@ pub struct ExportPlan {
     /// no ADR-014-compliant way to be cut at all, and [`plan::build_plan`] refuses the whole
     /// export with [`ExportErrorCode::SourceAudioRateUnknown`] rather than reaching this
     /// field: dropping the track here would write a video-only file for a source the
-    /// preview played with sound, and report nothing. `None` therefore means one thing
-    /// only, "this source has no audio". Bundling the stream index and the sample rate into
+    /// preview played with sound, and report nothing. `None` therefore means one of two
+    /// things, and both are stated, never silent: the source has no audio, or the user chose
+    /// [`ExportStreams::VideoOnly`]. Bundling the stream index and the sample rate into
     /// one [`PlannedAudio`] makes "an audio stream to address, but no exact way to address
     /// it" unrepresentable, instead of leaving that combination as an unstated policy
     /// question for the graph builder.
@@ -310,9 +379,9 @@ impl ExportPlan {
     /// mode will; the comparison then has nothing to compare, and the progress has no total. A
     /// plan without a video part also reports `None`, because it writes no frames at all; for
     /// that plan the comparison cannot catch the failure ADR 016 relies on it for, an ffmpeg that
-    /// wrote nothing and exited zero. [`plan::build_plan`] always plans video, and
-    /// `commands::export` asserts that no plan without video reaches the frame-count check. An
-    /// export without video needs a success check of its own.
+    /// wrote nothing and exited zero. `commands::export` therefore never runs the frame-count
+    /// check for a plan without video. It runs [`verify::verify_audio_output`] instead, which
+    /// reads the finished file back.
     #[must_use]
     pub fn expected_frames(&self) -> Option<u64> {
         self.video.as_ref().and_then(|video| video.expected_frames)
@@ -455,7 +524,8 @@ export_error_codes! {
     /// Produced by [`plan::build_plan`]: the preset asks for the source's own frame rate
     /// but the probe reports neither a valid `avg_frame_rate` nor `r_frame_rate`, or the
     /// resolved frame rate (from either the probe or an explicit preset rate) is not
-    /// strictly positive.
+    /// strictly positive. An export with [`ExportStreams::AudioOnly`] times no frames, so it
+    /// never produces this code.
     SourceFrameRateUnknown => "sourceFrameRateUnknown",
     /// Produced by [`plan::build_plan`]: the source reports an audio stream, and that
     /// stream carries no usable sample rate.
@@ -465,7 +535,14 @@ export_error_codes! {
     /// refuses the export rather than dropping the track: a dropped track writes a
     /// video-only file for a source the preview played with sound, and reports nothing --
     /// the same silent class of failure ADR 014 rules out for the short stream specifier.
+    ///
+    /// An export with [`ExportStreams::VideoOnly`] never reads the audio stream, so it never
+    /// produces this code.
     SourceAudioRateUnknown => "sourceAudioRateUnknown",
+    /// Produced by [`plan::build_plan`]: the request asks for [`ExportStreams::AudioOnly`], and
+    /// the source reports no audio stream. A plan without video and without audio would write
+    /// nothing, so the export is refused before anything is reserved.
+    SourceHasNoAudio => "sourceHasNoAudio",
     /// Reserved: the preset names an encoder the capability probe did not report as
     /// working.
     ///
@@ -485,6 +562,16 @@ export_error_codes! {
     /// Produced by `commands::export::verified_frame_count`: the final `frame` count
     /// differed from [`ExportPlan::expected_frames`] (ADR 014's frame-count comparison).
     FrameCountMismatch => "frameCountMismatch",
+    /// Produced by `commands::export::run_export_with`, for an export without video: the
+    /// finished file holds one audio stream, but ffprobe reports a duration outside
+    /// [`verify`]'s tolerance of [`PlannedAudio::expected_duration`], or no duration at all. The
+    /// failure carries the measured and the expected duration as named values.
+    AudioDurationMismatch => "audioDurationMismatch",
+    /// Produced by `commands::export::run_export_with`, for an export without video: ffmpeg
+    /// exited zero with no progress block at all, ffprobe could not read the finished file (it
+    /// exited unsuccessfully, or its answer does not parse), or the file does not hold exactly
+    /// one audio stream and no video stream.
+    OutputStreamsMismatch => "outputStreamsMismatch",
     /// Produced by `commands::export::run_export_with`: the renderer could not rename the
     /// temporary file over the destination.
     OutputRenameFailed => "outputRenameFailed",
@@ -535,6 +622,7 @@ mod tests {
             serialized,
             vec![
                 "appDataUnavailable",
+                "audioDurationMismatch",
                 "canceled",
                 "commandExecutionFailed",
                 "encoderUnavailable",
@@ -555,15 +643,71 @@ mod tests {
                 "outputPathInvalid",
                 "outputReadOnly",
                 "outputRenameFailed",
+                "outputStreamsMismatch",
                 "presetNotFound",
                 "settingsUnreadable",
                 "sourceAudioRateUnknown",
                 "sourceFrameRateUnknown",
+                "sourceHasNoAudio",
                 "sourceNotFile",
                 "sourceNotFound",
                 "sourcePathInvalid",
                 "tooManySegments",
             ]
         );
+    }
+
+    /// Every [`ExportStreams`] variant, through an exhaustive `match`: a variant added to the
+    /// enum fails to compile here until it is added to this list too.
+    fn all_export_streams() -> Vec<ExportStreams> {
+        let all = [
+            ExportStreams::VideoAndAudio,
+            ExportStreams::VideoOnly,
+            ExportStreams::AudioOnly,
+        ];
+        for streams in all {
+            match streams {
+                ExportStreams::VideoAndAudio
+                | ExportStreams::VideoOnly
+                | ExportStreams::AudioOnly => {}
+            }
+        }
+        all.to_vec()
+    }
+
+    #[test]
+    fn every_stream_choice_crosses_the_wire_as_its_stable_camel_case_string() {
+        // The frontend sends these exact strings (`EXPORT_STREAMS` in
+        // `src/features/export/types.ts`), and its parity test reads the `rename` attributes of
+        // this enum. This asks serde for both directions, so a rename that serde spells
+        // differently than the attribute reads cannot pass.
+        let mut serialized = Vec::new();
+        for streams in all_export_streams() {
+            let value = serde_json::to_value(streams).unwrap();
+            let wire = value.as_str().unwrap().to_owned();
+            assert_eq!(
+                serde_json::from_value::<ExportStreams>(value).unwrap(),
+                streams
+            );
+            serialized.push(wire);
+        }
+        assert_eq!(serialized, vec!["videoAndAudio", "videoOnly", "audioOnly"]);
+
+        // Any other spelling is refused, the Rust variant name included.
+        for refused in ["VideoAndAudio", "video", "audio", "videoAndaudio", ""] {
+            assert!(
+                serde_json::from_value::<ExportStreams>(serde_json::json!(refused)).is_err(),
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_stream_choice_names_the_parts_it_writes() {
+        let parts: Vec<(bool, bool)> = all_export_streams()
+            .into_iter()
+            .map(|streams| (streams.writes_video(), streams.writes_audio()))
+            .collect();
+        assert_eq!(parts, vec![(true, true), (true, false), (false, true)]);
     }
 }

@@ -14,7 +14,9 @@
 //! and a run reaches it only on the first probe of a binary, on a cache miss after an ffmpeg
 //! upgrade, and on a forced re-probe. Every start after that hits the on-disk cache, which answers
 //! after `-version` and before `-encoders`: one child, and so one window. A media import
-//! (`ffmpeg::probe`) and an export (`ffmpeg::export::process`, ADR 016) spawn one each.
+//! (`ffmpeg::probe`) and an export (`ffmpeg::export::process`, ADR 016) spawn one each, and an
+//! export without video spawns one `ffprobe` more, through `ffmpeg::probe`, to read its output
+//! back.
 //!
 //! `CREATE_NO_WINDOW` is the process creation flag that suppresses the allocation, and
 //! [`command_without_console`] is the only place in this crate that sets it. ADR 018 makes that a

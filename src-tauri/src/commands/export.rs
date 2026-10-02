@@ -42,11 +42,13 @@
 //! 4. A zero exit status is not a successful export. `reserve` creates the reserved file
 //!    before ffmpeg starts, so ADR 014 requires `-y`; without it ffmpeg refuses the existing
 //!    file, writes nothing, and still exits zero. [`verified_frame_count`] is what separates
-//!    that outcome from a real one.
-//! 5. The cancel flag is read once more after the process exits and **before** the rename.
-//!    ADR 016 requires it: without that read, a cancel arriving in the last seconds of an
-//!    encode still renames the output over the file the user chose while the interface says
-//!    the export was cancelled.
+//!    that outcome from a real one for an export with video. An export without video writes
+//!    no frames to count, and [`verified_audio_output`] separates the two outcomes for it: it
+//!    reads the finished file back through ffprobe.
+//! 5. The cancel flag is read once more after the process exits, after the success check, and
+//!    **before** the rename. ADR 016 requires it: without that read, a cancel arriving in the
+//!    last seconds of an encode still renames the output over the file the user chose while
+//!    the interface says the export was cancelled.
 //!
 //! The `encoderUnavailable` pre-check ADR 016 describes is deliberately not implemented here.
 //! It needs its own `ffmpeg -version` spawn and a capability-cache read, and it is a separate
@@ -54,11 +56,11 @@
 
 use crate::ffmpeg::export::{
     build_arguments, build_filter_graph, build_plan, choose_graph_shape, inspect_path,
-    run_export_process, ExportErrorCode, ExportPlan, ExportProcessOutcome, ExportProcessRequest,
-    ExportProcessStatus, ExportRegistry, ExportSlot, PendingOutput, PlanRequest, ProgressSnapshot,
-    SegmentBoundary,
+    run_export_process, verify_audio_output, AudioOutputMismatch, ExportErrorCode, ExportPlan,
+    ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot,
+    ExportStreams, PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary,
 };
-use crate::ffmpeg::{self, FfmpegPaths, LocateError, MediaProbe, ProbeError};
+use crate::ffmpeg::{self, FfmpegPaths, LocateError, MediaProbe, OutputAudioProbe, ProbeError};
 use crate::settings::{self, LoadedSettings, Preset, Settings, SettingsFileError};
 use crate::time::{Pts, Rational};
 use serde::{Deserialize, Serialize};
@@ -116,6 +118,11 @@ pub struct ExportRequestWire {
     /// a run actually used.
     #[serde(default)]
     pub preset_id: Option<String>,
+    /// Which streams of the source the export writes. **Required**, with no default: an
+    /// absent value would have to stand for one of the three choices, and a frontend that
+    /// forgot to send the user's choice would then export a file the user did not ask for and
+    /// report a success.
+    pub streams: ExportStreams,
 }
 
 /// The immediate payload `start_export` resolves with when it accepts a run.
@@ -128,9 +135,13 @@ pub struct ExportRequestWire {
 pub struct ExportStart {
     pub run_id: String,
     pub preset_id: String,
+    /// The stream choice of the request, echoed as the run uses it.
+    pub streams: ExportStreams,
     pub output_path: String,
     pub segment_count: u32,
     pub total_duration_us: u64,
+    /// Absent for an export without video, which writes no frames: its progress has no total,
+    /// and the interface shows it as indeterminate (ADR 025).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_frames: Option<u64>,
 }
@@ -155,6 +166,17 @@ pub struct ExportCommandError {
     /// reads it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoder: Option<String>,
+    /// The duration ffprobe measured on the finished file, in whole microseconds, for
+    /// `audioDurationMismatch`. Absent when ffprobe reported no duration, and on every other
+    /// code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measured_duration_us: Option<u64>,
+    /// The duration the plan expected, in whole microseconds, for `audioDurationMismatch`: the
+    /// audio the segments can take from the source stream. It equals `totalDurationUs` in
+    /// [`ExportStart`] when the source audio covers every segment, and is shorter when it does
+    /// not. Absent on every other code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_duration_us: Option<u64>,
 }
 
 impl ExportCommandError {
@@ -165,6 +187,8 @@ impl ExportCommandError {
             detail: None,
             exit_code: None,
             encoder: None,
+            measured_duration_us: None,
+            expected_duration_us: None,
         }
     }
 
@@ -172,10 +196,8 @@ impl ExportCommandError {
     /// an ffmpeg stderr tail. ADR 011 keeps the English out of `code` and puts it here.
     fn with_detail(code: ExportErrorCode, detail: impl Into<String>) -> Self {
         Self {
-            code,
             detail: Some(detail.into()),
-            exit_code: None,
-            encoder: None,
+            ..Self::new(code)
         }
     }
 }
@@ -235,6 +257,12 @@ pub enum ExportEvent {
         exit_code: Option<i32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         encoder: Option<String>,
+        /// See [`ExportCommandError::measured_duration_us`].
+        #[serde(skip_serializing_if = "Option::is_none")]
+        measured_duration_us: Option<u64>,
+        /// See [`ExportCommandError::expected_duration_us`].
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expected_duration_us: Option<u64>,
     },
 }
 
@@ -243,9 +271,14 @@ pub enum ExportEvent {
 struct PreparedExport {
     /// The preset id that was actually resolved, echoed back in [`ExportStart`].
     preset_id: String,
+    /// The stream choice of the request, echoed back in [`ExportStart`].
+    streams: ExportStreams,
     plan: ExportPlan,
-    /// The located `ffmpeg`, not `ffprobe`.
+    /// The located `ffmpeg`.
     ffmpeg: PathBuf,
+    /// The located `ffprobe`, which reads the finished file of an export without video back
+    /// for its success check ([`verified_audio_output`]).
+    ffprobe: PathBuf,
     /// The complete argument list, already built against [`PreparedExport::pending`]'s
     /// reserved path.
     arguments: Vec<String>,
@@ -484,6 +517,7 @@ where
             segments: &segments,
             probe: &probe,
             preset,
+            streams: request.streams,
         },
         inspect_path,
     )
@@ -517,8 +551,10 @@ where
 
     Ok(PreparedExport {
         preset_id: preset.id.clone(),
+        streams: request.streams,
         plan,
         ffmpeg: executables.ffmpeg,
+        ffprobe: executables.ffprobe,
         arguments,
         pending,
     })
@@ -549,6 +585,7 @@ fn start_payload(run_id: &str, prepared: &PreparedExport) -> ExportStart {
     ExportStart {
         run_id: run_id.to_owned(),
         preset_id: prepared.preset_id.clone(),
+        streams: prepared.streams,
         output_path: path_to_string(&prepared.plan.destination),
         // `build_plan` rejects an empty request and caps the count at `MAX_EXPORT_SEGMENTS`,
         // so this conversion cannot saturate for any plan that reaches here.
@@ -702,26 +739,34 @@ fn run_export(
         run_id,
         |event| emit_event(app, event),
         |request, on_progress| run_export_process(request, on_progress),
+        ffmpeg::probe_output_audio,
     )
 }
 
 /// Run the process stage, verify what it produced, and publish the output, reporting through
-/// `emit` and running the child through `process`.
+/// `emit`, running the child through `process`, and reading a finished file without video back
+/// through `probe_output`.
 ///
 /// The three checks between the process exiting and the rename are obligations 4 and 5 of
-/// this module's documentation, in the order ADR 016 requires them: the frame count, then the
-/// cancel flag, then the publication.
+/// this module's documentation, in the order ADR 016 requires them: the success check, then
+/// the cancel flag, then the publication. The success check is the frame count for a plan
+/// with video, and [`verified_audio_output`] for a plan without it. A failed check returns
+/// before the cancel flag is read and before `publishing` is emitted, and the early return
+/// drops the reservation, whose guard deletes the temporary file as on every other failure.
 ///
-/// Both `emit` and `process` are parameters for the same reason: this order is the whole
-/// point of the function, and a test has to be able to observe it. `process` lets a test
+/// `emit`, `process`, and `probe_output` are parameters for the same reason: this order is the
+/// whole point of the function, and a test has to be able to observe it. `process` lets a test
 /// return a chosen outcome, and set the cancel flag from inside the call, without an ffmpeg;
-/// `emit` lets it assert which events the order did and did not produce.
-fn run_export_with<Emit, Process>(
+/// `probe_output` lets it choose what ffprobe reports about the finished file, without an
+/// ffprobe, and receives the run's cancel flag, so a test can stop a slow probe; `emit` lets it
+/// assert which events the order did and did not produce.
+fn run_export_with<Emit, Process, ProbeOutput>(
     slot: &ExportSlot,
     prepared: PreparedExport,
     run_id: &str,
     emit: Emit,
     process: Process,
+    probe_output: ProbeOutput,
 ) -> Result<u64, ExportCommandError>
 where
     Emit: Fn(ExportEvent),
@@ -729,23 +774,16 @@ where
         ExportProcessRequest<'_>,
         &mut dyn FnMut(&ProgressSnapshot),
     ) -> std::io::Result<ExportProcessOutcome>,
+    ProbeOutput: FnOnce(&Path, &Path, &AtomicBool) -> Result<OutputAudioProbe, ProbeError>,
 {
     let PreparedExport {
         plan,
         ffmpeg,
+        ffprobe,
         arguments,
         pending,
         ..
     } = prepared;
-    // The frame count is the only success check below, and a plan without video has no frames
-    // to count: `verified_frame_count` would accept any snapshot for it, and an ffmpeg that
-    // refused the reservation and exited zero would publish an empty file. `build_plan` always
-    // plans video, so no such plan exists yet. The unit that adds one must give it a success
-    // check of its own before it removes this assertion.
-    debug_assert!(
-        plan.video.is_some(),
-        "an export without video needs a success check other than the frame count"
-    );
     let expected_frames = plan.expected_frames();
     let cancel = slot.cancel_flag();
 
@@ -775,23 +813,44 @@ where
             code,
         } => {
             return Err(ExportCommandError {
-                code: ExportErrorCode::FfmpegProcessFailed,
                 detail: outcome.stderr_detail(),
                 exit_code: code,
-                encoder: None,
+                ..ExportCommandError::new(ExportErrorCode::FfmpegProcessFailed)
             });
         }
         ExportProcessStatus::Exited { success: true, .. } => {}
     }
 
-    let frames = verified_frame_count(
-        expected_frames,
-        outcome.last_progress.as_ref(),
-        outcome.stderr_detail(),
-    )?;
+    // The success check. A plan with video counts its frames. A plan without video writes no
+    // frames, and its progress cannot stand in for them: an audio-only block carries no `frame`
+    // key, and `out_time_us` is wrong under `-copyts` (ADR 014 measurement 12). So the check
+    // reads the finished file back instead, and an export without video reports no frames.
+    let frames = if plan.video.is_some() {
+        verified_frame_count(
+            expected_frames,
+            outcome.last_progress.as_ref(),
+            outcome.stderr_detail(),
+        )?
+    } else {
+        // `build_plan` plans audio for every plan without video; the total duration only
+        // stands in for a hand-built plan that has neither part.
+        let expected = plan
+            .audio
+            .as_ref()
+            .map_or(plan.total_duration, |audio| audio.expected_duration);
+        verified_audio_output(
+            expected,
+            outcome.last_progress.as_ref(),
+            outcome.stderr_detail(),
+            || probe_output(&ffprobe, pending.path(), cancel.as_ref()),
+        )?;
+        0
+    };
 
     // ADR 016's second cancel test. Without it a cancel that arrives during the last seconds
-    // of the encode still renames the output over the file the user chose.
+    // of the encode still renames the output over the file the user chose. It runs after the
+    // success check, so it also covers a cancel that arrives just after ffprobe read the output;
+    // one that arrives while ffprobe runs stops the probe itself (`ProbeError::Canceled`).
     if slot.is_canceled() {
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
@@ -843,8 +902,8 @@ where
 /// function. A future variable-frame-rate mode cannot predict a count: there is then nothing to
 /// compare a real count against, and the export proceeds. A plan without video writes no frames
 /// at all, so this comparison would accept any snapshot for it and could not catch the
-/// missing-`-y` failure above. [`run_export_with`] asserts that no such plan reaches it, and an
-/// export without video needs a success check of its own before that assertion can go.
+/// missing-`-y` failure above. [`run_export_with`] therefore never calls this function for such
+/// a plan; [`verified_audio_output`] is its check.
 ///
 /// `detail` is the process's own stderr tail, which on the missing-`-y` path holds ffmpeg's
 /// refusal message and is the most useful thing a user can be shown.
@@ -855,10 +914,8 @@ fn verified_frame_count(
 ) -> Result<u64, ExportCommandError> {
     fn mismatch(detail: Option<String>) -> ExportCommandError {
         ExportCommandError {
-            code: ExportErrorCode::FrameCountMismatch,
             detail,
-            exit_code: None,
-            encoder: None,
+            ..ExportCommandError::new(ExportErrorCode::FrameCountMismatch)
         }
     }
 
@@ -873,11 +930,73 @@ fn verified_frame_count(
     Ok(frames)
 }
 
+/// Decide whether an ffmpeg that exited zero actually wrote the audio that was planned, for an
+/// export without video.
+///
+/// This is [`verified_frame_count`] for a plan that has no frames to count, and it answers the
+/// same question for the same reason: the exit status alone cannot tell a finished export from
+/// the empty reservation that the missing-`-y` path leaves behind.
+///
+/// 1. No progress block at all is a failure on its own, as it is for the frame count, and the
+///    probe does not run: the child never reported, so there is nothing written to read back.
+///    It reports `outputStreamsMismatch`, because the file holds none of the planned streams.
+/// 2. `probe` runs ffprobe on the finished temporary file, within
+///    [`crate::ffmpeg::probe::PROBE_TIMEOUT`] and under the run's cancel flag. How a probe that
+///    fails is reported depends on where the fault is:
+///    - ffprobe exited unsuccessfully, or wrote an answer that does not parse: the fault is in
+///      the file ffmpeg wrote, such as an `.m4a` with no index or an empty reservation. This
+///      reports `outputStreamsMismatch`, with ffmpeg's stderr tail as the detail, because that
+///      tail says why the file is wrong and ffprobe's says only that it is.
+///    - ffprobe could not start, or did not answer in time: the fault is in ffprobe or in the
+///      disk, not in the file. These keep `ffprobeSpawnFailed` and `ffprobeTimedOut`, with
+///      ffprobe's own diagnostic ([`map_reprobe_error`]).
+///    - The run was canceled while ffprobe ran: `canceled`.
+/// 3. [`verify_audio_output`] compares the answer with the plan: one audio stream, no video
+///    stream, and `expected` within its tolerance. `expected` is
+///    [`crate::ffmpeg::export::PlannedAudio::expected_duration`], the audio the segments can take
+///    from the source. A wrong stream set reports `outputStreamsMismatch`. A duration outside the
+///    tolerance, or none, reports `audioDurationMismatch`, with the measured and the expected
+///    duration as named values.
+///
+/// `detail` is the process's own stderr tail, as for the frame count.
+fn verified_audio_output(
+    expected: Rational,
+    last_progress: Option<&ProgressSnapshot>,
+    detail: Option<String>,
+    probe: impl FnOnce() -> Result<OutputAudioProbe, ProbeError>,
+) -> Result<(), ExportCommandError> {
+    let streams_mismatch = |detail: Option<String>| ExportCommandError {
+        detail,
+        ..ExportCommandError::new(ExportErrorCode::OutputStreamsMismatch)
+    };
+    if last_progress.is_none() {
+        return Err(streams_mismatch(detail));
+    }
+    let answer = probe().map_err(|error| match error {
+        ProbeError::ProcessFailed { .. } | ProbeError::Parse { .. } => {
+            streams_mismatch(detail.clone())
+        }
+        ProbeError::Canceled => ExportCommandError::new(ExportErrorCode::Canceled),
+        ProbeError::Spawn { .. } | ProbeError::TimedOut { .. } => map_reprobe_error(error),
+    })?;
+    verify_audio_output(&answer, expected).map_err(|mismatch| match mismatch {
+        AudioOutputMismatch::Streams { .. } => streams_mismatch(detail),
+        AudioOutputMismatch::Duration { measured, expected } => ExportCommandError {
+            detail,
+            measured_duration_us: measured.map(duration_microseconds),
+            expected_duration_us: Some(duration_microseconds(expected)),
+            ..ExportCommandError::new(ExportErrorCode::AudioDurationMismatch)
+        },
+    })
+}
+
 /// Turn one progress snapshot into the event the frontend accepts, or into nothing.
 ///
 /// A snapshot with no `frame` produces no event at all. `frame` is required on the wire, and
 /// the frontend's strict validator drops a whole event that is missing it, so emitting one
-/// would cost a progress update and gain nothing.
+/// would cost a progress update and gain nothing. Every snapshot of an export without video is
+/// such a snapshot (see [`ProgressSnapshot::frame`]), so that export sends no progress event,
+/// and the interface shows its `running` phase as indeterminate.
 ///
 /// `fps` and `speed` are filtered the same way and for the same reason. The validator accepts
 /// only a strictly positive `fps` and a non-negative `speed`, and ffmpeg really does write
@@ -904,7 +1023,11 @@ fn progress_event(
 ///
 /// The re-probe runs the same ffprobe the import ran, so it fails in the same four ways.
 /// Reusing `map_probe_error` keeps one mapping from a `ProbeError` to a code, a diagnostic,
-/// and an exit code, rather than letting a second copy drift away from it.
+/// and an exit code, rather than letting a second copy drift away from it. The probe of the
+/// finished file of an export without video ([`verified_audio_output`]) runs the same ffprobe
+/// through the same runner. It uses this mapping only for a probe that cannot start or that
+/// times out: an exit failure or a parse failure there is a wrong output, not a fault of the
+/// source, and a cancel ends the run as canceled.
 ///
 /// The timeout matters more here than it does on the import path. The single export slot is
 /// claimed before the re-probe runs, so an unbounded probe would hold it for the rest of the
@@ -916,33 +1039,38 @@ fn map_reprobe_error(error: ProbeError) -> ExportCommandError {
         ImportMediaErrorCode::FfprobeProcessFailed => ExportErrorCode::FfprobeProcessFailed,
         ImportMediaErrorCode::FfprobeParseFailed => ExportErrorCode::FfprobeParseFailed,
         ImportMediaErrorCode::FfprobeTimedOut => ExportErrorCode::FfprobeTimedOut,
-        // `map_probe_error` produces exactly the four codes above, and `ProbeError` has
-        // exactly four variants, so this arm is unreachable. It reports rather than panics:
-        // a fifth probe failure mode must not take an export worker down with it.
+        // `map_probe_error` produces exactly the four codes above for the four ways a probe
+        // fails. Its fifth variant, `Canceled`, comes only from a probe that holds a cancel
+        // flag, and the output probe handles it before this mapping. This arm is therefore
+        // unreachable. It reports rather than panics: a new probe failure mode must not take an
+        // export worker down with it.
         _ => {
             debug_assert!(false, "map_probe_error produced an unexpected code");
             ExportErrorCode::FfprobeProcessFailed
         }
     };
     ExportCommandError {
-        code,
         detail: mapped.detail,
         exit_code: mapped.exit_code,
-        encoder: None,
+        ..ExportCommandError::new(code)
     }
 }
 
 fn emit_failed(app: &tauri::AppHandle, run_id: &str, error: ExportCommandError) {
-    emit_event(
-        app,
-        ExportEvent::Failed {
-            run_id: run_id.to_owned(),
-            code: error.code,
-            detail: error.detail,
-            exit_code: error.exit_code,
-            encoder: error.encoder,
-        },
-    );
+    emit_event(app, failed_event(run_id, error));
+}
+
+/// The `failed` event that reports `error`, field for field.
+fn failed_event(run_id: &str, error: ExportCommandError) -> ExportEvent {
+    ExportEvent::Failed {
+        run_id: run_id.to_owned(),
+        code: error.code,
+        detail: error.detail,
+        exit_code: error.exit_code,
+        encoder: error.encoder,
+        measured_duration_us: error.measured_duration_us,
+        expected_duration_us: error.expected_duration_us,
+    }
 }
 
 fn emit_event(app: &tauri::AppHandle, event: ExportEvent) {
@@ -1089,6 +1217,7 @@ mod tests {
         let start = ExportStart {
             run_id: "42-7".to_owned(),
             preset_id: "default-h264-mp4".to_owned(),
+            streams: ExportStreams::AudioOnly,
             output_path: "/movies/out.mp4".to_owned(),
             segment_count: 3,
             total_duration_us: 12_500_000,
@@ -1129,6 +1258,8 @@ mod tests {
             detail: Some("decoder rejected input".to_owned()),
             exit_code: Some(7),
             encoder: Some("libx264".to_owned()),
+            measured_duration_us: None,
+            expected_duration_us: None,
         })
         .unwrap();
 
@@ -1208,6 +1339,8 @@ mod tests {
             detail: None,
             exit_code: None,
             encoder: None,
+            measured_duration_us: None,
+            expected_duration_us: None,
         })
         .unwrap();
         let detailed = serde_json::to_value(ExportEvent::Failed {
@@ -1216,6 +1349,8 @@ mod tests {
             detail: Some("stderr tail".to_owned()),
             exit_code: Some(1),
             encoder: None,
+            measured_duration_us: None,
+            expected_duration_us: None,
         })
         .unwrap();
 
@@ -1234,15 +1369,118 @@ mod tests {
             "sourcePath": "/media/source.mp4",
             "outputPath": "/movies/out.mp4",
             "segments": [{ "inPts": "9007199254740993", "outPts": "9007199254740994" }],
+            "streams": "videoAndAudio",
         }))
         .unwrap();
 
         assert_eq!(request.preset_id, None);
+        assert_eq!(request.streams, ExportStreams::VideoAndAudio);
         // The value below is above `Number.MAX_SAFE_INTEGER`, which is exactly why ADR 002
         // puts a `Pts` on the wire as a string: as a JSON number it would already have been
         // rounded before it reached this parser.
         assert_eq!(request.segments[0].in_pts, Pts::new(9_007_199_254_740_993));
         assert_eq!(request.segments[0].out_pts, Pts::new(9_007_199_254_740_994));
+    }
+
+    /// A request payload in its wire form, with `streams` set to `streams` or left out.
+    fn request_json(streams: Option<serde_json::Value>) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "sourcePath": "/media/source.mp4",
+            "outputPath": "/movies/out.mp4",
+            "segments": [{ "inPts": "0", "outPts": "90000" }],
+            "presetId": "active",
+        });
+        if let Some(streams) = streams {
+            value["streams"] = streams;
+        }
+        value
+    }
+
+    #[test]
+    fn the_request_carries_each_stream_choice_by_its_wire_string() {
+        for (wire, streams) in [
+            ("videoAndAudio", ExportStreams::VideoAndAudio),
+            ("videoOnly", ExportStreams::VideoOnly),
+            ("audioOnly", ExportStreams::AudioOnly),
+        ] {
+            let request: ExportRequestWire =
+                serde_json::from_value(request_json(Some(serde_json::json!(wire)))).unwrap();
+            assert_eq!(request.streams, streams, "{wire}");
+        }
+    }
+
+    #[test]
+    fn a_request_without_streams_is_refused_rather_than_defaulted() {
+        // No value may stand in for the user's choice. A frontend that forgot to send it is
+        // refused at the boundary, before any preparation starts.
+        let error = serde_json::from_value::<ExportRequestWire>(request_json(None)).unwrap_err();
+        assert!(error.to_string().contains("streams"), "{error}");
+    }
+
+    #[test]
+    fn a_request_with_an_unknown_or_malformed_stream_choice_is_refused() {
+        for refused in [
+            serde_json::json!("audio"),
+            serde_json::json!("VideoOnly"),
+            serde_json::json!("video_only"),
+            serde_json::json!(""),
+            serde_json::json!(null),
+            serde_json::json!(1),
+            serde_json::json!({ "video": true }),
+        ] {
+            assert!(
+                serde_json::from_value::<ExportRequestWire>(request_json(Some(refused.clone())))
+                    .is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_start_echoes_the_stream_choice() {
+        let start = ExportStart {
+            run_id: "42-7".to_owned(),
+            preset_id: "default-h264-mp4".to_owned(),
+            streams: ExportStreams::VideoOnly,
+            output_path: "/movies/out.mp4".to_owned(),
+            segment_count: 1,
+            total_duration_us: 1_000_000,
+            expected_frames: Some(30),
+        };
+        let value = serde_json::to_value(&start).unwrap();
+        assert_eq!(value["streams"], "videoOnly");
+        assert_eq!(value["expectedFrames"], 30);
+    }
+
+    #[test]
+    fn a_duration_mismatch_carries_both_durations_as_named_values_and_nothing_else_does() {
+        let mismatch = ExportCommandError {
+            measured_duration_us: Some(9_500_000),
+            expected_duration_us: Some(10_000_000),
+            ..ExportCommandError::new(ExportErrorCode::AudioDurationMismatch)
+        };
+
+        let rejection = serde_json::to_value(&mismatch).unwrap();
+        assert_eq!(rejection["code"], "audioDurationMismatch");
+        assert_eq!(rejection["measuredDurationUs"], 9_500_000);
+        assert_eq!(rejection["expectedDurationUs"], 10_000_000);
+
+        let event = serde_json::to_value(failed_event("1-0", mismatch)).unwrap();
+        assert_eq!(event["event"], "failed");
+        assert_eq!(event["code"], "audioDurationMismatch");
+        assert_eq!(event["measuredDurationUs"], 9_500_000);
+        assert_eq!(event["expectedDurationUs"], 10_000_000);
+        assert!(event.get("measured_duration_us").is_none());
+
+        // Every other failure omits both keys, rather than sending them as `null`.
+        let bare = serde_json::to_value(failed_event(
+            "1-0",
+            ExportCommandError::new(ExportErrorCode::FrameCountMismatch),
+        ))
+        .unwrap();
+        let object = bare.as_object().unwrap();
+        assert!(!object.contains_key("measuredDurationUs"));
+        assert!(!object.contains_key("expectedDurationUs"));
     }
 
     #[test]
@@ -1409,6 +1647,7 @@ mod tests {
                 out_pts: Pts::new(90_000),
             }],
             preset_id: Some("missing".to_owned()),
+            streams: ExportStreams::VideoAndAudio,
         };
 
         let error = prepare_export_with(
@@ -1453,6 +1692,7 @@ mod tests {
                 out_pts: Pts::new(90_000),
             }],
             preset_id: None,
+            streams: ExportStreams::VideoAndAudio,
         };
 
         let prepared = prepare_export_with(
@@ -1521,6 +1761,7 @@ mod tests {
                 out_pts: Pts::new(90_000),
             }],
             preset_id: None,
+            streams: ExportStreams::VideoAndAudio,
         };
 
         let error = prepare_export_with(
@@ -1565,6 +1806,7 @@ mod tests {
                 out_pts: Pts::new(90_000),
             }],
             preset_id: None,
+            streams: ExportStreams::VideoAndAudio,
         };
 
         let error = prepare_export_with(
@@ -1627,6 +1869,7 @@ mod tests {
                 out_pts: Pts::new(90_000),
             }],
             preset_id: None,
+            streams: ExportStreams::VideoAndAudio,
         };
 
         let result = prepare_export_with(
@@ -1713,6 +1956,7 @@ mod tests {
                 out_pts: Pts::new(90_000),
             }],
             preset_id: None,
+            streams: ExportStreams::VideoAndAudio,
         };
 
         let error = prepare_export_with(
@@ -1760,6 +2004,7 @@ mod tests {
                 out_pts: Pts::new(90_000),
             }],
             preset_id: None,
+            streams: ExportStreams::VideoAndAudio,
         };
 
         let error = prepare_export_with(
@@ -1812,6 +2057,7 @@ mod tests {
                 out_pts: Pts::new(90_000),
             }],
             preset_id: None,
+            streams: ExportStreams::VideoAndAudio,
         };
 
         let error = prepare_export_with(
@@ -1859,6 +2105,7 @@ mod tests {
                 .into_owned(),
             segments: vec![],
             preset_id: None,
+            streams: ExportStreams::VideoAndAudio,
         };
 
         let error = prepare_export_with(
@@ -1904,6 +2151,7 @@ mod tests {
                     .into_owned(),
                 segments: vec![],
                 preset_id: None,
+                streams: ExportStreams::VideoAndAudio,
             };
 
             let error = prepare_export_with(
@@ -1991,8 +2239,10 @@ mod tests {
         let pending = PendingOutput::reserve(&destination).unwrap();
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
+            streams: ExportStreams::VideoAndAudio,
             plan,
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe: PathBuf::from("/usr/bin/ffprobe"),
             arguments: vec![],
             pending,
         };
@@ -2021,8 +2271,10 @@ mod tests {
         let reserved = pending.path().to_path_buf();
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
+            streams: ExportStreams::VideoAndAudio,
             plan,
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe: PathBuf::from("/usr/bin/ffprobe"),
             arguments: vec![],
             pending,
         };
@@ -2046,6 +2298,7 @@ mod tests {
                     last_progress: Some(sample_snapshot(Some(30))),
                 })
             },
+            |_, _, _| unreachable!("a plan with video is verified by its frame count"),
         )
         .unwrap_err();
 
@@ -2061,36 +2314,629 @@ mod tests {
             .any(|event| matches!(event, ExportEvent::Publishing { .. })));
     }
 
+    // -- the stream choice: preparation ---------------------------------------------------
+
+    /// The sample probe with a 48000 Hz stereo audio stream at index 1.
+    fn sample_probe_with_audio() -> MediaProbe {
+        MediaProbe {
+            audio: Some(crate::ffmpeg::AudioProbe {
+                index: 1,
+                codec: Some("aac".to_owned()),
+                sample_rate: Some(48_000),
+                channels: Some(2),
+                start_time: None,
+                duration: None,
+            }),
+            ..sample_probe()
+        }
+    }
+
+    /// Prepare an export of a real source file with the given stream choice and probe, against
+    /// injected discovery and settings.
+    fn prepare_streams(
+        directory: &TestDirectory,
+        streams: ExportStreams,
+        probe: MediaProbe,
+    ) -> Result<PreparedExport, ExportCommandError> {
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let request = ExportRequestWire {
+            source_path: source.to_string_lossy().into_owned(),
+            output_path: directory
+                .path
+                .join("out.m4a")
+                .to_string_lossy()
+                .into_owned(),
+            segments: vec![ExportSegmentBoundaryWire {
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            preset_id: None,
+            streams,
+        };
+        prepare_export_with(
+            &request,
+            &directory.path,
+            &AtomicBool::new(false),
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_| {
+                Ok(LoadedSettings {
+                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
+                    seeded: false,
+                })
+            },
+            |_, _| Ok(probe),
+        )
+    }
+
+    /// The temporary files left in `directory`.
+    fn leftover_reservations(directory: &TestDirectory) -> usize {
+        fs::read_dir(&directory.path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count()
+    }
+
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "a success check other than the frame count")]
-    fn a_plan_without_video_never_reaches_the_frame_count_check() {
-        // `build_plan` always plans video, so this is unreachable through the command. A plan
-        // without video has no frame count, and the frame count is the only check that catches
-        // an ffmpeg that wrote nothing and exited zero. The assertion stops the run before the
-        // process stage starts, so the process closure below must never run.
+    fn preparation_refuses_an_audio_only_export_of_a_source_without_audio() {
         let directory = TestDirectory::new();
-        let destination = directory.path.join("out.mp4");
-        let mut plan = sample_plan(&destination);
+        let error = match prepare_streams(&directory, ExportStreams::AudioOnly, sample_probe()) {
+            Err(error) => error,
+            Ok(_) => panic!("a source without audio has no audio to export"),
+        };
+        assert_eq!(error.code, ExportErrorCode::SourceHasNoAudio);
+        // The planner refuses before the reservation, so nothing was written.
+        assert_eq!(leftover_reservations(&directory), 0);
+    }
+
+    #[test]
+    fn preparation_builds_an_audio_only_command_and_a_start_payload_without_a_frame_goal() {
+        let directory = TestDirectory::new();
+        let prepared = prepare_streams(
+            &directory,
+            ExportStreams::AudioOnly,
+            sample_probe_with_audio(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.streams, ExportStreams::AudioOnly);
+        assert_eq!(prepared.plan.video, None);
+        assert_eq!(prepared.ffprobe, directory.path.join("ffprobe"));
+        for flag in ["-c:v", "[v]", "-crf"] {
+            assert!(
+                !prepared.arguments.iter().any(|argument| argument == flag),
+                "{flag}: {:?}",
+                prepared.arguments
+            );
+        }
+        let muxer = prepared
+            .arguments
+            .iter()
+            .position(|argument| argument == "-f")
+            .unwrap();
+        assert_eq!(prepared.arguments[muxer + 1], "mp4");
+
+        // The start payload echoes the choice and carries no frame goal, so the interface shows
+        // the progress as indeterminate (ADR 025).
+        let start = start_payload("42-7", &prepared);
+        assert_eq!(start.streams, ExportStreams::AudioOnly);
+        assert_eq!(start.expected_frames, None);
+        assert_eq!(start.total_duration_us, 1_000_000);
+        let value = serde_json::to_value(&start).unwrap();
+        assert_eq!(value["streams"], "audioOnly");
+        assert!(!value.as_object().unwrap().contains_key("expectedFrames"));
+    }
+
+    #[test]
+    fn preparation_builds_a_video_only_command_with_no_audio_flag() {
+        let directory = TestDirectory::new();
+        let prepared = prepare_streams(
+            &directory,
+            ExportStreams::VideoOnly,
+            sample_probe_with_audio(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.plan.audio, None);
+        for flag in ["-c:a", "[a]"] {
+            assert!(
+                !prepared.arguments.iter().any(|argument| argument == flag),
+                "{flag}: {:?}",
+                prepared.arguments
+            );
+        }
+        let start = start_payload("42-7", &prepared);
+        assert_eq!(start.streams, ExportStreams::VideoOnly);
+        assert_eq!(start.expected_frames, Some(30));
+    }
+
+    // -- the stream choice: the success check of an export without video -------------------
+
+    /// A one-second plan that writes 48000 Hz audio and no video.
+    fn sample_audio_plan(destination: &Path) -> ExportPlan {
+        let mut plan = sample_plan(destination);
         plan.video = None;
-        let pending = PendingOutput::reserve(&destination).unwrap();
+        plan.audio = Some(crate::ffmpeg::export::PlannedAudio {
+            stream_index: 1,
+            sample_rate: 48_000,
+            output_sample_rate: 48_000,
+            output_channels: AudioChannels::Stereo,
+            encoder: "aac".to_owned(),
+            bitrate: None,
+            // The source audio covers the whole segment.
+            expected_duration: Rational::new(1, 1).unwrap(),
+        });
+        plan.segments[0].audio_in_tick = Some(0);
+        plan.segments[0].audio_out_tick = Some(48_000);
+        plan
+    }
+
+    /// An audio-only run, ready for [`run_export_with`], and the reserved path it writes.
+    fn prepared_audio_run(destination: &Path) -> (PreparedExport, PathBuf) {
+        let pending = PendingOutput::reserve(destination).unwrap();
+        let reserved = pending.path().to_path_buf();
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
-            plan,
+            streams: ExportStreams::AudioOnly,
+            plan: sample_audio_plan(destination),
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe: PathBuf::from("/usr/bin/ffprobe"),
             arguments: vec![],
             pending,
         };
+        (prepared, reserved)
+    }
+
+    /// The last progress block of a real audio-only run: no `frame` key at all (M5).
+    fn audio_snapshot() -> ProgressSnapshot {
+        ProgressSnapshot {
+            frame: None,
+            fps: None,
+            speed: Rational::new(40, 1),
+            total_size: Some(16_384),
+            done: true,
+        }
+    }
+
+    /// A zero exit with the given last progress block and a stderr tail.
+    fn exited_zero(last_progress: Option<ProgressSnapshot>) -> ExportProcessOutcome {
+        ExportProcessOutcome {
+            status: ExportProcessStatus::Exited {
+                code: Some(0),
+                success: true,
+            },
+            stderr: b"stderr tail".to_vec(),
+            last_progress,
+        }
+    }
+
+    fn output_probe(audio: u32, video: u32, duration: Option<&str>) -> OutputAudioProbe {
+        OutputAudioProbe {
+            audio_streams: audio,
+            video_streams: video,
+            duration: duration.map(|text| Rational::from_decimal_str(text).unwrap()),
+        }
+    }
+
+    fn published(events: &RefCell<Vec<ExportEvent>>) -> usize {
+        events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, ExportEvent::Publishing { .. }))
+            .count()
+    }
+
+    #[test]
+    fn an_audio_only_export_that_passes_the_check_is_published_after_the_check() {
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("out.m4a");
+        let (prepared, reserved) = prepared_audio_run(&destination);
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+        let events: RefCell<Vec<ExportEvent>> = RefCell::new(Vec::new());
+        let probed: RefCell<Option<(PathBuf, PathBuf, usize)>> = RefCell::new(None);
+
+        let frames = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |event| events.borrow_mut().push(event),
+            |_request, on_progress| {
+                fs::write(&reserved, b"the finished audio").unwrap();
+                on_progress(&audio_snapshot());
+                Ok(exited_zero(Some(audio_snapshot())))
+            },
+            |ffprobe, file, _cancel| {
+                *probed.borrow_mut() = Some((
+                    ffprobe.to_path_buf(),
+                    file.to_path_buf(),
+                    published(&events),
+                ));
+                Ok(output_probe(1, 0, Some("1.000000")))
+            },
+        )
+        .unwrap();
+
+        // An export without video reports no frames.
+        assert_eq!(frames, 0);
+        // The check read the reservation, through the located ffprobe, and it ran before the
+        // publication: no `publishing` event had been sent when it ran.
+        let (ffprobe, file, publishing_before) = probed.borrow().clone().unwrap();
+        assert_eq!(ffprobe, PathBuf::from("/usr/bin/ffprobe"));
+        assert_eq!(file, reserved);
+        assert_eq!(publishing_before, 0);
+        assert_eq!(published(&events), 1);
+        assert_eq!(fs::read(&destination).unwrap(), b"the finished audio");
+        assert!(!reserved.exists());
+        // A block without `frame` produces no progress event: the interface stays
+        // indeterminate rather than receiving an event its validator refuses.
+        assert!(!events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, ExportEvent::Progress { .. })));
+    }
+
+    /// Run an audio-only export whose process exits zero with `last_progress`, and whose output
+    /// probe answers `answer`, over a destination that already holds a previous export.
+    fn failed_audio_run(
+        last_progress: Option<ProgressSnapshot>,
+        answer: Result<OutputAudioProbe, ProbeError>,
+    ) -> ExportCommandError {
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("out.m4a");
+        fs::write(&destination, b"a previous export").unwrap();
+        let (prepared, reserved) = prepared_audio_run(&destination);
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+        let events: RefCell<Vec<ExportEvent>> = RefCell::new(Vec::new());
+
+        let error = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |event| events.borrow_mut().push(event),
+            |_request, _on_progress| {
+                fs::write(&reserved, b"a wrong file").unwrap();
+                Ok(exited_zero(last_progress))
+            },
+            |_, _, _| answer,
+        )
+        .unwrap_err();
+
+        // A failed check never publishes: no `publishing` event, the file the user chose keeps
+        // its contents, and the reservation is gone, as after every other failure.
+        assert_eq!(published(&events), 0);
+        assert_eq!(fs::read(&destination).unwrap(), b"a previous export");
+        assert!(!reserved.exists());
+        assert_eq!(leftover_reservations(&directory), 0);
+        error
+    }
+
+    #[test]
+    fn an_audio_only_export_of_the_wrong_duration_fails_with_both_durations() {
+        let error = failed_audio_run(
+            Some(audio_snapshot()),
+            Ok(output_probe(1, 0, Some("0.500000"))),
+        );
+
+        assert_eq!(error.code, ExportErrorCode::AudioDurationMismatch);
+        assert_eq!(error.measured_duration_us, Some(500_000));
+        assert_eq!(error.expected_duration_us, Some(1_000_000));
+        assert_eq!(error.detail.as_deref(), Some("stderr tail"));
+    }
+
+    #[test]
+    fn an_audio_only_export_with_no_reported_duration_fails_with_the_expected_duration_only() {
+        let error = failed_audio_run(Some(audio_snapshot()), Ok(output_probe(1, 0, None)));
+
+        assert_eq!(error.code, ExportErrorCode::AudioDurationMismatch);
+        assert_eq!(error.measured_duration_us, None);
+        assert_eq!(error.expected_duration_us, Some(1_000_000));
+    }
+
+    #[test]
+    fn an_audio_only_export_with_the_wrong_streams_fails_whatever_its_duration() {
+        for (audio, video) in [(1, 1), (0, 0), (2, 0), (0, 1)] {
+            let error = failed_audio_run(
+                Some(audio_snapshot()),
+                Ok(output_probe(audio, video, Some("1.000000"))),
+            );
+
+            assert_eq!(
+                error.code,
+                ExportErrorCode::OutputStreamsMismatch,
+                "{audio} audio, {video} video"
+            );
+            assert_eq!(error.measured_duration_us, None);
+            assert_eq!(error.expected_duration_us, None);
+        }
+    }
+
+    #[test]
+    fn an_audio_only_exit_with_no_progress_at_all_fails_without_probing() {
+        // The missing-`-y` case of ADR 016, for an export without video: ffmpeg refused the
+        // reservation, reported nothing, and exited zero. There is nothing written to read back.
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("out.m4a");
+        let (prepared, reserved) = prepared_audio_run(&destination);
         let registry = Arc::new(ExportRegistry::default());
         let slot = registry.begin("42-7").unwrap();
 
-        let _ = run_export_with(
+        let error = run_export_with(
             &slot,
             prepared,
             "42-7",
             |_event| {},
-            |_request, _on_progress| unreachable!("the process stage must not start"),
+            |_request, _on_progress| Ok(exited_zero(None)),
+            |_, _, _| unreachable!("an exit with no progress block has nothing to read back"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::OutputStreamsMismatch);
+        assert_eq!(error.detail.as_deref(), Some("stderr tail"));
+        assert!(!destination.exists());
+        assert!(!reserved.exists());
+    }
+
+    #[test]
+    fn the_audio_check_expects_the_audio_the_source_covers_and_still_catches_a_loss() {
+        // The one-second segment of a source whose audio starts 0.3 s late: the planner expects
+        // 0.7 s of audio. A correct export of that source writes 0.7 s and is published; one that
+        // lost more fails, and names the 0.7 s it expected.
+        let run = |measured: &str| {
+            let directory = TestDirectory::new();
+            let destination = directory.path.join("out.m4a");
+            let (mut prepared, reserved) = prepared_audio_run(&destination);
+            prepared
+                .plan
+                .audio
+                .as_mut()
+                .expect("the audio plan has audio")
+                .expected_duration = Rational::new(7, 10).unwrap();
+            let registry = Arc::new(ExportRegistry::default());
+            let slot = registry.begin("42-7").unwrap();
+            let answer = output_probe(1, 0, Some(measured));
+            let result = run_export_with(
+                &slot,
+                prepared,
+                "42-7",
+                |_event| {},
+                |_request, _on_progress| {
+                    fs::write(&reserved, b"the finished audio").unwrap();
+                    Ok(exited_zero(Some(audio_snapshot())))
+                },
+                |_, _, _| Ok(answer),
+            );
+            (result, destination.exists())
+        };
+
+        let (passed, published) = run("0.700000");
+        assert_eq!(passed.unwrap(), 0);
+        assert!(published);
+
+        let (lost, published) = run("0.500000");
+        let error = lost.unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::AudioDurationMismatch);
+        assert_eq!(error.measured_duration_us, Some(500_000));
+        assert_eq!(error.expected_duration_us, Some(700_000));
+        assert!(!published);
+    }
+
+    #[test]
+    fn an_output_that_ffprobe_cannot_read_is_a_wrong_output_with_the_ffmpeg_diagnostic() {
+        // An `.m4a` with no index, or an empty reservation, makes ffprobe exit 1 (M5). The fault
+        // is in the file ffmpeg wrote, not in the source, so the codes that blame the source --
+        // and offer no way back -- are wrong here. ffmpeg's stderr tail says why the file is
+        // wrong, and ffprobe's only that it is, so the tail stays the detail.
+        let process_failed = failed_audio_run(
+            Some(audio_snapshot()),
+            Err(ProbeError::ProcessFailed {
+                code: Some(1),
+                stderr: b"Invalid data found when processing input".to_vec(),
+            }),
         );
+        let parse_failed = failed_audio_run(
+            Some(audio_snapshot()),
+            Err(ProbeError::Parse {
+                source: crate::ffmpeg::ProbeParseError::Json(
+                    serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err(),
+                ),
+                stderr: b"ffprobe's own text".to_vec(),
+            }),
+        );
+
+        for error in [process_failed, parse_failed] {
+            assert_eq!(error.code, ExportErrorCode::OutputStreamsMismatch);
+            assert_eq!(error.detail.as_deref(), Some("stderr tail"));
+            assert_eq!(error.exit_code, None);
+            assert_eq!(error.measured_duration_us, None);
+            assert_eq!(error.expected_duration_us, None);
+        }
+    }
+
+    #[test]
+    fn an_output_probe_that_cannot_start_or_answer_keeps_its_ffprobe_code() {
+        // These faults are in ffprobe or in the disk, not in the file, so they keep the codes and
+        // the diagnostics of the re-probe of the source.
+        let timed_out = failed_audio_run(
+            Some(audio_snapshot()),
+            Err(ProbeError::TimedOut {
+                timeout: Duration::from_secs(30),
+                stderr: b"the share stopped answering".to_vec(),
+            }),
+        );
+        assert_eq!(timed_out.code, ExportErrorCode::FfprobeTimedOut);
+        assert_eq!(
+            timed_out.detail.as_deref(),
+            Some("the share stopped answering")
+        );
+
+        let spawn = failed_audio_run(
+            Some(audio_snapshot()),
+            Err(ProbeError::Spawn {
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "ffprobe went missing"),
+            }),
+        );
+        assert_eq!(spawn.code, ExportErrorCode::FfprobeSpawnFailed);
+        assert_eq!(spawn.detail.as_deref(), Some("ffprobe went missing"));
+    }
+
+    #[test]
+    fn a_cancel_during_a_slow_output_probe_ends_the_run_as_canceled_at_once() {
+        // A share that stopped answering holds ffprobe for up to `PROBE_TIMEOUT`, and an
+        // application quit waits five seconds (ADR 017). The run passes its own cancel flag to the
+        // probe, and a probe that the flag stopped ends the run as canceled, with nothing
+        // published and the reservation deleted. The probe below stands in for that ffprobe: it
+        // answers only when the flag it receives is set, as `probe_output_audio` does.
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("out.m4a");
+        let (prepared, reserved) = prepared_audio_run(&destination);
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+        let events: RefCell<Vec<ExportEvent>> = RefCell::new(Vec::new());
+        let started = std::time::Instant::now();
+
+        let error = std::thread::scope(|scope| {
+            let canceler = Arc::clone(&registry);
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                assert!(canceler.cancel("42-7"));
+            });
+            run_export_with(
+                &slot,
+                prepared,
+                "42-7",
+                |event| events.borrow_mut().push(event),
+                |_request, _on_progress| {
+                    fs::write(&reserved, b"the finished audio").unwrap();
+                    Ok(exited_zero(Some(audio_snapshot())))
+                },
+                |_, _, cancel| {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "the probe never saw the run's cancel flag"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(ProbeError::Canceled)
+                },
+            )
+            .unwrap_err()
+        });
+
+        assert_eq!(error.code, ExportErrorCode::Canceled);
+        assert_eq!(error.detail, None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(published(&events), 0);
+        assert!(!destination.exists());
+        assert!(!reserved.exists());
+        assert_eq!(leftover_reservations(&directory), 0);
+    }
+
+    #[test]
+    fn the_audio_check_runs_before_the_second_cancel_test() {
+        // ADR 016's order, for an export without video: the success check, then the cancel
+        // flag, then the publication. A cancel that arrives while ffprobe reads the output is
+        // seen by the cancel test that follows the check, and nothing is published.
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("out.m4a");
+        let (prepared, reserved) = prepared_audio_run(&destination);
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+        let events: RefCell<Vec<ExportEvent>> = RefCell::new(Vec::new());
+        let probed = RefCell::new(false);
+
+        let error = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |event| events.borrow_mut().push(event),
+            |_request, _on_progress| {
+                fs::write(&reserved, b"the finished audio").unwrap();
+                Ok(exited_zero(Some(audio_snapshot())))
+            },
+            |_, _, _| {
+                *probed.borrow_mut() = true;
+                assert!(registry.cancel("42-7"));
+                Ok(output_probe(1, 0, Some("1.000000")))
+            },
+        )
+        .unwrap_err();
+
+        assert!(*probed.borrow(), "the check runs before the cancel test");
+        assert_eq!(error.code, ExportErrorCode::Canceled);
+        assert_eq!(published(&events), 0);
+        assert!(!destination.exists());
+        assert!(!reserved.exists());
+
+        // A check that fails reports its own failure, even when a cancel arrived during it: the
+        // check returns before the cancel test is reached.
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("out.m4a");
+        let (prepared, _reserved) = prepared_audio_run(&destination);
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-8").unwrap();
+        let error = run_export_with(
+            &slot,
+            prepared,
+            "42-8",
+            |_event| {},
+            |_request, _on_progress| Ok(exited_zero(Some(audio_snapshot()))),
+            |_, _, _| {
+                assert!(registry.cancel("42-8"));
+                Ok(output_probe(1, 0, Some("0.100000")))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::AudioDurationMismatch);
+    }
+
+    #[test]
+    fn a_plan_with_video_is_verified_by_its_frame_count_and_never_probed() {
+        // Video and audio, and video only, keep the frame count as their success check. The
+        // output probe below must never run for either.
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::VideoOnly] {
+            let directory = TestDirectory::new();
+            let destination = directory.path.join("out.mp4");
+            let pending = PendingOutput::reserve(&destination).unwrap();
+            let reserved = pending.path().to_path_buf();
+            let prepared = PreparedExport {
+                preset_id: "active".to_owned(),
+                streams,
+                plan: sample_plan(&destination),
+                ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
+                ffprobe: PathBuf::from("/usr/bin/ffprobe"),
+                arguments: vec![],
+                pending,
+            };
+            let registry = Arc::new(ExportRegistry::default());
+            let slot = registry.begin("42-7").unwrap();
+
+            let frames = run_export_with(
+                &slot,
+                prepared,
+                "42-7",
+                |_event| {},
+                |_request, _on_progress| {
+                    fs::write(&reserved, b"the finished video").unwrap();
+                    Ok(exited_zero(Some(sample_snapshot(Some(30)))))
+                },
+                |_, _, _| unreachable!("a plan with video is verified by its frame count"),
+            )
+            .unwrap();
+
+            assert_eq!(frames, 30, "{streams:?}");
+            assert_eq!(fs::read(&destination).unwrap(), b"the finished video");
+        }
     }
 
     #[cfg(unix)]
@@ -2112,8 +2958,10 @@ mod tests {
         fs::set_permissions(&destination, fs::Permissions::from_mode(0o444)).unwrap();
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
+            streams: ExportStreams::VideoAndAudio,
             plan,
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe: PathBuf::from("/usr/bin/ffprobe"),
             arguments: vec![],
             pending,
         };
@@ -2135,6 +2983,7 @@ mod tests {
                     last_progress: Some(sample_snapshot(Some(30))),
                 })
             },
+            |_, _, _| unreachable!("a plan with video is verified by its frame count"),
         )
         .unwrap_err();
 

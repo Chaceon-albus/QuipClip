@@ -340,6 +340,7 @@ describe("ExportFlowController", () => {
           outputPath: "/media/out.mp4",
           segments: [{ inPts: "0" as Pts, outPts: "100" as Pts }],
           presetId: "default",
+          streams: "videoAndAudio",
         });
         await vi.waitFor(() => {
           expect(startFn).toHaveBeenCalled();
@@ -392,6 +393,7 @@ describe("ExportFlowController", () => {
         answerStart({
           runId: "run-kept",
           presetId: "default",
+          streams: "videoAndAudio",
           outputPath: "/media/out.mp4",
           segmentCount: 1,
           totalDurationUs: 1_000_000,
@@ -406,6 +408,7 @@ describe("ExportFlowController", () => {
         answerStart({
           runId: "run-kept",
           presetId: "default",
+          streams: "videoAndAudio",
           outputPath: "/media/out.mp4",
           segmentCount: 1,
           totalDurationUs: 1_000_000,
@@ -1103,10 +1106,12 @@ describe("ExportFlowController", () => {
         startExport.mock.invocationCallOrder[0],
       );
       const passedRequest = startExport.mock.calls[0][0] as ExportRequest;
+      // The setup step offers no stream choice yet, so the request asks for both streams.
       expect(passedRequest).toStrictEqual({
         sourcePath: "/media/source.mp4",
         outputPath: "/out/destination.mp4",
         presetId: "custom-p",
+        streams: "videoAndAudio",
         segments: [
           { inPts: "1000", outPts: "2000" },
           { inPts: "5000", outPts: "6000" },

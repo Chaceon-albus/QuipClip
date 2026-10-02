@@ -323,6 +323,13 @@ pub(crate) fn map_probe_error(error: ProbeError) -> ImportMediaError {
             detail: diagnostic_text(&stderr),
             exit_code: None,
         },
+        // Only the probe of an export output takes a cancel flag, and `commands::export` maps
+        // that probe's cancel itself. The import and the re-probe of the source pass none, so
+        // this arm is unreachable. It reports rather than panics, as an unexpected failure.
+        ProbeError::Canceled => {
+            debug_assert!(false, "a probe of the source cannot be canceled");
+            ImportMediaError::new(ImportMediaErrorCode::FfprobeProcessFailed)
+        }
     }
 }
 

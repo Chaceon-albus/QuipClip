@@ -1,8 +1,9 @@
-//! ffprobe execution and normalization for imported media.
+//! ffprobe execution and normalization for imported media, and for the finished file of an
+//! export that writes no video ([`probe_output_audio`]).
 
 use crate::ffmpeg::capabilities::smoke::{kill_and_reap, read_capped};
 use crate::procutil::command_without_console;
-use crate::time::{FrameCount, Pts, Rational, TickCount};
+use crate::time::{pts_seconds, FrameCount, Pts, Rational, TickCount};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
@@ -11,6 +12,7 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -106,6 +108,29 @@ pub struct AudioProbe {
     pub codec: Option<String>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
+    /// The time of the first sample of this stream, in seconds on the timeline of the container,
+    /// or `None` when ffprobe reports none.
+    ///
+    /// This is `start_pts` times the stream's `time_base`, exact, and the decimal `start_time`
+    /// only when one of those two is missing. It is the time `-copyts` gives the stream's first
+    /// sample, which is the timeline of the segment boundaries. A source whose audio starts after
+    /// its video, such as a recording that opened the microphone late, has a value above the
+    /// video's start here.
+    ///
+    /// The export reads this and [`Self::duration`] only to know how much audio its segments can
+    /// take from the stream (`PlannedAudio::expected_duration`). Neither is an edit boundary
+    /// (ADR 002), and neither is on the import wire: the interface does not read them.
+    #[serde(skip)]
+    pub start_time: Option<Rational>,
+    /// The length of this stream in seconds, or `None` when ffprobe reports none.
+    ///
+    /// This is `duration_ts` times the stream's `time_base`, exact; then the decimal `duration`;
+    /// then the `DURATION` tag less [`Self::start_time`], because the `matroska` demuxer reports no
+    /// other length for a stream and its tag holds the end of the track. A source whose audio
+    /// stops before its video, such as a phone recording, has a value below the video's length
+    /// here.
+    #[serde(skip)]
+    pub duration: Option<Rational>,
 }
 
 /// A failure to invoke ffprobe or normalize its output.
@@ -128,6 +153,12 @@ pub enum ProbeError {
         timeout: Duration,
         stderr: Vec<u8>,
     },
+    /// The caller's cancel flag was set while `ffprobe` ran, and the run killed it.
+    ///
+    /// Only [`probe_output_audio`] takes a cancel flag: it runs while an export holds the export
+    /// slot, after the encode, where a user's Stop and an application quit (ADR 017) must not
+    /// wait out [`PROBE_TIMEOUT`]. The probe of a source never reports this.
+    Canceled,
 }
 
 /// A deterministic JSON parsing or normalization failure.
@@ -161,6 +192,7 @@ impl fmt::Display for ProbeError {
             Self::TimedOut { timeout, .. } => {
                 write!(formatter, "ffprobe did not finish within {timeout:?}")
             }
+            Self::Canceled => write!(formatter, "ffprobe was stopped by a cancel request"),
         }
     }
 }
@@ -170,7 +202,7 @@ impl Error for ProbeError {
         match self {
             Self::Spawn { source } => Some(source),
             Self::Parse { source, .. } => Some(source),
-            Self::ProcessFailed { .. } | Self::TimedOut { .. } => None,
+            Self::ProcessFailed { .. } | Self::TimedOut { .. } | Self::Canceled => None,
         }
     }
 }
@@ -251,7 +283,7 @@ pub fn probe_media_within(
         OsStr::new("-i"),
         media_path.as_os_str(),
     ];
-    let run = run_probe_process(ffprobe_path, &arguments, timeout, PROBE_POLL_INTERVAL)
+    let run = run_probe_process(ffprobe_path, &arguments, timeout, PROBE_POLL_INTERVAL, None)
         .map_err(|source| ProbeError::Spawn { source })?;
     finish_probe_run(run, timeout)
 }
@@ -259,10 +291,20 @@ pub fn probe_media_within(
 /// How one `ffprobe` run ended, and everything it wrote.
 #[derive(Debug)]
 struct ProbeRun {
-    /// `None` when the process was still running at the deadline and was killed.
-    exit: Option<ProbeExit>,
+    end: ProbeEnd,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+}
+
+/// How one `ffprobe` run ended.
+#[derive(Debug, Clone, Copy)]
+enum ProbeEnd {
+    /// The process ended on its own.
+    Exited(ProbeExit),
+    /// The process was still running at the deadline and was killed.
+    TimedOut,
+    /// The caller's cancel flag was set while the process ran, and it was killed.
+    Canceled,
 }
 
 /// The exit status of an `ffprobe` that ended on its own.
@@ -272,17 +314,162 @@ struct ProbeExit {
     success: bool,
 }
 
+/// What ffprobe reports about the finished file of an export that writes no video.
+///
+/// [`MediaProbe`] cannot describe that file: it requires a video stream, and refuses a file
+/// without one as [`ProbeDataError::MissingVideo`]. This type holds only the three facts the
+/// success check of `ffmpeg::export::verify` reads, and it requires nothing, so an output with
+/// the wrong streams is reported by that check rather than as a parse failure here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputAudioProbe {
+    /// The number of streams whose `codec_type` is `audio`.
+    pub audio_streams: u32,
+    /// The number of streams whose `codec_type` is `video`, an attached picture included.
+    pub video_streams: u32,
+    /// The duration of the file in seconds, exact, or `None` when ffprobe reports none.
+    ///
+    /// This is `format.duration`, and the duration of the one audio stream only when the format
+    /// reports none. The format field is the one both audio containers fill: the `matroska`
+    /// demuxer reports no stream duration for an `.mka`, and keeps the length in the segment
+    /// header, which ffprobe shows as `format.duration`. In an `.m4a` the two agree.
+    pub duration: Option<Rational>,
+}
+
+/// Run the resolved ffprobe executable on the finished file of an export that writes no video,
+/// within [`PROBE_TIMEOUT`], and stop it when `cancel` is set.
+///
+/// The invocation, the runner and the deadline are those of [`probe_media`], so this probe
+/// follows the same rules for its child process (`procutil`, ADR 018) and cannot hold the export
+/// slot for longer than one probe of the source could.
+///
+/// `cancel` is the export's own flag. The runner reads it at every poll, so a Stop, or the
+/// cancel that an application quit sends (ADR 017), kills ffprobe within one poll interval and
+/// returns [`ProbeError::Canceled`]. The export then ends as canceled, and the guard of its
+/// reservation deletes the temporary file. A source that stopped answering would otherwise hold
+/// the export in the canceling state for up to [`PROBE_TIMEOUT`], far past the five seconds a
+/// quit waits.
+pub fn probe_output_audio(
+    ffprobe_path: &Path,
+    output_path: &Path,
+    cancel: &AtomicBool,
+) -> Result<OutputAudioProbe, ProbeError> {
+    let arguments = [
+        OsStr::new("-v"),
+        OsStr::new("error"),
+        OsStr::new("-of"),
+        OsStr::new("json"),
+        OsStr::new("-show_format"),
+        OsStr::new("-show_streams"),
+        OsStr::new("-i"),
+        output_path.as_os_str(),
+    ];
+    let run = run_probe_process(
+        ffprobe_path,
+        &arguments,
+        PROBE_TIMEOUT,
+        PROBE_POLL_INTERVAL,
+        Some(cancel),
+    )
+    .map_err(|source| ProbeError::Spawn { source })?;
+    finish_probe_run_with(run, PROBE_TIMEOUT, parse_output_audio_json)
+}
+
+/// Read [`OutputAudioProbe`] from the JSON of `-show_format -show_streams`.
+///
+/// Only malformed JSON fails. A missing `streams` array counts no streams, and a duration that
+/// is absent, `N/A`, or not a fixed-point decimal reads as `None`; the success check reports
+/// both conditions with a code of its own.
+pub fn parse_output_audio_json(json: &[u8]) -> Result<OutputAudioProbe, ProbeParseError> {
+    let raw: RawOutputProbe = serde_json::from_slice(json)?;
+    let count = |kind: &str| {
+        let streams = raw
+            .streams
+            .iter()
+            .filter(|stream| stream.codec_type.as_deref() == Some(kind))
+            .count();
+        u32::try_from(streams).unwrap_or(u32::MAX)
+    };
+    let audio_streams = count("audio");
+    let video_streams = count("video");
+    let stream_duration = || {
+        let mut audio = raw
+            .streams
+            .iter()
+            .filter(|stream| stream.codec_type.as_deref() == Some("audio"));
+        match (audio.next(), audio.next()) {
+            (Some(stream), None) => parse_decimal_seconds(stream.duration.as_deref()),
+            _ => None,
+        }
+    };
+    let duration = raw
+        .format
+        .as_ref()
+        .and_then(|format| parse_decimal_seconds(format.duration.as_deref()))
+        .or_else(stream_duration);
+    Ok(OutputAudioProbe {
+        audio_streams,
+        video_streams,
+        duration,
+    })
+}
+
+#[derive(Deserialize)]
+struct RawOutputProbe {
+    #[serde(default)]
+    streams: Vec<RawOutputStream>,
+    format: Option<RawOutputFormat>,
+}
+
+#[derive(Deserialize)]
+struct RawOutputStream {
+    codec_type: Option<String>,
+    duration: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawOutputFormat {
+    duration: Option<String>,
+}
+
+/// Parse a duration that ffprobe writes with `%f`, exactly, or `None` for anything else.
+///
+/// This is [`parse_format_start_time`]'s rule, for a duration: fixed point through
+/// `Rational::from_decimal_str`, never `f64` (ADR 002), and `N/A` or any other text as unknown.
+fn parse_decimal_seconds(value: Option<&str>) -> Option<Rational> {
+    let text = value
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && *text != "N/A")?;
+    Rational::from_decimal_str(text)
+}
+
 /// Turn one finished run into a probe or into the failure it reports.
 ///
 /// Separate from [`probe_media_within`] so the four outcomes -- killed at the deadline, a
 /// non-zero exit, unparsable output, and a good probe -- are each reachable from a test
 /// without a real `ffprobe` and without waiting for a real deadline.
 fn finish_probe_run(run: ProbeRun, timeout: Duration) -> Result<MediaProbe, ProbeError> {
-    let Some(exit) = run.exit else {
-        return Err(ProbeError::TimedOut {
-            timeout,
-            stderr: run.stderr,
-        });
+    finish_probe_run_with(run, timeout, parse_probe_json)
+}
+
+/// [`finish_probe_run`] with the parse of the answer passed in, so the probe of a source and the
+/// probe of an export output share one account of the ways a run can fail.
+///
+/// A canceled run is not parsed, as a run killed at the deadline is not: a killed probe
+/// answered nothing.
+fn finish_probe_run_with<T>(
+    run: ProbeRun,
+    timeout: Duration,
+    parse: impl FnOnce(&[u8]) -> Result<T, ProbeParseError>,
+) -> Result<T, ProbeError> {
+    let exit = match run.end {
+        ProbeEnd::Exited(exit) => exit,
+        ProbeEnd::TimedOut => {
+            return Err(ProbeError::TimedOut {
+                timeout,
+                stderr: run.stderr,
+            });
+        }
+        ProbeEnd::Canceled => return Err(ProbeError::Canceled),
     };
     if !exit.success {
         return Err(ProbeError::ProcessFailed {
@@ -290,7 +477,7 @@ fn finish_probe_run(run: ProbeRun, timeout: Duration) -> Result<MediaProbe, Prob
             stderr: run.stderr,
         });
     }
-    parse_probe_json(&run.stdout).map_err(|source| ProbeError::Parse {
+    parse(&run.stdout).map_err(|source| ProbeError::Parse {
         source,
         stderr: run.stderr,
     })
@@ -311,11 +498,16 @@ fn finish_probe_run(run: ProbeRun, timeout: Duration) -> Result<MediaProbe, Prob
 /// produce a false timeout. Killing the child closes both of its ends, so the two joins at
 /// the end are bounded on every path: `kill_and_reap` runs on each exit from the polling
 /// loop that did not already collect the child's status.
+///
+/// `cancel`, when the caller passes one, is read at every poll, after the exit status and before
+/// the deadline. A set flag ends the child as the deadline does, and the run reports
+/// [`ProbeEnd::Canceled`]. A child that exited in the same poll still reports its exit.
 fn run_probe_process(
     program: &Path,
     args: &[&OsStr],
     timeout: Duration,
     poll: Duration,
+    cancel: Option<&AtomicBool>,
 ) -> io::Result<ProbeRun> {
     let mut child = command_without_console(program)
         .args(args)
@@ -342,26 +534,31 @@ fn run_probe_process(
     // reads until the pipe closes, the joins below would then wait for that child with no
     // bound at all. On Unix, dropping a `Child` neither kills nor reaps it, so nothing later
     // would end it.
-    let polled = (|| -> io::Result<Option<ExitStatus>> {
+    let polled = (|| -> io::Result<Result<ExitStatus, ProbeEnd>> {
         let deadline = Instant::now() + timeout;
         loop {
-            match child.try_wait()? {
-                Some(status) => return Ok(Some(status)),
-                None if Instant::now() >= deadline => return Ok(None),
-                None => thread::sleep(poll),
+            if let Some(status) = child.try_wait()? {
+                return Ok(Ok(status));
             }
+            if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                return Ok(Err(ProbeEnd::Canceled));
+            }
+            if Instant::now() >= deadline {
+                return Ok(Err(ProbeEnd::TimedOut));
+            }
+            thread::sleep(poll);
         }
     })();
 
-    // Only the first arm has a child the polling already reaped. The deadline arm and the
-    // failed-`try_wait` arm both leave a process that may still be running, so each one ends
-    // it here, before the joins below.
-    let exit = match polled {
-        Ok(Some(status)) => Ok(Some(ProbeExit {
+    // Only the first arm has a child the polling already reaped. The deadline, the cancel and
+    // the failed-`try_wait` arms all leave a process that may still be running, so each one
+    // ends it here, before the joins below.
+    let end = match polled {
+        Ok(Ok(status)) => Ok(ProbeEnd::Exited(ProbeExit {
             code: status.code(),
             success: status.success(),
         })),
-        Ok(None) => kill_and_reap(&mut child).map(|()| None),
+        Ok(Err(end)) => kill_and_reap(&mut child).map(|()| end),
         Err(error) => {
             // The polling failure is what this run reports. The kill runs only to bound the
             // joins below, so its own result has nowhere to go.
@@ -374,7 +571,7 @@ fn run_probe_process(
     let stderr = stderr_thread.join().unwrap_or_default();
 
     Ok(ProbeRun {
-        exit: exit?,
+        end: end?,
         stdout,
         stderr,
     })
@@ -413,8 +610,18 @@ struct RawStream {
     nb_frames: Option<String>,
     sample_rate: Option<String>,
     channels: Option<Value>,
+    start_time: Option<String>,
     #[serde(default)]
     disposition: RawDisposition,
+    #[serde(default)]
+    tags: RawStreamTags,
+}
+
+#[derive(Default, Deserialize)]
+struct RawStreamTags {
+    /// The stream length the `matroska` muxer writes, as `HH:MM:SS.nnnnnnnnn`.
+    #[serde(rename = "DURATION")]
+    duration: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -549,7 +756,76 @@ fn normalize_audio(raw: &RawStream) -> Result<AudioProbe, ProbeDataError> {
             .transpose()?
             .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value > 0),
+        start_time: audio_start_time(raw),
+        duration: audio_duration(raw, audio_start_time(raw)),
     })
+}
+
+/// The time base of an audio stream, or `None` when it is absent or not positive.
+fn audio_time_base(raw: &RawStream) -> Option<Rational> {
+    raw.time_base
+        .as_deref()
+        .and_then(Rational::from_ffprobe)
+        .filter(|value| value.num() > 0)
+}
+
+/// [`AudioProbe::start_time`]: `start_pts` in the stream's time base, else the decimal
+/// `start_time`.
+///
+/// A value that does not parse reads as unknown and never fails the probe. The import needs the
+/// video stream only, and the export reads this as a bound on what it can check, not as an edit
+/// point, so a malformed audio field must not refuse a file that imported before.
+fn audio_start_time(raw: &RawStream) -> Option<Rational> {
+    let exact = parse_optional_i64_value(raw.start_pts.as_ref(), "streams.audio.start_pts")
+        .ok()
+        .flatten()
+        .zip(audio_time_base(raw))
+        .and_then(|(pts, time_base)| pts_seconds(Pts::new(pts), time_base));
+    exact.or_else(|| parse_decimal_seconds(raw.start_time.as_deref()))
+}
+
+/// [`AudioProbe::duration`]: `duration_ts` in the stream's time base, else the decimal
+/// `duration`, else the `DURATION` tag less `start`. A negative length reads as unknown. As for
+/// [`audio_start_time`], nothing here fails the probe.
+///
+/// The tag is not a length. The `matroska` muxer of ffmpeg 9.0.2 writes it as the end of the
+/// track on the container timeline: an audio track muxed to start at 0.3 s with 129.721 s of
+/// audio carries `00:02:10.021000000`. Its length is therefore the tag less the start of the
+/// stream, and a tag with no known start gives no length.
+fn audio_duration(raw: &RawStream, start: Option<Rational>) -> Option<Rational> {
+    let exact = parse_optional_i64_value(raw.duration_ts.as_ref(), "streams.audio.duration_ts")
+        .ok()
+        .flatten()
+        .zip(audio_time_base(raw))
+        .and_then(|(ticks, time_base)| pts_seconds(Pts::new(ticks), time_base));
+    let tagged = || {
+        parse_tag_duration(raw.tags.duration.as_deref())
+            .zip(start)
+            .and_then(|(end, start)| end.sub(start))
+    };
+    exact
+        .or_else(|| parse_decimal_seconds(raw.duration.as_deref()))
+        .or_else(tagged)
+        .filter(|value| value.num() >= 0)
+}
+
+/// Parse a `DURATION` tag of the form `HH:MM:SS.nnnnnnnnn` exactly, or `None` for anything else.
+fn parse_tag_duration(value: Option<&str>) -> Option<Rational> {
+    let mut parts = value?.trim().split(':');
+    let (hours, minutes, seconds) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some()
+        || hours.is_empty()
+        || minutes.is_empty()
+        || !hours.bytes().all(|byte| byte.is_ascii_digit())
+        || !minutes.bytes().all(|byte| byte.is_ascii_digit())
+        || !seconds.starts_with(|first: char| first.is_ascii_digit())
+    {
+        return None;
+    }
+    let hours = Rational::new(hours.parse::<i64>().ok()?.checked_mul(3_600)?, 1)?;
+    let minutes = Rational::new(minutes.parse::<i64>().ok()?.checked_mul(60)?, 1)?;
+    let seconds = Rational::from_decimal_str(seconds)?;
+    hours.add(minutes)?.add(seconds)
 }
 
 fn parse_bit_depth(video: &RawStream) -> Result<Option<u32>, ProbeDataError> {
@@ -1057,7 +1333,7 @@ mod tests {
     #[test]
     fn a_run_that_hit_the_deadline_reports_a_timeout_and_keeps_what_was_written() {
         let run = ProbeRun {
-            exit: None,
+            end: ProbeEnd::TimedOut,
             stdout: b"{".to_vec(),
             stderr: b"the share stopped answering".to_vec(),
         };
@@ -1078,7 +1354,7 @@ mod tests {
     #[test]
     fn a_run_that_exited_unsuccessfully_still_reports_the_process_failure() {
         let run = ProbeRun {
-            exit: Some(ProbeExit {
+            end: ProbeEnd::Exited(ProbeExit {
                 code: Some(1),
                 success: false,
             }),
@@ -1097,7 +1373,7 @@ mod tests {
     #[test]
     fn a_successful_run_parses_its_captured_stdout() {
         let run = ProbeRun {
-            exit: Some(ProbeExit {
+            end: ProbeEnd::Exited(ProbeExit {
                 code: Some(0),
                 success: true,
             }),
@@ -1122,10 +1398,13 @@ mod tests {
             &[OsStr::new("--this-flag-does-not-exist")],
             Duration::from_secs(5),
             Duration::from_millis(10),
+            None,
         )
         .expect("the test binary should spawn and exit quickly");
 
-        let exit = run.exit.expect("the process exited on its own");
+        let ProbeEnd::Exited(exit) = run.end else {
+            panic!("the process exited on its own, got {:?}", run.end);
+        };
         assert!(!exit.success);
     }
 
@@ -1142,11 +1421,15 @@ mod tests {
             &[OsStr::new("10")],
             Duration::from_millis(200),
             Duration::from_millis(10),
+            None,
         )
         .expect("the process should spawn and then be killed");
 
         let elapsed = started.elapsed();
-        assert!(run.exit.is_none(), "a killed process reports no exit");
+        assert!(
+            matches!(run.end, ProbeEnd::TimedOut),
+            "a killed process reports no exit"
+        );
         assert!(
             elapsed < Duration::from_secs(2),
             "expected the deadline to fire well before the ten-second sleep, took {elapsed:?}"
@@ -1168,15 +1451,363 @@ mod tests {
             &[OsStr::new("-n"), OsStr::new("20"), OsStr::new("127.0.0.1")],
             Duration::from_millis(200),
             Duration::from_millis(10),
+            None,
         )
         .expect("the process should spawn and then be killed");
 
         let elapsed = started.elapsed();
-        assert!(run.exit.is_none(), "a killed process reports no exit");
+        assert!(
+            matches!(run.end, ProbeEnd::TimedOut),
+            "a killed process reports no exit"
+        );
         assert!(
             elapsed < Duration::from_secs(2),
             "expected the deadline to fire well before ping finishes, took {elapsed:?}"
         );
+    }
+
+    /// Run `program` under a 30-second deadline, and set its cancel flag from another thread
+    /// after 150 ms. Returns how the run ended and how long it took.
+    fn run_and_cancel(program: &Path, args: &[&OsStr]) -> (ProbeEnd, Duration) {
+        let cancel = AtomicBool::new(false);
+        let started = Instant::now();
+        let run = thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(150));
+                cancel.store(true, Ordering::SeqCst);
+            });
+            run_probe_process(
+                program,
+                args,
+                PROBE_TIMEOUT,
+                Duration::from_millis(10),
+                Some(&cancel),
+            )
+            .expect("the process should spawn and then be killed")
+        });
+        (run.end, started.elapsed())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_canceled_probe_is_killed_at_once_instead_of_waiting_for_the_deadline() {
+        // The probe of an export output runs under the export's cancel flag. A share that stopped
+        // answering holds ffprobe for the whole deadline, and an application quit waits only five
+        // seconds (ADR 017), so the flag has to end the child, not only the wait for it. One
+        // process, no shell, for the reason the deadline test above gives.
+        let (end, elapsed) = run_and_cancel(Path::new("/bin/sleep"), &[OsStr::new("10")]);
+
+        assert!(matches!(end, ProbeEnd::Canceled), "{end:?}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "expected the cancel to end the ten-second sleep at once, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_canceled_probe_is_killed_at_once_instead_of_waiting_for_the_deadline() {
+        // The Windows twin of the test above, with the process of the Windows deadline test.
+        let (end, elapsed) = run_and_cancel(
+            Path::new("ping.exe"),
+            &[OsStr::new("-n"), OsStr::new("20"), OsStr::new("127.0.0.1")],
+        );
+
+        assert!(matches!(end, ProbeEnd::Canceled), "{end:?}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "expected the cancel to end ping at once, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_canceled_run_reports_the_cancel_and_parses_nothing() {
+        // What the child wrote before it was killed is not an answer, as for a timeout.
+        let run = ProbeRun {
+            end: ProbeEnd::Canceled,
+            stdout: br#"{"streams":[{"codec_type":"audio"}]}"#.to_vec(),
+            stderr: Vec::new(),
+        };
+        assert!(matches!(
+            finish_probe_run_with(run, PROBE_TIMEOUT, parse_output_audio_json),
+            Err(ProbeError::Canceled)
+        ));
+    }
+
+    #[test]
+    fn an_unset_cancel_flag_lets_the_probe_run_to_its_own_exit() {
+        let program = std::env::current_exe().expect("the test binary has a path");
+        let cancel = AtomicBool::new(false);
+
+        let run = run_probe_process(
+            &program,
+            &[OsStr::new("--this-flag-does-not-exist")],
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            Some(&cancel),
+        )
+        .expect("the test binary should spawn and exit quickly");
+
+        assert!(matches!(run.end, ProbeEnd::Exited(_)), "{:?}", run.end);
+    }
+
+    // -- the extent of the source audio stream -------------------------------------------------
+
+    /// The base probe with one audio stream whose fields are `audio`, merged over an index and a
+    /// codec type.
+    fn probe_with_audio_stream(audio: Value) -> MediaProbe {
+        let mut value = base_probe();
+        let mut stream = serde_json::json!({ "index": 1, "codec_type": "audio" });
+        for (key, field) in audio.as_object().unwrap() {
+            stream[key] = field.clone();
+        }
+        value["streams"].as_array_mut().unwrap().push(stream);
+        parse_value(value).unwrap()
+    }
+
+    #[test]
+    fn the_audio_extent_is_exact_from_its_ticks_and_its_time_base() {
+        // An audio stream that starts 0.3 s late and runs 129.7 s, at 44100 Hz: the ticks give
+        // the exact values, whatever the rounded decimals say.
+        let audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/44100",
+            "start_pts": 13230,
+            "start_time": "0.299999",
+            "duration_ts": 5719770,
+            "duration": "129.699999"
+        }))
+        .audio
+        .unwrap();
+        assert_eq!(audio.start_time, Some(seconds("0.3")));
+        assert_eq!(audio.duration, Some(seconds("129.7")));
+    }
+
+    #[test]
+    fn the_audio_extent_falls_back_to_the_decimals_and_then_to_the_duration_tag() {
+        // Without ticks, the decimals.
+        let audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "start_time": "0.300000",
+            "duration": "129.000000"
+        }))
+        .audio
+        .unwrap();
+        assert_eq!(audio.start_time, Some(seconds("0.3")));
+        assert_eq!(audio.duration, Some(seconds("129")));
+
+        // The shape the `matroska` demuxer gives, copied from the measured late-audio source: no
+        // stream duration, and a tag that holds the end of the track, 0.3 s + 129.721 s.
+        let audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "start_pts": 300,
+            "start_time": "0.300000",
+            "duration_ts": "N/A",
+            "duration": "N/A",
+            "tags": { "DURATION": "00:02:10.021000000" }
+        }))
+        .audio
+        .unwrap();
+        assert_eq!(audio.start_time, Some(seconds("0.3")));
+        assert_eq!(audio.duration, Some(seconds("129.721")));
+
+        // A tag is an end, so with no start it places nothing and gives no length.
+        let audio = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/1000",
+            "start_time": "N/A",
+            "tags": { "DURATION": "00:02:10.021000000" }
+        }))
+        .audio
+        .unwrap();
+        assert_eq!(audio.start_time, None);
+        assert_eq!(audio.duration, None);
+    }
+
+    #[test]
+    fn a_missing_or_malformed_audio_extent_reads_as_unknown_and_never_fails_the_probe() {
+        // The import needs the video stream only. An audio field this probe did not read before
+        // must not refuse a file that imported before.
+        for audio in [
+            serde_json::json!({}),
+            serde_json::json!({ "start_pts": "abc", "duration_ts": [1], "time_base": "1/44100" }),
+            serde_json::json!({ "start_pts": 0, "time_base": "0/1", "duration_ts": 10 }),
+            serde_json::json!({ "start_time": "N/A", "duration": "-1.000000" }),
+            serde_json::json!({ "tags": { "DURATION": "2:09" } }),
+            serde_json::json!({ "tags": { "DURATION": "00:02:x9.000000000" } }),
+        ] {
+            let audio = probe_with_audio_stream(audio.clone()).audio.unwrap();
+            assert_eq!(audio.start_time, None, "{audio:?}");
+            assert_eq!(audio.duration, None, "{audio:?}");
+        }
+    }
+
+    #[test]
+    fn the_duration_tag_parses_hours_minutes_and_exact_seconds() {
+        assert_eq!(
+            parse_tag_duration(Some("01:02:03.500000000")),
+            Some(seconds("3723.5"))
+        );
+        assert_eq!(parse_tag_duration(Some("00:00:05")), Some(seconds("5")));
+        for refused in ["", "5.0", "1:2:3:4", ":00:05.0", "00:-1:05.0", "00:00:.5"] {
+            assert_eq!(parse_tag_duration(Some(refused)), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn the_audio_extent_is_not_on_the_import_wire() {
+        // Only the export reads it. The interface's validator and types know nothing of it.
+        let probe = probe_with_audio_stream(serde_json::json!({
+            "time_base": "1/44100",
+            "start_pts": 13230,
+            "duration_ts": 5719770
+        }));
+        let value = serde_json::to_value(&probe).unwrap();
+        let audio = value["audio"].as_object().unwrap();
+        assert!(!audio.contains_key("startTime"));
+        assert!(!audio.contains_key("duration"));
+        assert_eq!(value["audio"]["index"], 1);
+    }
+
+    // -- the probe of an export output without video ------------------------------------------
+
+    fn parse_output(value: Value) -> OutputAudioProbe {
+        parse_output_audio_json(&serde_json::to_vec(&value).unwrap()).unwrap()
+    }
+
+    fn seconds(text: &str) -> Rational {
+        Rational::from_decimal_str(text).unwrap()
+    }
+
+    #[test]
+    fn an_m4a_output_reports_one_audio_stream_and_the_format_duration() {
+        // The shape ffprobe 9.0.2 writes for an `.m4a` of the `mp4` muxer: the stream and the
+        // format report the same duration.
+        let probe = parse_output(serde_json::json!({
+            "streams": [{
+                "index": 0,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "duration": "5.000000"
+            }],
+            "format": { "format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.000000" }
+        }));
+        assert_eq!(
+            probe,
+            OutputAudioProbe {
+                audio_streams: 1,
+                video_streams: 0,
+                duration: Some(seconds("5")),
+            }
+        );
+    }
+
+    #[test]
+    fn an_mka_output_reports_the_format_duration_where_the_stream_reports_none() {
+        // The `matroska` demuxer reports no stream duration, only a `DURATION` tag; the length
+        // is the segment's, which ffprobe shows as `format.duration`.
+        let probe = parse_output(serde_json::json!({
+            "streams": [{
+                "index": 0,
+                "codec_type": "audio",
+                "codec_name": "opus",
+                "duration": "N/A",
+                "tags": { "DURATION": "00:00:05.008000000" }
+            }],
+            "format": { "format_name": "matroska,webm", "duration": "5.008000" }
+        }));
+        assert_eq!(probe.duration, Some(seconds("5.008")));
+        assert_eq!(probe.audio_streams, 1);
+    }
+
+    #[test]
+    fn the_stream_duration_stands_in_only_for_a_missing_format_duration_and_one_audio_stream() {
+        let one = parse_output(serde_json::json!({
+            "streams": [{ "codec_type": "audio", "duration": "4.250000" }],
+            "format": { "duration": "N/A" }
+        }));
+        assert_eq!(one.duration, Some(seconds("4.25")));
+
+        // Two audio streams fail the check anyway; neither one's duration speaks for the file.
+        let two = parse_output(serde_json::json!({
+            "streams": [
+                { "codec_type": "audio", "duration": "4.250000" },
+                { "codec_type": "audio", "duration": "4.250000" }
+            ],
+            "format": {}
+        }));
+        assert_eq!(two.duration, None);
+        assert_eq!(two.audio_streams, 2);
+    }
+
+    #[test]
+    fn video_streams_are_counted_whatever_their_disposition_and_other_types_are_not() {
+        let probe = parse_output(serde_json::json!({
+            "streams": [
+                { "codec_type": "audio" },
+                { "codec_type": "video", "disposition": { "attached_pic": 1 } },
+                { "codec_type": "video" },
+                { "codec_type": "data" },
+                { "codec_type": "subtitle" },
+                {}
+            ],
+            "format": { "duration": "1.000000" }
+        }));
+        assert_eq!(probe.audio_streams, 1);
+        assert_eq!(probe.video_streams, 2);
+    }
+
+    #[test]
+    fn an_answer_without_streams_or_a_usable_duration_parses_and_only_bad_json_fails() {
+        // An empty or unusable answer is a finding for the success check, not a parse failure:
+        // the check reports it with the code that names what is wrong with the file.
+        let empty = parse_output(serde_json::json!({}));
+        assert_eq!(
+            empty,
+            OutputAudioProbe {
+                audio_streams: 0,
+                video_streams: 0,
+                duration: None,
+            }
+        );
+        let scientific = parse_output(serde_json::json!({
+            "streams": [{ "codec_type": "audio" }],
+            "format": { "duration": "1e+01" }
+        }));
+        assert_eq!(scientific.duration, None);
+
+        assert!(matches!(
+            parse_output_audio_json(b"{"),
+            Err(ProbeParseError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn a_successful_output_probe_run_parses_its_captured_stdout_and_a_failed_one_reports_it() {
+        let run = ProbeRun {
+            end: ProbeEnd::Exited(ProbeExit {
+                code: Some(0),
+                success: true,
+            }),
+            stdout: br#"{"streams":[{"codec_type":"audio"}],"format":{"duration":"2.500000"}}"#
+                .to_vec(),
+            stderr: Vec::new(),
+        };
+        let probe = finish_probe_run_with(run, PROBE_TIMEOUT, parse_output_audio_json).unwrap();
+        assert_eq!(probe.duration, Some(seconds("2.5")));
+
+        // An empty reservation is not a media file. ffprobe exits unsuccessfully on it, and the
+        // output probe reports that exit as the probe of a source does.
+        let run = ProbeRun {
+            end: ProbeEnd::Exited(ProbeExit {
+                code: Some(1),
+                success: false,
+            }),
+            stdout: Vec::new(),
+            stderr: b"Invalid data found when processing input".to_vec(),
+        };
+        assert!(matches!(
+            finish_probe_run_with(run, PROBE_TIMEOUT, parse_output_audio_json),
+            Err(ProbeError::ProcessFailed { code: Some(1), .. })
+        ));
     }
 
     fn parse_value(value: Value) -> Result<MediaProbe, ProbeParseError> {

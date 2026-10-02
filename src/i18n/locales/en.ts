@@ -801,11 +801,17 @@ export const en = {
       "QuipClip could not determine the frame rate of the source video.",
     sourceAudioRateUnknown:
       "QuipClip could not determine the sample rate of the source audio, so it cannot cut the audio exactly.",
+    sourceHasNoAudio:
+      "The source video has no audio in the marked segments, so QuipClip cannot export its audio.",
     encoderUnavailable: "The required encoder is not available on this system.",
     ffmpegSpawnFailed: "QuipClip could not start the FFmpeg process.",
     ffmpegProcessFailed: "FFmpeg failed during video export.",
     frameCountMismatch:
       "The frame count of the exported video was incorrect, so QuipClip did not save the output file.",
+    audioDurationMismatch:
+      "The duration of the exported audio was incorrect, so QuipClip did not save the output file.",
+    outputStreamsMismatch:
+      "The exported file did not contain the expected streams, so QuipClip did not save the output file.",
     outputRenameFailed:
       "QuipClip could not save the finished video to the destination path.",
     canceled: "The export was stopped.",

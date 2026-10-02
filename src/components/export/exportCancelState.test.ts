@@ -70,10 +70,12 @@ describe("resolveExportDismissal", () => {
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
       presetId: "mp4-h264",
+      streams: "videoAndAudio",
     };
     const START: ExportStart = {
       runId: "run-live",
       presetId: "mp4-h264",
+      streams: "videoAndAudio",
       outputPath: "/media/output.mp4",
       segmentCount: 1,
       totalDurationUs: 5_000_000,
@@ -357,10 +359,12 @@ describe("isCancelEnabled on the state of a real store", () => {
     outputPath: "/media/output.mp4",
     segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
     presetId: "mp4-h264",
+    streams: "videoAndAudio",
   };
   const START: ExportStart = {
     runId: "run-live",
     presetId: "mp4-h264",
+    streams: "videoAndAudio",
     outputPath: "/media/output.mp4",
     segmentCount: 1,
     totalDurationUs: 5_000_000,

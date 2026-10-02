@@ -9,12 +9,31 @@ import { isNonNegativeRational, isPositiveRational } from "@/features/media/vali
 import {
   BACKEND_EXPORT_ERROR_CODES,
   EXPORT_ERROR_CODES,
+  EXPORT_STREAMS,
   ExportError,
   type BackendExportErrorCode,
   type ExportErrorCode,
   type ExportProgressEvent,
   type ExportStart,
+  type ExportStreams,
 } from "./types";
+
+/**
+ * Checks whether an unknown value is one of the `EXPORT_STREAMS` wire strings.
+ */
+export function isExportStreams(value: unknown): value is ExportStreams {
+  return (
+    typeof value === "string" && (EXPORT_STREAMS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Checks whether an unknown value is a whole number of microseconds that JavaScript holds
+ * exactly: a non-negative safe integer, as `totalDurationUs` is.
+ */
+function isDurationUs(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
 
 /**
  * Checks whether an unknown value is a valid BackendExportErrorCode.
@@ -49,6 +68,7 @@ export function isExportStart(value: unknown): value is ExportStart {
   if (
     typeof s.runId !== "string" ||
     typeof s.presetId !== "string" ||
+    !isExportStreams(s.streams) ||
     typeof s.outputPath !== "string" ||
     !isPositiveU32(s.segmentCount) ||
     typeof s.totalDurationUs !== "number" ||
@@ -118,7 +138,9 @@ export function isExportProgressEvent(value: unknown): value is ExportProgressEv
         isBackendExportErrorCode(e.code) &&
         (e.detail === undefined || typeof e.detail === "string") &&
         (e.exitCode === undefined || isI32(e.exitCode)) &&
-        (e.encoder === undefined || typeof e.encoder === "string")
+        (e.encoder === undefined || typeof e.encoder === "string") &&
+        (e.measuredDurationUs === undefined || isDurationUs(e.measuredDurationUs)) &&
+        (e.expectedDurationUs === undefined || isDurationUs(e.expectedDurationUs))
       );
     default:
       return false;
@@ -147,6 +169,8 @@ export function validateExportProgressEvent(value: unknown): ExportProgressEvent
  * - `detail` is preserved ONLY when it is a string from backend rejections/payloads.
  * - `exitCode` is preserved ONLY when it is a safe integer within i32 bounds.
  * - `encoder` is preserved ONLY when it is a string.
+ * - `measuredDurationUs` and `expectedDurationUs` are preserved ONLY when each is a
+ *   non-negative safe integer.
  * - A plain `new Error("boom")` becomes `{ code: "unknown" }` with NO detail — the local message must not leak into detail.
  */
 export function normalizeExportError(error: unknown): ExportError {
@@ -168,11 +192,21 @@ export function normalizeExportError(error: unknown): ExportError {
     const encoder =
       typeof candidate.encoder === "string" ? candidate.encoder : undefined;
 
+    const measuredDurationUs = isDurationUs(candidate.measuredDurationUs)
+      ? candidate.measuredDurationUs
+      : undefined;
+
+    const expectedDurationUs = isDurationUs(candidate.expectedDurationUs)
+      ? candidate.expectedDurationUs
+      : undefined;
+
     return new ExportError({
       code,
       detail,
       exitCode,
       encoder,
+      measuredDurationUs,
+      expectedDurationUs,
     });
   }
 

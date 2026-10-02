@@ -358,6 +358,7 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
       outputPath: "/videos/out.mp4",
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
       presetId: "default",
+      streams: "videoAndAudio",
     });
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();
@@ -406,6 +407,7 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
     answerStart({
       runId: "run-kept",
       presetId: "default",
+      streams: "videoAndAudio",
       outputPath: "/videos/out.mp4",
       segmentCount: 1,
       totalDurationUs: 1_000_000,

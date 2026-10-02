@@ -5,6 +5,7 @@ import {
   BACKEND_EXPORT_ERROR_CODES,
   EXPORT_ERROR_CODES,
   EXPORT_STATUSES,
+  EXPORT_STREAMS,
   ExportError,
   FRONTEND_EXPORT_ERROR_CODES,
   type ExportActions,
@@ -70,6 +71,30 @@ function readRustExportErrorCodes(): string[] {
   return Array.from(wireStrings, (match) => match[1]);
 }
 
+/**
+ * Reads the wire strings of every `ExportStreams` variant out of the Rust source, in their
+ * order.
+ *
+ * Each variant names its wire string in an explicit `#[serde(rename = "...")]`, and the Rust
+ * side proves through serde that those are the strings it reads and writes
+ * (`every_stream_choice_crosses_the_wire_as_its_stable_camel_case_string`). The enum body is
+ * matched rather than the whole file, so a `rename` elsewhere cannot contribute a match.
+ */
+function readRustExportStreams(): string[] {
+  const source = readFileSync(
+    fileURLToPath(
+      new URL("../../../src-tauri/src/ffmpeg/export/mod.rs", import.meta.url),
+    ),
+    "utf8",
+  );
+
+  const body = /\npub enum ExportStreams \{\n([\s\S]*?)\n\}\n/.exec(source);
+  expect(body).not.toBeNull();
+
+  const wireStrings = body![1].matchAll(/#\[serde\(rename = "([A-Za-z]+)"\)\]/g);
+  return Array.from(wireStrings, (match) => match[1]);
+}
+
 describe("Export Types & Wire Constants", () => {
   describe("Rust vocabulary parity", () => {
     it("names exactly the codes the Rust export vocabulary emits", () => {
@@ -81,6 +106,21 @@ describe("Export Types & Wire Constants", () => {
       expect(new Set(rustCodes).size).toBe(rustCodes.length);
 
       expect([...BACKEND_EXPORT_ERROR_CODES].sort()).toEqual([...rustCodes].sort());
+    });
+
+    it("names exactly the stream choices the Rust ExportStreams enum accepts, in its order", () => {
+      const rustStreams = readRustExportStreams();
+
+      // Guards the parse itself, as above.
+      expect(rustStreams.length).toBe(3);
+
+      expect([...EXPORT_STREAMS]).toEqual(rustStreams);
+    });
+  });
+
+  describe("Export Streams", () => {
+    it("lists the three stream choices", () => {
+      expect(EXPORT_STREAMS).toEqual(["videoAndAudio", "videoOnly", "audioOnly"]);
     });
   });
 
@@ -122,10 +162,13 @@ describe("Export Types & Wire Constants", () => {
         "outputReadOnly",
         "sourceFrameRateUnknown",
         "sourceAudioRateUnknown",
+        "sourceHasNoAudio",
         "encoderUnavailable",
         "ffmpegSpawnFailed",
         "ffmpegProcessFailed",
         "frameCountMismatch",
+        "audioDurationMismatch",
+        "outputStreamsMismatch",
         "outputRenameFailed",
         "canceled",
         "commandExecutionFailed",
@@ -231,6 +274,30 @@ describe("Export Types & Wire Constants", () => {
       expect("detail" in error).toBe(true);
       expect("exitCode" in error).toBe(true);
       expect("encoder" in error).toBe(true);
+      expect("measuredDurationUs" in error).toBe(false);
+      expect("expectedDurationUs" in error).toBe(false);
+    });
+
+    it("carries the two durations of an audio duration mismatch as named values", () => {
+      const error = new ExportError({
+        code: "audioDurationMismatch",
+        measuredDurationUs: 9_500_000,
+        expectedDurationUs: 10_000_000,
+      });
+
+      expect(error.code).toBe("audioDurationMismatch");
+      expect(error.measuredDurationUs).toBe(9_500_000);
+      expect(error.expectedDurationUs).toBe(10_000_000);
+      // The values are not a diagnostic, so the message stays the code alone.
+      expect(error.message).toBe("audioDurationMismatch");
+
+      const unmeasured = new ExportError({
+        code: "audioDurationMismatch",
+        measuredDurationUs: undefined,
+        expectedDurationUs: 10_000_000,
+      });
+      expect(Object.hasOwn(unmeasured, "measuredDurationUs")).toBe(false);
+      expect(unmeasured.expectedDurationUs).toBe(10_000_000);
     });
   });
 
