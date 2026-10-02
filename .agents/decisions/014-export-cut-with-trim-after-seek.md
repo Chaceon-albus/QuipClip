@@ -209,6 +209,50 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     start of the container. In one MPEG-TS source with audio 12 s late, it reported no sample
     rate either. An MP4 file has an index, so its probe reported each start correctly.
 
+23. (Added on 2026-10-02.) When a segment lies wholly before the first audio sample, or wholly
+    after the last one, `atrim` passes no sample. The chain of that segment then gives no audio.
+    The fill of measurement 20 writes silence only in front of a sample. FFmpeg 9.0.2 on macOS ran the
+    graph of this record on 40 s sources of 30 fps H.264 with AAC. The audio started 3 s or 30 s
+    late, ended at 20 s, or had no packets for 0.5 s, in MP4, MKV and MPEG-TS. The plans held
+    such a segment alone, behind a covered segment, and in front of one. Other plans held a
+    segment that the audio ends inside, and three segments of each kind. The runs used the three
+    shapes, the source rate and 48000 Hz, with video and without video. Each run compared the
+    audio samples and the video frames that leave the graph: 444 comparisons.
+
+    - Without a change, a lone segment outside the audio failed in 17 runs with "Could not open
+      encoder before EOF". In 55 runs FFmpeg exited 0, and the graph gave no audio. An MP4
+      export of such a segment then held no audio track. The frame count check passes that file.
+      When the last segment was outside the audio, the audio track ended with the segment before
+      it.
+    - `apad=whole_len=<out - in>` behind the fill adds silence to the audio of the chain. The
+      result has the length of the segment, in samples of the source rate. With it, every run
+      exited 0, and every chain held the planned number of samples. The silence lay where the
+      audio does not reach, within the 0.024 s of the AAC priming. The video frames did not
+      change. Where the audio covered a part of the segment, the old samples were the start of
+      the new samples. When the output changed 44100 Hz to 48000 Hz, the last 17 samples in front
+      of the silence changed. There the resampler reads silence and not the end of the stream.
+    - `apad` gives its silence no timestamp when it receives no frame. `concat` converts that
+      missing value as a number, so these frames left `concat` at about −9.2 × 10^18. FFmpeg
+      9.0.2 replaced the timestamps before the encoder, but FFmpeg does not document that
+      behaviour. `asetpts=N` behind `apad` sets the timestamp of each frame to the number of
+      samples in front of it. The timestamps that leave `concat` are then contiguous.
+    - On sources whose audio covers every segment, `apad` and `asetpts=N` in every chain did not
+      change the output. The framemd5 of the video and audio frames that leave the graph was
+      identical in 441 runs. The runs used MP4, MKV, MPEG-TS and MOV, 32000 Hz to 48000 Hz, and
+      mono, stereo and 5.1 audio. They used 1, 3 and 100 segments, all shapes, and three output
+      formats. FFmpeg put its resampler behind `asetpts`, so `apad` counts samples at the source
+      rate. The fill leaves a gap of 0.1 s or less inside a segment unfilled. In the last segment,
+      `apad` now adds that time as silence at the end, as `concat` already did for every other
+      segment. A gap of 0.064 s in an MKV gave 3064 samples of silence at the end, at 48000 Hz.
+    - `apad` writes its silence one frame at a time. A last segment of 575 s after the end of
+      48000 Hz 5.1 audio took 42 MiB, against 45 MiB for a source whose audio covers it. The
+      padding of `concat` stays in memory. The same segment with another segment behind it took
+      900 MiB, and a segment of 120 s took 226 MiB. With `apad` in every chain, the case of 575 s
+      took 50 MiB.
+    - An export without video, with `apad` in every chain, wrote each segment at its full
+      length. There were 592 runs into `aac` in `.m4a`, and into `aac`, `libopus` and `flac` in
+      `.mka`. The duration of each file minus the planned duration was −0.0007 s to +0.0233 s.
+
 ## Decision
 
 ### The boundary mechanism
@@ -297,6 +341,28 @@ final `aformat`. The short option names `r`, `f` and `cl` need FFmpeg 4.3 or lat
 command line within the budget. The widest plan now measures 31509 bytes at the cap, which leaves
 234 bytes of the Windows budget free.
 
+(Changed on 2026-10-02.) An audio chain that `concat` does not pad ends at the length of its
+segment (measurement 23):
+
+```
+[<i>:<audioStreamIndex>]aformat=r=<sourceRate>,
+     atrim=start_pts=<in>:end_pts=<out>,asetpts=PTS-<in>,
+     aresample=<sourceRate>:first_pts=0,apad=whole_len=<out - in>,asetpts=N,
+     aformat=f=fltp:r=<outputRate>[:cl=<layout>][a<i>];
+```
+
+`concat` pads the audio of a segment to its video when another segment follows it. So an export
+with video adds `apad` and `asetpts=N` to the last audio chain only. An export without video
+adds them to every audio chain. `<out - in>` is the length of the segment in ticks of the source
+sample rate. A chain whose audio covers the segment without a gap already holds that number of
+samples, so its output does not change. A segment that the audio does not reach, or the part of a segment after
+the last sample, becomes silence. `asetpts=N` gives that silence its timestamps. The two filters
+cost 26 bytes and the digits of the length. With the filters in the last chain only, and a length
+of 12 digits, the widest plan measures 31547 bytes at the cap. Then 196 bytes of the Windows
+budget stay free.
+In every chain, the filters would cost up to 3800 bytes at the cap, and the budget does not have
+them. The widest plan without video measures 21323 bytes at the cap.
+
 (Changed on 2026-10-02.) The plan refuses an export that writes audio when the parts of its
 segments before the first sample of the source audio add up to more than 60 s (measurement 21).
 The code is `audioGapTooLong`, and `MAX_LEADING_AUDIO_SILENCE_SECONDS` holds the bound. The sum
@@ -304,7 +370,9 @@ counts the fills and the padding of `concat` together, because FFmpeg holds both
 the chains of overlapping segments build theirs at the same time. With video, a segment that ends
 at or before the first sample counts in full, so a cut at the first sample does not get around
 the bound. An audio-only export writes nothing for such a segment, so it counts only the segments
-that reach the sample. At the bound, the fill alone took 95 MiB on 48000 Hz stereo and 215 MiB on
+that reach the sample. (Changed on 2026-10-02: an audio-only export now writes silence for such a
+segment, with `apad`, which does not keep that silence in memory (measurement 23). The sum still
+counts only the segments that reach the sample.) At the bound, the fill alone took 95 MiB on 48000 Hz stereo and 215 MiB on
 48000 Hz 5.1. A video-only export reads no audio. The probe reports only where the stream starts,
 so the bound does not apply to a gap inside the stream. This bound does not cover the decoded
 video that waits for the first audio frame (measurement 21). A second input of the source removes
@@ -398,7 +466,8 @@ gives the audio of segment `i`. Under the second shape there is one second input
 seek. When the second shape and its second input do not fit in the budget, a third shape drops
 the second input and writes the command of the second shape as it was before. Then the graph
 waits for the audio again. At the cap on the longest Windows path, with every setting at its
-widest, the second input costs 288 bytes and misses the budget by 54 bytes, so that plan uses
+widest, the second input costs 288 bytes and misses the budget by 54 bytes (92 bytes since
+measurement 23), so that plan uses
 the third shape. A plan whose audio neither starts late nor ends before a segment does has no
 second input and does not change. Below the threshold the wait stays: at 3840x2160 and 60 fps,
 0.5 s of decoded video is about 370 MB with 8-bit samples, and about 750 MB with 10-bit samples.
@@ -453,7 +522,13 @@ The renderer decodes the original media. It must not decode a preview proxy.
   proportion to the gap. (Changed on 2026-10-02.) The plan refuses more than 60 s of silence in
   front of the first sample, summed over the segments (measurement 21). A gap inside the stream
   stays unbounded, because the probe does not report it. The padding after the end of the stream
-  stays unbounded too: this change does not bound it.
+  stays unbounded too: this change does not bound it. (Changed on 2026-10-02.) `apad`
+  (measurement 23) writes the padding of each chain that `concat` does not pad. It does not keep
+  that padding in memory. The padding of `concat`, for a segment with another segment behind it,
+  stays unbounded. It took 900 MiB for 575 s of 48000 Hz 5.1 audio after the end of the stream.
+  `apad` in
+  every chain removes this cost too, but the command line at the cap has no room for it. A later
+  unit can add `apad` to every chain of a command that fits the budget.
 - (Added on 2026-10-02.) Until the first audio frame of an input arrives, FFmpeg keeps each
   decoded video frame of that input in memory (measurement 21). A segment that starts long
   before the first sample therefore needs memory in proportion to that time and to the size of
@@ -475,7 +550,11 @@ The renderer decodes the original media. It must not decode a preview proxy.
   path of 106 characters. This cost is older than measurement 20.
 - (Added on 2026-10-02.) A last or only segment that lies wholly before the first audio sample
   gets no audio, because `concat` pads only a segment that another segment follows. When it is
-  the only segment, an export with video fails in FFmpeg (measurement 21).
+  the only segment, an export with video fails in FFmpeg (measurement 21). (Changed on
+  2026-10-02.) `apad` in the last audio chain now gives such a segment silence of its length
+  (measurement 23). It does the same for a segment wholly after the last sample. Measurement 23
+  also found that, without `apad`, FFmpeg can exit 0 and write a file with no audio track in this
+  case.
 - (Added on 2026-10-02.) A source whose audio timestamps drift from the sample count builds up an
   error. When the error passes 0.1 s, swresample drops or fills at least 0.1 s at once, in the
   middle of a segment. Timestamps that ran 2% slow gave one drop of 0.1 s in 10 s. Before
@@ -483,6 +562,13 @@ The renderer decodes the original media. It must not decode a preview proxy.
 - (Added on 2026-10-02.) `first_pts` fills a gap inside the stream by the behaviour of the code of
   swresample, which its documentation does not state. Measurement 20 must run again for each new
   release of FFmpeg that QuipClip supports.
+- (Added on 2026-10-02.) Two results of measurement 23 come from the behaviour of the code of
+  FFmpeg, which its documentation does not state:
+  - FFmpeg puts its resampler behind `asetpts=N`, so `apad` counts samples at the source rate.
+  - `asetpts=N` changes no timestamp of a covered chain, because the fill of measurement 20
+    numbers its output from 0 without a gap.
+
+  Measurement 23 must run again for each new release of FFmpeg that QuipClip supports.
 
 - An export cuts at the frames that the user selected, on each container that was tested.
 - An export of a short part of a long source does not decode the parts that it does not

@@ -163,7 +163,9 @@ pub const MAX_EXPORT_SEGMENTS: usize = 100;
 /// The part of a segment before that sample becomes silence: the audio chain fills it when the
 /// segment reaches the sample (`graph::audio_chain`), and `concat` pads it when the segment ends
 /// at or before the sample and another segment follows. FFmpeg holds each of the two whole in
-/// memory before it writes it.
+/// memory before it writes it. The end pad of a chain that `concat` does not pad
+/// (`graph::audio_end_pad`) writes its silence frame by frame, and holds none of it
+/// (ADR 014 measurement 23).
 /// ADR 014 measurement 21 measured the fill alone on AAC audio, at this bound: 95 MiB on 48000 Hz
 /// stereo, 215 MiB on 48000 Hz 5.1, and 532 MiB on 96000 Hz 7.1. The plan refuses more with
 /// [`ExportErrorCode::AudioGapTooLong`]. The bound does not cover the decoded video that FFmpeg
@@ -347,23 +349,18 @@ pub struct PlannedAudio {
     pub options: Vec<PresetOption>,
     /// The length of audio an export of the segments writes, in seconds, exact.
     ///
-    /// This is a sum over the segments that the stream's probed extent
-    /// ([`AudioProbe::start_time`] and [`AudioProbe::duration`]) reaches: for each one, the time
-    /// from its In point to the earlier of its Out point and the end of the stream. It is
-    /// [`ExportPlan::total_duration`] when the stream covers every segment, and when the audio of
-    /// the source only starts after an In point: the graph fills that late start with silence
-    /// (`graph::audio_chain`). It is shorter when the audio ends before a segment's Out point,
-    /// because `atrim` then finds no samples for the rest and an audio-only export writes none,
-    /// and when the stream does not reach a segment at all, which then writes nothing.
-    /// [`verify::verify_audio_output`] compares the finished file with this value, so a correct
-    /// export of such a source is not reported as truncated. A side of the extent that the probe
-    /// does not report bounds nothing: with no extent at all, this is the total duration.
+    /// This is [`ExportPlan::total_duration`], whatever part of the segments the source audio
+    /// covers. The graph starts the audio of each segment at its In point and fills a late start
+    /// with silence (`graph::audio_chain`), and it pads the end of every audio chain that `concat`
+    /// does not pad to the length of its segment (`graph::audio_end_pad`). So a segment that the
+    /// audio ends inside, or does not reach at all, writes silence for the rest (ADR 014
+    /// measurement 23). Before that pad, this was the part of each segment up to the probed end
+    /// of the stream, and the probe could misplace that end by the whole segment (ADR 036).
+    /// [`verify::verify_audio_output`] compares the finished file of an export without video
+    /// with this value.
     ///
     /// The graph does not read it. It is a bound for the success check, and never an edit
     /// boundary (ADR 002).
-    ///
-    /// [`AudioProbe::start_time`]: crate::ffmpeg::probe::AudioProbe::start_time
-    /// [`AudioProbe::duration`]: crate::ffmpeg::probe::AudioProbe::duration
     pub expected_duration: Rational,
 }
 
@@ -608,7 +605,8 @@ export_error_codes! {
     ///
     /// Each of those parts becomes silence that FFmpeg holds in memory until it is complete. An
     /// export with [`ExportStreams::AudioOnly`] counts only the segments that reach the first
-    /// sample, because it writes nothing for the others. An export with
+    /// sample, because the end pad of each chain writes the silence of the others frame by frame,
+    /// without holding it (`graph::audio_end_pad`). An export with
     /// [`ExportStreams::VideoOnly`] reads no audio, so it never produces this code. The probe
     /// reports only where the stream starts, so a gap inside the stream is not bounded.
     AudioGapTooLong => "audioGapTooLong",

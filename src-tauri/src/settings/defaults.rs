@@ -623,7 +623,8 @@ mod tests {
                 "[vc]format={pixel_format}[v];\
                  [0:0]trim=start_pts=900000:end_pts=1080000,setpts=PTS-STARTPTS,fps=30/1[v0];\
                  [0:1]aformat=r=48000,atrim=start_pts=480000:end_pts=576000,\
-                 asetpts=PTS-480000,aresample=48000:first_pts=0,aformat=f=fltp:r=48000[a0];\
+                 asetpts=PTS-480000,aresample=48000:first_pts=0,apad=whole_len=96000,\
+                 asetpts=N,aformat=f=fltp:r=48000[a0];\
                  [v0][a0]concat=n=1:v=1:a=1[vc][a]"
             ),
             "-map",
