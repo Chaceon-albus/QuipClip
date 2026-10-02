@@ -108,6 +108,11 @@ Clicking a segment selects it and does not seek. The playhead is the operand of 
 action, so a selection click that moved it would reintroduce the surprise this rule removes. The
 ruler is the click-to-seek surface.
 
+(Changed on 2026-10-02.) The track lane seeks too, wherever no segment and no playhead hit
+area lies above it. That includes the 8px above and below the source bar. Before this change
+a press in those two bands did nothing, although the hover line showed a time there, and a
+user reported it. A press on a segment still selects it and does not seek.
+
 ### Zoom and pan are view state
 
 The zoom factor of the timeline is view state. It never enters the timeline store, the
