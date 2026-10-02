@@ -881,7 +881,9 @@
  * control never moves the ring of a control inside it.
  *
  * A positioned child that covers the edge of its parent paints over the outline of that
- * parent. Such a control keeps the outer ring, as the seek slider of the timeline does. */
+ * parent. Such a control keeps the outer ring. The seek slider of the timeline fills its lane
+ * and has no room for an outer ring, so a wrapper of its content draws the ring instead, with
+ * the colour, the width and the offset of this utility (`TimelineSeekSlider`). */
 @property --focus-ring-offset {
   syntax: "<length>";
   inherits: false;

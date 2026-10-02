@@ -248,9 +248,15 @@ export interface TimelineSeekSliderProps extends PositionLayerProps {
 }
 
 /**
- * Canonical accessible seek surface. Its 8px vertical inset holds the source bar, the
- * pending In overlays, the hit area and the focus ring clear of the ruler divider and of
- * the lower panel edge.
+ * Canonical accessible seek surface. It spans the full height of the track lane, so a press
+ * anywhere in the lane seeks, also in the 8px above and below the source bar, where the hover
+ * line shows too. A segment, its edges and the playhead hit area lie above the slider and keep
+ * their presses.
+ *
+ * Its content is in a wrapper with an 8px vertical inset, the rectangle of the segment layer.
+ * The inset holds the source bar, the pending In overlays and the focus ring clear of the
+ * ruler divider and of the lower panel edge. The wrapper takes no pointer event, so every
+ * press in it goes to the slider.
  *
  * It renders per frame only for `aria-valuenow` and `aria-valuetext`, the displayed playhead
  * position. The value text is the timecode that the preview shows, in the format of the
@@ -296,16 +302,24 @@ export function TimelineSeekSlider({
       // WebView2 then draws the focus ring around the whole track at the next key press,
       // such as Space or an arrow key. The scrub runs on the pointer events, so the gesture
       // does not change. The Tab key still focuses the slider.
-      //
-      // The focus ring is outside the slider, in the 8px of track above and below it. Its two
-      // ends lie under the gutter and past the clip of the lane. An inset ring would not show:
-      // the source bar is a positioned child that fills the slider, and it paints over the
-      // outline of the slider.
       onMouseDown={preventFocusOnMouseDown}
       {...scrubHandlers}
-      className={`absolute inset-x-0 inset-y-2 touch-none ${canSeek ? "focus-ring outline-none" : ""}`}
+      className="group/seek absolute inset-0 touch-none outline-none"
     >
-      {children}
+      {/*
+       * The content wrapper draws the focus ring of the slider, with the colour, the width and
+       * the offset of `focus-ring`, while the slider has `:focus-visible`. The slider fills the
+       * lane, so a ring outside it would lie past the ruler divider and the panel edge. An
+       * inset ring would not show either: the source bar is a positioned child, and it paints
+       * over the outline of its parent. So the ring lies outside the wrapper, in the 8px of
+       * track above and below the content. Its two ends lie under the gutter and past the clip
+       * of the lane.
+       */}
+      <div
+        className={`pointer-events-none absolute inset-x-0 inset-y-2 ${canSeek ? "outline-offset-(--focus-ring-offset) outline-ring group-focus-visible/seek:outline-2" : ""}`}
+      >
+        {children}
+      </div>
     </div>
   );
 }

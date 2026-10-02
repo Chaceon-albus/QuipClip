@@ -157,9 +157,9 @@ function findSegmentEdge(target: EventTarget | null): SegmentEdge | null {
 
 /**
  * Completed segment overlays. The layer takes the clicks of its buttons only, so uncovered
- * track stays a seek surface; over a segment, the ruler track above and the playhead hit
- * area are the seek surfaces. The `z-10` puts this layer under the pending region and the
- * playhead.
+ * track stays a seek surface; over a segment, the ruler track above, the strips of track
+ * above and below the segment, and the playhead hit area are the seek surfaces. The `z-10`
+ * puts this layer under the pending region and the playhead.
  *
  * One exception: an unselected segment narrower than 12px has a hit area of 12px. So a
  * click up to (12 − w) / 2 px beside a segment of width w selects it and does not seek.

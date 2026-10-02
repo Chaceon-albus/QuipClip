@@ -1349,9 +1349,11 @@ export function TimelinePanel({
              * capturing the pointer so dragging past the ruler keeps scrubbing.
              * Segment buttons take the click over their own span to select the segment;
              * a press-and-drag that starts on a segment neither selects a seek nor scrubs,
-             * so the track lane below is not a seek surface once segments cover the
-             * source. This rectangle has the same left edge and the same width as the
-             * track lane rectangle, so `seekFromClientX` maps a coordinate identically.
+             * so the track lane below is not a seek surface where segments cover the
+             * source, except in the strips of track above and below them (see
+             * TimelineSeekSlider). This rectangle has the same left edge and the same
+             * width as the track lane rectangle, so `seekFromClientX` maps a coordinate
+             * identically.
              *
              * Pointer only, by intent: the keyboard path is the window-level layer, which
              * answers wherever focus is. Two handlers for one behaviour would move the
@@ -1430,9 +1432,9 @@ export function TimelinePanel({
             </div>
 
             {/*
-             * Track lane container. It has no vertical padding, so the geometry box and the
-             * track playhead span the full track height. The seek slider and the segment
-             * layer carry the 8px vertical inset instead.
+             * Track lane container. It has no vertical padding, so the geometry box, the seek
+             * slider and the track playhead span the full track height. The content of the
+             * seek slider and the segment layer carry the 8px vertical inset instead.
              *
              * It is the hover surface of the track. The pointer events of the scrub surfaces
              * and the segments in it bubble here. `data-timeline-track` names it for the rule
@@ -1447,10 +1449,12 @@ export function TimelinePanel({
               {media ? (
                 /*
                  * Shared geometry box. The seek slider and the segment layer are siblings
-                 * inside it, each spanning the same rectangle (`inset-x-0 inset-y-2`), so
-                 * `inset-y-1` and the left/width percentages resolve exactly as they did
-                 * when the overlays were children of the slider. Segments are interactive,
-                 * and interactive content cannot be nested inside a `role="slider"` element.
+                 * inside it. The slider fills the box, so the whole lane height seeks, and
+                 * its content wrapper spans the rectangle of the segment layer
+                 * (`inset-x-0 inset-y-2`), so `inset-y-1` and the left/width percentages
+                 * resolve exactly as they did when the overlays were children of the slider.
+                 * Segments are interactive, and interactive content cannot be nested inside a
+                 * `role="slider"` element.
                  */
                 <div className="relative h-full w-full">
                   {/*
