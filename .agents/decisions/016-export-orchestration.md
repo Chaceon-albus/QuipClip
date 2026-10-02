@@ -172,6 +172,11 @@ re-probe, and unbounded while executable discovery walks a `PATH` entry on a sha
 answering. A retry inside that window is still refused with `exportAlreadyRunning`. This
 decision accepts that. Bounding discovery is separate work.
 
+(Changed on 2026-10-02.) An export that writes audio can run up to two more reads of FFprobe after
+the re-probe (ADR 014 measurements 24 and 25). Each read has `PROBE_TIMEOUT` and polls the flag
+while it runs, so a cancel stops it at once. Preparation can therefore last up to three times
+`PROBE_TIMEOUT` when no cancel arrives.
+
 **Dismissing the dialog during preparation now cancels.** That phase stays dismissable, and the
 reason has inverted. It was dismissable because a cancel was impossible and refusing the
 dismissal would have given the interface a state it could enter and not leave; the cost was an

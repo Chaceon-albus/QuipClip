@@ -100,6 +100,12 @@ track in that tag gives an end that is too early by the start of the audio. For 
 starts late by more than 0.5 s, a correct export of such a file can then fail. (Changed on
 2026-10-02: the check no longer reads the end of the track, so it cannot fail for this reason.)
 
+(Added on 2026-10-02.) The probe misses an audio start that is more than about 5 s late in MKV,
+MPEG-TS and MPEG-PS. It then reports the start and the length of the container. The export
+therefore reads the first packet of the audio stream and moves the start to it (ADR 014
+measurement 24). The expected duration above does not read the start or the end of the audio, so
+this correction does not change the check of this record.
+
 A failed FFprobe of the output is a wrong output, not a fault of the source. An exit failure or a
 parse failure gives `outputStreamsMismatch` with the stderr of FFmpeg as its detail. A probe that
 cannot start or that times out keeps its own code.

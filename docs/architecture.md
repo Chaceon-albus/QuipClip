@@ -276,6 +276,13 @@ silence to the length of the segment. An export without video pads the audio of 
 same way. A segment that the audio of the source does not reach then gets silence (measurement
 23). The chains end in `concat`, in project array order.
 
+The export probes the source again before it plans. The probe analyzes about the first 5 s of the
+file, so it misses a later audio start in MKV, MPEG-TS and MPEG-PS. An export that writes audio
+therefore also reads the first packet of the audio stream, and the plan takes a later start from
+it. When that read fails, the plan uses the probe, and the export continues (ADR 014 measurement
+24). In MPEG-TS and MPEG-PS, the probe also reports no sample rate for such audio. The export then
+reads the rate again from the position of that packet (measurement 25).
+
 The renderer has three graph shapes. It opens one input for each segment while the assembled
 command line stays inside the platform budget. It otherwise opens one input, seeks once, and
 divides that input with `split` and `asplit`. When the source audio starts more than 0.5 s
