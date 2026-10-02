@@ -1813,8 +1813,8 @@ mod tests {
                 concat!(
                     "[vc]format=yuv420p[v];",
                     "[0:0]trim=start_pts=0:end_pts=90000,setpts=PTS-STARTPTS,fps=30/1[v0];",
-                    "[0:1]aformat=sample_rates=48000,atrim=start_pts=0:end_pts=48000,",
-                    "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000[a0];",
+                    "[0:1]aformat=r=48000,atrim=start_pts=0:end_pts=48000,asetpts=PTS-0,",
+                    "aresample=48000:first_pts=0,aformat=f=fltp:r=48000[a0];",
                     "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
                 ),
                 "-map",

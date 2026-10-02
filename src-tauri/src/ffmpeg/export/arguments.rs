@@ -160,7 +160,7 @@ pub const COMMAND_LINE_BUDGET: usize = UNIX_COMMAND_LINE_BUDGET;
 /// default. What it saves lies outside the graph: it writes the source path and its input
 /// flags once instead of once for each segment. Measurement 15 puts the graphs themselves
 /// close together and on both sides of the line -- `SingleInput` holds the larger graph for
-/// the first three segments and the smaller one from four segments upward -- so the graph size
+/// the first seven segments and the smaller one from eight segments upward -- so the graph size
 /// is not what decides between them.
 ///
 /// # This function cannot fail
@@ -1612,9 +1612,9 @@ mod tests {
                     "[vc]format=yuv420p[v];",
                     "[0:1]trim=start_pts=160000:end_pts=190030,setpts=PTS-STARTPTS,",
                     "fps=30000/1001[v0];",
-                    "[0:2]aformat=sample_rates=48000,",
-                    "atrim=start_pts=256000:end_pts=304048,asetpts=PTS-STARTPTS,",
-                    "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                    "[0:2]aformat=r=48000,atrim=start_pts=256000:end_pts=304048,",
+                    "asetpts=PTS-256000,aresample=48000:first_pts=0,",
+                    "aformat=f=fltp:r=48000:cl=stereo[a0];",
                     "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
                 ),
                 "-map",
@@ -2186,9 +2186,9 @@ mod tests {
         // `choose_graph_shape` *returns* fits. There is no third shape, so the fallback's own
         // length is the real limit of the renderer.
         //
-        // This plan measures 28797 of the 31743 available bytes. Do not read that gap as the
+        // This plan measures 28386 of the 31743 available bytes. Do not read that gap as the
         // margin the cap has: this fixture uses a 106-character path, ordinary encoder names,
-        // and no encoder options, and the widest plan the settings actually permit needs 31620
+        // and no encoder options, and the widest plan the settings actually permit needs 31509
         // at the same count. `the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap` measures
         // that one, and it is the test that justifies the cap. This one is about the realistic
         // case, and about the fallback being reached at all.
@@ -2230,14 +2230,15 @@ mod tests {
     ///
     /// 192000 is the top of ADR 023's fixed range, and it is one digit longer than 48000.
     /// `stereo` is the longest of the three layout choices: `mono` is two bytes shorter, and
-    /// `source` drops the whole `:channel_layouts=` option.
+    /// `source` drops the whole `:cl=` option.
     /// `the_widest_audio_format_is_the_one_the_widest_plan_carries_and_it_fits_at_the_cap`
     /// checks the choice.
     ///
     /// This bound assumes a probed rate of at most six digits, and no code enforces it: the
-    /// probe accepts any rate above 0. A `source` rate renders the stream's own rate in every
-    /// closing `aformat`, not only in the one input pin, so each digit past six adds one byte
-    /// for each segment and one for the pin. A probed rate longer than six digits is therefore outside the measured
+    /// probe accepts any rate above 0. The gap fill of each chain writes the stream's own rate
+    /// for every output choice, and a `source` output rate writes it in the closing `aformat`
+    /// too, so each digit past six adds one byte for each segment, two with `source`, and one
+    /// for the pin. A probed rate longer than six digits is therefore outside the measured
     /// budget. The consequence is not a wrong output: at the segment cap on Windows, the command
     /// line can exceed the limit, and the spawn then fails and reports `ffmpegSpawnFailed`.
     fn widest_audio() -> PlannedAudio {
@@ -2337,10 +2338,14 @@ mod tests {
         // for the largest segment count that still fits, on the fixture above, choosing the
         // shape the way production does.
         //
-        // Measured at the time of writing: the widest permitted plan needs 31620 of the 31743
-        // available bytes at the cap, so 123 bytes of slack remain, and 100 segments fit while
-        // 101 do not. (A realistic plan on a 106-character path measures 28797 at the same
-        // count.) Schema 2 of the settings spent 1484 of the 1607 bytes that were there before
+        // Measured at the time of writing: the widest permitted plan needs 31509 of the 31743
+        // available bytes at the cap, so 234 bytes of slack remain, and 100 segments fit while
+        // 101 do not. (A realistic plan on a 106-character path measures 28386 at the same
+        // count.) The audio chain that starts at the In point (`graph::audio_chain`) gave back
+        // 111 bytes: the timestamp reset with a 12-digit tick and the gap fill at 192000 Hz add
+        // 33 bytes to each chain, and the short option names of `aformat` take 34 from each
+        // chain and 11 from the one input pin. Before that chain, 123 bytes were free.
+        // Schema 2 of the settings spent 1484 of the 1607 bytes that were there before
         // it: 1408 for the two option lists at their limits (1024 bytes, and 384 for the
         // separators and quotes of 128 arguments), 71 for a 32-character pixel format in the
         // graph and in `-pix_fmt`, and 5 for `-cq 63 -b:v 0` over `-b:v 200000k`. The options
@@ -2489,8 +2494,8 @@ mod tests {
         // segment, so its command line is the shorter of the two wherever the choice is live.
         //
         // The second assertion holds a separate property: ADR 014 measurement 15 records that
-        // the single-input *graph* is the larger of the two for the first three segments and
-        // the smaller one from four segments upward, 28327 bytes against 29789 at the cap. No
+        // the single-input *graph* is the larger of the two for the first seven segments and
+        // the smaller one from eight segments upward, 27916 bytes against 28289 at the cap. No
         // decision reads that, because the fallback is never selected for its graph size, but a
         // reader who expects the graphs to be ordered the other way would mis-predict where the
         // budget goes.

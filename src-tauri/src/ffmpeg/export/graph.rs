@@ -5,7 +5,7 @@
 //! graph is testable without ffmpeg installed -- which is what the pinned-string tests below
 //! do, exactly as `capabilities::smoke`'s tests pin ADR 006's two smoke commands verbatim.
 //!
-//! Four of ADR 014's decisions live here and nowhere else:
+//! Five of ADR 014's decisions live here and nowhere else:
 //!
 //! - Every chain binds an **absolute** stream index, never the short specifier `[i:v]` or
 //!   `[i:a]`. A short specifier selects the first stream of its type; the probe selects the
@@ -24,6 +24,10 @@
 //!   `aformat` in front of `atrim`. This one looks redundant beside the `aformat` that ends
 //!   the same chain, and it is not: see [`audio_input_pin`] for the measurement, and do not
 //!   delete it.
+//! - Every audio chain **starts its audio at the segment's In point**, not at its first
+//!   sample: it subtracts the In tick, and an `aresample` fills a late start and a gap with
+//!   silence. A source whose audio starts after the In point otherwise plays early against its
+//!   video; see [`audio_chain`] for the measurement.
 //! - The two graph shapes exist because one input for each segment repeats the source path,
 //!   and Windows limits a command line to 32767 bytes. [`GraphShape`] names the choice but
 //!   does not make it: only the argument builder knows the assembled command's length, so
@@ -102,13 +106,19 @@ fn video_output_format(pixel_format: &str) -> String {
 ///
 /// Every chain reads the same audio stream and renders this same filter, so every chain ends
 /// at one rate and with one layout, and `concat` still receives inputs that agree. For
-/// [`AudioChannels::Source`] the filter names no `channel_layouts` at all, so each chain keeps
+/// [`AudioChannels::Source`] the filter names no channel layout at all, so each chain keeps
 /// the source stream's layout; ADR 023 measurement 3 found that ffmpeg then converts in front
 /// of an encoder that cannot take that layout, so no filter here depends on the encoder.
 ///
-/// A preset from before ADR 023 plans 48000 Hz and [`AudioChannels::Stereo`], and this renders
-/// exactly the constant ADR 014 used to fix:
-/// `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo`.
+/// The filter spells its options by their short names: `f` for `sample_fmts`, `r` for
+/// `sample_rates`, and `cl` for `channel_layouts`. ffmpeg declares each short name as a second
+/// entry for the same option field, so the filter is the same filter, and a 48000 Hz stereo
+/// chain renders `aformat=f=fltp:r=48000:cl=stereo` for the constant ADR 014 fixed as
+/// `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo`. The reason is the
+/// command-line budget: this filter is in every chain, and the short names take 34 bytes from
+/// each one with a channel layout, which pays for the filter [`audio_gap_fill`] adds to each
+/// chain. The short names exist from ffmpeg 4.3 on; ffmpeg 4.2 does not know them and refuses
+/// the graph.
 ///
 /// This is not the same `aformat` as [`audio_input_pin`], which carries the *source* rate and
 /// stands at the head of the chain. Both are needed, for opposite reasons: this one converts
@@ -117,13 +127,10 @@ fn video_output_format(pixel_format: &str) -> String {
 pub(crate) fn audio_output_format(audio: &PlannedAudio) -> String {
     let layout = match audio.output_channels {
         AudioChannels::Source => "",
-        AudioChannels::Stereo => ":channel_layouts=stereo",
-        AudioChannels::Mono => ":channel_layouts=mono",
+        AudioChannels::Stereo => ":cl=stereo",
+        AudioChannels::Mono => ":cl=mono",
     };
-    format!(
-        "aformat=sample_fmts=fltp:sample_rates={}{layout}",
-        audio.output_sample_rate
-    )
+    format!("aformat=f=fltp:r={}{layout}", audio.output_sample_rate)
 }
 
 /// Which of ADR 014's two graph shapes to render.
@@ -138,10 +145,12 @@ pub(crate) fn audio_output_format(audio: &PlannedAudio) -> String {
 /// segment under *both* shapes. The two graphs changed places after measurement 17 added the
 /// input rate pin, which costs one filter for each audio chain under `InputPerSegment` and
 /// exactly one filter in front of `asplit` under `SingleInput`. `SingleInput` therefore holds
-/// the larger graph for the first three segments, and the smaller graph from four segments
-/// upward: 28327 bytes against 29789 bytes at the segment cap, since the pixel format moved
-/// behind `concat` (it was 29804 against 31266 with a `format` in each chain, and the move takes
-/// the same 1477 bytes from both). What `SingleInput` saves lies
+/// the larger graph for the first seven segments, and the smaller graph from eight segments
+/// upward: 27916 bytes against 28289 bytes at the segment cap. The pin decides where the two
+/// cross: since it spells its rate as `r=` (see [`audio_output_format`]), it costs 11 bytes less
+/// in each chain under `InputPerSegment`, and they crossed between three and four segments
+/// before, at 28327 bytes against 29789. (Those were measured after the pixel format moved behind
+/// `concat`, which took the same 1477 bytes from both.) What `SingleInput` saves lies
 /// outside the graph as well -- it writes the source path once instead of once for each
 /// segment -- so it extends the reachable segment count without removing the growth. ADR 014's "graph shape" section draws the conclusion this
 /// module cannot: the segment cap, not the shape, is what keeps an export inside Windows'
@@ -159,7 +168,7 @@ pub enum GraphShape {
     /// One `-i` for the whole source, divided among the chains by `split` and `asplit`.
     ///
     /// The graph this renders is slightly *larger* than `InputPerSegment`'s for the first
-    /// three segments and slightly *smaller* from four segments upward (ADR 014 measurement
+    /// seven segments and slightly *smaller* from eight segments upward (ADR 014 measurement
     /// 15); what it saves at every count is the repeated input path and the flags around it.
     /// It needs the single seek [`ExportPlan::single_input_seek_seconds`] returns, not any one
     /// segment's own.
@@ -342,8 +351,10 @@ fn splitter_chain(stream_index: u32, pin: &str, filter: &str, label: &str, count
 /// has to sit on the input link itself -- in front of `atrim`, and in front of `asplit` under
 /// [`GraphShape::SingleInput`] rather than on the branches behind it, which is also one
 /// filter instead of one for each segment.
+///
+/// `r` is the short name of `sample_rates`, for the reason [`audio_output_format`] gives.
 fn audio_input_pin(audio: &PlannedAudio) -> String {
-    format!("aformat=sample_rates={},", audio.sample_rate)
+    format!("aformat=r={},", audio.sample_rate)
 }
 
 /// Render one segment's video chain, from its input link to its `[v<index>]` output label.
@@ -396,13 +407,96 @@ fn video_chain(
     format!("{head}{timing}{scale}[v{index}]")
 }
 
-/// Render one segment's audio chain, from its input link to its `[a<index>]` output label.
+/// Render the `aresample` that writes silence where a segment's audio has no samples: in front
+/// of its first sample, and in a gap inside the stream.
+///
+/// `first_pts=0` states that the output starts at timestamp 0, which is the segment's In point
+/// once [`audio_timestamp_reset`] has run. With that option libswresample turns on its
+/// timestamp compensation, as `async=1` would, so `async=1` adds bytes and changes nothing. The
+/// defaults then decide what is compensated: a first sample more than 1 ms after timestamp 0 is
+/// preceded by silence, a gap of more than 0.1 s (`min_hard_comp`) inside the segment is filled
+/// with silence, and an overlap of more than 0.1 s is dropped. Nothing is stretched. A shorter
+/// gap inside a segment stays unfilled: the rest of that segment plays early by up to 0.1 s, and
+/// `concat` pads the end of the segment, so the next one starts in sync again.
+///
+/// The filter's output rate is the source rate, [`PlannedAudio::sample_rate`]. It therefore
+/// resamples nothing. When the closing [`audio_output_format`] asks for another rate, ffmpeg
+/// still inserts its own resampler in front of it, as it did before this filter existed. The
+/// filter converts only the channel layout, which ffmpeg converted ahead of the cut before.
+/// Without the rate, this filter also took over the resampling, and M7 found the samples of a
+/// downmix with a resample (stereo or 5.1 at 44100 Hz to mono or stereo at 48000 Hz) up to
+/// 9.5e-7 away from those of the earlier graph: one conversion rounds differently from two. With
+/// the rate, every case M7 measured gave the same samples. The rate costs 6 or 7 bytes in each
+/// chain.
+fn audio_gap_fill(audio: &PlannedAudio) -> String {
+    format!("aresample={}:first_pts=0", audio.sample_rate)
+}
+
+/// Render the `asetpts` that moves a segment's In point to timestamp 0: `PTS-<in tick>`, or
+/// `PTS+<magnitude>` for a negative tick, which ADR 002 permits (see
+/// [`PlannedSegment::audio_in_tick`]).
+///
+/// The tick is the plan's [`PlannedSegment::audio_in_tick`], the same number `atrim` cuts at,
+/// in the unit the input link counts in, which [`audio_input_pin`] holds at the source rate.
+/// ffmpeg evaluates the expression in double precision, as it evaluated `PTS-STARTPTS`, and
+/// that is exact for every tick below 2^53: about 1500 years at 192000 Hz.
+fn audio_timestamp_reset(in_tick: i64) -> String {
+    if in_tick < 0 {
+        format!("asetpts=PTS+{}", in_tick.unsigned_abs())
+    } else {
+        format!("asetpts=PTS-{in_tick}")
+    }
+}
+
+/// Render one segment's audio chain, from its input link to its `[a<index>]` output label:
+/// the cut, the timestamp reset, the gap fill, and the output format.
 ///
 /// Under [`GraphShape::InputPerSegment`] this chain starts at an input link, so it carries
 /// [`audio_input_pin`] itself. Under [`GraphShape::SingleInput`] it starts behind `asplit`,
 /// and the splitter chain already pinned the one input link they share; repeating the pin
 /// here would only add a filter for each segment to a graph ADR 014 measurement 15 already
 /// counts in bytes against the Windows command-line limit.
+///
+/// **The audio of a segment starts at the segment's In point, not at its first sample.** The
+/// chain subtracts the In tick ([`audio_timestamp_reset`]), and [`audio_gap_fill`] then writes
+/// silence from the In point to the first sample. The chain used `asetpts=PTS-STARTPTS`, which
+/// subtracts the timestamp of the first sample `atrim` passes. When the source audio starts
+/// after the In point, as in a phone recording whose microphone opened after its camera, that
+/// sample lies after the In point: the reset removed the gap, `concat` padded the missing time
+/// with silence at the end of the segment, and the audio of the segment played as early as the
+/// gap. A gap inside the stream did the same at the sample level: the output kept its
+/// timestamps but held no samples for it, so a decoder that plays the samples one after another
+/// played the rest of the segment early by the gap. The video frame count sees neither fault.
+///
+/// Measurement M7 (ffmpeg 9.0.2) used test sources with a tone burst on the frame of each white
+/// flash, with audio that starts 0.3 s late, ends 1 s early, or has no packets for 0.5 s, in
+/// MP4 and MKV, at 44100 and 48000 Hz, with 1 and 3 segments in both shapes and at three output
+/// formats. With `PTS-STARTPTS`, a segment whose In point lay before the first audio sample
+/// played 0.043 to 0.300 s early, by its own gap, and the audio after the 0.5 s gap played
+/// 0.500 s early. With this chain, every burst lay within 0.8 ms of its flash.
+///
+/// The fill stands in each chain, between the reset and the closing `aformat`, because the two
+/// other places for one filter fail:
+///
+/// - Behind `concat`, the late start of a segment that is not the first one reaches the filter
+///   as a gap inside the stream, and a gap of up to 0.1 s stays there. M7 measured 0.043 to
+///   0.067 s left.
+/// - On the input link, in front of `atrim`, the filter numbers the samples again before the
+///   cut, and `atrim` cuts on those numbers instead of the source timestamps. M7 found the
+///   audio of a 3-segment MPEG-TS export two samples longer.
+///
+/// A source whose audio covers the segment does not change. Its first sample after `atrim` is
+/// at the In tick, so the reset is the one `PTS-STARTPTS` made, and the fill compensates
+/// nothing. M7 found the samples identical by MD5 with and without this chain on ADR 014's six
+/// fixtures, in both shapes, at the source rate, at 48000 Hz stereo, and at 44100 Hz mono; on
+/// stereo and 5.1 sources in every layout at the source rate and at 48000 Hz; and on 100
+/// segments of a 130 s source. Only the timestamps of some MPEG-TS frames changed, by one
+/// sample, because the fill numbers its output without the rounding of the source timestamps.
+///
+/// The reset and the fill add 33 bytes to each chain with a 12-digit tick at 192000 Hz. The
+/// short names of [`audio_output_format`] take 34 bytes from a chain with a channel layout and
+/// 21 from one without, and 11 from each input pin, so the widest command stays inside the
+/// Windows budget at [`super::MAX_EXPORT_SEGMENTS`]; see `arguments.rs`.
 fn audio_chain(audio: &PlannedAudio, shape: GraphShape, index: usize, ticks: (i64, i64)) -> String {
     let source = match shape {
         GraphShape::InputPerSegment => {
@@ -412,8 +506,10 @@ fn audio_chain(audio: &PlannedAudio, shape: GraphShape, index: usize, ticks: (i6
     };
     let (in_tick, out_tick) = ticks;
     let head = format!("{source}atrim=start_pts={in_tick}:end_pts={out_tick}");
+    let reset = audio_timestamp_reset(in_tick);
+    let fill = audio_gap_fill(audio);
     let format = audio_output_format(audio);
-    format!("{head},asetpts=PTS-STARTPTS,{format}[a{index}]")
+    format!("{head},{reset},{fill},{format}[a{index}]")
 }
 
 /// Render the `concat` filter, with the joined video at `[vc]` and the joined audio at the
@@ -567,9 +663,8 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -583,13 +678,11 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
-                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -603,17 +696,14 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
-                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[2:1]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1[v2];",
-                "[2:2]aformat=sample_rates=44100,atrim=start_pts=882000:end_pts=903168,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a2];",
+                "[2:2]aformat=r=44100,atrim=start_pts=882000:end_pts=903168,asetpts=PTS-882000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a2];",
                 "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vc][a]",
             )
         );
@@ -630,10 +720,10 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]split=1[sv0];",
-                "[0:2]aformat=sample_rates=44100,asplit=1[sa0];",
+                "[0:2]aformat=r=44100,asplit=1[sa0];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -647,13 +737,13 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]split=2[sv0][sv1];",
-                "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
+                "[0:2]aformat=r=44100,asplit=2[sa0][sa1];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
-                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -667,16 +757,16 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]split=3[sv0][sv1][sv2];",
-                "[0:2]aformat=sample_rates=44100,asplit=3[sa0][sa1][sa2];",
+                "[0:2]aformat=r=44100,asplit=3[sa0][sa1][sa2];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
-                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[sv2]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1[v2];",
-                "[sa2]atrim=start_pts=882000:end_pts=903168,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a2];",
+                "[sa2]atrim=start_pts=882000:end_pts=903168,asetpts=PTS-882000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a2];",
                 "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vc][a]",
             )
         );
@@ -707,17 +797,14 @@ mod tests {
         // behind it.
         let graph = build_filter_graph(&fixture_plan(1), GraphShape::InputPerSegment);
         assert!(
-            graph.contains("aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144"),
+            graph.contains("aformat=r=44100,atrim=start_pts=511560:end_pts=522144"),
             "{graph}"
         );
         assert!(
-            graph.contains("aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"),
+            graph.contains("aformat=f=fltp:r=48000:cl=stereo"),
             "{graph}"
         );
-        assert!(
-            !graph.contains("sample_rates=44100:channel_layouts"),
-            "{graph}"
-        );
+        assert!(!graph.contains("r=44100:cl"), "{graph}");
     }
 
     #[test]
@@ -744,24 +831,18 @@ mod tests {
         // One input for each segment: every chain begins at an input link of its own, so
         // every chain carries the pin.
         let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
-        assert!(
-            graph.contains("[0:2]aformat=sample_rates=44100,atrim="),
-            "{graph}"
-        );
-        assert!(
-            graph.contains("[1:2]aformat=sample_rates=44100,atrim="),
-            "{graph}"
-        );
+        assert!(graph.contains("[0:2]aformat=r=44100,atrim="), "{graph}");
+        assert!(graph.contains("[1:2]aformat=r=44100,atrim="), "{graph}");
 
         // One input: the chains begin behind `asplit`, so the pin belongs on the single input
         // link in front of it. That is the link ffmpeg configures the buffer source from, and
         // one filter covers every branch instead of one for each segment.
         let graph = build_filter_graph(&plan, GraphShape::SingleInput);
         assert!(
-            graph.contains("[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];"),
+            graph.contains("[0:2]aformat=r=44100,asplit=2[sa0][sa1];"),
             "{graph}"
         );
-        assert_eq!(graph.matches("sample_rates=44100").count(), 1, "{graph}");
+        assert_eq!(graph.matches("aformat=r=44100").count(), 1, "{graph}");
         assert!(graph.contains("[sa0]atrim=start_pts=511560"), "{graph}");
         assert!(graph.contains("[sa1]atrim=start_pts=441000"), "{graph}");
     }
@@ -782,9 +863,8 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[0:2]aformat=sample_rates=32000,atrim=start_pts=371200:end_pts=378880,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[0:2]aformat=r=32000,atrim=start_pts=371200:end_pts=378880,asetpts=PTS-371200,",
+                "aresample=32000:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -793,10 +873,10 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]split=1[sv0];",
-                "[0:2]aformat=sample_rates=32000,asplit=1[sa0];",
+                "[0:2]aformat=r=32000,asplit=1[sa0];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[sa0]atrim=start_pts=371200:end_pts=378880,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[sa0]atrim=start_pts=371200:end_pts=378880,asetpts=PTS-371200,",
+                "aresample=32000:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -826,13 +906,11 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a0];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100:cl=stereo[a0];",
                 "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
-                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a1];",
+                "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100:cl=stereo[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -841,13 +919,13 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]split=2[sv0][sv1];",
-                "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
+                "[0:2]aformat=r=44100,asplit=2[sa0][sa1];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100:cl=stereo[a0];",
                 "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
-                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a1];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100:cl=stereo[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -856,20 +934,20 @@ mod tests {
 
     #[test]
     fn source_channels_name_no_channel_layout_in_both_shapes() {
-        // The seeds' own format: the source rate and the source layout. With no
-        // `channel_layouts` option each chain keeps the stream's layout, so a 5.1 source stays
-        // 5.1 through an encoder that takes it (ADR 023 measurement 3).
+        // The seeds' own format: the source rate and the source layout. With no `cl` option
+        // (`channel_layouts`) each chain keeps the stream's layout, so a 5.1 source stays 5.1
+        // through an encoder that takes it (ADR 023 measurement 3).
         let plan = plan_with_output(2, 44_100, AudioChannels::Source);
         assert_eq!(
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=44100[a0];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100[a0];",
                 "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
-                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
-                "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=44100[a1];",
+                "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -878,13 +956,13 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]split=2[sv0][sv1];",
-                "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
+                "[0:2]aformat=r=44100,asplit=2[sa0][sa1];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=44100[a0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100[a0];",
                 "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
-                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=44100[a1];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=44100[a1];",
                 "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
@@ -894,11 +972,8 @@ mod tests {
         let fixed_rate = plan_with_output(1, 96_000, AudioChannels::Source);
         for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
             let graph = build_filter_graph(&fixed_rate, shape);
-            assert!(!graph.contains("channel_layouts"), "{graph}");
-            assert!(
-                graph.contains(",aformat=sample_fmts=fltp:sample_rates=96000[a0];"),
-                "{graph}"
-            );
+            assert!(!graph.contains("cl="), "{graph}");
+            assert!(graph.contains(",aformat=f=fltp:r=96000[a0];"), "{graph}");
         }
     }
 
@@ -910,9 +985,8 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono[a0];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=mono[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -921,10 +995,10 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]split=1[sv0];",
-                "[0:2]aformat=sample_rates=44100,asplit=1[sa0];",
+                "[0:2]aformat=r=44100,asplit=1[sa0];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono[a0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=mono[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -945,7 +1019,7 @@ mod tests {
                 let expected = audio_output_format(plan.audio.as_ref().expect("fixture audio"));
                 for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
                     let graph = build_filter_graph(&plan, shape);
-                    assert_eq!(graph.matches("aformat=sample_fmts=").count(), 3, "{graph}");
+                    assert_eq!(graph.matches("aformat=f=").count(), 3, "{graph}");
                     assert_eq!(
                         graph.matches(&format!("{expected}[a")).count(),
                         3,
@@ -1008,23 +1082,21 @@ mod tests {
         assert_eq!(
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[a0][a1]concat=n=2:v=0:a=1[a]",
             )
         );
         assert_eq!(
             build_filter_graph(&plan, GraphShape::SingleInput),
             concat!(
-                "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
-                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[0:2]aformat=r=44100,asplit=2[sa0][sa1];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[a0][a1]concat=n=2:v=0:a=1[a]",
             )
         );
@@ -1196,23 +1268,21 @@ mod tests {
         assert_eq!(
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[a0][a1]concat=n=2:v=0:a=1[a]",
             )
         );
         assert_eq!(
             build_filter_graph(&plan, GraphShape::SingleInput),
             concat!(
-                "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
-                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[0:2]aformat=r=44100,asplit=2[sa0][sa1];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[a0][a1]concat=n=2:v=0:a=1[a]",
             )
         );
@@ -1222,6 +1292,31 @@ mod tests {
             planned(ExportStreams::AudioOnly, false),
             Err(crate::ffmpeg::export::ExportErrorCode::SourceHasNoAudio)
         );
+    }
+
+    #[test]
+    fn every_audio_chain_from_the_planner_resets_at_the_planned_in_tick() {
+        // The reset subtracts the plan's own In tick, the number `atrim` cuts at, and not a
+        // number of its own: a second computation of the tick could round the other way, and
+        // the audio of the segment would then start one sample off its In point. Both choices
+        // that write audio render the same audio chains, in both shapes.
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            let plan = planned(streams, true).unwrap();
+            for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+                let graph = build_filter_graph(&plan, shape);
+                for segment in &plan.segments {
+                    let (in_tick, out_tick) = (
+                        segment.audio_in_tick.expect("a planned tick"),
+                        segment.audio_out_tick.expect("a planned tick"),
+                    );
+                    let chain = format!(
+                        "atrim=start_pts={in_tick}:end_pts={out_tick},asetpts=PTS-{in_tick},\
+                         aresample=44100:first_pts=0,aformat=f=fltp:"
+                    );
+                    assert_eq!(graph.matches(&chain).count(), 1, "{streams:?} {graph}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1278,9 +1373,8 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1299,9 +1393,8 @@ mod tests {
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
                 "scale=1920:1080,setsar=1[v0];",
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1318,11 +1411,9 @@ mod tests {
             graph,
             concat!(
                 "[vc]format=yuv420p[v];",
-                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,",
-                "fps=30000/1001[v0];",
-                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=30000/1001[v0];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1344,9 +1435,8 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:2]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[0:5]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
-                "asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[0:5]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1355,10 +1445,10 @@ mod tests {
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:2]split=1[sv0];",
-                "[0:5]aformat=sample_rates=44100,asplit=1[sa0];",
+                "[0:5]aformat=r=44100,asplit=1[sa0];",
                 "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
-                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
                 "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
@@ -1395,7 +1485,7 @@ mod tests {
                 // its boundary ticks in the output's rate after a seek (measurement 17), and
                 // no later stage of the export reports that.
                 assert!(
-                    plan.audio.is_none() || graph.contains("aformat=sample_rates=44100,"),
+                    plan.audio.is_none() || graph.contains("aformat=r=44100,"),
                     "unpinned audio input link in {graph}"
                 );
             }
@@ -1488,6 +1578,117 @@ mod tests {
                         ),
                         graph
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_audio_chain_starts_at_its_in_point_and_fills_the_gap_in_both_shapes() {
+        // The rule `audio_chain` holds, swept rather than pinned, so this still fails if every
+        // pinned string is updated to match a regression. `asetpts=PTS-STARTPTS` subtracts the
+        // first sample that `atrim` passes, and that sample lies after the In point when the
+        // source audio starts late or has a gap there (measurement M7). The reset must name the
+        // In tick, and the fill must follow it, in front of the closing `aformat`. The video
+        // chains keep `setpts=PTS-STARTPTS`: `trim` cuts at a frame that exists, so the first
+        // frame it passes is the In point.
+        for count in 1..=3 {
+            for plan in [
+                fixture_plan(count),
+                plan_with_output(count, 44_100, AudioChannels::Source),
+            ] {
+                let audio = plan.audio.as_ref().expect("fixture audio");
+                let fill = audio_gap_fill(audio);
+                let closing = audio_output_format(audio);
+                for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+                    let graph = build_filter_graph(&plan, shape);
+                    let audio_chains: Vec<&str> = graph
+                        .split(';')
+                        .filter(|chain| chain.contains("atrim="))
+                        .collect();
+                    assert_eq!(audio_chains.len(), count, "{graph}");
+                    for (index, (chain, segment)) in
+                        audio_chains.iter().zip(&plan.segments).enumerate()
+                    {
+                        let in_tick = segment.audio_in_tick.expect("fixture ticks");
+                        let tail = format!(",asetpts=PTS-{in_tick},{fill},{closing}[a{index}]");
+                        assert!(chain.ends_with(&tail), "{chain}");
+                        assert!(!chain.contains("STARTPTS"), "{chain}");
+                    }
+                    assert_eq!(graph.matches(&fill).count(), count, "{graph}");
+                    assert_eq!(graph.matches("aresample=").count(), count, "{graph}");
+                    let video_chains: Vec<&str> = graph
+                        .split(';')
+                        .filter(|chain| chain.contains("]trim="))
+                        .collect();
+                    assert_eq!(video_chains.len(), count, "{graph}");
+                    for chain in video_chains {
+                        assert!(chain.contains(",setpts=PTS-STARTPTS,fps="), "{chain}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_gap_fill_writes_the_source_rate_and_leaves_the_resampling_to_ffmpeg() {
+        // The fixture resamples 44100 Hz to 48000 Hz. A fill at the output rate, or at no rate,
+        // would take the resampling over from the converter ffmpeg inserts in front of the
+        // closing `aformat`, and M7 found a downmix with a resample in one conversion a few
+        // float steps away from the samples of the earlier graph. See `audio_gap_fill`.
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            let graph = build_filter_graph(&fixture_plan(3), shape);
+            assert_eq!(
+                graph.matches("aresample=44100:first_pts=0,").count(),
+                3,
+                "{graph}"
+            );
+            assert!(!graph.contains("aresample=48000"), "{graph}");
+            assert!(!graph.contains("aresample=first_pts"), "{graph}");
+        }
+    }
+
+    #[test]
+    fn a_negative_in_tick_resets_by_adding_its_magnitude() {
+        // ADR 002 permits a source to start at a negative PTS, so an In tick can be negative;
+        // `plan.rs` pins the sign of the tick itself. The reset then adds the magnitude.
+        assert_eq!(audio_timestamp_reset(0), "asetpts=PTS-0");
+        assert_eq!(audio_timestamp_reset(511_560), "asetpts=PTS-511560");
+        assert_eq!(audio_timestamp_reset(-6), "asetpts=PTS+6");
+        assert_eq!(
+            audio_timestamp_reset(i64::MIN),
+            "asetpts=PTS+9223372036854775808"
+        );
+
+        let mut plan = fixture_plan(1);
+        plan.segments[0].audio_in_tick = Some(-6);
+        plan.segments[0].audio_out_tick = Some(4);
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            let graph = build_filter_graph(&plan, shape);
+            assert!(
+                graph.contains("atrim=start_pts=-6:end_pts=4,asetpts=PTS+6,aresample=44100:"),
+                "{graph}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_graph_spells_an_aformat_option_by_its_long_name() {
+        // The short names pay for the gap fill in every chain; `audio_output_format` has the
+        // arithmetic, and `arguments.rs` measures the budget at the segment cap. A long name back
+        // in a chain costs its bytes once for each segment.
+        for channels in [
+            AudioChannels::Source,
+            AudioChannels::Stereo,
+            AudioChannels::Mono,
+        ] {
+            for count in 1..=3 {
+                let plan = plan_with_output(count, 48_000, channels);
+                for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+                    let graph = build_filter_graph(&plan, shape);
+                    for long in ["sample_fmts=", "sample_rates=", "channel_layouts="] {
+                        assert!(!graph.contains(long), "{long} in {graph}");
+                    }
                 }
             }
         }

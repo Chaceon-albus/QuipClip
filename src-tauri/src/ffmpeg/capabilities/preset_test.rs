@@ -473,9 +473,7 @@ mod tests {
             "-i",
             "anullsrc=r=48000:cl=stereo",
             "-filter_complex",
-            &format!(
-                "[0:v]format={pixel_format}[v];[1:a]aformat=sample_fmts=fltp:sample_rates=48000[a]"
-            ),
+            &format!("[0:v]format={pixel_format}[v];[1:a]aformat=f=fltp:r=48000[a]"),
             "-map",
             "[v]",
             "-map",
@@ -694,7 +692,7 @@ mod tests {
             "anullsrc=r=44100:cl=mono",
             "-filter_complex",
             "[0:v]format=yuv420p[v];\
-             [1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=mono[a]",
+             [1:a]aformat=f=fltp:r=44100:cl=mono[a]",
             "-map",
             "[v]",
             "-map",
@@ -729,7 +727,7 @@ mod tests {
         assert!(arguments.contains(&"anullsrc=r=48000:cl=stereo".to_owned()));
         assert!(arguments.contains(
             &"[0:v]format=yuv420p[v];\
-              [1:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a]"
+              [1:a]aformat=f=fltp:r=48000:cl=stereo[a]"
                 .to_owned()
         ));
     }

@@ -198,8 +198,9 @@ pub enum PathFacts {
 /// rational sum of every segment's duration, and [`PlannedVideo::expected_frames`] rounds
 /// each segment's frame count individually before summing -- never the reverse, since
 /// rounding the total instead can produce a different, and wrong, expected count.
-/// [`PlannedAudio::expected_duration`] sums each segment's overlap with the probed extent of the
-/// source audio stream, for the success check of an export without video.
+/// [`PlannedAudio::expected_duration`] sums, over the segments that the probed extent of the
+/// source audio stream reaches, the time from each one's In point to the earlier of its Out point
+/// and the end of the stream, for the success check of an export without video.
 ///
 /// The plan carries [`ExportPlan::video`] exactly when the export writes video. It carries
 /// [`ExportPlan::audio`] exactly when the export writes audio and the probe reports an audio
@@ -468,13 +469,18 @@ pub fn build_plan(
 
         if let Some((audio_start, audio_end)) = audio_extent {
             // The part of `[in, out)` the audio stream covers, which is empty when the stream
-            // starts after the Out point or ends before the In point.
+            // starts after the Out point or ends before the In point. A segment with such an
+            // empty part writes no audio at all: `atrim` passes no sample, so the graph has
+            // nothing to start the segment's silence from.
             let from = audio_start.map_or(in_seconds, |start| start.max(in_seconds));
             let to = audio_end.map_or(out_seconds, |end| end.min(out_seconds));
+            // Any other segment writes its audio from its In point, not from the first sample:
+            // the graph fills a late start with silence (`graph::audio_chain`). Only the end of
+            // the stream shortens it.
             if to > from && !expected_audio_overflowed {
                 match to
-                    .sub(from)
-                    .and_then(|covered| expected_audio_duration.add(covered))
+                    .sub(in_seconds)
+                    .and_then(|written| expected_audio_duration.add(written))
                 {
                     Some(sum) => expected_audio_duration = sum,
                     None => expected_audio_overflowed = true,
@@ -2121,16 +2127,74 @@ mod tests {
     }
 
     #[test]
-    fn audio_that_starts_late_is_expected_only_from_its_first_sample() {
-        // A recording that opened the microphone 0.3 s after the camera. The first segment can
-        // take 1.7 s of audio, and the second, which the audio covers, all of its 2 s.
+    fn audio_that_starts_late_is_expected_from_the_in_point_because_the_graph_fills_the_gap() {
+        // A recording that opened the microphone 0.3 s after the camera. The graph starts the
+        // audio of each segment at its In point and writes silence until the first sample
+        // (`graph::audio_chain`), so the first segment writes all of its 2 s, as the second does.
         let segments = [seconds_boundary("0", "2"), seconds_boundary("60", "62")];
         let (expected, total) = expected_audio(
             &probe_with_audio_extent(Some("0.3"), Some("129.7")),
             &segments,
         );
-        assert_eq!(expected, decimal("3.7"));
-        assert_eq!(total, decimal("4"));
+        assert_eq!(expected, decimal("4"));
+        assert_eq!(expected, total);
+    }
+
+    #[test]
+    fn a_segment_that_ends_before_the_first_audio_sample_is_expected_to_write_nothing() {
+        // `atrim` passes no sample for [0, 0.2) when the audio starts at 0.3 s, so the gap fill
+        // has nothing to start from, and the segment adds no audio to an audio-only export. A
+        // segment that reaches the first sample, [0.1, 0.4), writes from its own In point.
+        let segments = [
+            seconds_boundary("0", "0.2"),
+            seconds_boundary("60", "62"),
+            seconds_boundary("0.1", "0.4"),
+        ];
+        let (expected, total) = expected_audio(
+            &probe_with_audio_extent(Some("0.3"), Some("129.7")),
+            &segments,
+        );
+        assert_eq!(expected, decimal("2.3"));
+        assert_eq!(total, decimal("2.5"));
+    }
+
+    #[test]
+    fn a_late_audio_start_leaves_the_in_tick_at_the_in_point_for_every_choice_with_audio() {
+        // The graph subtracts the In tick to start the audio of a segment at its In point
+        // (`graph::audio_chain`), so the tick must name the In point itself, never the first
+        // sample of a stream that starts after it. The probed extent bounds only the check of an
+        // audio-only output. At the sample probe's 1/90000 and 48000 Hz, 0 s and 2 s are the
+        // ticks 0 and 96000.
+        let segments = [seconds_boundary("0", "2")];
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            for probe in [
+                probe_with_audio_extent(Some("0.3"), Some("129.7")),
+                probe_with_audio_extent(None, None),
+            ] {
+                let plan = plan_streams(
+                    streams,
+                    &segments,
+                    &probe,
+                    &sample_preset(),
+                    valid_path_facts(),
+                )
+                .unwrap();
+                assert_eq!(plan.segments[0].audio_in_tick, Some(0), "{streams:?}");
+                assert_eq!(plan.segments[0].audio_out_tick, Some(96_000), "{streams:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_segment_that_reaches_past_both_ends_of_the_audio_is_expected_from_its_in_point() {
+        // The start of the audio no longer shortens a segment, and its end still does.
+        let segments = [seconds_boundary("0", "130")];
+        let (expected, total) = expected_audio(
+            &probe_with_audio_extent(Some("0.3"), Some("128.7")),
+            &segments,
+        );
+        assert_eq!(expected, decimal("129"));
+        assert_eq!(total, decimal("130"));
     }
 
     #[test]
@@ -2152,10 +2216,15 @@ mod tests {
     fn a_side_of_the_extent_that_the_probe_does_not_report_bounds_nothing() {
         let segments = [seconds_boundary("0", "2"), seconds_boundary("128", "130")];
 
-        // A start with no length, as a stream without a duration reports it: only the start
-        // bounds the audio.
+        // A start with no length, as a stream without a duration reports it: the start bounds
+        // only which segments the audio reaches, and both of these are reached.
         let (expected, _) = expected_audio(&probe_with_audio_extent(Some("0.3"), None), &segments);
-        assert_eq!(expected, decimal("3.7"));
+        assert_eq!(expected, decimal("4"));
+        let (expected, _) = expected_audio(
+            &probe_with_audio_extent(Some("0.3"), None),
+            &[seconds_boundary("0", "0.2"), seconds_boundary("1", "2")],
+        );
+        assert_eq!(expected, decimal("1"));
 
         // A length with no start has no place on the timeline, so nothing is bounded.
         let (expected, total) =
@@ -2206,7 +2275,8 @@ mod tests {
     #[test]
     fn the_extent_changes_the_expected_audio_and_nothing_that_the_graph_reads() {
         // The ticks are the ticks of the boundaries, as for every export: the extent bounds the
-        // check of the output, never the cut.
+        // check of the output, never the cut. The audio of this source starts late and ends
+        // inside the segment, so the end changes the expected audio.
         let segments = [seconds_boundary("0", "2")];
         let plan = |probe: &MediaProbe| {
             plan_streams(
@@ -2218,7 +2288,7 @@ mod tests {
             )
             .unwrap()
         };
-        let late = plan(&probe_with_audio_extent(Some("0.3"), Some("129.7")));
+        let late = plan(&probe_with_audio_extent(Some("0.3"), Some("1.2")));
         let unknown = plan(&probe_with_audio_extent(None, None));
         assert_eq!(late.segments, unknown.segments);
         assert_eq!(late.total_duration, unknown.total_duration);

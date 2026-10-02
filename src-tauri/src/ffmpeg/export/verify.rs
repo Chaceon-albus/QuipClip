@@ -14,7 +14,7 @@
 //! 2. no video stream, and
 //! 3. a duration within [`AUDIO_DURATION_SHORT_TOLERANCE_MS`] below and
 //!    [`AUDIO_DURATION_LONG_TOLERANCE_MS`] above [`super::PlannedAudio::expected_duration`], the
-//!    audio that the segments can take from the source stream.
+//!    audio that the segments write from the source stream.
 //!
 //! The function is pure, like the rest of the renderer's checks: it runs no process and reads no
 //! file, so every outcome is testable without ffmpeg installed.
@@ -65,8 +65,9 @@ use crate::time::Rational;
 //   ffmpeg was killed reports no duration, and an `.m4a` whose ffmpeg was killed, like an empty
 //   reservation, makes ffprobe exit 1, which the check reports as `outputStreamsMismatch`.
 // - A source whose audio does not cover a segment gives a correct, shorter output, so the check
-//   compares with `PlannedAudio::expected_duration`, the overlap of each segment with the probed
-//   extent of the audio stream, and not with the planned duration. Four sources, muxed with
+//   compares with `PlannedAudio::expected_duration`, and not with the planned duration. In M5
+//   that value was the overlap of each segment with the probed extent of the audio stream; M7
+//   below changed it for audio that starts late. Four sources, muxed with
 //   `-c copy` from 130 s of video: audio that starts 0.3 s late and audio that ends 1 s early, each
 //   in an MP4 and an MKV. Segments [0, 2), [60, 62) and [128, 130) s, also with a segment that the
 //   audio does not cover at all ([0, 0.2) or [129.3, 129.9)), into `aac` and `flac` `.m4a` and
@@ -79,6 +80,21 @@ use crate::time::Rational;
 //   audio muxed to start at 0.3 s carried `00:02:10.021000000` for 129.721 s of audio. An MP4 of
 //   AAC reports the start of the priming samples, 0.278667 s for audio that sounds from 0.3 s,
 //   and the output then also holds those 0.021 s.
+//
+// Measurement M7, on ffmpeg and ffprobe 9.0.2 on macOS, changed the expected duration. The graph
+// now starts the audio of each segment at its In point and fills a late start with silence
+// (`graph::audio_chain`), so an audio-only export of a source whose audio starts late runs for the
+// whole segment. `PlannedAudio::expected_duration` therefore counts each segment that the probed
+// extent reaches from its In point to the earlier of its Out point and the end of the stream. A
+// segment that the extent does not reach still writes nothing. The sources were 40 s of 30 fps
+// H.264 with AAC that starts 0.3 s late or ends 1 s early, in an MP4 and an MKV, at 44100 and
+// 48000 Hz. The segments were [0, 2), [20, 22) and [38, 40) s for both; [0, 0.2), [20, 22) and
+// [0.1, 2) s, and [10, 12) and [0.25, 2) s, for the late sources; and [36, 40), [39.3, 39.9) and
+// [5, 7) s for the early ones, in both graph shapes, into `aac` and `flac` `.m4a` and `.mka`: 160
+// runs. Against this value every run measured 0 to
+// +0.023 s for the late sources and -0.014 to +0.023 s for the early ones. Against the overlap,
+// the late sources measured +0.043 to +0.323 s, which the tolerance below still passes, but
+// only by its margin.
 //
 // The tolerance below keeps a margin over the worst case on each side. Long: +0.50 s against
 // +0.324 s. It also covers an estimate of the worst case for `aac_at` at 8000 Hz that this
@@ -118,10 +134,10 @@ pub enum AudioOutputMismatch {
 
 /// Decide whether the finished file of an export without video holds the audio that was planned.
 ///
-/// `expected` is [`super::PlannedAudio::expected_duration`]: the exact sum of each segment's
-/// overlap with the source audio stream, which is the planned duration when the stream covers
-/// every segment. The stream set is checked first, because a duration says nothing about a file
-/// that holds the wrong streams.
+/// `expected` is [`super::PlannedAudio::expected_duration`]: the exact length of audio the
+/// segments write from the source stream, which is the planned duration when the stream reaches
+/// the end of every segment. The stream set is checked first, because a duration says nothing
+/// about a file that holds the wrong streams.
 ///
 /// The comparison is exact. The measured duration is the decimal ffprobe writes, read as a
 /// [`Rational`], and the bounds are whole milliseconds, so no step here rounds (ADR 002).

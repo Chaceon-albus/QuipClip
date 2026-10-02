@@ -313,13 +313,16 @@ pub struct PlannedAudio {
     /// The encoder options of the audio stream, verbatim from the preset, in the order the
     /// argument builder writes them: each one as `-<name>:a <value>`, after `-b:a`.
     pub options: Vec<PresetOption>,
-    /// The length of audio the segments can take from the source stream, in seconds, exact.
+    /// The length of audio an export of the segments writes, in seconds, exact.
     ///
-    /// This is the sum, over the segments, of each segment's overlap with the stream's probed
-    /// extent ([`AudioProbe::start_time`] and [`AudioProbe::duration`]). It is
-    /// [`ExportPlan::total_duration`] when the stream covers every segment, and it is shorter when
-    /// the audio of the source starts after a segment's In point or ends before its Out point:
-    /// `atrim` then finds no samples for that part, and an audio-only export writes none.
+    /// This is a sum over the segments that the stream's probed extent
+    /// ([`AudioProbe::start_time`] and [`AudioProbe::duration`]) reaches: for each one, the time
+    /// from its In point to the earlier of its Out point and the end of the stream. It is
+    /// [`ExportPlan::total_duration`] when the stream covers every segment, and when the audio of
+    /// the source only starts after an In point: the graph fills that late start with silence
+    /// (`graph::audio_chain`). It is shorter when the audio ends before a segment's Out point,
+    /// because `atrim` then finds no samples for the rest and an audio-only export writes none,
+    /// and when the stream does not reach a segment at all, which then writes nothing.
     /// [`verify::verify_audio_output`] compares the finished file with this value, so a correct
     /// export of such a source is not reported as truncated. A side of the extent that the probe
     /// does not report bounds nothing: with no extent at all, this is the total duration.
