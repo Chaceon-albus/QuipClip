@@ -70,6 +70,36 @@ presets that render the same arguments share a result. The file holds at most 64
 oldest goes first. A damaged file is a miss, and a write replaces the file atomically.
 `preset_test_results()` returns the stored results of the saved presets for the binary in use.
 
+### The interface
+
+(Added on 2026-10-02.) Three places show a result:
+
+- **The preset editor** of the Settings window has a Test button. It tests the draft as it is,
+  so the test includes an unsaved edit. The test first applies the text of the extra
+  parameters, as Save does. The button is off for a draft with a field problem or a failed
+  import of the extra parameters, because Rust validates the draft as a saved preset.
+- **Each row of the preset list** has a mark for the stored result of that preset.
+- **The setup step of the export** has a row "Preset Test" with the result, its FFmpeg line, and
+  Test Again. When the step opens, it reads the stored results. It tests a preset once in the
+  background when no stored result exists for that preset and binary. It does not test while an
+  export runs, or when the read failed, for example when FFmpeg is missing.
+
+The two sources of a result are the stored results that Rust returns and the tests that the
+window ran. A test that the window ran covers a draft and a result that Rust did not store. A
+stored result applies only while the fields that reach the test equal those of the saved preset.
+
+A result belongs to one binary. The window makes the key of the binary from its path and its
+version, and only from a probe that finished. A probe of the same binary therefore does not
+change the key. A new key starts a new generation, and the results of the old binary stop
+showing. This includes a late result from a test that ran during the change. When a probe ends
+with no binary, the window reads the stored results again. When FFmpeg is missing, that read
+clears them.
+
+The status line of a result is not a live region, so a screen reader does not read it for each
+row of the list or for a test in the background. The window announces only a test that
+the user started, at its start and at its end. It does not announce a test that ends after a
+change of binary, because its result no longer shows.
+
 ### Grants
 
 Both windows may call `test_preset` and `preset_test_results` (ADR 038). The Settings window tests
