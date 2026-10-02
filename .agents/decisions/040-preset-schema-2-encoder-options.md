@@ -86,6 +86,28 @@ record reads a version 2 file as a later version and does not write over it (ADR
 1 preset renders the command line of before, plus `-pix_fmt yuv420p`. The encoded packets were
 identical with and without that flag for libx264, libx265 and ProRes.
 
+### The editor
+
+(Added on 2026-10-02.) 
+The preset editor of the Settings window has a group Extra Parameters with a text area in the
+syntax of the ffmpeg command line. Apply reads the text:
+
+- Double and single quotes, and line continuations with `\`, `^` and `` ` ``, as a shell, the
+  Windows command prompt and PowerShell write them. A word that starts with `-` is a value only
+  when it is a number or in quotes.
+- The flags that a preset field holds go into that field: `-c:v`, `-c:a`, `-crf`, `-cq`,
+  `-q:v`, `-b:v`, `-b:a`, `-ar`, `-ac` and `-pix_fmt`. A `-b:v 0` next to a constant-quality kind
+  is absorbed with a note.
+- An option with `:a` goes to the audio list, and every other option to the video list.
+- A curly quote (“ ” ‘ ’) outside quotes is an error. Pasted text often holds one, and as a
+  character it would reach the encoder inside the value, where libx264 drops the first and the
+  last entry of a parameter string with a warning that the export hides.
+- The import is all or nothing, and each error names its line and its column.
+
+The text area shows the canonical text of the two lists, one option on each line. A Save reads
+any text that was not applied. Text typed while a save runs keeps the draft unsaved, so a switch
+to another preset or a close asks first.
+
 ## Consequences
 
 - A user can tune an encoder, ask for 10-bit output, and use the constant-quality mode of NVENC.
