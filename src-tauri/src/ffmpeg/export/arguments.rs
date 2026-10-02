@@ -90,8 +90,8 @@ pub const WINDOWS_COMMAND_LINE_LIMIT: usize = 32_767;
 /// budget would therefore fail with `E2BIG` on macOS.
 ///
 /// Nothing reaches it. [`super::MAX_EXPORT_SEGMENTS`] holds the widest command the settings
-/// permit near 31600 bytes, 33 times smaller, so this constant is a real platform number for
-/// the platform rather than a bound the renderer ever tests -- and one consequence is worth
+/// permit near 30100 bytes, about 35 times smaller, so this constant is a real platform number
+/// for the platform rather than a bound the renderer ever tests -- and one consequence is worth
 /// stating plainly: because [`COMMAND_LINE_BUDGET`] is the host's own, [`GraphShape::SingleInput`]
 /// is unreachable on macOS in production. Only a Windows user's export can select the fallback;
 /// on macOS it is exercised by the tests alone.
@@ -1226,12 +1226,13 @@ mod tests {
                 "/media/source.mp4",
                 "-filter_complex",
                 concat!(
+                    "[vc]format=yuv420p[v];",
                     "[0:1]trim=start_pts=160000:end_pts=190030,setpts=PTS-STARTPTS,",
-                    "fps=30000/1001,format=yuv420p[v0];",
+                    "fps=30000/1001[v0];",
                     "[0:2]aformat=sample_rates=48000,",
                     "atrim=start_pts=256000:end_pts=304048,asetpts=PTS-STARTPTS,",
                     "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                    "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                    "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
                 ),
                 "-map",
                 "[v]",
@@ -1554,9 +1555,9 @@ mod tests {
         // `choose_graph_shape` *returns* fits. There is no third shape, so the fallback's own
         // length is the real limit of the renderer.
         //
-        // This plan measures 30253 of the 31743 available bytes. Do not read that gap as the
+        // This plan measures 28776 of the 31743 available bytes. Do not read that gap as the
         // margin the cap has: this fixture uses a 106-character path and ordinary encoder
-        // names, and the widest plan the settings actually permit needs 31613 at the same
+        // names, and the widest plan the settings actually permit needs 30136 at the same
         // count. `the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap` measures
         // that one, and it is the test that justifies the cap. This one is about the realistic
         // case, and about the fallback being reached at all.
@@ -1680,14 +1681,16 @@ mod tests {
         // for the largest segment count that still fits, on the fixture above, choosing the
         // shape the way production does.
         //
-        // Measured at the time of writing: the widest permitted plan needs 31613 of the 31743
-        // available bytes at the cap, and 101 segments do not fit. The cap of 100 is therefore
-        // exactly the largest value that is safe -- there are 130 bytes of slack, not the
-        // thousand a plausible-looking fixture suggests. ADR 023's audio settings cost 115 of
-        // the 245 bytes that were there before them; see
+        // Measured at the time of writing: the widest permitted plan needs 30136 of the 31743
+        // available bytes at the cap, so 1607 bytes of slack remain, and 105 segments fit while
+        // 106 do not. (A realistic plan on a 106-character path measures 28776 at the same
+        // count.) The slack was 130 bytes, and 101 segments did not fit, while every video chain
+        // ended in its own `format`. One `format` behind `concat` (`graph::video_output_format`)
+        // gave back 1477 bytes at the cap. Earlier, ADR 023's audio settings cost 115 of the 245
+        // bytes that were there before them; see
         // `the_widest_audio_format_is_the_one_the_widest_plan_carries_and_it_fits_at_the_cap`.
-        // (A realistic plan on a 106-character path measures 30253 at the same count.) The
-        // assertion is one-sided on purpose:
+        // A filter added to every chain spends the slack at a hundred times its own length, so
+        // the slack is smaller than it looks. The assertion is one-sided on purpose:
         // shortening the command is welcome and must not fail a test, but a filter added to the
         // graph or a settings maximum raised has to bring the cap down with it, and that is the
         // drift this catches.
@@ -1826,7 +1829,7 @@ mod tests {
         //
         // The second assertion holds a separate property: ADR 014 measurement 15 records that
         // the single-input *graph* is the larger of the two for the first three segments and
-        // the smaller one from four segments upward, 29804 bytes against 31266 at the cap. No
+        // the smaller one from four segments upward, 28327 bytes against 29789 at the cap. No
         // decision reads that, because the fallback is never selected for its graph size, but a
         // reader who expects the graphs to be ordered the other way would mis-predict where the
         // budget goes.

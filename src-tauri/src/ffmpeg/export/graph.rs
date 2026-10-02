@@ -35,6 +35,11 @@
 //! Forcing square pixels on the source-resolution path would squash an anamorphic source
 //! against what the preview showed. The comment beside that branch has the measurement.
 //!
+//! One filter stands outside every chain: the `format` that sets the output pixel format reads
+//! the output of `concat` once, where ADR 014's chain template first ended each chain with it.
+//! The reason is the command-line budget. Its chain comes **first** in the graph text, and that
+//! position is what keeps the output the same; see [`video_output_format`].
+//!
 //! No step here uses floating point. A frame rate renders as `num/den` (ADR 002), so an NTSC
 //! rate reaches ffmpeg as the exact `30000/1001`, never a rounded decimal.
 
@@ -42,11 +47,50 @@ use super::{ExportPlan, OutputTiming, PlannedAudio, PlannedSegment};
 use crate::project::Resolution;
 use crate::settings::AudioChannels;
 
-/// The pixel format every video chain ends in, from ADR 014's chain template.
+/// The pixel format every export writes, from ADR 014's chain template.
 ///
-/// `concat` requires every one of its video inputs to agree on pixel format, so each chain
-/// normalizes to one before the join rather than relying on the source's own.
-const VIDEO_PIXEL_FORMAT: &str = "format=yuv420p";
+/// This is the one value [`video_output_format`] renders. It stays a constant until a preset
+/// can name a pixel format; that unit passes the planned value instead of this one, and nothing
+/// else in the graph changes.
+const VIDEO_PIXEL_FORMAT: &str = "yuv420p";
+
+/// Render the one `format` filter of the graph: from the joined video at `[vc]` to the graph's
+/// `[v]` output label, at `pixel_format`.
+///
+/// [`build_filter_graph`] writes this as the **first** chain of the graph, ahead of every
+/// segment chain and of the `concat` that writes `[vc]`. A chain can read a label that a later
+/// chain writes. Do not move this chain to the end of the graph, beside the `concat` it reads.
+///
+/// ADR 014's chain template ended every video chain in `format=yuv420p`, in front of `concat`.
+/// One filter behind `concat` writes the same output, and the position in the text is why.
+/// A `format` filter never converts anything: it only narrows the formats its link can carry,
+/// and ffmpeg inserts a converter wherever two filters cannot agree. `concat` holds one format
+/// list for its video output and every video input together, and ffmpeg merges the lists link
+/// by link, in the order the filters appear in the graph text. With this chain first, the target
+/// format reaches that shared list before any decoded format does, so each input whose format
+/// differs is converted once, in front of `concat`, as the filter in each chain converted it.
+/// With this chain last, the decoded format of one segment could reach the shared list first. A
+/// segment decoded in another format was then converted to that format in front of `concat`,
+/// and everything was converted again behind it. That needs segments that decode to different
+/// formats, such as a source joined from parts in different formats, and the measurement found
+/// it only on the source-resolution path: an explicit resolution's `scale` converts straight to
+/// the target.
+///
+/// This depends on ffmpeg's negotiation order, which ffmpeg does not document as a contract. A
+/// measurement on ffmpeg 9.0.2 (ADR 014, measurement 19) covers it: the framemd5 hashes of the video and of the audio are
+/// identical between this graph and a `format` in each chain, on ADR 014's six fixtures, on a
+/// 10-bit 4:2:2 source, and on sources that decode to different formats in different segments
+/// (4:2:2 beside 4:2:0, and 10-bit beside 8-bit), in both [`GraphShape`] variants, with and
+/// without `scale`. `the_pixel_format_chain_is_the_first_chain_of_every_graph` pins the position.
+///
+/// The reason for one filter is the command-line budget, not the graph. A filter in each chain
+/// costs its bytes once for each segment, and at [`super::MAX_EXPORT_SEGMENTS`] the widest
+/// command the settings permit had 130 bytes of slack left on Windows. `,format=yuv420p` took
+/// 1500 bytes at the cap, and a 10-bit name such as `yuv420p10le` would take 400 more. As one
+/// chain, the filter and its label cost 23 bytes at `yuv420p`, whatever the segment count.
+fn video_output_format(pixel_format: &str) -> String {
+    format!("[vc]format={pixel_format}[v]")
+}
 
 /// Render the `aformat` every audio chain ends in: the sample format, the plan's output rate,
 /// and the plan's channel layout, from ADR 014's chain template as ADR 023 amends it.
@@ -99,7 +143,9 @@ fn audio_output_format(audio: PlannedAudio) -> String {
 /// input rate pin, which costs one filter for each audio chain under `InputPerSegment` and
 /// exactly one filter in front of `asplit` under `SingleInput`. `SingleInput` therefore holds
 /// the larger graph for the first three segments, and the smaller graph from four segments
-/// upward: 29804 bytes against 31266 bytes at the segment cap. What `SingleInput` saves lies
+/// upward: 28327 bytes against 29789 bytes at the segment cap, since the pixel format moved
+/// behind `concat` (it was 29804 against 31266 with a `format` in each chain, and the move takes
+/// the same 1477 bytes from both). What `SingleInput` saves lies
 /// outside the graph as well -- it writes the source path once instead of once for each
 /// segment -- so it extends the reachable segment count without removing the growth. ADR 014's "graph shape" section draws the conclusion this
 /// module cannot: the segment cap, not the shape, is what keeps an export inside Windows'
@@ -178,7 +224,10 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
     );
 
     let count = plan.segments.len();
-    let mut chains: Vec<String> = Vec::new();
+    // The pixel format goes first in the text, ahead of the chains and the `concat` whose output
+    // it reads. ffmpeg negotiates in text order, and only this position converts each segment
+    // once; see `video_output_format`.
+    let mut chains: Vec<String> = vec![video_output_format(VIDEO_PIXEL_FORMAT)];
 
     if shape == GraphShape::SingleInput {
         chains.push(splitter_chain(
@@ -281,6 +330,9 @@ fn audio_input_pin(audio: PlannedAudio) -> String {
 }
 
 /// Render one segment's video chain, from its input link to its `[v<index>]` output label.
+///
+/// The chain carries no `format` filter. The pixel format is set once, behind `concat`; see
+/// [`video_output_format`].
 fn video_chain(
     plan: &ExportPlan,
     shape: GraphShape,
@@ -324,8 +376,7 @@ fn video_chain(
         segment.in_pts.value(),
         segment.out_pts.value()
     );
-    let tail = format!(",{VIDEO_PIXEL_FORMAT}[v{index}]");
-    format!("{head}{timing}{scale}{tail}")
+    format!("{head}{timing}{scale}[v{index}]")
 }
 
 /// Render one segment's audio chain, from its input link to its `[a<index>]` output label.
@@ -348,7 +399,12 @@ fn audio_chain(audio: PlannedAudio, shape: GraphShape, index: usize, ticks: (i64
     format!("{head},asetpts=PTS-STARTPTS,{format}[a{index}]")
 }
 
-/// Render the closing `concat` filter and the graph's output labels.
+/// Render the `concat` filter, with the joined video at `[vc]` and the joined audio at the
+/// graph's `[a]` output label.
+///
+/// The video does not leave the graph here. [`video_output_format`], the first chain of the
+/// graph, reads `[vc]` and writes `[v]`, so the label the argument builder maps is the same in
+/// every graph.
 fn concat_chain(count: usize, has_audio: bool) -> String {
     let inputs: String = (0..count)
         .map(|index| {
@@ -360,7 +416,7 @@ fn concat_chain(count: usize, has_audio: bool) -> String {
         })
         .collect();
     let audio_streams = u8::from(has_audio);
-    let outputs = if has_audio { "[v][a]" } else { "[v]" };
+    let outputs = if has_audio { "[vc][a]" } else { "[vc]" };
     format!("{inputs}concat=n={count}:v=1:a={audio_streams}{outputs}")
 }
 
@@ -467,12 +523,12 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
-                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
     }
@@ -483,17 +539,16 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
-                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v1];",
+                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
-                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
     }
@@ -504,22 +559,20 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
-                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v1];",
+                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
-                "[2:1]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v2];",
+                "[2:1]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1[v2];",
                 "[2:2]aformat=sample_rates=44100,atrim=start_pts=882000:end_pts=903168,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a2];",
-                "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]",
+                "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vc][a]",
             )
         );
     }
@@ -533,13 +586,13 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:1]split=1[sv0];",
                 "[0:2]aformat=sample_rates=44100,asplit=1[sa0];",
-                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
     }
@@ -550,17 +603,16 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:1]split=2[sv0][sv1];",
                 "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
-                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v1];",
+                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
-                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
     }
@@ -571,21 +623,19 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:1]split=3[sv0][sv1][sv2];",
                 "[0:2]aformat=sample_rates=44100,asplit=3[sa0][sa1][sa2];",
-                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v1];",
+                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
-                "[sv2]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v2];",
+                "[sv2]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1[v2];",
                 "[sa2]atrim=start_pts=882000:end_pts=903168,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a2];",
-                "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]",
+                "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vc][a]",
             )
         );
     }
@@ -685,24 +735,24 @@ mod tests {
         assert_eq!(
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(
-                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=sample_rates=32000,atrim=start_pts=371200:end_pts=378880,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
         assert_eq!(
             build_filter_graph(&plan, GraphShape::SingleInput),
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:1]split=1[sv0];",
                 "[0:2]aformat=sample_rates=32000,asplit=1[sa0];",
-                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=371200:end_pts=378880,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
     }
@@ -729,33 +779,31 @@ mod tests {
         assert_eq!(
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(
-                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a0];",
-                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v1];",
+                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a1];",
-                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
         assert_eq!(
             build_filter_graph(&plan, GraphShape::SingleInput),
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:1]split=2[sv0][sv1];",
                 "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
-                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a0];",
-                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v1];",
+                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a1];",
-                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
         assert!(!build_filter_graph(&plan, GraphShape::InputPerSegment).contains("48000"));
@@ -770,31 +818,29 @@ mod tests {
         assert_eq!(
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(
-                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
                 "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=44100[a0];",
-                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v1];",
+                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
                 "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=44100[a1];",
-                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
         assert_eq!(
             build_filter_graph(&plan, GraphShape::SingleInput),
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:1]split=2[sv0][sv1];",
                 "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
-                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=44100[a0];",
-                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v1];",
+                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
                 "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=44100[a1];",
-                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
             )
         );
 
@@ -817,24 +863,24 @@ mod tests {
         assert_eq!(
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(
-                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
         assert_eq!(
             build_filter_graph(&plan, GraphShape::SingleInput),
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:1]split=1[sv0];",
                 "[0:2]aformat=sample_rates=44100,asplit=1[sa0];",
-                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=mono[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
     }
@@ -877,11 +923,10 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
-                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
-                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v1];",
-                "[v0][v1]concat=n=2:v=1:a=0[v]",
+                "[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
+                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
+                "[v0][v1]concat=n=2:v=1:a=0[vc]",
             )
         );
     }
@@ -898,12 +943,11 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:1]split=2[sv0][sv1];",
-                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
-                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v1];",
-                "[v0][v1]concat=n=2:v=1:a=0[v]",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
+                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
+                "[v0][v1]concat=n=2:v=1:a=0[vc]",
             )
         );
         assert!(!graph.contains("asplit"));
@@ -946,12 +990,12 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
-                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
         assert!(!graph.contains("scale="), "{graph}");
@@ -966,12 +1010,13 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "scale=1920:1080,setsar=1,format=yuv420p[v0];",
+                "scale=1920:1080,setsar=1[v0];",
                 "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
         assert!(graph.contains("scale=1920:1080,setsar=1"), "{graph}");
@@ -985,12 +1030,13 @@ mod tests {
         assert_eq!(
             graph,
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,",
-                "fps=30000/1001,format=yuv420p[v0];",
+                "fps=30000/1001[v0];",
                 "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
         // 30000/1001 has no terminating decimal expansion, so any rounded spelling of it
@@ -1009,24 +1055,24 @@ mod tests {
         assert_eq!(
             build_filter_graph(&plan, GraphShape::InputPerSegment),
             concat!(
-                "[0:2]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[vc]format=yuv420p[v];",
+                "[0:2]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[0:5]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
                 "asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
         assert_eq!(
             build_filter_graph(&plan, GraphShape::SingleInput),
             concat!(
+                "[vc]format=yuv420p[v];",
                 "[0:2]split=1[sv0];",
                 "[0:5]aformat=sample_rates=44100,asplit=1[sa0];",
-                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1,",
-                "format=yuv420p[v0];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
                 "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
                 "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
-                "[v0][a0]concat=n=1:v=1:a=1[v][a]",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
             )
         );
     }
@@ -1067,6 +1113,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_pixel_format_chain_is_the_first_chain_of_every_graph() {
+        // The two rules `video_output_format` holds, swept rather than pinned. No segment chain
+        // carries a `format`, because a filter in each chain costs its bytes once for each
+        // segment, against a command-line budget that `arguments.rs` measures at the segment cap.
+        // And the one `format` chain is the first chain of the graph text: ffmpeg negotiates
+        // pixel formats in text order, and at the end of the graph the same chain converts a
+        // segment twice when segments decode to different formats. Like the guard above, this
+        // still fails if every pinned string is updated to match a regression.
+        let mut scaled = fixture_plan(3);
+        scaled.resolution = Some(Resolution { w: 1280, h: 720 });
+        let mut silent = fixture_plan(3);
+        silent.audio = None;
+        for segment in &mut silent.segments {
+            segment.audio_in_tick = None;
+            segment.audio_out_tick = None;
+        }
+
+        for plan in [
+            fixture_plan(1),
+            fixture_plan(2),
+            fixture_plan(3),
+            scaled,
+            silent,
+        ] {
+            for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+                let graph = build_filter_graph(&plan, shape);
+                assert!(
+                    !graph.contains(",format="),
+                    "a chain carries a format in {graph}"
+                );
+                assert_eq!(graph.matches("format=yuv420p").count(), 1, "{graph}");
+                assert_eq!(
+                    graph.split(';').next(),
+                    Some("[vc]format=yuv420p[v]"),
+                    "{graph}"
+                );
+                // `[vc]` joins exactly two filters: `concat` writes it, the format reads it.
+                assert_eq!(graph.matches("[vc]").count(), 2, "{graph}");
+                assert_eq!(graph.matches("[v]").count(), 1, "{graph}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_format_behind_concat_renders_the_pixel_format_it_is_given() {
+        // One parameter carries the pixel format, so a preset value reaches the graph through
+        // this function alone.
+        assert_eq!(
+            video_output_format(VIDEO_PIXEL_FORMAT),
+            "[vc]format=yuv420p[v]"
+        );
+        assert_eq!(video_output_format("p010le"), "[vc]format=p010le[v]");
+        assert_eq!(
+            video_output_format("yuv420p10le"),
+            "[vc]format=yuv420p10le[v]"
+        );
     }
 
     #[test]
