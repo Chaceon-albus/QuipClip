@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-25
 - Deciders: capric98
+- Amended by: ADR 042
 
 ## Context
 
@@ -60,7 +61,9 @@ network access only when cargo names offline mode as a possible cause.
 part and no build part. `MAJOR` and `MINOR` are 255 or less, and `PATCH` is 65535 or less.
 The limits come from the MSI product version, because `bundle.targets` is `"all"` and the
 Windows build makes an MSI package. The MSI format accepts a pre-release part only when it
-is all digits. A pre-release version needs a separate decision.
+is all digits. A version with a pre-release part needs a separate decision. ADR 042 lets
+the maintainer mark a published release with the GitHub pre-release flag. Its version is
+still a release version.
 
 **Release tag.** The release tag is `v` and the version, for example `v0.2.0`. It is an
 annotated tag on a commit on `main`, and the `Cargo.toml` of that commit has the version.
@@ -105,8 +108,10 @@ each release tag. It obeys these rules:
 6. The `publish` job runs in the `release` environment. A person can add required
    reviewers to that environment, who inspect the draft first. After the approval, the job
    checks the draft assets and their digests again. It checks the tag immediately before
-   it publishes the draft. Nothing else publishes a release.
-7. The release becomes Latest only when no other published release has a higher version.
+   it publishes the draft. No other job publishes a release. The maintainer does not
+   publish the draft from its edit form (ADR 042).
+7. The release becomes Latest only when no other published full release has a higher
+   version. A pre-release is not a full release (ADR 042).
 8. After the publish, the job makes sure that the release is immutable, and it runs
    `gh release verify`. A failure in these two steps does not make the release wrong.
 
@@ -147,7 +152,8 @@ nobody can move or delete the tag.
   not agree with `Cargo.toml`.
 - `package.json` has no version. `npm version` and `pnpm version` add the field again, so
   do not use them.
-- The project cannot make a pre-release version until a new decision allows one.
+- The project cannot make a version with a pre-release part until a new decision allows
+  one. A release can carry the GitHub pre-release flag (ADR 042).
 - A version that a published release used stays used. The next release takes the next
   version.
 - Each release runs the full CI again on the tagged commit, and the bundles build with no

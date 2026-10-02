@@ -62,6 +62,7 @@ document summarizes them and shows how the parts fit together.
 | [`039-recover-the-preview-after-a-decode-error.md`](../.agents/decisions/039-recover-the-preview-after-a-decode-error.md)                   | A decode error mid-file stalls the preview, and the next seek reloads it   |
 | [`040-preset-schema-2-encoder-options.md`](../.agents/decisions/040-preset-schema-2-encoder-options.md)                                     | Encoder options, constant quality and a pixel format in each preset        |
 | [`041-test-a-preset-on-this-machine.md`](../.agents/decisions/041-test-a-preset-on-this-machine.md)                                         | A preset can be tested on this machine with its own arguments              |
+| [`042-mark-a-release-as-a-pre-release.md`](../.agents/decisions/042-mark-a-release-as-a-pre-release.md)                                     | The maintainer marks a published release as a pre-release                  |
 
 ## Shape
 
@@ -573,7 +574,7 @@ TypeScript is held at 5.9, because `typescript-eslint` caps its peer range below
 
 ## Version and release
 
-See ADR 034.
+See ADR 034 and ADR 042.
 
 `src-tauri/Cargo.toml` holds the only copy of the application version. `tauri.conf.json`
 and `package.json` have no `version` field, so Tauri reads the version from `Cargo.toml`.
@@ -587,4 +588,5 @@ names and their SHA-256 digests against `scripts/release-assets.mjs`. The last j
 in the `release` environment. It checks the draft and the tag again, and publishes the
 draft as an immutable release. `tauri.macos.conf.json` gives the macOS bundle an ad-hoc
 signature. `docs/releasing.md` gives the setup, the steps of a release, and what to do
-when a job fails.
+when a job fails. After the publish, the maintainer can mark a release with the GitHub
+pre-release flag. Its version does not change (ADR 042).

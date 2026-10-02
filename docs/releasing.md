@@ -19,7 +19,8 @@ add a `version` field to `package.json`.
 
 A release version is `MAJOR.MINOR.PATCH`, for example `0.2.0`. It has no pre-release part
 such as `-beta.1`. `MAJOR` and `MINOR` are 255 or less, and `PATCH` is 65535 or less,
-because the Windows MSI package cannot hold a larger value.
+because the Windows MSI package cannot hold a larger value. A pre-release also has a
+release version. See [Pre-releases](#pre-releases).
 
 | Command                                       | Result                                                   |
 | --------------------------------------------- | -------------------------------------------------------- |
@@ -115,7 +116,12 @@ all the steps after it.
      QuipClip must then start. macOS must not say that the app is damaged.
    - The immutable releases setting is on.
 
-   When all four are correct, approve the `publish` job.
+   When all four are correct, approve the `publish` job. For a pre-release, do not set
+   the flag yet. See [Pre-releases](#pre-releases).
+
+   Do not publish the draft from its edit form with **Publish release**. That publish
+   skips the checks of the `publish` job. When it happened, see the last row of the table
+   in [When a job fails](#when-a-job-fails).
 
 9. Make sure that the release shows the **Immutable** label on the **Releases** page.
    Then verify the attestation, and verify a downloaded asset:
@@ -132,7 +138,49 @@ all the steps after it.
    gh release verify-asset v0.2.0 QuipClip_0.2.0_aarch64.dmg --repo Chaceon-albus/QuipClip
    ```
 
-After the publish, you can still edit the title and the notes of the release.
+After the publish, you can still edit the title and the notes of the release, and change
+whether it is a pre-release or the Latest release.
+
+## Pre-releases
+
+ADR 042 gives the reasons for these rules.
+
+A full release is a published release with no pre-release flag. A pre-release is a
+published release with the GitHub pre-release flag. Its version is a release version, so
+it has no pre-release part such as `-beta.1`. The release workflow always publishes a full
+release. You set the flag after the publish.
+
+Do not set the flag on the draft. The `publish` job asks GitHub to make the release Latest
+when its version is higher than the version of each other published full release. The
+GitHub REST documentation says that a pre-release cannot be Latest. GitHub can refuse the
+request, and the publish step then fails. The release is then still a draft. Clear the
+flag on the draft, click **Save draft**, and use **Re-run failed jobs**.
+
+To publish a pre-release:
+
+1. Do steps 1 to 8 of [Steps](#steps).
+2. On the **Releases** page, click the pencil icon of the release.
+3. Select **This is a pre-release**.
+4. Click **Update release**.
+5. Look at the **Latest** label on the **Releases** page. A pre-release cannot be Latest.
+   When the label is not on the published full release with the highest version, edit
+   that release, select **Set as latest release**, and click **Update release**.
+6. Do step 9 of [Steps](#steps).
+
+From the publish in step 8 of [Steps](#steps) until you click **Update release**, the
+release is a full release, and it can be Latest.
+
+The version of a published pre-release stays used. The next release takes the next
+version. The `publish` job compares the new version only with the published full releases.
+So a later full release with a lower version than a pre-release can become Latest.
+
+To make a pre-release a full release with the same bundles:
+
+1. On the **Releases** page, click the pencil icon of the release.
+2. Clear **This is a pre-release**.
+3. When its version is higher than the version of each other published full release,
+   select **Set as latest release**. Otherwise, clear it.
+4. Click **Update release**.
 
 ## The release workflow
 
@@ -146,9 +194,9 @@ After the publish, you can still edit the title and the notes of the release.
 | `draft`   | write | Finds or makes the draft, attaches the bundles, and checks the assets                 |
 | `publish` | write | Checks the tag and the assets again, publishes, and checks immutability               |
 
-Only the `publish` job makes the release public and immutable. Before it, the release is a
-draft that only the maintainers can see. `scripts/release-assets.mjs` holds the list of
-the expected assets.
+In the workflow, only the `publish` job publishes the release. Before it, the release is a
+draft that only the maintainers can see. Do not publish the draft from its edit form, as
+step 8 says. `scripts/release-assets.mjs` holds the list of the expected assets.
 
 A new push of the same tag stops the old run.
 
@@ -168,18 +216,19 @@ git push origin --delete v0.2.0
 git tag -d v0.2.0
 ```
 
-| Failed job or step               | What to do                                                                                                                                                                                                                                                   |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `verify`                         | Read the error. Delete the tag, correct the fault, and make the tag again.                                                                                                                                                                                   |
-| `ci` or `build`, temporary cause | Use **Re-run failed jobs**.                                                                                                                                                                                                                                  |
-| `ci` or `build`, fault in source | Correct the fault on `main`. Delete the tag, and make it again on the new commit.                                                                                                                                                                            |
-| `draft`, published release found | A published release of this tag exists. Do not run the workflow again. Release the next patch version.                                                                                                                                                       |
-| `draft`, bundle or asset check   | Read the asset list in the log. For a failed upload, use **Re-run failed jobs**. For a wrong bundle name, correct `scripts/release-assets.mjs` on `main`, delete the draft and the tag, and make the tag again.                                              |
-| `publish`, reviewer rejects      | Nothing is published. Correct the fault, delete the draft and the tag, and make the tag again. To publish with no change, use **Re-run failed jobs**.                                                                                                        |
-| `publish`, no approval           | GitHub stops the wait after 30 days, and then no re-run is possible. An approval after the bundle artifacts expire also fails. In both cases nothing is published. Delete the draft and the tag, and push the tag again.                                     |
-| `publish`, draft or tag check    | First open the **Releases** page. When the release is published, do not delete it, and look for the **Immutable** label. When it is still a draft, nothing is published: find the cause, delete the draft and the tag, and push the correct tag again.       |
-| `publish`, immutability check    | First look for the **Immutable** label on the **Releases** page. When it shows, the release is correct. When it does not show, the release is mutable and its tag is still free. Delete the release, enable immutable releases, and use **Re-run all jobs**. |
-| `publish`, attestation check     | The release is published. Do not run the workflow again. Run `gh release verify` by hand. When it passes, the release is correct.                                                                                                                            |
+| Failed job or step                 | What to do                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `verify`                           | Read the error. Delete the tag, correct the fault, and make the tag again.                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `ci` or `build`, temporary cause   | Use **Re-run failed jobs**.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `ci` or `build`, fault in source   | Correct the fault on `main`. Delete the tag, and make it again on the new commit.                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `draft`, published release found   | A published release of this tag exists. Do not run the workflow again. Release the next patch version.                                                                                                                                                                                                                                                                                                                                                                            |
+| `draft`, bundle or asset check     | Read the asset list in the log. For a failed upload, use **Re-run failed jobs**. For a wrong bundle name, correct `scripts/release-assets.mjs` on `main`, delete the draft and the tag, and make the tag again.                                                                                                                                                                                                                                                                   |
+| `publish`, reviewer rejects        | Nothing is published. Correct the fault, delete the draft and the tag, and make the tag again. To publish with no change, use **Re-run failed jobs**.                                                                                                                                                                                                                                                                                                                             |
+| `publish`, no approval             | GitHub stops the wait after 30 days, and then no re-run is possible. An approval after the bundle artifacts expire also fails. In both cases nothing is published. Delete the draft and the tag, and push the tag again.                                                                                                                                                                                                                                                          |
+| `publish`, draft or tag check      | First open the **Releases** page. When the release is published, do not delete it, and look for the **Immutable** label. When it is still a draft, nothing is published: find the cause, delete the draft and the tag, and push the correct tag again.                                                                                                                                                                                                                            |
+| `publish`, immutability check      | First look for the **Immutable** label on the **Releases** page. When it shows, the release is correct. When it does not show, the release is mutable and its tag is still free. Delete the release, enable immutable releases, and use **Re-run all jobs**.                                                                                                                                                                                                                      |
+| `publish`, attestation check       | The release is published. Do not run the workflow again. Run `gh release verify` by hand. When it passes, the release is correct.                                                                                                                                                                                                                                                                                                                                                 |
+| Draft published from its edit form | The `publish` job did not check the release. Cancel the **Release** run. Make sure that `gh api repos/Chaceon-albus/QuipClip/commits/refs/tags/v0.2.0 --jq .sha` gives the commit of the run. Then do step 9. When the release shows the **Immutable** label and the tag is correct, do not delete the release. When the tag points at another commit, the release is wrong. Release the next patch version. When the label does not show, use the row of the immutability check. |
 
 ## Known limits
 
@@ -188,7 +237,8 @@ git tag -d v0.2.0
   **Privacy & Security**. The Windows bundles have no signature, so SmartScreen warns at
   the first start. A published release cannot get signed bundles later, so signed bundles
   need a new version.
-- The project makes no pre-release versions. ADR 034 gives the reason.
+- A version has no pre-release part, such as `-beta.1`. ADR 034 gives the reason. A
+  pre-release also has a release version (ADR 042).
 - `release.yml` and `ci.yml` pin their actions to commits, and the pins do not update
   without a change. Update the pins and their comments by hand. Where both files use the
   same action, pin the same commit in both.
