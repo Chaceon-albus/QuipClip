@@ -2,8 +2,8 @@
  * Pure presenter for the export dialog setup step.
  *
  * Implements preset resolution, the summary sentence, the grouped preset summary, the size
- * estimate, and export blocker detection according to ADR 002, ADR 011, ADR 023, ADR 024 and
- * ADR 028. Pure module with no React dependencies.
+ * estimate, and export blocker detection according to ADR 002, ADR 011, ADR 023, ADR 024,
+ * ADR 028 and ADR 036. Pure module with no React dependencies.
  */
 
 import {
@@ -14,6 +14,7 @@ import {
   type MessageView,
   type PresetEncoderMarkView,
 } from "@/components/settings/presetPresenter";
+import type { ExportStreams } from "@/features/export/types";
 import type { FfmpegState } from "@/features/ffmpeg/types";
 import type { MediaProbe } from "@/features/media";
 import { getNominalFrameRate } from "@/features/playback";
@@ -574,8 +575,11 @@ export type ExactBytes = {
 export type ExportSizeInput = {
   /** The quality control and the audio settings of the selected preset. */
   readonly preset: Pick<Preset, "quality" | "audioEncoder" | "audioBitrate">;
-  /** True when the open source has an audio stream, so the export writes audio. */
-  readonly hasAudio: boolean;
+  /**
+   * The streams that the export writes (`resolveExportStreams`). A source with no audio
+   * stream gives `videoOnly`, so the export writes no audio.
+   */
+  readonly streams: ExportStreams;
   /**
    * The exact total duration of the segments in ticks of `videoTimeBase`, from
    * `activeSourceDurationTicks`. Null when it is not known.
@@ -590,17 +594,23 @@ export type ExportSizeInput = {
  * `(video bitrate + audio bitrate) × total duration`. A bitrate counts kilobits per second
  * (ADR 013), so the result is `kbps × 1000 / 8` bytes for each second.
  *
- * Only a preset in bitrate mode has an estimate. A CRF or a quality scale sets a quality and
- * not a size, so any number would be a guess. The estimate also needs the bitrate of every
- * stream the export writes: with an audio stream in the source, an audio encoder that is
- * lossless, or that uses its default bitrate, has no known bitrate, and the result is null.
- * A source with no audio stream adds no audio. The estimate leaves out the container overhead.
+ * The estimate needs the bitrate of every stream the export writes, and adds nothing for a
+ * stream that it does not write (ADR 036):
+ * - The video has a bitrate only in bitrate mode. A CRF or a quality scale sets a quality and
+ *   not a size, so any number would be a guess. An audio-only export ignores the quality.
+ * - The audio has no known bitrate with an encoder that is lossless, or that uses its default
+ *   bitrate. A video-only export, and an export of a source with no audio stream, ignore the
+ *   audio settings.
+ *
+ * The estimate leaves out the container overhead.
  *
  * Returns null when any input is not known, or when the duration is not positive.
  */
 export function estimateExportBytes(input: ExportSizeInput): ExactBytes | null {
-  const { preset, hasAudio, durationTicks, videoTimeBase } = input;
-  if (preset.quality.kind !== "bitrate") {
+  const { preset, streams, durationTicks, videoTimeBase } = input;
+  const writesVideo = streams !== "audioOnly";
+  const writesAudio = streams !== "videoOnly";
+  if (writesVideo && preset.quality.kind !== "bitrate") {
     return null;
   }
   if (
@@ -612,12 +622,15 @@ export function estimateExportBytes(input: ExportSizeInput): ExactBytes | null {
   ) {
     return null;
   }
-  const videoKbps = preset.quality.value;
-  if (!isPositiveSafeInteger(videoKbps)) {
-    return null;
+  let videoKbps = 0;
+  if (writesVideo) {
+    if (!isPositiveSafeInteger(preset.quality.value)) {
+      return null;
+    }
+    videoKbps = preset.quality.value;
   }
   let audioKbps = 0;
-  if (hasAudio) {
+  if (writesAudio) {
     if (
       isLosslessAudioEncoder(preset.audioEncoder) ||
       !isPositiveSafeInteger(preset.audioBitrate)
@@ -780,19 +793,28 @@ export function presentSizeEstimate(
 }
 
 /**
- * Checks whether an export blocker exists for the given preset.
+ * Checks whether an export blocker exists for the given preset and the streams that the
+ * export writes.
  *
  * Returns `export.setup.noPresets` when no preset is selected or available.
- * Returns `settings.field.containerMismatch` when the preset pairs an incompatible container
- * and audio encoder (e.g. mov + flac, mov + libopus per ADR 023).
+ * Returns `settings.field.containerMismatch` when the export writes the video and the audio,
+ * and the preset pairs an incompatible container and audio encoder (e.g. mov + flac, mov +
+ * libopus per ADR 023). A video-only export writes no audio. An audio-only export of a MOV
+ * preset uses the `mp4` muxer, which accepts both encoders (ADR 036). Neither is blocked.
  * Otherwise returns `null`, indicating the setup step allows proceeding to file destination selection.
  */
-export function presentSetupBlocker(preset: Preset | null): SetupBlockerView | null {
+export function presentSetupBlocker(
+  preset: Preset | null,
+  streams: ExportStreams,
+): SetupBlockerView | null {
   if (preset === null) {
     return { key: "export.setup.noPresets" };
   }
 
-  if (!isAudioEncoderAllowedIn(preset.container, preset.audioEncoder)) {
+  if (
+    streams === "videoAndAudio" &&
+    !isAudioEncoderAllowedIn(preset.container, preset.audioEncoder)
+  ) {
     return {
       key: "settings.field.containerMismatch",
       values: {
@@ -882,8 +904,10 @@ export type PresetOptionView = {
  * Presents the items of the preset select, in the order of the library.
  *
  * Each item carries what a row of the preset list in Settings shows: the name, the Default
- * badge, the summary line of `presentPresetRowSummary`, and the encoder mark of
- * `presentPresetEncoderMark`. The select and the list therefore describe a preset the same way.
+ * badge, the summary line of `presentPresetRowSummary`, and the encoder mark. The select and
+ * the list therefore describe a preset the same way. The mark weighs only the encoders of the
+ * streams that the export writes (`presentSetupEncoderMark`), so with both streams it is the
+ * mark of the list row.
  *
  * An `activePresetId` that names no preset marks no item. The step then selects the first
  * preset (`resolveSetupPresetId`), but that preset is not the default preset.
@@ -892,12 +916,31 @@ export function presentPresetOptions(
   settings: Pick<Settings, "presets" | "activePresetId">,
   ffmpegState: Pick<FfmpegState, "status" | "results">,
   formatter: Intl.NumberFormat,
+  streams: ExportStreams,
 ): PresetOptionView[] {
   return settings.presets.map((preset) => ({
     id: preset.id,
     name: preset.name,
     isDefault: preset.id === settings.activePresetId,
     summary: presentPresetRowSummary(preset, formatter),
-    encoderMark: presentPresetEncoderMark(ffmpegState, preset),
+    encoderMark: presentSetupEncoderMark(ffmpegState, preset, streams),
   }));
+}
+
+/**
+ * The encoder mark of a preset in the setup step: the mark of the preset list row
+ * (`presentPresetEncoderMark`), for the encoders of the streams that the export writes only
+ * (ADR 036). An audio-only export runs no video encoder, and a video-only export runs no audio
+ * encoder, so an encoder that does not run is not marked. The mark does not block the export
+ * (ADR 024).
+ */
+export function presentSetupEncoderMark(
+  ffmpegState: Pick<FfmpegState, "status" | "results">,
+  preset: Pick<Preset, "videoEncoder" | "audioEncoder">,
+  streams: ExportStreams,
+): PresetEncoderMarkView | null {
+  return presentPresetEncoderMark(ffmpegState, preset, {
+    video: streams !== "audioOnly",
+    audio: streams !== "videoOnly",
+  });
 }

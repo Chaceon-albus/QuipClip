@@ -179,9 +179,11 @@ export function TitleBar() {
   const handleExport = () => {
     void runExportFlow({
       setModalOpen: setExportDialogOpen,
-      // The save dialog and the open dialog list the same file kind, so both read the
-      // one `dialog.videoFilter` label. A second key with the same text would drift.
+      // The save dialog of an export with video and the open dialog list the same file
+      // kind, so both read the one `dialog.videoFilter` label. A second key with the same
+      // text would drift. An audio-only export lists audio files (ADR 036).
       filterName: t("dialog.videoFilter"),
+      audioFilterName: t("dialog.audioFilter"),
     });
   };
 

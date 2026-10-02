@@ -2,7 +2,7 @@
  * Native file dialog orchestration for export destination selection.
  *
  * Implements the Save Export flow with dependency injection, cancel handling,
- * error normalization, and preset container extension filtering.
+ * error normalization, and filtering by the extension of the output.
  */
 
 import { save as tauriSave } from "@tauri-apps/plugin-dialog";
@@ -14,11 +14,13 @@ import { ExportError } from "./types";
  */
 export interface OpenExportSaveDialogOptions {
   /**
-   * Container format / extension (e.g. "mp4", "mov", "mkv").
+   * The extension of the output file, with or without its dot: the container of the preset
+   * ("mp4", "mov", "mkv"), or "m4a" or "mka" for an audio-only export (ADR 036).
    */
-  container: string;
+  extension: string;
   /**
-   * Localized display label for the file filter in the native dialog.
+   * Localized display label for the file filter in the native dialog: video files, or audio
+   * files for an audio-only export.
    */
   filterName: string;
   /**
@@ -43,12 +45,12 @@ export interface OpenExportSaveDialogOptions {
  * Opens a native save file dialog to select an export output file path.
  *
  * Requirements:
- * - Uses @tauri-apps/plugin-dialog save with localized filter label and extension matching the preset container.
+ * - Uses @tauri-apps/plugin-dialog save with localized filter label and the extension of the output.
  * - Cancel is a strict no-op returning null (never an error).
  * - A rejection reports a dialogFailed ExportError with NO detail (never leaking local messages) through reportError and returns null.
  * - Never rethrows.
  *
- * @param options Configuration options including required container and filterName.
+ * @param options Configuration options including required extension and filterName.
  * @returns The chosen output file path on success, or null on cancel/failure.
  */
 export async function openExportSaveDialog(
@@ -57,7 +59,7 @@ export async function openExportSaveDialog(
   const saveDialogFn = options.saveDialog ?? tauriSave;
   const reportErrorFn = options.reportError ?? exportStore.getState().reportError;
 
-  const extension = options.container.replace(/^\./, "");
+  const extension = options.extension.replace(/^\./, "");
 
   let selected: unknown;
   try {

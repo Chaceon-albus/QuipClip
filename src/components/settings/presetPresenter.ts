@@ -482,6 +482,11 @@ export type PresetEncoderMarkView = {
   reasonKey: string;
 };
 
+/** The encoder slots of a preset that an encoder mark weighs. */
+export type EncoderMarkSlots = { readonly video: boolean; readonly audio: boolean };
+
+const BOTH_ENCODER_SLOTS: EncoderMarkSlots = { video: true, audio: true };
+
 /**
  * Presents the encoder mark for one preset row in the library list, so a preset naming an
  * encoder this machine cannot use is visible without opening it (ADR 013).
@@ -491,6 +496,11 @@ export type PresetEncoderMarkView = {
  * reached wins over an "unknown" in either slot, because a neutral badge naming the encoder
  * nothing is known about would hide the encoder that will really fail. Video before audio
  * decides a tie inside one severity. Returns `null` when both encoders are known to work.
+ *
+ * `slots` names the encoders that the mark weighs, both by default. With one slot, `null` means
+ * that the encoder of that slot is known to work. The export setup step weighs only the
+ * encoders of the streams that the export writes (ADR 036): an audio-only export does not run
+ * the video encoder, so that encoder cannot fail it.
  *
  * Ignores a `notProbed` reason. That reason says no report exists YET, so it holds for every
  * encoder name at once: marking on it puts a badge on every row while the probe runs, and on
@@ -502,18 +512,24 @@ export type PresetEncoderMarkView = {
 export function presentPresetEncoderMark(
   state: Pick<FfmpegState, "status" | "results">,
   preset: Pick<Preset, "videoEncoder" | "audioEncoder">,
+  slots: EncoderMarkSlots = BOTH_ENCODER_SLOTS,
 ): PresetEncoderMarkView | null {
-  const video = getEncoderAvailability(state, preset.videoEncoder);
-  const audio = getEncoderAvailability(state, preset.audioEncoder);
+  const weighed: EncoderOption[] = [];
+  if (slots.video) {
+    weighed.push(getEncoderAvailability(state, preset.videoEncoder));
+  }
+  if (slots.audio) {
+    weighed.push(getEncoderAvailability(state, preset.audioEncoder));
+  }
 
-  const both = [video, audio].filter(
+  const candidates = weighed.filter(
     (option): option is ReasonedEncoderOption =>
       option.availability !== "available" && option.reason !== "notProbed",
   );
 
   const target =
-    both.find((option) => option.availability === "unavailable") ??
-    both.find((option) => option.availability === "unknown");
+    candidates.find((option) => option.availability === "unavailable") ??
+    candidates.find((option) => option.availability === "unknown");
 
   if (!target) {
     return null;

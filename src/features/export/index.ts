@@ -14,3 +14,4 @@ export * from "./dialog";
 export * from "./request";
 export * from "./runState";
 export * from "./runTiming";
+export * from "./streamChoice";

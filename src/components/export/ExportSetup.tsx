@@ -11,6 +11,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  resolveExportStreams,
+  sourceHasAudio,
+  type ExportStreamChoice,
+  type ExportStreamKind,
+} from "@/features/export/streamChoice";
 import { useFfmpegStore } from "@/features/ffmpeg";
 import { useMediaStore } from "@/features/media";
 import { resolveTimecodeDisplay } from "@/features/playback";
@@ -25,10 +33,7 @@ import {
 import { getResolvedLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { DefaultBadge } from "@/components/settings/DefaultBadge";
-import {
-  joinDescribedBy,
-  presentPresetEncoderMark,
-} from "@/components/settings/presetPresenter";
+import { joinDescribedBy } from "@/components/settings/presetPresenter";
 import { presentSettingsError } from "@/components/settings/settingsErrorPresenter";
 import type { Preset } from "@/features/settings/types";
 import {
@@ -36,6 +41,7 @@ import {
   presentExportSummarySentence,
   presentPresetOptions,
   presentPresetSummary,
+  presentSetupEncoderMark,
   presentSetupSettingsSection,
   presentSizeEstimate,
   resolveExportSetupStepState,
@@ -45,6 +51,11 @@ import {
   type PresetSummaryRowView,
   type SetupBlockerView,
 } from "./exportSetupPresenter";
+import {
+  presentStreamSummary,
+  presentStreamSwitches,
+  type StreamSwitchView,
+} from "./exportStreamsPresenter";
 
 // One bigint or null, which compare by value, so the step renders again only when the exact
 // duration changes.
@@ -108,20 +119,97 @@ function SummaryRows({
   );
 }
 
-/** One group of the preset summary, named by its heading. */
+/**
+ * The switch at the end of a group heading. It chooses whether the export writes the stream
+ * of the group (ADR 036).
+ *
+ * A locked switch carries `aria-disabled` and not `disabled`, so it keeps the focus and shows
+ * its tooltip, and it ignores a toggle. Its description (`aria-describedby`) is a hidden copy
+ * of the reason. The tooltip describes only its trigger, the span, and only while it shows. A
+ * hidden element still gives a description, and a reading of the page does not read it twice.
+ *
+ * The tooltip trigger is a span around the switch. Radix writes the state of the tooltip to
+ * `data-state` of its trigger, and on the switch it would replace the checked state that the
+ * switch styles read. The span and the tooltip stay mounted when the lock changes, so the
+ * switch keeps the focus. The tooltip shows only for a locked switch.
+ */
+function StreamSwitch({
+  view,
+  frozen,
+  onCheckedChange,
+  translate,
+}: {
+  view: StreamSwitchView;
+  /** True while the save panel is open: the request already holds the choice. */
+  frozen: boolean;
+  onCheckedChange: (kind: ExportStreamKind, on: boolean) => void;
+  translate: Translate;
+}) {
+  const reasonId = useId();
+  const reason = view.lockKey !== null ? translate(view.lockKey) : null;
+  const locked = reason !== null || frozen;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex">
+          <Switch
+            size="sm"
+            checked={view.checked}
+            onCheckedChange={(checked) => {
+              if (!locked) {
+                onCheckedChange(view.kind, checked);
+              }
+            }}
+            aria-label={translate(view.labelKey)}
+            aria-disabled={locked ? true : undefined}
+            aria-describedby={reason !== null ? reasonId : undefined}
+            // 70 % keeps the on state of a locked switch readable: a source without audio
+            // shows a locked video switch on every export.
+            className="aria-disabled:opacity-70"
+          />
+          {reason !== null ? (
+            <span id={reasonId} hidden>
+              {reason}
+            </span>
+          ) : null}
+        </span>
+      </TooltipTrigger>
+      {reason !== null ? <TooltipContent>{reason}</TooltipContent> : null}
+    </Tooltip>
+  );
+}
+
+/**
+ * One group of the preset summary, named by its heading, with the switch of its stream at the
+ * end of the heading.
+ */
 function SummaryGroup({
   group,
+  streamSwitch,
+  streamsFrozen,
+  onStreamChange,
   translate,
 }: {
   group: PresetSummaryGroupView;
+  streamSwitch: StreamSwitchView;
+  streamsFrozen: boolean;
+  onStreamChange: (kind: ExportStreamKind, on: boolean) => void;
   translate: Translate;
 }) {
   const headingId = useId();
   return (
     <div role="group" aria-labelledby={headingId} className="space-y-1">
-      <h3 id={headingId} className="font-medium text-foreground">
-        {translate(group.headingKey)}
-      </h3>
+      <div className="flex items-center justify-between gap-3">
+        <h3 id={headingId} className="font-medium text-foreground">
+          {translate(group.headingKey)}
+        </h3>
+        <StreamSwitch
+          view={streamSwitch}
+          frozen={streamsFrozen}
+          onCheckedChange={onStreamChange}
+          translate={translate}
+        />
+      </div>
       {group.rows.length > 0 ? (
         <SummaryRows rows={group.rows} translate={translate} />
       ) : null}
@@ -228,6 +316,18 @@ export interface ExportSetupProps {
   blocker: SetupBlockerView | null;
   /** Callback fired when the user selects a different preset from the dropdown. */
   onSelect: (presetId: string) => void;
+  /** The stream switches as the user set them for this session (ADR 036). */
+  streamChoice: ExportStreamChoice;
+  /**
+   * Callback fired when the user turns a stream on or off. A locked switch does not call it,
+   * so it never asks to turn off the last stream.
+   */
+  onStreamChange: (kind: ExportStreamKind, on: boolean) => void;
+  /**
+   * True while the save panel is open. The request already holds the stream choice, so the
+   * switches do not change until the panel closes.
+   */
+  streamsFrozen?: boolean;
   /**
    * Opens the Settings window at `section`: from Open Settings when no preset can be listed,
    * and from Manage Presets under the preset select. The Settings window is a window of its
@@ -262,13 +362,21 @@ export interface ExportSetupProps {
  *   total duration that the Export tooltip of the title bar also shows (ADR 028).
  * - Summarizes the preset under Video and Audio. A "Same as Source" value names the value of
  *   the open source.
- * - Estimates the output size when the preset sets a video bitrate.
+ * - Puts a switch at the end of the Video and the Audio heading, which chooses the streams
+ *   that the export writes (ADR 036). A group that the export does not write shows one line in
+ *   place of its rows, and the Container row names the file of an audio-only export. The size
+ *   estimate, the encoder marks and the blocker follow the choice.
+ * - Estimates the output size when the bitrate of each stream that the export writes is
+ *   known.
  */
 export function ExportSetup({
   selectedPresetId,
   selectedPreset,
   blocker,
   onSelect,
+  streamChoice,
+  onStreamChange,
+  streamsFrozen = false,
   onOpenSettings,
   firstControlRef,
 }: ExportSetupProps) {
@@ -379,23 +487,31 @@ export function ExportSetup({
     );
   }
 
+  // The streams that the export writes, as the dialog resolves them for the blocker and the
+  // request.
+  const streams = resolveExportStreams(streamChoice, sourceHasAudio(probe));
+  const streamSwitches = presentStreamSwitches(streamChoice, probe);
   const options = settings
-    ? presentPresetOptions(settings, ffmpegState, numberFormatter)
+    ? presentPresetOptions(settings, ffmpegState, numberFormatter, streams)
     : [];
   const selectedOption =
     options.find((option) => option.id === selectedPresetId) ?? null;
   const encoderMark = selectedPreset
-    ? presentPresetEncoderMark(ffmpegState, selectedPreset)
+    ? presentSetupEncoderMark(ffmpegState, selectedPreset, streams)
     : null;
   const summary = selectedPreset
-    ? presentPresetSummary(selectedPreset, numberFormatter, probe)
+    ? presentStreamSummary(
+        presentPresetSummary(selectedPreset, numberFormatter, probe),
+        selectedPreset.container,
+        streams,
+      )
     : null;
   const sizeEstimate =
     selectedPreset && probe
       ? presentSizeEstimate(
           {
             preset: selectedPreset,
-            hasAudio: probe.audio !== null,
+            streams,
             durationTicks,
             videoTimeBase: probe.videoTimeBase,
           },
@@ -485,7 +601,14 @@ export function ExportSetup({
         <div className="space-y-3 rounded-md border border-border bg-muted/20 p-3 text-xs">
           <SummaryRows rows={[summary.container]} translate={translate} />
           {summary.groups.map((group) => (
-            <SummaryGroup key={group.id} group={group} translate={translate} />
+            <SummaryGroup
+              key={group.id}
+              group={group}
+              streamSwitch={streamSwitches[group.id]}
+              streamsFrozen={streamsFrozen}
+              onStreamChange={onStreamChange}
+              translate={translate}
+            />
           ))}
         </div>
       ) : null}

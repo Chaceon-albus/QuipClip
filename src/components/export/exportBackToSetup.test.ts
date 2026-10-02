@@ -437,6 +437,7 @@ function startGuardedOpenStep(revision: Partial<MediaSourceRevisionDescriptor>) 
   const step = runExportFlow({
     ...guardOpenStepEffects(isCurrent, { setModalOpen, reportError }),
     filterName: "Video Files",
+    audioFilterName: "Audio Files",
     getExportState: () => ({ status: "idle", tracking: false }),
     getMedia: () => media,
     readSourceRevision,

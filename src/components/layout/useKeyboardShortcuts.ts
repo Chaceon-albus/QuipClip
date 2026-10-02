@@ -114,6 +114,7 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       void runExportFlow({
         setModalOpen: exportPanelStore.getState().setOpen,
         filterName: i18n.t("dialog.videoFilter"),
+        audioFilterName: i18n.t("dialog.audioFilter"),
       });
       return;
     case "openSettings":

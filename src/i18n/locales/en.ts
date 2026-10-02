@@ -40,6 +40,8 @@ export const en = {
   },
   dialog: {
     videoFilter: "Video Files",
+    // The file filter of the save dialog for an export of the audio only.
+    audioFilter: "Audio Files",
   },
   preview: {
     empty: {
@@ -710,6 +712,23 @@ export const en = {
       sourceChannels_one: "Same as Source ({{count}} channel)",
       sourceChannels_other: "Same as Source ({{count}} channels)",
       noSourceAudio: "The source has no audio, so the exported file has no audio.",
+      // The switch at the end of the Video heading and of the Audio heading of the preset
+      // summary chooses whether the export writes that stream. `exportVideo` and
+      // `exportAudio` are the accessible names of the two switches. `notExported` replaces
+      // the rows of a group whose switch is off. The last switch that is on cannot be
+      // turned off, and its tooltip is `keepOneStream`. When the source has no audio, the
+      // audio switch is off and cannot be turned on, and its tooltip is `sourceHasNoAudio`.
+      exportVideo: "Export video",
+      exportAudio: "Export audio",
+      notExported: "Not exported",
+      keepOneStream: "Export at least the video or the audio",
+      sourceHasNoAudio: "The source has no audio",
+      // The tooltip of the locked video switch when the source has no audio.
+      videoRequired: "The source has no audio, so the video is always exported",
+      // The Container row of an export of the audio only. {{extension}} is the extension of
+      // the output file, ".m4a" or ".mka", and {{format}} is the name of its format, "MP4"
+      // or "MKV".
+      audioOnlyContainer: "{{extension}} ({{format}})",
       // {{size}} is a number with its unit, such as "120 MB" or "1.2 GB".
       estimatedSize: "Estimated size: about {{size}}",
       estimatedSizeBelowOneKilobyte: "Estimated size: less than 1 kB",

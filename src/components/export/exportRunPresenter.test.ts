@@ -372,3 +372,48 @@ describe("readoutDetailKey", () => {
     }
   });
 });
+
+// An audio-only export (ADR 036) has no frame goal, and its progress blocks have no frame, so
+// the run sends no progress event. Its `finished` event counts 0 frames.
+describe("an audio-only run", () => {
+  const audioOnly = {
+    frame: null,
+    expectedFrames: null,
+    fps: null,
+    speed: null,
+  } as const;
+
+  it("shows an indeterminate bar and the phase, with no frame, speed or estimate", () => {
+    const view = viewOf({ ...audioOnly, status: "running" });
+    expect(view.barValue).toBeNull();
+    expect(view.percentFraction).toBeNull();
+    expect(view.remainingSeconds).toBeNull();
+    expect(presentExportReadout(view)).toEqual({
+      lead: { kind: "phase", key: "export.status.running" },
+      trail: null,
+      frames: null,
+      speed: null,
+    });
+    expect(presentExportRunBar(barInput({ ...audioOnly, status: "running" }))).toEqual({
+      value: null,
+      tone: "default",
+      flowing: true,
+      decorative: false,
+    });
+  });
+
+  it("shows a full success bar when it finished, whatever its frame count", () => {
+    expect(
+      presentExportRunBar(barInput({ ...audioOnly, status: "finished", frame: 0 })),
+    ).toEqual({ value: 100, tone: "success", flowing: false, decorative: true });
+  });
+
+  it("shows no bar after a failure or a stop, because no fill is known", () => {
+    expect(
+      presentExportRunBar(barInput({ ...audioOnly, status: "failed" })),
+    ).toBeNull();
+    expect(
+      presentExportRunBar(barInput({ ...audioOnly, status: "canceled" })),
+    ).toBeNull();
+  });
+});

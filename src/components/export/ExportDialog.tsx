@@ -26,14 +26,17 @@ import {
 import {
   exportStore,
   isExportRunLive,
+  resolveExportStreams,
+  sourceHasAudio,
   useExportOutputActionStore,
   useExportStore,
   useExportRunTiming,
+  useExportStreamChoice,
   type ExportOutputActionState,
   type ExportRunTiming,
   type ExportState,
 } from "@/features/export";
-import { openMediaFileDialog } from "@/features/media";
+import { openMediaFileDialog, useMediaStore } from "@/features/media";
 import { useSettingsStore, type SettingsSection } from "@/features/settings";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { isMacOS } from "@/lib/platform";
@@ -329,7 +332,15 @@ export function ExportDialog({
   const effectivePresetId = resolveSetupPresetId(settings, frame.requestedPresetId);
   const selectedPreset =
     settings?.presets.find((preset) => preset.id === effectivePresetId) ?? null;
-  const blocker = presentSetupBlocker(selectedPreset);
+  // The stream switches of the setup step, and the streams that the export writes with them
+  // (ADR 036). The choice lasts for the session and turns both streams on again when the media
+  // changes (`exportStreamChoiceStore`). The setup step resolves the same streams for its
+  // summary.
+  const streamChoice = useExportStreamChoice((state) => state.choice);
+  const setStream = useExportStreamChoice((state) => state.setStream);
+  const probe = useMediaStore((state) => state.media?.probe ?? null);
+  const streams = resolveExportStreams(streamChoice, sourceHasAudio(probe));
+  const blocker = presentSetupBlocker(selectedPreset, streams);
   const exportDisabled =
     effectivePresetId === null ||
     blocker !== null ||
@@ -524,6 +535,7 @@ export function ExportDialog({
     void runExportFlow({
       setModalOpen: onOpenChange,
       filterName: t("dialog.videoFilter"),
+      audioFilterName: t("dialog.audioFilter"),
       skipSourceRevisionCheck: true,
     });
   };
@@ -577,7 +589,11 @@ export function ExportDialog({
       },
       setPending: setBackCheckPending,
       run: (effects) =>
-        runExportFlow({ ...effects, filterName: t("dialog.videoFilter") }),
+        runExportFlow({
+          ...effects,
+          filterName: t("dialog.videoFilter"),
+          audioFilterName: t("dialog.audioFilter"),
+        }),
     });
   };
 
@@ -591,8 +607,10 @@ export function ExportDialog({
         {
           setModalOpen: onOpenChange,
           filterName: t("dialog.videoFilter"),
+          audioFilterName: t("dialog.audioFilter"),
         },
         effectivePresetId,
+        streams,
       );
       if (started) {
         // Clear the user's manual selection once the export has started so that a subsequent
@@ -759,6 +777,9 @@ export function ExportDialog({
             selectedPreset={selectedPreset}
             blocker={blocker}
             onSelect={setRequestedPresetId}
+            streamChoice={streamChoice}
+            onStreamChange={setStream}
+            streamsFrozen={frame.choosingDestination}
             onOpenSettings={(section) => {
               handleOpenSettings(section, effectivePresetId);
             }}

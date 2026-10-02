@@ -13,6 +13,7 @@ import {
   type ExportProgressEvent,
   type ExportRequest,
   type ExportStart,
+  type ExportStreams,
 } from "@/features/export";
 import type { MediaSourceRevisionDescriptor } from "@/features/media";
 import type { Preset, Settings } from "@/features/settings/types";
@@ -113,6 +114,7 @@ describe("ExportFlowController", () => {
         startExport,
         reportError,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getExportState: () => ({ status: "idle", tracking: false }),
         getMedia: () => media,
         readSourceRevision: createMatchingReader(media),
@@ -142,6 +144,7 @@ describe("ExportFlowController", () => {
         reportError,
         readSourceRevision,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getExportState: () => ({ status: "idle", tracking: false }),
         getMedia: () => null,
         getSourceId: () => null,
@@ -169,6 +172,7 @@ describe("ExportFlowController", () => {
         openSaveDialog,
         reportError,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getExportState: () => ({ status: "idle", tracking: false }),
         getMedia: () => media,
         readSourceRevision: createMatchingReader(media),
@@ -195,6 +199,7 @@ describe("ExportFlowController", () => {
           setModalOpen,
           reset,
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
           getExportState: () => ({ status: terminalStatus, tracking: false }),
           getMedia: () => media,
           readSourceRevision: createMatchingReader(media),
@@ -222,6 +227,7 @@ describe("ExportFlowController", () => {
         setModalOpen,
         loadSettings,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getExportState: () => ({ status: "idle", tracking: false }),
         getSettings: () => currentSettings,
         getMedia: () => media,
@@ -244,6 +250,7 @@ describe("ExportFlowController", () => {
         setModalOpen,
         loadSettings,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getExportState: () => ({ status: "idle", tracking: false }),
         getSettings: () => null,
         getMedia: () => media,
@@ -269,6 +276,7 @@ describe("ExportFlowController", () => {
           startExport,
           getExportState: () => ({ status: activeStatus, tracking: false }),
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
         });
 
         expect(result).toBe(false);
@@ -294,6 +302,7 @@ describe("ExportFlowController", () => {
         reportError,
         openSaveDialog,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getExportState: () => ({ status: "failed", tracking: true }),
         getMedia: () => media,
         readSourceRevision,
@@ -365,6 +374,7 @@ describe("ExportFlowController", () => {
         const result = runExportFlow({
           setModalOpen,
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
           getExportState: () => store.getState(),
           reset: () => {
             store.getState().reset();
@@ -447,6 +457,7 @@ describe("ExportFlowController", () => {
           getSegments: () => [createSegment("s1", "src-1", "0", "100")],
           getSettings: () => createSettings([createPreset()]),
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
         });
 
         expect(result).toBe(false);
@@ -476,6 +487,7 @@ describe("ExportFlowController", () => {
           getSegments: () => [createSegment("s1", "src-1", "0", "100")],
           getSettings: () => createSettings([createPreset()]),
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
         });
 
         expect(result).toBe(false);
@@ -504,6 +516,7 @@ describe("ExportFlowController", () => {
           getSegments: () => [createSegment("s1", "src-1", "0", "100")],
           getSettings: () => createSettings([createPreset()]),
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
         });
 
         expect(result).toBe(true);
@@ -529,6 +542,7 @@ describe("ExportFlowController", () => {
           getSegments: () => [createSegment("s1", "src-1", "0", "100")],
           getSettings: () => createSettings([createPreset()]),
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
         });
 
         expect(result).toBe(true);
@@ -559,6 +573,7 @@ describe("ExportFlowController", () => {
           getSegments: () => [],
           getSettings: () => createSettings([createPreset()]),
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
         });
 
         expect(result).toBe(false);
@@ -590,6 +605,7 @@ describe("ExportFlowController", () => {
           getSegments: () => [createSegment("s1", "src-other", "0", "100")],
           getSettings: () => createSettings([createPreset()]),
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
         });
 
         expect(result).toBe(false);
@@ -638,6 +654,7 @@ describe("ExportFlowController", () => {
           setModalOpen,
           reportError,
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
           getExportState: () => ({ status: "idle", tracking: false }),
           getMedia: () => media,
           readSourceRevision,
@@ -673,6 +690,7 @@ describe("ExportFlowController", () => {
           loadSettings: vi.fn().mockResolvedValue(undefined),
           readSourceRevision: createMatchingReader(media),
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
           getExportState: () => ({ status: "idle" as const, tracking: false }),
           getMedia: () => media,
           getSourceId: () => "source-1",
@@ -783,6 +801,7 @@ describe("ExportFlowController", () => {
             setModalOpen,
             reportError: vi.fn(),
             filterName: "Video Files",
+            audioFilterName: "Audio Files",
             getExportState: () => ({ status: "idle", tracking: false }),
             getMedia: () => media,
             readSourceRevision: () =>
@@ -887,10 +906,11 @@ describe("ExportFlowController", () => {
         startExport,
         saveSettings,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings: () => createSettings([createPreset({ id: "p1" })]),
       });
 
-      const result = await controller.confirm("non-existent-preset");
+      const result = await controller.confirm("non-existent-preset", "videoAndAudio");
 
       expect(result).toBe(false);
       expect(reportError).toHaveBeenCalledWith(
@@ -916,20 +936,79 @@ describe("ExportFlowController", () => {
         openSaveDialog,
         startExport,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings: () => settings,
         getMedia: () => media,
         getSourceId: () => "s1",
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p-mov");
+      const result = await controller.confirm("p-mov", "videoAndAudio");
 
       expect(result).toBe(true);
       expect(openSaveDialog).toHaveBeenCalledWith({
-        container: "mov",
+        extension: "mov",
         filterName: "Video Files",
         defaultName: "clip_export.mov",
       });
+    });
+
+    describe("the stream choice", () => {
+      const media = createMedia("/media/clip.mov", "clip.mov");
+
+      function confirmWith(preset: Preset, streams: ExportStreams) {
+        const openSaveDialog = vi.fn().mockResolvedValue("/out/chosen.name");
+        const startExport = vi.fn().mockResolvedValue(null);
+        const controller = createExportFlowController({
+          setModalOpen: vi.fn(),
+          openSaveDialog,
+          startExport,
+          saveSettings: vi.fn().mockResolvedValue(null),
+          filterName: "Video Files",
+          audioFilterName: "Audio Files",
+          getSettings: () => createSettings([preset]),
+          getMedia: () => media,
+          getSourceId: () => "s1",
+          getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+        });
+        return {
+          result: controller.confirm(preset.id, streams),
+          openSaveDialog,
+          startExport,
+        };
+      }
+
+      it.each([
+        ["mp4", "videoAndAudio", "mp4", "Video Files"],
+        ["mov", "videoAndAudio", "mov", "Video Files"],
+        ["mkv", "videoAndAudio", "mkv", "Video Files"],
+        ["mp4", "videoOnly", "mp4", "Video Files"],
+        ["mov", "videoOnly", "mov", "Video Files"],
+        ["mkv", "videoOnly", "mkv", "Video Files"],
+        ["mp4", "audioOnly", "m4a", "Audio Files"],
+        ["mov", "audioOnly", "m4a", "Audio Files"],
+        ["mkv", "audioOnly", "mka", "Audio Files"],
+      ] as const)(
+        "a %s preset with %s names a .%s file with the filter %s",
+        async (container, streams, extension, filterName) => {
+          const preset = createPreset({ id: "p1", container });
+          const { result, openSaveDialog, startExport } = confirmWith(preset, streams);
+
+          expect(await result).toBe(true);
+          expect(openSaveDialog).toHaveBeenCalledWith({
+            extension,
+            filterName,
+            defaultName: `clip_export.${extension}`,
+          });
+          expect(startExport).toHaveBeenCalledWith(
+            expect.objectContaining({
+              outputPath: "/out/chosen.name",
+              presetId: "p1",
+              streams,
+            }),
+          );
+        },
+      );
     });
 
     it("confirm with the save dialog cancelled starts nothing and saves nothing", async () => {
@@ -951,6 +1030,7 @@ describe("ExportFlowController", () => {
         startExport,
         saveSettings,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getExportState: () => ({ status: "idle", tracking: false }),
         getSettings: () => settings,
         getMedia: () => media,
@@ -958,7 +1038,7 @@ describe("ExportFlowController", () => {
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p2");
+      const result = await controller.confirm("p2", "videoAndAudio");
 
       expect(result).toBe(false);
       expect(openSaveDialog).toHaveBeenCalledOnce();
@@ -980,10 +1060,11 @@ describe("ExportFlowController", () => {
         openSaveDialog,
         startExport,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings: () => createSettings([createPreset({ id: "p1" })]),
       });
 
-      const result = await controller.confirm("p1");
+      const result = await controller.confirm("p1", "videoAndAudio");
 
       expect(result).toBe(false);
       expect(reportError).toHaveBeenCalledWith(
@@ -1005,11 +1086,12 @@ describe("ExportFlowController", () => {
         setModalOpen,
         openSaveDialog,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getExportState: () => ({ status: storeStatus, tracking: false }),
         getSettings: () => createSettings([createPreset({ id: "p1" })]),
       });
 
-      const result = await controller.confirm("p1");
+      const result = await controller.confirm("p1", "videoAndAudio");
 
       expect(result).toBe(false);
       expect(openSaveDialog).toHaveBeenCalledOnce();
@@ -1038,13 +1120,14 @@ describe("ExportFlowController", () => {
         openSaveDialog,
         startExport,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings: () => settings,
         getMedia: () => media,
         getSourceId: () => sourceId,
         getSegments: () => segments,
       });
 
-      const result = await controller.confirm("custom-p");
+      const result = await controller.confirm("custom-p", "videoAndAudio");
 
       expect(result).toBe(true);
       expect(setModalOpen).toHaveBeenCalledWith(true);
@@ -1053,7 +1136,7 @@ describe("ExportFlowController", () => {
         startExport.mock.invocationCallOrder[0],
       );
       const passedRequest = startExport.mock.calls[0][0] as ExportRequest;
-      // The setup step offers no stream choice yet, so the request asks for both streams.
+      // The request carries the stream choice that the setup step passed.
       expect(passedRequest).toStrictEqual({
         sourcePath: "/media/source.mp4",
         outputPath: "/out/destination.mp4",
@@ -1081,13 +1164,14 @@ describe("ExportFlowController", () => {
         startExport: vi.fn().mockResolvedValue(null),
         saveSettings: saveSettingsDiff,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings: () => settings,
         getMedia: () => media,
         getSourceId: () => "s1",
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      await controllerDiff.confirm("p2");
+      await controllerDiff.confirm("p2", "videoAndAudio");
       expect(saveSettingsDiff).toHaveBeenCalledOnce();
       expect(saveSettingsDiff).toHaveBeenCalledWith(
         expect.objectContaining({ activePresetId: "p2" }),
@@ -1101,13 +1185,14 @@ describe("ExportFlowController", () => {
         startExport: vi.fn().mockResolvedValue(null),
         saveSettings: saveSettingsSame,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings: () => settings,
         getMedia: () => media,
         getSourceId: () => "s1",
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      await controllerSame.confirm("p1");
+      await controllerSame.confirm("p1", "videoAndAudio");
       expect(saveSettingsSame).not.toHaveBeenCalled();
     });
 
@@ -1126,13 +1211,14 @@ describe("ExportFlowController", () => {
         startExport,
         saveSettings,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings: () => settings,
         getMedia: () => media,
         getSourceId: () => "s1",
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p2");
+      const result = await controller.confirm("p2", "videoAndAudio");
 
       expect(result).toBe(true);
       expect(startExport).toHaveBeenCalledOnce();
@@ -1161,13 +1247,14 @@ describe("ExportFlowController", () => {
         startExport: vi.fn().mockResolvedValue(null),
         saveSettings,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings,
         getMedia: () => media,
         getSourceId: () => "s1",
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p2");
+      const result = await controller.confirm("p2", "videoAndAudio");
 
       expect(result).toBe(true);
       expect(getSettings).toHaveBeenCalledTimes(2);
@@ -1198,13 +1285,14 @@ describe("ExportFlowController", () => {
         startExport: vi.fn().mockResolvedValue(null),
         saveSettings,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings,
         getMedia: () => media,
         getSourceId: () => "s1",
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p2");
+      const result = await controller.confirm("p2", "videoAndAudio");
 
       expect(result).toBe(true);
       expect(getSettings).toHaveBeenCalledTimes(2);
@@ -1230,13 +1318,14 @@ describe("ExportFlowController", () => {
         startExport: vi.fn().mockResolvedValue(null),
         saveSettings,
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings,
         getMedia: () => media,
         getSourceId: () => "s1",
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p2");
+      const result = await controller.confirm("p2", "videoAndAudio");
 
       expect(result).toBe(true);
       expect(getSettings).toHaveBeenCalledTimes(2);
@@ -1255,11 +1344,12 @@ describe("ExportFlowController", () => {
         reportError: reportErrorNoMedia,
         openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings: () => settings,
         getMedia: () => null,
       });
 
-      const resNoMedia = await controllerNoMedia.confirm("p1");
+      const resNoMedia = await controllerNoMedia.confirm("p1", "videoAndAudio");
       expect(resNoMedia).toBe(false);
       expect(reportErrorNoMedia).toHaveBeenCalledWith(
         expect.objectContaining({ code: "sourceNotFound" }),
@@ -1275,13 +1365,14 @@ describe("ExportFlowController", () => {
         reportError: reportErrorNoSeg,
         openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
         filterName: "Video Files",
+        audioFilterName: "Audio Files",
         getSettings: () => settings,
         getMedia: () => media,
         getSourceId: () => "s1",
         getSegments: () => [],
       });
 
-      const resNoSeg = await controllerNoSeg.confirm("p1");
+      const resNoSeg = await controllerNoSeg.confirm("p1", "videoAndAudio");
       expect(resNoSeg).toBe(false);
       expect(reportErrorNoSeg).toHaveBeenCalledWith(
         expect.objectContaining({ code: "noSegments" }),
@@ -1289,22 +1380,27 @@ describe("ExportFlowController", () => {
       expect(setModalNoSeg).toHaveBeenCalledWith(true);
     });
 
-    it("confirmExportFlow helper invokes confirm with presetId", async () => {
+    it("confirmExportFlow helper invokes confirm with presetId and the streams", async () => {
       const openSaveDialog = vi.fn().mockResolvedValue(null);
-      const preset = createPreset({ id: "p1" });
+      const preset = createPreset({ id: "p1", container: "mkv" });
 
       const result = await confirmExportFlow(
         {
           setModalOpen: vi.fn(),
           openSaveDialog,
           filterName: "Video Files",
+          audioFilterName: "Audio Files",
           getSettings: () => createSettings([preset]),
         },
         "p1",
+        "audioOnly",
       );
 
       expect(result).toBe(false);
       expect(openSaveDialog).toHaveBeenCalledOnce();
+      expect(openSaveDialog).toHaveBeenCalledWith(
+        expect.objectContaining({ extension: "mka", filterName: "Audio Files" }),
+      );
     });
   });
 });

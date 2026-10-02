@@ -69,6 +69,18 @@ describe("presentFinishedExport", () => {
     });
   });
 
+  it("shows an audio-only output from its path and time alone, with no frame count", () => {
+    // An audio-only export (ADR 036) writes an .m4a or an .mka file and counts no frames.
+    expect(presentFinishedExport("/Users/me/Music/clip_export.mka", 4_000)).toEqual({
+      fileName: "clip_export.mka",
+      fileStem: "clip_export",
+      fileExtension: ".mka",
+      fullPath: "/Users/me/Music/clip_export.mka",
+      folderName: "Music",
+      elapsed: "0:04",
+    });
+  });
+
   it("gives no time when the time is unknown", () => {
     expect(presentFinishedExport("C:\\Videos\\clip.mp4", null)).toEqual({
       fileName: "clip.mp4",

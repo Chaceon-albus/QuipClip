@@ -5,6 +5,7 @@ import {
   presentPresetEncoderMark,
   presentPresetRowSummary,
 } from "@/components/settings/presetPresenter";
+import type { ExportStreams } from "@/features/export/types";
 import type { FfmpegState } from "@/features/ffmpeg/types";
 import { SettingsError, type Preset, type Settings } from "@/features/settings/types";
 import { FRAME_RATE_CHOICES } from "@/features/settings/videoOutputChoices";
@@ -25,6 +26,7 @@ import {
   presentPresetOptions,
   presentPresetSummary,
   presentSetupBlocker,
+  presentSetupEncoderMark,
   presentSetupSettingsSection,
   presentSizeEstimate,
   resolveExportSetupStepState,
@@ -715,7 +717,7 @@ describe("exportSetupPresenter", () => {
           audioEncoder: "aac",
           audioBitrate: 320,
         },
-        hasAudio: true,
+        streams: "videoAndAudio",
         durationTicks: activeSourceDurationTicks(segments, "s1"),
         videoTimeBase,
       };
@@ -740,7 +742,7 @@ describe("exportSetupPresenter", () => {
           audioEncoder: "aac",
           audioBitrate: 320,
         },
-        hasAudio: true,
+        streams: "videoAndAudio",
         // 10 s.
         durationTicks: 10_000n,
         videoTimeBase: ms,
@@ -762,8 +764,8 @@ describe("exportSetupPresenter", () => {
       expect(wholeBytes(estimateExportBytes(sizeInput()))).toBe(10_400_000n);
     });
 
-    it("adds no audio when the source has no audio stream", () => {
-      expect(wholeBytes(estimateExportBytes(sizeInput({ hasAudio: false })))).toBe(
+    it("adds no audio when the export writes no audio stream", () => {
+      expect(wholeBytes(estimateExportBytes(sizeInput({ streams: "videoOnly" })))).toBe(
         10_000_000n,
       );
       // With no audio stream, the audio settings of the preset do not matter.
@@ -771,7 +773,7 @@ describe("exportSetupPresenter", () => {
         wholeBytes(
           estimateExportBytes(
             sizeInput({
-              hasAudio: false,
+              streams: "videoOnly",
               preset: {
                 quality: { kind: "bitrate", value: 8000 },
                 audioEncoder: "flac",
@@ -880,6 +882,68 @@ describe("exportSetupPresenter", () => {
         estimateExportBytes(sizeInput({ videoTimeBase: { n: 0, d: 1 } })),
       ).toBeNull();
     });
+
+    describe("the streams that the export writes (ADR 036)", () => {
+      it("counts each stream that the export writes, and only those", () => {
+        // 10 s at 8000 kbps of video and 320 kbps of audio.
+        expect(wholeBytes(estimateExportBytes(sizeInput()))).toBe(10_400_000n);
+        expect(
+          wholeBytes(estimateExportBytes(sizeInput({ streams: "videoOnly" }))),
+        ).toBe(10_000_000n);
+        expect(
+          wholeBytes(estimateExportBytes(sizeInput({ streams: "audioOnly" }))),
+        ).toBe(400_000n);
+      });
+
+      it("estimates an audio-only export whatever the video quality", () => {
+        for (const quality of [
+          { kind: "crf", value: 20 },
+          { kind: "qualityScale", value: 5 },
+          { kind: "bitrate", value: 0 },
+        ] as const) {
+          const input = sizeInput({
+            streams: "audioOnly",
+            preset: { quality, audioEncoder: "aac", audioBitrate: 320 },
+          });
+          expect(wholeBytes(estimateExportBytes(input))).toBe(400_000n);
+          expect(presentSizeEstimate(input, formatter)).toEqual({
+            key: "export.setup.estimatedSize",
+            values: { size: "400 kB" },
+          });
+        }
+      });
+
+      it("needs the video bitrate whenever the export writes video", () => {
+        const crf = {
+          quality: { kind: "crf", value: 20 },
+          audioEncoder: "aac",
+          audioBitrate: 320,
+        } as const;
+        for (const streams of ["videoAndAudio", "videoOnly"] as const) {
+          expect(estimateExportBytes(sizeInput({ streams, preset: crf }))).toBeNull();
+        }
+      });
+
+      it("needs the audio bitrate whenever the export writes audio", () => {
+        for (const preset of [
+          { quality: { kind: "bitrate", value: 8000 }, audioEncoder: "flac" },
+          { quality: { kind: "bitrate", value: 8000 }, audioEncoder: "aac" },
+        ] as const) {
+          expect(
+            estimateExportBytes(sizeInput({ streams: "audioOnly", preset })),
+          ).toBeNull();
+          expect(
+            estimateExportBytes(sizeInput({ streams: "videoAndAudio", preset })),
+          ).toBeNull();
+          // A video-only export ignores the audio settings.
+          expect(
+            wholeBytes(
+              estimateExportBytes(sizeInput({ streams: "videoOnly", preset })),
+            ),
+          ).toBe(10_000_000n);
+        }
+      });
+    });
   });
 
   describe("roundToSignificantDigits", () => {
@@ -970,7 +1034,7 @@ describe("exportSetupPresenter", () => {
         audioEncoder: "aac",
         audioBitrate: 320,
       },
-      hasAudio: true,
+      streams: "videoAndAudio",
       // 83.48 s.
       durationTicks: 83_480n,
       videoTimeBase: { n: 1, d: 1000 },
@@ -992,7 +1056,7 @@ describe("exportSetupPresenter", () => {
           audioEncoder: "aac",
           audioBitrate: 1,
         },
-        hasAudio: true,
+        streams: "videoAndAudio",
         durationTicks: 1n,
         videoTimeBase: { n: 1, d: 90000 },
       };
@@ -1066,7 +1130,7 @@ describe("exportSetupPresenter", () => {
 
   describe("presentSetupBlocker", () => {
     it("returns export.setup.noPresets when preset is null", () => {
-      expect(presentSetupBlocker(null)).toEqual({
+      expect(presentSetupBlocker(null, "videoAndAudio")).toEqual({
         key: "export.setup.noPresets",
       });
     });
@@ -1075,7 +1139,7 @@ describe("exportSetupPresenter", () => {
       const movFlac = createPreset({ container: "mov", audioEncoder: "flac" });
       const movOpus = createPreset({ container: "mov", audioEncoder: "libopus" });
 
-      expect(presentSetupBlocker(movFlac)).toEqual({
+      expect(presentSetupBlocker(movFlac, "videoAndAudio")).toEqual({
         key: "settings.field.containerMismatch",
         values: {
           container: "MOV",
@@ -1083,7 +1147,7 @@ describe("exportSetupPresenter", () => {
         },
       });
 
-      expect(presentSetupBlocker(movOpus)).toEqual({
+      expect(presentSetupBlocker(movOpus, "videoAndAudio")).toEqual({
         key: "settings.field.containerMismatch",
         values: {
           container: "MOV",
@@ -1094,22 +1158,56 @@ describe("exportSetupPresenter", () => {
 
     it("pins uppercase container name MOV in containerMismatch blocker values", () => {
       const movFlac = createPreset({ container: "mov", audioEncoder: "flac" });
-      const blocker = presentSetupBlocker(movFlac);
+      const blocker = presentSetupBlocker(movFlac, "videoAndAudio");
 
       expect(blocker?.values?.container).toBe("MOV");
     });
 
     it("returns null for compatible container and audio encoder combinations", () => {
       expect(
-        presentSetupBlocker(createPreset({ container: "mp4", audioEncoder: "aac" })),
+        presentSetupBlocker(
+          createPreset({ container: "mp4", audioEncoder: "aac" }),
+          "videoAndAudio",
+        ),
       ).toBeNull();
       expect(
-        presentSetupBlocker(createPreset({ container: "mov", audioEncoder: "aac" })),
+        presentSetupBlocker(
+          createPreset({ container: "mov", audioEncoder: "aac" }),
+          "videoAndAudio",
+        ),
       ).toBeNull();
       expect(
-        presentSetupBlocker(createPreset({ container: "mkv", audioEncoder: "flac" })),
+        presentSetupBlocker(
+          createPreset({ container: "mkv", audioEncoder: "flac" }),
+          "videoAndAudio",
+        ),
       ).toBeNull();
     });
+
+    // A video-only export writes no audio, and an audio-only export of a MOV preset uses the
+    // mp4 muxer, which accepts flac and opus (ADR 036).
+    it.each(["videoOnly", "audioOnly"] as const)(
+      "does not block a MOV preset with flac or libopus for %s",
+      (streams) => {
+        for (const audioEncoder of ["flac", "libopus"]) {
+          expect(
+            presentSetupBlocker(
+              createPreset({ container: "mov", audioEncoder }),
+              streams,
+            ),
+          ).toBeNull();
+        }
+      },
+    );
+
+    it.each(["videoAndAudio", "videoOnly", "audioOnly"] as const)(
+      "reports a missing preset for %s",
+      (streams) => {
+        expect(presentSetupBlocker(null, streams)).toEqual({
+          key: "export.setup.noPresets",
+        });
+      },
+    );
   });
 
   describe("resolveExportSetupStepState", () => {
@@ -1216,6 +1314,7 @@ describe("exportSetupPresenter", () => {
         createSettings([nvenc, h264, hevc], "h264"),
         probe,
         formatter,
+        "videoAndAudio",
       );
       expect(options.map((option) => [option.id, option.name])).toStrictEqual([
         ["nvenc", "NVENC"],
@@ -1229,6 +1328,7 @@ describe("exportSetupPresenter", () => {
         createSettings([h264, hevc, nvenc], "hevc"),
         probe,
         formatter,
+        "videoAndAudio",
       );
       expect(options.map((option) => option.isDefault)).toStrictEqual([
         false,
@@ -1245,7 +1345,7 @@ describe("exportSetupPresenter", () => {
     ])("marks no preset when the default id %s", (_label, activePresetId) => {
       const settings = createSettings([h264, hevc], activePresetId);
       expect(resolveSetupPresetId(settings, null)).toBe("h264");
-      const options = presentPresetOptions(settings, probe, formatter);
+      const options = presentPresetOptions(settings, probe, formatter, "videoAndAudio");
       expect(options.some((option) => option.isDefault)).toBe(false);
     });
 
@@ -1254,6 +1354,7 @@ describe("exportSetupPresenter", () => {
         createSettings([h264, hevc, nvenc], "h264"),
         probe,
         formatter,
+        "videoAndAudio",
       );
       expect(options.map((option) => option.summary)).toStrictEqual(
         [h264, hevc, nvenc].map((preset) => presentPresetRowSummary(preset, formatter)),
@@ -1269,6 +1370,7 @@ describe("exportSetupPresenter", () => {
         createSettings([h264, nvenc], "h264"),
         probe,
         formatter,
+        "videoAndAudio",
       );
       expect(options[0]?.encoderMark).toBeNull();
       expect(options[1]?.encoderMark).toStrictEqual(
@@ -1282,9 +1384,9 @@ describe("exportSetupPresenter", () => {
     });
 
     it("lists no item for an empty library", () => {
-      expect(presentPresetOptions(createSettings([]), probe, formatter)).toStrictEqual(
-        [],
-      );
+      expect(
+        presentPresetOptions(createSettings([]), probe, formatter, "videoAndAudio"),
+      ).toStrictEqual([]);
     });
 
     it("names only keys that both catalogs define", () => {
@@ -1292,6 +1394,7 @@ describe("exportSetupPresenter", () => {
         createSettings([h264, hevc, nvenc], "h264"),
         probe,
         formatter,
+        "videoAndAudio",
       );
       const keys = options.flatMap((option) => [
         option.summary.key,
@@ -1312,5 +1415,63 @@ describe("exportSetupPresenter", () => {
         expect(typeof lookup(zhCN, key)).toBe("string");
       }
     });
+
+    it("marks each item for the streams that the export writes", () => {
+      const settings = createSettings([h264, nvenc], "h264");
+      expect(
+        presentPresetOptions(settings, probe, formatter, "videoOnly").map(
+          (option) => option.encoderMark?.encoderName ?? null,
+        ),
+      ).toStrictEqual([null, "h264_nvenc"]);
+      // An audio-only export runs no video encoder.
+      expect(
+        presentPresetOptions(settings, probe, formatter, "audioOnly").map(
+          (option) => option.encoderMark,
+        ),
+      ).toStrictEqual([null, null]);
+    });
+  });
+
+  describe("presentSetupEncoderMark", () => {
+    const probe: Pick<FfmpegState, "status" | "results"> = {
+      status: "ready",
+      results: [
+        { name: "libx264", kind: "video", listed: true, status: "works" },
+        { name: "h264_nvenc", kind: "video", listed: false, status: "notListed" },
+        { name: "aac", kind: "audio", listed: true, status: "works" },
+        { name: "libfdk_aac", kind: "audio", listed: false, status: "notListed" },
+      ],
+    };
+    const working = createPreset();
+    const badVideo = createPreset({ videoEncoder: "h264_nvenc" });
+    const badAudio = createPreset({ audioEncoder: "libfdk_aac" });
+    const badBoth = createPreset({
+      videoEncoder: "h264_nvenc",
+      audioEncoder: "libfdk_aac",
+    });
+    const markedName = (preset: Preset, streams: ExportStreams) =>
+      presentSetupEncoderMark(probe, preset, streams)?.encoderName ?? null;
+
+    it("is the mark of the preset list row when the export writes both streams", () => {
+      for (const preset of [working, badVideo, badAudio, badBoth]) {
+        expect(presentSetupEncoderMark(probe, preset, "videoAndAudio")).toStrictEqual(
+          presentPresetEncoderMark(probe, preset),
+        );
+      }
+    });
+
+    it.each([
+      ["videoAndAudio", "h264_nvenc", "libfdk_aac", "h264_nvenc"],
+      ["videoOnly", "h264_nvenc", null, "h264_nvenc"],
+      ["audioOnly", null, "libfdk_aac", "libfdk_aac"],
+    ] as const)(
+      "marks only the encoders that run for %s",
+      (streams, videoMark, audioMark, bothMark) => {
+        expect(markedName(badVideo, streams)).toBe(videoMark);
+        expect(markedName(badAudio, streams)).toBe(audioMark);
+        expect(markedName(badBoth, streams)).toBe(bothMark);
+        expect(markedName(working, streams)).toBeNull();
+      },
+    );
   });
 });

@@ -6,12 +6,14 @@
  *    verifies media presence, validates that marked segments exist for the active source,
  *    and runs the source disk revision check before opening the modal at the setup step.
  * 2. Start step (`confirm`): validates the chosen preset, opens the native save dialog
- *    with that preset's container extension, builds the export request, starts export rendering,
- *    and updates activePresetId in settings if the preset changed.
+ *    with the extension of the output, builds the export request with the stream choice of the
+ *    setup step (ADR 036), starts export rendering, and updates activePresetId in settings if
+ *    the preset changed.
  */
 
 import {
   buildExportRequest,
+  exportOutputExtension,
   exportStore,
   isExportRunLive,
   openExportSaveDialog,
@@ -19,6 +21,7 @@ import {
   type ExportErrorCode,
   type ExportRequest,
   type ExportStart,
+  type ExportStreams,
   type ExportRunLiveState,
   type OpenExportSaveDialogOptions,
 } from "@/features/export";
@@ -94,12 +97,18 @@ export interface ExportFlowControllerOptions {
   setModalOpen: (open: boolean) => void;
 
   /**
-   * Localized filter name displayed in the native save dialog.
+   * Localized filter name displayed in the native save dialog for an output with video.
    *
    * Required, with no default: the value is user-facing text and must come from a catalog
    * key (ADR 011). A default here would be an English literal with no key.
    */
   filterName: string;
+
+  /**
+   * Localized filter name displayed in the native save dialog for an audio-only output
+   * (ADR 036). Required for the reason that `filterName` gives.
+   */
+  audioFilterName: string;
 
   /**
    * Dialog opener function. Defaults to `openExportSaveDialog`.
@@ -195,6 +204,7 @@ export interface ExportFlowControllerOptions {
 export class ExportFlowController {
   private readonly setModalOpen: (open: boolean) => void;
   private readonly filterName: string;
+  private readonly audioFilterName: string;
   private readonly openSaveDialogFn: (
     options: OpenExportSaveDialogOptions,
   ) => Promise<string | null>;
@@ -220,6 +230,7 @@ export class ExportFlowController {
   constructor(options: ExportFlowControllerOptions) {
     this.setModalOpen = options.setModalOpen;
     this.filterName = options.filterName;
+    this.audioFilterName = options.audioFilterName;
     this.openSaveDialogFn = options.openSaveDialog ?? openExportSaveDialog;
     this.getMediaFn = options.getMedia ?? (() => mediaStore.getState().media);
     this.readSourceRevisionFn = options.readSourceRevision ?? readSourceRevision;
@@ -326,20 +337,22 @@ export class ExportFlowController {
    *
    * 1. Reads settings through `getSettings` and finds the preset by id.
    *    When missing, reports `presetNotFound` and returns false.
-   * 2. Opens the native save dialog with that preset's `container` and default name
-   *    `<source name>_export.<container>`.
+   * 2. Opens the native save dialog with the extension of the output and the default name
+   *    `<source name>_export.<extension>`. The extension is the `container` of the preset, or
+   *    `m4a` or `mka` for an audio-only export (`exportOutputExtension`). The filter label of
+   *    an audio-only export is `audioFilterName`, and `filterName` otherwise.
    * 3. When the save dialog throws, reports `dialogFailed`, keeps the modal open, and returns false.
    * 4. When the user cancels (the dialog returns null), returns false and changes nothing (the dialog
    *    stays on the setup step).
-   * 5. Re-reads media, segments, and the active source id, and builds the request with `presetId`.
-   *    A null request reports `noSegments` or `sourceNotFound`.
+   * 5. Re-reads media, segments, and the active source id, and builds the request with `presetId`
+   *    and `streams`. A null request reports `noSegments` or `sourceNotFound`.
    * 6. Calls `setModalOpen(true)` and `startExport(request)` without awaiting it.
    * 7. Re-reads settings. When non-null and still containing `presetId` where
    *    `presetId !== settings.activePresetId`, persists the choice via `saveSettings`.
    *    The save is fire-and-forget; rejections are caught and ignored (ADR 024).
    * 8. Returns true.
    */
-  async confirm(presetId: string): Promise<boolean> {
+  async confirm(presetId: string, streams: ExportStreams): Promise<boolean> {
     const settings = this.getSettingsFn();
     const preset = settings?.presets.find((p) => p.id === presetId);
     if (!settings || !preset) {
@@ -349,15 +362,16 @@ export class ExportFlowController {
     }
 
     const media = this.getMediaFn();
+    const extension = exportOutputExtension(preset.container, streams);
     const defaultName = media?.fileName
-      ? `${media.fileName.replace(/\.[^/.]+$/, "")}_export.${preset.container}`
+      ? `${media.fileName.replace(/\.[^/.]+$/, "")}_export.${extension}`
       : undefined;
 
     let outputPath: string | null;
     try {
       outputPath = await this.openSaveDialogFn({
-        container: preset.container,
-        filterName: this.filterName,
+        extension,
+        filterName: streams === "audioOnly" ? this.audioFilterName : this.filterName,
         defaultName,
       });
     } catch (err) {
@@ -387,9 +401,7 @@ export class ExportFlowController {
       segments: currentSegments,
       activeSourceId: currentSourceId,
       presetId,
-      // The setup step does not offer the stream choice yet, so every export writes the video
-      // and the audio, as every export did before the backend took the choice.
-      streams: "videoAndAudio",
+      streams,
     });
 
     if (!request) {
@@ -545,11 +557,13 @@ export async function runExportFlow(
 }
 
 /**
- * Convenience helper to run the export flow START step with a chosen preset.
+ * Convenience helper to run the export flow START step with a chosen preset and the streams
+ * that the export writes.
  */
 export function confirmExportFlow(
   options: ExportFlowControllerOptions,
   presetId: string,
+  streams: ExportStreams,
 ): Promise<boolean> {
-  return new ExportFlowController(options).confirm(presetId);
+  return new ExportFlowController(options).confirm(presetId, streams);
 }

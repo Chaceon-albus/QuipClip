@@ -9,16 +9,16 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 describe("Export Dialog Orchestration", () => {
-  const defaultContainer = "mp4";
+  const defaultExtension = "mp4";
   const defaultFilterName = "MP4 Video";
 
   describe("File Save Flow", () => {
-    it("calls save with container extension, localized filter name, and defaultName", async () => {
+    it("calls save with the extension, localized filter name, and defaultName", async () => {
       const saveDialogMock = vi.fn().mockResolvedValue("/media/output.mp4");
       const reportErrorMock = vi.fn();
 
       const result = await openExportSaveDialog({
-        container: "mp4",
+        extension: "mp4",
         filterName: defaultFilterName,
         defaultName: "clip_export.mp4",
         saveDialog: saveDialogMock,
@@ -39,11 +39,11 @@ describe("Export Dialog Orchestration", () => {
       expect(result).toBe("/media/output.mp4");
     });
 
-    it("strips leading dot from container if present", async () => {
+    it("strips leading dot from the extension if present", async () => {
       const saveDialogMock = vi.fn().mockResolvedValue("/media/output.mkv");
 
       const result = await openExportSaveDialog({
-        container: ".mkv",
+        extension: ".mkv",
         filterName: "Matroska Video",
         saveDialog: saveDialogMock,
       });
@@ -59,11 +59,28 @@ describe("Export Dialog Orchestration", () => {
       expect(result).toBe("/media/output.mkv");
     });
 
+    it("filters by the extension of an audio-only output, with the audio label", async () => {
+      const saveDialogMock = vi.fn().mockResolvedValue("/media/clip_export.m4a");
+
+      const result = await openExportSaveDialog({
+        extension: "m4a",
+        filterName: "Audio Files",
+        defaultName: "clip_export.m4a",
+        saveDialog: saveDialogMock,
+      });
+
+      expect(saveDialogMock).toHaveBeenCalledWith({
+        defaultPath: "clip_export.m4a",
+        filters: [{ name: "Audio Files", extensions: ["m4a"] }],
+      });
+      expect(result).toBe("/media/clip_export.m4a");
+    });
+
     it("passes optional title and defaultName to save dialog", async () => {
       const saveDialogMock = vi.fn().mockResolvedValue("/media/custom.mp4");
 
       const result = await openExportSaveDialog({
-        container: "mp4",
+        extension: "mp4",
         filterName: defaultFilterName,
         title: "Save Export Video",
         defaultName: "custom.mp4",
@@ -88,7 +105,7 @@ describe("Export Dialog Orchestration", () => {
       mockedTauriSave.mockResolvedValueOnce("/media/default-save.mp4");
 
       const result = await openExportSaveDialog({
-        container: defaultContainer,
+        extension: defaultExtension,
         filterName: defaultFilterName,
       });
 
@@ -110,7 +127,7 @@ describe("Export Dialog Orchestration", () => {
       const reportErrorMock = vi.fn();
 
       const result = await openExportSaveDialog({
-        container: defaultContainer,
+        extension: defaultExtension,
         filterName: defaultFilterName,
         saveDialog: saveDialogMock,
         reportError: reportErrorMock,
@@ -125,7 +142,7 @@ describe("Export Dialog Orchestration", () => {
       const reportErrorMock = vi.fn();
 
       const result = await openExportSaveDialog({
-        container: defaultContainer,
+        extension: defaultExtension,
         filterName: defaultFilterName,
         saveDialog: saveDialogMock,
         reportError: reportErrorMock,
@@ -140,7 +157,7 @@ describe("Export Dialog Orchestration", () => {
       const reportErrorMock = vi.fn();
 
       const result = await openExportSaveDialog({
-        container: defaultContainer,
+        extension: defaultExtension,
         filterName: defaultFilterName,
         saveDialog: saveDialogMock,
         reportError: reportErrorMock,
@@ -158,7 +175,7 @@ describe("Export Dialog Orchestration", () => {
       const reportErrorMock = vi.fn();
 
       const result = await openExportSaveDialog({
-        container: defaultContainer,
+        extension: defaultExtension,
         filterName: defaultFilterName,
         saveDialog: saveDialogMock,
         reportError: reportErrorMock,
@@ -178,7 +195,7 @@ describe("Export Dialog Orchestration", () => {
       const reportErrorMock = vi.fn();
 
       const result = await openExportSaveDialog({
-        container: defaultContainer,
+        extension: defaultExtension,
         filterName: defaultFilterName,
         saveDialog: saveDialogMock,
         reportError: reportErrorMock,
@@ -198,7 +215,7 @@ describe("Export Dialog Orchestration", () => {
       const storeReportSpy = vi.spyOn(exportStore.getState(), "reportError");
 
       const result = await openExportSaveDialog({
-        container: defaultContainer,
+        extension: defaultExtension,
         filterName: defaultFilterName,
         saveDialog: saveDialogMock,
       });
@@ -220,7 +237,7 @@ describe("Export Dialog Orchestration", () => {
 
       await expect(
         openExportSaveDialog({
-          container: defaultContainer,
+          extension: defaultExtension,
           filterName: defaultFilterName,
           saveDialog: saveDialogMock,
           reportError: () => {},
