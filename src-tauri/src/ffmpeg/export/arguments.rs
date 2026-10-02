@@ -231,6 +231,13 @@ fn command_line_length(arguments: &[String]) -> usize {
 /// labels refer to, so mismatching them produces a command ffmpeg rejects while parsing the
 /// graph.
 ///
+/// # Video
+///
+/// `-map "[v]"`, `-c:v`, and the quality flag appear exactly when [`ExportPlan::video`] is
+/// [`Some`], which is exactly when [`build_filter_graph`] writes a `[v]` output label.
+/// [`super::plan::build_plan`] plans video for every export, so every command it leads to
+/// carries all three.
+///
 /// # Audio
 ///
 /// `-map "[a]"` and `-c:a` appear exactly when [`ExportPlan::audio`] is [`Some`], which for
@@ -240,12 +247,12 @@ fn command_line_length(arguments: &[String]) -> usize {
 /// case, and a debug assertion there is what reports it.) Neither the audio encoder name nor an
 /// audio bitrate reaches the command line otherwise.
 ///
-/// `-b:a <n>k` follows `-c:a` directly when the plan also carries an
-/// [`ExportPlan::audio_bitrate`] (ADR 023). [`Quality`] still describes the video stream only.
-/// With no bitrate the audio encoder runs at its own default, which is what every export did
-/// before ADR 023, so an older preset renders the same vector as before. This writes the flag
-/// for any encoder, lossless ones included: ADR 023 leaves the knowledge of which encoders take
-/// no bitrate to the editor, which clears the value for them.
+/// `-b:a <n>k` follows `-c:a` directly when the audio part also carries a
+/// [`super::PlannedAudio::bitrate`] (ADR 023). [`Quality`] still describes the video stream
+/// only. With no bitrate the audio encoder runs at its own default, which is what every export
+/// did before ADR 023, so an older preset renders the same vector as before. This writes the
+/// flag for any encoder, lossless ones included: ADR 023 leaves the knowledge of which encoders
+/// take no bitrate to the editor, which clears the value for them.
 #[must_use]
 pub fn build_arguments(
     plan: &ExportPlan,
@@ -289,19 +296,23 @@ pub fn build_arguments(
     }
 
     push_pair(&mut arguments, "-filter_complex", graph);
-    push_pair(&mut arguments, "-map", "[v]");
+    if plan.video.is_some() {
+        push_pair(&mut arguments, "-map", "[v]");
+    }
     if plan.audio.is_some() {
         push_pair(&mut arguments, "-map", "[a]");
     }
 
-    push_pair(&mut arguments, "-c:v", &plan.video_encoder);
-    let (quality_flag, quality_value) = quality_arguments(plan.quality);
-    push_pair(&mut arguments, quality_flag, &quality_value);
-    if plan.audio.is_some() {
-        push_pair(&mut arguments, "-c:a", &plan.audio_encoder);
+    if let Some(video) = &plan.video {
+        push_pair(&mut arguments, "-c:v", &video.encoder);
+        let (quality_flag, quality_value) = quality_arguments(video.quality);
+        push_pair(&mut arguments, quality_flag, &quality_value);
+    }
+    if let Some(audio) = &plan.audio {
+        push_pair(&mut arguments, "-c:a", &audio.encoder);
         // Kilobits per second on the wire, with the `k` suffix, as for `-b:v`: the bare number
         // would mean bits per second, which is a thousand times too small.
-        if let Some(bitrate) = plan.audio_bitrate {
+        if let Some(bitrate) = audio.bitrate {
             push_pair(&mut arguments, "-b:a", &format!("{bitrate}k"));
         }
     }
@@ -443,7 +454,9 @@ fn render_seek(seek: Rational) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffmpeg::export::{OutputTiming, PlannedAudio, PlannedSegment, MAX_EXPORT_SEGMENTS};
+    use crate::ffmpeg::export::{
+        OutputTiming, PlannedAudio, PlannedSegment, PlannedVideo, MAX_EXPORT_SEGMENTS,
+    };
     use crate::project::Resolution;
     use crate::settings::{
         AudioChannels, MAX_AUDIO_BITRATE_KBPS, MAX_AUDIO_SAMPLE_RATE, MAX_ENCODER_NAME_CHARS,
@@ -516,6 +529,8 @@ mod tests {
             sample_rate,
             output_sample_rate: 48_000,
             output_channels: AudioChannels::Stereo,
+            encoder: "aac".to_owned(),
+            bitrate: None,
         }
     }
 
@@ -529,22 +544,36 @@ mod tests {
         ExportPlan {
             source: PathBuf::from(SOURCE),
             destination: PathBuf::from("/export/out.mp4"),
-            video_stream_index: 1,
+            video: Some(PlannedVideo {
+                stream_index: 1,
+                timing: OutputTiming::ConstantFrameRate(Rational::new(25, 1).unwrap()),
+                resolution: None,
+                encoder: "libx264".to_owned(),
+                quality: Quality {
+                    kind: QualityKind::Crf,
+                    value: 20,
+                },
+                expected_frames: Some(u64::try_from(frames).unwrap()),
+            }),
             audio: Some(legacy_audio(2, 44_100)),
             segments: fixture_segments(count),
-            timing: OutputTiming::ConstantFrameRate(Rational::new(25, 1).unwrap()),
-            resolution: None,
-            video_encoder: "libx264".to_owned(),
-            audio_encoder: "aac".to_owned(),
-            audio_bitrate: None,
-            quality: Quality {
-                kind: QualityKind::Crf,
-                value: 20,
-            },
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
-            expected_frames: Some(u64::try_from(frames).unwrap()),
         }
+    }
+
+    /// The video part of a fixture plan, which every fixture carries.
+    fn video_mut(plan: &mut ExportPlan) -> &mut PlannedVideo {
+        plan.video
+            .as_mut()
+            .expect("every fixture plan carries video")
+    }
+
+    /// The audio part of a fixture plan that still carries one.
+    fn audio_mut(plan: &mut ExportPlan) -> &mut PlannedAudio {
+        plan.audio
+            .as_mut()
+            .expect("this fixture plan carries audio")
     }
 
     /// `build_arguments` for a fixture plan and the sentinel graph, against `OUTPUT`.
@@ -728,6 +757,44 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_without_video_maps_and_encodes_audio_only() {
+        // `build_plan` always plans video today. The rule for a plan without it mirrors the
+        // rule above: `build_filter_graph` writes no `[v]` label for such a plan, so neither
+        // `-map "[v]"` nor `-c:v` nor the quality flag may appear.
+        let mut plan = fixture_plan(1);
+        plan.video = None;
+        assert_eq!(
+            arguments(&plan, GraphShape::InputPerSegment),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-ss",
+                "6.6",
+                "-i",
+                "/media/source.mp4",
+                "-filter_complex",
+                "<graph>",
+                "-map",
+                "[a]",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "/export/.out.mp4.tmp-4242-0",
+            ]
+        );
+    }
+
+    #[test]
     fn a_segment_whose_seek_clamped_to_none_carries_no_ss_at_all() {
         // ADR 014 measurement 7: the trailing `-ss 0` idiom is a workaround for ffmpeg before
         // 2.1 and has no effect on any build a user can install today. The absence of the flag
@@ -865,8 +932,8 @@ mod tests {
         // bits per second, a thousand times too small -- and ffmpeg would encode that without
         // complaint.
         let mut plan = fixture_plan(1);
-        plan.video_encoder = "h264_nvenc".to_owned();
-        plan.quality = Quality {
+        video_mut(&mut plan).encoder = "h264_nvenc".to_owned();
+        video_mut(&mut plan).quality = Quality {
             kind: QualityKind::Bitrate,
             value: 8_000,
         };
@@ -914,7 +981,7 @@ mod tests {
         // no `-b:a` appears; `the_audio_bitrate_flag_appears_exactly_when_set_and_there_is_audio`
         // below covers the other half.
         let mut plan = fixture_plan(1);
-        plan.quality = Quality {
+        video_mut(&mut plan).quality = Quality {
             kind: QualityKind::QualityScale,
             value: 3,
         };
@@ -961,7 +1028,7 @@ mod tests {
         // carries the `k` suffix for the reason `a_bitrate_preset_reaches_ffmpeg_in_kilobits`
         // gives for `-b:v`.
         let mut plan = fixture_plan(1);
-        plan.audio_bitrate = Some(320);
+        audio_mut(&mut plan).bitrate = Some(320);
         assert_eq!(
             arguments(&plan, GraphShape::InputPerSegment),
             vec![
@@ -1010,8 +1077,8 @@ mod tests {
         plan.destination = PathBuf::from("/export/out.mkv");
         // 510 kbps, not the settings maximum: libopus refuses more than 256 kbps for each
         // channel, and 510 kbps is valid for stereo.
-        plan.audio_encoder = "libopus".to_owned();
-        plan.audio_bitrate = Some(510);
+        audio_mut(&mut plan).encoder = "libopus".to_owned();
+        audio_mut(&mut plan).bitrate = Some(510);
         assert_eq!(
             arguments(&plan, GraphShape::SingleInput),
             vec![
@@ -1052,13 +1119,14 @@ mod tests {
     #[test]
     fn the_audio_bitrate_flag_appears_exactly_when_set_and_there_is_audio() {
         // Four cases, both shapes. With no bitrate the vector is the pre-ADR 023 one, byte for
-        // byte. With no audio, a bitrate must not reach the line either: `-b:a` would name a
-        // bitrate for a stream the graph never writes, exactly as a stray `-c:a` would.
+        // byte. With no audio, the bitrate leaves with the audio part, and `-b:a` must not reach
+        // the line either: it would name a bitrate for a stream the graph never writes, exactly
+        // as a stray `-c:a` would.
         for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
             for bitrate in [None, Some(MIN_AUDIO_BITRATE_KBPS), Some(320)] {
                 for has_audio in [true, false] {
                     let mut plan = fixture_plan(2);
-                    plan.audio_bitrate = bitrate;
+                    audio_mut(&mut plan).bitrate = bitrate;
                     if !has_audio {
                         plan.audio = None;
                         for segment in &mut plan.segments {
@@ -1087,12 +1155,29 @@ mod tests {
                             .expect("a plan with audio names an audio encoder");
                         assert_eq!(emitted[encoder + 2], "-b:a", "{emitted:?}");
                         assert_eq!(emitted[encoder + 3], format!("{bitrate}k"), "{emitted:?}");
-                    } else {
+                    } else if has_audio {
                         // Removing the setting changes nothing else: the vector equals the one
                         // a plan with no bitrate at all produces.
                         let mut unset = plan.clone();
-                        unset.audio_bitrate = None;
+                        audio_mut(&mut unset).bitrate = None;
                         assert_eq!(emitted, arguments(&unset, shape));
+                    } else {
+                        // Without audio, nothing of the audio part reaches the line: no map, no
+                        // encoder, and no bitrate, whatever bitrate the dropped part carried.
+                        // The vector equals the one a plan that never held a bitrate produces.
+                        for flag in ["[a]", "-c:a", "-b:a"] {
+                            assert!(
+                                !emitted.iter().any(|argument| argument == flag),
+                                "{flag} with no audio: {emitted:?}"
+                            );
+                        }
+                        let mut silent = fixture_plan(2);
+                        silent.audio = None;
+                        for segment in &mut silent.segments {
+                            segment.audio_in_tick = None;
+                            segment.audio_out_tick = None;
+                        }
+                        assert_eq!(emitted, arguments(&silent, shape));
                     }
                 }
             }
@@ -1194,12 +1279,12 @@ mod tests {
         // -- the two rates agree -- so `graph.rs` owns that test; this one only pins that the
         // command carries whatever graph it was handed, verbatim.
         let mut plan = fixture_plan(1);
-        plan.timing = OutputTiming::ConstantFrameRate(
+        video_mut(&mut plan).timing = OutputTiming::ConstantFrameRate(
             Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
         );
         plan.audio = Some(legacy_audio(2, 48_000));
         plan.segments[0] = segment(160_000, 190_030, 256_000, 304_048, Rational::new(1, 3));
-        plan.expected_frames = Some(30);
+        video_mut(&mut plan).expected_frames = Some(30);
         plan.total_duration = Rational::new(1_001, 1_000).expect("1.001 is a valid duration");
 
         let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
@@ -1273,11 +1358,11 @@ mod tests {
                 QualityKind::QualityScale,
             ] {
                 let mut plan = fixture_plan(2);
-                plan.quality = Quality { kind, value: 7 };
+                video_mut(&mut plan).quality = Quality { kind, value: 7 };
                 cases.push((plan, shape));
             }
             let mut with_audio_bitrate = fixture_plan(2);
-            with_audio_bitrate.audio_bitrate = Some(320);
+            audio_mut(&mut with_audio_bitrate).bitrate = Some(320);
             cases.push((with_audio_bitrate, shape));
 
             let mut silent = fixture_plan(2);
@@ -1392,8 +1477,8 @@ mod tests {
     /// The fixture command with the two encoder names substituted, and nothing else touched.
     fn arguments_with_encoders(video: &str, audio: &str) -> (Vec<String>, Vec<String>) {
         let mut plan = fixture_plan(1);
-        plan.video_encoder = video.to_owned();
-        plan.audio_encoder = audio.to_owned();
+        video_mut(&mut plan).encoder = video.to_owned();
+        audio_mut(&mut plan).encoder = audio.to_owned();
         let emitted = arguments(&plan, GraphShape::InputPerSegment);
 
         let mut expected = arguments(&fixture_plan(1), GraphShape::InputPerSegment);
@@ -1513,27 +1598,27 @@ mod tests {
             destination: PathBuf::from(
                 r"C:\Users\alexandra.whitfield\Videos\Exports\grand-final-highlights.mp4",
             ),
-            video_stream_index: 1,
+            video: Some(PlannedVideo {
+                stream_index: 1,
+                timing: OutputTiming::ConstantFrameRate(
+                    Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
+                ),
+                resolution: Some(Resolution { w: 3840, h: 2160 }),
+                encoder: "hevc_videotoolbox".to_owned(),
+                quality: Quality {
+                    kind: QualityKind::Crf,
+                    value: 20,
+                },
+                expected_frames: Some(30 * u64::try_from(count).expect("the count fits in a u64")),
+            }),
             audio: Some(legacy_audio(2, 48_000)),
             segments,
-            timing: OutputTiming::ConstantFrameRate(
-                Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
-            ),
-            resolution: Some(Resolution { w: 3840, h: 2160 }),
-            video_encoder: "hevc_videotoolbox".to_owned(),
-            audio_encoder: "aac".to_owned(),
-            audio_bitrate: None,
-            quality: Quality {
-                kind: QualityKind::Crf,
-                value: 20,
-            },
             container: Container::Mp4,
             total_duration: Rational::new(
                 901 * i64::try_from(count).expect("the segment count fits in an i64"),
                 30_000,
             )
             .expect("the fixture duration is representable"),
-            expected_frames: Some(30 * u64::try_from(count).expect("the count fits in a u64")),
         }
     }
 
@@ -1615,6 +1700,8 @@ mod tests {
             sample_rate: MAX_AUDIO_SAMPLE_RATE,
             output_sample_rate: MAX_AUDIO_SAMPLE_RATE,
             output_channels: AudioChannels::Stereo,
+            encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
+            bitrate: Some(MAX_AUDIO_BITRATE_KBPS),
         }
     }
 
@@ -1647,30 +1734,30 @@ mod tests {
         ExportPlan {
             source: PathBuf::from(longest_windows_path(".mkv")),
             destination: PathBuf::from(longest_windows_path(".mp4")),
-            video_stream_index: 10,
+            video: Some(PlannedVideo {
+                stream_index: 10,
+                timing: OutputTiming::ConstantFrameRate(
+                    Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
+                ),
+                resolution: Some(Resolution {
+                    w: MAX_RESOLUTION_DIMENSION,
+                    h: MAX_RESOLUTION_DIMENSION,
+                }),
+                encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
+                quality: Quality {
+                    kind: QualityKind::Bitrate,
+                    value: 200_000,
+                },
+                expected_frames: Some(30 * u64::try_from(count).expect("the count fits in a u64")),
+            }),
             audio: Some(widest_audio()),
             segments,
-            timing: OutputTiming::ConstantFrameRate(
-                Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
-            ),
-            resolution: Some(Resolution {
-                w: MAX_RESOLUTION_DIMENSION,
-                h: MAX_RESOLUTION_DIMENSION,
-            }),
-            video_encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
-            audio_encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
-            audio_bitrate: Some(MAX_AUDIO_BITRATE_KBPS),
-            quality: Quality {
-                kind: QualityKind::Bitrate,
-                value: 200_000,
-            },
             container: Container::Mp4,
             total_duration: Rational::new(
                 901 * i64::try_from(count).expect("the segment count fits in an i64"),
                 30_000,
             )
             .expect("the fixture duration is representable"),
-            expected_frames: Some(30 * u64::try_from(count).expect("the count fits in a u64")),
         }
     }
 
@@ -1739,9 +1826,9 @@ mod tests {
                     plan.audio = Some(PlannedAudio {
                         output_sample_rate,
                         output_channels,
+                        bitrate: audio_bitrate,
                         ..widest_audio()
                     });
-                    plan.audio_bitrate = audio_bitrate;
                     for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
                         assert!(
                             measured_length(&plan, shape, &reservation) <= widest_length(shape),
@@ -1765,9 +1852,9 @@ mod tests {
         legacy.audio = Some(PlannedAudio {
             output_sample_rate: 48_000,
             output_channels: AudioChannels::Stereo,
+            bitrate: None,
             ..widest_audio()
         });
-        legacy.audio_bitrate = None;
         assert_eq!(
             widest_length(shape) - measured_length(&legacy, shape, &reservation),
             MAX_EXPORT_SEGMENTS + (4 + ARGUMENT_OVERHEAD_BYTES) + (5 + ARGUMENT_OVERHEAD_BYTES)

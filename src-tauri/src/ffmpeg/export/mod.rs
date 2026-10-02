@@ -177,19 +177,51 @@ pub struct PlannedSegment {
     pub audio_out_tick: Option<i64>,
 }
 
-/// The audio stream a plan addresses, the sample rate its ticks are measured in, and the
-/// format every audio chain ends in.
+/// The video part of a plan: the stream it reads, how the output frames are timed and sized,
+/// the encoder settings a preset selected, and the frame count the export must reach.
+///
+/// Everything here describes the video stream only, and it only means something when there is
+/// video to write. [`ExportPlan::video`] holds it as one optional part for that reason, as
+/// [`ExportPlan::audio`] holds [`PlannedAudio`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedVideo {
+    /// The absolute index of the video stream the filter graph must address.
+    ///
+    /// ADR 014's "The command" section requires the graph to bind this stream by its
+    /// absolute index, never the short specifier `[i:v]`, for the same reason as
+    /// [`PlannedAudio::stream_index`].
+    pub stream_index: u32,
+    /// How the renderer times its output frames. See [`OutputTiming`].
+    pub timing: OutputTiming,
+    /// The output resolution, or `None` to keep the source video's own resolution.
+    pub resolution: Option<Resolution>,
+    /// The ffmpeg video encoder name, verbatim from the preset.
+    pub encoder: String,
+    /// The quality control and its value, verbatim from the preset.
+    pub quality: Quality,
+    /// The expected final `frame` count, for ADR 014's progress and frame-count comparison.
+    ///
+    /// This is `Some` under every [`OutputTiming`] this crate implements today. It is an
+    /// `Option`, not a plain `u64`, because ADR 014's "Output timing" section records that a
+    /// future variable-frame-rate mode cannot predict a frame count in advance; that mode
+    /// will report `None` here instead of widening this field's meaning.
+    pub expected_frames: Option<u64>,
+}
+
+/// The audio part of a plan: the stream it addresses, the sample rate its ticks are measured
+/// in, the format every audio chain ends in, and the encoder settings a preset selected.
 ///
 /// The first two facts always travel together; see [`ExportPlan::audio`] for why bundling them
 /// into one type, rather than two independent optional fields, is the point. The output format
-/// belongs here too, because it only means something when there is audio to format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// and the encoder settings belong here too, because they only mean something when there is
+/// audio to format and to encode.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedAudio {
     /// The absolute index of the audio stream the filter graph must address.
     ///
     /// ADR 014's "The command" section requires the graph to bind this stream by its
     /// absolute index, never the short specifier `[i:a]`, for the same reason as
-    /// [`ExportPlan::video_stream_index`].
+    /// [`PlannedVideo::stream_index`].
     pub stream_index: u32,
     /// The sample rate every `audio_in_tick`/`audio_out_tick` in this plan's segments is
     /// measured in: the tick unit is `1 / sample_rate` seconds.
@@ -213,14 +245,26 @@ pub struct PlannedAudio {
     /// all and the chain keeps the source stream's own (ADR 023). As with the rate, every chain
     /// reads the same stream, so every chain ends with the same layout.
     pub output_channels: AudioChannels,
+    /// The ffmpeg audio encoder name, verbatim from the preset.
+    pub encoder: String,
+    /// The audio bitrate in kilobits per second, verbatim from the preset, or `None` to leave
+    /// the audio encoder at its own default.
+    ///
+    /// The argument builder writes it as `-b:a <n>k` directly after `-c:a` (ADR 023).
+    pub bitrate: Option<u32>,
 }
 
 /// A fully resolved, ready-to-render export: one source, its segments in concat order, and
-/// the encoder settings a preset selected.
+/// the video and audio parts with the encoder settings a preset selected.
 ///
 /// [`plan::build_plan`] is the only place that produces this type. Every field is already
 /// resolved -- no later stage of the renderer re-reads the preset or the probe -- so a
 /// change to a preset after planning cannot silently retarget an export already in flight.
+///
+/// Both parts are optional, and each one is a whole decision for the graph: a part that is
+/// `None` writes no chain, no label, no map, and no encoder flag anywhere. [`plan::build_plan`]
+/// always plans video today, and it plans audio exactly when the source reports an audio
+/// stream.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportPlan {
     /// The source media file every segment cuts from.
@@ -228,12 +272,10 @@ pub struct ExportPlan {
     /// The final output location. The renderer writes a temporary file beside it and
     /// renames on success (ADR 004, ADR 014's "Other rules").
     pub destination: PathBuf,
-    /// The absolute index of the video stream the filter graph must address.
+    /// The video this plan writes, or `None` for a plan with no video.
     ///
-    /// ADR 014's "The command" section requires the graph to bind this stream by its
-    /// absolute index, never the short specifier `[i:v]`, for the same reason as
-    /// [`PlannedAudio::stream_index`].
-    pub video_stream_index: u32,
+    /// [`plan::build_plan`] always fills this part, so every plan it produces writes video.
+    pub video: Option<PlannedVideo>,
     /// The audio stream this plan addresses, together with the sample rate every audio
     /// tick in [`PlannedSegment`] is measured in, or `None` when the source reports no
     /// audio stream at all.
@@ -253,36 +295,29 @@ pub struct ExportPlan {
     pub audio: Option<PlannedAudio>,
     /// The segments to render, in the order they must appear in the concatenated output.
     pub segments: Vec<PlannedSegment>,
-    /// How the renderer times its output frames. See [`OutputTiming`].
-    pub timing: OutputTiming,
-    /// The output resolution, or `None` to keep the source video's own resolution.
-    pub resolution: Option<Resolution>,
-    /// The ffmpeg video encoder name, verbatim from the preset.
-    pub video_encoder: String,
-    /// The ffmpeg audio encoder name, verbatim from the preset.
-    pub audio_encoder: String,
-    /// The audio bitrate in kilobits per second, verbatim from the preset, or `None` to leave
-    /// the audio encoder at its own default.
-    ///
-    /// The argument builder writes it as `-b:a <n>k` only when [`Self::audio`] is `Some`, for
-    /// the same reason it writes `-c:a` only then.
-    pub audio_bitrate: Option<u32>,
-    /// The quality control and its value, verbatim from the preset.
-    pub quality: Quality,
     /// The output container, which selects the muxer (ADR 004).
     pub container: Container,
     /// The exact total output duration: the rational sum of every segment's duration.
     pub total_duration: Rational,
-    /// The expected final `frame` count, for ADR 014's progress and frame-count comparison.
-    ///
-    /// This is `Some` under every [`OutputTiming`] this crate implements today. It is an
-    /// `Option`, not a plain `u64`, because ADR 014's "Output timing" section records that a
-    /// future variable-frame-rate mode cannot predict a frame count in advance; that mode
-    /// will report `None` here instead of widening this field's meaning.
-    pub expected_frames: Option<u64>,
 }
 
 impl ExportPlan {
+    /// The expected final `frame` count, for ADR 014's progress and frame-count comparison:
+    /// [`PlannedVideo::expected_frames`] of [`Self::video`].
+    ///
+    /// `None` comes from two different cases, and they must not be read as one. The video part
+    /// reports `None` when it cannot predict a count, as ADR 014's future variable-frame-rate
+    /// mode will; the comparison then has nothing to compare, and the progress has no total. A
+    /// plan without a video part also reports `None`, because it writes no frames at all; for
+    /// that plan the comparison cannot catch the failure ADR 016 relies on it for, an ffmpeg that
+    /// wrote nothing and exited zero. [`plan::build_plan`] always plans video, and
+    /// `commands::export` asserts that no plan without video reaches the frame-count check. An
+    /// export without video needs a success check of its own.
+    #[must_use]
+    pub fn expected_frames(&self) -> Option<u64> {
+        self.video.as_ref().and_then(|video| video.expected_frames)
+    }
+
     /// The single input seek ADR 014's second graph shape needs: one input for the whole
     /// source, seeked once before the earliest frame any segment requires, with
     /// `split`/`asplit` dividing the decoded stream among each segment's own `trim` chain.

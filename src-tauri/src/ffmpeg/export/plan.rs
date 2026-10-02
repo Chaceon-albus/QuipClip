@@ -10,8 +10,8 @@
 //! doc comment for why that distinction is load-bearing.
 
 use super::{
-    ExportErrorCode, ExportPlan, OutputTiming, PlannedAudio, PlannedSegment, MAX_EXPORT_SEGMENTS,
-    SEEK_MARGIN_SECONDS,
+    ExportErrorCode, ExportPlan, OutputTiming, PlannedAudio, PlannedSegment, PlannedVideo,
+    MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::probe::MediaProbe;
 use crate::settings::{AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting};
@@ -184,9 +184,12 @@ pub enum PathFacts {
 /// For each segment, in order: the exact duration in seconds, the input seek position (ADR
 /// 014's "The seek", clamped at zero and reported as `None` when clamped), and the audio
 /// tick boundary when [`ExportPlan::audio`] is `Some`. `total_duration` is the exact
-/// rational sum of every segment's duration, and `expected_frames` rounds each segment's
-/// frame count individually before summing -- never the reverse, since rounding the total
-/// instead can produce a different, and wrong, expected count.
+/// rational sum of every segment's duration, and [`PlannedVideo::expected_frames`] rounds
+/// each segment's frame count individually before summing -- never the reverse, since
+/// rounding the total instead can produce a different, and wrong, expected count.
+///
+/// The plan always carries [`ExportPlan::video`]. It carries [`ExportPlan::audio`] exactly
+/// when the probe reports an audio stream.
 ///
 /// No step here uses floating point. Every quantity is either an integer or a [`Rational`],
 /// per ADR 002.
@@ -337,6 +340,8 @@ pub fn build_plan(
                 sample_rate,
                 output_sample_rate,
                 output_channels: preset.audio_channels,
+                encoder: preset.audio_encoder.clone(),
+                bitrate: preset.audio_bitrate,
             })
         }
     };
@@ -377,7 +382,7 @@ pub fn build_plan(
         // exact zero clamps to `None` exactly like a negative value does.
         let seek_seconds = (raw_seek.num() > 0).then_some(raw_seek);
 
-        let (audio_in_tick, audio_out_tick) = match audio {
+        let (audio_in_tick, audio_out_tick) = match &audio {
             Some(audio) => {
                 let in_tick = audio_tick(segment.in_pts, video_time_base, audio.sample_rate)
                     .ok_or(ExportErrorCode::InvalidSegment)?;
@@ -422,18 +427,18 @@ pub fn build_plan(
     Ok(ExportPlan {
         source: source.to_path_buf(),
         destination: destination.to_path_buf(),
-        video_stream_index: probe.video_stream_index,
+        video: Some(PlannedVideo {
+            stream_index: probe.video_stream_index,
+            timing: OutputTiming::ConstantFrameRate(output_frame_rate),
+            resolution,
+            encoder: preset.video_encoder.clone(),
+            quality: preset.quality,
+            expected_frames: Some(total_frames),
+        }),
         audio,
         segments: planned_segments,
-        timing: OutputTiming::ConstantFrameRate(output_frame_rate),
-        resolution,
-        video_encoder: preset.video_encoder.clone(),
-        audio_encoder: preset.audio_encoder.clone(),
-        audio_bitrate: preset.audio_bitrate,
-        quality: preset.quality,
         container: preset.container,
         total_duration,
-        expected_frames: Some(total_frames),
     })
 }
 
@@ -717,6 +722,11 @@ mod tests {
     /// for a path that does not exist.
     fn inspect_from(facts: HashMap<PathBuf, PathFacts>) -> impl Fn(&Path) -> PathFacts {
         move |path: &Path| facts.get(path).copied().unwrap_or(PathFacts::Absent)
+    }
+
+    /// The video part of a plan [`build_plan`] produced, which always carries one.
+    fn video(plan: &ExportPlan) -> &PlannedVideo {
+        plan.video.as_ref().expect("build_plan always plans video")
     }
 
     fn plan_with(
@@ -1056,7 +1066,7 @@ mod tests {
         preset.frame_rate = FrameRateSetting::Rate(Rational::new(24, 1).unwrap());
         let plan = plan_with(&[boundary(0, 1)], &probe, &preset, valid_path_facts()).unwrap();
         assert_eq!(
-            plan.timing,
+            video(&plan).timing,
             OutputTiming::ConstantFrameRate(Rational::new(24, 1).unwrap())
         );
     }
@@ -1074,7 +1084,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.timing,
+            video(&plan).timing,
             OutputTiming::ConstantFrameRate(Rational::new(25, 1).unwrap())
         );
     }
@@ -1141,7 +1151,7 @@ mod tests {
         preset.frame_rate = FrameRateSetting::Rate(Rational::new(1, 1).unwrap());
         let segments = [boundary(0, 5), boundary(5, 10)];
         let plan = plan_with(&segments, &probe, &preset, valid_path_facts()).unwrap();
-        assert_eq!(plan.expected_frames, Some(6));
+        assert_eq!(video(&plan).expected_frames, Some(6));
         assert_eq!(plan.total_duration, Rational::new(5, 1).unwrap());
     }
 
@@ -1158,7 +1168,7 @@ mod tests {
         preset.frame_rate = FrameRateSetting::Rate(Rational::new(30_000, 1001).unwrap());
         let segments = [boundary(0, 501), boundary(501, 1002), boundary(1002, 1503)];
         let plan = plan_with(&segments, &probe, &preset, valid_path_facts()).unwrap();
-        assert_eq!(plan.expected_frames, Some(3));
+        assert_eq!(video(&plan).expected_frames, Some(3));
     }
 
     // -- computation: seek, clamped and unclamped -----------------------------------------
@@ -1307,6 +1317,8 @@ mod tests {
                 sample_rate: 44_100,
                 output_sample_rate: 48_000,
                 output_channels: AudioChannels::Stereo,
+                encoder: "aac".to_owned(),
+                bitrate: None,
             })
         );
         assert_eq!(plan.segments[0].audio_in_tick, Some(0));
@@ -1339,6 +1351,8 @@ mod tests {
                 sample_rate: 48_000,
                 output_sample_rate: 48_000,
                 output_channels: AudioChannels::Stereo,
+                encoder: "aac".to_owned(),
+                bitrate: None,
             })
         );
         assert_eq!(plan.segments[0].audio_in_tick, Some(0));
@@ -1452,6 +1466,8 @@ mod tests {
                 sample_rate: 44_100,
                 output_sample_rate: 44_100,
                 output_channels: AudioChannels::Source,
+                encoder: "aac".to_owned(),
+                bitrate: None,
             })
         );
         assert_eq!(plan.segments[0].audio_out_tick, Some(1471));
@@ -1495,7 +1511,10 @@ mod tests {
                 valid_path_facts(),
             )
             .unwrap();
-            assert_eq!(plan.audio_bitrate, bitrate);
+            assert_eq!(
+                plan.audio.expect("the probe reports audio").bitrate,
+                bitrate
+            );
         }
     }
 
@@ -1525,7 +1544,7 @@ mod tests {
         let audio = plan.audio.expect("the probe reports audio");
         assert_eq!(audio.output_sample_rate, 48_000);
         assert_eq!(audio.output_channels, AudioChannels::Stereo);
-        assert_eq!(plan.audio_bitrate, None);
+        assert_eq!(audio.bitrate, None);
     }
 
     #[test]
@@ -1567,7 +1586,7 @@ mod tests {
             valid_path_facts(),
         )
         .unwrap();
-        assert_eq!(plan.resolution, None);
+        assert_eq!(video(&plan).resolution, None);
     }
 
     #[test]
@@ -1581,6 +1600,56 @@ mod tests {
             valid_path_facts(),
         )
         .unwrap();
-        assert_eq!(plan.resolution, Some(Resolution { w: 1280, h: 720 }));
+        assert_eq!(
+            video(&plan).resolution,
+            Some(Resolution { w: 1280, h: 720 })
+        );
+    }
+
+    // -- computation: the video part -------------------------------------------------------
+
+    #[test]
+    fn every_plan_carries_video_with_the_presets_own_settings() {
+        // The plan has an optional video part, and `build_plan` fills it every time: for a
+        // source without audio, and for one with audio. Every field is the preset's or the
+        // probe's own, resolved once here.
+        let mut probe = sample_probe();
+        probe.video_stream_index = 3;
+        let mut preset = sample_preset();
+        preset.video_encoder = "hevc_videotoolbox".to_owned();
+        preset.quality = Quality {
+            kind: QualityKind::Bitrate,
+            value: 8_000,
+        };
+        let expected = PlannedVideo {
+            stream_index: 3,
+            timing: OutputTiming::ConstantFrameRate(Rational::new(30, 1).unwrap()),
+            resolution: None,
+            encoder: "hevc_videotoolbox".to_owned(),
+            quality: Quality {
+                kind: QualityKind::Bitrate,
+                value: 8_000,
+            },
+            // 90000 ticks at 1/90000 is one second, at 30 frames per second.
+            expected_frames: Some(30),
+        };
+
+        let silent =
+            plan_with(&[boundary(0, 90_000)], &probe, &preset, valid_path_facts()).unwrap();
+        assert_eq!(silent.audio, None);
+        assert_eq!(silent.video.as_ref(), Some(&expected));
+        assert_eq!(silent.expected_frames(), Some(30));
+
+        probe.audio = Some(AudioProbe {
+            index: 1,
+            codec: Some("aac".to_owned()),
+            sample_rate: Some(48_000),
+            channels: Some(2),
+        });
+        let with_audio =
+            plan_with(&[boundary(0, 90_000)], &probe, &preset, valid_path_facts()).unwrap();
+        assert!(with_audio.audio.is_some());
+        assert_eq!(with_audio.video.as_ref(), Some(&expected));
+        assert_eq!(with_audio.expected_frames(), Some(30));
     }
 }

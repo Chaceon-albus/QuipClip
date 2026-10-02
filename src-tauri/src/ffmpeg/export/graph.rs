@@ -12,7 +12,7 @@
 //!   stream carrying the `default` disposition. ADR 014 records a real file where those two
 //!   rules disagree -- a non-default AC-3 stream at index 1 beside a default AAC stream at
 //!   index 2 -- so `[0:a]` would silently export audio the preview never played, with no
-//!   error anywhere. [`ExportPlan::video_stream_index`] and [`PlannedAudio::stream_index`]
+//!   error anywhere. [`PlannedVideo::stream_index`] and [`PlannedAudio::stream_index`]
 //!   carry the indices the probe chose, and this module emits them verbatim.
 //! - Every boundary is `start_pts`/`end_pts` in integer ticks, never `start`/`end`. FFmpeg
 //!   parses the `start` and `end` options into microseconds, and that truncation loses the
@@ -43,7 +43,7 @@
 //! No step here uses floating point. A frame rate renders as `num/den` (ADR 002), so an NTSC
 //! rate reaches ffmpeg as the exact `30000/1001`, never a rounded decimal.
 
-use super::{ExportPlan, OutputTiming, PlannedAudio, PlannedSegment};
+use super::{ExportPlan, OutputTiming, PlannedAudio, PlannedSegment, PlannedVideo};
 use crate::project::Resolution;
 use crate::settings::AudioChannels;
 
@@ -118,7 +118,7 @@ fn video_output_format(pixel_format: &str) -> String {
 /// stands at the head of the chain. Both are needed, for opposite reasons: this one converts
 /// the cut audio to the one format `concat` joins at; that one stops ffmpeg from converting
 /// the audio *before* the cut, which would read the boundary ticks in the wrong unit.
-fn audio_output_format(audio: PlannedAudio) -> String {
+fn audio_output_format(audio: &PlannedAudio) -> String {
     let layout = match audio.output_channels {
         AudioChannels::Source => "",
         AudioChannels::Stereo => ":channel_layouts=stereo",
@@ -191,6 +191,18 @@ pub enum GraphShape {
 /// the graph it would otherwise render carries `concat=n=0` (and `split=0` under
 /// [`GraphShape::SingleInput`]), which ffmpeg rejects.
 ///
+/// The plan must also carry at least one of its two parts. A plan with neither would render
+/// `concat=v=0:a=0`, which ffmpeg rejects too; `build_plan` always plans video, and a debug
+/// assertion catches a hand-built plan that has neither.
+///
+/// # Video
+///
+/// A plan with no video produces no video anywhere: no `trim` chain, no `split`, no `format`,
+/// `v=0` on `concat`, and `[a]` as the only output label. This is the rule for audio below,
+/// applied to the other part, so each part is one decision for the whole graph.
+/// [`build_plan`](super::plan::build_plan) plans video for every export today, so no plan
+/// that reaches this function lacks it.
+///
 /// # Audio
 ///
 /// A plan with no audio produces no audio anywhere: no `atrim` chain, no `asplit`, `a=0` on
@@ -217,33 +229,38 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
         !plan.segments.is_empty(),
         "an export plan must carry at least one segment"
     );
+    let video = plan.video.as_ref();
     let audio = resolve_audio(plan);
     debug_assert!(
         plan.audio.is_none() || audio.is_some(),
         "a plan that declares an audio stream must carry audio ticks on every segment"
     );
+    debug_assert!(
+        video.is_some() || plan.audio.is_some(),
+        "an export plan must carry video, audio, or both"
+    );
 
     let count = plan.segments.len();
+    let mut chains: Vec<String> = Vec::new();
+
     // The pixel format goes first in the text, ahead of the chains and the `concat` whose output
     // it reads. ffmpeg negotiates in text order, and only this position converts each segment
     // once; see `video_output_format`.
-    let mut chains: Vec<String> = vec![video_output_format(VIDEO_PIXEL_FORMAT)];
+    if video.is_some() {
+        chains.push(video_output_format(VIDEO_PIXEL_FORMAT));
+    }
 
     if shape == GraphShape::SingleInput {
-        chains.push(splitter_chain(
-            plan.video_stream_index,
-            "",
-            "split",
-            "sv",
-            count,
-        ));
+        if let Some(video) = video {
+            chains.push(splitter_chain(video.stream_index, "", "split", "sv", count));
+        }
         if let Some((planned, _)) = &audio {
             // The rate pin goes in front of `asplit`, not on each branch behind it: this
             // chain's head *is* the input link, so one filter pins it directly. See
             // `audio_input_pin`.
             chains.push(splitter_chain(
                 planned.stream_index,
-                &audio_input_pin(*planned),
+                &audio_input_pin(planned),
                 "asplit",
                 "sa",
                 count,
@@ -252,13 +269,15 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
     }
 
     for (index, segment) in plan.segments.iter().enumerate() {
-        chains.push(video_chain(plan, shape, index, *segment));
+        if let Some(video) = video {
+            chains.push(video_chain(video, shape, index, *segment));
+        }
         if let Some((planned, ticks)) = &audio {
-            chains.push(audio_chain(*planned, shape, index, ticks[index]));
+            chains.push(audio_chain(planned, shape, index, ticks[index]));
         }
     }
 
-    chains.push(concat_chain(count, audio.is_some()));
+    chains.push(concat_chain(count, video.is_some(), audio.is_some()));
     chains.join(";")
 }
 
@@ -267,8 +286,8 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
 /// The `collect` into an `Option<Vec<_>>` is the whole-graph decision described on
 /// [`build_filter_graph`]: one segment missing a tick means no audio anywhere, never a
 /// half-written audio path.
-fn resolve_audio(plan: &ExportPlan) -> Option<(PlannedAudio, Vec<(i64, i64)>)> {
-    let planned = plan.audio?;
+fn resolve_audio(plan: &ExportPlan) -> Option<(&PlannedAudio, Vec<(i64, i64)>)> {
+    let planned = plan.audio.as_ref()?;
     let ticks: Option<Vec<(i64, i64)>> = plan
         .segments
         .iter()
@@ -325,7 +344,7 @@ fn splitter_chain(stream_index: u32, pin: &str, filter: &str, label: &str, count
 /// has to sit on the input link itself -- in front of `atrim`, and in front of `asplit` under
 /// [`GraphShape::SingleInput`] rather than on the branches behind it, which is also one
 /// filter instead of one for each segment.
-fn audio_input_pin(audio: PlannedAudio) -> String {
+fn audio_input_pin(audio: &PlannedAudio) -> String {
     format!("aformat=sample_rates={},", audio.sample_rate)
 }
 
@@ -334,13 +353,13 @@ fn audio_input_pin(audio: PlannedAudio) -> String {
 /// The chain carries no `format` filter. The pixel format is set once, behind `concat`; see
 /// [`video_output_format`].
 fn video_chain(
-    plan: &ExportPlan,
+    video: &PlannedVideo,
     shape: GraphShape,
     index: usize,
     segment: PlannedSegment,
 ) -> String {
     let source = match shape {
-        GraphShape::InputPerSegment => format!("[{index}:{}]", plan.video_stream_index),
+        GraphShape::InputPerSegment => format!("[{index}:{}]", video.stream_index),
         GraphShape::SingleInput => format!("[sv{index}]"),
     };
     // ADR 014's "Output timing": version 1 always writes constant-frame-rate output, because
@@ -348,7 +367,7 @@ fn video_chain(
     // also requires a later variable-frame-rate mode to be an addition, and this `match` is
     // where it lands: that mode omits the `fps` filter instead of choosing a different rate,
     // so the choice cannot be a rate lookup on an unconditional filter.
-    let timing = match plan.timing {
+    let timing = match video.timing {
         OutputTiming::ConstantFrameRate(rate) => format!(",fps={}/{}", rate.num(), rate.den()),
     };
     // `scale` and `setsar=1` travel together, and a plan that keeps the source resolution
@@ -367,7 +386,7 @@ fn video_chain(
     // `concat` has nothing to reconcile. With an explicit resolution the filter is correct
     // and necessary: `scale` keeps the source SAR, which would then describe the wrong
     // geometry at the new pixel dimensions.
-    let scale = match plan.resolution {
+    let scale = match video.resolution {
         Some(Resolution { w, h }) => format!(",scale={w}:{h},setsar=1"),
         None => String::new(),
     };
@@ -386,7 +405,7 @@ fn video_chain(
 /// and the splitter chain already pinned the one input link they share; repeating the pin
 /// here would only add a filter for each segment to a graph ADR 014 measurement 15 already
 /// counts in bytes against the Windows command-line limit.
-fn audio_chain(audio: PlannedAudio, shape: GraphShape, index: usize, ticks: (i64, i64)) -> String {
+fn audio_chain(audio: &PlannedAudio, shape: GraphShape, index: usize, ticks: (i64, i64)) -> String {
     let source = match shape {
         GraphShape::InputPerSegment => {
             format!("[{index}:{}]{}", audio.stream_index, audio_input_pin(audio))
@@ -400,24 +419,34 @@ fn audio_chain(audio: PlannedAudio, shape: GraphShape, index: usize, ticks: (i64
 }
 
 /// Render the `concat` filter, with the joined video at `[vc]` and the joined audio at the
-/// graph's `[a]` output label.
+/// graph's `[a]` output label, for whichever of the two parts the plan carries.
 ///
 /// The video does not leave the graph here. [`video_output_format`], the first chain of the
 /// graph, reads `[vc]` and writes `[v]`, so the label the argument builder maps is the same in
 /// every graph.
-fn concat_chain(count: usize, has_audio: bool) -> String {
+fn concat_chain(count: usize, has_video: bool, has_audio: bool) -> String {
     let inputs: String = (0..count)
         .map(|index| {
-            if has_audio {
-                format!("[v{index}][a{index}]")
-            } else {
+            let video = if has_video {
                 format!("[v{index}]")
-            }
+            } else {
+                String::new()
+            };
+            let audio = if has_audio {
+                format!("[a{index}]")
+            } else {
+                String::new()
+            };
+            format!("{video}{audio}")
         })
         .collect();
+    let video_streams = u8::from(has_video);
     let audio_streams = u8::from(has_audio);
-    let outputs = if has_audio { "[vc][a]" } else { "[vc]" };
-    format!("{inputs}concat=n={count}:v=1:a={audio_streams}{outputs}")
+    let video_output = if has_video { "[vc]" } else { "" };
+    let audio_output = if has_audio { "[a]" } else { "" };
+    format!(
+        "{inputs}concat=n={count}:v={video_streams}:a={audio_streams}{video_output}{audio_output}"
+    )
 }
 
 #[cfg(test)]
@@ -488,21 +517,21 @@ mod tests {
         ExportPlan {
             source: PathBuf::from("/media/source.mp4"),
             destination: PathBuf::from("/export/out.mp4"),
-            video_stream_index: 1,
+            video: Some(PlannedVideo {
+                stream_index: 1,
+                timing: OutputTiming::ConstantFrameRate(Rational::new(25, 1).unwrap()),
+                resolution: None,
+                encoder: "libx264".to_owned(),
+                quality: Quality {
+                    kind: QualityKind::Crf,
+                    value: 20,
+                },
+                expected_frames: Some(u64::try_from(frames).unwrap()),
+            }),
             audio: Some(fixture_audio(2, 44_100)),
             segments: fixture_segments(count),
-            timing: OutputTiming::ConstantFrameRate(Rational::new(25, 1).unwrap()),
-            resolution: None,
-            video_encoder: "libx264".to_owned(),
-            audio_encoder: "aac".to_owned(),
-            audio_bitrate: None,
-            quality: Quality {
-                kind: QualityKind::Crf,
-                value: 20,
-            },
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
-            expected_frames: Some(u64::try_from(frames).unwrap()),
         }
     }
 
@@ -514,7 +543,16 @@ mod tests {
             sample_rate,
             output_sample_rate: 48_000,
             output_channels: AudioChannels::Stereo,
+            encoder: "aac".to_owned(),
+            bitrate: None,
         }
+    }
+
+    /// The video part of a fixture plan, which every fixture carries.
+    fn video_mut(plan: &mut ExportPlan) -> &mut PlannedVideo {
+        plan.video
+            .as_mut()
+            .expect("every fixture plan carries video")
     }
 
     #[test]
@@ -694,7 +732,10 @@ mod tests {
         // asserts the fixture's rate first: at 48000 the two rates agree and every assertion
         // below would still pass with the pin deleted.
         let plan = fixture_plan(2);
-        assert_eq!(plan.audio.expect("fixture audio").sample_rate, 44_100);
+        assert_eq!(
+            plan.audio.as_ref().expect("fixture audio").sample_rate,
+            44_100
+        );
 
         // One input for each segment: every chain begins at an input link of its own, so
         // every chain carries the pin.
@@ -897,7 +938,7 @@ mod tests {
         ] {
             for rate in [8_000, 44_100, 192_000] {
                 let plan = plan_with_output(3, rate, channels);
-                let expected = audio_output_format(plan.audio.expect("fixture audio"));
+                let expected = audio_output_format(plan.audio.as_ref().expect("fixture audio"));
                 for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
                     let graph = build_filter_graph(&plan, shape);
                     assert_eq!(graph.matches("aformat=sample_fmts=").count(), 3, "{graph}");
@@ -954,6 +995,52 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_without_video_renders_no_video_chain_and_one_output_label_in_both_shapes() {
+        // `build_plan` always plans video today. The rule for a plan without it is the rule
+        // for a plan without audio, applied to the other part: nothing of the part anywhere,
+        // `v=0` on `concat`, no `format`, and `[a]` as the only output label.
+        let mut plan = fixture_plan(2);
+        plan.video = None;
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::InputPerSegment),
+            concat!(
+                "[0:2]aformat=sample_rates=44100,atrim=start_pts=511560:end_pts=522144,",
+                "asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[1:2]aformat=sample_rates=44100,atrim=start_pts=441000:end_pts=462168,",
+                "asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[a0][a1]concat=n=2:v=0:a=1[a]",
+            )
+        );
+        assert_eq!(
+            build_filter_graph(&plan, GraphShape::SingleInput),
+            concat!(
+                "[0:2]aformat=sample_rates=44100,asplit=2[sa0][sa1];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-STARTPTS,",
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1];",
+                "[a0][a1]concat=n=2:v=0:a=1[a]",
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "video, audio, or both")]
+    fn a_plan_with_neither_part_trips_the_debug_assertion() {
+        // `build_plan` always plans video, so this is unreachable through the pipeline.
+        // Rendered anyway it would produce `concat=n=1:v=0:a=0`, which ffmpeg rejects.
+        let mut plan = fixture_plan(1);
+        plan.video = None;
+        plan.audio = None;
+        plan.segments[0].audio_in_tick = None;
+        plan.segments[0].audio_out_tick = None;
+        let _ = build_filter_graph(&plan, GraphShape::InputPerSegment);
+    }
+
+    #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "audio ticks on every segment")]
     fn a_plan_that_declares_audio_but_lost_a_segments_ticks_trips_the_debug_assertion() {
@@ -1005,7 +1092,7 @@ mod tests {
     #[test]
     fn an_explicit_resolution_emits_scale_immediately_before_setsar() {
         let mut plan = fixture_plan(1);
-        plan.resolution = Some(Resolution { w: 1920, h: 1080 });
+        video_mut(&mut plan).resolution = Some(Resolution { w: 1920, h: 1080 });
         let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
         assert_eq!(
             graph,
@@ -1025,7 +1112,8 @@ mod tests {
     #[test]
     fn an_ntsc_frame_rate_renders_as_an_exact_fraction_not_a_decimal() {
         let mut plan = fixture_plan(1);
-        plan.timing = OutputTiming::ConstantFrameRate(Rational::new(30_000, 1001).unwrap());
+        video_mut(&mut plan).timing =
+            OutputTiming::ConstantFrameRate(Rational::new(30_000, 1001).unwrap());
         let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
         assert_eq!(
             graph,
@@ -1050,7 +1138,7 @@ mod tests {
         // stream. A hardcoded 1, or the short specifier `[0:a]`, would bind the wrong stream
         // and export audio the preview never played, with no error reported anywhere.
         let mut plan = fixture_plan(1);
-        plan.video_stream_index = 2;
+        video_mut(&mut plan).stream_index = 2;
         plan.audio = Some(fixture_audio(5, 44_100));
         assert_eq!(
             build_filter_graph(&plan, GraphShape::InputPerSegment),
@@ -1086,7 +1174,7 @@ mod tests {
         // independently. This test is deliberately separate from the pinned strings above:
         // it still fails if someone updates every expected string to match a regression.
         let mut scaled = fixture_plan(3);
-        scaled.resolution = Some(Resolution { w: 1280, h: 720 });
+        video_mut(&mut scaled).resolution = Some(Resolution { w: 1280, h: 720 });
         let mut silent = fixture_plan(3);
         silent.audio = None;
 
@@ -1125,7 +1213,7 @@ mod tests {
         // segment twice when segments decode to different formats. Like the guard above, this
         // still fails if every pinned string is updated to match a regression.
         let mut scaled = fixture_plan(3);
-        scaled.resolution = Some(Resolution { w: 1280, h: 720 });
+        video_mut(&mut scaled).resolution = Some(Resolution { w: 1280, h: 720 });
         let mut silent = fixture_plan(3);
         silent.audio = None;
         for segment in &mut silent.segments {

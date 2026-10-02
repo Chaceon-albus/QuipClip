@@ -554,7 +554,7 @@ fn start_payload(run_id: &str, prepared: &PreparedExport) -> ExportStart {
         // so this conversion cannot saturate for any plan that reaches here.
         segment_count: u32::try_from(prepared.plan.segments.len()).unwrap_or(u32::MAX),
         total_duration_us: duration_microseconds(prepared.plan.total_duration),
-        expected_frames: prepared.plan.expected_frames,
+        expected_frames: prepared.plan.expected_frames(),
     }
 }
 
@@ -737,7 +737,16 @@ where
         pending,
         ..
     } = prepared;
-    let expected_frames = plan.expected_frames;
+    // The frame count is the only success check below, and a plan without video has no frames
+    // to count: `verified_frame_count` would accept any snapshot for it, and an ffmpeg that
+    // refused the reservation and exited zero would publish an empty file. `build_plan` always
+    // plans video, so no such plan exists yet. The unit that adds one must give it a success
+    // check of its own before it removes this assertion.
+    debug_assert!(
+        plan.video.is_some(),
+        "an export without video needs a success check other than the frame count"
+    );
+    let expected_frames = plan.expected_frames();
     let cancel = slot.cancel_flag();
 
     let outcome = process(
@@ -830,9 +839,12 @@ where
 /// A snapshot that exists but carries no `frame` key still counts as zero frames written, and
 /// is compared: it says the child was reporting, which the absent snapshot does not.
 ///
-/// `expected_frames` is absent only under a future variable-frame-rate mode, which cannot
-/// predict a count. There is then nothing to compare a real count against and the export
-/// proceeds.
+/// `expected_frames` is absent in two different cases, and only the first one reaches this
+/// function. A future variable-frame-rate mode cannot predict a count: there is then nothing to
+/// compare a real count against, and the export proceeds. A plan without video writes no frames
+/// at all, so this comparison would accept any snapshot for it and could not catch the
+/// missing-`-y` failure above. [`run_export_with`] asserts that no such plan reaches it, and an
+/// export without video needs a success check of its own before that assertion can go.
 ///
 /// `detail` is the process's own stderr tail, which on the missing-`-y` path holds ffmpeg's
 /// refusal message and is the most useful thing a user can be shown.
@@ -949,7 +961,7 @@ fn path_to_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffmpeg::export::{OutputTiming, PlannedSegment};
+    use crate::ffmpeg::export::{OutputTiming, PlannedSegment, PlannedVideo};
     use crate::ffmpeg::ExecutableOrigin;
     use crate::settings::{
         AudioChannels, AudioSampleRateSetting, Container, FrameRateSetting, Quality, QualityKind,
@@ -1025,7 +1037,17 @@ mod tests {
         ExportPlan {
             source: PathBuf::from("/media/source.mp4"),
             destination: destination.to_path_buf(),
-            video_stream_index: 0,
+            video: Some(PlannedVideo {
+                stream_index: 0,
+                timing: OutputTiming::ConstantFrameRate(Rational::new(30, 1).unwrap()),
+                resolution: None,
+                encoder: "libx264".to_owned(),
+                quality: Quality {
+                    kind: QualityKind::Crf,
+                    value: 20,
+                },
+                expected_frames: Some(30),
+            }),
             audio: None,
             segments: vec![PlannedSegment {
                 in_pts: Pts::new(0),
@@ -1034,18 +1056,8 @@ mod tests {
                 audio_in_tick: None,
                 audio_out_tick: None,
             }],
-            timing: OutputTiming::ConstantFrameRate(Rational::new(30, 1).unwrap()),
-            resolution: None,
-            video_encoder: "libx264".to_owned(),
-            audio_encoder: "aac".to_owned(),
-            audio_bitrate: None,
-            quality: Quality {
-                kind: QualityKind::Crf,
-                value: 20,
-            },
             container: Container::Mp4,
             total_duration: Rational::new(1, 1).unwrap(),
-            expected_frames: Some(30),
         }
     }
 
@@ -2047,6 +2059,38 @@ mod tests {
             .borrow()
             .iter()
             .any(|event| matches!(event, ExportEvent::Publishing { .. })));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a success check other than the frame count")]
+    fn a_plan_without_video_never_reaches_the_frame_count_check() {
+        // `build_plan` always plans video, so this is unreachable through the command. A plan
+        // without video has no frame count, and the frame count is the only check that catches
+        // an ffmpeg that wrote nothing and exited zero. The assertion stops the run before the
+        // process stage starts, so the process closure below must never run.
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("out.mp4");
+        let mut plan = sample_plan(&destination);
+        plan.video = None;
+        let pending = PendingOutput::reserve(&destination).unwrap();
+        let prepared = PreparedExport {
+            preset_id: "active".to_owned(),
+            plan,
+            ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
+            arguments: vec![],
+            pending,
+        };
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+
+        let _ = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |_event| {},
+            |_request, _on_progress| unreachable!("the process stage must not start"),
+        );
     }
 
     #[cfg(unix)]
