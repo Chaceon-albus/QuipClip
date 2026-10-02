@@ -10,7 +10,8 @@
 //! The test runs under the smoke-test lock of ADR 006, and never while an export runs (ADR 016):
 //! the two would compete for the encoder, and a test that competed reports a working preset as
 //! broken. A test that an export overlapped still reaches the window that asked, and it is not
-//! stored. A result is information only: an export never reads it.
+//! stored: the response says so in `stored` ([`PresetTestResponse`]), so the window does not take
+//! the result for a stored one. A result is information only: an export never reads it.
 //!
 //! Each stored result also reaches every window as [`PRESET_TESTED_EVENT`], so the window that
 //! did not ask reads the stored results again.
@@ -124,7 +125,22 @@ pub struct PresetTestResults {
     pub results: Vec<PresetTestEntry>,
 }
 
-/// Test `preset` on this machine, store the result for the current binary, and return it.
+/// The response of [`test_preset`]: the result, and whether the cache now holds it.
+///
+/// `stored` is false when an export began while the test ran, when the binary has no cache key
+/// (its metadata or its `-version` could not be read), and when the write of the cache file
+/// failed. The window that asked then shows the result, and it does not take it for a stored
+/// one: `preset_test_results` will not return it, and a later opening of the export setup tests
+/// the preset again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetTestResponse {
+    pub result: PresetTestResult,
+    pub stored: bool,
+}
+
+/// Test `preset` on this machine, store the result for the current binary, and return it with
+/// whether it was stored.
 ///
 /// The work runs on the blocking pool: it can wait for the smoke-test lock behind a capability
 /// probe, and then runs one process of at most [`PRESET_TEST_TIMEOUT`].
@@ -134,7 +150,7 @@ pub async fn test_preset(
     window: WebviewWindow,
     registry: tauri::State<'_, Arc<ExportRegistry>>,
     preset: Preset,
-) -> Result<PresetTestResult, PresetTestError> {
+) -> Result<PresetTestResponse, PresetTestError> {
     let app_data_directory = app
         .path()
         .app_data_dir()
@@ -173,7 +189,7 @@ pub async fn test_preset(
             },
         );
     }
-    Ok(run.result)
+    Ok(run)
 }
 
 /// Read the stored results for the presets of the settings document, on the binary that
@@ -204,13 +220,6 @@ struct TestDirectories<'a> {
     temporary: &'a Path,
 }
 
-/// The result of [`test_preset_with`], and whether the cache now holds it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PresetTestRun {
-    result: PresetTestResult,
-    stored: bool,
-}
-
 /// The body of [`test_preset`], with every step that reaches outside the process injected:
 /// executable discovery, the cache key of the binary, the run of the command, and the clock.
 ///
@@ -222,7 +231,8 @@ struct PresetTestRun {
 ///    still runs the test; its result is not stored.
 /// 4. The test waits for the smoke-test lock, and checks again that no export runs, because an
 ///    export can begin during the wait. It reads the count of begun exports under the lock.
-/// 5. The command runs, and its output is deleted.
+/// 5. The command runs, and its output is deleted. Before the lock, the outputs that earlier
+///    processes left behind are deleted (`preset_test::remove_stale_outputs`).
 /// 6. The result is stored only when the count of begun exports did not move, so a test that
 ///    an export overlapped, even a short export that also ended, is not stored.
 fn test_preset_with<Discover, KeyOf, Run, Now>(
@@ -233,7 +243,7 @@ fn test_preset_with<Discover, KeyOf, Run, Now>(
     key_of: KeyOf,
     run: Run,
     now: Now,
-) -> Result<PresetTestRun, PresetTestError>
+) -> Result<PresetTestResponse, PresetTestError>
 where
     Discover: FnOnce(&Path) -> Result<FfmpegPaths, LocateError>,
     KeyOf: FnOnce(&Path) -> Option<CacheKey>,
@@ -252,6 +262,7 @@ where
     fs::create_dir_all(directories.temporary).map_err(|error| {
         PresetTestError::with_detail(PresetTestErrorCode::TemporaryFileUnavailable, error)
     })?;
+    preset_test::remove_stale_outputs(directories.temporary);
     let output = preset_test::test_output_path(directories.temporary);
     let key_arguments = build_test_arguments(preset, OUTPUT_PLACEHOLDER);
     let arguments = build_test_arguments(preset, &output.to_string_lossy());
@@ -275,7 +286,7 @@ where
         }
         _ => false,
     };
-    Ok(PresetTestRun { result, stored })
+    Ok(PresetTestResponse { result, stored })
 }
 
 /// The body of [`preset_test_results`], with the settings read, discovery and the cache key
@@ -573,6 +584,22 @@ mod tests {
             serde_json::to_value(PresetTested { origin: "settings" }).unwrap(),
             serde_json::json!({ "origin": "settings" })
         );
+        assert_eq!(
+            serde_json::to_value(PresetTestResponse {
+                result: PresetTestResult {
+                    status: PresetTestStatus::TimedOut,
+                    line: None,
+                    exit_code: None,
+                    tested_at: NOW,
+                },
+                stored: false,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "result": { "status": "timedOut", "testedAt": NOW },
+                "stored": false,
+            })
+        );
     }
 
     #[test]
@@ -606,7 +633,7 @@ mod tests {
 
         assert_eq!(
             run,
-            PresetTestRun {
+            PresetTestResponse {
                 result: PresetTestResult {
                     status: PresetTestStatus::Passed,
                     line: None,
@@ -631,6 +658,43 @@ mod tests {
             ),
             Some(run.result)
         );
+    }
+
+    #[test]
+    fn a_test_deletes_the_old_outputs_of_other_processes_first() {
+        let directory = TestDirectory::new();
+        let (app_data, temporary) = directory.directories();
+        fs::create_dir_all(&temporary).unwrap();
+        let stale = temporary.join(format!(
+            "preset-test-{}-0.tmp",
+            std::process::id().wrapping_add(1)
+        ));
+        fs::write(&stale, b"left by a quit").unwrap();
+        // Old enough for the sweep: its modification time lies two minutes back.
+        let two_minutes_ago = SystemTime::now() - Duration::from_secs(120);
+        fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(two_minutes_ago)
+            .unwrap();
+        let registry = Arc::new(ExportRegistry::default());
+
+        test_preset_with(
+            &seed("default-h264-mp4"),
+            TestDirectories {
+                app_data: &app_data,
+                temporary: &temporary,
+            },
+            &registry,
+            found(&directory),
+            |_| Some(key()),
+            |_, _: &Path, _: &[String], _: &Path| Ok(exited(0, "")),
+            || NOW,
+        )
+        .unwrap();
+
+        assert!(!stale.exists());
     }
 
     #[test]

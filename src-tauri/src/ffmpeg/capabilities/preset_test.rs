@@ -39,7 +39,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::MutexGuard;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// The timeout for one preset test.
 ///
@@ -55,8 +55,16 @@ pub const PRESET_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often [`run_test_command`] polls the child process for completion.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-/// The video input of the test: ADR 006's black source of 0.2 s.
-const VIDEO_SOURCE: &str = "color=c=black:s=256x256:r=25:d=0.2";
+/// The video input of the test: ADR 006's black source of 0.2 s, tagged as limited range.
+///
+/// The `color` source sets no colour range, and a real video file usually carries one. Without
+/// the tag, `h264_videotoolbox` warns `Color range not set for yuv420p. Using MPEG range.` for
+/// every 8-bit format, `nv12` included, and every such test would read as passed with a warning
+/// for a fault of the test input. `setparams=range=tv` sets the limited range that it assumes;
+/// the filter and the value exist in every ffmpeg from 4.3. Measured with ffmpeg 9.0.2: the tag
+/// removes that warning for `yuv420p` and `nv12`, and a real warning such as an incompatible
+/// pixel format still shows.
+const VIDEO_SOURCE: &str = "color=c=black:s=256x256:r=25:d=0.2,setparams=range=tv";
 
 /// The length of the audio input, which `-t` bounds because `anullsrc` never ends.
 const AUDIO_DURATION_SECONDS: &str = "0.2";
@@ -256,9 +264,17 @@ struct OutputCleanup<'a> {
 impl Drop for OutputCleanup<'_> {
     fn drop(&mut self) {
         // A file that ffmpeg never created is the usual case of a failed test, not an error.
-        // Any other failure leaves a file of a few kilobytes in the cache directory, and a drop
-        // has nowhere to report it.
-        let _ = fs::remove_file(self.path);
+        // Any other failure, such as a virus scanner that holds the file on Windows, leaves a
+        // file of a few kilobytes in the cache directory. A drop can only log it, and the sweep
+        // of a later process (`remove_stale_outputs`) deletes it.
+        if let Err(error) = fs::remove_file(self.path) {
+            if error.kind() != io::ErrorKind::NotFound {
+                eprintln!(
+                    "preset test: the output {} was not deleted: {error}",
+                    self.path.display()
+                );
+            }
+        }
     }
 }
 
@@ -270,6 +286,11 @@ impl Drop for OutputCleanup<'_> {
 ///
 /// An `Err` means the process did not run, such as a binary that cannot start. It is not a
 /// result for the preset.
+///
+/// A test that runs when the application quits is not awaited, as a smoke test is not: the exit
+/// handler of `lib.rs` waits for an export only (ADR 017). The ffmpeg child can then outlive the
+/// application for up to [`PRESET_TEST_TIMEOUT`], and its output stays in the cache directory.
+/// The next test of a later process deletes it (`remove_stale_outputs`).
 pub fn run_test_command(
     _turn: &EncoderTurn,
     program: &Path,
@@ -422,6 +443,83 @@ fn truncate_to_bytes(text: &str, limit: usize) -> String {
     text[..end].to_owned()
 }
 
+/// How old the output of another process must be before [`remove_stale_outputs`] deletes it.
+///
+/// A test writes its output for at most [`PRESET_TEST_TIMEOUT`], so an output this much older has
+/// no process that still writes it. A younger output can belong to a test of a second QuipClip
+/// process, whose muxer reopens the file for `+faststart`, so it stays.
+const STALE_OUTPUT_AGE: Duration = Duration::from_secs(60);
+
+/// Delete the outputs that the tests of earlier QuipClip processes left in `directory`: a test
+/// that ran at a quit, or an output that a cleanup could not delete. Best effort: a failure is
+/// logged, and the test goes on.
+///
+/// Only a file named as [`test_output_path`] names it is a candidate, and only when the process id
+/// in the name is not this process and the file is older than [`STALE_OUTPUT_AGE`]. A file of
+/// this process belongs to its own test, which deletes it.
+pub fn remove_stale_outputs(directory: &Path) {
+    remove_stale_outputs_with(
+        directory,
+        std::process::id(),
+        SystemTime::now(),
+        STALE_OUTPUT_AGE,
+    );
+}
+
+/// [`remove_stale_outputs`] with the process id, the clock and the age supplied, so a test can
+/// leave a file of "another" process. Returns the number of files it deleted.
+fn remove_stale_outputs_with(
+    directory: &Path,
+    own_process: u32,
+    now: SystemTime,
+    min_age: Duration,
+) -> usize {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let Some(process) = name.to_str().and_then(output_process_id) else {
+            continue;
+        };
+        if process == own_process {
+            continue;
+        }
+        let old_enough = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= min_age);
+        if !old_enough {
+            continue;
+        }
+        let path = entry.path();
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => eprintln!(
+                "preset test: the stale output {} was not deleted: {error}",
+                path.display()
+            ),
+        }
+    }
+    removed
+}
+
+/// The process id in an output name of [`test_output_path`], `preset-test-<pid>-<n>.tmp`, or
+/// `None` for any other name.
+fn output_process_id(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("preset-test-")?.strip_suffix(".tmp")?;
+    let (process, sequence) = rest.split_once('-')?;
+    let is_number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    if !is_number(process) || !is_number(sequence) {
+        return None;
+    }
+    process.parse().ok()
+}
+
 /// The counter that [`test_output_path`] draws from.
 static OUTPUT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -465,7 +563,7 @@ mod tests {
             "-f",
             "lavfi",
             "-i",
-            "color=c=black:s=256x256:r=25:d=0.2",
+            "color=c=black:s=256x256:r=25:d=0.2,setparams=range=tv",
             "-f",
             "lavfi",
             "-t",
@@ -683,7 +781,7 @@ mod tests {
             "-f",
             "lavfi",
             "-i",
-            "color=c=black:s=256x256:r=25:d=0.2",
+            "color=c=black:s=256x256:r=25:d=0.2,setparams=range=tv",
             "-f",
             "lavfi",
             "-t",
@@ -730,6 +828,151 @@ mod tests {
               [1:a]aformat=f=fltp:r=48000:cl=stereo[a]"
                 .to_owned()
         ));
+    }
+
+    /// The source of the export that `export_command_of` plans, and the reservation it writes.
+    #[cfg(windows)]
+    const EXPORT_SOURCE: &str = r"C:\media\source.mov";
+    #[cfg(windows)]
+    const EXPORT_DESTINATION: &str = r"C:\export\out.mp4";
+    #[cfg(windows)]
+    const EXPORT_RESERVATION: &str = r"C:\export\.out.mp4.tmp-4242-0";
+    #[cfg(not(windows))]
+    const EXPORT_SOURCE: &str = "/media/source.mov";
+    #[cfg(not(windows))]
+    const EXPORT_DESTINATION: &str = "/export/out.mp4";
+    #[cfg(not(windows))]
+    const EXPORT_RESERVATION: &str = "/export/.out.mp4.tmp-4242-0";
+
+    /// The command of a real export of `preset`: one segment of a 30 fps source with 48000 Hz
+    /// stereo audio, planned by `build_plan` and rendered by `build_arguments`.
+    fn export_command_of(preset: &Preset) -> Vec<String> {
+        use crate::ffmpeg::export::{
+            build_arguments, build_filter_graph, build_plan, ExportStreams, GraphShape, PathFacts,
+            PathIdentity, PlanRequest, SegmentBoundary,
+        };
+        use crate::ffmpeg::{AudioProbe, MediaProbe};
+        use crate::time::Pts;
+
+        let probe = MediaProbe {
+            format_names: vec!["mov".to_owned(), "mp4".to_owned()],
+            format_long_name: None,
+            format_start_time: None,
+            video_codec: "h264".to_owned(),
+            video_profile: None,
+            pixel_format: Some("yuv420p".to_owned()),
+            bit_depth: Some(8),
+            width: 1920,
+            height: 1080,
+            video_stream_index: 0,
+            video_time_base: Rational::new(1, 90_000).unwrap(),
+            video_start_pts: Some(Pts::new(0)),
+            video_duration_ticks: None,
+            approximate_duration_seconds: None,
+            avg_frame_rate: Some(Rational::new(30, 1).unwrap()),
+            r_frame_rate: Some(Rational::new(30, 1).unwrap()),
+            reported_frame_count: None,
+            audio: Some(AudioProbe {
+                index: 1,
+                codec: Some("aac".to_owned()),
+                sample_rate: Some(48_000),
+                channels: Some(2),
+                start_time: None,
+                duration: None,
+            }),
+        };
+        let segments = [SegmentBoundary {
+            in_pts: Pts::new(900_000),
+            out_pts: Pts::new(1_080_000),
+        }];
+        let source = PathBuf::from(EXPORT_SOURCE);
+        let destination = PathBuf::from(EXPORT_DESTINATION);
+        let parent = destination.parent().unwrap().to_path_buf();
+        let plan = build_plan(
+            &PlanRequest {
+                source: &source,
+                destination: &destination,
+                segments: &segments,
+                probe: &probe,
+                preset,
+                streams: ExportStreams::VideoAndAudio,
+            },
+            |path: &Path| {
+                if path == source {
+                    PathFacts::File {
+                        identity: PathIdentity::new(1),
+                        read_only: false,
+                    }
+                } else if path == parent {
+                    PathFacts::Directory
+                } else {
+                    PathFacts::Absent
+                }
+            },
+        )
+        .expect("the preset plans");
+        let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
+        build_arguments(
+            &plan,
+            GraphShape::InputPerSegment,
+            &graph,
+            Path::new(EXPORT_RESERVATION),
+        )
+    }
+
+    /// The arguments from `-c:v` to the last argument before the output: the encoder arguments,
+    /// the pixel format, the options, and the muxer arguments.
+    fn encoder_and_muxer_slice(arguments: &[String]) -> &[String] {
+        let start = arguments
+            .iter()
+            .position(|argument| argument == "-c:v")
+            .expect("the command writes video");
+        &arguments[start..arguments.len() - 1]
+    }
+
+    #[test]
+    fn the_test_writes_the_encoder_and_muxer_arguments_of_a_real_export() {
+        // Every seed of every platform, and a preset that sets each audio field and holds options
+        // of both streams in MKV. The two commands must not drift: the test exists to report
+        // what an export of the preset would meet. The input rate of the test is the source rate
+        // of the export here, 48000 Hz, so the `-b:a` and the options agree as well.
+        let mut presets = every_platform_seed();
+        presets.push(Preset {
+            id: "custom".to_owned(),
+            name: "Custom".to_owned(),
+            container: Container::Mkv,
+            video_encoder: "libx265".to_owned(),
+            audio_encoder: "libopus".to_owned(),
+            audio_bitrate: Some(128),
+            audio_sample_rate: AudioSampleRateSetting::Fixed(48_000),
+            audio_channels: AudioChannels::Stereo,
+            quality: Quality {
+                kind: QualityKind::QualityScale,
+                value: 40,
+            },
+            resolution: ResolutionSetting::Custom(crate::project::Resolution { w: 1280, h: 720 }),
+            frame_rate: FrameRateSetting::Rate(Rational::new(24, 1).unwrap()),
+            pixel_format: "yuv420p10le".to_owned(),
+            video_options: vec![PresetOption {
+                name: "x265-params".to_owned(),
+                value: "aq-mode=3".to_owned(),
+            }],
+            audio_options: vec![PresetOption {
+                name: "application".to_owned(),
+                value: "audio".to_owned(),
+            }],
+        });
+        for preset in &presets {
+            let export = export_command_of(preset);
+            let test = build_test_arguments(preset, OUTPUT_PLACEHOLDER);
+            assert_eq!(
+                encoder_and_muxer_slice(&test),
+                encoder_and_muxer_slice(&export),
+                "{}",
+                preset.id
+            );
+            assert_eq!(export.last().map(String::as_str), Some(EXPORT_RESERVATION));
+        }
     }
 
     #[test]
@@ -822,6 +1065,40 @@ mod tests {
             Some(
                 "[warning] Incompatible pixel format 'p010le' for codec 'libx264', \
                  auto-selecting format 'yuv420p10le'"
+            )
+        );
+    }
+
+    #[test]
+    fn the_colour_range_warning_of_an_untagged_source_is_why_the_source_is_tagged() {
+        // Captured from ffmpeg 9.0.2: h264_videotoolbox with `format=yuv420p` from the untagged
+        // `color` source. The warning is real ffmpeg log, so the classifier counts it, and only
+        // the tag on the source (`VIDEO_SOURCE`) keeps every VideoToolbox test from reporting it.
+        let untagged = "[h264_videotoolbox @ 0x7bc9049180] [warning] Color range not set for \
+                        yuv420p. Using MPEG range.\n";
+        assert_eq!(
+            classify_test(&exited(0, untagged), TESTED_AT).status,
+            PresetTestStatus::PassedWithWarnings
+        );
+        assert!(VIDEO_SOURCE.ends_with(",setparams=range=tv"));
+        let arguments = build_test_arguments(&seed("default-h264-mp4"), OUTPUT_PLACEHOLDER);
+        assert_eq!(arguments[8], VIDEO_SOURCE);
+
+        // Captured from ffmpeg 9.0.2 with the tagged source: `yuv420p` and `nv12` wrote nothing,
+        // and `p010le` wrote only the warning of the pixel format, which still counts.
+        assert_eq!(
+            classify_test(&exited(0, ""), TESTED_AT).status,
+            PresetTestStatus::Passed
+        );
+        let tagged_p010 = "[warning] Incompatible pixel format 'p010le' for codec \
+                           'h264_videotoolbox', auto-selecting format 'nv12'\n";
+        let result = classify_test(&exited(0, tagged_p010), TESTED_AT);
+        assert_eq!(result.status, PresetTestStatus::PassedWithWarnings);
+        assert_eq!(
+            result.line.as_deref(),
+            Some(
+                "[warning] Incompatible pixel format 'p010le' for codec 'h264_videotoolbox', \
+                 auto-selecting format 'nv12'"
             )
         );
     }
@@ -1162,6 +1439,83 @@ mod tests {
             classify_test(&outcome, TESTED_AT).status,
             PresetTestStatus::TimedOut
         );
+    }
+
+    #[test]
+    fn the_sweep_deletes_old_outputs_of_other_processes_only() {
+        let directory = TestDirectory::new();
+        let own = std::process::id();
+        let other = own.wrapping_add(1);
+        let write = |name: &str| {
+            let path = directory.path.join(name);
+            fs::write(&path, b"output").unwrap();
+            path
+        };
+        let stale = write(&format!("preset-test-{other}-3.tmp"));
+        let mine = write(&format!("preset-test-{own}-4.tmp"));
+        let unrelated = write("capabilities.json");
+        let lookalike = write(&format!("preset-test-{other}-x.tmp"));
+
+        // "Now" lies a minute and a second after the files were written, so they are old.
+        let later = SystemTime::now() + Duration::from_secs(61);
+        assert_eq!(
+            remove_stale_outputs_with(&directory.path, own, later, STALE_OUTPUT_AGE),
+            1
+        );
+        assert!(!stale.exists());
+        assert!(
+            mine.exists(),
+            "a file of this process belongs to its own test"
+        );
+        assert!(unrelated.exists());
+        assert!(lookalike.exists());
+    }
+
+    #[test]
+    fn the_sweep_keeps_a_young_output_that_another_process_can_still_write() {
+        let directory = TestDirectory::new();
+        let other = std::process::id().wrapping_add(1);
+        let young = directory.path.join(format!("preset-test-{other}-0.tmp"));
+        fs::write(&young, b"output").unwrap();
+
+        assert_eq!(
+            remove_stale_outputs_with(
+                &directory.path,
+                std::process::id(),
+                SystemTime::now(),
+                STALE_OUTPUT_AGE
+            ),
+            0
+        );
+        assert!(young.exists());
+        // A missing directory has nothing to sweep.
+        assert_eq!(
+            remove_stale_outputs_with(
+                &directory.path.join("absent"),
+                std::process::id(),
+                SystemTime::now(),
+                STALE_OUTPUT_AGE
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn an_output_name_gives_its_process_id() {
+        assert_eq!(output_process_id("preset-test-4242-0.tmp"), Some(4242));
+        for name in [
+            "preset-test--0.tmp",
+            "preset-test-4242-.tmp",
+            "preset-test-4242.tmp",
+            "preset-test-42a-0.tmp",
+            "preset-test-4242-0.mp4",
+            "other-4242-0.tmp",
+        ] {
+            assert_eq!(output_process_id(name), None, "{name}");
+        }
+        let output = test_output_path(Path::new("/cache"));
+        let name = output.file_name().unwrap().to_str().unwrap();
+        assert_eq!(output_process_id(name), Some(std::process::id()));
     }
 
     #[test]
