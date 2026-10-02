@@ -1,0 +1,134 @@
+# 036. Choose the output streams of an export: video and audio, video only, or audio only
+
+- Status: Accepted
+- Date: 2026-10-02
+- Deciders: capric98
+- Amends: ADR 014, ADR 016, ADR 023, ADR 025
+
+## Context
+
+Every export wrote a video stream, and it wrote an audio stream whenever the source had one.
+The user asked for an export of the video only and an export of the audio only. The user chose
+to make this a choice of the export dialog, not a field of the preset: the video and the audio
+are both on by default, the user can turn one of them off, and the user can never turn both
+off. This record states the backend and the wire contract. The control in the export dialog is
+a later unit, and until it lands every request asks for the video and the audio.
+
+The export plan already had optional parts after a refactor: `video: Option<PlannedVideo>` and
+`audio: Option<PlannedAudio>`. The graph and the arguments already rendered a plan without
+audio, and a plan without video rendered no video chain, no format chain and no video flags.
+
+Two rules of the pipeline do not work without video. ADR 016 decides success by the frame
+count, and an audio-only output has no frames. ADR 014 measurement 12 shows that `out_time_us`
+is not correct under `-copyts`, so the progress cannot measure time either.
+
+## Decision
+
+### The wire contract
+
+`ExportRequestWire` holds a required field `streams`: `videoAndAudio`, `videoOnly` or
+`audioOnly`. It has no default, and an unknown value is refused, as for every field of the
+request. `ExportStart` echoes the value. The TypeScript types hold the same three values, and a
+test compares them with the Rust names.
+
+### The plan
+
+- `videoAndAudio` builds the plan of every earlier export. The command line does not change.
+- `videoOnly` builds no audio part. A source without audio is accepted, and so is a source whose
+  audio stream reports no sample rate.
+- `audioOnly` builds no video part. The check of the frame rate does not apply. A source without
+  an audio stream is refused with `sourceHasNoAudio` before any process starts. That check is
+  step 13 of the preflight, after the frame rate and before the sample rate of the audio,
+  because a missing stream has no rate to ask about.
+
+### The command
+
+- Video only: no audio chain, `concat` with `a=0`, and no `-map [a]`, `-c:a` or `-b:a`.
+- Audio only: no video chain, no format chain, `concat` with `v=0:a=1`, and only `-map [a]`. The
+  muxer is `mp4`, with `+faststart`, for a preset whose container is MP4 or MOV, and the file is
+  an `.m4a` file. The muxer is `matroska` for an MKV preset, and the file is an `.mka` file.
+  - `ipod`, the muxer that FFmpeg selects for a `.m4a` name, refuses FLAC. `mp4` accepts it.
+  - `mov` is not used for audio only. The editor already refuses MOV with FLAC or Opus (ADR
+    023). A custom PCM encoder from a MOV preset can need a newer FFmpeg in `mp4`.
+  - The frontend names the destination. The backend does not change the extension.
+
+### Progress and success of an audio-only export
+
+An audio-only progress block has no `frame` key. The start payload therefore holds no
+`expectedFrames`, the run sends no progress event, and the interface shows an indeterminate
+progress for the whole encode (ADR 025).
+
+The success check reads the output file. After FFmpeg exits with status 0:
+
+1. A run that wrote no progress block fails with `outputStreamsMismatch`. FFprobe does not run.
+2. FFprobe reads the temporary file, with the probe timeout and the rules for child processes.
+   It must find exactly one audio stream and no video stream, or the run fails with
+   `outputStreamsMismatch`.
+3. The duration of the file must lie within −0.10 s and +0.50 s of the expected duration, or the
+   run fails with `audioDurationMismatch`. The error carries the measured and the expected
+   duration in whole microseconds.
+
+The expected duration is the sum of the overlap of each segment with the audio stream of the
+source. The probe reads the start and the duration of that stream. A side of the stream that the
+probe does not know limits nothing, and an overflow of the sum gives the planned duration. Without
+this rule a correct export failed whenever the audio of the source started late or ended early,
+as many phone and screen recordings do. Only an audio-only plan computes this value. An
+audio-only export whose segments the audio stream does not reach at all is refused in the plan
+with `sourceHasNoAudio`, because it would write an empty file that a check against 0 s passes.
+
+In a Matroska file the probe reads the end of the track from its `DURATION` tag, as the
+Matroska muxer of FFmpeg writes it. A file from another muxer that writes the length of the
+track in that tag gives an end that is too early by the start of the audio. For audio that
+starts late by more than 0.5 s, a correct export of such a file can then fail.
+
+A failed FFprobe of the output is a wrong output, not a fault of the source. An exit failure or a
+parse failure gives `outputStreamsMismatch` with the stderr of FFmpeg as its detail. A probe that
+cannot start or that times out keeps its own code.
+
+The check runs before the second cancel check and before `publishing`. A failed check publishes
+nothing, and the guard of the reservation deletes the temporary file. The output probe reads the
+cancel flag of the run every 25 ms. A cancel kills and reaps FFprobe, and the run ends as
+canceled, inside the exit budget of ADR 017.
+
+### Measurement
+
+FFmpeg and FFprobe 9.0.2 on macOS, with the exact command that the code builds, in 1044 runs.
+The sources were 30 fps H.264 with AAC at 44.1 kHz and 48 kHz. The encoders were `aac`, `aac_at`,
+`libopus`, `libmp3lame`, `flac` and `alac`. The outputs were `.m4a` and `.mka`, with 1, 3 and 100
+segments, both graph shapes, output rates from 8 kHz to 192 kHz, stereo and mono.
+
+- No audio-only progress block had a `frame` key.
+- The duration of the output minus the planned duration:
+
+  | Output | At the source rate | Over the whole rate range |
+  | --- | --- | --- |
+  | `.m4a`, every encoder | 0 to +0.017 s | −0.000125 to +0.095 s |
+  | `.mka`, FLAC and ALAC | 0 | 0 to +0.004 s |
+  | `.mka`, Opus | +0.008 s | +0.007 to +0.011 s |
+  | `.mka`, AAC | +0.021 to +0.023 s | +0.011 to +0.132 s |
+  | `.mka`, MP3 | +0.023 to +0.025 s | +0.023 to +0.142 s |
+  | `.mka`, `aac_at` | +0.048 to +0.061 s | +0.048 to +0.324 s |
+
+  The overhang of `.mka` is the priming of the encoder plus a padded last frame. The worst case
+  was `aac_at` into `.mka` at 8 kHz. The tolerance of +0.50 s covers it with a margin.
+- The check found a truncated output: 2 of 3 segments gave 7.667 s against 9.700 s. A killed
+  `.mka` reports no duration and fails. A killed `.m4a` and an empty file make FFprobe fail.
+- In 48 more runs, sources whose audio starts 0.3 s late or ends 1 s early failed by −0.258 s to
+  −1.600 s against the planned duration, and passed within ±0.021 s against the expected
+  duration. A truncated output of the same sources still failed.
+- In 24 pairs, the audio-only output decoded to the same samples as the audio of a video and
+  audio export of the same plan. The audio-only cut uses the same `atrim` ticks. An export with
+  video can pad a segment other than the last with silence in `concat` when its video is longer.
+
+## Consequences
+
+- An audio-only export has no progress percentage, no speed and no time estimate.
+- A loss of audio shorter than 0.10 s plus the overhang of the output passes the check: about
+  0.10 s in `.m4a`, and up to about 0.42 s for `aac_at` in `.mka` at 8 kHz.
+- `libmp3lame` in `.m4a` fails at 8 kHz and 11.025 kHz, and `aac_at` fails at 96 kHz and 192 kHz.
+  FFmpeg exits with an error, and the run reports `ffmpegProcessFailed`.
+- The measurement found a fault that existed before this record and that this record does not
+  correct. In a video and audio export of a source whose audio starts late, `asetpts=PTS-STARTPTS`
+  removes the gap before the first audio sample, and `concat` pads silence at the end of the
+  segment instead. The audio of that segment then plays about as early as the gap, 0.3 s in the
+  measurement. A later unit must correct it.

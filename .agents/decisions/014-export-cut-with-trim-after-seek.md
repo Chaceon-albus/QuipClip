@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-04
 - Deciders: capric98
-- Amended by: ADR 023
+- Amended by: ADR 023, ADR 036
 
 ## Context
 
@@ -167,6 +167,10 @@ The renderer must not emit a trailing `-ss 0`.
 ### The command
 
 One process writes one output. The renderer opens one input for each segment.
+
+(Changed on 2026-10-02.) The command below is the export of the video and the audio. ADR 036
+gives the shapes of a video-only and of an audio-only export, the muxer of an audio-only export,
+and the check of its output.
 
 ```
 ffmpeg -nostdin -hide_banner -loglevel error -progress pipe:1 -nostats -y \

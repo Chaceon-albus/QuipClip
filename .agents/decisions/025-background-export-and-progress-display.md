@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-22
 - Deciders: capric98
+- Amended by: ADR 036
 
 ## Context
 
@@ -168,6 +169,10 @@ value of `ffmpeg` is the mean since the start of the encode, so the estimate doe
 from one block to the next. The interface shows no estimate when `fps` is absent or zero, or
 when `expectedFrames` is unknown. The conversion from `Rational` to a number is for display
 only (ADR 002).
+
+(Changed on 2026-10-02.) An audio-only export (ADR 036) has no `expectedFrames`, and its progress
+blocks carry no `frame`, so the run sends no progress event. Its bar is indeterminate for the whole
+encode, and the interface shows no speed and no time estimate.
 
 (Changed on 2026-09-24.) The dialog also shows the elapsed time of the run. One small store,
 `src/features/export/runTiming.ts`, records when a run starts and ends, from the same store

@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
+- Amended by: ADR 036
 
 ## Context
 
@@ -134,6 +135,12 @@ ADR 014 requires the comparison. This decision records why the command cannot sk
 requires `-y`. Without it, `ffmpeg` refuses the existing file, prints an error, and **exits with
 status zero**. A command that trusted the exit status would rename an empty file over the video of
 the user. The frame count is the only signal that separates the two outcomes.
+
+(Changed on 2026-10-02.) An export without video writes no frames. For such a plan, the check of
+the output file of ADR 036 decides success: a progress block must exist, FFprobe must find one
+audio stream and no video stream, and the duration must match. That check also catches the
+empty file of a missing `-y`, because FFprobe cannot read an empty file. It runs before the
+second cancel check and before `publishing`, so a failed check publishes nothing.
 
 ### A cancel during preparation names the slot, not the run
 

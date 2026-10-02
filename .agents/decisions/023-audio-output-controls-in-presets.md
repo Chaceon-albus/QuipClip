@@ -4,6 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 006, ADR 013, ADR 014
+- Amended by: ADR 036
 
 ## Context
 
@@ -108,6 +109,10 @@ as `ffmpegProcessFailed`, with the text from standard error.
 
 Rust does not repeat this rule. The rule is a fact about muxers. It is not a limit that
 keeps the settings document usable, which is the purpose of the checks in ADR 013.
+
+(Changed on 2026-10-02.) An audio-only export of a MOV preset writes an `.m4a` file through the
+`mp4` muxer (ADR 036), which accepts FLAC and Opus. The editor still refuses MOV with those
+encoders, because the preset also serves exports with video.
 
 ### Tested encoders
 
