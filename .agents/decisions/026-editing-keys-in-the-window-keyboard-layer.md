@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 021
-- Amended by: ADR 035, ADR 037, ADR 038
+- Amended by: ADR 035, ADR 037, ADR 038, ADR 039
 
 ## Context
 
@@ -168,6 +168,9 @@ The actions behave as follows:
 
 - Mark In and Mark Out write the PTS of the frame the browser confirmed, as ADR 003 and
   ADR 022 require. A key press during a pending seek does nothing.
+- (Added on 2026-10-02.) During a decode stall (ADR 039), Space, Play Segment and the frame
+  steps do nothing, and their controls are disabled with a reason. The seeks of Home, End, Go
+  to In and Go to Out still run, and they load the preview again.
 - A step of ten frames is one request to `seekNominal` with ten frame intervals. It is not
   ten requests. ADR 019 sounds one cue for it.
 - Go to the Out point seeks to `outPts`. The segment is half open (ADR 002), so that frame

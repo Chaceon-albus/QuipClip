@@ -4,7 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 019
-- Amended by: ADR 035
+- Amended by: ADR 035, ADR 039
 
 ## Context
 
@@ -229,6 +229,9 @@ outside `calibrating`.
 - **What drops it.** Attach, detach, reset, a loss of readiness, a failed seek, `play` and
   a play that the element starts by itself. `play` then plays from where the element
   stands, because a seek before the anchor would spoil the calibration.
+- (Added on 2026-10-02.) **A second source.** The reload request of a stall (ADR 039) becomes
+  a deferred request when the new element is ready. Its detach before the metadata, and the
+  attach of a new element of the same source, do not drop it.
 - **The display of a deferred step** assumes the frame grid. If the calibration fails
   instead, the playhead moves by less than one frame when the step runs.
 

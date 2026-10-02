@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
+- Amended by: ADR 039
 
 ## Context
 
@@ -104,6 +105,11 @@ frame becomes the presented frame again. The PTS of that frame still comes from 
 callback, so `currentTime` still creates no edit point.
 
 QuipClip does not use `seekable.start(0)` as a source timestamp origin.
+
+(Changed on 2026-10-02.) A decode error after the source decoded in part is a stall, not a
+failure (ADR 039). The preview keeps the timeline live and loads a new element on the next seek
+of the user. That element calibrates again from its own first frame, so the rules of this record
+apply to it unchanged. An error before that point still shows the decode failure panel.
 
 (Changed on 2026-09-24.) While calibration is `calibrating`, no action of the playback store
 moves the element. A frame step, a ruler click, a seek to a stored PTS, Home, End and the

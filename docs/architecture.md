@@ -59,6 +59,7 @@ document summarizes them and shows how the parts fit together.
 | [`036-choose-the-output-streams-at-export.md`](../.agents/decisions/036-choose-the-output-streams-at-export.md)                             | Export the video and the audio, the video only, or the audio only          |
 | [`037-player-first-navigation-keys.md`](../.agents/decisions/037-player-first-navigation-keys.md)                                           | The arrows jump in time, `,` and `.` step frames, ↑ and ↓ find edit points |
 | [`038-settings-in-its-own-window.md`](../.agents/decisions/038-settings-in-its-own-window.md)                                               | Settings opens in its own window, with a grant for each command            |
+| [`039-recover-the-preview-after-a-decode-error.md`](../.agents/decisions/039-recover-the-preview-after-a-decode-error.md)                   | A decode error mid-file stalls the preview, and the next seek reloads it   |
 
 ## Shape
 
