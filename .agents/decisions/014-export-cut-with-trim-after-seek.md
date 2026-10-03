@@ -403,6 +403,68 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     length of its video, 26 frames. The new chain gave 2.400 s, the sum of the two segments. A
     source with audio gave 2.400 s too.
 
+27. (Added on 2026-10-03.) A silence prefix streams the silence in front of a late audio start.
+    The fill of measurement 20 writes all of its silence at once and holds it in memory. The
+    prefix generates the silence of a segment with `anullsrc`, one frame at a time, and joins it in
+    front of the audio of the stream with a `concat` of its own:
+
+    ```
+    anullsrc=r=<sourceRate>:cl=mono,aresample,atrim=end_sample=<prefix>[q<i>];
+    <cut of measurement 20>,asetpts=PTS-<in + prefix>[r<i>];
+    [q<i>][r<i>]concat=n=2:v=0:a=1,asettb=1/<sourceRate>,aresample=<sourceRate>:first_pts=0,
+         <end>,<aformat>[a<i>]
+    ```
+
+    The prefix ends 0.25 s before the first audio packet. The fill behind the `concat` writes the
+    rest of the silence from the timestamp of the first decoded sample. The silence is mono, and a
+    bare `aresample` converts it to the layout and the sample format that `concat` negotiates with
+    the audio of the stream. So the prefix needs no layout name, and the audio of the stream is not
+    converted for it.
+
+    Two details of the form are necessary:
+
+    - `concat` writes its timestamps in microseconds, and the fill reads a timestamp as samples by
+      truncation. Without `asettb`, 9 of 21 In points on a 44.1 kHz source and 4 of 12 on an MPEG-TS
+      source put the audio one sample early. `asettb=1/<sourceRate>` rounds the timestamps back to
+      whole samples.
+    - The fill must stay behind the `concat`. In front of it, on the audio of the stream, the fill
+      can convert as freely as the prefix. Then, for a chain that keeps the layout of the source,
+      `concat` took the mono layout of the prefix, and the samples changed.
+
+    FFmpeg 9.0.2 on macOS compared the PCM that leaves the graph, with the fill alone and with the
+    prefix. The samples were identical by MD5 in each of these cases:
+
+    - 44.1 kHz stereo, In at 0.001, 0.002, 0.007, 4.747, 6.168, 10.001, 23.965, 33.255 and
+      53.823 s, written as 48 kHz stereo
+    - 44.1 kHz stereo written as 44.1 kHz mono, and in the one-input shape
+    - MPEG-TS at 48 kHz, In at 126001, 1260000, 3229408 and 4000017 ticks of 1/90000
+    - 48 kHz stereo, written as 48 kHz stereo
+    - 6-channel PCM in MKV without a layout name, at its own layout
+    - 5.1 AAC with 600 s in front of the first packet, at its own layout
+
+    With the fill alone, the peak memory was 26 MiB to 1556 MiB. With the prefix, it was 26 MiB to
+    29 MiB. The real commands of the renderer gave output identical to the commit before, on the 15
+    sources of ADR 043. On a 44.1 kHz source with two prefixes and In points that are not whole
+    milliseconds, the audio process gave PCM identical to the same command without the prefixes. A
+    source of 630 s with 5.1 audio from 600 s, which the plan refused before, exported with a peak of
+    30 MiB in the audio process and 50 MiB in the encoder. Its sound started at 599.994 s, after
+    exact silence.
+
+    The fill writes silence only for a gap of more than 0.1 s. When the start that the plan reads
+    lay 0.2 s or 0.24 s after the true first sample, the gap behind the prefix was under 0.1 s, and
+    the audio of the segment moved. The start that the plan reads is the first packet, or the start
+    that the probe reports, and the first decoded sample lies at it or after it, by the priming of
+    the encoder.
+
+    `aresample` cannot convert mono to an ambisonic layout or to `binaural`. FFmpeg stops with
+    "Output channel layout 'ambisonic 1' is not supported". A second review compared 248 more
+    cases, from 8000 Hz to 192000 Hz, with negative In ticks and 200 random ones, and found the
+    samples identical. It found layouts of a custom order and layouts without a name identical too.
+
+    A prefix costs about 121 bytes of the command line. At the segment cap, on the longest Windows
+    path, with every setting at its widest and 16 prefixes of twelve digits, the audio process of
+    ADR 043 needs 31413 of the 31743 bytes that Windows allows.
+
 ## Decision
 
 ### The boundary mechanism
@@ -542,6 +604,18 @@ that wait; see "The graph shape". (Changed on 2026-10-03: ADR 043 writes the aud
 with video in a second process, where every chain that reads the stream ends in `apad`. So the sum
 counts only the segments that reach the first sample, in every export, and no export waits for
 the first audio frame with decoded video.)
+
+(Changed on 2026-10-03.) A segment that reaches the first sample of the source audio, and starts at
+least 1.25 s before it, gets a silence prefix (measurement 27). The prefix is the time from the In
+point to the first sample, less 0.25 s, in whole samples of the source rate, rounded down. At most
+16 segments of one export get a prefix: the segments with the longest silence first, and of two
+equal silences the earlier segment first. A stream gets no prefix when its rate is above
+192000 Hz, because the rounding of the timestamps of `concat` is exact only below about 333 kHz. A
+stream also gets no prefix when its layout is ambisonic or `binaural`, because `aresample` cannot
+convert the mono silence to these layouts. Every other layout took the prefix with identical
+samples, layouts of a custom order and layouts without a name included. The bound of 60 s now counts only the silence that the fills
+hold in memory: the silence of each segment less its prefix. So a single segment no longer reaches
+the bound.
 
 (Changed on 2026-10-02.) The video chain no longer ends in `format=yuv420p`. One chain at the
 start of the graph text sets the pixel format of the joined video, and `concat` writes `[vc]`:
@@ -756,7 +830,8 @@ refuse the export first for what the read found.
 ## Consequences
 
 - (Added on 2026-10-02.) The fill of measurement 20 holds the whole of a gap in memory before it
-  writes it. A leading gap of 600 s on 48 kHz 5.1 audio took 1.6 GB, against 44 MB for 10 s. A
+  writes it. (Changed on 2026-10-03: a silence prefix now streams the silence in front of a late
+  start, measurement 27. A gap inside the stream still fills in memory.) A leading gap of 600 s on 48 kHz 5.1 audio took 1.6 GB, against 44 MB for 10 s. A
   segment that spans a long late start or a long drop of the audio therefore needs memory in
   proportion to the gap. (Changed on 2026-10-02.) The plan refuses more than 60 s of silence in
   front of the first sample, summed over the segments (measurement 21). A gap inside the stream
@@ -844,6 +919,11 @@ refuse the export first for what the read found.
   (measurement 23). It does the same for a segment wholly after the last sample. Measurement 23
   also found that, without `apad`, FFmpeg can exit 0 and write a file with no audio track in this
   case.
+- (Added on 2026-10-03.) A prefix ends 0.25 s before the first audio packet, and the fill holds
+  that margin in memory. The fill writes silence only for a gap of more than 0.1 s. So the cut
+  stays exact only while the first decoded sample lies at most 0.15 s before the start that the
+  plan reads. In every measured source the first decoded sample came at that start or after it.
+  A source that broke this rule would play the audio of the segment up to 0.1 s early.
 - (Added on 2026-10-02.) A source whose audio timestamps drift from the sample count builds up an
   error. When the error passes 0.1 s, swresample drops or fills at least 0.1 s at once, in the
   middle of a segment. Timestamps that ran 2% slow gave one drop of 0.1 s in 10 s. Before
