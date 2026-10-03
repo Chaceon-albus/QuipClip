@@ -169,9 +169,9 @@ graph depends on the shape of the other.
 ### What this replaces
 
 This record removes the second input of ADR 014 measurement 22, its three conditions, the threshold
-of 0.5 s, and the third graph shape. The bound of 60 s on the silence in front of the first audio sample
-stays for the fill of ADR 014 measurement 20. It now counts only the segments that reach the first
-sample, in every export, because every chain that reads the stream ends in the end pad.
+of 0.5 s, and the third graph shape. The bound of 60 s on the silence in front of the first audio
+sample stays for the fill of ADR 014 measurement 20. It now counts only the segments that reach the
+first sample, in every export, because every chain that reads the stream ends in the end pad.
 
 ## Consequences
 
@@ -181,6 +181,8 @@ sample, in every export, because every chain that reads the stream ends in the e
 - No late start, early end, gap, or empty audio stream makes the encoder keep decoded video. The
   fill in front of a late start, and in a gap inside the stream, still holds its silence in memory
   in the audio process (ADR 014 measurement 20).
+  (Changed on 2026-10-03: a prefix streams the silence in front of a late start, ADR 014
+  measurement 27. The plan bounds the silence of the gaps, measurement 28.)
 - A segment that the audio does not cover to its Out point gets audio of its length in ticks, as a
   covered segment does. When another segment follows it, the timeline of the following segments
   moves by the difference between that length and the length of the video, a fraction of a

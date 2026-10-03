@@ -465,6 +465,66 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     path, with every setting at its widest and 16 prefixes of twelve digits, the audio process of
     ADR 043 needs 31413 of the 31743 bytes that Windows allows.
 
+28. (Added on 2026-10-03.) The fill holds the silence of a gap inside the audio stream in memory.
+    A read of the decoded frames finds the gap before the plan. The fill of measurement 20 makes
+    silence for each gap of more than 0.1 s, which is the default `min_hard_comp` of `aresample`.
+    The prefix of measurement 27 streams only the silence in front of the first sample. FFmpeg
+    9.0.2 on macOS cut AAC sources, 48000 Hz stereo, with gaps in the audio. The audio process of
+    ADR 043 took this peak memory for one segment:
+
+    | The gaps in the segment                                  | Peak    |
+    | -------------------------------------------------------- | ------- |
+    | None: the segment ends in a gap                          | 27 MiB  |
+    | 306 gaps of 0.25 s in one hour, 76.5 s in total          | 27 MiB  |
+    | 703 gaps of 0.36 s, one frame of audio between, 253 s    | 27 MiB  |
+    | One gap of 40 s                                          | 56 MiB  |
+    | Two gaps of 40 s, 10 s of audio between                  | 56 MiB  |
+    | Two gaps of 40 s, 43 ms of audio between                 | 56 MiB  |
+    | 50 s or 70 s in front of the first frame                 | 89 MiB  |
+    | One gap of 80 s                                          | 88 MiB  |
+    | One gap of 90 s                                          | 152 MiB |
+
+    The peak follows the longest gap, not the sum of the gaps, and it grows in steps. `ashowinfo`
+    behind the fill shows the cause. When the frame behind a gap arrives, the fill makes the silence
+    of the whole gap and keeps it in memory. It passes the silence on in frames of 4096 samples, one
+    frame each time the next filter asks. It reads no further frame until it has passed on all of
+    the silence. So a chain holds the silence of one gap at a time. A second review measured a late
+    start of 40 s with a gap of 40 s in one chain: it took the memory of one of them.
+
+    The probe reports only where the stream starts. A read of the packets does not find every gap
+    either. An MP4 or MOV file stores a gap as the length of the packet in front of it, here
+    4321288 samples. The decoder gives that packet 1024 samples. So the export decodes the audio
+    frames inside its segments before the plan, and reads their times and sample counts:
+
+    ```
+    ffprobe -v error -select_streams <index> -show_entries frame=pts_time,nb_samples
+            -read_intervals <in>%<out>,... -of csv=p=0 -i <source>
+    ```
+
+    ffprobe decodes only the selected stream. A frame lasts its samples at the sample rate of the
+    stream. In an MPEG-TS source whose analysis missed the audio, only the first frame of each PES
+    packet has a time. A frame without a time follows the frame in front of it, as FFmpeg times
+    it. An AC-3 frame carries side data, and ffprobe writes an empty field for it behind the two
+    values.
+
+    The read found the gap of a source with audio from 0 s to 10.005 s and from 100.011 s in each
+    container:
+
+    - Matroska: 10.0053 s to 100.011 s
+    - MP4 and MOV: 10.0055 s to 100.011 s
+    - MPEG-TS: 11.4265 s to 101.432 s, after the offset of 1.4 s that the muxer adds
+
+    It found no gap of more than 0.1 s in 12 other sources, or in short samples of AC-3, E-AC-3,
+    Opus, MP3, PCM, FLAC and ALAC audio. The read took 0.06 s to 0.18 s for each source, 1.6 s for
+    one hour of stereo AAC, and 0.6 s for 10 minutes of 5.1 AAC. Its answer is about 3 MB for each
+    hour of audio.
+
+    With the bound, the plan refused the segment from 5 s to 105 s of that source. It refused it in
+    Matroska, MP4, MOV and MPEG-TS, and in an export of the audio only. It accepted each case of the
+    table whose longest gap is 60 s or less, and refused the others. The plan accepted the 15
+    sources of ADR 043 and the 4 cases of measurement 27. The output of the 15 sources was
+    identical to the output of the commit before.
+
 ## Decision
 
 ### The boundary mechanism
@@ -596,9 +656,11 @@ at or before the first sample counts in full, so a cut at the first sample does 
 the bound. An audio-only export writes nothing for such a segment, so it counts only the segments
 that reach the sample. (Changed on 2026-10-02: an audio-only export now writes silence for such a
 segment, with `apad`, which does not keep that silence in memory (measurement 23). The sum still
-counts only the segments that reach the sample.) At the bound, the fill alone took 95 MiB on 48000 Hz stereo and 215 MiB on
-48000 Hz 5.1. A video-only export reads no audio. The probe reports only where the stream starts,
-so the bound does not apply to a gap inside the stream. This bound does not cover the decoded
+counts only the segments that reach the sample.) At the bound, the fill alone took 95 MiB on
+48000 Hz stereo and 215 MiB on 48000 Hz 5.1. A video-only export reads no audio. The probe reports
+only where the stream starts, so the bound does not apply to a gap inside the stream. (Changed on
+2026-10-03: the export reads the gaps before the plan, and the bound counts them, measurement 28.)
+This bound does not cover the decoded
 video that waits for the first audio frame (measurement 21). A second input of the source removes
 that wait; see "The graph shape". (Changed on 2026-10-03: ADR 043 writes the audio of an export
 with video in a second process, where every chain that reads the stream ends in `apad`. So the sum
@@ -613,9 +675,25 @@ equal silences the earlier segment first. A stream gets no prefix when its rate 
 192000 Hz, because the rounding of the timestamps of `concat` is exact only below about 333 kHz. A
 stream also gets no prefix when its layout is ambisonic or `binaural`, because `aresample` cannot
 convert the mono silence to these layouts. Every other layout took the prefix with identical
-samples, layouts of a custom order and layouts without a name included. The bound of 60 s now counts only the silence that the fills
-hold in memory: the silence of each segment less its prefix. So a single segment no longer reaches
-the bound.
+samples, layouts of a custom order and layouts without a name included. The bound of 60 s now
+counts only the silence that the fills hold in memory: the silence of each segment less its
+prefix. So a single segment no longer reaches the bound.
+
+(Changed on 2026-10-03.) Before the plan, the export reads the gaps inside the audio stream within
+its segments (measurement 28). The bound of 60 s now also counts the longest gap of each segment
+that has audio of the same segment behind it. The gap counts from the end of the frame in front of
+it, or from the In point when that is later. One chain holds one silence at a time. So each segment
+counts the longer of two silences: its silence in front of the first sample, less the prefix, and
+its longest gap. The bound adds these counts over all segments. The silence after the last frame of
+a segment counts nothing, because `apad` writes it.
+
+A gap that holds the In point counts only when the stream has audio in front of the In point. That
+is so when the first sample of the stream lies at or before the In point, or, when the probe
+reports no start, when the read found a frame in front of the gap. Otherwise that gap is the
+silence in front of the first sample, which counts less the prefix of the segment. The read runs
+when the export writes audio from a stream that holds packets. A read that fails, or that takes
+longer than the 30 s of the probe timeout, bounds no gap, as before. The constant of the bound is
+now `MAX_HELD_AUDIO_SILENCE_SECONDS`. It was `MAX_LEADING_AUDIO_SILENCE_SECONDS`.
 
 (Changed on 2026-10-02.) The video chain no longer ends in `format=yuv420p`. One chain at the
 start of the graph text sets the pixel format of the joined video, and `concat` writes `[vc]`:
@@ -831,11 +909,13 @@ refuse the export first for what the read found.
 
 - (Added on 2026-10-02.) The fill of measurement 20 holds the whole of a gap in memory before it
   writes it. (Changed on 2026-10-03: a silence prefix now streams the silence in front of a late
-  start, measurement 27. A gap inside the stream still fills in memory.) A leading gap of 600 s on 48 kHz 5.1 audio took 1.6 GB, against 44 MB for 10 s. A
-  segment that spans a long late start or a long drop of the audio therefore needs memory in
-  proportion to the gap. (Changed on 2026-10-02.) The plan refuses more than 60 s of silence in
-  front of the first sample, summed over the segments (measurement 21). A gap inside the stream
-  stays unbounded, because the probe does not report it. The padding after the end of the stream
+  start, measurement 27. A gap inside the stream still fills in memory.) A leading gap of 600 s
+  on 48 kHz 5.1 audio took 1.6 GB, against 44 MB for 10 s. A segment that spans a long late start
+  or a long drop of the audio therefore needs memory in proportion to the gap. (Changed on
+  2026-10-02.) The plan refuses more than 60 s of silence in front of the first sample, summed
+  over the segments (measurement 21). A gap inside the stream stays unbounded, because the probe
+  does not report it. (Changed on 2026-10-03: the plan bounds the gaps that the export reads
+  before it, measurement 28.) The padding after the end of the stream
   stays unbounded too: this change does not bound it. (Changed on 2026-10-02.) `apad`
   (measurement 23) writes the padding of each chain that `concat` does not pad. It does not keep
   that padding in memory. The padding of `concat`, for a segment with another segment behind it,
@@ -924,6 +1004,23 @@ refuse the export first for what the read found.
   stays exact only while the first decoded sample lies at most 0.15 s before the start that the
   plan reads. In every measured source the first decoded sample came at that start or after it.
   A source that broke this rule would play the audio of the segment up to 0.1 s early.
+- (Added on 2026-10-03.) The export decodes the audio of its segments once before it starts, to
+  find the gaps (measurement 28). That adds about 1.6 s for each hour of stereo AAC in the
+  segments. A slow disk adds more, because ffprobe reads the file through those parts. ffprobe
+  ends the read of a segment at the first audio packet after its Out point. So when the audio ends
+  before the Out point, the read continues to the end of the file. A read that takes longer than
+  30 s bounds no gap. So does an answer that reaches the capture limit of 16 MiB, which is about
+  five hours of audio.
+- (Added on 2026-10-03.) The bound adds the counts of all segments. So it can refuse an export
+  whose segments write their gaps one after the other and fit in memory. A single gap of more than
+  60 s refuses its segment: a gap of 90 s took 152 MiB. A later change can split a segment at a
+  long gap instead.
+- (Added on 2026-10-03.) The bound assumes that a chain gets no frames while it waits for its turn
+  in `concat`. That is true with one input for each segment. With one input (`SingleInput`), a
+  waiting chain gets every frame through `asplit` and keeps its whole output, with or without
+  gaps. A second review measured 146 MiB with gaps and 147 MiB without them, for a waiting segment
+  of 124 s, against 37 MiB in source order. That cost is older than this change. The bullet on
+  `split` under one input records the same cost for the video.
 - (Added on 2026-10-02.) A source whose audio timestamps drift from the sample count builds up an
   error. When the error passes 0.1 s, swresample drops or fills at least 0.1 s at once, in the
   middle of a segment. Timestamps that ran 2% slow gave one drop of 0.1 s in 10 s. Before

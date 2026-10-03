@@ -270,13 +270,16 @@ at zero, and omits `-ss` when the result is zero. Each segment chain cuts with `
 rate with an `aformat` before `atrim`. Under the second shape below, that pin is emitted once,
 in front of `asplit`, because the chains share one input link. Each chain then resets the
 timestamps to its In point, fills a late start or a gap of the audio with silence, and
-normalizes the streams (ADR 014 measurement 20). The fill holds its silence in memory. So a segment that starts long before the first audio sample
-gets a silence prefix, which streams all of that silence but the last 0.25 s (measurement 27). The
-plan refuses segments only when the silence that the fills hold adds up to more than 60 s
-(`audioGapTooLong`, measurement 21). Every audio chain that reads the stream pads its audio with
-silence to the length of the segment. In the audio process below, each chain also cuts its audio
-to that length. A segment that the audio of the source does not reach then gets silence
-(measurement 23). The chains end in `concat`, in project array order.
+normalizes the streams (ADR 014 measurement 20). The fill holds its silence in memory. So a segment
+that starts long before the first audio sample gets a silence prefix, which streams all of that
+silence but the last 0.25 s (measurement 27). Before the plan, the export decodes the audio of the
+segments with ffprobe to find the gaps inside the stream (measurement 28). For each segment, the
+plan counts the longer of two silences that the fill holds: the silence in front of the first
+sample, less the prefix, and the longest gap. It refuses the segments when these counts are more
+than 60 s in total (`audioGapTooLong`, measurement 21). Every audio chain that reads the stream pads
+its audio with silence to the length of the segment. In the audio process below, each chain also
+cuts its audio to that length. A segment that the audio of the source does not reach then gets
+silence (measurement 23). The chains end in `concat`, in project array order.
 
 An export with video and with audio from the stream runs two `ffmpeg` processes (ADR 043). The
 audio process cuts the audio of each segment and writes it as WAV to its stdout. The encoder cuts
