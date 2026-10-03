@@ -227,6 +227,7 @@ fn planned_audio(preset: &Preset, sample_rate: u32) -> PlannedAudio {
         bitrate: preset.audio_bitrate,
         options: preset.audio_options.clone(),
         expected_duration: Rational::new(1, 5).expect("1/5 always reduces to a valid Rational"),
+        silence_layout: None,
     }
 }
 
@@ -880,6 +881,9 @@ mod tests {
                 start_time: None,
                 duration: None,
                 tagged_end: None,
+                channel_layout: None,
+                reported_packets: None,
+                holds_no_packets: false,
             }),
         };
         let segments = [SegmentBoundary {

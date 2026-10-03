@@ -113,6 +113,30 @@ pub struct AudioProbe {
     /// ([`probe_audio_sample_rate_at`]).
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
+    /// The channel layout of this stream as ffprobe names it, such as `stereo` or `5.1(side)`, or
+    /// `None` when ffprobe reports none or `unknown`.
+    ///
+    /// Only the export reads it, to generate silence in the layout of a stream that holds no
+    /// packets ([`Self::holds_no_packets`]). It is not on the import wire.
+    #[serde(skip)]
+    pub channel_layout: Option<String>,
+    /// The number of packets the container records for this stream, from `nb_frames`, or `None`
+    /// when ffprobe reports none.
+    ///
+    /// An MP4 file records the samples of each track in its index, so its count is there before
+    /// any packet is read. A Matroska file records none. Only [`Self::take_no_packet`] reads it.
+    #[serde(skip)]
+    pub reported_packets: Option<u64>,
+    /// True when the stream holds no audio at all: the export's read of its first packet found
+    /// none, and the container does not contradict that read ([`Self::take_no_packet`]).
+    ///
+    /// The probe never sets it. It analyzes only the start of the file, and it gives a stream
+    /// without packets the start and the length of the container, so such a stream looks like
+    /// audio that covers the whole file. The export then generates silence and reads no input for
+    /// the audio, because an input whose audio never arrives makes FFmpeg keep the decoded video
+    /// of the whole rest of the file in memory (ADR 014 measurement 26).
+    #[serde(skip)]
+    pub holds_no_packets: bool,
     /// The time of the first sample of this stream, in seconds on the timeline of the container,
     /// or `None` when ffprobe reports none.
     ///
@@ -196,6 +220,31 @@ impl AudioProbe {
             .and_then(|end| end.sub(first_packet))
             .filter(|length| length.num() > 0);
         true
+    }
+
+    /// Record that [`probe_first_audio_packet`] read this stream and found no packet. Returns
+    /// whether [`Self::holds_no_packets`] is now set.
+    ///
+    /// That read reports no packet only when ffprobe wrote no error, but a read error that no
+    /// demuxer reports still ends the read as the end of the file does. The container can show
+    /// that the read ended early, and then the mark is not set:
+    ///
+    /// - [`Self::reported_packets`] counts at least one packet, as the index of an MP4 file does.
+    /// - [`Self::tagged_end`] lies after zero. The `matroska` muxer of FFmpeg writes the end of
+    ///   the track there, `00:00:00.000000000` for a track without packets (ADR 014 measurement
+    ///   26). A muxer that writes the length of the track in the same tag gives a time after zero
+    ///   for audio too.
+    ///
+    /// Only the `DURATION` tag counts. Older versions of mkvmerge write their statistics as
+    /// `DURATION-eng` and `NUMBER_OF_FRAMES-eng`, and this check does not read them, so for such a
+    /// file only the stderr of the read guards a stream with audio.
+    ///
+    /// Without the mark the stream keeps what the probe reported, as after a read that failed.
+    pub fn take_no_packet(&mut self) -> bool {
+        let counted = self.reported_packets.is_some_and(|count| count > 0);
+        let tagged = self.tagged_end.is_some_and(|end| end.num() > 0);
+        self.holds_no_packets = !counted && !tagged;
+        self.holds_no_packets
     }
 }
 
@@ -533,8 +582,9 @@ pub struct FirstAudioPacket {
 /// [`AudioProbe::take_first_packet`] applies its time. Its position and the id of the stream let
 /// [`probe_audio_sample_rate_at`] read a sample rate that the analysis missed.
 ///
-/// The answer is `None` when the stream has no packet. The runner, the deadline and the cancel
-/// rule are those of [`probe_output_audio`] (`procutil`, ADR 018).
+/// The answer is `None` only when the stream holds no packet, as far as this read can tell; see
+/// [`first_packet_answer`]. The runner, the deadline and the cancel rule are those of
+/// [`probe_output_audio`] (`procutil`, ADR 018).
 pub fn probe_first_audio_packet(
     ffprobe_path: &Path,
     media_path: &Path,
@@ -566,17 +616,49 @@ pub fn probe_first_audio_packet(
         Some(cancel),
     )
     .map_err(|source| ProbeError::Spawn { source })?;
-    finish_probe_run_with(run, PROBE_TIMEOUT, parse_first_packet_json)
+    let stderr = run.stderr.clone();
+    let packet = finish_probe_run_with(run, PROBE_TIMEOUT, parse_first_packet_json)?;
+    first_packet_answer(packet, stderr)
+}
+
+/// Decide what an answer of [`probe_first_audio_packet`] that exited successfully says, given what
+/// ffprobe wrote to stderr.
+///
+/// A packet is an answer whatever stderr holds. An answer without a packet is not always the end of
+/// the stream: ffprobe ends its read of packets at a read error as it ends it at the end of the
+/// file, and exits 0 either way. A Matroska file that ends early reports `File ended prematurely`
+/// and lists no packet, although its track holds audio further on (ADR 014 measurement 26). So an
+/// answer without a packet reads as `None`, a stream without packets, only when ffprobe wrote
+/// nothing but white space to stderr. Otherwise it is a read that failed:
+/// [`ProbeError::Parse`] with a missing `packets` field, and the stderr of the run.
+fn first_packet_answer(
+    packet: Option<FirstAudioPacket>,
+    stderr: Vec<u8>,
+) -> Result<Option<FirstAudioPacket>, ProbeError> {
+    if packet.is_none() && !stderr.iter().all(u8::is_ascii_whitespace) {
+        return Err(ProbeError::Parse {
+            source: ProbeParseError::Invalid(ProbeDataError::MissingField { field: "packets" }),
+            stderr,
+        });
+    }
+    Ok(packet)
 }
 
 /// Read the answer of [`probe_first_audio_packet`].
 ///
-/// Only malformed JSON fails. An answer without a packet reads as `None`. A packet without a
-/// usable `pts`, `pos` or stream `id`, and a missing or non-positive time base, leave that field
-/// `None`: the caller then keeps what [`probe_media`] reported for it.
+/// Malformed JSON fails. An answer without a packet reads as `None` when it lists the selected
+/// stream, and fails with a missing `streams` field when it does not: ffprobe then found no stream
+/// at that index, which says nothing about the packets of the stream the caller means. A packet
+/// without a usable `pts`, `pos` or stream `id`, and a missing or non-positive time base, leave
+/// that field `None`: the caller then keeps what [`probe_media`] reported for it.
 pub fn parse_first_packet_json(json: &[u8]) -> Result<Option<FirstAudioPacket>, ProbeParseError> {
     let raw: RawFirstPacket = serde_json::from_slice(json)?;
     let Some(packet) = raw.packets.first() else {
+        if raw.streams.is_empty() {
+            return Err(ProbeParseError::Invalid(ProbeDataError::MissingField {
+                field: "streams",
+            }));
+        }
         return Ok(None);
     };
     let stream = raw.streams.first();
@@ -884,6 +966,7 @@ struct RawStream {
     nb_frames: Option<String>,
     sample_rate: Option<String>,
     channels: Option<Value>,
+    channel_layout: Option<String>,
     start_time: Option<String>,
     #[serde(default)]
     disposition: RawDisposition,
@@ -1032,6 +1115,22 @@ fn normalize_audio(raw: &RawStream) -> Result<AudioProbe, ProbeDataError> {
             .transpose()?
             .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value > 0),
+        channel_layout: raw
+            .channel_layout
+            .as_deref()
+            .map(str::trim)
+            .filter(|layout| !layout.is_empty() && *layout != "unknown")
+            .map(str::to_owned),
+        // A count that does not parse reads as unknown, as the extent below does: the import needs
+        // the video stream only.
+        reported_packets: parse_optional_text_i64(
+            raw.nb_frames.as_deref(),
+            "streams.audio.nb_frames",
+        )
+        .ok()
+        .flatten()
+        .and_then(|count| u64::try_from(count).ok()),
+        holds_no_packets: false,
         start_time,
         duration: audio_duration(raw, start_time, tagged_end),
         tagged_end,
@@ -1947,7 +2046,62 @@ mod tests {
         assert!(!audio.contains_key("startTime"));
         assert!(!audio.contains_key("duration"));
         assert!(!audio.contains_key("taggedEnd"));
+        assert!(!audio.contains_key("channelLayout"));
+        assert!(!audio.contains_key("holdsNoPackets"));
         assert_eq!(value["audio"]["index"], 1);
+    }
+
+    #[test]
+    fn a_read_without_a_packet_marks_the_stream_only_when_the_container_does_not_record_audio() {
+        let audio = |fields: Value| probe_with_audio_stream(fields).audio.unwrap();
+        // The Matroska track of ADR 014 measurement 26: no count, and a tag of zero.
+        let mut empty = audio(serde_json::json!({
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "duration_ts": 120_000,
+            "tags": { "DURATION": "00:00:00.000000000" }
+        }));
+        assert_eq!(empty.reported_packets, None);
+        assert!(empty.take_no_packet());
+        assert!(empty.holds_no_packets);
+        // A track with audio: a positive tag, or a count in the index of an MP4 file.
+        for fields in [
+            serde_json::json!({ "time_base": "1/1000", "tags": { "DURATION": "00:02:00.021000000" } }),
+            serde_json::json!({ "time_base": "1/48000", "nb_frames": "5626" }),
+        ] {
+            let mut recorded = audio(fields.clone());
+            assert!(!recorded.take_no_packet(), "{fields}");
+            assert!(!recorded.holds_no_packets, "{fields}");
+        }
+        // A count of zero, or one that does not parse, records nothing.
+        for count in ["0", "N/A", "x"] {
+            let mut stream = audio(serde_json::json!({ "nb_frames": count }));
+            assert!(stream.take_no_packet(), "{count}");
+        }
+        assert_eq!(
+            audio(serde_json::json!({ "nb_frames": "5626" })).reported_packets,
+            Some(5626)
+        );
+    }
+
+    #[test]
+    fn the_channel_layout_is_the_name_ffprobe_gives_and_unknown_reads_as_none() {
+        for (reported, expected) in [
+            (serde_json::json!("stereo"), Some("stereo")),
+            (serde_json::json!("5.1(side)"), Some("5.1(side)")),
+            (serde_json::json!("unknown"), None),
+            (serde_json::json!(""), None),
+            (Value::Null, None),
+        ] {
+            let audio = probe_with_audio_stream(serde_json::json!({
+                "channels": 2,
+                "channel_layout": reported
+            }))
+            .audio
+            .unwrap();
+            assert_eq!(audio.channel_layout.as_deref(), expected, "{reported:?}");
+            assert!(!audio.holds_no_packets);
+        }
     }
 
     // -- the first packet of the source audio stream ------------------------------------------
@@ -2014,17 +2168,68 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_without_a_packet_reads_as_none_and_only_bad_json_fails() {
+    fn an_answer_without_a_packet_reads_as_none_only_when_it_lists_the_stream() {
+        // The answer ffprobe 9.0.2 wrote for a Matroska track that holds no packets.
         for answer in [
-            serde_json::json!({}),
-            serde_json::json!({ "packets": [], "streams": [{ "id": "0x101", "time_base": "1/1000" }] }),
+            serde_json::json!({
+                "packets": [],
+                "programs": [],
+                "stream_groups": [],
+                "streams": [{ "time_base": "1/1000" }]
+            }),
+            serde_json::json!({ "streams": [{ "id": "0x101", "time_base": "1/1000" }] }),
         ] {
             assert_eq!(parse_first_packet(answer.clone()), None, "{answer}");
+        }
+        // The answer for an index that names no stream lists none. It says nothing about the
+        // packets of the stream the caller means.
+        for answer in [
+            serde_json::json!({ "packets": [], "programs": [], "stream_groups": [], "streams": [] }),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                matches!(
+                    parse_first_packet_json(&serde_json::to_vec(&answer).unwrap()),
+                    Err(ProbeParseError::Invalid(ProbeDataError::MissingField {
+                        field: "streams"
+                    }))
+                ),
+                "{answer}"
+            );
         }
         assert!(matches!(
             parse_first_packet_json(b"{"),
             Err(ProbeParseError::Json(_))
         ));
+    }
+
+    #[test]
+    fn an_answer_without_a_packet_counts_only_when_ffprobe_reported_no_error() {
+        let packet = FirstAudioPacket {
+            time: Some(seconds("59.979")),
+            position: None,
+            stream_id: None,
+        };
+        // A packet is an answer whatever stderr holds.
+        assert_eq!(
+            first_packet_answer(Some(packet), b"[h264] error\n".to_vec()).unwrap(),
+            Some(packet)
+        );
+        for stderr in [&b""[..], b"\n", b" \r\n\t"] {
+            assert_eq!(first_packet_answer(None, stderr.to_vec()).unwrap(), None);
+        }
+        // What ffprobe 9.0.2 wrote for a Matroska file cut off before its first audio packet.
+        let stderr = b"[matroska,webm @ 0x7ac1040000] File ended prematurely\n".to_vec();
+        match first_packet_answer(None, stderr.clone()) {
+            Err(ProbeError::Parse {
+                source: ProbeParseError::Invalid(ProbeDataError::MissingField { field }),
+                stderr: reported,
+            }) => {
+                assert_eq!(field, "packets");
+                assert_eq!(reported, stderr);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

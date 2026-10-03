@@ -633,6 +633,7 @@ mod tests {
             options: vec![],
             // The command does not read it; any value renders the same command.
             expected_duration: Rational::new(1, 1).unwrap(),
+            silence_layout: None,
         }
     }
 
@@ -2403,6 +2404,7 @@ mod tests {
             options: widest_options(),
             // The command does not read it; any value renders the same command.
             expected_duration: Rational::new(1, 1).unwrap(),
+            silence_layout: None,
         }
     }
 

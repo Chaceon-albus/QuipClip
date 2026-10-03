@@ -24,6 +24,9 @@
 //!   `aformat` in front of `atrim`. This one looks redundant beside the `aformat` that ends
 //!   the same chain, and it is not: see [`audio_input_pin`] for the measurement, and do not
 //!   delete it.
+//! - The one exception to the rules of this list and the next two is a chain of an audio stream
+//!   that holds no packets. It reads no input: it generates the silence of its segment, at the
+//!   length and in the output format of every other chain. See [`audio_silence_chain`].
 //! - Every audio chain **starts its audio at the segment's In point**, not at its first
 //!   sample: it subtracts the In tick, and an `aresample` fills a late start and a gap with
 //!   silence. A source whose audio starts after the In point otherwise plays early against its
@@ -108,8 +111,9 @@ fn video_output_format(pixel_format: &str) -> String {
 /// that happens to match, such as the legacy 48000 Hz on a 48000 Hz source. The test fixtures deliberately use a 44100 Hz source with a 48000 Hz output, so the
 /// two numbers can never be confused for each other.
 ///
-/// Every chain reads the same audio stream and renders this same filter, so every chain ends
-/// at one rate and with one layout, and `concat` still receives inputs that agree. For
+/// Every chain reads the same audio stream, or generates silence in one layout
+/// ([`audio_silence_chain`]), and renders this same filter, so every chain ends at one rate and
+/// with one layout, and `concat` still receives inputs that agree. For
 /// [`AudioChannels::Source`] the filter names no channel layout at all, so each chain keeps
 /// the source stream's layout; ADR 023 measurement 3 found that ffmpeg then converts in front
 /// of an encoder that cannot take that layout, so no filter here depends on the encoder.
@@ -246,7 +250,9 @@ impl GraphShape {
 /// source, so a segment without an audio stream cannot occur between segments with one -- and
 /// ADR 004's silence generation belongs to the multi-source work. A segment of a source *with*
 /// audio that the stream does not reach is a different case, and its own chain writes the
-/// silence: see [`audio_end_pad`].
+/// silence: see [`audio_end_pad`]. A plan whose audio stream holds no packets reads that stream
+/// nowhere, and no `asplit` divides it: each chain generates the silence of its segment, see
+/// [`audio_silence_chain`].
 ///
 /// This function treats audio as one decision for the whole graph rather than one per
 /// segment. [`build_plan`](super::plan::build_plan) is the only producer of an
@@ -298,7 +304,11 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
                 count,
             ));
         }
-        if let Some((planned, _)) = &audio {
+        // A plan whose chains generate silence reads no audio stream, so nothing is split.
+        if let Some((planned, _)) = audio
+            .as_ref()
+            .filter(|(planned, _)| planned.silence_layout.is_none())
+        {
             // The rate pin goes in front of `asplit`, not on each branch behind it: this
             // chain's head *is* the input link, so one filter pins it directly. See
             // `audio_input_pin`.
@@ -320,6 +330,10 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
             chains.push(video_chain(video, shape, index, *segment));
         }
         if let Some((planned, ticks)) = &audio {
+            if let Some(layout) = &planned.silence_layout {
+                chains.push(audio_silence_chain(planned, layout, index, ticks[index]));
+                continue;
+            }
             // `concat` pads the audio of a segment to its video when another segment follows, so
             // only the chains it does not pad need their own end; see `audio_end_pad`.
             let padded = video.is_none() || index + 1 == count;
@@ -658,6 +672,36 @@ fn audio_chain(
     format!("{head},{reset},{fill}{pad},{format}[a{index}]")
 }
 
+/// Render the audio chain of one segment of an audio stream that holds no packets: the silence of
+/// the segment, generated from no input, to its `[a<index>]` output label.
+///
+/// `anullsrc` generates silence at [`PlannedAudio::sample_rate`] in
+/// [`PlannedAudio::silence_layout`]. `atrim=end_sample=<out tick - in tick>` ends it at the number
+/// of samples that [`audio_end_pad`] gives a chain that reads the stream, and the closing
+/// [`audio_output_format`] is the one of every other chain. So the silence has the length, the
+/// rate and the layout that the audio of the segment would have.
+///
+/// The chain reads no input, and that is its purpose. An input of a stream that holds no packets
+/// gives no audio frame before the end of the file, and ffmpeg configures the graph only when each
+/// input link has a first frame. Until then it keeps each decoded video frame of that input in
+/// memory: the whole rest of the file. `anullsrc` writes one frame when the filter behind it asks
+/// for one, so the chain keeps none of its silence in memory either. ADR 014 measurement 26 has
+/// the figures.
+fn audio_silence_chain(
+    audio: &PlannedAudio,
+    layout: &str,
+    index: usize,
+    ticks: (i64, i64),
+) -> String {
+    let (in_tick, out_tick) = ticks;
+    let length = out_tick.saturating_sub(in_tick).max(0);
+    format!(
+        "anullsrc=r={}:cl={layout},atrim=end_sample={length},{}[a{index}]",
+        audio.sample_rate,
+        audio_output_format(audio)
+    )
+}
+
 /// Render the `concat` filter, with the joined video at `[vc]` and the joined audio at the
 /// graph's `[a]` output label, for whichever of the two parts the plan carries.
 ///
@@ -792,6 +836,7 @@ mod tests {
             options: vec![],
             // The graph does not read it; any value renders the same graph.
             expected_duration: Rational::new(1, 1).unwrap(),
+            silence_layout: None,
         }
     }
 
@@ -916,6 +961,75 @@ mod tests {
                 plan.separate_audio_input
             );
         }
+    }
+
+    /// `fixture_plan(count)` with an audio stream that holds no packets, silenced in `layout`.
+    fn plan_with_silence(count: usize, layout: &str) -> ExportPlan {
+        let mut plan = fixture_plan(count);
+        plan.audio.as_mut().unwrap().silence_layout = Some(layout.to_owned());
+        plan
+    }
+
+    #[test]
+    fn a_stream_without_packets_generates_the_silence_of_each_segment_from_no_input() {
+        // Each chain generates its length at the source rate and ends in the format of every
+        // other chain. No chain reads stream 2, and the last chain needs no pad of its own.
+        let graph =
+            build_filter_graph(&plan_with_silence(2, "stereo"), GraphShape::InputPerSegment);
+        assert_eq!(
+            graph,
+            concat!(
+                "[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
+                "anullsrc=r=44100:cl=stereo,atrim=end_sample=10584,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
+                "anullsrc=r=44100:cl=stereo,atrim=end_sample=21168,",
+                "aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
+            )
+        );
+    }
+
+    #[test]
+    fn a_single_input_of_a_stream_without_packets_splits_only_the_video() {
+        for shape in [GraphShape::SingleInput, GraphShape::SingleInputSharedAudio] {
+            let graph = build_filter_graph(&plan_with_silence(2, "5.1(side)"), shape);
+            assert_eq!(
+                graph,
+                concat!(
+                    "[vc]format=yuv420p[v];",
+                    "[0:1]split=2[sv0][sv1];",
+                    "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
+                    "anullsrc=r=44100:cl=5.1(side),atrim=end_sample=10584,",
+                    "aformat=f=fltp:r=48000:cl=stereo[a0];",
+                    "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
+                    "anullsrc=r=44100:cl=5.1(side),atrim=end_sample=21168,",
+                    "aformat=f=fltp:r=48000:cl=stereo[a1];",
+                    "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
+                ),
+                "{shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_silence_of_an_audio_only_plan_ends_each_chain_at_its_length() {
+        // `build_plan` refuses an audio-only export of a stream without packets. The graph still
+        // renders a hand-built one with one chain for each segment and nothing else.
+        let mut plan = plan_with_silence(2, "mono");
+        plan.video = None;
+        let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
+        assert_eq!(
+            graph,
+            concat!(
+                "anullsrc=r=44100:cl=mono,atrim=end_sample=10584,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "anullsrc=r=44100:cl=mono,atrim=end_sample=21168,",
+                "aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "[a0][a1]concat=n=2:v=0:a=1[a]",
+            )
+        );
     }
 
     #[test]
@@ -1226,9 +1340,9 @@ mod tests {
 
     #[test]
     fn every_chain_of_one_graph_ends_in_the_same_audio_format() {
-        // `concat` needs inputs that agree. Every chain reads the same stream and renders the
-        // same closing filter, so one graph must hold exactly one spelling of it, once for each
-        // segment, whatever the format.
+        // `concat` needs inputs that agree. Every chain reads the same stream, or generates
+        // silence, and renders the same closing filter, so one graph must hold exactly one
+        // spelling of it, once for each segment, whatever the format.
         for channels in [
             AudioChannels::Source,
             AudioChannels::Stereo,
@@ -1383,6 +1497,9 @@ mod tests {
                 start_time: None,
                 duration: None,
                 tagged_end: None,
+                channel_layout: None,
+                reported_packets: None,
+                holds_no_packets: false,
             }),
         };
         let preset = Preset {

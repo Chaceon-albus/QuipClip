@@ -325,17 +325,19 @@ pub struct PlannedAudio {
     ///
     /// [`plan::build_plan`] resolves the preset's [`AudioSampleRateSetting::Source`] to
     /// [`Self::sample_rate`] here, so the graph renders a number and never reads the preset.
-    /// Every chain reads the same audio stream and ends at this one rate, so `concat` still
-    /// receives inputs that agree (ADR 023).
+    /// Every chain reads the same audio stream, or generates silence with no stream
+    /// ([`Self::silence_layout`]), and ends at this one rate, so `concat` still receives inputs
+    /// that agree (ADR 023).
     ///
     /// [`AudioSampleRateSetting::Source`]: crate::settings::AudioSampleRateSetting::Source
     pub output_sample_rate: u32,
     /// The channel layout every audio chain ends in.
     ///
-    /// [`AudioChannels::Source`] is the one value the plan cannot resolve to a concrete layout:
-    /// the probe reports a channel count, not a layout, so the graph instead names no layout at
-    /// all and the chain keeps the source stream's own (ADR 023). As with the rate, every chain
-    /// reads the same stream, so every chain ends with the same layout.
+    /// [`AudioChannels::Source`] is the one value the plan does not resolve to a concrete layout:
+    /// the graph names no layout at all, and the chain keeps the source stream's own (ADR 023).
+    /// As with the rate, every chain reads the same stream, so every chain ends with the same
+    /// layout. Chains that generate silence read no stream; they generate it in
+    /// [`Self::silence_layout`], which is then that same layout for every chain.
     pub output_channels: AudioChannels,
     /// The ffmpeg audio encoder name, verbatim from the preset.
     pub encoder: String,
@@ -362,6 +364,21 @@ pub struct PlannedAudio {
     /// The graph does not read it. It is a bound for the success check, and never an edit
     /// boundary (ADR 002).
     pub expected_duration: Rational,
+    /// The channel layout of the silence that every audio chain generates, or `None` when the
+    /// chains read the audio stream.
+    ///
+    /// [`plan::build_plan`] sets it when the audio stream holds no packets
+    /// ([`crate::ffmpeg::AudioProbe::holds_no_packets`]). An input of that stream never gives
+    /// an audio frame, so FFmpeg would keep the decoded video until the end of the file before
+    /// it configures the graph: 1416 MiB for a segment of 5 s from a source of 120 s at 640x360
+    /// (ADR 014 measurement 26). Each chain then generates the silence of its segment
+    /// (`graph::audio_silence_chain`) at [`Self::sample_rate`] and reads no input, and the plan
+    /// opens no second input for the audio.
+    ///
+    /// The layout is the one the chain ends in when [`Self::output_channels`] names one, and
+    /// otherwise the layout of the stream, so the output track has the layout it would have if
+    /// the stream held audio.
+    pub silence_layout: Option<String>,
 }
 
 /// A fully resolved, ready-to-render export: one source, its segments in concat order, and
@@ -419,8 +436,9 @@ pub struct ExportPlan {
     /// source audio comes more than [`SEPARATE_AUDIO_INPUT_LEAD_MILLISECONDS`] after the start
     /// of the container, when a segment's input starts to read later than that time before the
     /// last audio sample, or when a segment that another segment follows in concat order ends
-    /// later than that time before the last sample. Under [`GraphShape::InputPerSegment`] the
-    /// second inputs follow the
+    /// later than that time before the last sample. It never sets it for a plan whose chains
+    /// generate silence ([`PlannedAudio::silence_layout`]), because those chains read no input.
+    /// Under [`GraphShape::InputPerSegment`] the second inputs follow the
     /// inputs of the segments, in segment order. Under [`GraphShape::SingleInput`] there is one
     /// second input, with the one seek. [`GraphShape::SingleInputSharedAudio`] ignores it.
     pub separate_audio_input: bool,

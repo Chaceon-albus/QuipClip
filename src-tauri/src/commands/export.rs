@@ -526,6 +526,12 @@ where
             audio_sample_rate_at,
         )?;
     }
+    // After the reads of the audio, which can each spend tens of seconds. A cancel that arrives as
+    // the last one ends must not reach the plan, which can refuse what these reads found with a
+    // code of its own, such as `sourceHasNoAudio`.
+    if canceled() {
+        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+    }
 
     let segments: Vec<SegmentBoundary> = request
         .segments
@@ -612,17 +618,23 @@ fn rate_readable_from_packets(format_names: &[String]) -> bool {
 /// the second input for the audio. It refuses audio without a sample rate with
 /// `sourceAudioRateUnknown`.
 ///
-/// 1. `first_audio_packet` reads the first packet of the stream.
+/// 1. `first_audio_packet` reads the first packet of the stream. When it finds none and reports no
+///    error, [`crate::ffmpeg::AudioProbe::take_no_packet`] marks the stream as one that holds no
+///    audio, unless the container counts packets or records a duration for it. The plan then
+///    generates silence instead of reading the stream (ADR 014 measurement 26). The other steps do
+///    not run.
 /// 2. Only when the re-probe reported no sample rate, and the packet has a position and the stream
 ///    an id, `audio_sample_rate_at` reads the rate again from the position of that packet.
 /// 3. [`crate::ffmpeg::AudioProbe::take_first_packet`] corrects the start, and the length with
 ///    it, from the time of the packet.
 ///
 /// These reads only add accuracy, so they never fail the export. A read that cannot start, exits
-/// unsuccessfully, writes an answer that does not parse, finds nothing, or times out leaves the
-/// values of the re-probe, as they were before these reads existed. A cancel that stops a read
-/// ends the run as canceled. The flag is also read before each one: the re-probe takes no cancel
-/// flag, and each read can spend up to [`crate::ffmpeg::probe::PROBE_TIMEOUT`].
+/// unsuccessfully, writes an answer that does not parse, or times out leaves the values of the
+/// re-probe, as they were before these reads existed. So does a read that finds no packet but
+/// reports an error, which [`crate::ffmpeg::probe_first_audio_packet`] returns as a failure. A
+/// cancel that stops a read ends the run as canceled. The flag is also read before each one: the
+/// re-probe takes no cancel flag, and each read can spend up to
+/// [`crate::ffmpeg::probe::PROBE_TIMEOUT`]. The caller reads it once more after the last one.
 fn correct_audio_probe<FirstPacket, RateAt>(
     ffprobe: &Path,
     source: &Path,
@@ -649,8 +661,14 @@ where
         Err(ProbeError::Canceled) => {
             return Err(ExportCommandError::new(ExportErrorCode::Canceled))
         }
-        // No packet, or a read that failed: the values of the re-probe stand.
-        Ok(None) | Err(_) => return Ok(()),
+        // The read found no packet of the stream and reported no error. The container can still
+        // show that the stream holds audio, and then the values of the re-probe stand.
+        Ok(None) => {
+            audio.take_no_packet();
+            return Ok(());
+        }
+        // A read that failed: the values of the re-probe stand.
+        Err(_) => return Ok(()),
     };
     if audio.sample_rate.is_none() {
         if let Some((position, stream_id)) = packet.position.zip(packet.stream_id) {
@@ -1277,8 +1295,21 @@ mod tests {
         }
     }
 
-    /// A read of the first audio packet that finds no packet, so the values of the re-probe
-    /// stand.
+    /// A read of the first audio packet that fails, so the values of the re-probe stand.
+    fn first_packet_unread(
+        _: &Path,
+        _: &Path,
+        _: u32,
+        _: &AtomicBool,
+    ) -> Result<Option<FirstAudioPacket>, ProbeError> {
+        Err(ProbeError::ProcessFailed {
+            code: Some(1),
+            stderr: Vec::new(),
+        })
+    }
+
+    /// A read of the first audio packet that reaches the end of the file without a packet of
+    /// the stream: the stream holds no audio.
     fn no_first_packet(
         _: &Path,
         _: &Path,
@@ -1812,7 +1843,7 @@ mod tests {
                 *probed.borrow_mut() = true;
                 unreachable!()
             },
-            no_first_packet,
+            first_packet_unread,
             sample_rate_not_read,
         )
         .unwrap_err();
@@ -1859,7 +1890,7 @@ mod tests {
                 assert_eq!(path, source);
                 Ok(sample_probe())
             },
-            no_first_packet,
+            first_packet_unread,
             sample_rate_not_read,
         )
         .unwrap();
@@ -1920,7 +1951,7 @@ mod tests {
                 },
                 settings::load,
                 |_, _| Ok(sample_probe_with_audio()),
-                no_first_packet,
+                first_packet_unread,
                 sample_rate_not_read,
             )
             .unwrap()
@@ -2040,7 +2071,7 @@ mod tests {
                 })
             },
             |_, _| Ok(sample_probe()),
-            no_first_packet,
+            first_packet_unread,
             sample_rate_not_read,
         )
         .unwrap_err();
@@ -2087,7 +2118,7 @@ mod tests {
                 })
             },
             |_, _| Ok(sample_probe()),
-            no_first_packet,
+            first_packet_unread,
             sample_rate_not_read,
         )
         .unwrap_err();
@@ -2152,7 +2183,7 @@ mod tests {
                 })
             },
             |_, _| Ok(sample_probe()),
-            no_first_packet,
+            first_packet_unread,
             sample_rate_not_read,
         );
 
@@ -2233,7 +2264,7 @@ mod tests {
             },
             |_| unreachable!(),
             |_, _| unreachable!(),
-            no_first_packet,
+            first_packet_unread,
             sample_rate_not_read,
         )
         .unwrap_err();
@@ -2295,7 +2326,7 @@ mod tests {
                 *probed.borrow_mut() = true;
                 unreachable!()
             },
-            no_first_packet,
+            first_packet_unread,
             sample_rate_not_read,
         )
         .unwrap_err();
@@ -2349,7 +2380,7 @@ mod tests {
                 cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(sample_probe())
             },
-            no_first_packet,
+            first_packet_unread,
             sample_rate_not_read,
         )
         .unwrap_err();
@@ -2385,7 +2416,7 @@ mod tests {
             |_| Err(LocateError::NotFound { inspected: vec![] }),
             |_| unreachable!(),
             |_, _| unreachable!(),
-            no_first_packet,
+            first_packet_unread,
             sample_rate_not_read,
         )
         .unwrap_err();
@@ -2442,7 +2473,7 @@ mod tests {
                     *probed.borrow_mut() = true;
                     unreachable!()
                 },
-                no_first_packet,
+                first_packet_unread,
                 sample_rate_not_read,
             )
             .unwrap_err();
@@ -2601,6 +2632,9 @@ mod tests {
                 start_time: None,
                 duration: None,
                 tagged_end: None,
+                channel_layout: None,
+                reported_packets: None,
+                holds_no_packets: false,
             }),
             ..sample_probe()
         }
@@ -2619,7 +2653,7 @@ mod tests {
             probe,
             &[(0, 1)],
             &AtomicBool::new(false),
-            no_first_packet,
+            first_packet_unread,
         )
     }
 
@@ -2903,7 +2937,7 @@ mod tests {
             sample_probe_with_a_missed_audio_start(),
             &[(0, 75)],
             &AtomicBool::new(false),
-            no_first_packet,
+            first_packet_unread,
         )
         .is_ok());
     }
@@ -2933,7 +2967,7 @@ mod tests {
             sample_probe_with_a_missed_audio_start(),
             &[(0, 75)],
             &AtomicBool::new(false),
-            no_first_packet,
+            first_packet_unread,
         )
         .is_ok());
 
@@ -2970,6 +3004,154 @@ mod tests {
         assert_eq!(error.code, ExportErrorCode::AudioGapTooLong);
     }
 
+    /// The `-filter_complex` argument of a prepared command.
+    fn graph_of(prepared: &PreparedExport) -> &str {
+        let at = prepared
+            .arguments
+            .iter()
+            .position(|argument| argument == "-filter_complex")
+            .unwrap();
+        &prepared.arguments[at + 1]
+    }
+
+    /// The re-probe of a Matroska source of 120 s whose audio track holds no packets, as FFmpeg
+    /// 9.0.2 wrote it: the start and the length of the container, and a `DURATION` tag of
+    /// `00:00:00.000000000` (ADR 014 measurement 26).
+    fn sample_probe_with_an_empty_audio_track() -> MediaProbe {
+        let mut probe = sample_probe_with_a_missed_audio_start();
+        probe.audio.as_mut().unwrap().tagged_end = Some(Rational::new(0, 1).unwrap());
+        probe
+    }
+
+    #[test]
+    fn a_stream_without_packets_generates_silence_and_opens_no_input_for_the_audio() {
+        // Read as audio, the track gives no frame before the end of the file, and FFmpeg keeps the
+        // decoded video until then. The read of the first packet finds none and reports no error.
+        let directory = TestDirectory::new();
+        let prepared = prepare_reading_first_packet(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_an_empty_audio_track(),
+            &[(0, 1), (30, 32)],
+            &AtomicBool::new(false),
+            no_first_packet,
+        )
+        .unwrap();
+        let audio = prepared.plan.audio.as_ref().unwrap();
+        assert_eq!(audio.silence_layout.as_deref(), Some("stereo"));
+        assert_eq!(audio.expected_duration, Rational::new(3, 1).unwrap());
+        assert!(!prepared.plan.separate_audio_input);
+        // One input for each segment, and none for the audio; no chain reads stream 1.
+        let inputs = prepared
+            .arguments
+            .iter()
+            .filter(|argument| *argument == "-i")
+            .count();
+        assert_eq!(inputs, 2);
+        let graph = graph_of(&prepared);
+        assert!(!graph.contains(":1]"), "{graph}");
+        assert!(
+            graph.contains(
+                "anullsrc=r=48000:cl=stereo,atrim=end_sample=96000,\
+                 aformat=f=fltp:r=48000:cl=stereo[a1]"
+            ),
+            "{graph}"
+        );
+
+        // A read that fails says nothing about the stream, so the chains read it, as before.
+        let directory = TestDirectory::new();
+        let prepared = prepare_reading_first_packet(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_an_empty_audio_track(),
+            &[(0, 1), (30, 32)],
+            &AtomicBool::new(false),
+            first_packet_unread,
+        )
+        .unwrap();
+        assert_eq!(prepared.plan.audio.as_ref().unwrap().silence_layout, None);
+        assert!(graph_of(&prepared).contains("[0:1]aformat=r=48000,atrim="));
+    }
+
+    #[test]
+    fn a_container_that_records_audio_overrules_a_read_that_found_no_packet() {
+        // A read error that no demuxer reports ends the read as the end of the file does. A
+        // positive `DURATION` tag, or a count of packets in the index of an MP4 file, shows that the
+        // track holds audio, so the chains read it.
+        let mut counted = sample_probe_with_an_empty_audio_track();
+        counted.audio.as_mut().unwrap().reported_packets = Some(5626);
+        for probe in [sample_probe_with_a_missed_audio_start(), counted] {
+            let directory = TestDirectory::new();
+            let prepared = prepare_reading_first_packet(
+                &directory,
+                ExportStreams::VideoAndAudio,
+                probe,
+                &[(0, 1)],
+                &AtomicBool::new(false),
+                no_first_packet,
+            )
+            .unwrap();
+            assert_eq!(prepared.plan.audio.as_ref().unwrap().silence_layout, None);
+            assert!(graph_of(&prepared).contains("[0:1]aformat=r=48000,atrim="));
+        }
+        // A count of zero contradicts nothing.
+        let mut empty = sample_probe_with_an_empty_audio_track();
+        empty.audio.as_mut().unwrap().reported_packets = Some(0);
+        let directory = TestDirectory::new();
+        let prepared = prepare_reading_first_packet(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            empty,
+            &[(0, 1)],
+            &AtomicBool::new(false),
+            no_first_packet,
+        )
+        .unwrap();
+        assert!(prepared.plan.audio.unwrap().silence_layout.is_some());
+    }
+
+    #[test]
+    fn an_audio_only_export_of_a_stream_without_packets_is_refused_as_a_source_without_audio() {
+        let directory = TestDirectory::new();
+        let error = match prepare_reading_first_packet(
+            &directory,
+            ExportStreams::AudioOnly,
+            sample_probe_with_an_empty_audio_track(),
+            &[(0, 1)],
+            &AtomicBool::new(false),
+            no_first_packet,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("an empty stream gives no audio to export"),
+        };
+        assert_eq!(error.code, ExportErrorCode::SourceHasNoAudio);
+        assert_eq!(leftover_reservations(&directory), 0);
+    }
+
+    #[test]
+    fn a_cancel_that_arrives_as_the_read_finds_no_packet_ends_the_run_as_canceled() {
+        // Without the check after the reads, the plan would refuse this audio-only export with
+        // `sourceHasNoAudio` and report that instead of the cancel.
+        let directory = TestDirectory::new();
+        let cancel = AtomicBool::new(false);
+        let error = match prepare_reading_first_packet(
+            &directory,
+            ExportStreams::AudioOnly,
+            sample_probe_with_an_empty_audio_track(),
+            &[(0, 1)],
+            &cancel,
+            |_, _, _, flag| {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(None)
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("the run was canceled"),
+        };
+        assert_eq!(error.code, ExportErrorCode::Canceled);
+        assert_eq!(leftover_reservations(&directory), 0);
+    }
+
     #[test]
     fn a_first_audio_packet_at_or_before_the_reported_start_leaves_the_command_as_it_was() {
         // A source that the re-probe reads correctly: its first packet lies at the reported start,
@@ -2992,7 +3174,7 @@ mod tests {
                     probe.clone(),
                     &[(0, 1), (30, 40)],
                     &AtomicBool::new(false),
-                    no_first_packet,
+                    first_packet_unread,
                 )
                 .unwrap(),
             );
@@ -3410,6 +3592,7 @@ mod tests {
             options: vec![],
             // The source audio covers the whole segment.
             expected_duration: Rational::new(1, 1).unwrap(),
+            silence_layout: None,
         });
         plan.segments[0].audio_in_tick = Some(0);
         plan.segments[0].audio_out_tick = Some(48_000);

@@ -557,6 +557,9 @@ mod tests {
                 start_time: None,
                 duration: None,
                 tagged_end: None,
+                channel_layout: None,
+                reported_packets: None,
+                holds_no_packets: false,
             }),
         }
     }

@@ -14,8 +14,10 @@ use super::{
     PlannedVideo, MAX_EXPORT_SEGMENTS, MAX_LEADING_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
     SEPARATE_AUDIO_INPUT_LEAD_MILLISECONDS,
 };
-use crate::ffmpeg::probe::MediaProbe;
-use crate::settings::{AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting};
+use crate::ffmpeg::probe::{AudioProbe, MediaProbe};
+use crate::settings::{
+    AudioChannels, AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting,
+};
 use crate::time::{pts_seconds, Pts, Rational};
 use std::path::Path;
 
@@ -171,10 +173,12 @@ pub enum PathFacts {
 ///     `r_frame_rate`, or the resolved rate is not strictly positive --
 ///     [`ExportErrorCode::SourceFrameRateUnknown`]. An audio-only export times no frames, so
 ///     it skips this check.
-/// 13. The export is [`ExportStreams::AudioOnly`], and the probe reports no audio stream --
+/// 13. The export is [`ExportStreams::AudioOnly`], and the probe reports no audio stream, or
+///     one that holds no packets ([`AudioProbe::holds_no_packets`]) --
 ///     [`ExportErrorCode::SourceHasNoAudio`]. This check opens the audio step, because it is
 ///     the one question about the audio that comes before its sample rate: a stream that is
-///     absent has no rate to ask about.
+///     absent has no rate to ask about. An export of only the audio of an empty stream would
+///     write a file of silence and nothing else.
 /// 14. The export writes audio ([`ExportStreams::writes_audio`]), and the probe reports an
 ///     audio stream whose sample rate is absent, not positive, or larger than `u32` --
 ///     [`ExportErrorCode::SourceAudioRateUnknown`]. A video-only export never reads the
@@ -185,7 +189,8 @@ pub enum PathFacts {
 ///     reach that sample, because the end pad of each chain writes the silence of the others
 ///     frame by frame, without holding it (`graph::audio_end_pad`). The sum is checked after
 ///     each segment, in order, together with the conversions of its boundaries. A probe that
-///     reports no start of the stream bounds nothing.
+///     reports no start of the stream bounds nothing, and neither does a stream that holds no
+///     packets, whose chains generate their silence frame by frame.
 ///
 /// `destination` must be absolute for the same reason `source` must: a CWD-relative path
 /// would carry an ambiguous location into a pipeline that spawns a child process and later
@@ -213,7 +218,9 @@ pub enum PathFacts {
 /// The plan carries [`ExportPlan::video`] exactly when the export writes video. It carries
 /// [`ExportPlan::audio`] exactly when the export writes audio and the probe reports an audio
 /// stream. Check 13 makes the two rules leave no plan with neither part: the one choice
-/// without video is refused when there is no audio to write.
+/// without video is refused when there is no audio to write. When that stream holds no packets,
+/// the audio part carries [`PlannedAudio::silence_layout`], and its chains generate silence
+/// instead of reading the stream.
 ///
 /// [`ExportStreams::VideoAndAudio`] plans exactly what every export planned before the choice
 /// existed, so a request with that value renders the same command as before, byte for byte.
@@ -348,8 +355,14 @@ pub fn build_plan(
     let format_start_time = probe.format_start_time.unwrap_or(zero);
     let margin = seek_margin_rational();
     // An audio-only export of a source with no audio would write nothing at all, so it is
-    // refused here, before the rate question below can be asked of a stream that is absent.
-    if streams == ExportStreams::AudioOnly && probe.audio.is_none() {
+    // refused here, before the rate question below can be asked of a stream that is absent. A
+    // stream that holds no packets is no audio either: the export would be silence alone.
+    if streams == ExportStreams::AudioOnly
+        && probe
+            .audio
+            .as_ref()
+            .is_none_or(|audio| audio.holds_no_packets)
+    {
         return Err(ExportErrorCode::SourceHasNoAudio);
     }
     // An audio stream with no usable sample rate is refused, not dropped. ADR 014 cuts audio
@@ -365,8 +378,9 @@ pub fn build_plan(
     //
     // The output format is resolved here too, so the graph renders numbers and never reads the
     // preset. `source` for the rate becomes the source stream's own rate. `source` for the
-    // channels stays as it is, because the probe reports a channel count and not a layout; see
-    // `PlannedAudio::output_channels`. The rate range and the bitrate range are not re-checked
+    // channels stays as it is: the graph names no layout, and the chain keeps the stream's own;
+    // see `PlannedAudio::output_channels`. Only the silence of a stream without packets needs a
+    // layout name, and `silence_layout` gives it. The rate range and the bitrate range are not re-checked
     // here: `settings::validate_settings` bounds both, and `commands::export` plans only from a
     // preset it read out of the settings document through the validating `settings::load`.
     let source_audio = probe.audio.as_ref().filter(|_| streams.writes_audio());
@@ -390,17 +404,23 @@ pub fn build_plan(
                 options: preset.audio_options.clone(),
                 // The total duration, once the segments below have summed it.
                 expected_duration: zero,
+                silence_layout: audio
+                    .holds_no_packets
+                    .then(|| silence_layout(preset.audio_channels, audio)),
             })
         }
     };
+    // From here on, the source audio is the stream the chains read. A stream that holds no
+    // packets is read by no chain, so nothing below waits for it or fills in front of it.
+    let source_audio = source_audio.filter(|audio| !audio.holds_no_packets);
     // The first sample of the source audio, for the bound on the silence in front of it
-    // (`MAX_LEADING_AUDIO_SILENCE_SECONDS`). Only a plan that writes audio has one.
+    // (`MAX_LEADING_AUDIO_SILENCE_SECONDS`). Only a plan that reads audio has one.
     let audio_start = source_audio.and_then(|audio| audio.start_time);
     let max_leading_silence = max_leading_audio_silence_rational();
     let mut leading_silence = zero;
     // A plan with video and audio waits for the first audio frame before its graph runs, and
     // keeps the decoded video until then (`ExportPlan::separate_audio_input`). Without video
-    // there is nothing to keep, and without audio nothing to wait for.
+    // there is nothing to keep, and without an audio input nothing to wait for.
     let waits_for_audio = streams.writes_video() && source_audio.is_some();
     let separate_audio_lead = separate_audio_input_lead_rational();
     // The last sample of the source audio, when the probe reports where the stream starts and
@@ -627,6 +647,45 @@ fn zero_rational() -> Rational {
 fn seek_margin_rational() -> Rational {
     Rational::new(SEEK_MARGIN_SECONDS, 1)
         .expect("SEEK_MARGIN_SECONDS/1 always reduces to a valid Rational")
+}
+
+/// The longest channel layout name [`silence_layout`] copies from the probe into the graph.
+const MAX_SILENCE_LAYOUT_NAME_BYTES: usize = 32;
+
+/// The channel layout of the silence of an audio stream that holds no packets
+/// ([`PlannedAudio::silence_layout`]).
+///
+/// A preset that names a layout gets that layout, the one every chain ends in anyway. A preset
+/// that keeps the source layout gets the layout that ffprobe reports for the stream, when it is a
+/// plain name such as `stereo` or `5.1(side)`. A name with other characters, such as the
+/// `6 channels (FL+FR+...)` that ffprobe writes for a custom order, or a name longer than
+/// [`MAX_SILENCE_LAYOUT_NAME_BYTES`], does not go into the graph text. The silence then takes
+/// `<count>c`, the default layout of the channel count, for 1 to 8 channels. FFmpeg 4.3 and later
+/// parse that spelling for those counts. FFmpeg 4.3 to 5.0 have no default layout for most larger
+/// counts, and FFmpeg 9.0.2 refuses `64c`. For a larger count, or no count, the silence is stereo,
+/// the default of the presets.
+fn silence_layout(channels: AudioChannels, audio: &AudioProbe) -> String {
+    match channels {
+        AudioChannels::Stereo => "stereo".to_owned(),
+        AudioChannels::Mono => "mono".to_owned(),
+        AudioChannels::Source => audio
+            .channel_layout
+            .as_deref()
+            .filter(|layout| {
+                layout.len() <= MAX_SILENCE_LAYOUT_NAME_BYTES
+                    && layout
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b".()+-_".contains(&byte))
+            })
+            .map(str::to_owned)
+            .or_else(|| {
+                audio
+                    .channels
+                    .filter(|count| (1..=8).contains(count))
+                    .map(|count| format!("{count}c"))
+            })
+            .unwrap_or_else(|| "stereo".to_owned()),
+    }
 }
 
 /// [`MAX_LEADING_AUDIO_SILENCE_SECONDS`] as a [`Rational`], for the same reason as
@@ -1489,6 +1548,9 @@ mod tests {
             start_time: None,
             duration: None,
             tagged_end: None,
+            channel_layout: None,
+            reported_packets: None,
+            holds_no_packets: false,
         });
         // 1001 ticks * 1/30000 s = 1001/30000 s; * 44100 = 44144100/30000 = 1471.47,
         // which rounds to 1471.
@@ -1511,6 +1573,7 @@ mod tests {
                 options: vec![],
                 // Every segment is expected for its whole length.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
+                silence_layout: None,
             })
         );
         assert_eq!(plan.segments[0].audio_in_tick, Some(0));
@@ -1529,6 +1592,9 @@ mod tests {
             start_time: None,
             duration: None,
             tagged_end: None,
+            channel_layout: None,
+            reported_packets: None,
+            holds_no_packets: false,
         });
         // 1001 ticks * 1/30000 s = 1001/30000 s; * 48000 = 48048000/30000 = 1601.6,
         // which rounds to 1602.
@@ -1551,6 +1617,7 @@ mod tests {
                 options: vec![],
                 // Every segment is expected for its whole length.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
+                silence_layout: None,
             })
         );
         assert_eq!(plan.segments[0].audio_in_tick, Some(0));
@@ -1579,6 +1646,9 @@ mod tests {
             start_time: None,
             duration: None,
             tagged_end: None,
+            channel_layout: None,
+            reported_packets: None,
+            holds_no_packets: false,
         });
         let plan = plan_with(
             &[boundary(128_000, 140_800)],
@@ -1618,6 +1688,9 @@ mod tests {
             start_time: None,
             duration: None,
             tagged_end: None,
+            channel_layout: None,
+            reported_packets: None,
+            holds_no_packets: false,
         });
         let error = plan_with(
             &[boundary(0, 1001)],
@@ -1648,6 +1721,9 @@ mod tests {
             start_time: None,
             duration: None,
             tagged_end: None,
+            channel_layout: None,
+            reported_packets: None,
+            holds_no_packets: false,
         });
         probe
     }
@@ -1678,6 +1754,7 @@ mod tests {
                 options: vec![],
                 // Every segment is expected for its whole length.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
+                silence_layout: None,
             })
         );
         assert_eq!(plan.segments[0].audio_out_tick, Some(1471));
@@ -1774,6 +1851,9 @@ mod tests {
             start_time: None,
             duration: None,
             tagged_end: None,
+            channel_layout: None,
+            reported_packets: None,
+            holds_no_packets: false,
         });
         // in_pts = -3s: seek = -3 - 0 - 5 margin = -8, clamps to None.
         // audio_in_tick = round(-3s * 2 Hz) = -6.
@@ -1863,6 +1943,9 @@ mod tests {
             start_time: None,
             duration: None,
             tagged_end: None,
+            channel_layout: None,
+            reported_packets: None,
+            holds_no_packets: false,
         });
         let with_audio =
             plan_with(&[boundary(0, 90_000)], &probe, &preset, valid_path_facts()).unwrap();
@@ -1884,6 +1967,9 @@ mod tests {
             start_time: None,
             duration: None,
             tagged_end: None,
+            channel_layout: None,
+            reported_packets: None,
+            holds_no_packets: false,
         });
         probe
     }
@@ -1899,6 +1985,9 @@ mod tests {
             start_time: None,
             duration: None,
             tagged_end: None,
+            channel_layout: None,
+            reported_packets: None,
+            holds_no_packets: false,
         });
         probe
     }
@@ -2419,6 +2508,182 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, ExportErrorCode::SourceAudioRateUnknown);
+    }
+
+    // -- an audio stream that holds no packets -----------------------------------------------
+
+    /// The probe of a Matroska source of 120 s whose audio track holds no packets, after the
+    /// export read its first packet: the start and the length are the container's.
+    fn probe_with_empty_audio() -> MediaProbe {
+        let mut probe = probe_with_audio_extent(Some("0"), Some("120"));
+        probe.audio.as_mut().unwrap().holds_no_packets = true;
+        probe
+    }
+
+    #[test]
+    fn a_stream_without_packets_plans_silence_and_no_second_input() {
+        let segments = [seconds_boundary("0", "1"), seconds_boundary("126", "127")];
+        let plan = plan_with(
+            &segments,
+            &probe_with_empty_audio(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+        let audio = plan.audio.as_ref().unwrap();
+        assert_eq!(audio.silence_layout.as_deref(), Some("stereo"));
+        // The ticks still give each chain its length, and the audio still runs for every segment.
+        assert_eq!(plan.segments[1].audio_in_tick, Some(126 * 48_000));
+        assert_eq!(plan.segments[1].audio_out_tick, Some(127 * 48_000));
+        assert_eq!(audio.expected_duration, Rational::new(2, 1).unwrap());
+        // The second segment seeks to 121 s, after the reported end of the audio at 120 s, so it
+        // would take a second input if the chains read the stream.
+        assert!(!plan.separate_audio_input);
+        let mut with_packets = probe_with_empty_audio();
+        with_packets.audio.as_mut().unwrap().holds_no_packets = false;
+        assert!(separate_audio(
+            ExportStreams::VideoAndAudio,
+            &with_packets,
+            &segments
+        ));
+    }
+
+    #[test]
+    fn a_stream_without_packets_bounds_no_leading_silence() {
+        // The reported start lies after the segment, but no chain fills in front of it.
+        let mut probe = probe_with_audio_extent(Some("90"), Some("30"));
+        probe.audio.as_mut().unwrap().holds_no_packets = true;
+        plan_with(
+            &[seconds_boundary("0", "80")],
+            &probe,
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_audio_only_export_of_a_stream_without_packets_has_no_audio() {
+        let error = plan_streams(
+            ExportStreams::AudioOnly,
+            &[seconds_boundary("0", "1")],
+            &probe_with_empty_audio(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap_err();
+        assert_eq!(error, ExportErrorCode::SourceHasNoAudio);
+        // A video-only export never reads the audio, so it plans as it would for any source.
+        let plan = plan_streams(
+            ExportStreams::VideoOnly,
+            &[seconds_boundary("0", "1")],
+            &probe_with_empty_audio(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+        assert!(plan.audio.is_none());
+    }
+
+    #[test]
+    fn a_stream_with_packets_plans_no_silence() {
+        let plan = plan_with(
+            &[seconds_boundary("0", "1")],
+            &probe_with_audio(),
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+        assert_eq!(plan.audio.unwrap().silence_layout, None);
+    }
+
+    #[test]
+    fn the_silence_takes_the_layout_of_the_preset_or_a_plain_layout_of_the_stream() {
+        let layout_of = |channels: AudioChannels, layout: Option<&str>, count: Option<u32>| {
+            let mut probe = probe_with_empty_audio();
+            let audio = probe.audio.as_mut().unwrap();
+            audio.channel_layout = layout.map(str::to_owned);
+            audio.channels = count;
+            let preset = Preset {
+                audio_channels: channels,
+                ..sample_preset()
+            };
+            plan_with(
+                &[seconds_boundary("0", "1")],
+                &probe,
+                &preset,
+                valid_path_facts(),
+            )
+            .unwrap()
+            .audio
+            .unwrap()
+            .silence_layout
+            .unwrap()
+        };
+        // A preset that names a layout gets it, whatever the stream reports.
+        assert_eq!(
+            layout_of(AudioChannels::Stereo, Some("5.1"), Some(6)),
+            "stereo"
+        );
+        assert_eq!(layout_of(AudioChannels::Mono, Some("5.1"), Some(6)), "mono");
+        // A preset that keeps the source layout gets a plain name of the stream.
+        for layout in ["5.1(side)", "7.1(wide-side)", "FL+FR+LFE", "22.2"] {
+            assert_eq!(
+                layout_of(AudioChannels::Source, Some(layout), Some(6)),
+                layout
+            );
+        }
+        // Any other name gives the default layout of the channel count, and no count gives stereo.
+        for layout in [
+            "6 channels (FL+FR+FC+LFE+SL+SR)",
+            "5.1:x",
+            "5.1,anull",
+            "FL+FR+FC+LFE+BL+BR+FLC+FRC+BC+SL+SR",
+        ] {
+            assert_eq!(
+                layout_of(AudioChannels::Source, Some(layout), Some(6)),
+                "6c",
+                "{layout}"
+            );
+        }
+        assert_eq!(layout_of(AudioChannels::Source, None, Some(3)), "3c");
+        assert_eq!(layout_of(AudioChannels::Source, None, Some(8)), "8c");
+        assert_eq!(layout_of(AudioChannels::Source, None, None), "stereo");
+        // FFmpeg parses `<count>c` only for the counts that have a default layout.
+        for count in [10, 16, 24, 64] {
+            assert_eq!(
+                layout_of(AudioChannels::Source, Some("unparsed name"), Some(count)),
+                "stereo",
+                "{count}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stream_without_packets_and_without_a_sample_rate_is_refused_as_before() {
+        // An MPEG-TS stream without packets reports a rate of 0 (ADR 014 measurement 26). With
+        // video, the rate is asked first, as for any stream without one. Without video, the stream
+        // is no audio, which comes before its rate.
+        let mut probe = probe_with_empty_audio();
+        probe.audio.as_mut().unwrap().sample_rate = None;
+        let refusal = |streams| {
+            plan_streams(
+                streams,
+                &[seconds_boundary("0", "1")],
+                &probe,
+                &sample_preset(),
+                valid_path_facts(),
+            )
+            .unwrap_err()
+        };
+        assert_eq!(
+            refusal(ExportStreams::VideoAndAudio),
+            ExportErrorCode::SourceAudioRateUnknown
+        );
+        assert_eq!(
+            refusal(ExportStreams::AudioOnly),
+            ExportErrorCode::SourceHasNoAudio
+        );
     }
 
     /// `ExportPlan::separate_audio_input` of a plan of `segments` from `probe`, for `streams`.
