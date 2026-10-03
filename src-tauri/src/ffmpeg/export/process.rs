@@ -88,6 +88,30 @@
 //! file, and it also catches the failure ADR 014 measurement 9 describes, where a seek that
 //! landed after its target silently dropped frames from the cut.
 //!
+//! # An export can be two processes
+//!
+//! An export can name a second `ffmpeg` that writes the audio
+//! ([`ExportProcessRequest::audio_arguments`]). That process starts first, and its stdout
+//! becomes the stdin of the encoder, which reads it as `pipe:0`. Its stderr is drained on a
+//! fourth thread, as the encoder's is. The progress stream, the frame count and the stdin rule
+//! above belong to the encoder.
+//!
+//! The two processes are one export, and nothing else would be safe. A cancel kills both. A
+//! failure of either kills the other at once: an encoder whose audio ended early still exits
+//! zero after it has encoded the rest of the video, with a short audio track that the frame
+//! count cannot see. The export succeeds only when both exit successfully, and the encoder's
+//! success alone is not enough to stop watching the audio process. The pipe has no cycle: the
+//! audio process only writes it, and the encoder only reads it, so neither process can wait for
+//! the other in both directions.
+//!
+//! On Unix the two processes share one pipe, and this process keeps no end of it after the
+//! spawn. On Windows the standard library does not pass the stdout of one child to another as it
+//! is. It creates a second pipe for the encoder and starts a thread in this process that copies
+//! 4 KiB at a time from the first pipe to the second, so `ffmpeg` gets an ordinary synchronous
+//! handle. Nothing joins that thread, and it cannot hang an export: its read ends when the audio
+//! process dies, and its write fails when the encoder dies, and either ends the thread and closes
+//! its two handles.
+//!
 //! # Kill the child, not a shell around it
 //!
 //! Killing a process does not kill its children, and the pipes this module drains are
@@ -145,8 +169,8 @@ const STDERR_DETAIL_LIMIT: usize = 512;
 /// otherwise be answered by growing a gigabyte-long `Vec` inside the export worker.
 const MAX_PROGRESS_LINE_BYTES: usize = 64 * 1024;
 
-/// One export process to run: the executable, its arguments, the flag that stops it, and how
-/// often to look at that flag.
+/// One export to run: the executable, its arguments, the arguments of an audio process when the
+/// export has one, the flag that stops it, and how often to look at that flag.
 ///
 /// The arguments arrive fully built. This module adds nothing to them -- not `-y`, not
 /// `-nostdin`, not `-progress pipe:1` -- because ADR 014 fixes the command shape in one place
@@ -165,6 +189,20 @@ pub struct ExportProcessRequest<'a> {
     /// snapshot stays `None`, and `-y`, without which the run ends in the silent zero-exit
     /// refusal the module documentation describes.
     pub arguments: &'a [String],
+    /// The complete argument list of a second `ffmpeg` that writes the audio of the export to its
+    /// stdout, or `None` for an export of one process.
+    ///
+    /// The audio process starts first, and its stdout becomes the stdin of the process that
+    /// [`Self::arguments`] runs, which reads it as `pipe:0`. Its stdin is null and its stderr is
+    /// drained like the other one. The two processes are one export: a cancel kills both, a
+    /// failure of either one kills the other, and the export succeeds only when both exit
+    /// successfully. See [`run_export_process`].
+    ///
+    /// The encoder must read `pipe:0` to its end. An encoder that stops reading early, as
+    /// `-shortest` or an output `-t` can make it, leaves the audio process writing into a closed
+    /// pipe, and the export then fails with the audio process's error although the encoder may
+    /// have written a whole file.
+    pub audio_arguments: Option<&'a [String]>,
     /// The cancellation flag, normally [`super::registry::ExportSlot::cancel_flag`].
     ///
     /// Read with [`Ordering::SeqCst`], to pair with [`super::registry::ExportRegistry::cancel`]'s
@@ -213,9 +251,20 @@ pub enum ExportProcessStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportProcessOutcome {
     /// How the process ended.
+    ///
+    /// With an audio process ([`ExportProcessRequest::audio_arguments`]), this is how the export
+    /// as a whole ended: `success` holds only when both processes exited successfully, and
+    /// `code` is the code of the encoder when it failed, and of the audio process otherwise.
     pub status: ExportProcessStatus,
     /// Up to [`STDERR_CAPTURE_LIMIT`] bytes from the end of the child's stderr, captured on
     /// a separate thread while it ran.
+    ///
+    /// With an audio process, this is the stderr of the process that explains the outcome: the
+    /// encoder's, unless only the audio process failed, and then the audio process's. When both
+    /// failed, neither stderr alone says which failure came first. A dead encoder ends the pipe
+    /// that the audio process writes, and a dead audio process ends the input that the encoder
+    /// reads. This then holds the tail of both, each after a label that names its process, cut
+    /// so that [`ExportProcessOutcome::stderr_detail`] keeps both (`both_stderr_tails`).
     pub stderr: Vec<u8>,
     /// The last complete `-progress` block the child wrote, or `None` when it wrote none.
     ///
@@ -249,6 +298,10 @@ impl ExportProcessOutcome {
 }
 
 /// Run one `ffmpeg` export to completion, to a cancellation, or to a spawn failure.
+///
+/// With [`ExportProcessRequest::audio_arguments`], the export is two processes, supervised as
+/// one: see the module documentation. A spawn failure of either is an `io::Error`, and the audio
+/// process that started before a failed encoder spawn is killed on the way out.
 ///
 /// `on_progress` is called once per completed `-progress` block, in order, on this thread.
 /// Snapshots that arrive between two polls are delivered together on the next one, and the
@@ -298,6 +351,7 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
     let ExportProcessRequest {
         ffmpeg,
         arguments,
+        audio_arguments,
         cancel,
         poll,
     } = request;
@@ -311,25 +365,65 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
         });
     }
 
+    // The audio process starts first, because its stdout is the encoder's stdin. It is owned by
+    // a guard from the moment it exists, as the encoder is below, so a failed spawn of the
+    // encoder kills it on the way out.
+    let mut audio = match audio_arguments {
+        Some(audio_arguments) => Some(ChildGuard::new(
+            command_without_console(ffmpeg)
+                .args(audio_arguments)
+                // The audio process reads only its own inputs, so it gets a null stdin for the
+                // reason the encoder below gets one.
+                .stdin(Stdio::null())
+                // The WAV stream the encoder reads as `pipe:0`.
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+        )),
+        None => None,
+    };
+    let encoder_stdin = match audio.as_mut() {
+        Some(audio) => Stdio::from(
+            audio
+                .child_mut()
+                .stdout
+                .take()
+                .expect("stdout was requested as piped above"),
+        ),
+        // ADR 004 and ADR 014 both put `-nostdin` on the command line, and this null
+        // stdin says the same thing a second way. The flag stops `ffmpeg` prompting; the
+        // null handle stops it inheriting the parent's stdin at all, so a build or a fork
+        // that ignores the flag still cannot park the export waiting on a console that,
+        // in a packaged Tauri application, does not exist. The smoke path pairs them the
+        // same way.
+        None => Stdio::null(),
+    };
+
     // Owned by a guard from the moment it exists. Everything below can unwind -- the caller's
     // progress callback most of all -- and a bare `Child` local would survive that unwind as an
     // orphaned encoder; see [`ChildGuard`].
     let mut child = ChildGuard::new(
         command_without_console(ffmpeg)
             .args(arguments)
-            // ADR 004 and ADR 014 both put `-nostdin` on the command line, and this null
-            // stdin says the same thing a second way. The flag stops `ffmpeg` prompting; the
-            // null handle stops it inheriting the parent's stdin at all, so a build or a fork
-            // that ignores the flag still cannot park the export waiting on a console that,
-            // in a packaged Tauri application, does not exist. The smoke path pairs them the
-            // same way.
-            .stdin(Stdio::null())
+            // A null handle, or the audio process's stdout. With the pipe, `-nostdin` still
+            // holds: it turns off the console interaction, and `pipe:0` reads the handle as an
+            // input.
+            .stdin(encoder_stdin)
             // `-progress pipe:1` writes here. Piped, never inherited: this is the data this
             // module exists to read.
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?,
     );
+
+    let audio_stderr_thread = audio.as_mut().map(|audio| {
+        let stderr = audio
+            .child_mut()
+            .stderr
+            .take()
+            .expect("stderr was requested as piped above");
+        thread::spawn(move || read_capped_tail(stderr, STDERR_CAPTURE_LIMIT))
+    });
 
     let stderr = child
         .child_mut()
@@ -359,9 +453,11 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
 
     // The supervision loop returns its `Result` into a binding instead of using `?` in the
     // body of this function, for the reason `run_with_timeout` gives: every path out of here,
-    // the error paths included, must still join both reader threads, or a failed `try_wait`
+    // the error paths included, must still join the reader threads, or a failed `try_wait`
     // would abandon them reading pipes nobody ever joins.
-    let poll_result = (|| -> io::Result<ExportProcessStatus> {
+    let poll_result = (|| -> io::Result<Ending> {
+        let mut encoder_exit = None;
+        let mut audio_exit = None;
         loop {
             drain_progress(&progress_receiver, &mut on_progress, &mut last_progress);
 
@@ -372,13 +468,49 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
             // is what absorbs it.
             if cancel.load(Ordering::SeqCst) {
                 kill_and_reap(child.child_mut())?;
-                return Ok(ExportProcessStatus::Canceled);
+                if let Some(audio) = audio.as_mut() {
+                    kill_and_reap(audio.child_mut())?;
+                }
+                return Ok(Ending::Canceled);
             }
 
-            if let Some(status) = child.child_mut().try_wait()? {
-                return Ok(ExportProcessStatus::Exited {
+            if encoder_exit.is_none() {
+                encoder_exit = child.child_mut().try_wait()?;
+            }
+            if let Some(audio) = audio.as_mut().filter(|_| audio_exit.is_none()) {
+                audio_exit = audio.child_mut().try_wait()?;
+            }
+
+            let encoder_failed = encoder_exit.is_some_and(|status| !status.success());
+            let audio_failed = audio_exit.is_some_and(|status| !status.success());
+            if encoder_failed || audio_failed {
+                // One failure ends the export, so the other process has nothing left to do: an
+                // encoder whose audio stopped would encode the rest of the video for a file that
+                // is not published, and an audio process whose encoder stopped would only write
+                // into a closed pipe.
+                if encoder_exit.is_none() {
+                    kill_and_reap(child.child_mut())?;
+                }
+                if let Some(audio) = audio.as_mut().filter(|_| audio_exit.is_none()) {
+                    kill_and_reap(audio.child_mut())?;
+                }
+                let failed = if encoder_failed {
+                    encoder_exit
+                } else {
+                    audio_exit
+                };
+                return Ok(Ending::Failed {
+                    code: failed.and_then(|status| status.code()),
+                    encoder: encoder_failed,
+                    audio: audio_failed,
+                });
+            }
+
+            // A successful encoder has read its audio to the end, so an audio process that is
+            // still running is about to exit, and it is still watched until it does.
+            if let Some(status) = encoder_exit.filter(|_| audio.is_none() || audio_exit.is_some()) {
+                return Ok(Ending::Succeeded {
                     code: status.code(),
-                    success: status.success(),
                 });
             }
 
@@ -387,21 +519,28 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
     })();
 
     if poll_result.is_err() {
-        // `try_wait` or `kill` failed, so the child may still be running with both pipes
-        // open, and joining a reader blocked on a pipe that never closes would hang this
-        // thread for as long as the encode would have taken. Both results are discarded: this
-        // is a best-effort attempt to close those pipes on a path that is already reporting
-        // the first failure, and a second error here would only hide it.
+        // `try_wait` or `kill` failed, so a child may still be running with its pipes open, and
+        // joining a reader blocked on a pipe that never closes would hang this thread for as
+        // long as the encode would have taken. Every result is discarded: this is a best-effort
+        // attempt to close those pipes on a path that is already reporting the first failure,
+        // and a second error here would only hide it.
         //
         // `ChildGuard` cannot cover this one. It runs when this function returns, which on
         // this path is *after* the joins below, and by then the hang has already happened.
         let _ = child.child_mut().kill();
         let _ = child.child_mut().wait();
+        if let Some(audio) = audio.as_mut() {
+            let _ = audio.child_mut().kill();
+            let _ = audio.child_mut().wait();
+        }
     }
 
-    // Both joins run before the `?` on `poll_result`. Killing the child, or the child exiting
-    // on its own, closes both pipes, so each reader reaches end of stream and returns.
-    let stderr = stderr_thread.join().unwrap_or_default();
+    // Every join runs before the `?` on `poll_result`. Killing a child, or a child exiting
+    // on its own, closes its pipes, so each reader reaches end of stream and returns.
+    let encoder_stderr = stderr_thread.join().unwrap_or_default();
+    let audio_stderr = audio_stderr_thread
+        .map(|thread| thread.join().unwrap_or_default())
+        .unwrap_or_default();
     let stdout_join = stdout_thread.join();
 
     // Delivered after the join, so this cannot race the pump: every snapshot the child
@@ -417,11 +556,74 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
     // error, so the frame-count comparison reads whatever was delivered before the panic.
     drop(stdout_join);
 
+    let (status, stderr) = match poll_result? {
+        Ending::Canceled => (ExportProcessStatus::Canceled, encoder_stderr),
+        Ending::Succeeded { code } => (
+            ExportProcessStatus::Exited {
+                code,
+                success: true,
+            },
+            encoder_stderr,
+        ),
+        Ending::Failed {
+            code,
+            encoder,
+            audio,
+        } => {
+            let stderr = match (encoder, audio) {
+                (true, true) => both_stderr_tails(&audio_stderr, &encoder_stderr),
+                (false, true) => audio_stderr,
+                _ => encoder_stderr,
+            };
+            (
+                ExportProcessStatus::Exited {
+                    code,
+                    success: false,
+                },
+                stderr,
+            )
+        }
+    };
     Ok(ExportProcessOutcome {
-        status: poll_result?,
+        status,
         stderr,
         last_progress,
     })
+}
+
+/// How the supervision loop of [`run_export_process`] ended, before the readers are joined.
+enum Ending {
+    /// The cancel flag was set, and every process was killed.
+    Canceled,
+    /// Every process exited successfully. `code` is the encoder's.
+    Succeeded { code: Option<i32> },
+    /// A process exited unsuccessfully, and any process still running was killed. `encoder` and
+    /// `audio` say which processes were seen to fail; a process that this loop killed is not
+    /// one of them.
+    Failed {
+        code: Option<i32>,
+        encoder: bool,
+        audio: bool,
+    },
+}
+
+/// The stderr of an export whose two processes both failed: the tail of each, the audio
+/// process's first, on separate lines, each after a label that names its process.
+///
+/// [`ExportProcessOutcome::stderr_detail`] cuts the last [`STDERR_DETAIL_LIMIT`] bytes, so each
+/// tail is cut from the last bytes of its capture that fit in half of that, minus the newline
+/// between them, and the detail keeps both. A byte that is not UTF-8 becomes a replacement
+/// character of three bytes, as in every detail, and can then push the start of the audio tail
+/// out of the detail.
+fn both_stderr_tails(audio: &[u8], encoder: &[u8]) -> Vec<u8> {
+    const AUDIO_LABEL: &str = "audio: ";
+    const ENCODER_LABEL: &str = "\nencoder: ";
+    let half = STDERR_DETAIL_LIMIT / 2 - ENCODER_LABEL.len();
+    let mut combined = AUDIO_LABEL.as_bytes().to_vec();
+    combined.extend(stderr_tail(audio, half).unwrap_or_default().into_bytes());
+    combined.extend(ENCODER_LABEL.as_bytes());
+    combined.extend(stderr_tail(encoder, half).unwrap_or_default().into_bytes());
+    combined
 }
 
 /// Read a `-progress` stream to end of stream, calling `emit` once per completed block.
@@ -616,9 +818,10 @@ impl Drop for ChildGuard {
 /// It is **not** the documented shape of that race. Rust 1.98's [`Child::kill`] says that if the
 /// child has already exited, `Ok(())` is returned, and it states that the `ErrorKind` a failure
 /// maps to is not part of its compatibility contract. So `InvalidInput` is neither promised for
-/// this case nor, on this code path, reachable: `kill_and_reap` is called only from the cancel
-/// branch, where the `Child` has just been polled and its status collected or not by
-/// `try_wait`, and both of those outcomes leave `kill` returning `Ok`.
+/// this case nor, on this code path, reachable. `kill_and_reap` is called from the cancel branch
+/// and from the failure branch of the supervision loop. There the `Child` has just been polled, or
+/// an earlier poll already collected its status, and every one of those states leaves `kill`
+/// returning `Ok`.
 ///
 /// The arm stays because the cost of keeping it is one match arm and the cost of dropping it is
 /// an export that reports a spurious `io::Error` -- losing the stderr and the frame count with
@@ -891,6 +1094,7 @@ mod tests {
             ExportProcessRequest {
                 ffmpeg: program,
                 arguments,
+                audio_arguments: None,
                 cancel: &cancel,
                 poll: TEST_POLL,
             },
@@ -942,6 +1146,7 @@ mod tests {
             ExportProcessRequest {
                 ffmpeg: &program,
                 arguments: &arguments,
+                audio_arguments: None,
                 cancel: &cancel,
                 poll: TEST_POLL,
             },
@@ -1011,6 +1216,7 @@ mod tests {
                 ExportProcessRequest {
                     ffmpeg: &program,
                     arguments: &arguments,
+                    audio_arguments: None,
                     cancel: &cancel,
                     poll: TEST_POLL,
                 },
@@ -1045,6 +1251,7 @@ mod tests {
             ExportProcessRequest {
                 ffmpeg: &missing,
                 arguments: &[],
+                audio_arguments: None,
                 cancel: &cancel,
                 poll: TEST_POLL,
             },
@@ -1110,6 +1317,7 @@ mod tests {
             ExportProcessRequest {
                 ffmpeg: &program,
                 arguments: &arguments,
+                audio_arguments: None,
                 cancel: &cancel,
                 poll: Duration::ZERO,
             },
@@ -1256,5 +1464,357 @@ mod tests {
         };
 
         assert_eq!(outcome.stderr_detail(), None);
+    }
+
+    // -- an export of two processes ---------------------------------------------------------
+
+    /// One program run twice: as the audio process and as the encoder, the way the renderer runs
+    /// `ffmpeg` twice.
+    struct Pair {
+        program: PathBuf,
+        audio: Vec<String>,
+        encoder: Vec<String>,
+    }
+
+    /// The pair of `/bin/sh -c` scripts. A script that only waits uses `exec`, so the process
+    /// that is killed is the process that holds the pipes, as [`pid_reporting_sleeper`] explains.
+    #[cfg(unix)]
+    fn pair(audio: &str, encoder: &str) -> Pair {
+        Pair {
+            program: PathBuf::from("/bin/sh"),
+            audio: vec!["-c".to_owned(), audio.to_owned()],
+            encoder: vec!["-c".to_owned(), encoder.to_owned()],
+        }
+    }
+
+    /// The pair of PowerShell scripts. PowerShell sleeps and copies in its own process, where
+    /// `cmd.exe` would start a grandchild that keeps the pipes open after the kill.
+    #[cfg(windows)]
+    fn pair(audio: &str, encoder: &str) -> Pair {
+        let script = |script: &str| {
+            vec![
+                "-NoProfile".to_owned(),
+                "-NonInteractive".to_owned(),
+                "-Command".to_owned(),
+                script.to_owned(),
+            ]
+        };
+        Pair {
+            program: PathBuf::from("powershell.exe"),
+            audio: script(audio),
+            encoder: script(encoder),
+        }
+    }
+
+    /// An encoder that copies its stdin to its stdout line by line, so whatever the audio process
+    /// writes arrives as the progress stream of the encoder.
+    #[cfg(unix)]
+    const COPY_STDIN: &str = "exec cat";
+    /// See the Unix arm.
+    #[cfg(windows)]
+    const COPY_STDIN: &str = "$in = [Console]::In; \
+         while ($null -ne ($line = $in.ReadLine())) { [Console]::Out.WriteLine($line) }";
+
+    /// A process that waits 120 seconds and reads nothing.
+    #[cfg(unix)]
+    const SLEEP: &str = "exec sleep 120";
+    /// See the Unix arm.
+    #[cfg(windows)]
+    const SLEEP: &str = "Start-Sleep -Seconds 120";
+
+    /// Run `pair` with `cancel`, collecting every snapshot delivered.
+    fn run_pair(
+        pair: &Pair,
+        cancel: &AtomicBool,
+        mut on_progress: impl FnMut(&ProgressSnapshot),
+    ) -> ExportProcessOutcome {
+        run_export_process(
+            ExportProcessRequest {
+                ffmpeg: &pair.program,
+                arguments: &pair.encoder,
+                audio_arguments: Some(&pair.audio),
+                cancel,
+                poll: TEST_POLL,
+            },
+            |snapshot| on_progress(snapshot),
+        )
+        .expect("both processes should spawn")
+    }
+
+    #[test]
+    fn the_stdout_of_the_audio_process_is_the_stdin_of_the_encoder() {
+        #[cfg(unix)]
+        let audio = "printf 'frame=7\\nprogress=end\\n'";
+        #[cfg(windows)]
+        let audio = "[Console]::Out.WriteLine('frame=7'); [Console]::Out.WriteLine('progress=end')";
+        let outcome = run_pair(&pair(audio, COPY_STDIN), &AtomicBool::new(false), |_| {});
+
+        assert_eq!(
+            outcome.status,
+            ExportProcessStatus::Exited {
+                code: Some(0),
+                success: true
+            }
+        );
+        assert_eq!(outcome.last_progress.and_then(|block| block.frame), Some(7));
+    }
+
+    #[test]
+    fn a_failed_audio_process_fails_the_export_and_stops_the_encoder() {
+        // The encoder never ends on its own. Only the kill that follows the failure of the audio
+        // process lets this test finish before its 120 s sleep.
+        #[cfg(unix)]
+        let audio = "echo bad audio >&2; exit 3";
+        #[cfg(windows)]
+        let audio = "[Console]::Error.WriteLine('bad audio'); exit 3";
+        let started = Instant::now();
+        let outcome = run_pair(&pair(audio, SLEEP), &AtomicBool::new(false), |_| {});
+
+        assert_eq!(
+            outcome.status,
+            ExportProcessStatus::Exited {
+                code: Some(3),
+                success: false
+            }
+        );
+        assert!(outcome.stderr_detail().unwrap().contains("bad audio"));
+        assert!(started.elapsed() < Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_failed_encoder_fails_the_export_and_stops_the_audio_process() {
+        #[cfg(unix)]
+        let encoder = "echo broken encoder >&2; exit 4";
+        #[cfg(windows)]
+        let encoder = "[Console]::Error.WriteLine('broken encoder'); exit 4";
+        let started = Instant::now();
+        let outcome = run_pair(&pair(SLEEP, encoder), &AtomicBool::new(false), |_| {});
+
+        assert_eq!(
+            outcome.status,
+            ExportProcessStatus::Exited {
+                code: Some(4),
+                success: false
+            }
+        );
+        assert!(outcome.stderr_detail().unwrap().contains("broken encoder"));
+        assert!(started.elapsed() < Duration::from_secs(60));
+    }
+
+    /// An encoder that copies the first two lines of its stdin to its stdout and then exits zero,
+    /// without waiting for the end of its input.
+    #[cfg(unix)]
+    const COPY_ONE_BLOCK_AND_EXIT: &str = "exec head -n 2";
+    /// See the Unix arm.
+    #[cfg(windows)]
+    const COPY_ONE_BLOCK_AND_EXIT: &str = "$in = [Console]::In; \
+         [Console]::Out.WriteLine($in.ReadLine()); [Console]::Out.WriteLine($in.ReadLine()); exit 0";
+
+    /// [`COPY_ONE_BLOCK_AND_EXIT`], and then a wait of 120 seconds in the same process.
+    #[cfg(unix)]
+    const COPY_ONE_BLOCK_AND_SLEEP: &str = "head -n 2; exec sleep 120";
+    /// See the Unix arm.
+    #[cfg(windows)]
+    const COPY_ONE_BLOCK_AND_SLEEP: &str = "$in = [Console]::In; \
+         [Console]::Out.WriteLine($in.ReadLine()); [Console]::Out.WriteLine($in.ReadLine()); \
+         Start-Sleep -Seconds 120";
+
+    #[test]
+    fn an_audio_process_that_fails_after_a_successful_encoder_still_fails_the_export() {
+        // The encoder exits zero after one block, while the audio process is still running. Only
+        // then does the audio process report its failure. The export waits for it, and fails with
+        // it.
+        #[cfg(unix)]
+        let audio = "printf 'frame=1\\nprogress=end\\n'; sleep 0.5; echo late failure >&2; exit 7";
+        #[cfg(windows)]
+        let audio = "[Console]::Out.WriteLine('frame=1'); \
+                     [Console]::Out.WriteLine('progress=end'); Start-Sleep -Milliseconds 500; \
+                     [Console]::Error.WriteLine('late failure'); exit 7";
+        let outcome = run_pair(
+            &pair(audio, COPY_ONE_BLOCK_AND_EXIT),
+            &AtomicBool::new(false),
+            |_| {},
+        );
+
+        assert_eq!(
+            outcome.status,
+            ExportProcessStatus::Exited {
+                code: Some(7),
+                success: false
+            }
+        );
+        assert!(outcome.stderr_detail().unwrap().contains("late failure"));
+        // The encoder wrote its whole progress stream before the failure ended the export.
+        assert_eq!(outcome.last_progress.and_then(|block| block.frame), Some(1));
+    }
+
+    #[test]
+    fn a_cancel_kills_the_audio_process_and_the_encoder() {
+        // The audio process reports its own process id through the encoder, as the first
+        // progress block, and then sleeps. The encoder copies that block and then sleeps too, so
+        // only the kill can end it: the end of its input would not.
+        #[cfg(unix)]
+        let audio = "echo frame=$$; echo progress=continue; exec sleep 120";
+        #[cfg(windows)]
+        let audio = "[Console]::Out.WriteLine('frame=' + $PID); \
+                     [Console]::Out.WriteLine('progress=continue'); [Console]::Out.Flush(); \
+                     Start-Sleep -Seconds 120";
+        let cancel = AtomicBool::new(false);
+        let mut audio_pid = None;
+        let mut canceled_at = None;
+        let outcome = run_pair(
+            &pair(audio, COPY_ONE_BLOCK_AND_SLEEP),
+            &cancel,
+            |snapshot| {
+                audio_pid = snapshot.frame;
+                cancel.store(true, Ordering::SeqCst);
+                canceled_at.get_or_insert_with(Instant::now);
+            },
+        );
+
+        assert_eq!(outcome.status, ExportProcessStatus::Canceled);
+        let pid = audio_pid.expect("the audio process reports its id before the cancel");
+        assert!(
+            process_is_gone(pid),
+            "the audio process survived as process {pid}"
+        );
+        // The joins returned, so the stdout of the encoder closed, and the encoder holds it until
+        // the kill.
+        let after_cancel = canceled_at.expect("the callback runs").elapsed();
+        assert!(
+            after_cancel < Duration::from_secs(5),
+            "took {after_cancel:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_callback_leaves_neither_process_running() {
+        #[cfg(unix)]
+        let audio = "echo frame=$$; echo progress=continue; exec sleep 120";
+        #[cfg(windows)]
+        let audio = "[Console]::Out.WriteLine('frame=' + $PID); \
+                     [Console]::Out.WriteLine('progress=continue'); [Console]::Out.Flush(); \
+                     Start-Sleep -Seconds 120";
+        let both = pair(audio, COPY_ONE_BLOCK_AND_SLEEP);
+        let cancel = AtomicBool::new(false);
+        let mut audio_pid = None;
+        let started = Instant::now();
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            run_pair(&both, &cancel, |snapshot| {
+                audio_pid = snapshot.frame;
+                panic!("the callback fails");
+            })
+        }));
+
+        assert!(result.is_err());
+        let pid = audio_pid.expect("the audio process reports its id before the panic");
+        assert!(
+            process_is_gone(pid),
+            "the audio process survived as process {pid}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_cancel_set_before_the_spawn_starts_neither_process() {
+        // A program that does not exist: any spawn would fail, and `run_pair` would panic.
+        let missing = Pair {
+            program: PathBuf::from("/this/program/does/not/exist"),
+            audio: vec!["audio".to_owned()],
+            encoder: vec!["encoder".to_owned()],
+        };
+        let outcome = run_pair(&missing, &AtomicBool::new(true), |_| {});
+        assert_eq!(outcome.status, ExportProcessStatus::Canceled);
+        assert!(outcome.stderr.is_empty());
+    }
+
+    #[test]
+    fn a_failed_spawn_of_the_encoder_is_an_error_and_ends_the_audio_process() {
+        // A NUL byte in an argument makes the spawn of the encoder fail on both platforms, after
+        // the audio process started. The guard of the audio process kills and reaps it on the way
+        // out, so the call returns at once and not after the 120 s sleep.
+        let mut failing = pair(SLEEP, SLEEP);
+        failing.encoder.push("nul\0byte".to_owned());
+        let started = Instant::now();
+        let result = run_export_process(
+            ExportProcessRequest {
+                ffmpeg: &failing.program,
+                arguments: &failing.encoder,
+                audio_arguments: Some(&failing.audio),
+                cancel: &AtomicBool::new(false),
+                poll: TEST_POLL,
+            },
+            |_| {},
+        );
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(60));
+    }
+
+    #[test]
+    fn when_both_processes_fail_the_export_reports_the_encoder_code_and_both_tails() {
+        // Both processes fail after a short wait, inside one long poll interval, so the loop sees
+        // both failures in the same look.
+        #[cfg(unix)]
+        let (audio, encoder) = (
+            "sleep 0.2; echo audio gave up >&2; exit 5",
+            "sleep 0.2; echo encoder gave up >&2; exit 6",
+        );
+        #[cfg(windows)]
+        let (audio, encoder) = (
+            "Start-Sleep -Milliseconds 200; [Console]::Error.WriteLine('audio gave up'); exit 5",
+            "Start-Sleep -Milliseconds 200; [Console]::Error.WriteLine('encoder gave up'); exit 6",
+        );
+        let both = pair(audio, encoder);
+        let outcome = run_export_process(
+            ExportProcessRequest {
+                ffmpeg: &both.program,
+                arguments: &both.encoder,
+                audio_arguments: Some(&both.audio),
+                cancel: &AtomicBool::new(false),
+                poll: Duration::from_secs(4),
+            },
+            |_| {},
+        )
+        .expect("both processes should spawn");
+
+        assert_eq!(
+            outcome.status,
+            ExportProcessStatus::Exited {
+                code: Some(6),
+                success: false
+            }
+        );
+        let detail = outcome.stderr_detail().unwrap();
+        assert!(detail.contains("audio: audio gave up"), "{detail}");
+        assert!(detail.contains("encoder: encoder gave up"), "{detail}");
+    }
+
+    #[test]
+    fn when_both_processes_fail_the_detail_keeps_the_tail_of_each() {
+        let numbered = |name: &str| -> Vec<u8> {
+            (1..=200)
+                .map(|line| format!("{name} line {line}\n"))
+                .collect::<String>()
+                .into_bytes()
+        };
+        let combined = both_stderr_tails(&numbered("audio"), &numbered("encoder"));
+        let outcome = ExportProcessOutcome {
+            status: ExportProcessStatus::Exited {
+                code: Some(1),
+                success: false,
+            },
+            stderr: combined.clone(),
+            last_progress: None,
+        };
+        let detail = outcome.stderr_detail().unwrap();
+
+        assert!(combined.len() <= STDERR_DETAIL_LIMIT);
+        assert!(detail.contains("audio line 200"), "{detail}");
+        assert!(detail.contains("encoder line 200"), "{detail}");
+        assert!(!detail.contains("audio line 1\n"), "{detail}");
+        let audio_at = detail.find("audio line 200").unwrap();
+        let encoder_at = detail.find("encoder line 200").unwrap();
+        assert!(audio_at < encoder_at);
     }
 }

@@ -922,6 +922,7 @@ where
         ExportProcessRequest {
             ffmpeg: &ffmpeg,
             arguments: &arguments,
+            audio_arguments: None,
             cancel: cancel.as_ref(),
             poll: PROGRESS_POLL_INTERVAL,
         },
