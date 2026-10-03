@@ -1870,6 +1870,7 @@ mod tests {
                 probe: &probe,
                 preset: &preset,
                 streams,
+                audio_gaps: &[],
             },
             move |path: &Path| {
                 if path == Path::new(PLANNED_SOURCE) {

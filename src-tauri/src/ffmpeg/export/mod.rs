@@ -162,7 +162,8 @@ impl ExportStreams {
 pub const MAX_EXPORT_SEGMENTS: usize = 100;
 
 /// The longest silence, in whole seconds, that the segments of an export may need FFmpeg to
-/// hold in memory in front of the first sample of the source audio stream, all together.
+/// hold in memory, all together: in front of the first sample of the source audio stream, and in
+/// the gaps inside the stream.
 ///
 /// The part of a segment before that sample becomes silence. When the segment reaches the
 /// sample, the audio chain fills that part (`graph::audio_chain`), and FFmpeg holds the whole
@@ -175,7 +176,26 @@ pub const MAX_EXPORT_SEGMENTS: usize = 100;
 /// either. The end pad of its chain (`graph::audio_end_pad`) writes its silence frame by frame,
 /// and holds none of it (ADR 014 measurement 23). Every audio chain carries that pad since the
 /// audio has its own process (ADR 043), so such a segment counts nothing toward this bound.
-pub const MAX_LEADING_AUDIO_SILENCE_SECONDS: i64 = 60;
+///
+/// The fill also makes the silence of a gap inside the stream, longer than
+/// [`AUDIO_FILL_MIN_GAP_MILLISECONDS`], and holds all of it in memory too (ADR 014 measurement
+/// 28). The export reads those gaps inside the segments before it plans
+/// (`ffmpeg::probe::probe_audio_gaps`). The fill passes the silence of one gap on before it reads
+/// the frame behind the next, so one chain holds one silence at a time. Each segment counts the
+/// longer of its silence in front of the first sample, less the prefix, and the longest gap that
+/// it holds audio behind. The silence after the last frame of a segment counts nothing, because
+/// the end pad writes it.
+pub const MAX_HELD_AUDIO_SILENCE_SECONDS: i64 = 60;
+
+/// The longest gap, in milliseconds, between two frames of the audio that the fill of a chain
+/// writes no silence for.
+///
+/// This is the default `min_hard_comp` of `aresample`, 0.1 s, which the fill
+/// (`graph::audio_gap_fill`) keeps. Behind a longer gap, the fill makes the silence of the whole
+/// gap, and FFmpeg holds it in memory until the fill has passed it on
+/// ([`MAX_HELD_AUDIO_SILENCE_SECONDS`]). The read of the gaps in front of the plan reports only the
+/// longer gaps.
+pub const AUDIO_FILL_MIN_GAP_MILLISECONDS: i64 = 100;
 
 /// The silence, in milliseconds, that a silence prefix leaves in front of the first audio
 /// packet of its segment, for the fill of the chain to close (ADR 014 measurement 27).
@@ -186,7 +206,7 @@ pub const MAX_LEADING_AUDIO_SILENCE_SECONDS: i64 = 60;
 /// 0.15 s before the start that the plan reads. That start is the first packet or the start that
 /// the probe reports, and the first decoded sample lies at it or after it, by the priming of the
 /// encoder, which is at most 2112 samples, 48 ms at 44100 Hz. The fill holds this margin in
-/// memory, so it counts toward [`MAX_LEADING_AUDIO_SILENCE_SECONDS`].
+/// memory, so it counts toward [`MAX_HELD_AUDIO_SILENCE_SECONDS`].
 pub const AUDIO_PREFIX_MARGIN_MILLISECONDS: i64 = 250;
 
 /// The most segments of one export that get a silence prefix ([`PlannedSegment::audio_prefix`]).
@@ -194,7 +214,7 @@ pub const AUDIO_PREFIX_MARGIN_MILLISECONDS: i64 = 250;
 /// A prefix costs about 120 bytes of the command line of its process, and the command at
 /// [`MAX_EXPORT_SEGMENTS`] has not that much for every segment. The segments with the longest
 /// silence in front of the first sample get the prefixes. Any other segment fills its silence
-/// in memory, and that counts toward [`MAX_LEADING_AUDIO_SILENCE_SECONDS`].
+/// in memory, and that counts toward [`MAX_HELD_AUDIO_SILENCE_SECONDS`].
 pub const MAX_AUDIO_PREFIXES: usize = 16;
 
 /// The seek margin ADR 014 selects, in whole seconds.
@@ -650,17 +670,19 @@ export_error_codes! {
     /// A plan without video and without audio would write nothing, and one of an empty stream only
     /// silence, so the export is refused before anything is reserved.
     SourceHasNoAudio => "sourceHasNoAudio",
-    /// Produced by [`plan::build_plan`]: the export writes audio, and the parts of its segments
-    /// before the first sample of the source audio stream add up to more than
-    /// [`MAX_LEADING_AUDIO_SILENCE_SECONDS`].
+    /// Produced by [`plan::build_plan`]: the export writes audio, and the silence that the fills
+    /// of its chains hold in memory adds up to more than [`MAX_HELD_AUDIO_SILENCE_SECONDS`].
     ///
-    /// Each of those parts becomes silence that FFmpeg holds in memory until it is complete. Every
-    /// export counts only the segments that reach the first sample, because the end pad of each
-    /// chain that reads the stream writes the silence of the others frame by frame, without
-    /// holding it (`graph::audio_end_pad`): every chain of an export without video, and every
-    /// chain of the audio process of an export with video (ADR 043). An export with
-    /// [`ExportStreams::VideoOnly`] reads no audio, so it never produces this code. The probe
-    /// reports only where the stream starts, so a gap inside the stream is not bounded.
+    /// Each segment counts the longer of two silences: its part before the first sample of the
+    /// source audio stream, less its silence prefix, and the longest gap inside the stream that it
+    /// holds audio behind. FFmpeg holds each of them in memory until the fill has passed it on. For
+    /// the part before the first sample, every export counts only the segments that reach it,
+    /// because the end pad of each chain that reads the stream writes the silence of the others
+    /// frame by frame, without holding it (`graph::audio_end_pad`): every chain of an export
+    /// without video, and every chain of the audio process of an export with video (ADR 043). An
+    /// export with [`ExportStreams::VideoOnly`] reads no audio, so it never produces this code. A
+    /// gap inside the stream counts only when the read of the gaps in front of the plan succeeded
+    /// (`ffmpeg::probe::probe_audio_gaps`).
     AudioGapTooLong => "audioGapTooLong",
     /// Reserved: the preset names an encoder the capability probe did not report as
     /// working.

@@ -99,15 +99,16 @@ function readRustExportStreams(): string[] {
 
 describe("Export Types & Wire Constants", () => {
   describe("Rust vocabulary parity", () => {
-    it("names the Rust bound of the leading audio silence in the message of audioGapTooLong", () => {
+    it("names the Rust bound of the held audio silence in the message of audioGapTooLong", () => {
       const source = readFileSync(
         fileURLToPath(
           new URL("../../../src-tauri/src/ffmpeg/export/mod.rs", import.meta.url),
         ),
         "utf8",
       );
-      const bound =
-        /\npub const MAX_LEADING_AUDIO_SILENCE_SECONDS: i64 = (\d+);\n/.exec(source);
+      const bound = /\npub const MAX_HELD_AUDIO_SILENCE_SECONDS: i64 = (\d+);\n/.exec(
+        source,
+      );
       expect(bound).not.toBeNull();
       for (const catalog of [en, zhCN]) {
         expect(catalog.exportError.audioGapTooLong).toContain(` ${bound![1]} `);

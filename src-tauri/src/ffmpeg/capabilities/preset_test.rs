@@ -901,6 +901,7 @@ mod tests {
                 probe: &probe,
                 preset,
                 streams: ExportStreams::VideoAndAudio,
+                audio_gaps: &[],
             },
             |path: &Path| {
                 if path == source {

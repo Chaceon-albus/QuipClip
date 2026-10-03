@@ -770,7 +770,7 @@ export const zhCN: TranslationCatalog = {
     sourceAudioRateUnknown: "无法确定源音频的采样率，因此无法精确剪切音频。",
     sourceHasNoAudio: "源视频没有音频，因此无法导出其音频。",
     audioGapTooLong:
-      "标记的片段在源音频开头之前合计需要超过 60 秒的静音，补上这些静音所需的内存过多。请把入点移到更靠近音频开头的位置，或只导出视频。",
+      "标记的片段中有些部分没有源音频（位于源音频开始之前，或位于源音频的中断处）。QuipClip 必须把其中一些部分的静音保存在内存中。对于这些片段，这些静音合计超过 60 秒，会占用过多内存。请从片段中去掉源音频中较长的中断，或只导出视频。",
     encoderUnavailable: "当前系统缺少所需的编码器。",
     ffmpegSpawnFailed: "无法启动 FFmpeg 进程。",
     ffmpegProcessFailed: "FFmpeg 在视频导出期间失败。",

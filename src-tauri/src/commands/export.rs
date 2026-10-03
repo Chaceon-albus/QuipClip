@@ -61,14 +61,15 @@ use crate::ffmpeg::export::{
     choose_audio_graph_shape, choose_graph_shape, encoder_graph, inspect_path, run_export_process,
     verify_audio_output, AudioOutputMismatch, ExportErrorCode, ExportPlan, ExportProcessOutcome,
     ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot, ExportStreams,
-    PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary,
+    PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary, AUDIO_FILL_MIN_GAP_MILLISECONDS,
+    MAX_EXPORT_SEGMENTS,
 };
 use crate::ffmpeg::{
-    self, AudioProbe, FfmpegPaths, FirstAudioPacket, LocateError, MediaProbe, OutputAudioProbe,
-    ProbeError,
+    self, AudioGap, AudioGapRead, AudioProbe, FfmpegPaths, FirstAudioPacket, LocateError,
+    MediaProbe, OutputAudioProbe, ProbeError,
 };
 use crate::settings::{self, LoadedSettings, Preset, Settings, SettingsFileError};
-use crate::time::{Pts, Rational};
+use crate::time::{pts_seconds, Pts, Rational};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -339,14 +340,17 @@ pub async fn start_export(
     let cancel = slot.cancel_flag();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         prepare_export_with(
-            &request,
-            &app_data_directory,
-            cancel.as_ref(),
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &app_data_directory,
+                cancel: cancel.as_ref(),
+            },
             discover_for_export,
             settings::load,
             ffmpeg::probe_media,
             ffmpeg::probe_first_audio_packet,
             ffmpeg::probe_audio_sample_rate_at,
+            ffmpeg::probe_audio_gaps,
         )
     })
     .await
@@ -444,13 +448,29 @@ fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateE
     ffmpeg::discover(configured.as_deref(), app_data_directory)
 }
 
+/// The plain data [`prepare_export_with`] needs, grouped apart from the six functions it also
+/// takes.
+///
+/// `clippy`'s `too-many-arguments` lint (see `clippy.toml`) counts each injected function as one
+/// argument. `ffmpeg::capabilities::ProbeRequest` gives the reason to group the data rather than
+/// to raise the threshold.
+#[derive(Clone, Copy)]
+struct PrepareRequest<'a> {
+    /// The export the interface asked for.
+    request: &'a ExportRequestWire,
+    /// The directory of the settings file and of the discovery of the executables.
+    app_data_directory: &'a Path,
+    /// This run's cancel flag, read between the steps.
+    cancel: &'a AtomicBool,
+}
+
 /// Do every fallible step an export needs before ffmpeg starts, in ADR 016's order.
 ///
-/// The five injected functions are the ones that reach outside the process: executable
-/// discovery, the settings read, the ffprobe re-probe, and the two reads of
-/// [`correct_audio_probe`]. ADR 014's "Other rules" requires that re-probe -- the renderer reads
-/// the container start time and the selected stream indices from a fresh probe, never from stale
-/// project metadata.
+/// The six injected functions are the ones that reach outside the process: executable
+/// discovery, the settings read, the ffprobe re-probe, the two reads of [`correct_audio_probe`],
+/// and the read of [`read_audio_gaps`]. ADR 014's "Other rules" requires that re-probe -- the
+/// renderer reads the container start time and the selected stream indices from a fresh probe,
+/// never from stale project metadata.
 ///
 /// See this module's documentation for the five ordering obligations the body below carries.
 ///
@@ -463,15 +483,14 @@ fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateE
 /// the run from working through every remaining step after the answer is no longer wanted, and
 /// it means a cancel during preparation ends with the slot released and no reserved file left
 /// on disk.
-fn prepare_export_with<Discover, Load, Probe, FirstPacket, RateAt>(
-    request: &ExportRequestWire,
-    app_data_directory: &Path,
-    cancel: &AtomicBool,
+fn prepare_export_with<Discover, Load, Probe, FirstPacket, RateAt, Gaps>(
+    prepare: PrepareRequest<'_>,
     discover: Discover,
     load: Load,
     probe: Probe,
     first_audio_packet: FirstPacket,
     audio_sample_rate_at: RateAt,
+    audio_gaps: Gaps,
 ) -> Result<PreparedExport, ExportCommandError>
 where
     Discover: FnOnce(&Path) -> Result<FfmpegPaths, LocateError>,
@@ -480,7 +499,13 @@ where
     FirstPacket:
         FnOnce(&Path, &Path, u32, &AtomicBool) -> Result<Option<FirstAudioPacket>, ProbeError>,
     RateAt: FnOnce(&Path, &Path, u64, u32, &AtomicBool) -> Result<Option<u32>, ProbeError>,
+    Gaps: FnOnce(&Path, &Path, &AudioGapRead<'_>, &AtomicBool) -> Result<Vec<AudioGap>, ProbeError>,
 {
+    let PrepareRequest {
+        request,
+        app_data_directory,
+        cancel,
+    } = prepare;
     // Read the same way `ExportSlot::is_canceled` reads it, so the ordering pairs with
     // `ExportRegistry::cancel`'s store.
     let canceled = || cancel.load(std::sync::atomic::Ordering::SeqCst);
@@ -533,6 +558,14 @@ where
             audio_sample_rate_at,
         )?;
     }
+    let audio_gaps = read_audio_gaps(
+        &executables.ffprobe,
+        &source,
+        &probe,
+        request,
+        cancel,
+        audio_gaps,
+    )?;
     // After the reads of the audio, which can each spend tens of seconds. A cancel that arrives as
     // the last one ends must not reach the plan, which can refuse what these reads found with a
     // code of its own, such as `sourceHasNoAudio`.
@@ -559,6 +592,7 @@ where
             probe: &probe,
             preset,
             streams: request.streams,
+            audio_gaps: &audio_gaps,
         },
         inspect_path,
     )
@@ -700,6 +734,72 @@ where
         audio.take_first_packet(time);
     }
     Ok(())
+}
+
+/// Read the gaps inside the audio stream of an export inside its segments, for the bound of the
+/// plan on the silence that the fills of the chains hold in memory (ADR 014 measurement 28).
+///
+/// The read runs when the export writes audio from a stream that holds packets and has a sample
+/// rate. Otherwise no chain reads the stream, or the plan refuses the audio, and the answer is
+/// empty. The answer is empty as well when the plan refuses the segments: none, more than
+/// [`MAX_EXPORT_SEGMENTS`], a boundary that is not a time, or an In point that is not before its
+/// Out point. The ranges of the read are the segments, in seconds on the timeline of the
+/// container, which is the timeline of `-copyts`.
+///
+/// The read only adds a bound, so it never fails the export. A read that cannot start, exits
+/// unsuccessfully, writes an answer that does not parse, or times out gives no gaps. The plan then
+/// bounds only the silence in front of the first sample, as before this read existed. A cancel
+/// that stops the read ends the run as canceled. The flag is also read before the read starts.
+fn read_audio_gaps<Gaps>(
+    ffprobe: &Path,
+    source: &Path,
+    probe: &MediaProbe,
+    request: &ExportRequestWire,
+    cancel: &AtomicBool,
+    audio_gaps: Gaps,
+) -> Result<Vec<AudioGap>, ExportCommandError>
+where
+    Gaps: FnOnce(&Path, &Path, &AudioGapRead<'_>, &AtomicBool) -> Result<Vec<AudioGap>, ProbeError>,
+{
+    let Some((audio, sample_rate)) = probe
+        .audio
+        .as_ref()
+        .filter(|audio| request.streams.writes_audio() && !audio.holds_no_packets)
+        .and_then(|audio| Some((audio, audio.sample_rate?)))
+    else {
+        return Ok(Vec::new());
+    };
+    if request.segments.is_empty() || request.segments.len() > MAX_EXPORT_SEGMENTS {
+        return Ok(Vec::new());
+    }
+    let ranges: Option<Vec<(Rational, Rational)>> = request
+        .segments
+        .iter()
+        .map(|segment| {
+            let start = pts_seconds(segment.in_pts, probe.video_time_base)?;
+            let end = pts_seconds(segment.out_pts, probe.video_time_base)?;
+            (start < end).then_some((start, end))
+        })
+        .collect();
+    let Some(ranges) = ranges else {
+        return Ok(Vec::new());
+    };
+    if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+    }
+    let read = AudioGapRead {
+        stream_index: audio.index,
+        sample_rate,
+        ranges: &ranges,
+        min_gap: Rational::new(AUDIO_FILL_MIN_GAP_MILLISECONDS, 1000)
+            .expect("AUDIO_FILL_MIN_GAP_MILLISECONDS/1000 always reduces to a valid Rational"),
+    };
+    match audio_gaps(ffprobe, source, &read, cancel) {
+        Ok(gaps) => Ok(gaps),
+        Err(ProbeError::Canceled) => Err(ExportCommandError::new(ExportErrorCode::Canceled)),
+        // A read that failed: the plan bounds no gap inside the stream.
+        Err(_) => Ok(Vec::new()),
+    }
 }
 
 /// Resolve the preset an export renders with: the requested id, or the settings document's
@@ -1332,6 +1432,16 @@ mod tests {
         Ok(None)
     }
 
+    /// A read of the gaps inside the audio stream that finds none.
+    fn no_audio_gaps(
+        _: &Path,
+        _: &Path,
+        _: &AudioGapRead<'_>,
+        _: &AtomicBool,
+    ) -> Result<Vec<AudioGap>, ProbeError> {
+        Ok(Vec::new())
+    }
+
     /// A read of the sample rate that a test expects never to run.
     fn sample_rate_not_read(
         _: &Path,
@@ -1837,9 +1947,11 @@ mod tests {
         };
 
         let error = prepare_export_with(
-            &request,
-            &directory.path,
-            &AtomicBool::new(false),
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+            },
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -1859,6 +1971,7 @@ mod tests {
             },
             first_packet_unread,
             sample_rate_not_read,
+            no_audio_gaps,
         )
         .unwrap_err();
 
@@ -1884,9 +1997,11 @@ mod tests {
         };
 
         let prepared = prepare_export_with(
-            &request,
-            &directory.path,
-            &AtomicBool::new(false),
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+            },
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -1906,6 +2021,7 @@ mod tests {
             },
             first_packet_unread,
             sample_rate_not_read,
+            no_audio_gaps,
         )
         .unwrap();
 
@@ -1953,9 +2069,11 @@ mod tests {
         };
         let prepare = || {
             prepare_export_with(
-                &request,
-                &directory.path,
-                &AtomicBool::new(false),
+                PrepareRequest {
+                    request: &request,
+                    app_data_directory: &directory.path,
+                    cancel: &AtomicBool::new(false),
+                },
                 |_| {
                     Ok(FfmpegPaths {
                         ffmpeg: directory.path.join("ffmpeg"),
@@ -1967,6 +2085,7 @@ mod tests {
                 |_, _| Ok(sample_probe_with_audio()),
                 first_packet_unread,
                 sample_rate_not_read,
+                no_audio_gaps,
             )
             .unwrap()
         };
@@ -2070,9 +2189,11 @@ mod tests {
         };
 
         let error = prepare_export_with(
-            &request,
-            &directory.path,
-            &AtomicBool::new(false),
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+            },
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -2089,6 +2210,7 @@ mod tests {
             |_, _| Ok(sample_probe()),
             first_packet_unread,
             sample_rate_not_read,
+            no_audio_gaps,
         )
         .unwrap_err();
 
@@ -2117,9 +2239,11 @@ mod tests {
         };
 
         let error = prepare_export_with(
-            &request,
-            &directory.path,
-            &AtomicBool::new(false),
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+            },
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -2136,6 +2260,7 @@ mod tests {
             |_, _| Ok(sample_probe()),
             first_packet_unread,
             sample_rate_not_read,
+            no_audio_gaps,
         )
         .unwrap_err();
 
@@ -2182,9 +2307,11 @@ mod tests {
         };
 
         let result = prepare_export_with(
-            &request,
-            &directory.path,
-            &AtomicBool::new(false),
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+            },
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -2201,6 +2328,7 @@ mod tests {
             |_, _| Ok(sample_probe()),
             first_packet_unread,
             sample_rate_not_read,
+            no_audio_gaps,
         );
 
         // Release the file before the assertions, so a failing assertion cannot leave a file that
@@ -2271,9 +2399,11 @@ mod tests {
         };
 
         let error = prepare_export_with(
-            &request,
-            &directory.path,
-            &AtomicBool::new(true),
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(true),
+            },
             |_| {
                 *discovered.borrow_mut() = true;
                 unreachable!()
@@ -2282,6 +2412,7 @@ mod tests {
             |_, _| unreachable!(),
             first_packet_unread,
             sample_rate_not_read,
+            no_audio_gaps,
         )
         .unwrap_err();
 
@@ -2321,9 +2452,11 @@ mod tests {
         };
 
         let error = prepare_export_with(
-            &request,
-            &directory.path,
-            &cancel,
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &cancel,
+            },
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -2344,6 +2477,7 @@ mod tests {
             },
             first_packet_unread,
             sample_rate_not_read,
+            no_audio_gaps,
         )
         .unwrap_err();
 
@@ -2376,9 +2510,11 @@ mod tests {
         };
 
         let error = prepare_export_with(
-            &request,
-            &directory.path,
-            &cancel,
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &cancel,
+            },
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -2398,6 +2534,7 @@ mod tests {
             },
             first_packet_unread,
             sample_rate_not_read,
+            no_audio_gaps,
         )
         .unwrap_err();
 
@@ -2426,14 +2563,17 @@ mod tests {
         };
 
         let error = prepare_export_with(
-            &request,
-            &directory.path,
-            &AtomicBool::new(false),
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+            },
             |_| Err(LocateError::NotFound { inspected: vec![] }),
             |_| unreachable!(),
             |_, _| unreachable!(),
             first_packet_unread,
             sample_rate_not_read,
+            no_audio_gaps,
         )
         .unwrap_err();
 
@@ -2474,9 +2614,11 @@ mod tests {
             };
 
             let error = prepare_export_with(
-                &request,
-                &directory.path,
-                &AtomicBool::new(false),
+                PrepareRequest {
+                    request: &request,
+                    app_data_directory: &directory.path,
+                    cancel: &AtomicBool::new(false),
+                },
                 |_| {
                     Ok(FfmpegPaths {
                         ffmpeg: directory.path.join("ffmpeg"),
@@ -2491,6 +2633,7 @@ mod tests {
                 },
                 first_packet_unread,
                 sample_rate_not_read,
+                no_audio_gaps,
             )
             .unwrap_err();
 
@@ -2722,6 +2865,78 @@ mod tests {
             &AtomicBool,
         ) -> Result<Option<u32>, ProbeError>,
     ) -> Result<PreparedExport, ExportCommandError> {
+        prepare_reading_audio_and_gaps(
+            directory,
+            streams,
+            probe,
+            segments,
+            cancel,
+            first_audio_packet,
+            audio_sample_rate_at,
+            no_audio_gaps,
+        )
+    }
+
+    /// [`prepare_reading_first_packet`] with the read of the gaps inside the audio stream
+    /// injected too.
+    fn prepare_reading_gaps(
+        directory: &TestDirectory,
+        streams: ExportStreams,
+        probe: MediaProbe,
+        segments: &[(i64, i64)],
+        cancel: &AtomicBool,
+        first_audio_packet: impl FnOnce(
+            &Path,
+            &Path,
+            u32,
+            &AtomicBool,
+        ) -> Result<Option<FirstAudioPacket>, ProbeError>,
+        audio_gaps: impl FnOnce(
+            &Path,
+            &Path,
+            &AudioGapRead<'_>,
+            &AtomicBool,
+        ) -> Result<Vec<AudioGap>, ProbeError>,
+    ) -> Result<PreparedExport, ExportCommandError> {
+        prepare_reading_audio_and_gaps(
+            directory,
+            streams,
+            probe,
+            segments,
+            cancel,
+            first_audio_packet,
+            sample_rate_not_read,
+            audio_gaps,
+        )
+    }
+
+    /// [`prepare_reading_audio`] with the read of the gaps injected too.
+    fn prepare_reading_audio_and_gaps(
+        directory: &TestDirectory,
+        streams: ExportStreams,
+        probe: MediaProbe,
+        segments: &[(i64, i64)],
+        cancel: &AtomicBool,
+        first_audio_packet: impl FnOnce(
+            &Path,
+            &Path,
+            u32,
+            &AtomicBool,
+        ) -> Result<Option<FirstAudioPacket>, ProbeError>,
+        audio_sample_rate_at: impl FnOnce(
+            &Path,
+            &Path,
+            u64,
+            u32,
+            &AtomicBool,
+        ) -> Result<Option<u32>, ProbeError>,
+        audio_gaps: impl FnOnce(
+            &Path,
+            &Path,
+            &AudioGapRead<'_>,
+            &AtomicBool,
+        ) -> Result<Vec<AudioGap>, ProbeError>,
+    ) -> Result<PreparedExport, ExportCommandError> {
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
         let request = ExportRequestWire {
@@ -2742,9 +2957,11 @@ mod tests {
             streams,
         };
         prepare_export_with(
-            &request,
-            &directory.path,
-            cancel,
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel,
+            },
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -2761,6 +2978,7 @@ mod tests {
             |_, _| Ok(probe),
             first_audio_packet,
             audio_sample_rate_at,
+            audio_gaps,
         )
     }
 
@@ -3025,6 +3243,214 @@ mod tests {
         let mut probe = sample_probe_with_a_missed_audio_start();
         probe.audio.as_mut().unwrap().tagged_end = Some(Rational::new(0, 1).unwrap());
         probe
+    }
+
+    // -- the read of the gaps inside the audio stream ------------------------------------------
+
+    /// A read of the gaps inside the audio stream that a test expects never to run: no chain reads
+    /// the stream, the plan refuses the segments, or a cancel ends the run first.
+    fn gaps_not_read(
+        _: &Path,
+        _: &Path,
+        _: &AudioGapRead<'_>,
+        _: &AtomicBool,
+    ) -> Result<Vec<AudioGap>, ProbeError> {
+        unreachable!("the test expects no read of the gaps inside the audio stream")
+    }
+
+    /// The gaps that ffprobe reads in an audio stream that stops at 10 s and resumes at 100 s.
+    fn gap_from_10_to_100(
+        _: &Path,
+        _: &Path,
+        _: &AudioGapRead<'_>,
+        _: &AtomicBool,
+    ) -> Result<Vec<AudioGap>, ProbeError> {
+        Ok(vec![
+            AudioGap {
+                from: None,
+                to: Rational::new(0, 1).unwrap(),
+            },
+            AudioGap {
+                from: Some(Rational::new(10, 1).unwrap()),
+                to: Rational::new(100, 1).unwrap(),
+            },
+        ])
+    }
+
+    #[test]
+    fn the_read_of_the_gaps_gets_the_stream_its_rate_and_the_segments_in_seconds() {
+        let directory = TestDirectory::new();
+        let read = RefCell::new(None);
+        prepare_reading_gaps(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_a_missed_audio_start(),
+            &[(60, 62), (10, 20)],
+            &AtomicBool::new(false),
+            first_packet_unread,
+            |_, _, gap_read: &AudioGapRead<'_>, _| {
+                *read.borrow_mut() = Some((
+                    gap_read.stream_index,
+                    gap_read.sample_rate,
+                    gap_read.ranges.to_vec(),
+                    gap_read.min_gap,
+                ));
+                Ok(Vec::new())
+            },
+        )
+        .unwrap();
+        let whole = |seconds| Rational::new(seconds, 1).unwrap();
+        assert_eq!(
+            read.into_inner(),
+            Some((
+                1,
+                48_000,
+                vec![(whole(60), whole(62)), (whole(10), whole(20))],
+                Rational::new(1, 10).unwrap(),
+            ))
+        );
+    }
+
+    #[test]
+    fn a_long_gap_inside_the_audio_refuses_the_export_before_the_reservation() {
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            let directory = TestDirectory::new();
+            let prepare = |segments: &[(i64, i64)]| {
+                prepare_reading_gaps(
+                    &directory,
+                    streams,
+                    sample_probe_with_a_missed_audio_start(),
+                    segments,
+                    &AtomicBool::new(false),
+                    first_packet_unread,
+                    gap_from_10_to_100,
+                )
+            };
+            match prepare(&[(5, 110)]) {
+                Err(error) => assert_eq!(error.code, ExportErrorCode::AudioGapTooLong),
+                Ok(_) => panic!("the fill of [5, 110) holds 90 s of silence"),
+            }
+            assert_eq!(leftover_reservations(&directory), 0);
+            // A segment that ends in the gap holds no audio behind it.
+            prepare(&[(5, 90)]).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_failed_read_of_the_gaps_bounds_no_gap_and_a_cancel_ends_the_run() {
+        let directory = TestDirectory::new();
+        let prepare = |cancel: &AtomicBool, gaps: Result<Vec<AudioGap>, ProbeError>| {
+            prepare_reading_gaps(
+                &directory,
+                ExportStreams::VideoAndAudio,
+                sample_probe_with_a_missed_audio_start(),
+                &[(5, 110)],
+                cancel,
+                first_packet_unread,
+                move |_, _, _, _| gaps,
+            )
+        };
+        let failed = ProbeError::ProcessFailed {
+            code: Some(1),
+            stderr: Vec::new(),
+        };
+        prepare(&AtomicBool::new(false), Err(failed)).unwrap();
+        let canceled = prepare(&AtomicBool::new(false), Err(ProbeError::Canceled));
+        assert!(
+            matches!(&canceled, Err(error) if error.code == ExportErrorCode::Canceled),
+            "a cancel that stops the read ends the run"
+        );
+        // A cancel that arrives as the first read of the audio ends stops the run before the read
+        // of the gaps starts.
+        let cancel = AtomicBool::new(false);
+        let error = prepare_reading_gaps(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_a_missed_audio_start(),
+            &[(5, 110)],
+            &cancel,
+            |_, _, _, _| {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(packet_at(0)))
+            },
+            gaps_not_read,
+        );
+        assert!(matches!(&error, Err(error) if error.code == ExportErrorCode::Canceled));
+        assert_eq!(leftover_reservations(&directory), 0);
+    }
+
+    #[test]
+    fn the_gaps_are_not_read_when_no_chain_reads_the_audio_stream() {
+        let directory = TestDirectory::new();
+        // A video-only export reads no audio.
+        prepare_reading_gaps(
+            &directory,
+            ExportStreams::VideoOnly,
+            sample_probe_with_a_missed_audio_start(),
+            &[(5, 110)],
+            &AtomicBool::new(false),
+            first_packet_unread,
+            gaps_not_read,
+        )
+        .unwrap();
+        // A stream without packets is read by no chain: its chains generate their silence.
+        prepare_reading_gaps(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_an_empty_audio_track(),
+            &[(5, 110)],
+            &AtomicBool::new(false),
+            no_first_packet,
+            gaps_not_read,
+        )
+        .unwrap();
+        // The plan refuses no segments, more segments than it takes, an In point that is not before
+        // its Out point, and a stream without a sample rate.
+        for (segments, code) in [
+            (Vec::new(), ExportErrorCode::NoSegments),
+            (
+                vec![(0, 1); MAX_EXPORT_SEGMENTS + 1],
+                ExportErrorCode::TooManySegments,
+            ),
+        ] {
+            let refused = prepare_reading_gaps(
+                &directory,
+                ExportStreams::VideoAndAudio,
+                sample_probe_with_a_missed_audio_start(),
+                &segments,
+                &AtomicBool::new(false),
+                first_packet_unread,
+                gaps_not_read,
+            );
+            assert!(
+                matches!(&refused, Err(error) if error.code == code),
+                "{code:?}"
+            );
+        }
+        let refused = prepare_reading_gaps(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            sample_probe_with_a_missed_audio_start(),
+            &[(5, 5)],
+            &AtomicBool::new(false),
+            first_packet_unread,
+            gaps_not_read,
+        );
+        assert!(matches!(&refused, Err(error) if error.code == ExportErrorCode::InvalidSegment));
+        let mut probe = sample_probe_with_a_missed_audio_start();
+        probe.audio.as_mut().unwrap().sample_rate = None;
+        let refused = prepare_reading_gaps(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            probe,
+            &[(5, 110)],
+            &AtomicBool::new(false),
+            first_packet_unread,
+            gaps_not_read,
+        );
+        assert!(
+            matches!(&refused, Err(error) if error.code == ExportErrorCode::SourceAudioRateUnknown)
+        );
     }
 
     #[test]
@@ -3481,9 +3907,11 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
         };
         let error = prepare_export_with(
-            &request,
-            &directory.path,
-            &cancel,
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &cancel,
+            },
             |_| {
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
@@ -3503,6 +3931,7 @@ mod tests {
             },
             |_, _, _, _| unreachable!("the run was canceled before the read"),
             sample_rate_not_read,
+            no_audio_gaps,
         )
         .unwrap_err();
 

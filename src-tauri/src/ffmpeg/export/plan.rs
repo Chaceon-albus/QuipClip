@@ -12,9 +12,9 @@
 use super::{
     ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PlannedAudio, PlannedSegment,
     PlannedVideo, AUDIO_PREFIX_MARGIN_MILLISECONDS, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
-    MAX_LEADING_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
+    MAX_HELD_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
 };
-use crate::ffmpeg::probe::{AudioProbe, MediaProbe};
+use crate::ffmpeg::probe::{AudioGap, AudioProbe, MediaProbe};
 use crate::settings::{
     AudioChannels, AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting,
 };
@@ -58,6 +58,12 @@ pub struct PlanRequest<'a> {
     /// Which streams of the source the export writes, as the user chose them. This decides
     /// which parts of [`ExportPlan`] exist; see [`ExportStreams`].
     pub streams: ExportStreams,
+    /// The gaps inside the audio stream of [`MediaProbe::audio`] that the export read inside the
+    /// segments, in order of time, from `ffmpeg::probe::probe_audio_gaps`. Empty when the export
+    /// read none, or the read failed. The fill of a chain holds the silence of each gap in memory,
+    /// so the plan bounds the longest gap of each segment with the silence in front of the first
+    /// sample (check 15).
+    pub audio_gaps: &'a [AudioGap],
 }
 
 /// An opaque, comparable identity for one file on disk, used only to detect that two
@@ -183,16 +189,19 @@ pub enum PathFacts {
 ///     audio stream whose sample rate is absent, not positive, or larger than `u32` --
 ///     [`ExportErrorCode::SourceAudioRateUnknown`]. A video-only export never reads the
 ///     audio stream, so it skips this check.
-/// 15. The export writes audio, and the parts of the segments that reach the first sample of
-///     the source audio stream, before that sample, less their silence prefixes
-///     ([`PlannedSegment::audio_prefix`]), add up to more than
-///     [`MAX_LEADING_AUDIO_SILENCE_SECONDS`] -- [`ExportErrorCode::AudioGapTooLong`]. That sum is
-///     the silence that the fills hold in memory. A segment that ends at or before the sample
-///     counts nothing, because the end pad of its chain writes its silence frame by frame, without
-///     holding it (`graph::audio_end_pad`). The sum is checked once every segment is planned,
-///     because the prefixes go to the longest silences of all segments. A probe that reports no
-///     start of the stream bounds nothing, and neither does a stream that holds no packets, whose
-///     chains generate their silence frame by frame.
+/// 15. The export writes audio, and the silence that the fills hold in memory adds up to more
+///     than [`MAX_HELD_AUDIO_SILENCE_SECONDS`] -- [`ExportErrorCode::AudioGapTooLong`]. That
+///     silence has two parts. The first is the part of each segment that reaches the first sample
+///     of the source audio stream, before that sample, less its silence prefix
+///     ([`PlannedSegment::audio_prefix`]). A segment that ends at or before the sample counts
+///     nothing, because the end pad of its chain writes its silence frame by frame, without
+///     holding it (`graph::audio_end_pad`). The second is the longest gap of
+///     [`PlanRequest::audio_gaps`] that the segment holds audio behind (`longest_held_gap`). Each
+///     segment counts the longer of the two, because one chain holds one of them at a time. The
+///     sum is checked once every segment is planned, because the prefixes go to the longest
+///     silences of all segments. A probe that reports no start of the stream bounds no silence in
+///     front of the first sample, and a stream that holds no packets bounds nothing: its chains
+///     generate their silence frame by frame.
 ///
 /// `destination` must be absolute for the same reason `source` must: a CWD-relative path
 /// would carry an ambiguous location into a pipeline that spawns a child process and later
@@ -416,11 +425,14 @@ pub fn build_plan(
     // packets is read by no chain, so nothing below waits for it or fills in front of it.
     let source_audio = source_audio.filter(|audio| !audio.holds_no_packets);
     // The first sample of the source audio, for the bound on the silence in front of it
-    // (`MAX_LEADING_AUDIO_SILENCE_SECONDS`). Only a plan that reads audio has one.
+    // (`MAX_HELD_AUDIO_SILENCE_SECONDS`). Only a plan that reads audio has one.
     let audio_start = source_audio.and_then(|audio| audio.start_time);
     // The silence in front of the first sample, for each segment that reaches that sample, in
     // segment order. The prefixes and the bound read it once every segment is planned.
     let mut leading_silences: Vec<Option<Rational>> = Vec::with_capacity(segments.len());
+    // The longest gap inside the stream that the fill of each segment holds, in segment order.
+    // The bound reads it with the silence in front of the first sample.
+    let mut longest_gaps: Vec<Rational> = Vec::with_capacity(segments.len());
 
     let mut planned_segments = Vec::with_capacity(segments.len());
     let mut total_duration = zero;
@@ -462,6 +474,11 @@ pub fn build_plan(
                 None => None,
             };
         leading_silences.push(leading_silence);
+        longest_gaps.push(match source_audio {
+            Some(_) => longest_held_gap(request.audio_gaps, in_seconds, out_seconds, audio_start)
+                .ok_or(ExportErrorCode::InvalidSegment)?,
+            None => zero,
+        });
 
         let raw_seek = in_seconds
             .sub(format_start_time)
@@ -522,24 +539,31 @@ pub fn build_plan(
         if source_audio.is_some_and(takes_audio_prefixes) {
             assign_audio_prefixes(&mut planned_segments, &leading_silences, audio.sample_rate)?;
         }
-        // What the fills of the chains hold in memory: the silence in front of the first sample,
-        // less the prefix, which streams. The chains of all segments can build their fills at the
-        // same time, so the bound is on the sum.
-        let max_leading_silence = max_leading_audio_silence_rational();
+        // What the fill of each chain holds in memory: the silence in front of the first sample,
+        // less the prefix, which streams, or the longest gap inside the stream, whichever is
+        // longer. One chain holds one of them at a time (`longest_held_gap`). The chains of all
+        // segments can build their fills at the same time, so the bound is on the sum.
+        let max_held_silence = max_held_audio_silence_rational();
         let mut held = zero;
-        for (segment, silence) in planned_segments.iter().zip(&leading_silences) {
-            let Some(silence) = silence else { continue };
-            let streamed = match segment.audio_prefix {
-                Some(prefix) => Rational::new(prefix, i64::from(audio.sample_rate))
-                    .ok_or(ExportErrorCode::InvalidSegment)?,
-                None => zero,
+        for ((segment, silence), longest_gap) in planned_segments
+            .iter()
+            .zip(&leading_silences)
+            .zip(&longest_gaps)
+        {
+            let leading = match (silence, segment.audio_prefix) {
+                (None, _) => zero,
+                (Some(silence), None) => *silence,
+                (Some(silence), Some(prefix)) => {
+                    Rational::new(prefix, i64::from(audio.sample_rate))
+                        .and_then(|streamed| silence.sub(streamed))
+                        .ok_or(ExportErrorCode::InvalidSegment)?
+                }
             };
-            held = silence
-                .sub(streamed)
-                .and_then(|rest| held.add(rest))
+            held = held
+                .add(leading.max(*longest_gap))
                 .ok_or(ExportErrorCode::InvalidSegment)?;
         }
-        if held > max_leading_silence {
+        if held > max_held_silence {
             return Err(ExportErrorCode::AudioGapTooLong);
         }
     }
@@ -717,11 +741,56 @@ fn assign_audio_prefixes(
     Ok(())
 }
 
-/// [`MAX_LEADING_AUDIO_SILENCE_SECONDS`] as a [`Rational`], for the same reason as
+/// [`MAX_HELD_AUDIO_SILENCE_SECONDS`] as a [`Rational`], for the same reason as
 /// [`zero_rational`].
-fn max_leading_audio_silence_rational() -> Rational {
-    Rational::new(MAX_LEADING_AUDIO_SILENCE_SECONDS, 1)
-        .expect("MAX_LEADING_AUDIO_SILENCE_SECONDS/1 always reduces to a valid Rational")
+fn max_held_audio_silence_rational() -> Rational {
+    Rational::new(MAX_HELD_AUDIO_SILENCE_SECONDS, 1)
+        .expect("MAX_HELD_AUDIO_SILENCE_SECONDS/1 always reduces to a valid Rational")
+}
+
+/// The longest gap of `gaps` that the fill of the audio chain of the segment from `in_seconds` to
+/// `out_seconds` holds, in seconds, or `None` when the time overflows.
+///
+/// The fill makes the silence of a gap when a frame of the segment comes behind it: a gap whose
+/// `to` lies after the In point and before the Out point. It makes the silence of the part of the
+/// gap after the In point. The silence after the last frame of a segment is no gap here, because
+/// the end pad writes it frame by frame. A gap that the In point lies in, and a gap without a
+/// `from`, are the silence in front of the first frame of the segment. They count only when the
+/// stream has audio in front of the In point: its first sample, `audio_start`, lies at or before
+/// the In point, or, when the start is unknown, the read found a frame in front of the gap.
+/// Otherwise the segment starts before the first sample, and check 15 counts that silence less the
+/// prefix of the segment, or a stream without a known start bounds none of it.
+///
+/// Only the longest gap counts. When the frame behind a gap arrives, the fill makes the silence of
+/// the whole gap and keeps it in memory. It passes the silence on in frames of 4096 samples, one
+/// frame each time the next filter asks, and it reads no further frame until it has passed on all
+/// of it. So one chain holds the silence of one gap at a time. In FFmpeg 9.0.2, 306 gaps of 0.25 s,
+/// 703 gaps of 0.36 s with one frame of audio between, and two gaps of 40 s 43 ms apart each took
+/// the memory of their longest gap, and a late start of 40 s with a gap of 40 s took the memory of
+/// one of them (ADR 014 measurement 28).
+fn longest_held_gap(
+    gaps: &[AudioGap],
+    in_seconds: Rational,
+    out_seconds: Rational,
+    audio_start: Option<Rational>,
+) -> Option<Rational> {
+    let mut longest = zero_rational();
+    for gap in gaps
+        .iter()
+        .filter(|gap| gap.to > in_seconds && gap.to < out_seconds)
+    {
+        let audio_in_front = match audio_start {
+            Some(start) => start <= in_seconds,
+            None => gap.from.is_some(),
+        };
+        let from = match gap.from {
+            Some(from) if from > in_seconds => from,
+            _ if audio_in_front => in_seconds,
+            _ => continue,
+        };
+        longest = longest.max(gap.to.sub(from)?);
+    }
+    Some(longest)
 }
 
 /// Convert one source PTS into an audio tick at `sample_rate`, as `round(pts * time_base *
@@ -998,6 +1067,18 @@ mod tests {
         preset: &Preset,
         facts: HashMap<PathBuf, PathFacts>,
     ) -> Result<ExportPlan, ExportErrorCode> {
+        plan_streams_with_gaps(streams, segments, probe, preset, facts, &[])
+    }
+
+    /// [`plan_streams`] with the gaps `audio_gaps` that the export read inside the audio stream.
+    fn plan_streams_with_gaps(
+        streams: ExportStreams,
+        segments: &[SegmentBoundary],
+        probe: &MediaProbe,
+        preset: &Preset,
+        facts: HashMap<PathBuf, PathFacts>,
+        audio_gaps: &[AudioGap],
+    ) -> Result<ExportPlan, ExportErrorCode> {
         let source = Path::new(SOURCE);
         let destination = Path::new(DESTINATION);
         let request = PlanRequest {
@@ -1007,6 +1088,7 @@ mod tests {
             probe,
             preset,
             streams,
+            audio_gaps,
         };
         build_plan(&request, inspect_from(facts))
     }
@@ -1076,6 +1158,7 @@ mod tests {
                 probe: &sample_probe(),
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
+                audio_gaps: &[],
             };
             let error = build_plan(&request, inspect_from(valid_path_facts())).unwrap_err();
             assert_eq!(
@@ -1131,6 +1214,7 @@ mod tests {
                 probe: &sample_probe(),
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
+                audio_gaps: &[],
             };
             let error = build_plan(&request, inspect_from(valid_path_facts())).unwrap_err();
             assert_eq!(
@@ -1207,6 +1291,7 @@ mod tests {
             probe: &sample_probe(),
             preset: &sample_preset(),
             streams: ExportStreams::VideoAndAudio,
+            audio_gaps: &[],
         };
         let mut facts = valid_path_facts();
         facts.insert(PathBuf::from(SOURCE), present_file(1));
@@ -2649,6 +2734,261 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, ExportErrorCode::SourceAudioRateUnknown);
+    }
+
+    // -- the gaps inside the audio stream ------------------------------------------------------
+
+    /// A gap from `from` to `to` seconds, as `ffmpeg::probe::probe_audio_gaps` reads it.
+    fn audio_gap(from: Option<&str>, to: &str) -> AudioGap {
+        AudioGap {
+            from: from.map(|text| Rational::from_decimal_str(text).unwrap()),
+            to: Rational::from_decimal_str(to).unwrap(),
+        }
+    }
+
+    /// [`plan_streams_with_gaps`] for `streams` and `segments` of a source whose audio starts at
+    /// `start` seconds, with the gaps `gaps`.
+    fn plan_gaps(
+        streams: ExportStreams,
+        start: Option<&str>,
+        segments: &[SegmentBoundary],
+        gaps: &[AudioGap],
+    ) -> Result<ExportPlan, ExportErrorCode> {
+        plan_streams_with_gaps(
+            streams,
+            segments,
+            &probe_with_audio_extent(start, Some("200")),
+            &sample_preset(),
+            valid_path_facts(),
+            gaps,
+        )
+    }
+
+    #[test]
+    fn a_gap_inside_the_stream_counts_when_its_segment_holds_audio_behind_it() {
+        // The audio of a Matroska source stops at 10 s and resumes at 100 s, as ffmpeg 9.0.2 cut a
+        // test source (ADR 014 measurement 28). The fill of a segment that holds the frame at 100 s
+        // writes the 90 s in front of it at once.
+        let gaps = [audio_gap(None, "0"), audio_gap(Some("10"), "100")];
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            let plan =
+                |segments: &[SegmentBoundary]| plan_gaps(streams, Some("0"), segments, &gaps);
+            assert_eq!(
+                plan(&[seconds_boundary("5", "110")]).unwrap_err(),
+                ExportErrorCode::AudioGapTooLong,
+                "{streams:?}"
+            );
+            // A segment that ends in the gap holds no audio behind it, and its end pad writes the
+            // rest of the segment frame by frame. So does a segment that ends at the frame.
+            plan(&[seconds_boundary("5", "99")]).unwrap();
+            plan(&[seconds_boundary("5", "100")]).unwrap();
+            // A segment that starts in the gap, after the first sample, fills from its In point:
+            // 50 s fit the bound, and 70 s do not.
+            plan(&[seconds_boundary("50", "110")]).unwrap();
+            assert_eq!(
+                plan(&[seconds_boundary("30", "110")]).unwrap_err(),
+                ExportErrorCode::AudioGapTooLong
+            );
+            // A segment that starts at the frame holds no gap.
+            plan(&[seconds_boundary("100", "190")]).unwrap();
+        }
+        // A video-only export reads no audio.
+        plan_gaps(
+            ExportStreams::VideoOnly,
+            Some("0"),
+            &[seconds_boundary("5", "110")],
+            &gaps,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_gaps_of_all_segments_count_together_with_the_silence_in_front_of_the_first_sample() {
+        // Every chain can hold its fill at the same time, so the bound is on the sum, as it is for
+        // the silence in front of the first sample.
+        let gaps = [audio_gap(None, "0"), audio_gap(Some("10"), "40")];
+        let two = [seconds_boundary("5", "50"), seconds_boundary("5", "50")];
+        plan_gaps(ExportStreams::VideoAndAudio, Some("0"), &two, &gaps).unwrap();
+        let three = [
+            seconds_boundary("5", "50"),
+            seconds_boundary("5", "50"),
+            seconds_boundary("5", "50"),
+        ];
+        assert_eq!(
+            plan_gaps(ExportStreams::VideoAndAudio, Some("0"), &three, &gaps).unwrap_err(),
+            ExportErrorCode::AudioGapTooLong
+        );
+        // The audio starts at 60.5 s. [30, 61) gets a prefix and leaves its margin of 0.25 s to the
+        // fill. The read reports the silence in front of the first frame too, as a gap without a
+        // `from`, and that gap does not count twice. A gap of 59.75 s behind the first sample
+        // reaches the bound exactly, and one of 59.76 s goes over it.
+        let late = |to: &str| {
+            plan_gaps(
+                ExportStreams::VideoAndAudio,
+                Some("60.5"),
+                &[seconds_boundary("30", "61"), seconds_boundary("61", "190")],
+                &[audio_gap(None, "60.5"), audio_gap(Some("70"), to)],
+            )
+        };
+        late("129.75").unwrap();
+        assert_eq!(
+            late("129.76").unwrap_err(),
+            ExportErrorCode::AudioGapTooLong
+        );
+    }
+
+    #[test]
+    fn only_the_longest_gap_of_each_segment_counts() {
+        // One chain held the silence of one gap at a time (ADR 014 measurement 28): 306 dropouts
+        // of 0.25 s in an hour took 27 MiB, and two gaps of 40 s 43 ms apart took the memory of
+        // one.
+        let mut dropouts = vec![audio_gap(None, "0")];
+        for index in 1..=300 {
+            let end = Rational::new(12 * index, 1).unwrap();
+            dropouts.push(AudioGap {
+                from: Some(end.sub(Rational::new(1, 4).unwrap()).unwrap()),
+                to: end,
+            });
+        }
+        let hour = [seconds_boundary("5", "3605")];
+        plan_gaps(ExportStreams::VideoAndAudio, Some("0"), &hour, &dropouts).unwrap();
+        let close = [
+            audio_gap(None, "0"),
+            audio_gap(Some("10"), "50"),
+            audio_gap(Some("50.02"), "90.02"),
+        ];
+        let segment = [seconds_boundary("5", "100")];
+        plan_gaps(ExportStreams::VideoAndAudio, Some("0"), &segment, &close).unwrap();
+        // A longer gap among them goes over the bound alone.
+        let mut longer = close.to_vec();
+        longer.push(audio_gap(Some("91"), "152"));
+        assert_eq!(
+            plan_gaps(
+                ExportStreams::VideoAndAudio,
+                Some("0"),
+                &[seconds_boundary("5", "160")],
+                &longer
+            )
+            .unwrap_err(),
+            ExportErrorCode::AudioGapTooLong
+        );
+        // The longest gap counts wherever it lies in the segment.
+        assert_eq!(
+            plan_gaps(
+                ExportStreams::VideoAndAudio,
+                Some("0"),
+                &segment,
+                &[
+                    audio_gap(None, "0"),
+                    audio_gap(Some("10"), "71"),
+                    audio_gap(Some("72"), "80"),
+                ],
+            )
+            .unwrap_err(),
+            ExportErrorCode::AudioGapTooLong
+        );
+        // The longest gaps of two segments add up.
+        assert_eq!(
+            plan_gaps(
+                ExportStreams::VideoAndAudio,
+                Some("0"),
+                &[seconds_boundary("5", "60"), seconds_boundary("55", "100")],
+                &close
+            )
+            .unwrap_err(),
+            ExportErrorCode::AudioGapTooLong
+        );
+    }
+
+    #[test]
+    fn a_segment_counts_the_longer_of_its_late_start_and_its_longest_gap() {
+        // [59.5, 190) starts 1 s before the first sample, too close for a prefix, so its fill
+        // holds that second. One chain holds one silence at a time: a late start of 40 s with a
+        // gap of 40 s took the memory of one of them (ADR 014 measurement 28). So a gap of 59.5 s
+        // behind it fits the bound, and a gap of 60.5 s does not.
+        let plan = |to: &str| {
+            plan_gaps(
+                ExportStreams::VideoAndAudio,
+                Some("60.5"),
+                &[seconds_boundary("59.5", "190")],
+                &[audio_gap(None, "60.5"), audio_gap(Some("70"), to)],
+            )
+        };
+        plan("129.5").unwrap();
+        assert_eq!(plan("130.5").unwrap_err(), ExportErrorCode::AudioGapTooLong);
+        // The other side: a stream in the `binaural` layout gets no prefix, so [1.5, 120) holds
+        // its 59 s in front of the first sample, and a gap of 30 s behind it adds nothing.
+        let mut probe = probe_with_audio_extent(Some("60.5"), Some("200"));
+        probe.audio.as_mut().unwrap().channel_layout = Some("binaural".to_owned());
+        let late = |from: &str| {
+            plan_streams_with_gaps(
+                ExportStreams::VideoAndAudio,
+                &[seconds_boundary(from, "120")],
+                &probe,
+                &sample_preset(),
+                valid_path_facts(),
+                &[audio_gap(None, "60.5"), audio_gap(Some("70"), "100")],
+            )
+        };
+        assert_eq!(late("1.5").unwrap().segments[0].audio_prefix, None);
+        assert_eq!(late("0").unwrap_err(), ExportErrorCode::AudioGapTooLong);
+    }
+
+    #[test]
+    fn the_silence_in_front_of_the_first_frame_counts_only_behind_a_known_first_sample() {
+        // A segment that starts before the first frame and has no frame in front of it in the read
+        // fills from its In point. When the probe reports no start of the stream, that frame can
+        // be the first sample, and a stream without a known start bounds no silence in front of it.
+        let gaps = [audio_gap(None, "80")];
+        let segment = [seconds_boundary("10", "90")];
+        plan_gaps(ExportStreams::VideoAndAudio, None, &segment, &gaps).unwrap();
+        assert_eq!(
+            plan_gaps(ExportStreams::VideoAndAudio, Some("0"), &segment, &gaps).unwrap_err(),
+            ExportErrorCode::AudioGapTooLong
+        );
+        // A frame in front of the In point shows audio in front of it, without a known start too:
+        // [50, 110) fills 50 s from its In point, and [30, 110) fills 70 s.
+        let behind_a_frame = [audio_gap(None, "0"), audio_gap(Some("5.02"), "100.011")];
+        plan_gaps(
+            ExportStreams::VideoAndAudio,
+            None,
+            &[seconds_boundary("0", "5"), seconds_boundary("50", "110")],
+            &behind_a_frame,
+        )
+        .unwrap();
+        assert_eq!(
+            plan_gaps(
+                ExportStreams::VideoAndAudio,
+                None,
+                &[seconds_boundary("30", "110")],
+                &behind_a_frame,
+            )
+            .unwrap_err(),
+            ExportErrorCode::AudioGapTooLong
+        );
+        // A gap behind a frame of the segment counts without a known start.
+        assert_eq!(
+            plan_gaps(
+                ExportStreams::VideoAndAudio,
+                None,
+                &segment,
+                &[audio_gap(None, "10"), audio_gap(Some("15"), "80")],
+            )
+            .unwrap_err(),
+            ExportErrorCode::AudioGapTooLong
+        );
+        // A stream that holds no packets is read by no chain, so its gaps count nothing.
+        let mut probe = probe_with_audio_extent(Some("0"), Some("200"));
+        probe.audio.as_mut().unwrap().holds_no_packets = true;
+        plan_streams_with_gaps(
+            ExportStreams::VideoAndAudio,
+            &segment,
+            &probe,
+            &sample_preset(),
+            valid_path_facts(),
+            &[audio_gap(Some("15"), "80")],
+        )
+        .unwrap();
     }
 
     // -- an audio stream that holds no packets -----------------------------------------------
