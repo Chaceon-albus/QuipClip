@@ -4,6 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 014, ADR 016, ADR 023, ADR 024, ADR 025
+- Amended by: ADR 043
 
 ## Context
 
@@ -48,6 +49,8 @@ test compares them with the Rust names.
   change, the plan refused a stream without packets and without a sample rate, as in MPEG-TS,
   with `sourceAudioRateUnknown`. `videoAndAudio` writes silence for a stream without packets when
   the stream has a sample rate.
+- (Added on 2026-10-03.) `videoAndAudio` with audio that its chains read from the stream runs two
+  processes (ADR 043). `videoOnly` and `audioOnly` stay one process.
 
 ### The command
 

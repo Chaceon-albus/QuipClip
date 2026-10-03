@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 027
+- Amended by: ADR 027, ADR 043
 
 ## Context
 
@@ -47,6 +47,10 @@ The wait has to cover one poll of the cancel flag by the export supervisor, the 
 reap of the `ffmpeg` child, the join of its two pipe reader threads, and the deletion of the
 reserved temporary file. That sum is well under one second. Five seconds is far above it and is
 still short enough that a quit reads as a quit.
+
+(Added on 2026-10-03.) An export with video and audio runs two `ffmpeg` children (ADR 043). The
+supervisor kills and reaps both on the cancel, and joins the reader threads of both, within the
+same budget.
 
 The budget is a limit, not a wait for completion. An exit that can be delayed without limit is
 worse than an orphaned process, because only the user can end it, and the window is already

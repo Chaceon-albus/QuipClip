@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-04
 - Deciders: capric98
-- Amended by: ADR 023, ADR 036, ADR 040
+- Amended by: ADR 023, ADR 036, ADR 040, ADR 043
 
 ## Context
 
@@ -538,7 +538,10 @@ counts only the segments that reach the sample.) At the bound, the fill alone to
 48000 Hz 5.1. A video-only export reads no audio. The probe reports only where the stream starts,
 so the bound does not apply to a gap inside the stream. This bound does not cover the decoded
 video that waits for the first audio frame (measurement 21). A second input of the source removes
-that wait; see "The graph shape".
+that wait; see "The graph shape". (Changed on 2026-10-03: ADR 043 writes the audio of an export
+with video in a second process, where every chain that reads the stream ends in `apad`. So the sum
+counts only the segments that reach the first sample, in every export, and no export waits for
+the first audio frame with decoded video.)
 
 (Changed on 2026-10-02.) The video chain no longer ends in `format=yuv420p`. One chain at the
 start of the graph text sets the pixel format of the joined video, and `concat` writes `[vc]`:
@@ -633,6 +636,11 @@ measurement 23), so that plan uses
 the third shape. A plan whose audio neither starts late nor ends before a segment does has no
 second input and does not change. Below the threshold the wait stays: at 3840x2160 and 60 fps,
 0.5 s of decoded video is about 370 MB with 8-bit samples, and about 750 MB with 10-bit samples.
+
+(Changed on 2026-10-03.) ADR 043 replaces the second input, its three conditions, the threshold of
+0.5 s and the third shape. An export with video and with audio that its chains read from the stream
+takes its audio from a second process. The graph of the encoder then has no audio input. Each of
+the two processes chooses between the two shapes on its own.
 
 A larger export needs the graph off the command line. That syntax exists as
 `-/filter_complex <file>` in FFmpeg 7.1 and later. The capability probe already reads the
@@ -730,7 +738,7 @@ audio, the plan also uses the values of the probe.
 The plan does not read a stream without packets. With video, each audio chain generates the
 silence of its segment, at the source rate, with the `aformat` of every other chain (see "The
 command"). The plan opens no second input for the audio, and it does not bound the silence in
-front of the first sample. The plan refuses an audio-only export with `sourceHasNoAudio` (ADR
+front of the first sample. (Changed on 2026-10-03: such a plan stays one process, ADR 043.) The plan refuses an audio-only export with `sourceHasNoAudio` (ADR
 036), because that export would write only silence. When the export writes video, the plan still
 refuses a stream without a sample rate with `sourceAudioRateUnknown`.
 
@@ -759,7 +767,9 @@ refuse the export first for what the read found.
   stays unbounded. It took 900 MiB for 575 s of 48000 Hz 5.1 audio after the end of the stream.
   `apad` in
   every chain removes this cost too, but the command line at the cap has no room for it. A later
-  unit can add `apad` to every chain of a command that fits the budget.
+  unit can add `apad` to every chain of a command that fits the budget. (Changed on 2026-10-03:
+  the audio process of ADR 043 ends every chain in `apad` and a cut to its length, so `concat`
+  pads only the rounding of a frame.)
 - (Added on 2026-10-02.) Until the first audio frame of an input arrives, FFmpeg keeps each
   decoded video frame of that input in memory (measurement 21). A segment that starts long
   before the first sample therefore needs memory in proportion to that time and to the size of
@@ -774,12 +784,16 @@ refuse the export first for what the read found.
   - a probe that reports no length of the audio, so the conditions at its end do not apply;
   - a seek into a gap inside the audio stream, which the probe does not report;
   - a wait shorter than 0.5 s.
+
+  (Changed on 2026-10-03: ADR 043 removes the wait in each of these cases, because the graph of the
+  encoder reads no audio input.)
 - (Added on 2026-10-02.) An export that writes audio runs FFprobe twice before FFmpeg starts
   (measurement 24). The second run reads the file up to the first audio packet. On a slow disk or
   a share, a source whose audio starts late can make that read last up to the probe timeout of
   30 s. Preparation then lasts up to 60 s. A cancel stops the read. When the read fails, the plan
   uses the values of the probe. The two decisions that read the audio start then do not apply, as
   before this change. They are the bound of measurement 21 and the second input of measurement 22.
+  (Changed on 2026-10-03: ADR 043 removes the second input, so only the bound reads the start.)
   Since the pad of measurement 23, the expected duration of an audio-only export (ADR 036) does not
   read the start. (Changed on 2026-10-02: a source whose probe reports no sample rate runs FFprobe
   three times, measurement 25, so its preparation lasts up to 90 s.)
@@ -787,7 +801,8 @@ refuse the export first for what the read found.
   file to its end. The measured reads took 0.09 s for 600 MB in the page cache. On a slow disk or
   a share, a large file can make the read reach the probe timeout of 30 s. The plan then reads
   the stream, and FFmpeg keeps the decoded video until the end of the file, as before measurement
-  26.
+  26. (Changed on 2026-10-03: the audio process of ADR 043 then reads the stream to its end, and
+  the encoder keeps no video for it.)
 - (Added on 2026-10-02.) A read error that no demuxer reports ends the read of the first packet
   as the end of the file does, with no stderr. When the container records no audio, the plan then
   takes a stream with audio for an empty stream. The export then writes silence for that stream.

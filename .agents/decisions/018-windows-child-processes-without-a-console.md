@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-20
 - Deciders: capric98
+- Amended by: ADR 043
 
 ## Context
 
@@ -21,7 +22,8 @@ QuipClip starts many short child processes:
   candidate encoders. A first probe is therefore up to fifteen processes. A start that hits
   the cache is one process, because the cache lookup returns before `-encoders`.
 - A media import runs one `ffprobe`.
-- An export runs one `ffmpeg`.
+- An export runs one `ffmpeg`. (Changed on 2026-10-03: an export with video and audio runs two,
+  ADR 043. Both start through the constructor below.)
 
 Each of those processes showed a console window. A first probe flashes up to fifteen windows
 during startup. This looks like a fault in the application.

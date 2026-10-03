@@ -63,6 +63,7 @@ document summarizes them and shows how the parts fit together.
 | [`040-preset-schema-2-encoder-options.md`](../.agents/decisions/040-preset-schema-2-encoder-options.md)                                     | Encoder options, constant quality and a pixel format in each preset        |
 | [`041-test-a-preset-on-this-machine.md`](../.agents/decisions/041-test-a-preset-on-this-machine.md)                                         | A preset can be tested on this machine with its own arguments              |
 | [`042-mark-a-release-as-a-pre-release.md`](../.agents/decisions/042-mark-a-release-as-a-pre-release.md)                                     | The maintainer marks a published release as a pre-release                  |
+| [`043-write-the-audio-in-a-second-process.md`](../.agents/decisions/043-write-the-audio-in-a-second-process.md)                             | The audio of an export with video comes from a second `ffmpeg`, by a pipe  |
 
 ## Shape
 
@@ -261,7 +262,7 @@ ffmpeg 9.0.1. ADR 016 adds the orchestration. The renderer is written, and `star
 `reveal_export_output` shows the file that the run wrote in the file manager. It takes the
 run identifier, never a path (ADR 029).
 
-One `ffmpeg` process writes one output. One `-copyts`, placed once before the first input,
+One export writes one output. One `-copyts`, placed once before the first input,
 keeps the raw source PTS visible to the filter graph on every input. The renderer seeks each
 input to `inPts * videoTimeBase - formatStartTime - SEEK_MARGIN_SECONDS`, clamps that value
 at zero, and omits `-ss` when the result is zero. Each segment chain cuts with `trim` and
@@ -271,10 +272,18 @@ in front of `asplit`, because the chains share one input link. Each chain then r
 timestamps to its In point, fills a late start or a gap of the audio with silence, and
 normalizes the streams (ADR 014 measurement 20). The fill holds its silence in memory, so the
 plan refuses segments that need more than 60 s of silence in total before the first audio sample
-(`audioGapTooLong`, measurement 21). An export with video pads the audio of its last chain with
-silence to the length of the segment. An export without video pads the audio of each chain in the
-same way. A segment that the audio of the source does not reach then gets silence (measurement
-23). The chains end in `concat`, in project array order.
+(`audioGapTooLong`, measurement 21). Every audio chain that reads the stream pads its audio with
+silence to the length of the segment. In the audio process below, each chain also cuts its audio
+to that length. A segment that the audio of the source does not reach then gets silence
+(measurement 23). The chains end in `concat`, in project array order.
+
+An export with video and with audio from the stream runs two `ffmpeg` processes (ADR 043). The
+audio process cuts the audio of each segment and writes it as WAV to its stdout. The encoder cuts
+the video, reads that WAV stream as `pipe:0`, and maps it past its graph. Each graph has a stand-in
+for the half of the other process, so that `concat` places each segment as one process would. The
+graph of the encoder has no audio input, so FFmpeg never keeps decoded video while it waits for
+audio that comes late, never, or after a gap. An export without video, an export without audio, and
+an export whose audio stream holds no packets stay one process.
 
 The export probes the source again before it plans. The probe analyzes about the first 5 s of the
 file, so it misses a later audio start in MKV, MPEG-TS and MPEG-PS. An export that writes audio
@@ -287,14 +296,9 @@ stream holds no packets. An export with video then generates the silence of each
 `anullsrc` and reads no input for the audio. The plan refuses an audio-only export with
 `sourceHasNoAudio` (measurement 26).
 
-The renderer has three graph shapes. It opens one input for each segment while the assembled
-command line stays inside the platform budget. It otherwise opens one input, seeks once, and
-divides that input with `split` and `asplit`. When the source audio starts more than 0.5 s
-after the container, or an input starts to read near or after its end, or a segment with another
-behind it ends near or after its end, every segment takes its audio from a second input with
-the same seek. FFmpeg then does not keep the decoded video until
-the audio arrives (ADR 014 measurement 22). When the second shape with that input does not fit,
-a third shape drops it.
+The renderer has two graph shapes, and each process chooses its own. It opens one input for each
+segment while the assembled command line stays inside the platform budget. It otherwise opens one
+input, seeks once, and divides that input with `split` or `asplit`.
 
 The final `aformat` of each audio chain takes its sample rate and its channel layout from the
 preset (ADR 023). The value `source` selects the rate of the source stream, or omits the

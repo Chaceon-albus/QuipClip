@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 036, ADR 041
+- Amended by: ADR 036, ADR 041, ADR 043
 
 ## Context
 
@@ -141,6 +141,11 @@ the output file of ADR 036 decides success: a progress block must exist, FFprobe
 audio stream and no video stream, and the duration must match. That check also catches the
 empty file of a missing `-y`, because FFprobe cannot read an empty file. It runs before the
 second cancel check and before `publishing`, so a failed check publishes nothing.
+
+(Added on 2026-10-03.) An export with video and audio runs two processes (ADR 043). It succeeds
+only when both exit successfully, and the frame count of the encoder decides success as before. A
+failure of either process fails the export with `ffmpegProcessFailed`, and the other process is
+killed at once.
 
 ### A cancel during preparation names the slot, not the run
 
