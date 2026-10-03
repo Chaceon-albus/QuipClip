@@ -356,6 +356,53 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
     from the start of the video wrote 80.000 s against an expected 80.000 s. Before this change,
     the plan refused each of these exports with `sourceAudioRateUnknown`.
 
+26. (Added on 2026-10-02.) An audio stream can hold no packets. FFmpeg 9.0.2 on macOS made such
+    sources from 30 fps H.264 sources with AAC. A stream copy dropped every audio packet. The
+    `matroska` muxer kept the empty track, and the `mp4` muxer dropped it. For an MKV source of
+    120 s, the probe reported the start of the container, 0 s, as the start of the track. It
+    reported a `duration_ts` of 120 s. The `DURATION` tag of the track was `00:00:00.000000000`. In
+    MPEG-TS, the probe reported a sample rate of 0, as in measurement 25.
+
+    The read of the first packet of measurement 24 exited 0, listed the stream and no packet, and
+    wrote nothing to stderr. It took 0.05 s for a file of 30 MB and 0.09 s for a file of 600 MB,
+    with the files in the page cache. The same answer can come from a stream that holds audio.
+    FFprobe ends its read at a read error in the same way as at the end of the file, and it exits
+    0 in both cases. An MKV source with audio from 60 s, truncated to 3 MB, gave exit 0 and no
+    packet. It wrote `File ended prematurely` to stderr. Its `DURATION` tag still held the end of
+    the track, `00:02:00.021000000`, because the muxer of FFmpeg writes the tags near the start of
+    the file. An index that names no stream gave exit 0, no packet, an empty list of streams, and
+    no stderr. The `nb_frames` of the audio track of an MP4 source counted its packets, 5626.
+
+    The plan read the empty track as audio that covers the whole file. The graph waited for the
+    first audio frame, which did not come before the end of the file. FFmpeg kept the decoded video
+    until then. This chain generates the silence of the segment and reads no input:
+
+    ```
+    anullsrc=r=<sourceRate>:cl=<layout>,atrim=end_sample=<out - in>,
+         aformat=f=fltp:r=<outputRate>[:cl=<layout>][a<i>]
+    ```
+
+    The table gives the peak memory of an MP4 export with libx264 and AAC, in MiB:
+
+    | Source and segments | Read the track | Generate silence |
+    | --- | --- | --- |
+    | 640x360, stereo, [0, 5), one input for each segment | 1416 | 65 |
+    | 640x360, stereo, [0, 5) then [60, 70), one input for each segment | 2169 | 75 |
+    | The same, one input | 1418 | 65 |
+    | 640x360, 5.1, the source rate and layout, [0, 5) | 1416 | 64 |
+    | 1280x720, 600 s, [0, 5) then [590, 600), one input for each segment | not run | 189 |
+
+    In each pair, the decoded video and the decoded audio of the two outputs were identical by MD5.
+    The two shapes also gave identical outputs. Each audio track had the planned length and the
+    rate and the layout of the preset, and its maximum volume was −91 dB. The measurement did not
+    run the case at 1280x720 with the old chain, because that chain keeps the decoded video of the
+    whole file.
+
+    A preset of 24 fps on the 30 fps source, with [0, 1.1) then [60, 61.3), gave identical video.
+    The audio of the old chain lasted 2.383 s, because `concat` padded the first segment to the
+    length of its video, 26 frames. The new chain gave 2.400 s, the sum of the two segments. A
+    source with audio gave 2.400 s too.
+
 ## Decision
 
 ### The boundary mechanism
@@ -465,6 +512,18 @@ of 12 digits, the widest plan measures 31547 bytes at the cap. Then 196 bytes of
 budget stay free.
 In every chain, the filters would cost up to 3800 bytes at the cap, and the budget does not have
 them. The widest plan without video measures 21323 bytes at the cap.
+
+(Changed on 2026-10-02.) Each audio chain of a stream that holds no packets generates the silence
+of its segment and reads no input (measurement 26):
+
+```
+anullsrc=r=<sourceRate>:cl=<layout>,atrim=end_sample=<out - in>,
+     aformat=f=fltp:r=<outputRate>[:cl=<layout>][a<i>];
+```
+
+`<out - in>` is the length that `apad` gives a chain that reads the stream, and the last
+`aformat` is the same. The single-input shapes split only the video. The chain is shorter than a
+chain that reads the stream, so the widest plan of the budget does not change.
 
 (Changed on 2026-10-02.) The plan refuses an export that writes audio when the parts of its
 segments before the first sample of the source audio add up to more than 60 s (measurement 21).
@@ -638,6 +697,8 @@ does not change the plan.)
 The read uses the runner, the deadline and the cancel flag of the probe of an export output
 (ADR 036). When the read cannot start, fails, finds no packet, or does not finish in time, the plan
 uses the values of the probe, and the export continues. A cancel ends the run.
+(Changed on 2026-10-02: a read that finds no packet and reports no error can now mark a stream
+without packets. See the paragraph on a stream without packets below.)
 
 The start can be early by the priming of the encoder, which is 21 ms for AAC at 48 kHz. The read
 does not correct a sample rate of 0. It does not run when the probe reports no sample rate, because
@@ -653,6 +714,36 @@ no positive rate, or does not finish in time, the rate stays unknown. The plan t
 audio with `sourceAudioRateUnknown`, as before. A cancel ends the run. The export reads the first
 packet of a stream without a rate only in MPEG-TS and MPEG-PS, the demuxers `mpegts` and `mpeg`.
 In another container, the reads cannot give the rate, and the plan refuses the audio at once.
+
+(Added on 2026-10-02.) The read of the first packet marks a stream without packets when all of
+these conditions are true (measurement 26):
+
+- The read lists the stream and lists no packet.
+- The read writes nothing to stderr.
+- The container records no audio for the stream. The container records audio when `nb_frames` is
+  above 0, or when the `DURATION` tag lies after zero.
+
+A read that lists no packet and writes to stderr counts as a read that failed. So does a read
+that lists no stream. The plan then uses the values of the probe. When the container records
+audio, the plan also uses the values of the probe.
+
+The plan does not read a stream without packets. With video, each audio chain generates the
+silence of its segment, at the source rate, with the `aformat` of every other chain (see "The
+command"). The plan opens no second input for the audio, and it does not bound the silence in
+front of the first sample. The plan refuses an audio-only export with `sourceHasNoAudio` (ADR
+036), because that export would write only silence. When the export writes video, the plan still
+refuses a stream without a sample rate with `sourceAudioRateUnknown`.
+
+The silence takes the layout that the preset names. When the preset keeps the layout of the
+source, the silence takes the layout that the probe reports. That name must have at most 32
+bytes, and only letters, digits and `.()+-_`. Otherwise, for 1 to 8 channels, the silence takes
+`<channels>c`, the default layout of that count. For other counts, and for an unknown count, it is
+stereo. FFmpeg 4.3 to 5.0 have no default layout for most larger counts, and FFmpeg 9.0.2 refuses
+`64c`.
+
+The export reads the cancel flag again after the reads of the audio and before the plan. A cancel
+that arrives at the end of the last read therefore ends the run as canceled. The plan does not
+refuse the export first for what the read found.
 
 ## Consequences
 
@@ -692,6 +783,27 @@ In another container, the reads cannot give the rate, and the plan refuses the a
   Since the pad of measurement 23, the expected duration of an audio-only export (ADR 036) does not
   read the start. (Changed on 2026-10-02: a source whose probe reports no sample rate runs FFprobe
   three times, measurement 25, so its preparation lasts up to 90 s.)
+- (Added on 2026-10-02.) For a stream without packets, the read of the first packet reads the
+  file to its end. The measured reads took 0.09 s for 600 MB in the page cache. On a slow disk or
+  a share, a large file can make the read reach the probe timeout of 30 s. The plan then reads
+  the stream, and FFmpeg keeps the decoded video until the end of the file, as before measurement
+  26.
+- (Added on 2026-10-02.) A read error that no demuxer reports ends the read of the first packet
+  as the end of the file does, with no stderr. When the container records no audio, the plan then
+  takes a stream with audio for an empty stream. The export then writes silence for that stream.
+  The muxer of FFmpeg writes a `DURATION` tag near the start of an MKV file. An MP4 file counts
+  its packets. So this fault needs a file that has neither. Older versions of mkvmerge write
+  `DURATION-eng` and `NUMBER_OF_FRAMES-eng`, and the check does not read these tags.
+- (Added on 2026-10-02.) The read writes to stderr when a decoder reports an error during the
+  analysis of the start of the file, for example on H.264 that starts at a frame that is not a
+  keyframe. A stream without packets in such a file counts as a read that failed. The plan then
+  reads the stream, and FFmpeg keeps the decoded video until the end of the file, as before
+  measurement 26.
+- (Added on 2026-10-02.) The preset can set a frame rate that differs from the source. Then the
+  silence of a stream without packets follows the rule of a chain that reads audio. Each segment
+  lasts its length in ticks. The old chain gave the length of its video to each segment that
+  another segment follows. The two differ by less than one frame for each such segment
+  (measurement 26).
 - (Added on 2026-10-02.) An MPEG-TS source whose audio starts more than about 5 s late still has
   no sample rate in the probe (measurement 22). The plan refuses its audio with
   `sourceAudioRateUnknown`, and only a video-only export of it works. The export does not read the

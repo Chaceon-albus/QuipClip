@@ -282,6 +282,10 @@ therefore also reads the first packet of the audio stream, and the plan takes a 
 it. When that read fails, the plan uses the probe, and the export continues (ADR 014 measurement
 24). In MPEG-TS and MPEG-PS, the probe also reports no sample rate for such audio. The export then
 reads the rate again from the position of that packet (measurement 25).
+When that read lists no packet and reports no error, and the container records no audio, the
+stream holds no packets. An export with video then generates the silence of each segment with
+`anullsrc` and reads no input for the audio. The plan refuses an audio-only export with
+`sourceHasNoAudio` (measurement 26).
 
 The renderer has three graph shapes. It opens one input for each segment while the assembled
 command line stays inside the platform budget. It otherwise opens one input, seeks once, and

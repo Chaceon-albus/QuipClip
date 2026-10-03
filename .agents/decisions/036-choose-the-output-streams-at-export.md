@@ -43,6 +43,11 @@ test compares them with the Rust names.
   60 s of silence in total before the first sample of the audio, with `audioGapTooLong` (ADR 014
   measurement 21). `audioOnly` counts only the segments that reach the first sample. `videoOnly`
   reads no audio, so the video of such segments still exports.
+- (Added on 2026-10-02.) `audioOnly` refuses a source whose audio stream holds no packets with
+  `sourceHasNoAudio` (ADR 014 measurement 26), because it would write only silence. Before this
+  change, the plan refused a stream without packets and without a sample rate, as in MPEG-TS,
+  with `sourceAudioRateUnknown`. `videoAndAudio` writes silence for a stream without packets when
+  the stream has a sample rate.
 
 ### The command
 
