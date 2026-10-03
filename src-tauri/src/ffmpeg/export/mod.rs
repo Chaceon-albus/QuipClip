@@ -161,8 +161,8 @@ impl ExportStreams {
 /// require that work, and this crate does not do it.
 pub const MAX_EXPORT_SEGMENTS: usize = 100;
 
-/// The longest silence, in whole seconds, that the segments of an export may need in front of
-/// the first sample of the source audio stream, all together.
+/// The longest silence, in whole seconds, that the segments of an export may need FFmpeg to
+/// hold in memory in front of the first sample of the source audio stream, all together.
 ///
 /// The part of a segment before that sample becomes silence. When the segment reaches the
 /// sample, the audio chain fills that part (`graph::audio_chain`), and FFmpeg holds the whole
@@ -170,11 +170,32 @@ pub const MAX_EXPORT_SEGMENTS: usize = 100;
 /// AAC audio, at this bound: 95 MiB on 48000 Hz stereo, 215 MiB on 48000 Hz 5.1, and 532 MiB on
 /// 96000 Hz 7.1. The plan refuses more with [`ExportErrorCode::AudioGapTooLong`].
 ///
-/// A segment that ends at or before the sample needs no fill. The end pad of its chain
-/// (`graph::audio_end_pad`) writes its silence frame by frame, and holds none of it (ADR 014
-/// measurement 23). Every audio chain carries that pad since the audio has its own process
-/// (ADR 043), so such a segment counts nothing toward this bound.
+/// A segment with a silence prefix ([`PlannedSegment::audio_prefix`]) gets most of that silence
+/// streamed, and only the rest counts. A segment that ends at or before the sample needs no fill
+/// either. The end pad of its chain (`graph::audio_end_pad`) writes its silence frame by frame,
+/// and holds none of it (ADR 014 measurement 23). Every audio chain carries that pad since the
+/// audio has its own process (ADR 043), so such a segment counts nothing toward this bound.
 pub const MAX_LEADING_AUDIO_SILENCE_SECONDS: i64 = 60;
+
+/// The silence, in milliseconds, that a silence prefix leaves in front of the first audio
+/// packet of its segment, for the fill of the chain to close (ADR 014 measurement 27).
+///
+/// The prefix ends before the first packet, and the fill (`graph::audio_gap_fill`) writes the
+/// rest from the real timestamp of the first decoded sample. The fill writes silence only for a
+/// gap of more than 0.1 s, so the cut stays exact while the first decoded sample lies at most
+/// 0.15 s before the start that the plan reads. That start is the first packet or the start that
+/// the probe reports, and the first decoded sample lies at it or after it, by the priming of the
+/// encoder, which is at most 2112 samples, 48 ms at 44100 Hz. The fill holds this margin in
+/// memory, so it counts toward [`MAX_LEADING_AUDIO_SILENCE_SECONDS`].
+pub const AUDIO_PREFIX_MARGIN_MILLISECONDS: i64 = 250;
+
+/// The most segments of one export that get a silence prefix ([`PlannedSegment::audio_prefix`]).
+///
+/// A prefix costs about 120 bytes of the command line of its process, and the command at
+/// [`MAX_EXPORT_SEGMENTS`] has not that much for every segment. The segments with the longest
+/// silence in front of the first sample get the prefixes. Any other segment fills its silence
+/// in memory, and that counts toward [`MAX_LEADING_AUDIO_SILENCE_SECONDS`].
+pub const MAX_AUDIO_PREFIXES: usize = 16;
 
 /// The seek margin ADR 014 selects, in whole seconds.
 ///
@@ -254,6 +275,17 @@ pub struct PlannedSegment {
     /// pads the audio of the segment to the length of its video, as it does in the encoder (ADR
     /// 043).
     pub frames: Option<u64>,
+    /// The number of samples of silence, at [`PlannedAudio::sample_rate`], that the audio chain
+    /// of this segment generates in front of the audio it reads, or `None` for no prefix.
+    ///
+    /// [`plan::build_plan`] gives a prefix to a segment that starts at least 1 s plus
+    /// [`AUDIO_PREFIX_MARGIN_MILLISECONDS`] before the first sample of the source audio and reaches
+    /// that sample, to at most [`MAX_AUDIO_PREFIXES`] segments, and only for a stream of at most
+    /// 192000 Hz whose layout is not ambisonic or `binaural`, which the mono silence of the prefix
+    /// cannot be converted to. The prefix is the time from the In point to the first sample, less
+    /// the margin. The fill of the chain holds its silence in memory, and the prefix streams it
+    /// instead (`graph::audio_silence_prefix`, ADR 014 measurement 27).
+    pub audio_prefix: Option<i64>,
 }
 
 /// The video part of a plan: the stream it reads, how the output frames are timed and sized,

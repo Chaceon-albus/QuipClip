@@ -30,7 +30,9 @@
 //! - Every audio chain **starts its audio at the segment's In point**, not at its first
 //!   sample: it subtracts the In tick, and an `aresample` fills a late start and a gap with
 //!   silence. A source whose audio starts after the In point otherwise plays early against its
-//!   video; see [`audio_chain`] for the measurement.
+//!   video; see [`audio_chain`] for the measurement. A chain whose segment starts long before
+//!   the first sample generates most of that silence as a prefix instead, which streams; see
+//!   [`audio_silence_prefix`].
 //! - Every audio chain that `concat` does not pad **ends at the segment's length**: the last
 //!   chain of a graph with video, and every chain of a graph without video, pad their audio with
 //!   silence to the planned tick length. A segment that lies wholly before the first audio sample
@@ -331,6 +333,7 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
                 audio_inputs[index],
                 index,
                 ticks[index],
+                segment.audio_prefix,
                 end,
             ));
         }
@@ -453,6 +456,7 @@ pub fn build_audio_graph(plan: &ExportPlan, shape: GraphShape) -> String {
             audio_inputs[index],
             index,
             ticks[index],
+            segment.audio_prefix,
             ChainEnd::Exact,
         ));
     }
@@ -666,6 +670,9 @@ fn audio_gap_fill(audio: &PlannedAudio) -> String {
 /// `PTS+<magnitude>` for a negative tick, which ADR 002 permits (see
 /// [`PlannedSegment::audio_in_tick`]).
 ///
+/// A chain with a silence prefix passes the In tick plus the prefix, so that its audio starts
+/// where the prefix ends ([`audio_chain`]).
+///
 /// The tick is the plan's [`PlannedSegment::audio_in_tick`], the same number `atrim` cuts at,
 /// in the unit the input link counts in, which [`audio_input_pin`] holds at the source rate.
 /// ffmpeg evaluates the expression in double precision, as it evaluated `PTS-STARTPTS`, and
@@ -776,7 +783,9 @@ enum ChainEnd {
 
 /// Render one segment's audio chain, from its input link to its `[a<index>]` output label:
 /// the cut, the timestamp reset, the gap fill, the end that `end` names, and the output
-/// format.
+/// format. With a silence prefix, the reset moves the audio by the prefix as well, a `concat`
+/// joins the prefix in front of it, and `asettb` stands in front of the fill; see
+/// [`audio_silence_prefix`].
 ///
 /// Under [`GraphShape::InputPerSegment`] this chain starts at an input link, so it carries
 /// [`audio_input_pin`] itself. Under [`GraphShape::SingleInput`] it starts behind `asplit`,
@@ -829,6 +838,7 @@ fn audio_chain(
     input: Option<usize>,
     index: usize,
     ticks: (i64, i64),
+    prefix: Option<i64>,
     end: ChainEnd,
 ) -> String {
     let source = match input {
@@ -837,7 +847,6 @@ fn audio_chain(
     };
     let (in_tick, out_tick) = ticks;
     let head = format!("{source}atrim=start_pts={in_tick}:end_pts={out_tick}");
-    let reset = audio_timestamp_reset(in_tick);
     let fill = audio_gap_fill(audio);
     let pad = match end {
         ChainEnd::Open => String::new(),
@@ -845,7 +854,59 @@ fn audio_chain(
         ChainEnd::Exact => format!(",{}", audio_exact_end(in_tick, out_tick)),
     };
     let format = audio_output_format(audio);
-    format!("{head},{reset},{fill}{pad},{format}[a{index}]")
+    match prefix {
+        None => {
+            let reset = audio_timestamp_reset(in_tick);
+            format!("{head},{reset},{fill}{pad},{format}[a{index}]")
+        }
+        // The audio that the chain reads starts the prefix later, and `concat` puts the prefix in
+        // front of it, so its first sample keeps its place behind the In point. `concat` writes its
+        // timestamps in microseconds, and `asettb` gives them back the time base of one sample
+        // before the fill reads them; see `audio_silence_prefix`.
+        Some(prefix) => {
+            let reset = audio_timestamp_reset(in_tick.saturating_add(prefix));
+            let silence = audio_silence_prefix(audio, index, prefix);
+            let rate = audio.sample_rate;
+            format!(
+                "{silence};{head},{reset}[r{index}];\
+                 [q{index}][r{index}]concat=n=2:v=0:a=1,asettb=1/{rate},{fill}{pad},{format}\
+                 [a{index}]"
+            )
+        }
+    }
+}
+
+/// Render the silence prefix of one segment ([`PlannedSegment::audio_prefix`]): `prefix` samples
+/// of silence at [`PlannedAudio::sample_rate`], from no input, to the `[q<index>]` label.
+///
+/// [`audio_chain`] joins it in front of the audio it reads, with a `concat` of its own, and the
+/// gap fill ([`audio_gap_fill`]) behind that `concat` closes the rest of the silence, from the end
+/// of the prefix to the first decoded sample. The fill writes all of its silence at once and holds
+/// it in memory: 1556 MiB for 600 s of 48000 Hz 5.1 audio in front of the first sample. The prefix
+/// writes one frame when the filter behind it asks for one, so the same chain took 29 MiB, and its
+/// samples were identical (ADR 014 measurement 27).
+///
+/// The silence is mono, and a bare `aresample` converts it to the layout and the sample format
+/// that `concat` negotiates with the audio of the stream. So the prefix needs no layout name, and
+/// the audio of the stream is never converted for it: the measurement found the samples identical
+/// for stereo, 5.1 and a 6-channel stream without a layout name. The fill must stay behind the
+/// `concat`. In front of it, on the audio of the stream, it can convert as freely as the prefix,
+/// and `concat` then took the mono layout of the prefix for a chain that keeps the layout of the
+/// source.
+///
+/// `concat` writes its timestamps in microseconds, and the fill reads a timestamp as samples by
+/// truncation. On 44100 Hz audio, and on In points that are not whole milliseconds, the rounding to
+/// microseconds then put the audio one sample early. `asettb=1/<rate>` between the two rounds the
+/// timestamps back to whole samples. The error of `concat` is at most about 1.5 microseconds, so
+/// the rounding is exact below about 333 kHz, and the plan gives no prefix to a faster stream.
+///
+/// `aresample` cannot convert mono to an ambisonic layout or to `binaural`, so the plan gives no
+/// prefix to a stream of such a layout (see `plan`).
+fn audio_silence_prefix(audio: &PlannedAudio, index: usize, prefix: i64) -> String {
+    format!(
+        "anullsrc=r={}:cl=mono,aresample,atrim=end_sample={prefix}[q{index}]",
+        audio.sample_rate
+    )
 }
 
 /// Render the audio chain of one segment of an audio stream that holds no packets: the silence of
@@ -966,6 +1027,7 @@ mod tests {
             audio_out_tick: Some(audio_out_tick),
             // 25 frames per second at the time base of 1/12800: one frame is 512 ticks.
             frames: Some(u64::try_from((out_pts - in_pts) / 512).unwrap()),
+            audio_prefix: None,
         }
     }
 
@@ -1147,6 +1209,57 @@ mod tests {
                 "asetpts=N,aformat=f=fltp:r=48000:cl=stereo[a1];",
                 "[pv0][a0][pv1][a1]concat=n=2:v=1:a=1[pv][a]",
             )
+        );
+    }
+
+    #[test]
+    fn a_silence_prefix_streams_in_front_of_the_audio_it_shifts_in_both_shapes() {
+        // Segment 1 gets 0.25 s of prefix: the silence from no input, then the audio of the
+        // stream with its timestamps moved by the prefix, joined in front of the fill.
+        let mut plan = fixture_plan(2);
+        plan.segments[1].audio_prefix = Some(11_025);
+        let per_segment = build_audio_graph(&plan, GraphShape::InputPerSegment);
+        assert!(
+            per_segment.contains(concat!(
+                "anullsrc=r=44100:cl=mono,aresample,atrim=end_sample=11025[q1];",
+                "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,",
+                "asetpts=PTS-452025[r1];",
+                "[q1][r1]concat=n=2:v=0:a=1,asettb=1/44100,aresample=44100:first_pts=0,",
+                "apad=whole_len=21168,atrim=end_sample=21168,asetpts=N,",
+                "aformat=f=fltp:r=48000:cl=stereo[a1];",
+            )),
+            "{per_segment}"
+        );
+        let single = build_audio_graph(&plan, GraphShape::SingleInput);
+        assert!(
+            single.contains(concat!(
+                "anullsrc=r=44100:cl=mono,aresample,atrim=end_sample=11025[q1];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-452025[r1];",
+                "[q1][r1]concat=n=2:v=0:a=1,asettb=1/44100,aresample=44100:first_pts=0,",
+            )),
+            "{single}"
+        );
+        // Segment 0 has none, and its chain is the chain without a prefix.
+        assert!(per_segment.contains("asetpts=PTS-511560,aresample=44100:first_pts=0,"));
+        // The graph without video takes the same prefix, with its own end.
+        plan.video = None;
+        let audio_only = build_filter_graph(&plan, GraphShape::InputPerSegment);
+        assert!(
+            audio_only.contains(concat!(
+                "[q1][r1]concat=n=2:v=0:a=1,asettb=1/44100,aresample=44100:first_pts=0,",
+                "apad=whole_len=21168,asetpts=N,aformat=f=fltp:r=48000:cl=stereo[a1]",
+            )),
+            "{audio_only}"
+        );
+    }
+
+    #[test]
+    fn a_prefix_moves_a_negative_in_tick_by_its_length() {
+        let mut plan = fixture_plan(1);
+        plan.segments[0].audio_in_tick = Some(-20_000);
+        plan.segments[0].audio_prefix = Some(5_000);
+        assert!(
+            build_audio_graph(&plan, GraphShape::InputPerSegment).contains("asetpts=PTS+15000[r0]")
         );
     }
 

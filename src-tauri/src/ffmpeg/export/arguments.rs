@@ -662,7 +662,8 @@ fn render_seek(seek: Rational) -> Option<String> {
 mod tests {
     use super::*;
     use crate::ffmpeg::export::{
-        OutputTiming, PlannedAudio, PlannedSegment, PlannedVideo, MAX_EXPORT_SEGMENTS,
+        OutputTiming, PlannedAudio, PlannedSegment, PlannedVideo, MAX_AUDIO_PREFIXES,
+        MAX_EXPORT_SEGMENTS,
     };
     use crate::project::Resolution;
     use crate::settings::{
@@ -729,6 +730,7 @@ mod tests {
             audio_out_tick: Some(audio_out_tick),
             // 25 frames per second at the time base of 1/12800: one frame is 512 ticks.
             frames: Some(u64::try_from((out_pts - in_pts) / 512).unwrap()),
+            audio_prefix: None,
         }
     }
 
@@ -2478,6 +2480,7 @@ mod tests {
                     audio_out_tick: Some(in_tick + 4_804_800),
                     // 900900 ticks of 1/90000 s at 30000/1001 frames per second.
                     frames: Some(300),
+                    audio_prefix: None,
                 }
             })
             .collect();
@@ -2606,7 +2609,9 @@ mod tests {
     /// too, so each digit past six adds one byte for each segment, two with `source`, and one
     /// for the pin. A probed rate longer than six digits is therefore outside the measured
     /// budget. The consequence is not a wrong output: at the segment cap on Windows, the command
-    /// line can exceed the limit, and the spawn then fails and reports `ffmpegSpawnFailed`.
+    /// line can exceed the limit, and the spawn then fails and reports `ffmpegSpawnFailed`. A
+    /// silence prefix writes the rate three more times, but the plan gives none to a stream
+    /// faster than 192000 Hz, so the prefixes add nothing past six digits.
     fn widest_audio() -> PlannedAudio {
         PlannedAudio {
             stream_index: 11,
@@ -2673,6 +2678,14 @@ mod tests {
                     audio_in_tick: Some(in_tick),
                     audio_out_tick: Some(WIDEST_AUDIO_TICK),
                     frames: Some(WIDEST_FRAME_COUNT),
+                    // The last segments, as many as may have one, carry a prefix of twelve digits:
+                    // their indices have two digits, and each prefixed chain writes its index four
+                    // times. The audio after the prefix starts 12000 ticks before the Out point, so
+                    // the In tick plus the prefix keeps twelve digits, as in a real plan.
+                    audio_prefix: (usize::try_from(index).expect("the index fits")
+                        + MAX_AUDIO_PREFIXES
+                        >= count)
+                        .then_some(WIDEST_AUDIO_TICK - 12_000 - in_tick),
                 }
             })
             .collect();
@@ -2743,12 +2756,15 @@ mod tests {
         // The plan has two commands since the audio of an export with video has its own process
         // (ADR 043), and each must fit on its own. Measured at the time of writing, at the cap and
         // as `SingleInput`: the encoder needs 24735 of the 31743 available bytes, and the audio
-        // process 29477, so 7008 and 2266 bytes of slack remain, and the two fit up to 130 and
-        // 107 segments. The encoder replaced each audio chain with a stand-in silence, and it
+        // process 31413, so 7008 and 330 bytes of slack remain, and the two fit up to 130 and
+        // 101 segments. The encoder replaced each audio chain with a stand-in silence, and it
         // keeps the encoder options. The audio process carries in every chain the end pad and the
         // cut to the length of the segment (`graph::audio_exact_end`), with two twelve-digit
         // lengths, and a stand-in video for each segment, with a nine-digit frame count, and no
-        // encoder option. The audio process is therefore the command that limits the cap now.
+        // encoder option. Its last `MAX_AUDIO_PREFIXES` chains also carry a silence prefix of
+        // twelve digits (`graph::audio_silence_prefix`), about 121 bytes each: 1936 bytes, which
+        // took the audio process from 29477 bytes. The audio process is therefore the command that
+        // limits the cap, and the count of prefixes is what its slack allows.
         //
         // The history below is of the one command that carried both before ADR 043. It needed 31547
         // of the 31743 available bytes at the cap, so 196 bytes of slack remained, and 100 segments
@@ -2798,8 +2814,8 @@ mod tests {
     fn the_widest_plan_without_video_still_fits_at_the_segment_cap() {
         // A graph without video pads every audio chain (`graph::audio_end_pad`), so its growth for
         // each segment carries the pad too. It has no video chain, so it is still far below the
-        // budget: 21323 bytes at the cap, as `SingleInput`, and 151 segments fit. The assertion is
-        // one-sided for the reason the test above gives.
+        // budget: 23259 bytes at the cap, as `SingleInput`, with the sixteen silence prefixes of
+        // `widest_plan`. The assertion is one-sided for the reason the test above gives.
         let reservation = longest_windows_path(".m4a.tmp-13724-0");
         let output = Path::new(&reservation);
         let plan = widest_audio_only_plan(MAX_EXPORT_SEGMENTS);

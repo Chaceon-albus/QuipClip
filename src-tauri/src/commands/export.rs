@@ -1368,6 +1368,7 @@ mod tests {
                 audio_in_tick: None,
                 audio_out_tick: None,
                 frames: Some(30),
+                audio_prefix: None,
             }],
             container: Container::Mp4,
             total_duration: Rational::new(1, 1).unwrap(),
@@ -2922,69 +2923,51 @@ mod tests {
     }
 
     #[test]
-    fn the_corrected_audio_start_bounds_the_silence_in_front_of_it() {
-        // A segment from 0 s to 75 s needs 70 s of silence in front of audio that starts at 70 s,
-        // which is more than the 60 s bound (ADR 014 measurement 21).
-        let directory = TestDirectory::new();
-        let error = match prepare_reading_first_packet(
-            &directory,
-            ExportStreams::VideoAndAudio,
-            sample_probe_with_a_missed_audio_start(),
-            &[(0, 75)],
-            &AtomicBool::new(false),
-            first_packet_at(70),
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("70 s of silence is over the bound"),
-        };
-        assert_eq!(error.code, ExportErrorCode::AudioGapTooLong);
-        assert_eq!(leftover_reservations(&directory), 0);
+    fn the_corrected_audio_start_gives_the_segment_its_silence_prefix() {
+        // A segment from 0 s to 75 s needs 70 s of silence in front of audio that starts at 70 s.
+        // The audio chain streams all of it but the margin of 0.25 s (ADR 014 measurement 27),
+        // with and without video. The re-probe alone puts the audio at 0 s, and gives no prefix.
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            let directory = TestDirectory::new();
+            let prepared = prepare_reading_first_packet(
+                &directory,
+                streams,
+                sample_probe_with_a_missed_audio_start(),
+                &[(0, 75)],
+                &AtomicBool::new(false),
+                first_packet_at(70),
+            )
+            .unwrap();
+            assert_eq!(prepared.plan.segments[0].audio_prefix, Some(3_348_000));
+            let graph = if streams == ExportStreams::VideoAndAudio {
+                audio_graph_of(&prepared)
+            } else {
+                graph_of(&prepared)
+            };
+            assert!(
+                graph.contains("anullsrc=r=48000:cl=mono,aresample,atrim=end_sample=3348000[q0]"),
+                "{graph}"
+            );
 
-        let directory = TestDirectory::new();
-        assert!(prepare_reading_first_packet(
-            &directory,
-            ExportStreams::VideoAndAudio,
-            sample_probe_with_a_missed_audio_start(),
-            &[(0, 75)],
-            &AtomicBool::new(false),
-            first_packet_unread,
-        )
-        .is_ok());
+            let directory = TestDirectory::new();
+            let uncorrected = prepare_reading_first_packet(
+                &directory,
+                streams,
+                sample_probe_with_a_missed_audio_start(),
+                &[(0, 75)],
+                &AtomicBool::new(false),
+                first_packet_unread,
+            )
+            .unwrap();
+            assert_eq!(uncorrected.plan.segments[0].audio_prefix, None);
+        }
     }
 
     #[test]
-    fn an_audio_only_export_bounds_the_silence_in_front_of_the_corrected_start() {
-        // Without video, only a segment that reaches the first sample counts toward the bound
-        // (ADR 014 measurement 21). A segment from 0 s to 75 s reaches audio that starts at 70 s
-        // after 70 s of silence. The re-probe alone puts the audio at 0 s and bounds nothing.
-        let directory = TestDirectory::new();
-        let error = match prepare_reading_first_packet(
-            &directory,
-            ExportStreams::AudioOnly,
-            sample_probe_with_a_missed_audio_start(),
-            &[(0, 75)],
-            &AtomicBool::new(false),
-            first_packet_at(70),
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("70 s of silence is over the bound"),
-        };
-        assert_eq!(error.code, ExportErrorCode::AudioGapTooLong);
-        let directory = TestDirectory::new();
-        assert!(prepare_reading_first_packet(
-            &directory,
-            ExportStreams::AudioOnly,
-            sample_probe_with_a_missed_audio_start(),
-            &[(0, 75)],
-            &AtomicBool::new(false),
-            first_packet_unread,
-        )
-        .is_ok());
-
-        // A segment from 0 s to 65 s ends before audio that starts at 70 s. Without video it does
-        // not reach the first sample, so it counts nothing, and its chain writes 65 s of silence
-        // frame by frame (ADR 014 measurement 23). With video, `concat` can pad it in memory, so it
-        // counts in full, and 65 s is over the bound.
+    fn a_segment_that_ends_before_the_corrected_start_writes_its_silence_frame_by_frame() {
+        // A segment from 0 s to 65 s ends before audio that starts at 70 s. It does not reach the
+        // first sample, so it needs no prefix and counts nothing toward the bound: its chain writes
+        // 65 s of silence frame by frame (ADR 014 measurement 23).
         let directory = TestDirectory::new();
         let prepared = prepare_reading_first_packet(
             &directory,

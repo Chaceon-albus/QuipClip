@@ -11,7 +11,8 @@
 
 use super::{
     ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PlannedAudio, PlannedSegment,
-    PlannedVideo, MAX_EXPORT_SEGMENTS, MAX_LEADING_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
+    PlannedVideo, AUDIO_PREFIX_MARGIN_MILLISECONDS, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
+    MAX_LEADING_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::probe::{AudioProbe, MediaProbe};
 use crate::settings::{
@@ -183,13 +184,15 @@ pub enum PathFacts {
 ///     [`ExportErrorCode::SourceAudioRateUnknown`]. A video-only export never reads the
 ///     audio stream, so it skips this check.
 /// 15. The export writes audio, and the parts of the segments that reach the first sample of
-///     the source audio stream, before that sample, add up to more than
-///     [`MAX_LEADING_AUDIO_SILENCE_SECONDS`] -- [`ExportErrorCode::AudioGapTooLong`]. A segment
-///     that ends at or before the sample counts nothing, because the end pad of its chain writes
-///     its silence frame by frame, without holding it (`graph::audio_end_pad`). The sum is checked
-///     after each segment, in order, together with the conversions of its boundaries. A probe that
-///     reports no start of the stream bounds nothing, and neither does a stream that holds no
-///     packets, whose chains generate their silence frame by frame.
+///     the source audio stream, before that sample, less their silence prefixes
+///     ([`PlannedSegment::audio_prefix`]), add up to more than
+///     [`MAX_LEADING_AUDIO_SILENCE_SECONDS`] -- [`ExportErrorCode::AudioGapTooLong`]. That sum is
+///     the silence that the fills hold in memory. A segment that ends at or before the sample
+///     counts nothing, because the end pad of its chain writes its silence frame by frame, without
+///     holding it (`graph::audio_end_pad`). The sum is checked once every segment is planned,
+///     because the prefixes go to the longest silences of all segments. A probe that reports no
+///     start of the stream bounds nothing, and neither does a stream that holds no packets, whose
+///     chains generate their silence frame by frame.
 ///
 /// `destination` must be absolute for the same reason `source` must: a CWD-relative path
 /// would carry an ambiguous location into a pipeline that spawns a child process and later
@@ -415,8 +418,9 @@ pub fn build_plan(
     // The first sample of the source audio, for the bound on the silence in front of it
     // (`MAX_LEADING_AUDIO_SILENCE_SECONDS`). Only a plan that reads audio has one.
     let audio_start = source_audio.and_then(|audio| audio.start_time);
-    let max_leading_silence = max_leading_audio_silence_rational();
-    let mut leading_silence = zero;
+    // The silence in front of the first sample, for each segment that reaches that sample, in
+    // segment order. The prefixes and the bound read it once every segment is planned.
+    let mut leading_silences: Vec<Option<Rational>> = Vec::with_capacity(segments.len());
 
     let mut planned_segments = Vec::with_capacity(segments.len());
     let mut total_duration = zero;
@@ -443,23 +447,21 @@ pub fn build_plan(
             .sub(in_seconds)
             .ok_or(ExportErrorCode::InvalidSegment)?;
 
-        // The part of a segment before the first sample of the audio becomes silence. The audio
-        // chain fills it when the segment reaches that sample, and FFmpeg holds the whole fill in
-        // memory. The chains of all segments can build theirs at the same time, so the bound is on
-        // the sum. A segment that ends at or before the sample counts nothing: the end pad of its
-        // chain writes its silence frame by frame (`graph::audio_end_pad`), and every chain that
-        // reads the stream carries that pad, in an export without video and in the audio process
-        // of an export with video (ADR 043).
-        if let Some(start) = audio_start.filter(|start| *start > in_seconds && *start < out_seconds)
-        {
-            leading_silence = start
-                .sub(in_seconds)
-                .and_then(|silence| leading_silence.add(silence))
-                .ok_or(ExportErrorCode::InvalidSegment)?;
-            if leading_silence > max_leading_silence {
-                return Err(ExportErrorCode::AudioGapTooLong);
-            }
-        }
+        // The part of a segment before the first sample of the audio becomes silence. A segment
+        // that ends at or before the sample needs nothing here: the end pad of its chain writes its
+        // silence frame by frame (`graph::audio_end_pad`), and every chain that reads the stream
+        // carries that pad, in an export without video and in the audio process of an export with
+        // video (ADR 043).
+        let leading_silence =
+            match audio_start.filter(|start| *start > in_seconds && *start < out_seconds) {
+                Some(start) => Some(
+                    start
+                        .sub(in_seconds)
+                        .ok_or(ExportErrorCode::InvalidSegment)?,
+                ),
+                None => None,
+            };
+        leading_silences.push(leading_silence);
 
         let raw_seek = in_seconds
             .sub(format_start_time)
@@ -512,7 +514,34 @@ pub fn build_plan(
             audio_in_tick,
             audio_out_tick,
             frames,
+            audio_prefix: None,
         });
+    }
+
+    if let Some(audio) = &audio {
+        if source_audio.is_some_and(takes_audio_prefixes) {
+            assign_audio_prefixes(&mut planned_segments, &leading_silences, audio.sample_rate)?;
+        }
+        // What the fills of the chains hold in memory: the silence in front of the first sample,
+        // less the prefix, which streams. The chains of all segments can build their fills at the
+        // same time, so the bound is on the sum.
+        let max_leading_silence = max_leading_audio_silence_rational();
+        let mut held = zero;
+        for (segment, silence) in planned_segments.iter().zip(&leading_silences) {
+            let Some(silence) = silence else { continue };
+            let streamed = match segment.audio_prefix {
+                Some(prefix) => Rational::new(prefix, i64::from(audio.sample_rate))
+                    .ok_or(ExportErrorCode::InvalidSegment)?,
+                None => zero,
+            };
+            held = silence
+                .sub(streamed)
+                .and_then(|rest| held.add(rest))
+                .ok_or(ExportErrorCode::InvalidSegment)?;
+        }
+        if held > max_leading_silence {
+            return Err(ExportErrorCode::AudioGapTooLong);
+        }
     }
 
     let resolution = match preset.resolution {
@@ -607,12 +636,7 @@ fn silence_layout(channels: AudioChannels, audio: &AudioProbe) -> String {
         AudioChannels::Source => audio
             .channel_layout
             .as_deref()
-            .filter(|layout| {
-                layout.len() <= MAX_SILENCE_LAYOUT_NAME_BYTES
-                    && layout
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b".()+-_".contains(&byte))
-            })
+            .filter(|layout| is_plain_layout_name(layout))
             .map(str::to_owned)
             .or_else(|| {
                 audio
@@ -622,6 +646,75 @@ fn silence_layout(channels: AudioChannels, audio: &AudioProbe) -> String {
             })
             .unwrap_or_else(|| "stereo".to_owned()),
     }
+}
+
+/// The fastest source sample rate that gets silence prefixes. The `concat` of a prefix rounds its
+/// timestamps to microseconds, and `asettb` gives back whole samples exactly only below about
+/// 333 kHz (`graph::audio_silence_prefix`). This is the top of the range of the presets.
+const MAX_AUDIO_PREFIX_SAMPLE_RATE: u32 = 192_000;
+
+/// Whether the chains of `audio` can carry silence prefixes: a rate up to
+/// [`MAX_AUDIO_PREFIX_SAMPLE_RATE`], and a layout that `aresample` can convert the mono silence
+/// to. It cannot convert it to an ambisonic layout, which ffprobe names `ambisonic <order>` with
+/// any channels after it, nor to `binaural`, the one named layout of `ffmpeg -layouts` that fails.
+/// FFmpeg then stops with "Output channel layout ... is not supported". Every other layout took
+/// the prefix with identical samples, those of a custom order and those without a name included,
+/// and so does a stream whose layout ffprobe does not report.
+fn takes_audio_prefixes(audio: &AudioProbe) -> bool {
+    audio
+        .sample_rate
+        .is_some_and(|rate| rate <= MAX_AUDIO_PREFIX_SAMPLE_RATE)
+        && audio
+            .channel_layout
+            .as_deref()
+            .is_none_or(|layout| !layout.starts_with("ambisonic") && layout != "binaural")
+}
+
+/// Whether ffprobe's name of a layout is plain: at most [`MAX_SILENCE_LAYOUT_NAME_BYTES`] of
+/// letters, digits and `.()+-_`, as `stereo` and `5.1(side)` are.
+fn is_plain_layout_name(layout: &str) -> bool {
+    layout.len() <= MAX_SILENCE_LAYOUT_NAME_BYTES
+        && layout
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".()+-_".contains(&byte))
+}
+
+/// Give a silence prefix ([`PlannedSegment::audio_prefix`]) to the segments with the longest
+/// silence in front of the first audio sample, at most [`MAX_AUDIO_PREFIXES`] of them.
+///
+/// `leading_silences` holds that silence in seconds for each segment that reaches the sample, in
+/// segment order. A prefix is the silence less [`AUDIO_PREFIX_MARGIN_MILLISECONDS`], in whole
+/// samples at `sample_rate`, rounded down, so it ends before the first packet whatever the
+/// rounding. A segment gets one only when the prefix is at least one second: a shorter fill
+/// costs less memory than the prefix costs bytes of the command line. Two equal prefixes go to
+/// the earlier segment first.
+fn assign_audio_prefixes(
+    segments: &mut [PlannedSegment],
+    leading_silences: &[Option<Rational>],
+    sample_rate: u32,
+) -> Result<(), ExportErrorCode> {
+    let margin = Rational::new(AUDIO_PREFIX_MARGIN_MILLISECONDS, 1000)
+        .expect("AUDIO_PREFIX_MARGIN_MILLISECONDS/1000 always reduces to a valid Rational");
+    let one_second = i64::from(sample_rate);
+    let rate = Rational::new(one_second, 1).ok_or(ExportErrorCode::InvalidSegment)?;
+    let mut candidates: Vec<(usize, i64)> = Vec::new();
+    for (index, silence) in leading_silences.iter().enumerate() {
+        let Some(silence) = silence else { continue };
+        let samples = silence
+            .sub(margin)
+            .and_then(|prefix| prefix.mul(rate))
+            .ok_or(ExportErrorCode::InvalidSegment)?;
+        let prefix = i64::try_from(i128::from(samples.num()).div_euclid(i128::from(samples.den())))
+            .map_err(|_| ExportErrorCode::InvalidSegment)?;
+        if prefix >= one_second {
+            candidates.push((index, prefix));
+        }
+    }
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    for (index, prefix) in candidates.into_iter().take(MAX_AUDIO_PREFIXES) {
+        segments[index].audio_prefix = Some(prefix);
+    }
+    Ok(())
 }
 
 /// [`MAX_LEADING_AUDIO_SILENCE_SECONDS`] as a [`Rational`], for the same reason as
@@ -2346,38 +2439,148 @@ mod tests {
     }
 
     #[test]
-    fn a_segment_that_needs_more_than_the_longest_leading_silence_is_refused_with_audio() {
-        // [0.4, 61) would take 60.1 s of silence in front of the first sample. [0.5, 61) takes
-        // exactly 60 s.
+    fn a_long_silence_in_front_of_the_first_sample_streams_as_a_prefix() {
+        // [0.4, 61) needs 60.1 s of silence in front of the first sample at 60.5 s. The chain
+        // streams all of it but the margin of 0.25 s (ADR 014 measurement 27), so the plan does not
+        // refuse it, as it did when the fill held all of it in memory.
         for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
-            let error = plan_late_audio(streams, &[seconds_boundary("0.4", "61")]).unwrap_err();
-            assert_eq!(error, ExportErrorCode::AudioGapTooLong, "{streams:?}");
-            plan_late_audio(streams, &[seconds_boundary("0.5", "61")]).unwrap();
+            let plan = plan_late_audio(streams, &[seconds_boundary("0.4", "61")]).unwrap();
+            // 60.1 s less 0.25 s, at 48000 Hz.
+            assert_eq!(
+                plan.segments[0].audio_prefix,
+                Some(2_872_800),
+                "{streams:?}"
+            );
         }
     }
 
     #[test]
-    fn the_leading_silence_of_all_segments_is_bounded_together() {
-        // Two overlapping segments each need about 30 s, which the graph builds at once.
-        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
-            let error = plan_late_audio(
-                streams,
-                &[
-                    seconds_boundary("30.5", "61"),
-                    seconds_boundary("30.4", "62"),
-                ],
+    fn a_silence_shorter_than_a_second_and_the_margin_gets_no_prefix() {
+        // 1.25 s would give a prefix of exactly 1 s, the shortest that the plan writes.
+        let short = plan_late_audio(
+            ExportStreams::VideoAndAudio,
+            &[seconds_boundary("59.26", "61")],
+        )
+        .unwrap();
+        assert_eq!(short.segments[0].audio_prefix, None);
+        let exact = plan_late_audio(
+            ExportStreams::VideoAndAudio,
+            &[seconds_boundary("59.25", "61")],
+        )
+        .unwrap();
+        assert_eq!(exact.segments[0].audio_prefix, Some(48_000));
+        // A segment that starts after the first sample, or ends before it, gets none.
+        let around = plan_late_audio(
+            ExportStreams::VideoAndAudio,
+            &[seconds_boundary("70", "80"), seconds_boundary("0", "50")],
+        )
+        .unwrap();
+        assert!(around.segments.iter().all(|s| s.audio_prefix.is_none()));
+    }
+
+    #[test]
+    fn the_longest_silences_get_the_prefixes_and_the_rest_counts_toward_the_bound() {
+        // 20 segments, each 3.5 s in front of the first sample, and one of 30.5 s placed last.
+        // The longest silence comes first in the choice, then the earlier segments. Sixteen
+        // prefixes stream all but 0.25 s each, and five segments fill 3.5 s each in memory: 21.5 s
+        // in all, inside the bound.
+        let mut segments: Vec<SegmentBoundary> =
+            (0..20).map(|_| seconds_boundary("57", "61")).collect();
+        segments.push(seconds_boundary("30", "61"));
+        let plan = plan_late_audio(ExportStreams::VideoAndAudio, &segments).unwrap();
+        let prefixed: Vec<usize> = plan
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| segment.audio_prefix.is_some())
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(prefixed.len(), MAX_AUDIO_PREFIXES);
+        assert_eq!(prefixed[..15], (0..15).collect::<Vec<_>>()[..]);
+        assert_eq!(prefixed[15], 20);
+        assert_eq!(plan.segments[20].audio_prefix, Some(30 * 48_000 + 12_000));
+    }
+
+    #[test]
+    fn a_prefix_rounds_down_to_whole_samples_at_44100_hz() {
+        // 60.5 s less 0.401 s less 0.25 s is 59.849 s, 2639340.9 samples at 44100 Hz. The prefix
+        // takes 2639340, so it ends before the margin, where rounding to nearest would take one more.
+        let mut probe = probe_with_audio_extent(Some("60.5"), Some("60"));
+        probe.audio.as_mut().unwrap().sample_rate = Some(44_100);
+        let plan = plan_with(
+            &[seconds_boundary("0.401", "61")],
+            &probe,
+            &sample_preset(),
+            valid_path_facts(),
+        )
+        .unwrap();
+        assert_eq!(plan.segments[0].audio_prefix, Some(2_639_340));
+    }
+
+    #[test]
+    fn a_stream_that_the_prefix_cannot_convert_to_gets_no_prefix() {
+        let prefix = |layout: Option<&str>, rate: u32| {
+            let mut probe = probe_with_audio_extent(Some("60.5"), Some("60"));
+            let audio = probe.audio.as_mut().unwrap();
+            audio.channel_layout = layout.map(str::to_owned);
+            audio.sample_rate = Some(rate);
+            plan_with(
+                &[seconds_boundary("30", "61")],
+                &probe,
+                &sample_preset(),
+                valid_path_facts(),
             )
-            .unwrap_err();
-            assert_eq!(error, ExportErrorCode::AudioGapTooLong, "{streams:?}");
-            plan_late_audio(
-                streams,
-                &[
-                    seconds_boundary("30.5", "61"),
-                    seconds_boundary("30.5", "61"),
-                ],
-            )
-            .unwrap();
+            .unwrap()
+            .segments[0]
+                .audio_prefix
+        };
+        // No layout name, a named layout, a custom order and a layout without a name take it.
+        for layout in [
+            None,
+            Some("5.1(side)"),
+            Some("2.1"),
+            Some("2 channels (FR+FL)"),
+            Some("4 channels (FL+FR+LFE+BC)"),
+        ] {
+            assert!(prefix(layout, 48_000).is_some(), "{layout:?}");
         }
+        // `aresample` cannot convert mono to an ambisonic layout, nor to `binaural`.
+        for layout in ["ambisonic 1", "ambisonic 2+stereo", "binaural"] {
+            assert_eq!(prefix(Some(layout), 48_000), None, "{layout}");
+        }
+        // Above 192000 Hz, the timestamps of the prefix do not round back to whole samples.
+        assert!(prefix(None, 192_000).is_some());
+        assert_eq!(prefix(None, 384_000), None);
+    }
+
+    #[test]
+    fn the_silence_that_the_fills_hold_is_bounded_together() {
+        // Each of these segments needs 1 s in front of the first sample: too short for a prefix,
+        // so every second of it is filled in memory. Sixty fit the bound of 60 s, and one more
+        // goes over it.
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            let sixty: Vec<SegmentBoundary> =
+                (0..60).map(|_| seconds_boundary("59.5", "61")).collect();
+            plan_late_audio(streams, &sixty).unwrap();
+            let mut sixty_one = sixty.clone();
+            sixty_one.push(seconds_boundary("59.5", "61"));
+            assert_eq!(
+                plan_late_audio(streams, &sixty_one).unwrap_err(),
+                ExportErrorCode::AudioGapTooLong,
+                "{streams:?}"
+            );
+        }
+        // The margin that a prefix leaves counts too: 16 prefixes leave 4 s, and 57 segments of
+        // 1 s more go over the bound.
+        let mut segments: Vec<SegmentBoundary> =
+            (0..16).map(|_| seconds_boundary("50", "61")).collect();
+        segments.extend((0..56).map(|_| seconds_boundary("59.5", "61")));
+        plan_late_audio(ExportStreams::VideoAndAudio, &segments).unwrap();
+        segments.push(seconds_boundary("59.5", "61"));
+        assert_eq!(
+            plan_late_audio(ExportStreams::VideoAndAudio, &segments).unwrap_err(),
+            ExportErrorCode::AudioGapTooLong
+        );
     }
 
     #[test]
