@@ -34,7 +34,9 @@
 //! - Every audio chain that `concat` does not pad **ends at the segment's length**: the last
 //!   chain of a graph with video, and every chain of a graph without video, pad their audio with
 //!   silence to the planned tick length. A segment that lies wholly before the first audio sample
-//!   or wholly after the last one otherwise writes no audio at all; see [`audio_end_pad`].
+//!   or wholly after the last one otherwise writes no audio at all; see [`audio_end_pad`]. Every
+//!   chain of the audio process of an export with video is cut to that length as well; see
+//!   [`audio_exact_end`].
 //! - The two graph shapes exist because one input for each segment repeats the source path,
 //!   and Windows limits a command line to 32767 bytes. [`GraphShape`] names the choice but
 //!   does not make it: only the argument builder knows the assembled command's length, so
@@ -141,8 +143,7 @@ pub(crate) fn audio_output_format(audio: &PlannedAudio) -> String {
     format!("aformat=f=fltp:r={}{layout}", audio.output_sample_rate)
 }
 
-/// Which of ADR 014's three graph shapes to render: one input for each segment, one input, and
-/// the fallback of one input that drops its second input for the audio.
+/// Which of ADR 014's two graph shapes to render: one input for each segment, or one input.
 ///
 /// This module never selects between them. The choice depends on the length of the whole
 /// assembled command line, and only the argument builder can measure that. Passing the
@@ -169,10 +170,6 @@ pub(crate) fn audio_output_format(audio: &PlannedAudio) -> String {
 pub enum GraphShape {
     /// One `-i` for each segment: chain `i` reads input `i`, so no splitter is needed.
     ///
-    /// With [`ExportPlan::separate_audio_input`], each segment reads its audio from one more
-    /// `-i` of the source, with its own seek. Those inputs follow the inputs of the segments, in
-    /// segment order.
-    ///
     /// This is the shape ADR 014 prefers, and measurement 14 supports it: runs with 8, 32,
     /// and 64 inputs of one file produced exactly the expected frame counts, and the largest
     /// used 20 MB of memory. Many inputs are cheap. Their only cost is that each one repeats
@@ -185,25 +182,14 @@ pub enum GraphShape {
     /// 15); what it saves at every count is the repeated input path and the flags around it.
     /// It needs the single seek [`ExportPlan::single_input_seek_seconds`] returns, not any one
     /// segment's own.
-    ///
-    /// With [`ExportPlan::separate_audio_input`], the audio comes from a second `-i` of the
-    /// source with the same seek, and `asplit` reads input 1 instead of input 0.
     SingleInput,
-    /// [`Self::SingleInput`] with the audio from the one input, even when the plan asks for a
-    /// second input for it.
-    ///
-    /// This is the last fallback of the command-line budget, for a plan whose second input does
-    /// not fit. The graph then waits for the first audio frame of the one input, and keeps the
-    /// decoded video until it arrives (ADR 014 measurement 21). It renders the same command as
-    /// [`Self::SingleInput`] for a plan that asks for no second input.
-    SingleInputSharedAudio,
 }
 
 impl GraphShape {
-    /// True for the two shapes that divide one input among the chains.
+    /// True for the shape that divides one input among the chains.
     #[must_use]
     pub const fn is_single_input(self) -> bool {
-        matches!(self, Self::SingleInput | Self::SingleInputSharedAudio)
+        matches!(self, Self::SingleInput)
     }
 }
 
@@ -312,9 +298,8 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
             // The rate pin goes in front of `asplit`, not on each branch behind it: this
             // chain's head *is* the input link, so one filter pins it directly. See
             // `audio_input_pin`.
-            let input = usize::from(shape == GraphShape::SingleInput && plan.separate_audio_input);
             chains.push(splitter_chain(
-                input,
+                0,
                 planned.stream_index,
                 &audio_input_pin(planned),
                 "asplit",
@@ -336,19 +321,181 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
             }
             // `concat` pads the audio of a segment to its video when another segment follows, so
             // only the chains it does not pad need their own end; see `audio_end_pad`.
-            let padded = video.is_none() || index + 1 == count;
+            let end = if video.is_none() || index + 1 == count {
+                ChainEnd::Padded
+            } else {
+                ChainEnd::Open
+            };
             chains.push(audio_chain(
                 planned,
                 audio_inputs[index],
                 index,
                 ticks[index],
-                padded,
+                end,
             ));
         }
     }
 
     chains.push(concat_chain(count, video.is_some(), audio.is_some()));
     chains.join(";")
+}
+
+/// Render the graph of the encoder of an export whose audio has its own process
+/// ([`ExportPlan::separate_audio_process`]), for the requested shape.
+///
+/// It is the graph of one process with each audio chain replaced by a stand-in: the silence of
+/// the planned length of the segment, which reads no input (`stand_in_audio_chain`). `concat`
+/// therefore places the video of each segment where it places it when it reads the real audio,
+/// at the end of the longer of the two, and its audio output goes to `anullsink`. The audio that
+/// the encoder writes comes from the pipe of the audio process, which the argument builder maps
+/// directly, outside this graph (ADR 043).
+///
+/// The graph has no audio input, and that is its purpose: ffmpeg configures a filter graph only
+/// when each input link has a first frame, and it keeps each decoded video frame until then
+/// (ADR 014 measurement 21).
+///
+/// # Preconditions
+///
+/// The plan carries video and audio, and every segment its ticks. A debug assertion reports a
+/// plan without either part.
+#[must_use]
+pub fn build_video_graph(plan: &ExportPlan, shape: GraphShape) -> String {
+    debug_assert!(
+        plan.separate_audio_process(),
+        "the graph of the encoder needs video and audio ticks"
+    );
+    let (Some(video), Some((audio, ticks))) = (plan.video.as_ref(), resolve_audio(plan)) else {
+        return build_filter_graph(plan, shape);
+    };
+    let count = plan.segments.len();
+    let mut chains = vec![video_output_format(&video.pixel_format)];
+    if shape.is_single_input() {
+        chains.push(splitter_chain(
+            0,
+            video.stream_index,
+            "",
+            "split",
+            "sv",
+            count,
+        ));
+    }
+    for (index, segment) in plan.segments.iter().enumerate() {
+        chains.push(video_chain(video, shape, index, *segment));
+        chains.push(stand_in_audio_chain(audio, index, ticks[index]));
+    }
+    let inputs: String = (0..count)
+        .map(|index| format!("[v{index}][pa{index}]"))
+        .collect();
+    chains.push(format!("{inputs}concat=n={count}:v=1:a=1[vc][pa]"));
+    chains.push("[pa]anullsink".to_owned());
+    chains.join(";")
+}
+
+/// Render the graph of the audio process of an export with video
+/// ([`ExportPlan::separate_audio_process`]), for the requested shape.
+///
+/// It is the graph of one process with each video chain replaced by a stand-in: a video of
+/// [`PlannedSegment::frames`] tiny frames at the output rate, which reads no input
+/// (`stand_in_video_chain`). `concat` therefore pads the audio of each segment to the length of
+/// its video, as it does when it reads the real video. Its video output, `[pv]`, is left
+/// unconnected: the argument builder maps it to an output of the `null` muxer.
+///
+/// That output is not `nullsink`, and that is a measured requirement. A sink in the graph lets
+/// ffmpeg request frames of `[pv]` whatever the audio output needs. When the stand-in video of a
+/// segment has ended, `concat` answers each such request with the audio of that segment, and
+/// `apad` writes silence without reading any input, so one pass of the graph wrote 570 s of
+/// silence into the queue of `[a]`: 344 MiB, against 28 MiB for the same graph with a `null`
+/// output, whose frames ffmpeg requests in step with the audio (ADR 043).
+/// Every audio chain ends at exactly the length of its segment (`audio_exact_end`), so no silence
+/// that `concat` pads is longer than the rounding of the frame count, and every chain has the
+/// length of the stand-in silence that the encoder places its video against. The process writes
+/// `[a]` to its stdout, and the encoder reads it (ADR 043).
+///
+/// The graph decodes no video, so no decoded video waits in it for the first audio frame.
+///
+/// # Preconditions
+///
+/// As for [`build_video_graph`], and every segment carries its frame count.
+#[must_use]
+pub fn build_audio_graph(plan: &ExportPlan, shape: GraphShape) -> String {
+    debug_assert!(
+        plan.separate_audio_process(),
+        "the graph of the audio process needs video and audio ticks"
+    );
+    let (Some(video), Some((audio, ticks))) = (plan.video.as_ref(), resolve_audio(plan)) else {
+        return build_filter_graph(plan, shape);
+    };
+    let count = plan.segments.len();
+    let mut chains = Vec::new();
+    if shape.is_single_input() {
+        chains.push(splitter_chain(
+            0,
+            audio.stream_index,
+            &audio_input_pin(audio),
+            "asplit",
+            "sa",
+            count,
+        ));
+    }
+    let audio_inputs = audio_input_indices(plan, shape);
+    for (index, segment) in plan.segments.iter().enumerate() {
+        debug_assert!(
+            segment.frames.is_some(),
+            "a plan with video carries the frame count of every segment"
+        );
+        chains.push(stand_in_video_chain(
+            video,
+            index,
+            segment.frames.unwrap_or(0),
+        ));
+        chains.push(audio_chain(
+            audio,
+            audio_inputs[index],
+            index,
+            ticks[index],
+            ChainEnd::Exact,
+        ));
+    }
+    let inputs: String = (0..count)
+        .map(|index| format!("[pv{index}][a{index}]"))
+        .collect();
+    chains.push(format!("{inputs}concat=n={count}:v=1:a=1[pv][a]"));
+    chains.join(";")
+}
+
+/// Render the stand-in for the video of one segment in the graph of the audio process:
+/// `frames` frames of 2x2 pixels at the output frame rate, to the `[pv<index>]` label.
+///
+/// The video chain of the encoder ends in `fps=<rate>`, so its frames carry the timestamps `0, 1,
+/// 2, ...` in the time base `1/rate`, and `color` with the same rate gives the same. `concat` takes
+/// the length of a segment's video from those timestamps, so the stand-in gives the audio of the
+/// segment the length that the real video gives it in the encoder. The frame count is the plan's
+/// rounding of the segment's length, the same term [`PlannedVideo::expected_frames`] sums and the
+/// frame count check compares. The frames are 2x2 because nothing reads their pixels.
+fn stand_in_video_chain(video: &PlannedVideo, index: usize, frames: u64) -> String {
+    let rate = match video.timing {
+        OutputTiming::ConstantFrameRate(rate) => format!("{}/{}", rate.num(), rate.den()),
+    };
+    format!("color=s=2x2:r={rate},trim=end_frame={frames}[pv{index}]")
+}
+
+/// Render the stand-in for the audio of one segment in the graph of the encoder: the silence of
+/// the planned length at the source rate, converted to the output rate, to the `[pa<index>]`
+/// label.
+///
+/// The audio chain of the audio process ends at exactly `<out tick - in tick>` samples at the
+/// source rate ([`audio_exact_end`]), also when its source audio overlaps itself, and its closing
+/// `aformat` resamples to the output rate. The stand-in gives `concat` the same number of samples
+/// through the same conversion, so `concat` places the video of the segment where it places it
+/// with the real audio. One channel is enough, because the layout does not change the number of
+/// samples, and nothing reads them.
+fn stand_in_audio_chain(audio: &PlannedAudio, index: usize, ticks: (i64, i64)) -> String {
+    let (in_tick, out_tick) = ticks;
+    let length = out_tick.saturating_sub(in_tick).max(0);
+    format!(
+        "anullsrc=r={}:cl=mono,atrim=end_sample={length},aformat=f=fltp:r={}[pa{index}]",
+        audio.sample_rate, audio.output_sample_rate
+    )
 }
 
 /// Pair the plan's audio stream with every segment's tick boundary, or report no audio.
@@ -367,27 +514,23 @@ fn resolve_audio(plan: &ExportPlan) -> Option<(&PlannedAudio, Vec<(i64, i64)>)> 
 }
 
 /// The input that the audio chain of each segment reads under `InputPerSegment`, in segment
-/// order, or `None` for each chain under the two shapes that read the audio from `asplit`.
+/// order, or `None` for each chain under the shape that reads the audio from `asplit`.
 ///
-/// Inputs `0` to `n - 1` are the inputs of the segments. With
-/// [`ExportPlan::separate_audio_input`], segment `i` reads its audio from input `n + i`, which
-/// [`super::build_arguments`] opens with the seek of that segment.
+/// Segment `i` reads input `i`, in the graph of one process and in the graph of the audio
+/// process alike: each process opens its own inputs.
 fn audio_input_indices(plan: &ExportPlan, shape: GraphShape) -> Vec<Option<usize>> {
-    let count = plan.segments.len();
-    let offset = if plan.separate_audio_input { count } else { 0 };
-    (0..count)
-        .map(|index| (!shape.is_single_input()).then_some(offset + index))
+    (0..plan.segments.len())
+        .map(|index| (!shape.is_single_input()).then_some(index))
         .collect()
 }
 
 /// Render the `split`/`asplit` chain that feeds every segment chain from one input.
 ///
-/// `input` is the input that the splitter reads: 0, or 1 for the second input that gives
-/// only the audio. `pin` is inserted between the input link and the splitter, already carrying
-/// its own trailing comma, or is empty. Only the audio splitter uses it, for
-/// [`audio_input_pin`]'s reason; the video link has no equivalent hazard, because ADR 014
-/// measurement 3 found the video input link time base equal to the video stream's own with
-/// or without a seek.
+/// `input` is the input that the splitter reads. `pin` is inserted between the input link and the
+/// splitter, already carrying its own trailing comma, or is empty. Only the audio splitter uses it,
+/// for [`audio_input_pin`]'s reason; the video link has no equivalent hazard, because ADR 014
+/// measurement 3 found the video input link time base equal to the video stream's own with or
+/// without a seek.
 fn splitter_chain(
     input: usize,
     stream_index: u32,
@@ -576,8 +719,9 @@ fn audio_timestamp_reset(in_tick: i64) -> String {
 /// segment of 575 s after the end of 48000 Hz 5.1 audio peaked at 42 MiB, against 45 MiB for a
 /// source whose audio covers it. The padding of `concat` is not streamed: the same segment with
 /// another one behind it took 900 MiB. A pad in every chain of a graph with video removes that
-/// cost too, but the two filters cost 26 bytes and the digits of the length in each chain, and at
-/// [`super::MAX_EXPORT_SEGMENTS`] the widest command does not have them; see `arguments.rs`.
+/// cost too. The one command of ADR 014 had no room for it at [`super::MAX_EXPORT_SEGMENTS`], and
+/// the audio process of ADR 043 has: every chain of [`build_audio_graph`] carries it, cut to the
+/// length ([`audio_exact_end`]).
 ///
 /// On sources whose audio covers every segment, measurement 23 found the video and audio frames
 /// that leave the graph identical by framemd5 with and without the pad, in 441 runs: MP4, MKV,
@@ -598,8 +742,40 @@ fn audio_end_pad(in_tick: i64, out_tick: i64) -> String {
     format!("apad=whole_len={length},asetpts=N")
 }
 
+/// Render the filters that give a chain of the audio process exactly the length of its segment:
+/// [`audio_end_pad`] with `atrim=end_sample=<out tick - in tick>` between its two filters.
+///
+/// The end pad adds silence up to the length and never removes a sample. A chain whose source audio
+/// overlaps itself by less than 0.1 s keeps the overlap ([`audio_gap_fill`]), and is then longer
+/// than its segment. In the graph of one process, `concat` moved the video of the next segment by
+/// that much. The encoder of ADR 043 places its video against a stand-in silence of exactly the
+/// length (`stand_in_audio_chain`), so a longer chain would put the audio of every later segment
+/// behind its video, by the sum of the overlaps. A file joined with `-c copy` overlaps by about 21
+/// ms at each join. The cut drops the samples past the length, at the end of the segment, and keeps
+/// each segment in step with its video.
+fn audio_exact_end(in_tick: i64, out_tick: i64) -> String {
+    debug_assert!(
+        in_tick <= out_tick,
+        "a planned segment cannot end before it starts"
+    );
+    let length = out_tick.saturating_sub(in_tick).max(0);
+    format!("apad=whole_len={length},atrim=end_sample={length},asetpts=N")
+}
+
+/// How [`audio_chain`] ends, in front of its closing format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainEnd {
+    /// No end of its own: `concat` pads the chain to the length of its video.
+    Open,
+    /// The end pad, which gives the chain at least the length of its segment ([`audio_end_pad`]).
+    Padded,
+    /// The end pad and a cut, which give the chain exactly the length of its segment
+    /// ([`audio_exact_end`]).
+    Exact,
+}
+
 /// Render one segment's audio chain, from its input link to its `[a<index>]` output label:
-/// the cut, the timestamp reset, the gap fill, the end pad when `padded` is true, and the output
+/// the cut, the timestamp reset, the gap fill, the end that `end` names, and the output
 /// format.
 ///
 /// Under [`GraphShape::InputPerSegment`] this chain starts at an input link, so it carries
@@ -653,7 +829,7 @@ fn audio_chain(
     input: Option<usize>,
     index: usize,
     ticks: (i64, i64),
-    padded: bool,
+    end: ChainEnd,
 ) -> String {
     let source = match input {
         Some(input) => format!("[{input}:{}]{}", audio.stream_index, audio_input_pin(audio)),
@@ -663,10 +839,10 @@ fn audio_chain(
     let head = format!("{source}atrim=start_pts={in_tick}:end_pts={out_tick}");
     let reset = audio_timestamp_reset(in_tick);
     let fill = audio_gap_fill(audio);
-    let pad = if padded {
-        format!(",{}", audio_end_pad(in_tick, out_tick))
-    } else {
-        String::new()
+    let pad = match end {
+        ChainEnd::Open => String::new(),
+        ChainEnd::Padded => format!(",{}", audio_end_pad(in_tick, out_tick)),
+        ChainEnd::Exact => format!(",{}", audio_exact_end(in_tick, out_tick)),
     };
     let format = audio_output_format(audio);
     format!("{head},{reset},{fill}{pad},{format}[a{index}]")
@@ -788,6 +964,8 @@ mod tests {
             seek_seconds: Rational::new(33, 5),
             audio_in_tick: Some(audio_in_tick),
             audio_out_tick: Some(audio_out_tick),
+            // 25 frames per second at the time base of 1/12800: one frame is 512 ticks.
+            frames: Some(u64::try_from((out_pts - in_pts) / 512).unwrap()),
         }
     }
 
@@ -819,7 +997,6 @@ mod tests {
             segments: fixture_segments(count),
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
-            separate_audio_input: false,
         }
     }
 
@@ -904,62 +1081,106 @@ mod tests {
         );
     }
 
-    /// `fixture_plan(count)` with [`ExportPlan::separate_audio_input`] set.
-    fn plan_with_separate_audio(count: usize) -> ExportPlan {
-        ExportPlan {
-            separate_audio_input: true,
-            ..fixture_plan(count)
-        }
-    }
-
     #[test]
-    fn with_a_separate_audio_input_each_segment_reads_its_audio_from_input_n_plus_its_index() {
-        // Inputs 0 to 2 belong to the segments, and inputs 3 to 5 give their audio, in segment
-        // order. The video chains do not change.
-        let graph = build_filter_graph(&plan_with_separate_audio(3), GraphShape::InputPerSegment);
+    fn the_encoder_of_a_separate_audio_process_places_its_video_against_stand_in_silence() {
+        // The graph of one process, with each audio chain replaced by the silence of its planned
+        // length, from no input. No chain reads stream 2.
+        let plan = fixture_plan(2);
+        assert!(plan.separate_audio_process());
         assert_eq!(
-            graph,
+            build_video_graph(&plan, GraphShape::InputPerSegment),
             concat!(
                 "[vc]format=yuv420p[v];",
                 "[0:1]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                "[3:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "anullsrc=r=44100:cl=mono,atrim=end_sample=10584,aformat=f=fltp:r=48000[pa0];",
                 "[1:1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
-                "[4:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
-                "aresample=44100:first_pts=0,aformat=f=fltp:r=48000:cl=stereo[a1];",
-                "[2:1]trim=start_pts=256000:end_pts=262144,setpts=PTS-STARTPTS,fps=25/1[v2];",
-                "[5:2]aformat=r=44100,atrim=start_pts=882000:end_pts=903168,asetpts=PTS-882000,",
-                "aresample=44100:first_pts=0,apad=whole_len=21168,asetpts=N,",
-                "aformat=f=fltp:r=48000:cl=stereo[a2];",
-                "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vc][a]",
+                "anullsrc=r=44100:cl=mono,atrim=end_sample=21168,aformat=f=fltp:r=48000[pa1];",
+                "[v0][pa0][v1][pa1]concat=n=2:v=1:a=1[vc][pa];",
+                "[pa]anullsink",
             )
         );
-    }
-
-    #[test]
-    fn with_a_separate_audio_input_a_single_input_splits_the_audio_of_input_1() {
-        let separate = build_filter_graph(&plan_with_separate_audio(2), GraphShape::SingleInput);
-        let shared = build_filter_graph(&fixture_plan(2), GraphShape::SingleInput);
         assert_eq!(
-            separate,
-            shared.replace(
-                "[0:2]aformat=r=44100,asplit=2",
-                "[1:2]aformat=r=44100,asplit=2"
+            build_video_graph(&plan, GraphShape::SingleInput),
+            concat!(
+                "[vc]format=yuv420p[v];",
+                "[0:1]split=2[sv0][sv1];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
+                "anullsrc=r=44100:cl=mono,atrim=end_sample=10584,aformat=f=fltp:r=48000[pa0];",
+                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
+                "anullsrc=r=44100:cl=mono,atrim=end_sample=21168,aformat=f=fltp:r=48000[pa1];",
+                "[v0][pa0][v1][pa1]concat=n=2:v=1:a=1[vc][pa];",
+                "[pa]anullsink",
             )
         );
-        assert_ne!(separate, shared);
     }
 
     #[test]
-    fn the_shared_audio_fallback_renders_the_single_input_graph_of_a_plan_without_the_flag() {
-        let shared = build_filter_graph(&fixture_plan(2), GraphShape::SingleInput);
-        for plan in [fixture_plan(2), plan_with_separate_audio(2)] {
-            assert_eq!(
-                build_filter_graph(&plan, GraphShape::SingleInputSharedAudio),
-                shared,
-                "{}",
-                plan.separate_audio_input
-            );
+    fn the_audio_process_pads_every_chain_against_a_stand_in_video_of_the_planned_frames() {
+        // The graph of one process, with each video chain replaced by the planned number of
+        // frames at the output rate, from no input, and every audio chain cut to its length.
+        let plan = fixture_plan(2);
+        assert_eq!(
+            build_audio_graph(&plan, GraphShape::InputPerSegment),
+            concat!(
+                "color=s=2x2:r=25/1,trim=end_frame=6[pv0];",
+                "[0:2]aformat=r=44100,atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,atrim=end_sample=10584,",
+                "asetpts=N,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "color=s=2x2:r=25/1,trim=end_frame=12[pv1];",
+                "[1:2]aformat=r=44100,atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,atrim=end_sample=21168,",
+                "asetpts=N,aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "[pv0][a0][pv1][a1]concat=n=2:v=1:a=1[pv][a]",
+            )
+        );
+        assert_eq!(
+            build_audio_graph(&plan, GraphShape::SingleInput),
+            concat!(
+                "[0:2]aformat=r=44100,asplit=2[sa0][sa1];",
+                "color=s=2x2:r=25/1,trim=end_frame=6[pv0];",
+                "[sa0]atrim=start_pts=511560:end_pts=522144,asetpts=PTS-511560,",
+                "aresample=44100:first_pts=0,apad=whole_len=10584,atrim=end_sample=10584,",
+                "asetpts=N,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "color=s=2x2:r=25/1,trim=end_frame=12[pv1];",
+                "[sa1]atrim=start_pts=441000:end_pts=462168,asetpts=PTS-441000,",
+                "aresample=44100:first_pts=0,apad=whole_len=21168,atrim=end_sample=21168,",
+                "asetpts=N,aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "[pv0][a0][pv1][a1]concat=n=2:v=1:a=1[pv][a]",
+            )
+        );
+    }
+
+    #[test]
+    fn the_stand_ins_take_the_exact_rates_and_lengths_of_the_plan() {
+        // An NTSC rate renders as its exact fraction in the stand-in video, as in `fps`, and the
+        // stand-in silence converts from the source rate to the output rate of the plan.
+        let mut plan = fixture_plan(1);
+        video_mut(&mut plan).timing =
+            OutputTiming::ConstantFrameRate(Rational::new(30_000, 1_001).unwrap());
+        plan.segments[0].frames = Some(7);
+        plan.audio.as_mut().unwrap().output_sample_rate = 32_000;
+        let audio = build_audio_graph(&plan, GraphShape::InputPerSegment);
+        assert!(
+            audio.starts_with("color=s=2x2:r=30000/1001,trim=end_frame=7[pv0];"),
+            "{audio}"
+        );
+        let video = build_video_graph(&plan, GraphShape::InputPerSegment);
+        assert!(
+            video.contains(
+                "anullsrc=r=44100:cl=mono,atrim=end_sample=10584,aformat=f=fltp:r=32000[pa0]"
+            ),
+            "{video}"
+        );
+    }
+
+    #[test]
+    fn a_plan_without_video_or_with_silence_has_no_separate_audio_process() {
+        let mut audio_only = fixture_plan(1);
+        audio_only.video = None;
+        let mut video_only = fixture_plan(1);
+        video_only.audio = None;
+        for plan in [audio_only, video_only, plan_with_silence(1, "stereo")] {
+            assert!(!plan.separate_audio_process());
         }
     }
 
@@ -993,24 +1214,21 @@ mod tests {
 
     #[test]
     fn a_single_input_of_a_stream_without_packets_splits_only_the_video() {
-        for shape in [GraphShape::SingleInput, GraphShape::SingleInputSharedAudio] {
-            let graph = build_filter_graph(&plan_with_silence(2, "5.1(side)"), shape);
-            assert_eq!(
-                graph,
-                concat!(
-                    "[vc]format=yuv420p[v];",
-                    "[0:1]split=2[sv0][sv1];",
-                    "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
-                    "anullsrc=r=44100:cl=5.1(side),atrim=end_sample=10584,",
-                    "aformat=f=fltp:r=48000:cl=stereo[a0];",
-                    "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
-                    "anullsrc=r=44100:cl=5.1(side),atrim=end_sample=21168,",
-                    "aformat=f=fltp:r=48000:cl=stereo[a1];",
-                    "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
-                ),
-                "{shape:?}"
-            );
-        }
+        let graph = build_filter_graph(&plan_with_silence(2, "5.1(side)"), GraphShape::SingleInput);
+        assert_eq!(
+            graph,
+            concat!(
+                "[vc]format=yuv420p[v];",
+                "[0:1]split=2[sv0][sv1];",
+                "[sv0]trim=start_pts=148480:end_pts=151552,setpts=PTS-STARTPTS,fps=25/1[v0];",
+                "anullsrc=r=44100:cl=5.1(side),atrim=end_sample=10584,",
+                "aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "[sv1]trim=start_pts=128000:end_pts=134144,setpts=PTS-STARTPTS,fps=25/1[v1];",
+                "anullsrc=r=44100:cl=5.1(side),atrim=end_sample=21168,",
+                "aformat=f=fltp:r=48000:cl=stereo[a1];",
+                "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][a]",
+            )
+        );
     }
 
     #[test]
@@ -2081,11 +2299,7 @@ mod tests {
                     plan.video = None;
                 }
                 let audio = plan.audio.clone().expect("fixture audio");
-                for shape in [
-                    GraphShape::InputPerSegment,
-                    GraphShape::SingleInput,
-                    GraphShape::SingleInputSharedAudio,
-                ] {
+                for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
                     let graph = build_filter_graph(&plan, shape);
                     let audio_chains: Vec<&str> = graph
                         .split(';')

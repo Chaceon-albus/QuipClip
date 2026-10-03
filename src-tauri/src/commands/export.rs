@@ -37,8 +37,10 @@
 //!    never `plan.destination`. ffmpeg writes the reservation, and the rename that publishes
 //!    the destination happens after the process has exited.
 //! 3. [`choose_graph_shape`] is called once and its result is passed to **both**
-//!    [`build_filter_graph`] and [`build_arguments`]. The shapes disagree about how many
-//!    inputs the graph's labels refer to, so a mismatch produces a command ffmpeg rejects.
+//!    [`encoder_graph`] and [`build_arguments`]. The shapes disagree about how many
+//!    inputs the graph's labels refer to, so a mismatch produces a command ffmpeg rejects. The
+//!    command of an audio process (ADR 043) follows the same rule with its own shape:
+//!    [`choose_audio_graph_shape`], [`build_audio_graph`] and [`build_audio_arguments`].
 //! 4. A zero exit status is not a successful export. `reserve` creates the reserved file
 //!    before ffmpeg starts, so ADR 014 requires `-y`; without it ffmpeg refuses the existing
 //!    file, writes nothing, and still exits zero. [`verified_frame_count`] is what separates
@@ -55,10 +57,11 @@
 //! unit; the error code stays reserved, as it is in `ffmpeg::export`.
 
 use crate::ffmpeg::export::{
-    build_arguments, build_filter_graph, build_plan, choose_graph_shape, inspect_path,
-    run_export_process, verify_audio_output, AudioOutputMismatch, ExportErrorCode, ExportPlan,
-    ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot,
-    ExportStreams, PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary,
+    build_arguments, build_audio_arguments, build_audio_graph, build_plan,
+    choose_audio_graph_shape, choose_graph_shape, encoder_graph, inspect_path, run_export_process,
+    verify_audio_output, AudioOutputMismatch, ExportErrorCode, ExportPlan, ExportProcessOutcome,
+    ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot, ExportStreams,
+    PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary,
 };
 use crate::ffmpeg::{
     self, AudioProbe, FfmpegPaths, FirstAudioPacket, LocateError, MediaProbe, OutputAudioProbe,
@@ -285,6 +288,10 @@ struct PreparedExport {
     /// The complete argument list, already built against [`PreparedExport::pending`]'s
     /// reserved path.
     arguments: Vec<String>,
+    /// The argument list of the audio process, when the plan has one
+    /// ([`ExportPlan::separate_audio_process`], ADR 043). Its stdout is the stdin of the process
+    /// that [`Self::arguments`] runs.
+    audio_arguments: Option<Vec<String>>,
     /// The reserved temporary output. Holding it here keeps the reservation alive for the
     /// whole run: dropping it deletes the file ffmpeg is writing.
     pending: PendingOutput,
@@ -578,10 +585,14 @@ where
     })?;
 
     // Obligations 2 and 3: ffmpeg writes the reservation, not the destination, and one shape
-    // decision serves both the graph and the arguments.
+    // decision serves both the graph and the arguments of each process.
     let shape = choose_graph_shape(&plan, pending.path());
-    let graph = build_filter_graph(&plan, shape);
+    let graph = encoder_graph(&plan, shape);
     let arguments = build_arguments(&plan, shape, &graph, pending.path());
+    let audio_arguments = plan.separate_audio_process().then(|| {
+        let shape = choose_audio_graph_shape(&plan);
+        build_audio_arguments(&plan, shape, &build_audio_graph(&plan, shape))
+    });
 
     Ok(PreparedExport {
         preset_id: preset.id.clone(),
@@ -590,6 +601,7 @@ where
         ffmpeg: executables.ffmpeg,
         ffprobe: executables.ffprobe,
         arguments,
+        audio_arguments,
         pending,
     })
 }
@@ -614,9 +626,8 @@ fn rate_readable_from_packets(format_names: &[String]) -> bool {
 /// The re-probe analyzes about the first 5 s of the file. In a Matroska, MPEG-TS or MPEG-PS
 /// source whose audio starts later, it reports the start of the container as the start of the
 /// audio, and in MPEG-TS and MPEG-PS a sample rate of 0 (ADR 014 measurements 22, 24 and 25). The
-/// plan reads the start for two decisions: the bound on the silence in front of the audio, and
-/// the second input for the audio. It refuses audio without a sample rate with
-/// `sourceAudioRateUnknown`.
+/// plan reads the start for the bound on the silence in front of the audio. It refuses audio
+/// without a sample rate with `sourceAudioRateUnknown`.
 ///
 /// 1. `first_audio_packet` reads the first packet of the stream. When it finds none and reports no
 ///    error, [`crate::ffmpeg::AudioProbe::take_no_packet`] marks the stream as one that holds no
@@ -912,6 +923,7 @@ where
         ffmpeg,
         ffprobe,
         arguments,
+        audio_arguments,
         pending,
         ..
     } = prepared;
@@ -922,7 +934,7 @@ where
         ExportProcessRequest {
             ffmpeg: &ffmpeg,
             arguments: &arguments,
-            audio_arguments: None,
+            audio_arguments: audio_arguments.as_deref(),
             cancel: cancel.as_ref(),
             poll: PROGRESS_POLL_INTERVAL,
         },
@@ -1355,10 +1367,10 @@ mod tests {
                 seek_seconds: None,
                 audio_in_tick: None,
                 audio_out_tick: None,
+                frames: Some(30),
             }],
             container: Container::Mp4,
             total_duration: Rational::new(1, 1).unwrap(),
-            separate_audio_input: false,
         }
     }
 
@@ -1983,19 +1995,21 @@ mod tests {
                 "-copyts",
                 "-i",
                 source_argument.as_str(),
+                "-f",
+                "wav",
+                "-i",
+                "pipe:0",
                 "-filter_complex",
                 concat!(
                     "[vc]format=yuv420p[v];",
                     "[0:0]trim=start_pts=0:end_pts=90000,setpts=PTS-STARTPTS,fps=30/1[v0];",
-                    "[0:1]aformat=r=48000,atrim=start_pts=0:end_pts=48000,asetpts=PTS-0,",
-                    "aresample=48000:first_pts=0,apad=whole_len=48000,asetpts=N,",
-                    "aformat=f=fltp:r=48000[a0];",
-                    "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
+                    "anullsrc=r=48000:cl=mono,atrim=end_sample=48000,aformat=f=fltp:r=48000[pa0];",
+                    "[v0][pa0]concat=n=1:v=1:a=1[vc][pa];[pa]anullsink",
                 ),
                 "-map",
                 "[v]",
                 "-map",
-                "[a]",
+                "1:a",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -2550,6 +2564,7 @@ mod tests {
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
             arguments: vec![],
+            audio_arguments: None,
             pending,
         };
 
@@ -2582,6 +2597,7 @@ mod tests {
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
             arguments: vec![],
+            audio_arguments: None,
             pending,
         };
         let registry = Arc::new(ExportRegistry::default());
@@ -2866,9 +2882,8 @@ mod tests {
 
     #[test]
     fn a_later_first_audio_packet_gives_the_plan_the_audio_start_the_re_probe_missed() {
-        // The re-probe puts the audio at 0 s, so the plan neither sees the late start nor takes the
-        // audio from a second input, and FFmpeg keeps 12 s of decoded video in memory. The first
-        // packet at 12 s corrects both.
+        // The re-probe puts the audio at 0 s, so the plan does not see the late start and cannot
+        // bound the silence in front of it. The first packet at 12 s corrects the start.
         let directory = TestDirectory::new();
         let cancel = AtomicBool::new(false);
         let read = RefCell::new(None);
@@ -2901,15 +2916,9 @@ mod tests {
                 true
             ))
         );
-        assert!(prepared.plan.separate_audio_input);
-
-        let uncorrected = prepare_streams(
-            &directory,
-            ExportStreams::VideoAndAudio,
-            sample_probe_with_a_missed_audio_start(),
-        )
-        .unwrap();
-        assert!(!uncorrected.plan.separate_audio_input);
+        // The audio has its own process whatever its start (ADR 043). The start the packet gives
+        // bounds the silence in front of it; see the next test.
+        assert!(prepared.audio_arguments.is_some());
     }
 
     #[test]
@@ -2990,19 +2999,30 @@ mod tests {
             prepared.plan.audio.unwrap().expected_duration,
             Rational::new(65, 1).unwrap()
         );
+        // With video the same: the audio process pads every chain the same way (ADR 043).
         let directory = TestDirectory::new();
-        let error = match prepare_reading_first_packet(
+        prepare_reading_first_packet(
             &directory,
             ExportStreams::VideoAndAudio,
             sample_probe_with_a_missed_audio_start(),
             &[(0, 65)],
             &AtomicBool::new(false),
             first_packet_at(70),
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("65 s of silence is over the bound with video"),
-        };
-        assert_eq!(error.code, ExportErrorCode::AudioGapTooLong);
+        )
+        .unwrap();
+    }
+
+    /// The `-filter_complex` argument of the command of the audio process of a prepared export.
+    fn audio_graph_of(prepared: &PreparedExport) -> &str {
+        let audio = prepared
+            .audio_arguments
+            .as_ref()
+            .expect("the export has an audio process");
+        let at = audio
+            .iter()
+            .position(|argument| argument == "-filter_complex")
+            .unwrap();
+        &audio[at + 1]
     }
 
     /// The `-filter_complex` argument of a prepared command.
@@ -3041,7 +3061,8 @@ mod tests {
         let audio = prepared.plan.audio.as_ref().unwrap();
         assert_eq!(audio.silence_layout.as_deref(), Some("stereo"));
         assert_eq!(audio.expected_duration, Rational::new(3, 1).unwrap());
-        assert!(!prepared.plan.separate_audio_input);
+        // One process: no chain reads the stream, so nothing waits for it.
+        assert!(prepared.audio_arguments.is_none());
         // One input for each segment, and none for the audio; no chain reads stream 1.
         let inputs = prepared
             .arguments
@@ -3071,14 +3092,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(prepared.plan.audio.as_ref().unwrap().silence_layout, None);
-        assert!(graph_of(&prepared).contains("[0:1]aformat=r=48000,atrim="));
+        assert!(audio_graph_of(&prepared).contains("[0:1]aformat=r=48000,atrim="));
     }
 
     #[test]
     fn a_container_that_records_audio_overrules_a_read_that_found_no_packet() {
         // A read error that no demuxer reports ends the read as the end of the file does. A
-        // positive `DURATION` tag, or a count of packets in the index of an MP4 file, shows that the
-        // track holds audio, so the chains read it.
+        // positive `DURATION` tag, or a count of packets in the index of an MP4 file, shows that
+        // the track holds audio, so the chains read it.
         let mut counted = sample_probe_with_an_empty_audio_track();
         counted.audio.as_mut().unwrap().reported_packets = Some(5626);
         for probe in [sample_probe_with_a_missed_audio_start(), counted] {
@@ -3093,7 +3114,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(prepared.plan.audio.as_ref().unwrap().silence_layout, None);
-            assert!(graph_of(&prepared).contains("[0:1]aformat=r=48000,atrim="));
+            assert!(audio_graph_of(&prepared).contains("[0:1]aformat=r=48000,atrim="));
         }
         // A count of zero contradicts nothing.
         let mut empty = sample_probe_with_an_empty_audio_track();
@@ -3156,19 +3177,26 @@ mod tests {
     #[test]
     fn a_first_audio_packet_at_or_before_the_reported_start_leaves_the_command_as_it_was() {
         // A source that the re-probe reads correctly: its first packet lies at the reported start,
-        // or before it by the priming of the encoder. The plan and the command do not change, byte
-        // for byte. The start of 0.6 s is past the 0.5 s threshold of the second input, so a packet
-        // at 0.4 s that moved the start would drop that input.
-        let plan_and_command = |prepared: PreparedExport| -> (ExportPlan, Vec<String>) {
+        // or before it by the priming of the encoder. The plan and the commands do not change, byte
+        // for byte.
+        //
+        // The plan, the encoder's command without the reservation, and the audio process's
+        // command (ADR 043).
+        type PlanAndCommands = (ExportPlan, Vec<String>, Option<Vec<String>>);
+        let plan_and_commands = |prepared: PreparedExport| -> PlanAndCommands {
             let mut arguments = prepared.arguments.clone();
             arguments.pop();
-            (prepared.plan.clone(), arguments)
+            (
+                prepared.plan.clone(),
+                arguments,
+                prepared.audio_arguments.clone(),
+            )
         };
         let directory = TestDirectory::new();
         let mut probe = sample_probe_with_a_missed_audio_start();
         probe.audio.as_mut().unwrap().start_time = Rational::new(3, 5);
         for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
-            let expected = plan_and_command(
+            let expected = plan_and_commands(
                 prepare_reading_first_packet(
                     &directory,
                     streams,
@@ -3180,7 +3208,7 @@ mod tests {
                 .unwrap(),
             );
             assert_eq!(
-                expected.0.separate_audio_input,
+                expected.0.separate_audio_process(),
                 streams == ExportStreams::VideoAndAudio
             );
             for time in [Rational::new(3, 5), Rational::new(2, 5)] {
@@ -3197,7 +3225,7 @@ mod tests {
                     move |_, _, _, _| Ok(Some(first_packet)),
                 )
                 .unwrap();
-                assert_eq!(plan_and_command(prepared), expected, "{first_packet:?}");
+                assert_eq!(plan_and_commands(prepared), expected, "{first_packet:?}");
             }
         }
     }
@@ -3288,8 +3316,9 @@ mod tests {
         assert_eq!(audio.sample_rate, 44_100);
         // The ticks of the cut count that rate: one second is 44100 of them.
         assert_eq!(prepared.plan.segments[0].audio_out_tick, Some(44_100));
-        // The start from the same packet still applies.
-        assert!(prepared.plan.separate_audio_input);
+        // The audio process converts from that rate.
+        let graph = audio_graph_of(&prepared);
+        assert!(graph.contains("aformat=r=44100,atrim="), "{graph}");
     }
 
     #[test]
@@ -3547,7 +3576,6 @@ mod tests {
                 move |_, _, _, _| Err(failure),
             )
             .unwrap_or_else(|error| panic!("{shown}: {:?}", error.code));
-            assert!(!prepared.plan.separate_audio_input, "{shown}");
             assert_eq!(command(prepared), expected, "{shown}");
         }
     }
@@ -3611,6 +3639,7 @@ mod tests {
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
             arguments: vec![],
+            audio_arguments: None,
             pending,
         };
         (prepared, reserved)
@@ -4038,6 +4067,7 @@ mod tests {
                 ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
                 ffprobe: PathBuf::from("/usr/bin/ffprobe"),
                 arguments: vec![],
+                audio_arguments: None,
                 pending,
             };
             let registry = Arc::new(ExportRegistry::default());
@@ -4085,6 +4115,7 @@ mod tests {
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
             arguments: vec![],
+            audio_arguments: None,
             pending,
         };
         let registry = Arc::new(ExportRegistry::default());

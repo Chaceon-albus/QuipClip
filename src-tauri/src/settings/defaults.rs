@@ -311,8 +311,9 @@ pub fn seeded_settings() -> Settings {
 mod tests {
     use super::*;
     use crate::ffmpeg::export::{
-        build_arguments, build_filter_graph, build_plan, ExportStreams, GraphShape, PathFacts,
-        PathIdentity, PlanRequest, SegmentBoundary,
+        build_arguments, build_audio_arguments, build_audio_graph, build_plan, encoder_graph,
+        ExportPlan, ExportStreams, GraphShape, PathFacts, PathIdentity, PlanRequest,
+        SegmentBoundary,
     };
     use crate::ffmpeg::{AudioProbe, MediaProbe};
     use crate::settings::{
@@ -566,6 +567,18 @@ mod tests {
 
     /// The command `preset` renders for one segment from 10 s to 12 s of [`probe`].
     fn command_of(preset: &Preset) -> Vec<String> {
+        let plan = plan_of(preset);
+        let graph = encoder_graph(&plan, GraphShape::InputPerSegment);
+        build_arguments(
+            &plan,
+            GraphShape::InputPerSegment,
+            &graph,
+            Path::new(RESERVATION),
+        )
+    }
+
+    /// The plan of [`command_of`].
+    fn plan_of(preset: &Preset) -> ExportPlan {
         let segments = [SegmentBoundary {
             in_pts: Pts::new(900_000),
             out_pts: Pts::new(1_080_000),
@@ -573,7 +586,7 @@ mod tests {
         let source = PathBuf::from(SOURCE);
         let destination = PathBuf::from(DESTINATION);
         let parent = PathBuf::from(DESTINATION_PARENT);
-        let plan = build_plan(
+        build_plan(
             &PlanRequest {
                 source: &source,
                 destination: &destination,
@@ -595,18 +608,12 @@ mod tests {
                 }
             },
         )
-        .expect("the seed plans");
-        let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
-        build_arguments(
-            &plan,
-            GraphShape::InputPerSegment,
-            &graph,
-            Path::new(RESERVATION),
-        )
+        .expect("the seed plans")
     }
 
     /// Every argument in front of `-c:v`, which only the pixel format of a seed changes: the
-    /// process flags, the seek 5 s before the In point, the input, the graph, and the maps.
+    /// process flags, the seek 5 s before the In point, the input, the pipe of the audio process
+    /// (ADR 043), the graph, and the maps.
     fn head(pixel_format: &str) -> Vec<String> {
         [
             "-nostdin",
@@ -622,19 +629,21 @@ mod tests {
             "5",
             "-i",
             SOURCE,
+            "-f",
+            "wav",
+            "-i",
+            "pipe:0",
             "-filter_complex",
             &format!(
                 "[vc]format={pixel_format}[v];\
                  [0:0]trim=start_pts=900000:end_pts=1080000,setpts=PTS-STARTPTS,fps=30/1[v0];\
-                 [0:1]aformat=r=48000,atrim=start_pts=480000:end_pts=576000,\
-                 asetpts=PTS-480000,aresample=48000:first_pts=0,apad=whole_len=96000,\
-                 asetpts=N,aformat=f=fltp:r=48000[a0];\
-                 [v0][a0]concat=n=1:v=1:a=1[vc][a]"
+                 anullsrc=r=48000:cl=mono,atrim=end_sample=96000,aformat=f=fltp:r=48000[pa0];\
+                 [v0][pa0]concat=n=1:v=1:a=1[vc][pa];[pa]anullsink"
             ),
             "-map",
             "[v]",
             "-map",
-            "[a]",
+            "1:a",
         ]
         .iter()
         .map(|argument| (*argument).to_owned())
@@ -666,6 +675,58 @@ mod tests {
         command.extend(video.iter().map(|argument| (*argument).to_owned()));
         command.extend(tail());
         command
+    }
+
+    #[test]
+    fn every_seed_renders_the_golden_command_of_its_audio_process() {
+        // The audio process reads the same input, writes the cut audio at the length of the
+        // segment against a stand-in video of 60 frames, and sends it to the encoder as WAV. The
+        // video settings of a seed do not reach it, and the seeds share their audio settings.
+        let golden: Vec<String> = [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostats",
+            "-copyts",
+            "-ss",
+            "5",
+            "-i",
+            SOURCE,
+            "-filter_complex",
+            "color=s=2x2:r=30/1,trim=end_frame=60[pv0];\
+             [0:1]aformat=r=48000,atrim=start_pts=480000:end_pts=576000,\
+             asetpts=PTS-480000,aresample=48000:first_pts=0,apad=whole_len=96000,\
+             atrim=end_sample=96000,asetpts=N,aformat=f=fltp:r=48000[a0];\
+             [pv0][a0]concat=n=1:v=1:a=1[pv][a]",
+            "-map",
+            "[a]",
+            "-c:a",
+            "pcm_f32le",
+            "-f",
+            "wav",
+            "pipe:1",
+            "-map",
+            "[pv]",
+            "-c:v",
+            "rawvideo",
+            "-f",
+            "null",
+            "-",
+        ]
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect();
+        for preset in default_presets() {
+            let plan = plan_of(&preset);
+            let graph = build_audio_graph(&plan, GraphShape::InputPerSegment);
+            assert_eq!(
+                build_audio_arguments(&plan, GraphShape::InputPerSegment, &graph),
+                golden,
+                "{}",
+                preset.id
+            );
+        }
     }
 
     #[test]

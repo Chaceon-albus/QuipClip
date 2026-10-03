@@ -11,7 +11,8 @@
 //! audio ticks. [`ExportPlan`] also
 //! exposes [`ExportPlan::single_input_seek_seconds`], the one extra value ADR 014's second
 //! graph shape (one input for the whole source) needs beyond the per-segment plan, and
-//! [`ExportPlan::separate_audio_input`], which gives the audio a second input of the source.
+//! [`ExportPlan::separate_audio_process`], which writes the audio of an export with video in a
+//! second `ffmpeg` (ADR 043).
 //!
 //! [`fsinspect`] is the one production implementation of that injected closure: it turns a real
 //! path into the [`PathFacts`] the planner reads, and it reports a file only when it could also
@@ -70,9 +71,12 @@ pub mod progress;
 pub mod registry;
 pub mod verify;
 
-pub use arguments::{build_arguments, choose_graph_shape};
+pub use arguments::{
+    build_arguments, build_audio_arguments, choose_audio_graph_shape, choose_graph_shape,
+    encoder_graph,
+};
 pub use fsinspect::inspect_path;
-pub use graph::{build_filter_graph, GraphShape};
+pub use graph::{build_audio_graph, build_filter_graph, build_video_graph, GraphShape};
 pub use output::PendingOutput;
 pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, SegmentBoundary};
 pub use process::{
@@ -160,35 +164,17 @@ pub const MAX_EXPORT_SEGMENTS: usize = 100;
 /// The longest silence, in whole seconds, that the segments of an export may need in front of
 /// the first sample of the source audio stream, all together.
 ///
-/// The part of a segment before that sample becomes silence: the audio chain fills it when the
-/// segment reaches the sample (`graph::audio_chain`), and `concat` pads it when the segment ends
-/// at or before the sample and another segment follows. FFmpeg holds each of the two whole in
-/// memory before it writes it. The end pad of a chain that `concat` does not pad
-/// (`graph::audio_end_pad`) writes its silence frame by frame, and holds none of it
-/// (ADR 014 measurement 23).
-/// ADR 014 measurement 21 measured the fill alone on AAC audio, at this bound: 95 MiB on 48000 Hz
-/// stereo, 215 MiB on 48000 Hz 5.1, and 532 MiB on 96000 Hz 7.1. The plan refuses more with
-/// [`ExportErrorCode::AudioGapTooLong`]. The bound does not cover the decoded video that FFmpeg
-/// keeps until the first audio frame arrives, which measurement 21 also records.
-pub const MAX_LEADING_AUDIO_SILENCE_SECONDS: i64 = 60;
-
-/// The time, in milliseconds, between the start of the container and the first sample of the
-/// source audio, above which every segment takes its audio from a second input of the source.
+/// The part of a segment before that sample becomes silence. When the segment reaches the
+/// sample, the audio chain fills that part (`graph::audio_chain`), and FFmpeg holds the whole
+/// fill in memory before it writes any of it. ADR 014 measurement 21 measured the fill alone on
+/// AAC audio, at this bound: 95 MiB on 48000 Hz stereo, 215 MiB on 48000 Hz 5.1, and 532 MiB on
+/// 96000 Hz 7.1. The plan refuses more with [`ExportErrorCode::AudioGapTooLong`].
 ///
-/// FFmpeg configures the filter graph only when each input link has a first frame, and until
-/// then it keeps each decoded video frame in memory (ADR 014 measurement 21). An input reads
-/// from the keyframe at or before its seek, and the plan does not know where that keyframe is:
-/// one group of pictures can be seconds long. So an input of any segment can start to read up to
-/// this time before the first audio sample, and hold the video of that time: 2.6 GiB for 60 s at
-/// 1280x720. A second input of the same file, with the same seek, that gives only the audio
-/// reaches the first audio sample without decoding the video, so the graph starts at once
-/// (measurement 22). Below this time the cost is small, and the command line stays as it was: a
-/// source whose audio starts a few frames after the video, as many do, opens no second input.
-/// The same time also bounds the other side. An input that starts to read after the last audio
-/// sample waits until the end of the file, and so does the audio of a segment whose Out point
-/// lies after that sample. Under one input, `concat` then holds the video that `split` gives the
-/// segments behind it.
-pub const SEPARATE_AUDIO_INPUT_LEAD_MILLISECONDS: i64 = 500;
+/// A segment that ends at or before the sample needs no fill. The end pad of its chain
+/// (`graph::audio_end_pad`) writes its silence frame by frame, and holds none of it (ADR 014
+/// measurement 23). Every audio chain carries that pad since the audio has its own process
+/// (ADR 043), so such a segment counts nothing toward this bound.
+pub const MAX_LEADING_AUDIO_SILENCE_SECONDS: i64 = 60;
 
 /// The seek margin ADR 014 selects, in whole seconds.
 ///
@@ -259,6 +245,15 @@ pub struct PlannedSegment {
     /// The exclusive end of the segment's audio, in the same tick unit and under the same
     /// sign convention as `audio_in_tick`.
     pub audio_out_tick: Option<i64>,
+    /// The number of frames the video chain of this segment writes, or `None` when
+    /// [`ExportPlan::video`] is `None`.
+    ///
+    /// This is `round((outPts - inPts) * videoTimeBase * outputFrameRate)`, the term of one
+    /// segment in [`PlannedVideo::expected_frames`]. The graph of the audio process of an export
+    /// with video gives each segment a stand-in video of this many frames, so that `concat` there
+    /// pads the audio of the segment to the length of its video, as it does in the encoder (ADR
+    /// 043).
+    pub frames: Option<u64>,
 }
 
 /// The video part of a plan: the stream it reads, how the output frames are timed and sized,
@@ -372,8 +367,8 @@ pub struct PlannedAudio {
     /// an audio frame, so FFmpeg would keep the decoded video until the end of the file before
     /// it configures the graph: 1416 MiB for a segment of 5 s from a source of 120 s at 640x360
     /// (ADR 014 measurement 26). Each chain then generates the silence of its segment
-    /// (`graph::audio_silence_chain`) at [`Self::sample_rate`] and reads no input, and the plan
-    /// opens no second input for the audio.
+    /// (`graph::audio_silence_chain`) at [`Self::sample_rate`] and reads no input, so the export
+    /// is one process ([`ExportPlan::separate_audio_process`]).
     ///
     /// The layout is the one the chain ends in when [`Self::output_channels`] names one, and
     /// otherwise the layout of the stream, so the output track has the layout it would have if
@@ -428,23 +423,28 @@ pub struct ExportPlan {
     pub container: Container,
     /// The exact total output duration: the rational sum of every segment's duration.
     pub total_duration: Rational,
-    /// True when every segment takes its audio from a second input of the source, with the
-    /// seek of the segment, so the graph does not wait for the audio with the decoded video in
-    /// memory (ADR 014 measurements 21 and 22).
-    ///
-    /// [`plan::build_plan`] sets it for a plan with video and audio when the first sample of the
-    /// source audio comes more than [`SEPARATE_AUDIO_INPUT_LEAD_MILLISECONDS`] after the start
-    /// of the container, when a segment's input starts to read later than that time before the
-    /// last audio sample, or when a segment that another segment follows in concat order ends
-    /// later than that time before the last sample. It never sets it for a plan whose chains
-    /// generate silence ([`PlannedAudio::silence_layout`]), because those chains read no input.
-    /// Under [`GraphShape::InputPerSegment`] the second inputs follow the
-    /// inputs of the segments, in segment order. Under [`GraphShape::SingleInput`] there is one
-    /// second input, with the one seek. [`GraphShape::SingleInputSharedAudio`] ignores it.
-    pub separate_audio_input: bool,
 }
 
 impl ExportPlan {
+    /// True when a second `ffmpeg` writes the audio of this export and the encoder reads it from
+    /// a pipe (ADR 043): the plan writes video, and its audio chains read the audio stream.
+    ///
+    /// FFmpeg configures a filter graph only when each input link has a first frame, and it keeps
+    /// every decoded video frame until then (ADR 014 measurement 21). An input whose audio comes
+    /// late, never, or only after a gap therefore makes the encoder keep the video of that time.
+    /// With the audio in its own process, the graph of the encoder reads no audio input, and the
+    /// graph of the audio process decodes no video. A plan without video has nothing to keep, a
+    /// plan without audio nothing to wait for, and a plan whose chains generate silence
+    /// ([`PlannedAudio::silence_layout`]) reads no audio input, so each of those is one process.
+    #[must_use]
+    pub fn separate_audio_process(&self) -> bool {
+        self.video.is_some()
+            && self
+                .audio
+                .as_ref()
+                .is_some_and(|audio| audio.silence_layout.is_none())
+    }
+
     /// The expected final `frame` count, for ADR 014's progress and frame-count comparison:
     /// [`PlannedVideo::expected_frames`] of [`Self::video`].
     ///
@@ -614,17 +614,19 @@ export_error_codes! {
     /// produces this code.
     SourceAudioRateUnknown => "sourceAudioRateUnknown",
     /// Produced by [`plan::build_plan`]: the request asks for [`ExportStreams::AudioOnly`], and
-    /// the source reports no audio stream. A plan without video and without audio would write
-    /// nothing, so the export is refused before anything is reserved.
+    /// the source reports no audio stream, or one that holds no packets (ADR 014 measurement 26).
+    /// A plan without video and without audio would write nothing, and one of an empty stream only
+    /// silence, so the export is refused before anything is reserved.
     SourceHasNoAudio => "sourceHasNoAudio",
     /// Produced by [`plan::build_plan`]: the export writes audio, and the parts of its segments
     /// before the first sample of the source audio stream add up to more than
     /// [`MAX_LEADING_AUDIO_SILENCE_SECONDS`].
     ///
-    /// Each of those parts becomes silence that FFmpeg holds in memory until it is complete. An
-    /// export with [`ExportStreams::AudioOnly`] counts only the segments that reach the first
-    /// sample, because the end pad of each chain writes the silence of the others frame by frame,
-    /// without holding it (`graph::audio_end_pad`). An export with
+    /// Each of those parts becomes silence that FFmpeg holds in memory until it is complete. Every
+    /// export counts only the segments that reach the first sample, because the end pad of each
+    /// chain that reads the stream writes the silence of the others frame by frame, without
+    /// holding it (`graph::audio_end_pad`): every chain of an export without video, and every
+    /// chain of the audio process of an export with video (ADR 043). An export with
     /// [`ExportStreams::VideoOnly`] reads no audio, so it never produces this code. The probe
     /// reports only where the stream starts, so a gap inside the stream is not bounded.
     AudioGapTooLong => "audioGapTooLong",

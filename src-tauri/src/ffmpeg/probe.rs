@@ -146,11 +146,12 @@ pub struct AudioProbe {
     /// its video, such as a recording that opened the microphone late, has a value above the
     /// video's start here.
     ///
-    /// The export reads this and [`Self::duration`] only to decide whether its segments take
-    /// their audio from a second input (`ExportPlan::separate_audio_input`), and this to bound
-    /// the silence that its segments need in front of the first sample
-    /// (`MAX_LEADING_AUDIO_SILENCE_SECONDS` of the export module). Neither is an edit boundary
-    /// (ADR 002), and neither is on the import wire: the interface does not read them.
+    /// The export reads this only to bound the silence that its segments need in front of the
+    /// first sample (`MAX_LEADING_AUDIO_SILENCE_SECONDS` of the export module). [`Self::duration`]
+    /// decided, with this, whether the segments took their audio from a second input, until the
+    /// audio of an export with video got its own process (ADR 043). No decision reads the length
+    /// now. Neither is an edit boundary (ADR 002), and neither is on the import wire: the
+    /// interface does not read them.
     ///
     /// ffprobe can report the start of the container here when the audio starts more than about
     /// 5 s into a Matroska, MPEG-TS or MPEG-PS file. An export that writes audio therefore
@@ -1149,9 +1150,8 @@ fn audio_time_base(raw: &RawStream) -> Option<Rational> {
 /// `start_time`.
 ///
 /// A value that does not parse reads as unknown and never fails the probe. The import needs the
-/// video stream only, and the export reads this only to bound the leading silence and to decide
-/// the second input for the audio, not as an edit point, so a malformed audio field must not
-/// refuse a file that imported before.
+/// video stream only, and the export reads this only to bound the leading silence, not as an edit
+/// point, so a malformed audio field must not refuse a file that imported before.
 fn audio_start_time(raw: &RawStream) -> Option<Rational> {
     let exact = parse_optional_i64_value(raw.start_pts.as_ref(), "streams.audio.start_pts")
         .ok()
