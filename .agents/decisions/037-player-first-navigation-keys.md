@@ -4,6 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 021, ADR 026, ADR 035
+- Amended by: ADR 044
 
 ## Context
 
@@ -36,6 +37,11 @@ table does not change.
 | `,` / `.`                  | none      | step one frame back / forward              | acts   |
 | `,` / `.`                  | `Shift`   | step ten frames back / forward             | acts   |
 | `ArrowUp` / `ArrowDown`    | none      | go to the previous / the next edit point   | acts   |
+
+(Changed on 2026-10-04.) ADR 044 changes the rows of `ArrowLeft` and `ArrowRight` with no
+modifier: while the video is paused they step one frame, and while it plays they jump 5 seconds.
+While the video is paused and no frame step can run, they still jump. ADR 044 also adds `D` and
+`F` for the frame steps.
 
 `primary` is `Cmd` on macOS and `Ctrl` on Windows. `Alt` stays unclaimed. No menu accelerator of
 the application uses an arrow key, and the layer cancels every key press that it owns, so the web

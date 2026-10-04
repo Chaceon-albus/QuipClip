@@ -109,8 +109,8 @@ is the macOS key. On Windows, use `Ctrl`.
 | -------------------- | -------------------------------------------------------------------------------- |
 | `Space`              | Play or pause                                                                    |
 | `/`                  | Play the current segment, or the segment at the playhead. Stop at its last frame |
-| `←` `→`              | Jump 5 s. With `Shift`, 1 s. With `Cmd`, 30 s                                    |
-| `,` `.`              | Step one frame. With `Shift`, ten frames                                         |
+| `←` `→`              | Paused: step one frame. Playing: jump 5 s. With `Shift`, 1 s. With `Cmd`, 30 s   |
+| `,` `.` or `D` `F`   | Step one frame. With `Shift`, ten frames                                         |
 | `↑` `↓`              | Go to the previous or the next edit point                                        |
 | `Home` `End`         | Go to the start or the end                                                       |
 | `I` `O`              | Mark In, Mark Out. `O` on the Out of the current segment finishes the segment    |

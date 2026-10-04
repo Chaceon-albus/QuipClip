@@ -64,6 +64,7 @@ document summarizes them and shows how the parts fit together.
 | [`041-test-a-preset-on-this-machine.md`](../.agents/decisions/041-test-a-preset-on-this-machine.md)                                         | A preset can be tested on this machine with its own arguments              |
 | [`042-mark-a-release-as-a-pre-release.md`](../.agents/decisions/042-mark-a-release-as-a-pre-release.md)                                     | The maintainer marks a published release as a pre-release                  |
 | [`043-write-the-audio-in-a-second-process.md`](../.agents/decisions/043-write-the-audio-in-a-second-process.md)                             | The audio of an export with video comes from a second `ffmpeg`, by a pipe  |
+| [`044-arrow-keys-step-a-frame-while-paused.md`](../.agents/decisions/044-arrow-keys-step-a-frame-while-paused.md)                           | Paused arrows step a frame, playing arrows jump 5 s, D and F step frames   |
 
 ## Shape
 
