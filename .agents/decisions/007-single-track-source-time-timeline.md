@@ -178,6 +178,26 @@ colour, and it now shows on the track line and on the frame band only while a se
 current and no In is pending. Only the fill of the selected segment needs the ring for
 contrast. The ruler line has no ring.
 
+(Changed on 2026-10-04.) The pending In mark has its own colour, `--timeline-mark`. It is an
+orange in the light theme and an amber in the dark theme, far from the teal of the playhead on
+the hue circle. While an In is pending, the Mark In button takes the same tint. A user found the
+mark hard to see right after Mark In, because the playhead stood on it in almost the same
+colour. The mark is a 2px line over the full height of the track lane, centred on the In as
+before. A 12px flag at the top of the lane points from the line into the segment that the In
+starts. The playhead line is 2px wide, so the flag stays in view while the playhead stands on
+the In.
+
+The dashed region is gone. A user saw its right border beside the playhead, where it looked like
+a second In mark. The engine snapped that border and the playhead line to device pixels on their
+own. The dashes and the rounded corners also moved on each frame of playback, because a dashed
+border spaces its dashes over the length of each side. A trail now fills the part of the source
+from the In to the playhead, in the rectangle of a segment. It has no border at either end.
+Its left end lies under the line of the mark, and its right end lies under the playhead line.
+Its tint grows toward the playhead, and it hides the hatch of the source bar. Its fill lies under
+the segments, so a segment that it crosses stays in view. Two solid edges lie above and below the
+rectangle of a segment, where no segment covers them, so the extent of the trail also shows where
+it crosses a segment.
+
 The wheel zooms, and it holds the time under the pointer in place. A gesture that is
 clearly horizontal pans instead, and so does the shift key with the wheel. The panel gives
 those gestures to the web view, which already scrolls the container.
