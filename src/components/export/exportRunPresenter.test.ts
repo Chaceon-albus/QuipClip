@@ -11,6 +11,7 @@ import {
   type ExportProgressInput,
   type ExportProgressView,
 } from "./exportProgressPresenter";
+import { createFrameSmoother } from "./exportProgressSmoothing";
 import {
   ELAPSED_TICK_SLACK_MS,
   exportElapsedMs,
@@ -19,6 +20,7 @@ import {
   presentExportReadout,
   presentExportRunBar,
   readoutDetailKey,
+  remainingSecondsAt,
   selectExportProgressFields,
   type ExportReadoutDetailKey,
   type ExportRunBarInput,
@@ -137,19 +139,19 @@ describe("phaseLabelKey", () => {
 });
 
 describe("presentExportReadout", () => {
-  it("shows the percent, the remaining time, the frames, and the speed while encoding", () => {
+  it("puts the remaining time at the left and the percent at the right while encoding", () => {
     expect(presentExportReadout(viewOf())).toEqual({
-      lead: { kind: "percent", fraction: 0.25 },
-      trail: { kind: "remaining", seconds: 30 },
+      status: { kind: "remaining" },
+      percent: 0.25,
       frames: { kind: "ofTotal", frame: 250, expectedFrames: 1000 },
       speed: 1.8,
     });
   });
 
-  it("shows no phase word beside the percent before the first rate", () => {
+  it("leaves the left slot empty beside the percent before the first rate", () => {
     const readout = presentExportReadout(viewOf({ fps: null }));
-    expect(readout.lead).toEqual({ kind: "percent", fraction: 0.25 });
-    expect(readout.trail).toBeNull();
+    expect(readout.status).toBeNull();
+    expect(readout.percent).toBe(0.25);
   });
 
   it("names the phase alone while preparing, with no frame and no speed", () => {
@@ -158,8 +160,8 @@ describe("presentExportReadout", () => {
         viewOf({ status: "preparing", frame: null, expectedFrames: null }),
       ),
     ).toEqual({
-      lead: { kind: "phase", key: "export.status.preparing" },
-      trail: null,
+      status: { kind: "phase", key: "export.status.preparing" },
+      percent: null,
       frames: null,
       speed: null,
     });
@@ -167,8 +169,8 @@ describe("presentExportReadout", () => {
 
   it("names the phase and counts the frames when the total is unknown", () => {
     expect(presentExportReadout(viewOf({ expectedFrames: null }))).toEqual({
-      lead: { kind: "phase", key: "export.status.running" },
-      trail: null,
+      status: { kind: "phase", key: "export.status.running" },
+      percent: null,
       frames: { kind: "count", frame: 250 },
       speed: 1.8,
     });
@@ -185,10 +187,10 @@ describe("presentExportReadout", () => {
     expect(presentExportReadout(viewOf({ frame: null })).frames).toBeNull();
   });
 
-  it("puts the phase after 100 percent while the output is published", () => {
+  it("puts the phase at the left of 100 percent while the output is published", () => {
     const readout = presentExportReadout(viewOf({ status: "publishing", frame: 1000 }));
-    expect(readout.lead).toEqual({ kind: "percent", fraction: 1 });
-    expect(readout.trail).toEqual({ kind: "phase", key: "export.status.publishing" });
+    expect(readout.status).toEqual({ kind: "phase", key: "export.status.publishing" });
+    expect(readout.percent).toBe(1);
     // The last count stays, so the line does not disappear for the last step.
     expect(readout.frames).toEqual({
       kind: "ofTotal",
@@ -197,18 +199,71 @@ describe("presentExportReadout", () => {
     });
   });
 
-  it("puts Stopping after the percent while a stop is outstanding", () => {
+  it("puts Stopping at the left of the percent while a stop is outstanding", () => {
     const readout = presentExportReadout(viewOf({ cancelRequested: true }));
-    expect(readout.lead).toEqual({ kind: "percent", fraction: 0.25 });
-    expect(readout.trail).toEqual({ kind: "phase", key: "export.status.canceling" });
+    expect(readout.status).toEqual({ kind: "phase", key: "export.status.canceling" });
+    expect(readout.percent).toBe(0.25);
   });
 
   it("names Stopping alone when a stop comes before the percent is known", () => {
     const readout = presentExportReadout(
       viewOf({ status: "preparing", frame: null, cancelRequested: true }),
     );
-    expect(readout.lead).toEqual({ kind: "phase", key: "export.status.canceling" });
-    expect(readout.trail).toBeNull();
+    expect(readout.status).toEqual({ kind: "phase", key: "export.status.canceling" });
+    expect(readout.percent).toBeNull();
+  });
+
+  it("gives the left slot to the phase word as soon as the phase leaves the encode", () => {
+    // Each input has a frame, a total and a rate, so only the phase decides.
+    for (const overrides of [
+      { cancelRequested: true },
+      { status: "publishing" },
+      { status: "failed", tracking: true, cancelRequested: true },
+    ] as const) {
+      expect(presentExportReadout(viewOf(overrides)).status?.kind).toBe("phase");
+    }
+    expect(
+      presentExportReadout(viewOf({ status: "failed", tracking: true })).status,
+    ).toEqual({ kind: "remaining" });
+  });
+});
+
+describe("remainingSecondsAt", () => {
+  it("estimates from the position, not from the reported frame", () => {
+    // 1000 frames at 25 frames per second: 750 frames are 30 seconds, 700 are 28.
+    expect(remainingSecondsAt(createInput(), null)).toBe(30);
+    expect(remainingSecondsAt(createInput(), 300)).toBe(28);
+    expect(remainingSecondsAt(createInput(), 299.5)).toBe(29);
+  });
+
+  it("never gives a negative time", () => {
+    expect(remainingSecondsAt(createInput(), 1200)).toBe(0);
+  });
+
+  it("gives no estimate when the input gives none", () => {
+    expect(remainingSecondsAt(createInput({ fps: null }), 300)).toBeNull();
+    expect(remainingSecondsAt(createInput({ expectedFrames: null }), 300)).toBeNull();
+    expect(remainingSecondsAt(createInput({ cancelRequested: true }), 300)).toBeNull();
+    expect(remainingSecondsAt(createInput({ status: "publishing" }), 300)).toBeNull();
+  });
+
+  it("falls one second at each tick of the run clock while the encode is steady", () => {
+    // ffmpeg reports every 500 ms, at its mean of 25 frames per second.
+    const smoother = createFrameSmoother();
+    const reports = Array.from({ length: 12 }, (_, index) => ({
+      frame: 250 + index * 12.5,
+      at: index * 500,
+    }));
+    const estimates: (number | null)[] = [];
+    let next = 0;
+    for (let tick = 1_000; tick <= 5_000; tick += 1_000) {
+      while (next < reports.length && reports[next].at <= tick - 250) {
+        smoother.push(reports[next].frame, reports[next].at);
+        next++;
+      }
+      estimates.push(remainingSecondsAt(createInput(), smoother.frameAt(tick, 1000)));
+    }
+    expect(estimates).toEqual([29, 28, 27, 26, 25]);
   });
 });
 
@@ -389,8 +444,8 @@ describe("an audio-only run", () => {
     expect(view.percentFraction).toBeNull();
     expect(view.remainingSeconds).toBeNull();
     expect(presentExportReadout(view)).toEqual({
-      lead: { kind: "phase", key: "export.status.running" },
-      trail: null,
+      status: { kind: "phase", key: "export.status.running" },
+      percent: null,
       frames: null,
       speed: null,
     });

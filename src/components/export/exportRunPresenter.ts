@@ -104,11 +104,16 @@ export function phaseLabelKey(phase: ExportProgressPhase): ExportPhaseLabelKey {
   }
 }
 
-/** One item of the first line of the readout. */
-export type ExportReadoutItem =
-  | { kind: "percent"; fraction: number }
-  | { kind: "remaining"; seconds: number }
-  | { kind: "phase"; key: ExportPhaseLabelKey };
+/**
+ * The item at the left end of the first line of the readout.
+ *
+ * - `phase`: the word of a phase, such as "Finishing…". It shows for every phase but a running
+ *   encode with a known percent.
+ * - `remaining`: the remaining time. The run clock of the panel samples its value on each whole
+ *   second, together with the elapsed time below it, so the presenter gives only the slot.
+ */
+export type ExportReadoutStatus =
+  { kind: "phase"; key: ExportPhaseLabelKey } | { kind: "remaining" };
 
 /** The frame count of the second line, or null when no frame was reported. */
 export type ExportReadoutFrames =
@@ -116,39 +121,36 @@ export type ExportReadoutFrames =
   | { kind: "count"; frame: number }
   | null;
 
+/**
+ * The readout in two columns. The left column holds `status`, and the elapsed time below it.
+ * The right column holds the large percent, and the frame count and the speed below it.
+ */
 export interface ExportReadoutView {
-  /** The start of the first line: the large percent, or the phase when the percent is unknown. */
-  lead: ExportReadoutItem;
-  /**
-   * The end of the first line: the remaining time, or the phase when the lead is the percent
-   * and the phase is not a plain encode. Null when nothing more is known.
-   */
-  trail: ExportReadoutItem | null;
+  /** The left end of the first line: the phase word or the remaining time. Null for neither. */
+  status: ExportReadoutStatus | null;
+  /** The right end of the first line: the large percent, 0 to 1. Null when it is unknown. */
+  percent: number | null;
+  /** The frame count at the right end of the second line. */
   frames: ExportReadoutFrames;
-  /** Speed factor, or null when unknown or before the encode. */
+  /** The speed factor after the frame count, or null when unknown or before the encode. */
   speed: number | null;
 }
 
 /**
- * Presents the progress readout in its order: the percent, the remaining time, the frame
- * count and the speed. Each item shows only when it is known.
+ * Presents the progress readout. Each item shows only when it is known.
  *
- * A running encode with a percent shows no phase word, because the percent says that it
- * runs. Every other phase names itself: "Preparing export…", "Finishing…", "Stopping…",
- * and "Exporting…" when the total is unknown.
+ * A running encode with a percent shows no phase word, because the percent says that it runs.
+ * Its left slot holds the remaining time when there is an estimate, and else stays empty. Every
+ * other phase puts its word in that slot: "Preparing export…", "Finishing…", "Stopping…", and
+ * "Exporting…" when the total is unknown. The phase word and the remaining time therefore never
+ * show together.
  */
 export function presentExportReadout(view: ExportProgressView): ExportReadoutView {
-  const phase: ExportReadoutItem = { kind: "phase", key: phaseLabelKey(view.phase) };
-  const lead: ExportReadoutItem =
-    view.percentFraction !== null
-      ? { kind: "percent", fraction: view.percentFraction }
-      : phase;
-
-  let trail: ExportReadoutItem | null = null;
-  if (view.remainingSeconds !== null) {
-    trail = { kind: "remaining", seconds: view.remainingSeconds };
-  } else if (lead.kind === "percent" && view.phase !== "running") {
-    trail = phase;
+  let status: ExportReadoutStatus | null = null;
+  if (view.phase !== "running" || view.percentFraction === null) {
+    status = { kind: "phase", key: phaseLabelKey(view.phase) };
+  } else if (view.remainingSeconds !== null) {
+    status = { kind: "remaining" };
   }
 
   // Preparation reports no frame. From the encode on, the last count stays through the
@@ -162,7 +164,30 @@ export function presentExportReadout(view: ExportProgressView): ExportReadoutVie
         : { kind: "count", frame: view.frame };
   }
 
-  return { lead, trail, frames, speed: encoding ? view.speed : null };
+  return {
+    status,
+    percent: view.percentFraction,
+    frames,
+    speed: encoding ? view.speed : null,
+  };
+}
+
+/**
+ * The remaining time, in whole seconds, when the encode is at `position`. Null when the input
+ * gives no estimate (`presentExportProgress`).
+ *
+ * The run clock passes the smoothed position at its tick (`exportProgressSmoothing`). That
+ * position moves on between two ffmpeg reports, so the estimate falls about one second at each
+ * tick, in step with the elapsed time. The rule stays the rule of ADR 025:
+ * `(expectedFrames - frame) / fps`, rounded up, with `fps` the mean of ffmpeg. A null position
+ * keeps the reported frame of the input.
+ */
+export function remainingSecondsAt(
+  input: ExportProgressInput,
+  position: number | null,
+): number | null {
+  const frame = position ?? input.frame;
+  return presentExportProgress({ ...input, frame })?.remainingSeconds ?? null;
 }
 
 export type ExportReadoutDetailKey =
