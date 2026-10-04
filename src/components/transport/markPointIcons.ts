@@ -2,11 +2,11 @@
  * The Mark In and Mark Out glyphs of the transport bar. The In and Out badges of the preview
  * frame use them too (`PreviewBoundaryBadges`), so the three places show one shape.
  *
- * Each glyph is the shape of its marker on the timeline: a bracket whose open side faces the
- * segment, and a faint block for the segment itself. The In bracket `[` is the pending In
- * mark of the track, which opens to the right of the In boundary. The Out bracket `]` is the
- * right edge of a segment box. The block repeats the fill of the pending region and of a
- * segment, so the two glyphs read as the two ends of one segment.
+ * Each glyph is a bracket whose open side faces the segment, and a faint block for the segment
+ * itself. The In bracket `[` is the left edge of a segment box, and the Out bracket `]` is its
+ * right edge, so the two glyphs read as the two ends of one segment. The pending In mark of the
+ * track has another shape, a line with a flag in the mark colour, so that it stands apart from
+ * the playhead (ADR 007). It also opens to the right of the In boundary.
  *
  * `createLucideIcon` gives the glyphs the frame of every other icon of the bar: the 24-unit
  * grid, the 2-unit stroke with round caps and joins, `currentColor`, the size classes and

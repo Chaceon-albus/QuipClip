@@ -24,7 +24,7 @@ export interface SegmentTrimPreviewProps {
  * box, which follows the playhead, is a child that mounts only while a trim runs, so no part of
  * the preview renders per frame at other times. The box has the look of the selected segment,
  * because the trim selects its segment. It is z-20, above the segment layer (z-10) and under
- * the playhead (z-30). It is aria-hidden and takes no pointer event, as the pending In region
+ * the playhead (z-30). It is aria-hidden and takes no pointer event, as the pending In trail
  * does.
  */
 export const SegmentTrimPreview = memo(function SegmentTrimPreview({

@@ -200,7 +200,7 @@ export interface TrackFrameBandProps extends PositionLayerProps {
  * right edge, at the start of the next frame, shows the width of the frame.
  *
  * It is z-30 and comes before the track playhead in the document, so the playhead line lies over
- * it, and it lies over the segments and the pending In region. It takes no pointer event, so the
+ * it, and it lies over the segments and the pending In trail. It takes no pointer event, so the
  * segments, their edges, the playhead hit area and the seek slider under it keep every press,
  * and the snap and the trim of a drag do not change. It is aria-hidden: the seek slider already
  * gives the timecode.
@@ -254,7 +254,7 @@ export interface TimelineSeekSliderProps extends PositionLayerProps {
  * their presses.
  *
  * Its content is in a wrapper with an 8px vertical inset, the rectangle of the segment layer.
- * The inset holds the source bar, the pending In overlays and the focus ring clear of the
+ * The inset holds the source bar, the pending In trail and the focus ring clear of the
  * ruler divider and of the lower panel edge. The wrapper takes no pointer event, so every
  * press in it goes to the slider.
  *

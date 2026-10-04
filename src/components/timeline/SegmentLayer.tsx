@@ -356,8 +356,8 @@ export const SegmentLayer = memo(function SegmentLayer({
   /*
    * The layer draws each segment in two passes, and the `z-10` of the layer makes it one
    * stacking context. So the z values below order the passes inside the layer only, and the
-   * whole layer stays under the pending In overlays (z-20) and the playhead (z-30) of the
-   * track.
+   * whole layer stays under the pending In mark (z-20) and the playhead (z-30) of the track.
+   * It lies over the fill of the pending In trail, which has no z-index.
    *
    * 1. The fill pass: one button for each segment. It holds the fill, the label and the
    *    click target. The selected button is z-20, so its fill covers the fills of the

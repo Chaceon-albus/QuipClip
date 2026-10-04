@@ -104,6 +104,7 @@
   --color-timeline-divider: var(--timeline-divider);
   --color-timeline-playhead: var(--timeline-playhead);
   --color-timeline-selection: var(--timeline-selection);
+  --color-timeline-mark: var(--timeline-mark);
 
   --color-clip-video: var(--clip-video);
   --color-clip-video-hover: var(--clip-video-hover);
@@ -467,6 +468,14 @@
 
   --timeline-selection: oklch(0.53 0.075 190);
 
+  /* The pending In mark and its trail (PendingInLayer). The colour is orange, far from the
+   * teal of the playhead on the hue circle, so a mark under the playhead still reads as a mark.
+   * It keeps 4.7:1 against the track and 3.1:1 against the fill of an unselected segment. On
+   * the hover fill of a segment it keeps 2.7:1, as the brand colour of the earlier mark did.
+   * Against the playhead colour it keeps only 1.1:1, so the two differ by hue alone. The flag
+   * of the mark stands beside the playhead line, so the shape tells them apart too. */
+  --timeline-mark: oklch(0.56 0.145 48);
+
   /* ---------------------------------------------------------
    * Video clips
    *
@@ -791,6 +800,10 @@
   --timeline-playhead: oklch(0.77 0.105 188);
 
   --timeline-selection: oklch(0.72 0.085 190);
+
+  /* Amber, lighter than the light theme mark: 9.9:1 against the track, 10.2:1 against the
+   * ruler and 4.7:1 against the fill of an unselected segment. */
+  --timeline-mark: oklch(0.8 0.15 70);
 
   /* ---------------------------------------------------------
    * Video clips

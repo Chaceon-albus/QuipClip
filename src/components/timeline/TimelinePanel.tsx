@@ -169,9 +169,9 @@ function readVisibleLane(scrollEl: HTMLElement): ClientRange {
  *
  * The shell subscribes to no value that changes per presented frame. The layers that draw
  * the displayed position subscribe to it themselves: RulerPlayhead, TrackPlayhead, the
- * `aria-valuenow` of TimelineSeekSlider, the pending In region, the frame band at a high zoom
+ * `aria-valuenow` of TimelineSeekSlider, the pending In trail, the frame band at a high zoom
  * (TrackFrameBand), and PlayheadFollow, which holds the follow effects. SegmentLayer, the
- * segment summary in the gutter, the pending In bracket, and the ruler ticks do not
+ * segment summary in the gutter, the pending In mark, and the ruler ticks do not
  * subscribe to it. So a presented frame renders only those small layers again.
  * A layer that renders per frame takes its label as a prop, and a layer that does not
  * reads the catalog itself.
@@ -1536,7 +1536,7 @@ export function TimelinePanel({
                      */}
                     <div className="pointer-events-none absolute inset-0 rounded-lg border border-timeline-divider bg-timeline-track bg-[linear-gradient(135deg,var(--timeline-divider)_0_9%,transparent_9%_50%,var(--timeline-divider)_50%_59%,transparent_59%)] bg-size-[8px_8px]" />
 
-                    {/* Pending In region and bracket (see PendingInTrackMarks) */}
+                    {/* Pending In trail and mark (see PendingInTrackMarks) */}
                     <PendingInTrackMarks
                       videoStartPts={videoStartPts}
                       videoTimeBase={videoTimeBase}

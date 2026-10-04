@@ -241,13 +241,14 @@ export function TransportBar() {
   const splitReasonId = useId();
   const playReasonId = useId();
 
-  // While an In mark waits for its Out mark, Mark In shows it in the primary tint. The button is
-  // not a toggle, so it takes no `aria-pressed`: a pressed state would say that a second press
-  // clears the mark, and a second press moves it. The state is a description instead, which the
-  // button names in `aria-describedby`, and the second line of the tooltip when no reason
-  // takes that line. While Mark In would finish the current segment, the same description
-  // says so. The two never apply together, because the store never holds a pending In beside
-  // a current segment (ADR 007).
+  // While an In mark waits for its Out mark, Mark In shows it in the tint of the mark colour, the
+  // colour of the pending In mark on the timeline (`--timeline-mark`), so the button and the
+  // mark read as one state. The button is not a toggle, so it takes no `aria-pressed`: a
+  // pressed state would say that a second press clears the mark, and a second press moves it.
+  // The state is a description instead, which the button names in `aria-describedby`, and the
+  // second line of the tooltip when no reason takes that line. While Mark In would finish the
+  // current segment, the same description says so. The two never apply together, because the
+  // store never holds a pending In beside a current segment (ADR 007).
   const isInPending = hasActiveSource && pendingInPts !== null;
   const markInStateText = isInPending
     ? t("transport.state.inPending")
@@ -391,9 +392,11 @@ export function TransportBar() {
           <Tooltip>
             <TooltipTrigger asChild>
               <span className="inline-flex">
-                {/* The pending state keeps the label in the foreground colour: the primary
-                    text on its own tint is below 4.5:1 in the light theme. The border, the
-                    fill and the glyph carry the tint. */}
+                {/* The pending state keeps the label in the foreground colour: the mark
+                    colour as text on its own tint is below 4.5:1 in the light theme. The
+                    border, the fill and the glyph carry the tint. In the light theme the glyph
+                    keeps 4.3:1 on the tint at rest and 3.7:1 while pressed, above the 3:1 of an
+                    icon. */}
                 <Button
                   variant="tool"
                   size="tool-row"
@@ -410,7 +413,7 @@ export function TransportBar() {
                   className={cn(
                     "disabled:delay-150 motion-reduce:duration-0",
                     isInPending &&
-                      "border-primary bg-primary/10 hover:bg-primary/15 active:bg-primary/20",
+                      "border-timeline-mark bg-timeline-mark/10 hover:bg-timeline-mark/15 active:bg-timeline-mark/20",
                   )}
                   aria-label={t("transport.action.markInAria")}
                   aria-describedby={`${markInReasonId} ${markInStateId}`}
@@ -419,7 +422,7 @@ export function TransportBar() {
                   <MarkInIcon
                     className={cn(
                       "size-4",
-                      isInPending ? "text-primary" : "text-muted-foreground",
+                      isInPending ? "text-timeline-mark" : "text-muted-foreground",
                     )}
                   />
                   <span className="text-xs font-semibold">

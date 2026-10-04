@@ -6,7 +6,6 @@ import {
   type TimelineStoreState,
 } from "@/features/timeline";
 import type { Pts, Rational } from "@/types/project";
-import { calculatePendingInRegionBox } from "./pendingInGeometry";
 import { useDisplayedPlaybackPosition } from "./useDisplayedPlaybackPosition";
 
 const selectPendingInPts = (state: TimelineStoreState) => state.pendingInPts;
@@ -39,10 +38,10 @@ function calculatePendingInPercent(
 }
 
 /**
- * The pending In region and the pending In bracket in the track, the content of the seek
- * slider that follows the source bar.
+ * The pending In mark and its trail in the track, the content of the seek slider that follows
+ * the source bar.
  *
- * This layer subscribes to the pending mark only. The region, which does depend on the
+ * This layer subscribes to the pending mark only. The trail, which does depend on the
  * playhead, is a child that the layer mounts only while a pending mark can be drawn. So no
  * part of this layer renders per frame while no In mark is pending.
  */
@@ -53,7 +52,7 @@ export const PendingInTrackMarks = memo(function PendingInTrackMarks({
 }: PendingInLayerProps) {
   const pendingInPts = useTimelineStore(selectPendingInPts);
 
-  // The region needs every input of this percent, so it cannot show while this is null.
+  // The trail needs every input of this percent, so it cannot show while this is null.
   const pendingInPercent = calculatePendingInPercent(
     pendingInPts,
     videoStartPts,
@@ -66,7 +65,7 @@ export const PendingInTrackMarks = memo(function PendingInTrackMarks({
 
   return (
     <>
-      <PendingInRegion
+      <PendingInTrail
         pendingInPts={pendingInPts}
         videoStartPts={videoStartPts}
         videoTimeBase={videoTimeBase}
@@ -74,67 +73,100 @@ export const PendingInTrackMarks = memo(function PendingInTrackMarks({
       />
 
       {/*
-       * Pending In mark: a "[" bracket on the In boundary. `-ml-px` centres its 2px left
-       * stroke on the boundary, as the 2px playhead line is centred on its position, so the
-       * stroke covers the pixels that the playhead covers when it stands on the In. The In
-       * PTS is the inclusive left edge of its frame (ADR 002), so the bracket opens to the
-       * right. Right after Mark In the playhead, a plain line that the z-30 layer draws above
-       * the bracket, covers the stroke, and the upper and lower arms show to its right.
+       * The pending In mark, in the mark colour, which is not the colour of the playhead. The
+       * playhead stands on the In right after Mark In, and a mark in the brand colour then
+       * looked like part of the playhead.
+       *
+       * - The line is 2px wide and centred on the In, as the 2px playhead line is centred on
+       *   its position, so it covers the pixels that the playhead covers when it stands on the
+       *   In. It spans the full track lane, as the playhead does, so it reads as a second line
+       *   of the same kind (`-inset-y-2` undoes the 8px inset of the content).
+       * - The flag is a 12px swallowtail at the top of the lane, to the right of the line. The
+       *   In PTS is the inclusive left edge of its frame (ADR 002), so the flag points into the
+       *   segment that the In starts. The playhead line is 2px wide, so the flag stays in view
+       *   while the playhead covers the line, right after Mark In.
+       *
+       * The z-20 mark lies over the segments, because a new segment can start inside an old one
+       * (ADR 007). The mark colour keeps 3:1 against the fill of an unselected segment and 4.7:1
+       * against the track in the light theme, and 4.7:1 and 9.9:1 in the dark theme. It never
+       * lies over the selected fill: while a segment is current, no In mark is pending.
        */}
       <div
-        className="pointer-events-none absolute inset-y-0 z-20 -ml-px w-1.5 rounded-l-[2px] border-y-2 border-l-2 border-primary"
+        className="pointer-events-none absolute -inset-y-2 z-20 w-0"
         style={{ left: `${pendingInPercent}%` }}
-      />
+      >
+        <div className="absolute inset-y-0 -left-px w-0.5 bg-timeline-mark" />
+        <div className="absolute top-0 left-px h-3 w-3 bg-timeline-mark [clip-path:polygon(0_0,100%_0,62%_50%,100%_100%,0_100%)]" />
+      </div>
     </>
   );
 });
 
-interface PendingInRegionProps extends PendingInLayerProps {
+interface PendingInTrailProps extends PendingInLayerProps {
   pendingInPts: Pts | null;
 }
 
 /**
- * Pending In active region preview overlay.
+ * The trail of the pending In: the part of the source from the In to the playhead, the
+ * segment that Mark Out or Finish would make there. It shows only while the playhead is after
+ * the In.
  *
- * The region depends on the playhead, so it renders per frame. Its right edge is the
- * position the playhead is drawn at, and not the presented frame. Each seek clears
- * `presentedFrame` until the next RVFC callback, so a region drawn from it would disappear
- * on every click, frame step and scrub sample (ADR 022). This is display only: Mark Out and
- * the edit predicates still read `presentedFrame`.
+ * The trail depends on the playhead, so it renders per frame. Its right edge is the position
+ * the playhead is drawn at, and not the presented frame. Each seek clears `presentedFrame`
+ * until the next RVFC callback, so a trail drawn from it would disappear on every click, frame
+ * step and scrub sample (ADR 022). This is display only: Mark Out and the edit predicates still
+ * read `presentedFrame`.
  *
- * The region can lie over an existing segment, because a new segment can overlap an old one
- * (ADR 007). The dashed border is the opaque brand colour, so it keeps 3:1 against the fill
- * of an unselected segment in the light theme. At 80% opacity it did not. It does not keep
- * 3:1 against the selected fill, which is also the brand colour. But the region never lies
- * over the selected segment: while a segment is current, no In mark is pending (ADR 007).
+ * The playhead pulls the trail behind it, so the trail has no edge of its own at either end.
+ * Its left end lies under the line of the In mark, and its right end lies under the 2px
+ * playhead line, centred in it. The earlier dashed outline had a right border at the playhead.
+ * The engine snapped that border and the playhead line to device pixels on their own, so the
+ * border could show beside the playhead and look like a second mark. Its dashes and its rounded
+ * corners also moved on every frame of playback, because a dashed border spaces its dashes over
+ * the length of each side. The trail has no dash and no corner. Only its gradient stretches
+ * with the width, smoothly.
  *
- * Each 2px side border is centred on its edge (`calculatePendingInRegionBox`). The left border
- * then lies on the left stroke of the bracket, and the right border lies under the playhead
- * line.
+ * It has two parts:
+ *
+ * - The fill: the track colour under a tint of the mark colour that grows toward the playhead,
+ *   so it hides the hatch of the source bar and reads as a trail. It has the rectangle of a
+ *   segment (`inset-y-1`), so the segment that a press makes appears where the trail was. It
+ *   lies under the segments (it has no z-index, and the segment layer is z-10), so a segment
+ *   that the trail crosses stays in view.
+ * - The edges: two solid 2px lines in the 4px between the source bar and the rectangle of a
+ *   segment, above and below it. No segment covers them, so they show the extent of the trail
+ *   also where it crosses a segment. They carry no information that the In line and the
+ *   playhead do not, so in the light theme they may keep less than 3:1 against the track.
  */
-function PendingInRegion({
+function PendingInTrail({
   pendingInPts,
   videoStartPts,
   videoTimeBase,
   totalDurationSeconds,
-}: PendingInRegionProps) {
+}: PendingInTrailProps) {
   const { elapsedSeconds } = useDisplayedPlaybackPosition(videoStartPts, videoTimeBase);
-  const pendingRegion = calculatePendingInRegionLayoutFromSeconds(
+  const trail = calculatePendingInRegionLayoutFromSeconds(
     pendingInPts,
     elapsedSeconds,
     videoStartPts,
     videoTimeBase,
     totalDurationSeconds,
   );
-  if (!pendingRegion || !pendingRegion.isVisible) {
+  if (!trail || !trail.isVisible) {
     return null;
   }
-  const box = calculatePendingInRegionBox(pendingRegion);
 
+  const style = { left: trail.left, width: trail.width };
   return (
-    <div
-      className="pointer-events-none absolute inset-y-1 z-20 rounded-md border-2 border-dashed border-primary bg-primary/15"
-      style={{ left: box.left, width: box.width }}
-    />
+    <>
+      <div
+        className="pointer-events-none absolute inset-y-1 bg-timeline-track bg-linear-to-r from-timeline-mark/8 to-timeline-mark/35"
+        style={style}
+      />
+      <div
+        className="pointer-events-none absolute inset-y-0.5 border-y-2 border-timeline-mark/60"
+        style={style}
+      />
+    </>
   );
 }
