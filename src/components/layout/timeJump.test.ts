@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Pts, Rational, TickCount } from "@/types/project";
 import {
+  PLAYING_ARROW_JUMP_SECONDS,
   planTimeJump,
   TIME_JUMP_SECONDS,
   TIME_JUMP_SEEK_OPTIONS,
@@ -67,10 +68,9 @@ function pendingAt(
 }
 
 describe("TIME_JUMP_SECONDS", () => {
-  it("jumps 5 s with the arrow, 1 s with Shift and 30 s with primary", () => {
+  it("jumps 1 s with Shift and an arrow, 30 s with primary, and 5 s with an arrow in play", () => {
+    expect(PLAYING_ARROW_JUMP_SECONDS).toBe(5);
     expect(TIME_JUMP_SECONDS).toStrictEqual({
-      jumpBackFiveSeconds: -5,
-      jumpForwardFiveSeconds: 5,
       jumpBackOneSecond: -1,
       jumpForwardOneSecond: 1,
       jumpBackThirtySeconds: -30,

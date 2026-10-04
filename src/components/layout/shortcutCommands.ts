@@ -50,7 +50,12 @@ import {
 } from "./actionConditions";
 import { findEditPoint } from "./editPointJump";
 import type { ShortcutAction } from "./shortcutBindings";
-import { planTimeJump, TIME_JUMP_SECONDS, TIME_JUMP_SEEK_OPTIONS } from "./timeJump";
+import {
+  PLAYING_ARROW_JUMP_SECONDS,
+  planTimeJump,
+  TIME_JUMP_SECONDS,
+  TIME_JUMP_SEEK_OPTIONS,
+} from "./timeJump";
 
 /** The number of nominal frame intervals that one ten-frame step moves (ADR 026). */
 export const LARGE_FRAME_STEP = 10;
@@ -784,8 +789,31 @@ export function planShortcutCommand(
       return { kind: "seekNominal", frames: sign * size, held: press?.repeat === true };
     }
 
-    case "jumpBackFiveSeconds":
-    case "jumpForwardFiveSeconds":
+    case "stepOrJumpBack":
+    case "stepOrJumpForward": {
+      // The arrow with no modifier. While the video plays it jumps, as in a media player, and a
+      // frame step there would only stop the playback. While the video is paused it steps one
+      // frame, the same step as `,` and `.`. When no frame step can run (no nominal frame rate,
+      // or a decode stall), it jumps, so the key still moves the playhead, and the seek of the
+      // jump also loads a stalled preview again.
+      const sign = action === "stepOrJumpBack" ? -1 : 1;
+      if (
+        !playback.isPlaying &&
+        canStepFrames(
+          hasActiveSource,
+          hasNominalFrameRate(probe),
+          isDecodeStalled(playback),
+        )
+      ) {
+        return { kind: "seekNominal", frames: sign, held: press?.repeat === true };
+      }
+      return planTimeJumpCommand(
+        sign * PLAYING_ARROW_JUMP_SECONDS,
+        snapshot,
+        hasActiveSource,
+      );
+    }
+
     case "jumpBackOneSecond":
     case "jumpForwardOneSecond":
     case "jumpBackThirtySeconds":

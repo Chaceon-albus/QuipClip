@@ -1,6 +1,8 @@
 /**
- * Plans the time jumps of the window keyboard layer: an arrow key jumps 5 s back or forward,
- * 1 s with Shift and 30 s with primary, as a media player such as PotPlayer or mpv does.
+ * Plans the time jumps of the window keyboard layer: an arrow key jumps 5 s back or forward
+ * while the video plays, 1 s with Shift and 30 s with primary, as a media player such as
+ * PotPlayer or mpv does. While the video is paused, the arrow key with no modifier steps one
+ * frame instead (`shortcutCommands.ts`).
  *
  * `planTimeJump` reads one snapshot of the media and playback state and returns the seek of the
  * jump, an edge (`start` or `end`) whose seek the caller plans with the plan of Home or End, or
@@ -58,16 +60,21 @@ import type { ShortcutAction } from "./shortcutBindings";
 
 /** The seconds that each time jump action moves: negative back, positive forward. */
 export const TIME_JUMP_SECONDS = {
-  jumpBackFiveSeconds: -5,
-  jumpForwardFiveSeconds: 5,
   jumpBackOneSecond: -1,
   jumpForwardOneSecond: 1,
   jumpBackThirtySeconds: -30,
   jumpForwardThirtySeconds: 30,
 } as const satisfies Partial<Record<ShortcutAction, number>>;
 
-/** An action of the key table that jumps in time. */
+/** An action of the key table that always jumps in time. */
 export type TimeJumpAction = keyof typeof TIME_JUMP_SECONDS;
+
+/**
+ * The seconds of the jump of an arrow key with no modifier while the video plays, as in
+ * PotPlayer and mpv. While the video is paused, that key steps one frame instead
+ * (`stepOrJumpBack` and `stepOrJumpForward` in `shortcutCommands.ts`).
+ */
+export const PLAYING_ARROW_JUMP_SECONDS = 5;
 
 /**
  * The options of every seek of a jump. A jump while the video plays plays on from the target,

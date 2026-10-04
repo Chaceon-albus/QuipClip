@@ -483,11 +483,14 @@ describe("planShortcutCommand", () => {
 
     it("plans the same command for a repeat and a press of an action that is not a step", () => {
       for (const action of SHORTCUT_ACTIONS) {
+        // The arrows with no modifier step a frame while the video is paused, as here.
         if (
           action === "stepBackOneFrame" ||
           action === "stepForwardOneFrame" ||
           action === "stepBackTenFrames" ||
-          action === "stepForwardTenFrames"
+          action === "stepForwardTenFrames" ||
+          action === "stepOrJumpBack" ||
+          action === "stepOrJumpForward"
         ) {
           continue;
         }
@@ -576,10 +579,16 @@ describe("planShortcutCommand", () => {
 
   describe("the time jumps", () => {
     const KEEP_PLAYING = { keepPlaying: true };
+    /** A snapshot of a video that plays, where an arrow with no modifier jumps 5 s. */
+    const playing = (overrides: SnapshotOverrides = {}): ShortcutSnapshot =>
+      createSnapshot({
+        ...overrides,
+        playback: { isPlaying: true, ...overrides.playback },
+      });
 
     it("jumps 5 s, 1 s and 30 s on the frame grid, and keeps the playback running", () => {
       // Frame 30 (1 s) is on screen at 30 fps, and the extent ends at 10 s.
-      expect(planShortcutCommand("jumpForwardFiveSeconds", createSnapshot())).toEqual({
+      expect(planShortcutCommand("stepOrJumpForward", playing())).toEqual({
         kind: "seekToFrameIndex",
         frameIndex: 180,
         options: KEEP_PLAYING,
@@ -594,14 +603,68 @@ describe("planShortcutCommand", () => {
         frameIndex: 0,
         options: KEEP_PLAYING,
       });
-      const atSix = createSnapshot({
+      const atSix = playing({
         playback: { presentedFrame: null, seekTargetSeconds: 6 },
       });
-      expect(planShortcutCommand("jumpBackFiveSeconds", atSix)).toEqual({
+      expect(planShortcutCommand("stepOrJumpBack", atSix)).toEqual({
         kind: "seekToFrameIndex",
         frameIndex: 30,
         options: KEEP_PLAYING,
       });
+    });
+
+    it("steps one frame with an arrow while paused, and jumps 5 s while playing", () => {
+      expect(planShortcutCommand("stepOrJumpForward", createSnapshot())).toEqual({
+        kind: "seekNominal",
+        frames: 1,
+        held: false,
+      });
+      // A held arrow is a held step, as a held . is: its backward cue is silent (ADR 019).
+      expect(
+        planShortcutCommand("stepOrJumpBack", createSnapshot(), { repeat: true }),
+      ).toEqual({ kind: "seekNominal", frames: -1, held: true });
+      // The same press during playback jumps, and keeps playing.
+      expect(planShortcutCommand("stepOrJumpForward", playing())).toEqual({
+        kind: "seekToFrameIndex",
+        frameIndex: 180,
+        options: KEEP_PLAYING,
+      });
+      // A segment playback plays too, so the arrow jumps there as well.
+      const segmentPlayback = playing({
+        playback: {
+          playbackStop: {
+            inPts: pts("60000"),
+            outPts: pts("240000"),
+            phase: "playing",
+          },
+        },
+      });
+      expect(planShortcutCommand("stepOrJumpForward", segmentPlayback)).toEqual({
+        kind: "seekToFrameIndex",
+        frameIndex: 180,
+        options: KEEP_PLAYING,
+      });
+    });
+
+    it("jumps 5 s with a paused arrow when no frame step can run", () => {
+      // No nominal frame rate: the step buttons are disabled, and the arrow still moves.
+      const noRate = createSnapshot({
+        probe: createProbe({ avgFrameRate: null, rFrameRate: null }),
+      });
+      expect(planShortcutCommand("stepForwardOneFrame", noRate)).toBeNull();
+      expect(planShortcutCommand("stepOrJumpForward", noRate)).not.toBeNull();
+      expect(planShortcutCommand("stepOrJumpForward", noRate)?.kind).not.toBe(
+        "seekNominal",
+      );
+      // A decode stall: the step does nothing, and the seek of the jump loads the preview.
+      const stalled = createSnapshot({
+        playback: { presentedFrame: null, decodeStall: { atSeconds: 1 } },
+      });
+      expect(planShortcutCommand("stepBackOneFrame", stalled)).toBeNull();
+      expect(planShortcutCommand("stepOrJumpBack", stalled)?.kind).not.toBe(
+        "seekNominal",
+      );
+      expect(planShortcutCommand("stepOrJumpBack", stalled)).not.toBeNull();
     });
 
     it("plans the same jump for a key repeat, a press and a menu", () => {
@@ -617,7 +680,7 @@ describe("planShortcutCommand", () => {
     });
 
     it("goes where Home goes for a target before the start, and plays on", () => {
-      expect(planShortcutCommand("jumpBackFiveSeconds", createSnapshot())).toEqual({
+      expect(planShortcutCommand("stepOrJumpBack", playing())).toEqual({
         kind: "seekToPts",
         pts: "0",
         options: KEEP_PLAYING,
@@ -636,14 +699,14 @@ describe("planShortcutCommand", () => {
       });
       expect(planShortcutCommand("jumpBackOneSecond", atStart)).toBeNull();
       // Without a calibration, Home goes to time zero on the approximate clock.
-      const uncalibrated = createSnapshot({
+      const uncalibrated = playing({
         playback: {
           calibrationStatus: "unavailable",
           presentedFrame: null,
           approximateBrowserTimeSeconds: 2,
         },
       });
-      expect(planShortcutCommand("jumpBackFiveSeconds", uncalibrated)).toEqual({
+      expect(planShortcutCommand("stepOrJumpBack", uncalibrated)).toEqual({
         kind: "seekApproximate",
         seconds: 0,
         options: { ...APPROXIMATE_SHORTCUT_SEEK_OPTIONS, keepPlaying: true },
@@ -665,7 +728,7 @@ describe("planShortcutCommand", () => {
           presentedFrame: { mediaTime: 299 / 30, inferredSourcePts: pts("897000") },
         },
       });
-      expect(planShortcutCommand("jumpForwardFiveSeconds", atLast)).toBeNull();
+      expect(planShortcutCommand("jumpForwardOneSecond", atLast)).toBeNull();
       // Off the grid, End seeks to the last tick with its own option.
       const variable = createSnapshot({
         probe: createProbe({ rFrameRate: { n: 60, d: 1 } }),
@@ -676,14 +739,14 @@ describe("planShortcutCommand", () => {
         options: { ...EXTENT_END_SEEK_OPTIONS, keepPlaying: true },
       });
       // Without a calibration, End goes to the end of the ruler on the approximate clock.
-      const uncalibrated = createSnapshot({
+      const uncalibrated = playing({
         playback: {
           calibrationStatus: "unavailable",
           presentedFrame: null,
           approximateBrowserTimeSeconds: 8,
         },
       });
-      expect(planShortcutCommand("jumpForwardFiveSeconds", uncalibrated)).toEqual({
+      expect(planShortcutCommand("stepOrJumpForward", uncalibrated)).toEqual({
         kind: "seekApproximate",
         seconds: 10,
         options: { ...APPROXIMATE_SHORTCUT_SEEK_OPTIONS, keepPlaying: true },
@@ -691,10 +754,10 @@ describe("planShortcutCommand", () => {
     });
 
     it("seeks off the grid by PTS, and without a calibration on the approximate clock", () => {
-      const variable = createSnapshot({
+      const variable = playing({
         probe: createProbe({ rFrameRate: { n: 60, d: 1 } }),
       });
-      expect(planShortcutCommand("jumpForwardFiveSeconds", variable)).toEqual({
+      expect(planShortcutCommand("stepOrJumpForward", variable)).toEqual({
         kind: "seekToPts",
         pts: "540000",
         options: KEEP_PLAYING,
@@ -1865,8 +1928,8 @@ describe("planShortcutCommand", () => {
         // A jump is a seek, not a frame step: it plays no cue (ADR 019).
         expect(request).not.toHaveBeenCalled();
 
-        // ← from 4 s goes back past the start, where Home goes.
-        expect(h.press("jumpBackFiveSeconds")).toEqual({
+        // ⌘← from 4 s goes back past the start, where Home goes.
+        expect(h.press("jumpBackThirtySeconds")).toEqual({
           kind: "seekToPts",
           pts: "0",
           options: { keepPlaying: true },
@@ -1889,7 +1952,7 @@ describe("planShortcutCommand", () => {
       h.playback.getState().play();
       expect(h.playback.getState().isPlaying).toBe(true);
 
-      h.press("jumpForwardFiveSeconds");
+      h.press("stepOrJumpForward");
       expect(h.element.currentTime).toBeCloseTo(150.5 / 25, 9);
       expect(h.playback.getState().isPlaying).toBe(true);
       expect(pause).not.toHaveBeenCalled();
@@ -2177,6 +2240,40 @@ describe("planShortcutCommand", () => {
       const seeks = h.element.currentTimeSets;
       expect(h.press("goToEnd")).toBeNull();
       expect(h.element.currentTimeSets).toBe(seeks);
+    });
+
+    it("a paused →, held: steps one frame at each repeat, and the video stays paused", () => {
+      const h = createStoreHarness();
+      h.clickRulerAt("25");
+      expect(h.playback.getState().isPlaying).toBe(false);
+      // The browser presents the frame of the step, which starts at a whole frame (ADR 022).
+      const presentFrame = (frame: number): void => {
+        h.presentSeekedFrame(frame / 25);
+      };
+
+      expect(h.press("stepOrJumpForward", { repeat: false })).toEqual({
+        kind: "seekNominal",
+        frames: 1,
+        held: false,
+      });
+      presentFrame(26);
+      expect(h.shownPts()).toBe("26");
+      expect(h.press("stepOrJumpForward", { repeat: true })).toEqual({
+        kind: "seekNominal",
+        frames: 1,
+        held: true,
+      });
+      presentFrame(27);
+      expect(h.shownPts()).toBe("27");
+      // ← steps back the same way, and nothing starts the playback.
+      expect(h.press("stepOrJumpBack")).toEqual({
+        kind: "seekNominal",
+        frames: -1,
+        held: false,
+      });
+      presentFrame(26);
+      expect(h.shownPts()).toBe("26");
+      expect(h.playback.getState().isPlaying).toBe(false);
     });
 
     it("End then → on the grid: the step does nothing, and O marks the last frame", () => {

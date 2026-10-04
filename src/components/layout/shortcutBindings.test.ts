@@ -65,13 +65,13 @@ describe("shortcutBindings", () => {
       {
         name: "ArrowLeft",
         press: () => press({ key: "ArrowLeft", code: "ArrowLeft" }),
-        action: "jumpBackFiveSeconds",
+        action: "stepOrJumpBack",
         repeat: "acts",
       },
       {
         name: "ArrowRight",
         press: () => press({ key: "ArrowRight", code: "ArrowRight" }),
-        action: "jumpForwardFiveSeconds",
+        action: "stepOrJumpForward",
         repeat: "acts",
       },
       {
@@ -515,7 +515,14 @@ describe("shortcutBindings", () => {
         fallback: true,
         keyCap: ".",
       });
-      // Every later binding of a frame step is a layout variant.
+      // Every later binding of a frame step is a layout variant, except the letter of
+      // PotPlayer: D back and F forward, with Shift for ten frames.
+      const letters = {
+        stepBackOneFrame: "D",
+        stepForwardOneFrame: "F",
+        stepBackTenFrames: "D",
+        stepForwardTenFrames: "F",
+      } as const;
       for (const action of [
         "stepBackOneFrame",
         "stepForwardOneFrame",
@@ -523,7 +530,12 @@ describe("shortcutBindings", () => {
         "stepForwardTenFrames",
       ] as const) {
         const later = SHORTCUT_BINDINGS.filter((b) => b.action === action).slice(1);
-        for (const binding of later) {
+        expect(later[0]?.key).toStrictEqual({
+          kind: "letter",
+          letter: letters[action],
+        });
+        expect(later[0]?.layoutVariant).toBeUndefined();
+        for (const binding of later.slice(1)) {
           expect(binding.layoutVariant).toBe(true);
         }
       }
@@ -631,6 +643,36 @@ describe("shortcutBindings", () => {
       ).toBeNull();
     });
 
+    it("steps one frame with D and F, and ten frames with Shift, as PotPlayer does", () => {
+      for (const platform of PLATFORMS) {
+        expect(actionOf(press({ key: "d", code: "KeyD" }), platform)).toBe(
+          "stepBackOneFrame",
+        );
+        expect(actionOf(press({ key: "f", code: "KeyF" }), platform)).toBe(
+          "stepForwardOneFrame",
+        );
+        expect(
+          actionOf(press({ key: "D", code: "KeyD", shiftKey: true }), platform),
+        ).toBe("stepBackTenFrames");
+        expect(
+          actionOf(press({ key: "F", code: "KeyF", shiftKey: true }), platform),
+        ).toBe("stepForwardTenFrames");
+        // A Cyrillic layout types no ASCII letter there, so the position names the key.
+        expect(actionOf(press({ key: "в", code: "KeyD" }), platform)).toBe(
+          "stepBackOneFrame",
+        );
+        // Dvorak types e on the D position, which is no binding, and d on the H position.
+        expect(actionOf(press({ key: "e", code: "KeyD" }), platform)).toBeNull();
+        expect(actionOf(press({ key: "d", code: "KeyH" }), platform)).toBe(
+          "stepBackOneFrame",
+        );
+        // primary with D or F stays with the system.
+        expect(
+          actionOf(press({ key: "d", code: "KeyD", ...primary(platform) }), platform),
+        ).toBeNull();
+      }
+    });
+
     it("rejects a plain Z and E, which need primary, and steps from a plain comma", () => {
       for (const platform of PLATFORMS) {
         expect(actionOf(press({ key: "z", code: "KeyZ" }), platform)).toBeNull();
@@ -647,7 +689,7 @@ describe("shortcutBindings", () => {
     it("keeps Shift, primary and primary+Shift with an arrow apart", () => {
       for (const platform of PLATFORMS) {
         expect(actionOf(press({ key: "ArrowLeft", code: "ArrowLeft" }), platform)).toBe(
-          "jumpBackFiveSeconds",
+          "stepOrJumpBack",
         );
         expect(
           actionOf(
@@ -1231,7 +1273,7 @@ describe("shortcutBindings", () => {
         ],
         ["ArrowUp", { key: "ArrowUp", code: "ArrowUp" }, "goToPreviousEditPoint"],
         ["ArrowDown", { key: "ArrowDown", code: "ArrowDown" }, "goToNextEditPoint"],
-        ["ArrowLeft", { key: "ArrowLeft", code: "ArrowLeft" }, "jumpBackFiveSeconds"],
+        ["ArrowLeft", { key: "ArrowLeft", code: "ArrowLeft" }, "stepOrJumpBack"],
         [
           "Shift+ArrowRight",
           { key: "ArrowRight", code: "ArrowRight", shiftKey: true },

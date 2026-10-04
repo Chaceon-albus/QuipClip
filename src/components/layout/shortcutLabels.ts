@@ -362,10 +362,13 @@ export function shortcutFor(
 /**
  * The number of bindings that the tooltip chips of an action name. Every other action names
  * its first binding only. Fit also names Shift+Z, because a layout that needs AltGr or Option
- * to type `\` cannot press the first key: no binding holds Alt.
+ * to type `\` cannot press the first key: no binding holds Alt. The two one-frame steps also
+ * name D and F, the frame step keys of PotPlayer, beside the `,` and `.` of mpv.
  */
 const CHIP_BINDING_COUNT: { readonly [A in ShortcutAction]?: number } = {
   zoomToFit: 2,
+  stepBackOneFrame: 2,
+  stepForwardOneFrame: 2,
 };
 
 /**

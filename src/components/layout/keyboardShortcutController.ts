@@ -191,7 +191,7 @@ export function isShortcutSuppressed(event: ShortcutKeyEvent): boolean {
  * Unlike the owners of `KEYBOARD_OWNER_SELECTOR`, a splitter owns only the keys that move it.
  * `Home` and `End` are also in the key table (ADR 026), so without this rule a press on the
  * splitter would go to the first or the last frame. Every other key keeps its meaning: `Space`
- * still plays and `ArrowLeft` still jumps while the splitter has the focus.
+ * still plays and `ArrowLeft` still steps or jumps while the splitter has the focus.
  */
 export function isSplitterKey(event: ShortcutKeyEvent): boolean {
   return (
@@ -215,7 +215,7 @@ export function isSplitterKey(event: ShortcutKeyEvent): boolean {
  * which the browser scrolls. A marked container whose content fits does not scroll, so there
  * the keys still go to the edit points. The test reads the closest marked container only, as the
  * browser scrolls the closest container. Every other key keeps its meaning there: `ArrowLeft`
- * still jumps while a menu trigger has the focus.
+ * still steps or jumps while a menu trigger has the focus.
  */
 export function isVerticalArrowOwned(event: ShortcutKeyEvent): boolean {
   const { target } = event;

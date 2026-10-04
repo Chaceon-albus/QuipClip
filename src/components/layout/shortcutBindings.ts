@@ -29,8 +29,8 @@ export function getShortcutPlatform(): ShortcutPlatform {
 export const SHORTCUT_ACTIONS = [
   "togglePlayback",
   "playSegment",
-  "jumpBackFiveSeconds",
-  "jumpForwardFiveSeconds",
+  "stepOrJumpBack",
+  "stepOrJumpForward",
   "jumpBackOneSecond",
   "jumpForwardOneSecond",
   "jumpBackThirtySeconds",
@@ -277,19 +277,21 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     action: "playSegment",
     repeat: "taken",
   },
-  // The time jumps of a media player, such as PotPlayer and mpv: 5 s with the arrow alone, 1 s
-  // with Shift, 30 s with primary (`timeJump.ts`). A held arrow jumps on every repeat, and each
-  // jump counts from the target of the jump before it.
+  // The arrows of a media player, such as PotPlayer and mpv. The arrow alone jumps 5 s while
+  // the video plays, and steps one frame while it is paused, because a user who adjusts a
+  // frame pauses first (`stepOrJumpBack`, `shortcutCommands.ts`). Shift jumps 1 s and primary
+  // jumps 30 s in both states (`timeJump.ts`). A held arrow acts on every repeat, and each jump
+  // counts from the target of the jump before it.
   {
     key: named("ArrowLeft"),
     modifiers: [],
-    action: "jumpBackFiveSeconds",
+    action: "stepOrJumpBack",
     repeat: "acts",
   },
   {
     key: named("ArrowRight"),
     modifiers: [],
-    action: "jumpForwardFiveSeconds",
+    action: "stepOrJumpForward",
     repeat: "acts",
   },
   {
@@ -362,6 +364,22 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     action: "stepForwardOneFrame",
     repeat: "acts",
   },
+  // The frame steps of PotPlayer: D steps one frame back and F one frame forward. Shift with the
+  // same key steps ten, as Shift with `,` and `.` does. The letters follow the layout (ADR 026),
+  // so a Dvorak user presses the keys that show D and F. The rows come after `,` and `.`, so the
+  // first chip of a step stays `,` or `.`, and the tooltip names D or F as its second chip.
+  {
+    key: letter("D"),
+    modifiers: [],
+    action: "stepBackOneFrame",
+    repeat: "acts",
+  },
+  {
+    key: letter("F"),
+    modifiers: [],
+    action: "stepForwardOneFrame",
+    repeat: "acts",
+  },
   {
     key: characterAt("<", "Comma", { fallback: true, keyCap: "," }),
     modifiers: ["shift"],
@@ -370,6 +388,18 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
   },
   {
     key: characterAt(">", "Period", { fallback: true, keyCap: "." }),
+    modifiers: ["shift"],
+    action: "stepForwardTenFrames",
+    repeat: "acts",
+  },
+  {
+    key: letter("D"),
+    modifiers: ["shift"],
+    action: "stepBackTenFrames",
+    repeat: "acts",
+  },
+  {
+    key: letter("F"),
     modifiers: ["shift"],
     action: "stepForwardTenFrames",
     repeat: "acts",

@@ -178,20 +178,20 @@ describe("keyboardShortcutController", () => {
     });
 
     // 2. ArrowLeft -> the jump of 5 s back
-    it("resolves ArrowLeft to jumpBackFiveSeconds", () => {
+    it("resolves ArrowLeft to stepOrJumpBack", () => {
       const event = createKeyEvent({ key: "ArrowLeft" });
       expect(resolveShortcut(event, allAvailable)).toEqual({
         claimed: true,
-        action: "jumpBackFiveSeconds",
+        action: "stepOrJumpBack",
       });
     });
 
     // 3. ArrowRight -> the jump of 5 s forward
-    it("resolves ArrowRight to jumpForwardFiveSeconds", () => {
+    it("resolves ArrowRight to stepOrJumpForward", () => {
       const event = createKeyEvent({ key: "ArrowRight" });
       expect(resolveShortcut(event, allAvailable)).toEqual({
         claimed: true,
-        action: "jumpForwardFiveSeconds",
+        action: "stepOrJumpForward",
       });
     });
 
@@ -221,7 +221,7 @@ describe("keyboardShortcutController", () => {
         ),
       ).toEqual({
         claimed: true,
-        action: "jumpBackFiveSeconds",
+        action: "stepOrJumpBack",
       });
 
       expect(
@@ -231,7 +231,7 @@ describe("keyboardShortcutController", () => {
         ),
       ).toEqual({
         claimed: true,
-        action: "jumpForwardFiveSeconds",
+        action: "stepOrJumpForward",
       });
 
       expect(
@@ -277,7 +277,7 @@ describe("keyboardShortcutController", () => {
         ),
       ).toEqual({
         claimed: true,
-        action: "jumpBackFiveSeconds",
+        action: "stepOrJumpBack",
       });
 
       expect(
@@ -287,7 +287,7 @@ describe("keyboardShortcutController", () => {
         ),
       ).toEqual({
         claimed: true,
-        action: "jumpForwardFiveSeconds",
+        action: "stepOrJumpForward",
       });
 
       // The slider is no container that scrolls, so ArrowUp goes to the edit point there.
@@ -389,7 +389,7 @@ describe("keyboardShortcutController", () => {
         ),
       ).toEqual({
         claimed: true,
-        action: "jumpBackFiveSeconds",
+        action: "stepOrJumpBack",
       });
 
       expect(
@@ -399,7 +399,7 @@ describe("keyboardShortcutController", () => {
         ),
       ).toEqual({
         claimed: true,
-        action: "jumpForwardFiveSeconds",
+        action: "stepOrJumpForward",
       });
 
       expect(
@@ -501,8 +501,8 @@ describe("keyboardShortcutController", () => {
 
     it("acts on a repeated press of every key that ADR 026 marks 'acts'", () => {
       const acts: readonly [ShortcutKeyEvent, ShortcutAction][] = [
-        [createKeyEvent({ key: "ArrowLeft" }), "jumpBackFiveSeconds"],
-        [createKeyEvent({ key: "ArrowRight" }), "jumpForwardFiveSeconds"],
+        [createKeyEvent({ key: "ArrowLeft" }), "stepOrJumpBack"],
+        [createKeyEvent({ key: "ArrowRight" }), "stepOrJumpForward"],
         [createKeyEvent({ key: "ArrowLeft", shiftKey: true }), "jumpBackOneSecond"],
         [createKeyEvent({ key: "ArrowRight", shiftKey: true }), "jumpForwardOneSecond"],
         [createKeyEvent({ key: "ArrowLeft", ctrlKey: true }), "jumpBackThirtySeconds"],
@@ -910,7 +910,7 @@ describe("keyboardShortcutController", () => {
       });
     });
 
-    it("claims ArrowRight and returns jumpForwardFiveSeconds on a closed popup trigger", () => {
+    it("claims ArrowRight and returns stepOrJumpForward on a closed popup trigger", () => {
       const popupTriggerTarget: ShortcutEventTarget = {
         tagName: "BUTTON",
         isContentEditable: false,
@@ -928,7 +928,7 @@ describe("keyboardShortcutController", () => {
       expect(isShortcutSuppressed(event)).toBe(false);
       expect(resolveShortcut(event, allAvailable)).toEqual({
         claimed: true,
-        action: "jumpForwardFiveSeconds",
+        action: "stepOrJumpForward",
       });
     });
 
@@ -1334,7 +1334,7 @@ describe("keyboardShortcutController", () => {
           createKeyEvent({ key: "ArrowLeft", target: splitterTarget }),
           allAvailable,
         ),
-      ).toEqual({ claimed: true, action: "jumpBackFiveSeconds" });
+      ).toEqual({ claimed: true, action: "stepOrJumpBack" });
     });
 
     it("keeps ArrowUp and ArrowDown from the edit points while the splitter has the focus", () => {
@@ -1430,7 +1430,7 @@ describe("keyboardShortcutController", () => {
           createKeyEvent({ key: "ArrowLeft", target: trigger }),
           allAvailable,
         ),
-      ).toEqual({ claimed: true, action: "jumpBackFiveSeconds" });
+      ).toEqual({ claimed: true, action: "stepOrJumpBack" });
       expect(
         resolveShortcut(createKeyEvent({ key: " ", target: trigger }), allAvailable),
       ).toEqual({ claimed: true, action: "togglePlayback" });
