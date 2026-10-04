@@ -113,9 +113,9 @@ is the macOS key. On Windows, use `Ctrl`.
 | `,` `.`              | Step one frame. With `Shift`, ten frames                                         |
 | `↑` `↓`              | Go to the previous or the next edit point                                        |
 | `Home` `End`         | Go to the start or the end                                                       |
-| `I` `O`              | Mark In, Mark Out                                                                |
+| `I` `O`              | Mark In, Mark Out. `O` on the Out of the current segment finishes the segment    |
 | `Shift+I` `Shift+O`  | Go to the In or the Out of the current segment                                   |
-| `Esc`                | Finish the current segment                                                       |
+| `Esc`                | Finish the current segment. After an In, end a segment at the playhead           |
 | `Delete` `Backspace` | Delete the current segment                                                       |
 | `Cmd+Z`              | Undo                                                                             |
 | `Cmd+Shift+Z`        | Redo. On Windows, `Ctrl+Y` also redoes                                           |
