@@ -510,10 +510,12 @@ the first excluded frame. Split creates adjacent half-open segments. Exact inclu
 final source frame needs discovery of its following boundary.
 
 One segment is current, and every edit action names it rather than inferring a target from the
-playhead. Mark In and Mark Out adjust its boundaries; Finish Segment ends it so the next Mark In
-starts a fresh one, and Mark In at or after its Out finishes it and marks the next In in one
-step; clicking a segment makes it current; Delete Segment removes it and leaves nothing current. Segments may therefore overlap without ambiguity. While a current segment
-resolves, there is no pending In mark. See ADR 007.
+playhead. Mark In and Mark Out adjust its boundaries. Finish Segment ends it, so the next Mark In
+starts a fresh one. Mark In at or after its Out finishes it and marks the next In in one step.
+Mark Out on its Out finishes it too. Clicking a segment makes it current. Delete Segment removes
+it and leaves nothing current. Segments may therefore overlap without ambiguity. While a current
+segment resolves, there is no pending In mark. Finish Segment with a pending In makes a segment
+that ends at the frame on screen, when that frame is after the In. See ADR 007.
 
 `Source.id` is stable project identity. A separate revision key of path, size, and
 modification time drives runtime invalidation and the replacement warning. The generated

@@ -91,6 +91,32 @@ is current:
 A pending In alone still adds no history entry. The tooltip of Mark In says when a press
 finishes the segment.
 
+(Changed on 2026-10-04.) Two more actions finish a segment. A user asked for both.
+
+- Mark Out on the Out of the current segment finishes that segment and moves no point. Mark Out
+  leaves the playhead on the Out, so a second press of Mark Out at the same frame ends the
+  segment. Before this change, Mark Out was disabled there, and the second press did nothing.
+  The finish adds no history entry, as Finish Segment does for a current segment. The tooltip of
+  Mark Out says when a press finishes the segment.
+- Finish Segment with a pending In and a frame on screen after the In completes a segment from
+  the In to that frame. Nothing is current after it. Before this change, Finish Segment dropped
+  the pending In. The Out is the frame on screen, the frame that Mark Out writes (ADR 003,
+  ADR 022). The action adds one history entry. Undo removes the segment and restores the
+  pending In.
+
+Finish Segment still drops a pending In when the frame on screen is at or before the In,
+because no segment can end there (ADR 002). The user discards a pending In in this way. The
+tooltip of Finish says which of the two a press does. While no frame is on screen, Finish
+Segment with a pending In is disabled, as Mark Out is. A pending seek and a decode stall
+(ADR 039) clear the frame. A fast press after a seek therefore does not drop a mark that the user
+wanted to complete. With an unavailable calibration no frame can be marked, so the action drops
+the mark.
+
+A consequence: after the playhead moves past a pending In, Finish Segment no longer discards the
+In. To discard it, the user moves the playhead to the In or before it, or selects a segment.
+During a decode stall, Finish Segment cannot discard a pending In either. The seek that clears
+the stall shows a frame again.
+
 While a current segment resolves for the active source, there is no pending In mark. The two
 fields describe the same thing — the segment being built — so they never both hold a value.
 

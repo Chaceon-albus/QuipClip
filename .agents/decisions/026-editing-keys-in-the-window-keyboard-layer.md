@@ -168,6 +168,12 @@ The actions behave as follows:
 
 - Mark In and Mark Out write the PTS of the frame the browser confirmed, as ADR 003 and
   ADR 022 require. A key press during a pending seek does nothing.
+- (Added on 2026-10-04.) Mark Out on the Out of the current segment finishes that segment.
+  `Escape` with a pending In completes a segment that ends at the frame on screen, when that
+  frame is after the In. At or before the In, `Escape` drops the pending In, as before. ADR 007
+  gives both rules. The key and the Finish button read one plan (`planFinishSegment`), and a
+  null plan is the condition of both. While an In is pending and no frame is on screen, the
+  Finish button is disabled, and `Escape` owns the key press and does nothing, as Mark Out does.
 - (Added on 2026-10-02.) During a decode stall (ADR 039), Space, Play Segment and the frame
   steps do nothing, and their controls are disabled with a reason. The seeks of Home, End, Go
   to In and Go to Out still run, and they load the preview again.
