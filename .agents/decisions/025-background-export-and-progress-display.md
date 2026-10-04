@@ -186,6 +186,41 @@ request all use it.
 
 One pure presenter computes these values for the dialog, the status bar, and the task bar.
 
+(Changed on 2026-10-04.) The dialog smooths the frame count, and its two times change together.
+A user saw the bar move in jerks. The user also saw the remaining time and the elapsed time
+change at different moments, because each block of `ffmpeg` changed the estimate and a timer of
+its own changed the elapsed time.
+
+- `ffmpeg` writes one `-progress` block about every 500 ms. Between two blocks, the dialog moves
+  the frame count along a line toward the frame that the measured rate gives one interval after
+  the last block (`exportProgressSmoothing.ts`). The rate and the interval are moving averages
+  of the blocks that change the frame count. The position never moves backward and never
+  passes the total. It stops one interval after the last block, so a stalled encode does not run
+  on. A lower frame starts a new model.
+- The bar, the percent, the value text of the bar and the frame count read that one position, so
+  they agree. The percent rule does not change: it rounds down, and it stops at 99 percent while
+  the status is `running`.
+- The smoothing runs only while the encode runs with a known total. It keeps its last position
+  while the dialog closes. When the system asks for reduced motion, the bar, the percent and the
+  frame count show the reported values. A run that fails or stops shows the last reported frame,
+  so its bar can move back by up to one interval.
+- A dialog that opens during a run does not know when its first frame arrived. That frame
+  therefore measures no rate and no interval. The next block also measures nothing, and the
+  position moves only to its frame. The first measurement is the gap after that block.
+- One clock ticks on each whole second of the run. At each tick it samples the remaining time
+  and the elapsed time together. The remaining time is `(expectedFrames - position) / fps` at the
+  tick, rounded up, so it falls by about one second at each tick. The clock reads the predicted
+  position also under reduced motion, because the countdown is text and not motion. A block that
+  arrives between two ticks does not change it. The first estimate shows at once. When the phase
+  leaves the encode, the estimate disappears at once.
+- The readout has two columns. The left column holds the remaining time, or the word of the
+  phase, and the elapsed time. The right column holds the percent, and the frame count with the
+  speed.
+
+The status bar and the task bar still show the reported values. The backend and the arguments of
+`ffmpeg` do not change. A shorter `-stats_period` would need FFmpeg 4.4 or later, and no ADR
+sets a minimum version.
+
 ### The window shows progress on the Dock and the task bar
 
 The frontend calls `setProgressBar` on the main window. The capability file grants

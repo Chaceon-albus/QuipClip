@@ -338,7 +338,9 @@ needs a second click to confirm. While the dialog is hidden, the status bar
 shows the progress of the run, and then its result until the user dismisses it. The Dock on
 macOS and the task bar on Windows also show the progress. The percent and the time estimate
 come from the frame count and the `fps` value of `-progress`, and one presenter computes them
-for every display. One `ProgressBar` component in `src/components/common/` draws every bar.
+for every display. The dialog smooths the frame count between two `-progress` blocks, and one
+clock changes its remaining time and its elapsed time together. One `ProgressBar` component in
+`src/components/common/` draws every bar.
 
 The seek supplies the speed. The trim supplies the exactness. An input seek alone is not
 frame-exact: on MPEG-TS a seek lands only on key frames, and it can land after the target.
