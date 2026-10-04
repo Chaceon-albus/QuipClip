@@ -51,7 +51,7 @@ describe("advanceSegmentMotion: which segments fade in", () => {
   it("moves nothing in the baseline of a list", () => {
     const store = createStore();
     markSegment(store, "0", "100");
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     markSegment(store, "200", "300");
 
     // The layer mounts on a list that already holds two segments, as after a source loads.
@@ -68,7 +68,7 @@ describe("advanceSegmentMotion: which segments fade in", () => {
     expect([...motion.advance().enteringIds]).toStrictEqual(["segment-1"]);
     expect(motion.state.cutFlashes).toStrictEqual([]);
 
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     markSegment(store, "200", "300");
     // Only the new segment fades in, and the first one stays as it is.
     expect([...motion.advance().enteringIds]).toStrictEqual(["segment-2"]);
@@ -179,7 +179,7 @@ describe("advanceSegmentMotion: which segments fade in", () => {
     const made = motion.advance();
 
     // A zoom, a scroll, a resize or a selection renders the layer with the same list.
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     store.getState().selectSegment("segment-1");
     expect(motion.advance()).toBe(made);
     expect([...made.enteringIds]).toStrictEqual(["segment-1"]);

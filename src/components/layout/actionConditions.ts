@@ -6,15 +6,15 @@
  * about when that action is available (ADR 026).
  *
  * The conditions of Mark In, Mark Out and Split are `canMarkIn`, `canMarkOut` and
- * `canSplitCurrentSegment` in the timeline feature. They stay there, beside the PTS rules that
- * they apply, and both callers read them from there.
+ * `canSplitCurrentSegment` in the timeline feature. Finish Segment is available while its plan
+ * there, `planFinishSegment`, is not null. They stay there, beside the PTS rules that they
+ * apply, and both callers read them from there.
  *
  * Every function takes plain facts and no store, so a store selector can call it and settle on
  * a boolean, and the tests need no document.
  */
 
 import { MIN_TIMELINE_ZOOM, type CurrentSegmentRef } from "@/features/timeline";
-import type { Pts } from "@/types/project";
 
 /**
  * True while media is open and an attached element of it has loaded metadata. Every
@@ -62,18 +62,6 @@ export function canUndoEdit(hasActiveSource: boolean, canUndo: boolean): boolean
 /** Redo needs an active source and an undone entry in the edit history. */
 export function canRedoEdit(hasActiveSource: boolean, canRedo: boolean): boolean {
   return hasActiveSource && canRedo;
-}
-
-/**
- * Finishing the named segment (Finish Segment) needs an active source and a segment in
- * progress: a current segment, or a pending In mark. With neither, nothing is in progress.
- */
-export function canFinishSegment(
-  hasActiveSource: boolean,
-  currentSegment: CurrentSegmentRef | null,
-  pendingInPts: Pts | null,
-): boolean {
-  return hasActiveSource && (currentSegment !== null || pendingInPts !== null);
 }
 
 /** Delete Segment needs an active source and a current segment to name its target (ADR 007). */

@@ -18,9 +18,9 @@
  *   presenter then returns `EDIT_REASON_PENDING`, and `settleDisabledReason` keeps the last
  *   settled reason until the frame callback answers.
  *
- * The presenter also gives the description of Mark In while a press would finish the current
- * segment (`presentMarkInFinishesSegment`). That line depends on the playhead too, so it
- * settles by the same rule.
+ * The presenter also gives the description of Mark In and of Mark Out while a press would
+ * finish the current segment (`presentMarkInFinishesSegment`, `presentMarkOutFinishesSegment`).
+ * Those lines depend on the playhead too, so they settle by the same rule.
  *
  * It returns translation keys and does not call the i18n runtime (ADR 011).
  */
@@ -32,6 +32,8 @@ import {
   canMarkOut,
   canSplitCurrentSegment,
   markInFinishesSegment,
+  markOutFinishesSegment,
+  planFinishSegment,
   type CurrentSegmentTarget,
 } from "@/features/timeline";
 import { isPtsString } from "@/lib/time";
@@ -47,12 +49,14 @@ export type TransportDisabledReasonKey =
   | "transport.disabledReason.playheadInsideSegment"
   | "transport.disabledReason.playheadAfterIn"
   | "transport.disabledReason.atInPoint"
-  | "transport.disabledReason.atOutPoint"
   | "transport.disabledReason.noFrameRate"
   | "transport.disabledReason.decodeStalled";
 
 /** The description of Mark In while a press would finish the current segment. */
 export type MarkInFinishesSegmentKey = "transport.state.finishesSegment";
+
+/** The description of Mark Out while a press would finish the current segment at its Out. */
+export type MarkOutFinishesSegmentKey = "transport.state.finishesAtOut";
 
 /**
  * The value for a disabled control whose reason depends on a playhead position that a
@@ -67,6 +71,16 @@ export type EditDisabledReason =
 export type MarkInFinishesSegmentDescription =
   MarkInFinishesSegmentKey | typeof EDIT_REASON_PENDING | null;
 
+export type MarkOutFinishesSegmentDescription =
+  MarkOutFinishesSegmentKey | typeof EDIT_REASON_PENDING | null;
+
+/** The description of Finish while an In mark is pending: what a press does now. */
+export type FinishSegmentDescriptionKey =
+  "transport.state.finishCompletesSegment" | "transport.state.finishDiscardsIn";
+
+export type FinishSegmentDescription =
+  FinishSegmentDescriptionKey | typeof EDIT_REASON_PENDING | null;
+
 /**
  * The playback facts that the reason reads. The playback store state satisfies it as it is,
  * so a store selector can pass its state without allocating an object for each frame.
@@ -74,7 +88,13 @@ export type MarkInFinishesSegmentDescription =
 export type TransportReasonPlayback = Pick<
   PlaybackState,
   "calibrationStatus" | "presentedFrame" | "seekTargetSeconds"
->;
+> & {
+  /**
+   * The decode stall of the preview element (ADR 039). Only the description of Finish reads
+   * it. Absent means none.
+   */
+  readonly decodeStall?: PlaybackState["decodeStall"];
+};
 
 /** The facts that change only with an edit or with the source, not with each frame. */
 export interface EditReasonContext {
@@ -230,14 +250,10 @@ export function presentEditDisabledReason(
       return pts === bounds.lo ? "transport.disabledReason.atInPoint" : null;
 
     case "markOut":
-      if (bounds === null) {
-        // The condition is false and a pending In exists, so the playhead is at or before it.
-        return "transport.disabledReason.playheadAfterIn";
-      }
-      if (pts === bounds.hi) {
-        return "transport.disabledReason.atOutPoint";
-      }
-      if (pts <= bounds.lo) {
+      // With no current segment, the condition is false and a pending In exists, so the
+      // playhead is at or before it. With a current segment, Mark Out is disabled only at or
+      // before its In: on the Out it finishes the segment, so it is enabled there.
+      if (bounds === null || pts <= bounds.lo) {
         return "transport.disabledReason.playheadAfterIn";
       }
       return null;
@@ -249,35 +265,29 @@ export function presentEditDisabledReason(
 }
 
 /**
- * Returns the description of Mark In while a press would finish the current segment and
- * start a pending In at the frame on screen (`markInFinishesSegment`). Returns
- * `EDIT_REASON_PENDING` while a pending seek hides the frame that decides it, and null in
- * every other state.
+ * The description of a mark control while a press would finish the current segment, given
+ * whether the press finishes it now. Returns `EDIT_REASON_PENDING` while a pending seek hides
+ * the frame that decides it, and null in every other state.
  *
  * Null without a pending seek in these states, because no playhead position can make the
- * description true: no source is active, the calibration is not ready, no segment is
- * current, or the current segment has a stored PTS that does not parse.
+ * description true: no source is active, the calibration is not ready, no segment is current,
+ * or the current segment has a stored PTS that does not parse.
  *
- * A frame step from the Out point clears the presented frame until the frame callback
- * answers (ADR 022). The pending value keeps the second line of the tooltip for that window,
- * so the tooltip does not switch between two lines and one.
+ * A frame step from the Out point clears the presented frame until the frame callback answers
+ * (ADR 022). The pending value keeps the second line of the tooltip for that window, so the
+ * tooltip does not switch between two lines and one.
  */
-export function presentMarkInFinishesSegment(
+function presentFinishesSegment<K extends string>(
+  finishes: boolean,
+  key: K,
   playback: TransportReasonPlayback,
   context: EditReasonContext,
-): MarkInFinishesSegmentDescription {
+): K | typeof EDIT_REASON_PENDING | null {
+  if (finishes) {
+    return key;
+  }
   const { calibrationStatus, presentedFrame } = playback;
   const { hasActiveSource, currentTarget } = context;
-  if (
-    markInFinishesSegment(
-      calibrationStatus,
-      presentedFrame,
-      hasActiveSource,
-      currentTarget,
-    )
-  ) {
-    return "transport.state.finishesSegment";
-  }
   if (
     !hasActiveSource ||
     calibrationStatus !== "ready" ||
@@ -297,15 +307,105 @@ export function presentMarkInFinishesSegment(
 }
 
 /**
+ * Returns the description of Mark In while a press would finish the current segment and
+ * start a pending In at the frame on screen (`markInFinishesSegment`). Returns
+ * `EDIT_REASON_PENDING` while a pending seek hides the frame that decides it, and null in
+ * every other state (`presentFinishesSegment`).
+ */
+export function presentMarkInFinishesSegment(
+  playback: TransportReasonPlayback,
+  context: EditReasonContext,
+): MarkInFinishesSegmentDescription {
+  return presentFinishesSegment(
+    markInFinishesSegment(
+      playback.calibrationStatus,
+      playback.presentedFrame,
+      context.hasActiveSource,
+      context.currentTarget,
+    ),
+    "transport.state.finishesSegment",
+    playback,
+    context,
+  );
+}
+
+/**
+ * Returns the description of Mark Out while a press would finish the current segment, because
+ * the frame on screen is its Out (`markOutFinishesSegment`). Returns `EDIT_REASON_PENDING`
+ * while a pending seek hides the frame that decides it, and null in every other state
+ * (`presentFinishesSegment`).
+ */
+export function presentMarkOutFinishesSegment(
+  playback: TransportReasonPlayback,
+  context: EditReasonContext,
+): MarkOutFinishesSegmentDescription {
+  return presentFinishesSegment(
+    markOutFinishesSegment(
+      playback.calibrationStatus,
+      playback.presentedFrame,
+      context.hasActiveSource,
+      context.currentTarget,
+    ),
+    "transport.state.finishesAtOut",
+    playback,
+    context,
+  );
+}
+
+/**
+ * Returns the description of Finish while an In mark is pending (`planFinishSegment`): a press
+ * makes a segment that ends at the frame on screen, or it discards the In mark when that frame
+ * is at or before the In. Returns `EDIT_REASON_PENDING` while no frame is on screen, because
+ * the frame decides it, and null when no In mark is pending or no source is active. A current
+ * segment has no description: Finish only ends it, as the label says.
+ *
+ * During a decode stall (ADR 039) no frame is on screen until a seek loads the preview again,
+ * which can take long. Finish is disabled then, and the description is null, so the tooltip
+ * does not keep a line that no press can do.
+ */
+export function presentFinishSegmentDescription(
+  playback: TransportReasonPlayback,
+  context: EditReasonContext,
+): FinishSegmentDescription {
+  const { hasActiveSource, pendingInPts, currentTarget } = context;
+  if (
+    !hasActiveSource ||
+    currentTarget.hasSegment ||
+    pendingInPts === null ||
+    playback.decodeStall != null
+  ) {
+    return null;
+  }
+  const plan = planFinishSegment(
+    playback.calibrationStatus,
+    playback.presentedFrame,
+    pendingInPts,
+    hasActiveSource,
+    currentTarget,
+  );
+  if (plan === null) {
+    return EDIT_REASON_PENDING;
+  }
+  return plan.kind === "complete"
+    ? "transport.state.finishCompletesSegment"
+    : "transport.state.finishDiscardsIn";
+}
+
+/**
  * Returns the reason to show, given the reason shown before and the one presented now. The
- * description of Mark In (`presentMarkInFinishesSegment`) settles by the same rule.
+ * descriptions of Mark In, Mark Out and Finish (`presentMarkInFinishesSegment`,
+ * `presentMarkOutFinishesSegment`, `presentFinishSegmentDescription`) settle by the same rule.
  *
  * `EDIT_REASON_PENDING` keeps the reason shown before, so a frame step does not blank the
  * reason line and does not show a reason for a position the frame callback has not
  * confirmed. Every other value replaces it.
  */
 export function settleDisabledReason<
-  K extends TransportDisabledReasonKey | MarkInFinishesSegmentKey,
+  K extends
+    | TransportDisabledReasonKey
+    | MarkInFinishesSegmentKey
+    | MarkOutFinishesSegmentKey
+    | FinishSegmentDescriptionKey,
 >(shown: K | null, presented: K | typeof EDIT_REASON_PENDING | null): K | null {
   return presented === EDIT_REASON_PENDING ? shown : presented;
 }

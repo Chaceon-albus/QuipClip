@@ -209,11 +209,18 @@ export function markInFinishesSegment(
  * mark and an inferred PTS strictly greater than it. Equal `inPts` and `outPts` stay
  * rejected (ADR 002).
  *
- * With a current segment, Mark Out instead moves that segment's Out boundary, so it is
- * enabled only while the move would change the segment and would still leave
- * `inPts < outPts`. The store invariant keeps `pendingInPts` null in this case, so the
- * pending mark is not consulted, and an unparseable segment disables the action for the
- * same reason as in `canMarkIn`.
+ * With a current segment, the frame on screen decides what Mark Out does:
+ *
+ * - After the In and not on the Out, Mark Out moves the Out boundary, and the move leaves
+ *   `inPts < outPts`.
+ * - On the Out boundary, a move would change nothing. Mark Out then finishes the segment
+ *   (`markOutFinishesSegment`), as Finish Segment does, so it is enabled. Mark Out leaves the
+ *   playhead on the Out, so a second press at the same frame finishes the segment.
+ * - At or before the In, the move would leave no frame in the segment, so it is disabled.
+ *
+ * The store invariant keeps `pendingInPts` null while a segment is current, so the pending
+ * mark is not consulted, and an unparseable segment disables the action for the same reason
+ * as in `canMarkIn`.
  */
 export function canMarkOut(
   calibrationStatus: CalibrationStatus,
@@ -230,13 +237,96 @@ export function canMarkOut(
     if (currentTarget.bounds === null) {
       return false;
     }
-    const value = BigInt(pts);
-    return value !== currentTarget.bounds.hi && currentTarget.bounds.lo < value;
+    return currentTarget.bounds.lo < BigInt(pts);
   }
   if (pendingInPts === null || !isPtsString(pendingInPts)) {
     return false;
   }
   return isValidSegmentRange(pendingInPts, pts);
+}
+
+/**
+ * Checks whether Mark Out, when it runs now, finishes the current segment instead of moving
+ * its Out boundary.
+ *
+ * True only while a segment is current and the inferred PTS is its exclusive Out boundary
+ * (ADR 002). A move there would change nothing, so the press finishes the segment, as Finish
+ * Segment does. The transport bar reads it to say so in the tooltip of Mark Out. Costs one
+ * BigInt construction and one comparison, so it is cheap enough to run on every presented
+ * frame.
+ */
+export function markOutFinishesSegment(
+  calibrationStatus: CalibrationStatus,
+  presentedFrame: PresentedFrame | null,
+  hasActiveSource: boolean,
+  currentTarget?: CurrentSegmentTarget | null,
+): boolean {
+  const pts = markablePts(calibrationStatus, presentedFrame, hasActiveSource);
+  const bounds = currentTarget?.hasSegment ? currentTarget.bounds : null;
+  if (pts === null || bounds === null) {
+    return false;
+  }
+  return BigInt(pts) === bounds.hi;
+}
+
+/**
+ * What Finish Segment does now.
+ *
+ * - `end`: ends the segment in progress and makes no segment. The current segment is already
+ *   canonical, so it only stops being current. A pending In mark is dropped.
+ * - `complete`: completes the pending In mark into a segment that ends at `outPts`, the frame
+ *   on screen, and leaves nothing current.
+ */
+export type FinishSegmentPlan =
+  { readonly kind: "end" } | { readonly kind: "complete"; readonly outPts: Pts };
+
+/**
+ * Plans Finish Segment, or returns null when it must do nothing now.
+ *
+ * - Nothing in progress: null.
+ * - A current segment: `end`.
+ * - A pending In mark and a frame on screen after it: `complete` at that frame. The Out is the
+ *   frame on screen, the frame that Mark Out would write (ADR 003, ADR 022). So Finish Segment
+ *   does what Mark Out and then Finish Segment did, in one action.
+ * - A pending In mark and a frame on screen at or before it: `end`. No segment can end there
+ *   (ADR 002), so the press drops the pending In mark, as it did before the action completed
+ *   segments. This is how the user discards a pending In mark.
+ * - A pending In mark and no frame on screen: null while the calibration is ready or still
+ *   open. A pending seek clears the frame until the frame callback answers (ADR 022), and a
+ *   decode stall clears it until a seek loads the preview again (ADR 039). The action is then
+ *   unavailable, as Mark Out is, so it does not drop the mark that the user meant to complete.
+ *   With an unavailable calibration no frame can ever be marked, so the press is `end`.
+ *
+ * A null plan is the condition of the action: the keyboard layer owns the key and does
+ * nothing, and the Finish button is disabled. Both read this rule, so the key and the button
+ * act alike (ADR 026).
+ */
+export function planFinishSegment(
+  calibrationStatus: CalibrationStatus,
+  presentedFrame: PresentedFrame | null,
+  pendingInPts: Pts | null,
+  hasActiveSource: boolean,
+  currentTarget?: CurrentSegmentTarget | null,
+): FinishSegmentPlan | null {
+  if (!hasActiveSource) {
+    return null;
+  }
+  if (currentTarget?.hasSegment) {
+    return { kind: "end" };
+  }
+  if (pendingInPts === null) {
+    return null;
+  }
+  if (calibrationStatus !== "unavailable" && presentedFrame === null) {
+    return null;
+  }
+  if (
+    presentedFrame !== null &&
+    canMarkOut(calibrationStatus, presentedFrame, pendingInPts, hasActiveSource, null)
+  ) {
+    return { kind: "complete", outPts: presentedFrame.inferredSourcePts };
+  }
+  return { kind: "end" };
 }
 
 /** Exact half-open bounds of one segment, parsed once so a per-frame test can reuse them. */

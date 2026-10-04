@@ -90,7 +90,7 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       timeline.deleteSegment();
       return;
     case "finishSegment":
-      timeline.newSegment();
+      timeline.finishSegment(command.outPts);
       return;
     case "cancelTrim":
       // Escape during the drag trim of a segment edge (ADR 030).

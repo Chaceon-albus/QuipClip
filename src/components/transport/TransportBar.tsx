@@ -21,7 +21,6 @@ import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   canDeleteSegment,
-  canFinishSegment,
   canRedoEdit,
   canStepFrames,
   canTogglePlayback,
@@ -44,6 +43,8 @@ import {
   canSplitCurrentSegment,
   findCurrentSegment,
   getCurrentSegmentTarget,
+  planFinishSegment,
+  timelineStore,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
@@ -53,13 +54,17 @@ import { MarkInIcon, MarkOutIcon } from "./markPointIcons";
 import { SegmentDurationReadout } from "./SegmentDurationReadout";
 import {
   presentEditDisabledReason,
+  presentFinishSegmentDescription,
   presentMarkInFinishesSegment,
+  presentMarkOutFinishesSegment,
   presentPlayDisabledReason,
   presentStepDisabledReason,
   settleDisabledReason,
   type EDIT_REASON_PENDING,
   type EditReasonContext,
+  type FinishSegmentDescriptionKey,
   type MarkInFinishesSegmentKey,
+  type MarkOutFinishesSegmentKey,
   type TransportDisabledReasonKey,
 } from "./transportDisabledReason";
 
@@ -74,7 +79,7 @@ const selectCurrentSegmentId = (s: TimelineStoreState) => s.currentSegmentId;
 const selectMarkIn = (s: TimelineStoreState) => s.markIn;
 const selectMarkOut = (s: TimelineStoreState) => s.markOut;
 const selectSplit = (s: TimelineStoreState) => s.split;
-const selectFinishSegment = (s: TimelineStoreState) => s.newSegment;
+const selectFinishSegment = (s: TimelineStoreState) => s.finishSegment;
 const selectDeleteSegment = (s: TimelineStoreState) => s.deleteSegment;
 const selectUndo = (s: TimelineStoreState) => s.undo;
 const selectRedo = (s: TimelineStoreState) => s.redo;
@@ -100,13 +105,17 @@ const PLAY_GLYPH_HIDDEN_CLASS = "scale-80 opacity-0";
  * Returns the reason to show for an edit control, and keeps the last one while a pending seek
  * hides the reason (`settleDisabledReason`). A frame step then leaves the reason line as it
  * was until the frame callback answers, the same window in which the dimming waits. The
- * description of Mark In that depends on the playhead settles the same way.
+ * descriptions of Mark In and Mark Out that depend on the playhead settle the same way.
  *
  * The setter runs during the render only when the value changes, which is the React pattern
  * for state derived from the previous render.
  */
 function useSettledReason<
-  K extends TransportDisabledReasonKey | MarkInFinishesSegmentKey,
+  K extends
+    | TransportDisabledReasonKey
+    | MarkInFinishesSegmentKey
+    | MarkOutFinishesSegmentKey
+    | FinishSegmentDescriptionKey,
 >(presented: K | typeof EDIT_REASON_PENDING | null): K | null {
   const [shown, setShown] = useState<K | null>(null);
   const next = settleDisabledReason(shown, presented);
@@ -203,6 +212,16 @@ export function TransportBar() {
   const markInFinishes = useSettledReason(
     usePlaybackStore((s) => presentMarkInFinishesSegment(s, reasonContext)),
   );
+  // On the Out of the current segment, Mark Out finishes that segment. A second Mark Out at
+  // the frame of the first one therefore ends the segment, as Finish does.
+  const markOutFinishes = useSettledReason(
+    usePlaybackStore((s) => presentMarkOutFinishesSegment(s, reasonContext)),
+  );
+  // With a pending In, Finish makes a segment that ends at the frame on screen, or discards
+  // the In when that frame is at or before it. The description says which.
+  const finishDescription = useSettledReason(
+    usePlaybackStore((s) => presentFinishSegmentDescription(s, reasonContext)),
+  );
   const stepReason = presentStepDisabledReason(
     hasActiveSource,
     hasNominalRate,
@@ -217,6 +236,8 @@ export function TransportBar() {
   const markInReasonId = useId();
   const markInStateId = useId();
   const markOutReasonId = useId();
+  const markOutStateId = useId();
+  const finishStateId = useId();
   const splitReasonId = useId();
   const playReasonId = useId();
 
@@ -233,6 +254,8 @@ export function TransportBar() {
     : markInFinishes === null
       ? null
       : t(markInFinishes);
+  const markOutStateText = markOutFinishes === null ? null : t(markOutFinishes);
+  const finishStateText = finishDescription === null ? null : t(finishDescription);
 
   const isMuted = usePreviewMutePreference((s) => s.muted);
 
@@ -252,10 +275,17 @@ export function TransportBar() {
   const isMarkInDisabled = !isMarkInEnabled;
   const isMarkOutDisabled = !isMarkOutEnabled;
   const isSplitDisabled = !isSplitEnabled;
-  const isFinishSegmentDisabled = !canFinishSegment(
-    hasActiveSource,
-    currentSegment,
-    pendingInPts,
+  // Finish is available while its plan is not null (`planFinishSegment`), the condition of
+  // the key too. With a pending In, no frame on screen makes it unavailable, as Mark Out is.
+  const isFinishSegmentDisabled = usePlaybackStore(
+    (s) =>
+      planFinishSegment(
+        s.calibrationStatus,
+        s.presentedFrame,
+        pendingInPts,
+        hasActiveSource,
+        currentTarget,
+      ) === null,
   );
   const isDeleteSegmentDisabled = !canDeleteSegment(hasActiveSource, currentSegment);
   const isStepDisabled = !canStepFrames(
@@ -427,7 +457,7 @@ export function TransportBar() {
                   }}
                   className="disabled:delay-150 motion-reduce:duration-0"
                   aria-label={t("transport.action.markOutAria")}
-                  aria-describedby={markOutReasonId}
+                  aria-describedby={`${markOutReasonId} ${markOutStateId}`}
                   aria-keyshortcuts={markOutShortcut?.aria}
                 >
                   <MarkOutIcon className="size-4 text-muted-foreground" />
@@ -438,12 +468,15 @@ export function TransportBar() {
                 <span id={markOutReasonId} className="sr-only">
                   {reasonText(markOutReason)}
                 </span>
+                <span id={markOutStateId} className="sr-only">
+                  {markOutStateText}
+                </span>
               </span>
             </TooltipTrigger>
             <ShortcutTooltipContent
               label={t("transport.action.markOutAria")}
               keys={markOutShortcut?.keys}
-              reason={reasonText(markOutReason)}
+              reason={reasonText(markOutReason) ?? markOutStateText}
             />
           </Tooltip>
 
@@ -567,26 +600,56 @@ export function TransportBar() {
         {/* Group 4: Current segment (Finish / Delete, icon over label) */}
         <div className="flex items-center gap-1">
           <Tooltip>
+            {/* The span is the tooltip trigger while the button is disabled, as for the edit
+                buttons: with a pending In, Finish is disabled while no frame is on screen. */}
             <TooltipTrigger asChild>
-              <Button
-                variant="tool-ghost"
-                size="tool-row"
-                className="min-w-12 flex-col gap-0.5 px-1.5"
-                disabled={isFinishSegmentDisabled}
-                onMouseDown={preventFocusOnMouseDown}
-                onClick={finishSegment}
-                aria-label={t("transport.action.finishSegmentAria")}
-                aria-keyshortcuts={finishSegmentShortcut?.aria}
-              >
-                <SquareCheck className="size-4" />
-                <span className="text-2xs leading-none font-medium">
-                  {t("transport.action.finishSegment")}
+              <span className="inline-flex">
+                <Button
+                  variant="tool-ghost"
+                  size="tool-row"
+                  className="min-w-12 flex-col gap-0.5 px-1.5 disabled:delay-150 motion-reduce:duration-0"
+                  disabled={isFinishSegmentDisabled}
+                  onMouseDown={preventFocusOnMouseDown}
+                  onClick={() => {
+                    // The rule of the key (`planFinishSegment`), on the state at click time:
+                    // with a pending In, Finish completes a segment at the frame on screen.
+                    const playback = playbackStore.getState();
+                    const timeline = timelineStore.getState();
+                    const plan = planFinishSegment(
+                      playback.calibrationStatus,
+                      playback.presentedFrame,
+                      timeline.pendingInPts,
+                      hasActiveSource,
+                      getCurrentSegmentTarget(
+                        findCurrentSegment(
+                          timeline.segments,
+                          timeline.currentSegmentId,
+                          timeline.sourceId,
+                        ),
+                      ),
+                    );
+                    if (plan !== null) {
+                      finishSegment(plan.kind === "complete" ? plan.outPts : null);
+                    }
+                  }}
+                  aria-label={t("transport.action.finishSegmentAria")}
+                  aria-describedby={finishStateId}
+                  aria-keyshortcuts={finishSegmentShortcut?.aria}
+                >
+                  <SquareCheck className="size-4" />
+                  <span className="text-2xs leading-none font-medium">
+                    {t("transport.action.finishSegment")}
+                  </span>
+                </Button>
+                <span id={finishStateId} className="sr-only">
+                  {finishStateText}
                 </span>
-              </Button>
+              </span>
             </TooltipTrigger>
             <ShortcutTooltipContent
               label={t("transport.action.finishSegmentAria")}
               keys={finishSegmentShortcut?.keys}
+              reason={finishStateText}
             />
           </Tooltip>
 

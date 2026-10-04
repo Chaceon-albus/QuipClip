@@ -175,6 +175,9 @@ export const zhCN: TranslationCatalog = {
     state: {
       inPending: "已有待定的入点。请标记出点以生成片段。",
       finishesSegment: "结束当前片段，并在播放头处标记入点。",
+      finishesAtOut: "在出点处结束当前片段。",
+      finishCompletesSegment: "生成从待定入点到播放头的片段。",
+      finishDiscardsIn: "放弃待定的入点。将播放头移到入点之后即可生成片段。",
     },
     segmentDuration: {
       segment: "片段 {{index}} 时长",
@@ -187,7 +190,6 @@ export const zhCN: TranslationCatalog = {
       playheadInsideSegment: "请将播放头移到入点与出点之间。",
       playheadAfterIn: "请将播放头移到入点之后。",
       atInPoint: "播放头已位于入点。",
-      atOutPoint: "播放头已位于出点。",
       noFrameRate: "源未报告帧率。",
       decodeStalled: "预览停在无法解码的位置。把播放头移到别处即可继续。",
     },

@@ -241,7 +241,7 @@ function createStoreHarness({
         timeline.getState().markOut(command.pts);
         return;
       case "finishSegment":
-        timeline.getState().newSegment();
+        timeline.getState().finishSegment(command.outPts);
         return;
       default:
         throw new Error(`The harness does not run ${command.kind}`);
@@ -1666,18 +1666,56 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("deleteSegment", pending)).toBeNull();
     });
 
-    it("finishes a current segment or a pending In mark, with the newSegment call", () => {
+    it("finishes a current segment or a pending In mark, with the finishSegment call", () => {
       expect(planShortcutCommand("finishSegment", createSnapshot())).toBeNull();
       const current = createSnapshot({
         timeline: { segments: [segment("a", "0", "3000")], currentSegmentId: "a" },
       });
       expect(planShortcutCommand("finishSegment", current)).toEqual({
         kind: "finishSegment",
+        outPts: null,
       });
+      // A pending In before the frame on screen: the press completes a segment there.
       const pending = createSnapshot({ timeline: { pendingInPts: pts("0") } });
       expect(planShortcutCommand("finishSegment", pending)).toEqual({
         kind: "finishSegment",
+        outPts: "90000",
       });
+    });
+
+    it("drops a pending In that no segment can end after, and waits for a pending seek", () => {
+      // The frame on screen is 90000. On the In and after it, no segment can end there.
+      for (const pendingInPts of ["90000", "120000"]) {
+        expect(
+          planShortcutCommand(
+            "finishSegment",
+            createSnapshot({ timeline: { pendingInPts: pts(pendingInPts) } }),
+          ),
+        ).toEqual({ kind: "finishSegment", outPts: null });
+      }
+      // A pending seek hides the frame, and so does a decode stall (ADR 039), which leaves no
+      // seek target: the action is unavailable, and the mark stays.
+      for (const seekTargetSeconds of [2, null]) {
+        expect(
+          planShortcutCommand(
+            "finishSegment",
+            createSnapshot({
+              playback: { presentedFrame: null, seekTargetSeconds },
+              timeline: { pendingInPts: pts("0") },
+            }),
+          ),
+        ).toBeNull();
+      }
+      // With no calibration, no frame can ever be marked, so the press drops the mark.
+      expect(
+        planShortcutCommand(
+          "finishSegment",
+          createSnapshot({
+            playback: { calibrationStatus: "unavailable", presentedFrame: null },
+            timeline: { pendingInPts: pts("0") },
+          }),
+        ),
+      ).toEqual({ kind: "finishSegment", outPts: null });
     });
 
     it("cancels a trim with Escape while the drag runs, and never finishes the segment", () => {
@@ -1697,9 +1735,10 @@ describe("planShortcutCommand", () => {
       // With no drag, the key finishes the segment as before.
       expect(
         planShortcutCommand("finishSegment", { ...trimming, isTrimDragging: false }),
-      ).toEqual({ kind: "finishSegment" });
+      ).toEqual({ kind: "finishSegment", outPts: null });
       expect(planShortcutCommand("finishSegment", trimming)).toEqual({
         kind: "finishSegment",
+        outPts: null,
       });
     });
 
@@ -1872,7 +1911,7 @@ describe("planShortcutCommand", () => {
       // The segment [25, 50), finished, and a pending In at 100.
       h.timeline.getState().markIn(pts("25"));
       h.timeline.getState().markOut(pts("50"));
-      h.timeline.getState().newSegment();
+      h.timeline.getState().finishSegment(null);
       h.timeline.getState().markIn(pts("100"));
       expect(h.timeline.getState().pendingInPts).toBe("100");
       const seeks = h.element.currentTimeSets;
@@ -2290,9 +2329,52 @@ describe("planShortcutCommand", () => {
       expect(h.element.currentTimeSets).toBe(seeks);
       expect(h.shownPts()).toBe("50");
 
-      expect(h.press("finishSegment")).toEqual({ kind: "finishSegment" });
+      expect(h.press("finishSegment")).toEqual({ kind: "finishSegment", outPts: null });
       expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "50" });
       expect(h.timeline.getState().pendingInPts).toBe("50");
+    });
+
+    it("I, O, O: a second O at the Out finishes the segment, and I then starts a new one", () => {
+      const h = createStoreHarness();
+      expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "0" });
+      h.clickRulerAt("50");
+      expect(h.press("markOut")).toEqual({ kind: "markOut", pts: "50" });
+      expect(h.timeline.getState().currentSegmentId).toBe("segment-1");
+      const canUndo = h.timeline.getState().canUndo;
+
+      // The playhead stands on the Out, so the second press finishes the segment and moves no
+      // point. It adds no history entry.
+      expect(h.press("markOut")).toEqual({ kind: "markOut", pts: "50" });
+      expect(h.timeline.getState()).toMatchObject({
+        segments: [{ id: "segment-1", sourceId: SOURCE_ID, inPts: "0", outPts: "50" }],
+        currentSegmentId: null,
+        pendingInPts: null,
+        canUndo,
+      });
+      // Nothing is current, so the next segment starts at the same frame.
+      expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "50" });
+      expect(h.timeline.getState().pendingInPts).toBe("50");
+    });
+
+    it("I, move, Escape: Finish ends the segment at the playhead, and Undo restores the In", () => {
+      const h = createStoreHarness();
+      expect(h.press("markIn")).toEqual({ kind: "markIn", pts: "0" });
+      h.clickRulerAt("50");
+      expect(h.press("finishSegment")).toEqual({ kind: "finishSegment", outPts: "50" });
+      expect(h.timeline.getState()).toMatchObject({
+        segments: [{ id: "segment-1", sourceId: SOURCE_ID, inPts: "0", outPts: "50" }],
+        currentSegmentId: null,
+        pendingInPts: null,
+        canUndo: true,
+      });
+
+      // One history entry: Undo removes the segment and brings the pending In back.
+      h.timeline.getState().undo();
+      expect(h.timeline.getState()).toMatchObject({
+        segments: [],
+        currentSegmentId: null,
+        pendingInPts: "0",
+      });
     });
 
     it("I, O, I: an I at or after the Out finishes the segment and starts the next one", () => {

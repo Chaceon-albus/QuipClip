@@ -4,7 +4,6 @@ import type { Pts } from "@/types/project";
 import {
   canDeleteSegment,
   canExportMedia,
-  canFinishSegment,
   canFitTimeline,
   canRedoEdit,
   canStepFrames,
@@ -21,7 +20,6 @@ const current: CurrentSegmentRef = {
   index: 0,
   segment: { id: "a", sourceId: "s", inPts: "0" as Pts, outPts: "3000" as Pts },
 };
-const pendingIn = "1500" as Pts;
 
 describe("actionConditions", () => {
   it("makes a source active only with open media, an attached element and metadata", () => {
@@ -66,14 +64,6 @@ describe("actionConditions", () => {
         );
       }
     }
-  });
-
-  it("finishes a segment only while one is in progress", () => {
-    expect(canFinishSegment(true, current, null)).toBe(true);
-    expect(canFinishSegment(true, null, pendingIn)).toBe(true);
-    expect(canFinishSegment(true, null, null)).toBe(false);
-    expect(canFinishSegment(false, current, null)).toBe(false);
-    expect(canFinishSegment(false, null, pendingIn)).toBe(false);
   });
 
   it("deletes a segment only while one is current", () => {

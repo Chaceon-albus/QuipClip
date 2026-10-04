@@ -49,7 +49,7 @@ describe("timeline store source ownership", () => {
     store.getState().markIn(pts("-10"));
     store.getState().markOut(pts("20"));
     // Without this the next Mark In would adjust the completed segment instead.
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     store.getState().markIn(pts("30"));
     store.getState().setSource("source-1", "revision-1");
     expect(store.getState().segments).toHaveLength(1);
@@ -75,7 +75,7 @@ describe("timeline store source ownership", () => {
     store.getState().setSource("source-1", "revision-1");
     store.getState().markIn(pts("10"));
     store.getState().markOut(pts("20"));
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     store.getState().markIn(pts("30"));
 
     store.getState().setSource("source-2", "revision-2");
@@ -144,7 +144,7 @@ describe("timeline store half-open editing", () => {
     store.getState().setSource("source-1", "revision-1");
     store.getState().markIn(pts("100"));
     store.getState().markOut(pts("200"));
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     store.getState().markIn(pts("-100"));
     store.getState().markOut(pts("-50"));
     expect(store.getState().segments.map((segment) => segment.inPts)).toEqual([
@@ -271,7 +271,7 @@ describe("timeline store current segment", () => {
     store.getState().setSource("source-1", "revision-1");
     store.getState().markIn(pts("0"));
     store.getState().markOut(pts("100"));
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     store.getState().markIn(pts("20"));
     store.getState().markOut(pts("80"));
     return store;
@@ -318,7 +318,7 @@ describe("timeline store current segment", () => {
 
   it("does nothing when Split has no current segment", () => {
     const store = createOverlapping();
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     store.getState().split(pts("50"));
     expect(shape(store)).toEqual([
       { id: "segment-1", inPts: "0", outPts: "100" },
@@ -592,6 +592,104 @@ describe("timeline store current segment", () => {
     });
   });
 
+  describe("Mark Out on the Out of the current segment", () => {
+    it("finishes the segment, moves no point, and adds no history entry", () => {
+      const store = createStore();
+      store.getState().setSource("source-1", "revision-1");
+      store.getState().markIn(pts("10"));
+      store.getState().markOut(pts("30"));
+      expect(store.getState().currentSegmentId).toBe("segment-1");
+
+      store.getState().markOut(pts("30"));
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: null,
+        pendingInPts: null,
+      });
+      expectOneInProgress(store);
+
+      // The finish is not an edit, so the first Undo undoes the Mark Out that made the segment.
+      store.getState().undo();
+      expect(store.getState().segments).toEqual([]);
+      expect(store.getState().pendingInPts).toBe("10");
+    });
+
+    it("compares the frame with the Out exactly, and moves the Out elsewhere", () => {
+      const store = createStore();
+      store.getState().setSource("source-1", "revision-1");
+      store.getState().markIn(pts("9007199254740990"));
+      store.getState().markOut(pts("9007199254740993"));
+      // A number would round both values to the same double. BigInt does not.
+      store.getState().markOut(pts("9007199254740992"));
+      expect(store.getState().currentSegmentId).toBe("segment-1");
+      expect(shape(store)).toEqual([
+        { id: "segment-1", inPts: "9007199254740990", outPts: "9007199254740992" },
+      ]);
+    });
+  });
+
+  describe("Finish Segment", () => {
+    it("completes a pending In at the given Out, leaves nothing current, and undoes", () => {
+      const store = createStore();
+      store.getState().setSource("source-1", "revision-1");
+      store.getState().markIn(pts("10"));
+
+      store.getState().finishSegment(pts("30"));
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
+      expect(store.getState()).toMatchObject({
+        currentSegmentId: null,
+        pendingInPts: null,
+        canUndo: true,
+        canRedo: false,
+      });
+
+      // One history entry: Undo brings the pending In back, and Redo makes the segment again.
+      store.getState().undo();
+      expect(store.getState().segments).toEqual([]);
+      expect(store.getState().pendingInPts).toBe("10");
+      store.getState().redo();
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
+      expect(store.getState().pendingInPts).toBeNull();
+      expect(store.getState().currentSegmentId).toBeNull();
+    });
+
+    it("drops a pending In that the Out cannot complete, with no history entry", () => {
+      for (const outPts of [null, pts("10"), pts("5"), pts("x")]) {
+        const store = createStore();
+        store.getState().setSource("source-1", "revision-1");
+        store.getState().markIn(pts("10"));
+        store.getState().finishSegment(outPts);
+        expect(store.getState()).toMatchObject({
+          segments: [],
+          pendingInPts: null,
+          currentSegmentId: null,
+          canUndo: false,
+        });
+      }
+    });
+
+    it("only ends a current segment, whatever the Out", () => {
+      const store = createStore();
+      store.getState().setSource("source-1", "revision-1");
+      store.getState().markIn(pts("10"));
+      store.getState().markOut(pts("30"));
+      store.getState().finishSegment(pts("50"));
+      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
+      expect(store.getState().currentSegmentId).toBeNull();
+      // The undo stack holds the Mark Out only.
+      store.getState().undo();
+      expect(store.getState().segments).toEqual([]);
+      expect(store.getState().canUndo).toBe(false);
+    });
+
+    it("makes no segment while no source is active", () => {
+      const store = createStore();
+      store.getState().finishSegment(pts("30"));
+      expect(store.getState().segments).toEqual([]);
+      expect(store.getState().canUndo).toBe(false);
+    });
+  });
+
   it("records no history for a boundary equal to the stored one", () => {
     const store = createStore();
     store.getState().setSource("source-1", "revision-1");
@@ -628,7 +726,7 @@ describe("timeline store current segment", () => {
     store.getState().markIn(pts("12"));
     expectOneInProgress(store);
 
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     expect(store.getState()).toMatchObject({
       currentSegmentId: null,
       pendingInPts: null,
@@ -639,7 +737,7 @@ describe("timeline store current segment", () => {
     expectOneInProgress(store);
 
     // Selection clears the pending mark of a segment that was still being built.
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     store.getState().markIn(pts("70"));
     store.getState().selectSegment("segment-1");
     expect(store.getState().pendingInPts).toBeNull();
@@ -705,10 +803,10 @@ describe("timeline store current segment", () => {
     store.getState().setSource("source-1", "revision-1");
     store.getState().markIn(pts("0"));
     store.getState().markOut(pts("10"));
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     store.getState().markIn(pts("20"));
     store.getState().markOut(pts("30"));
-    store.getState().newSegment();
+    store.getState().finishSegment(null);
     store.getState().markIn(pts("40"));
     store.getState().markOut(pts("50"));
 

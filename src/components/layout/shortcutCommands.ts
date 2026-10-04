@@ -28,6 +28,7 @@ import {
   findSegmentAtPts,
   getCurrentSegmentTarget,
   getTimelineDurationSeconds,
+  planFinishSegment,
   type CurrentSegmentRef,
   type TimelineState,
   type TimelineViewportState,
@@ -38,7 +39,6 @@ import type { Pts, Segment } from "@/types/project";
 import {
   canDeleteSegment,
   canExportMedia,
-  canFinishSegment,
   canFitTimeline,
   canRedoEdit,
   canStepFrames,
@@ -187,7 +187,14 @@ export type ShortcutCommand =
   | { readonly kind: "markIn"; readonly pts: Pts }
   | { readonly kind: "markOut"; readonly pts: Pts }
   | { readonly kind: "deleteSegment" }
-  | { readonly kind: "finishSegment" }
+  | {
+      readonly kind: "finishSegment";
+      /**
+       * The Out that completes a pending In mark: the frame on screen. Null ends what is in
+       * progress and makes no segment (`planFinishSegment`).
+       */
+      readonly outPts: Pts | null;
+    }
   | { readonly kind: "cancelTrim" }
   | { readonly kind: "undo" }
   | { readonly kind: "redo" }
@@ -692,6 +699,36 @@ function planPlaySegment(
 }
 
 /**
+ * The call of Finish Segment, or null when it must do nothing now.
+ *
+ * The plan is the rule that the Finish button also reads (`planFinishSegment`), and a null plan
+ * is the condition of both. With a pending In mark, the press completes a segment at the frame
+ * on screen, drops the mark when no segment can end there, and is unavailable while no frame is
+ * on screen.
+ */
+function planFinishSegmentCommand(
+  snapshot: ShortcutSnapshot,
+  hasActiveSource: boolean,
+): ShortcutCommand | null {
+  const { playback, timeline } = snapshot;
+  const plan = planFinishSegment(
+    playback.calibrationStatus,
+    playback.presentedFrame,
+    timeline.pendingInPts,
+    hasActiveSource,
+    getCurrentSegmentTarget(currentSegmentOf(timeline)),
+  );
+  switch (plan?.kind) {
+    case undefined:
+      return null;
+    case "end":
+      return { kind: "finishSegment", outPts: null };
+    case "complete":
+      return { kind: "finishSegment", outPts: plan.outPts };
+  }
+}
+
+/**
  * Returns the store call that the action makes now, or null when its condition is false.
  *
  * @param press The key press, or undefined for a single press. Only the frame steps read it.
@@ -827,13 +864,7 @@ export function planShortcutCommand(
       if (snapshot.isTrimDragging === true) {
         return { kind: "cancelTrim" };
       }
-      return canFinishSegment(
-        hasActiveSource,
-        currentSegmentOf(timeline),
-        timeline.pendingInPts,
-      )
-        ? { kind: "finishSegment" }
-        : null;
+      return planFinishSegmentCommand(snapshot, hasActiveSource);
 
     case "undo":
       return canUndoEdit(hasActiveSource, timeline.canUndo) ? { kind: "undo" } : null;

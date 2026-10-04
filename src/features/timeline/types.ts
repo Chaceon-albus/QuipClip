@@ -103,7 +103,10 @@ export interface TimelineActions {
    *
    * With no current segment, completes the pending In mark into a newly appended
    * segment, which becomes current, and clears the pending In mark.
-   * With a current segment, moves that segment's `outPts`.
+   * With a current segment and `currentPts` not equal to its `outPts`, moves that segment's
+   * `outPts`.
+   * With a current segment and `currentPts` equal to its `outPts`, finishes that segment, as
+   * `finishSegment` does: nothing is current after it, and no history entry is added.
    * Rejects silently under the same conditions as `markIn`.
    *
    * @param currentPts Presentation timestamp in source video time base (must satisfy inPts < currentPts).
@@ -144,11 +147,20 @@ export interface TimelineActions {
   trimSegmentEdge: (segmentId: string, edge: SegmentEdge, pts: Pts) => void;
 
   /**
-   * Ends whatever segment is in progress, so the next Mark In starts a new one.
-   * Clears both `currentSegmentId` and `pendingInPts`, because both describe the segment
-   * being built. Adds no history entry: a completed segment is already canonical.
+   * Ends whatever segment is in progress, so the next Mark In starts a new one. Clears both
+   * `currentSegmentId` and `pendingInPts`, because both describe the segment being built.
+   *
+   * With a pending In mark and an `outPts` after it, first completes the pending mark into a
+   * newly appended segment that ends at `outPts`, with one history entry, as Mark Out does. The
+   * new segment is not current. Undo then restores the pending In mark.
+   * In every other case adds no history entry: a current segment is already canonical, and a
+   * pending In mark that `outPts` cannot complete (null, malformed, or at or before the In) is
+   * dropped.
+   *
+   * @param outPts The Out for a pending In mark: the PTS of the frame on screen, or null to drop
+   *   the pending mark (`planFinishSegment`).
    */
-  newSegment: () => void;
+  finishSegment: (outPts: Pts | null) => void;
 
   /**
    * Removes the current segment and leaves nothing current.

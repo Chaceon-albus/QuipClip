@@ -20,6 +20,8 @@ import {
   getSegmentBounds,
   getTimelineDurationSeconds,
   markInFinishesSegment,
+  markOutFinishesSegment,
+  planFinishSegment,
   splitSegment,
 } from "./math";
 
@@ -162,9 +164,90 @@ describe("timeline PTS editing", () => {
     // The store invariant keeps the pending mark null while a segment is current.
     expect(canMarkOut("ready", frame("90"), null, true, target)).toBe(true);
     expect(canMarkOut("ready", frame("200"), null, true, target)).toBe(true);
-    expect(canMarkOut("ready", frame("100"), null, true, target)).toBe(false);
+    // On the Out, Mark Out finishes the segment, so it is enabled there too.
+    expect(canMarkOut("ready", frame("100"), null, true, target)).toBe(true);
     expect(canMarkOut("ready", frame("50"), null, true, target)).toBe(false);
     expect(canMarkOut("ready", frame("20"), null, true, target)).toBe(false);
+  });
+
+  it("finishes the current segment with Mark Out on its Out, and only there", () => {
+    // The current segment is "b", the half-open interval [50, 100).
+    const target = getCurrentSegmentTarget(
+      findCurrentSegment(segments, "b", "source-a"),
+    );
+    const finishes = (value: string) =>
+      markOutFinishesSegment("ready", frame(value), true, target);
+
+    expect(finishes("100")).toBe(true);
+    expect(canMarkOut("ready", frame("100"), null, true, target)).toBe(true);
+    // Before and after the Out, Mark Out moves it. At or before the In it is disabled.
+    for (const value of ["99", "101", "200", "50", "20"]) {
+      expect(finishes(value)).toBe(false);
+    }
+    // No current segment, a segment that does not parse, a pending seek and an inactive
+    // source never finish.
+    expect(markOutFinishesSegment("ready", frame("100"), true, null)).toBe(false);
+    const malformed = getCurrentSegmentTarget({
+      index: 0,
+      segment: { id: "x", sourceId: "source-a", inPts: pts("x"), outPts: pts("100") },
+    });
+    expect(markOutFinishesSegment("ready", frame("100"), true, malformed)).toBe(false);
+    expect(markOutFinishesSegment("ready", null, true, target)).toBe(false);
+    expect(markOutFinishesSegment("calibrating", frame("100"), true, target)).toBe(
+      false,
+    );
+    expect(markOutFinishesSegment("ready", frame("100"), false, target)).toBe(false);
+    // The comparison is exact, with BigInt, beyond the safe integer range of a number.
+    const large = getCurrentSegmentTarget({
+      index: 0,
+      segment: {
+        id: "large",
+        sourceId: "source-a",
+        inPts: pts("9007199254740990"),
+        outPts: pts("9007199254740993"),
+      },
+    });
+    expect(
+      markOutFinishesSegment("ready", frame("9007199254740992"), true, large),
+    ).toBe(false);
+    expect(
+      markOutFinishesSegment("ready", frame("9007199254740993"), true, large),
+    ).toBe(true);
+  });
+
+  it("plans Finish Segment from the segment in progress and the frame on screen", () => {
+    const target = getCurrentSegmentTarget(
+      findCurrentSegment(segments, "b", "source-a"),
+    );
+    const none = getCurrentSegmentTarget(null);
+
+    // Nothing in progress, or no active source: nothing to do.
+    expect(planFinishSegment("ready", frame("60"), null, true, none)).toBeNull();
+    expect(planFinishSegment("ready", frame("60"), pts("50"), false, none)).toBeNull();
+    // A current segment only ends, whatever the frame.
+    for (const shown of [frame("60"), frame("100"), null]) {
+      expect(planFinishSegment("ready", shown, null, true, target)).toEqual({
+        kind: "end",
+      });
+    }
+    // A pending In and a frame after it: the segment ends at that frame.
+    expect(planFinishSegment("ready", frame("60"), pts("50"), true, none)).toEqual({
+      kind: "complete",
+      outPts: "60",
+    });
+    // A frame on or before the In: no segment can end there, so the mark is dropped.
+    for (const value of ["50", "20"]) {
+      expect(planFinishSegment("ready", frame(value), pts("50"), true, none)).toEqual({
+        kind: "end",
+      });
+    }
+    // No frame on screen: wait while the calibration holds or is still open, so a pending seek
+    // does not drop the mark. With no calibration, no frame can ever be marked.
+    expect(planFinishSegment("ready", null, pts("50"), true, none)).toBeNull();
+    expect(planFinishSegment("calibrating", null, pts("50"), true, none)).toBeNull();
+    expect(planFinishSegment("unavailable", null, pts("50"), true, none)).toEqual({
+      kind: "end",
+    });
   });
 
   it("finishes the current segment with Mark In at or after its Out", () => {

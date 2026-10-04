@@ -221,10 +221,11 @@ export const en = {
       split: "Split",
       splitAria: "Split Segment at Playhead",
       // Ends the segment that is being built: the current segment, or a pending In point.
-      // The next Mark In then starts a new segment. The English word "finish" also names
-      // the last phase of an export, when QuipClip saves the output file
-      // (`export.status.publishing`, `statusBar.export.publishing`). The two are different
-      // actions, so a translation can use a different word for each.
+      // A pending In point becomes a segment that ends at the playhead, or it is dropped when
+      // the playhead is at or before it. The next Mark In then starts a new segment. The
+      // English word "finish" also names the last phase of an export, when QuipClip saves the
+      // output file (`export.status.publishing`, `statusBar.export.publishing`). The two are
+      // different actions, so a translation can use a different word for each.
       finishSegment: "Finish",
       finishSegmentAria: "Finish Segment",
       deleteSegment: "Delete",
@@ -237,14 +238,25 @@ export const en = {
       // It silences the preview and the frame step sound, not the export.
       mute: "Mute Audio",
     },
-    // The descriptions of Mark In. Each is the second line of its tooltip, and assistive
-    // technology reads it on the button. `inPending` shows while an In point waits for its
-    // Out point. `finishesSegment` shows while a segment is current and the frame on screen is
-    // at or after its Out point. A press of Mark In then finishes that segment and marks an In
-    // point at the frame on screen.
+    // The descriptions of Mark In, Mark Out and Finish. Each is the second line of its
+    // tooltip, and assistive technology reads it on the button. `inPending` shows on Mark In
+    // while an In point waits for its Out point. `finishesSegment` shows on Mark In while a
+    // segment is current and the frame on screen is at or after its Out point. A press of
+    // Mark In then finishes that segment and marks an In point at the frame on screen.
+    // `finishesAtOut` shows on Mark Out while a segment is current and the frame on screen is
+    // its Out point. A press of Mark Out then finishes that segment and changes no point.
+    // `finishCompletesSegment` and `finishDiscardsIn` show on Finish while an In point is
+    // pending: the first while the playhead is after the In point, where a press makes a
+    // segment that ends at the playhead, and the second while it is at or before the In point,
+    // where a press drops the In point.
     state: {
       inPending: "An In point is pending. Mark an Out point to make a segment.",
       finishesSegment: "Finishes this segment and marks an In point at the playhead.",
+      finishesAtOut: "Finishes this segment at its Out point.",
+      finishCompletesSegment:
+        "Makes a segment from the pending In point to the playhead.",
+      finishDiscardsIn:
+        "Discards the pending In point. Move the playhead after it to make a segment.",
     },
     // The label above the duration at the right end of the transport bar. `segment` names the
     // current segment. {{index}} is its number, as in `timeline.segment`. `pending` names the
@@ -260,7 +272,6 @@ export const en = {
       playheadInsideSegment: "Move the playhead between the In and Out points.",
       playheadAfterIn: "Move the playhead after the In point.",
       atInPoint: "The playhead is already at the In point.",
-      atOutPoint: "The playhead is already at the Out point.",
       noFrameRate: "The source reports no frame rate.",
       // On Play and the two frame step buttons while the preview is stopped at a part that it
       // cannot decode (`preview.decodeStall`). The next seek loads the video again.

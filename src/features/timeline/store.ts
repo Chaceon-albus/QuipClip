@@ -174,6 +174,61 @@ export function createTimelineStore(
     });
   };
 
+  /**
+   * Ends whatever segment is in progress, so the next Mark In starts a new one. Both fields
+   * describe the segment being built, so both end together. No history entry: a completed
+   * segment is already canonical, and a pending In mark is not yet an edit.
+   */
+  const endSegmentInProgress = (
+    set: StoreApi<TimelineStoreState>["setState"],
+  ): void => {
+    set({ currentSegmentId: null, pendingInPts: null });
+  };
+
+  /**
+   * Completes the pending In mark into a new segment that ends at `outPts`, with one history
+   * entry, and clears the pending mark. Mark Out and Finish Segment share this rule, so both
+   * accept and refuse the same values. Returns false, with no change, when no In is pending or
+   * `outPts` would not leave `inPts < outPts` (ADR 002).
+   *
+   * The segment goes to the end of the array, which is the export order (ADR 007). Mark Out
+   * makes it current, so the next Mark In or Split adjusts it. Finish Segment leaves nothing
+   * current, so the next Mark In starts a new segment.
+   */
+  const completePendingIn = (
+    set: StoreApi<TimelineStoreState>["setState"],
+    state: TimelineState,
+    sourceId: string,
+    outPts: Pts,
+    makeCurrent: boolean,
+  ): boolean => {
+    if (
+      state.pendingInPts === null ||
+      !isValidSegmentRange(state.pendingInPts, outPts)
+    ) {
+      return false;
+    }
+
+    const completedSegment: Segment = {
+      id: generateId(),
+      sourceId,
+      inPts: state.pendingInPts,
+      outPts,
+    };
+
+    undoStack.push(historyEntry(state));
+    redoStack = [];
+
+    set({
+      segments: [...state.segments, completedSegment],
+      pendingInPts: null,
+      currentSegmentId: makeCurrent ? completedSegment.id : null,
+      canUndo: true,
+      canRedo: false,
+    });
+    return true;
+  };
+
   return createStore<TimelineStoreState>()((set, get) => ({
     sourceId: initialState?.sourceId ?? null,
     sourceRevisionKey: initialState?.sourceRevisionKey ?? null,
@@ -278,35 +333,22 @@ export function createTimelineStore(
       );
 
       if (current !== null) {
+        // On the exclusive Out, a move would change nothing. The mark instead finishes the
+        // segment, as Finish Segment does, so a second Mark Out at the frame of the first one
+        // ends the segment. The bounds are those that `canMarkOut` and
+        // `markOutFinishesSegment` read. A segment whose stored PTS does not parse has no
+        // bounds, so the mark goes to `moveBoundary` as before.
+        const bounds = getCurrentSegmentTarget(current).bounds;
+        if (bounds !== null && BigInt(currentPts) === bounds.hi) {
+          endSegmentInProgress(set);
+          return;
+        }
         moveBoundary(set, state, current, "out", currentPts);
         return;
       }
 
-      if (state.pendingInPts === null) {
-        return;
-      }
-      if (!isValidSegmentRange(state.pendingInPts, currentPts)) {
-        return;
-      }
-
-      const completedSegment: Segment = {
-        id: generateId(),
-        sourceId: state.sourceId,
-        inPts: state.pendingInPts,
-        outPts: currentPts,
-      };
-
-      undoStack.push(historyEntry(state));
-      redoStack = [];
-
       // The completed segment becomes current, so the next Mark In or Split adjusts it.
-      set({
-        segments: [...state.segments, completedSegment],
-        pendingInPts: null,
-        currentSegmentId: completedSegment.id,
-        canUndo: true,
-        canRedo: false,
-      });
+      completePendingIn(set, state, state.sourceId, currentPts, true);
     },
 
     split: (currentPts: Pts) => {
@@ -362,9 +404,26 @@ export function createTimelineStore(
       moveBoundary(set, state, target, edge, pts);
     },
 
-    newSegment: () => {
-      // Both fields describe the segment being built, so both end together.
-      set({ currentSegmentId: null, pendingInPts: null });
+    finishSegment: (outPts: Pts | null) => {
+      const state = get();
+      const current = findCurrentSegment(
+        state.segments,
+        state.currentSegmentId,
+        state.sourceId,
+      );
+      // A pending In mark with a valid Out completes a segment, which is not current after
+      // it. Every other case only ends what is in progress: a current segment is already
+      // canonical, and a pending In mark that no Out can complete is dropped.
+      if (
+        current === null &&
+        state.sourceId &&
+        outPts !== null &&
+        isPtsString(outPts) &&
+        completePendingIn(set, state, state.sourceId, outPts, false)
+      ) {
+        return;
+      }
+      endSegmentInProgress(set);
     },
 
     deleteSegment: () => {
