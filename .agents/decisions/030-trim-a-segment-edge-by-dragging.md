@@ -111,6 +111,10 @@ release commits the frame that the browser presents at the end of the drag.
   notice says "The trim was not applied." Escape and a cancel by the browser drop the trim
   with no notice. While a trim drags, Mark In, Mark Out, Delete, Undo and Redo do nothing,
   and Escape cancels the trim instead of finishing the segment (ADR 026).
+- (Added on 2026-10-14.) **Select several segments.** While a trim drags, Select All
+  (`primary` with `A`) also does nothing, because it would change the selection from the
+  segment of the trim (ADR 045). A press with the primary modifier on an edge never starts a
+  trim. Its click adds the segment to the selection or removes it.
 
 ## Consequences
 

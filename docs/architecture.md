@@ -65,6 +65,7 @@ document summarizes them and shows how the parts fit together.
 | [`042-mark-a-release-as-a-pre-release.md`](../.agents/decisions/042-mark-a-release-as-a-pre-release.md)                                     | The maintainer marks a published release as a pre-release                  |
 | [`043-write-the-audio-in-a-second-process.md`](../.agents/decisions/043-write-the-audio-in-a-second-process.md)                             | The audio of an export with video comes from a second `ffmpeg`, by a pipe  |
 | [`044-arrow-keys-step-a-frame-while-paused.md`](../.agents/decisions/044-arrow-keys-step-a-frame-while-paused.md)                           | Paused arrows step a frame, playing arrows jump 5 s, D and F step frames   |
+| [`045-select-several-segments-and-delete-them.md`](../.agents/decisions/045-select-several-segments-and-delete-them.md)                     | `Cmd`/`Ctrl` with a click or `A` selects segments, Delete removes them all |
 
 ## Shape
 
@@ -513,12 +514,17 @@ the first excluded frame. Split creates adjacent half-open segments. Exact inclu
 final source frame needs discovery of its following boundary.
 
 One segment is current, and every edit action names it rather than inferring a target from the
-playhead. Mark In and Mark Out adjust its boundaries. Finish Segment ends it, so the next Mark In
-starts a fresh one. Mark In at or after its Out finishes it and marks the next In in one step.
-Mark Out on its Out finishes it too. Clicking a segment makes it current. Delete Segment removes
-it and leaves nothing current. Segments may therefore overlap without ambiguity. While a current
-segment resolves, there is no pending In mark. Finish Segment with a pending In makes a segment
-that ends at the frame on screen, when that frame is after the In. See ADR 007.
+playhead. Segments may therefore overlap without ambiguity. Mark In and Mark Out adjust its
+boundaries. Finish Segment ends it, so the next Mark In starts a fresh one. Mark In at or after
+its Out finishes it and marks the next In in one step. Mark Out on its Out finishes it too.
+Clicking a segment makes it current. While a current segment resolves, there is no pending In
+mark. Finish Segment with a pending In makes a segment that ends at the frame on screen, when
+that frame is after the In. See ADR 007.
+
+A click with `Cmd` on macOS or `Ctrl` on Windows adds a segment to the selection, and the same
+key with `A` selects every segment. A selection of one segment makes it current. A selection of several leaves nothing
+current. Delete Segment removes every selected segment as one edit, and leaves nothing selected.
+See ADR 045.
 
 `Source.id` is stable project identity. A separate revision key of path, size, and
 modification time drives runtime invalidation and the replacement warning. The generated

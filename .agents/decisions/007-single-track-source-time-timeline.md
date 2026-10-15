@@ -74,6 +74,11 @@ Clicking a segment on the timeline makes it current. **Delete Segment** removes 
 nothing current, because selecting a neighbour automatically would make an unseen segment the
 operand of the next Delete or Split, which is the ambiguity this rule removes.
 
+(Changed on 2026-10-14.) ADR 045 lets the user select several segments, with `primary` and a
+click or with `primary` and `A`. A selection of one segment makes it current, as before. A
+selection of several leaves nothing current, so Mark In, Mark Out and Split still never guess a
+target. Delete removes every selected segment, as one edit.
+
 (Changed on 2026-10-02.) Mark In at or after the Out of the current segment finishes that
 segment and marks an In point at the frame on screen. Mark Out makes the segment that it
 completes current, and the playhead then stands on the Out of that segment. Before this change,

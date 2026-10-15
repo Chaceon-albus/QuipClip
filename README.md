@@ -94,6 +94,9 @@ QuipClip numbers the segments in the order that you mark them. A split puts the 
 directly after the left half. The export joins the segments in the order of their numbers,
 not in the order of their positions on the timeline.
 
+Click a segment to select it. Hold `Cmd` on macOS or `Ctrl` on Windows and click to add a
+segment to the selection or to remove it. Press `Delete` to delete the selected segments.
+
 The export dialog shows the progress. Click **Run in Background** to hide the dialog. The
 status bar then shows the progress.
 
@@ -116,7 +119,8 @@ is the macOS key. On Windows, use `Ctrl`.
 | `I` `O`              | Mark In, Mark Out. `O` on the Out of the current segment finishes the segment    |
 | `Shift+I` `Shift+O`  | Go to the In or the Out of the current segment                                   |
 | `Esc`                | Finish the current segment. After an In, end a segment at the playhead           |
-| `Delete` `Backspace` | Delete the current segment                                                       |
+| `Delete` `Backspace` | Delete the selected segments                                                     |
+| `Cmd+A`              | Select all segments                                                              |
 | `Cmd+Z`              | Undo                                                                             |
 | `Cmd+Shift+Z`        | Redo. On Windows, `Ctrl+Y` also redoes                                           |
 | `=` `-`              | Zoom the timeline in or out                                                      |

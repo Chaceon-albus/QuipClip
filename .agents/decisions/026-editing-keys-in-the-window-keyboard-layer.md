@@ -62,6 +62,11 @@ action. `primary` is `Cmd` on macOS and `Ctrl` on Windows.
 "Taken, no act" means that the layer owns a repeated key press and performs nothing, as
 ADR 021 does for a held `Space`.
 
+(Changed on 2026-10-14.) ADR 045 adds a row: `A` with `primary` selects every segment of the
+active source, and a repeated press is taken and does nothing. `Delete` and `Backspace` now
+delete every selected segment. The Delete Segment item of the context menu still acts on one
+segment, because the request for the menu selects only its segment.
+
 (Changed on 2026-10-02.) ADR 037 replaces the two rows of the arrow keys. The arrows jump in
 time, `,` and `.` step frames, and `ArrowUp` and `ArrowDown` go to the edit points.
 
