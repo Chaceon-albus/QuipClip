@@ -73,9 +73,11 @@ export const PendingInTrackMarks = memo(function PendingInTrackMarks({
       />
 
       {/*
-       * The pending In mark, in the mark colour, which is not the colour of the playhead. The
-       * playhead stands on the In right after Mark In, and a mark in the brand colour then
-       * looked like part of the playhead.
+       * The pending In mark, in the mark colour: a teal of the palette, darker than the playhead
+       * in the light theme and lighter in the dark theme. The playhead stands on the In right
+       * after Mark In, and the two lines then cover the same pixels. The flag beside the line
+       * keeps the mark in view there. The flag also tells the mark from the border of a
+       * segment, which has almost the same colour, when the In lies on the edge of a segment.
        *
        * - The line is 2px wide and centred on the In, as the 2px playhead line is centred on
        *   its position, so it covers the pixels that the playhead covers when it stands on the
@@ -87,9 +89,9 @@ export const PendingInTrackMarks = memo(function PendingInTrackMarks({
        *   while the playhead covers the line, right after Mark In.
        *
        * The z-20 mark lies over the segments, because a new segment can start inside an old one
-       * (ADR 007). The mark colour keeps 3:1 against the fill of an unselected segment and 4.7:1
-       * against the track in the light theme, and 4.7:1 and 9.9:1 in the dark theme. It never
-       * lies over the selected fill: while a segment is current, no In mark is pending.
+       * (ADR 007). The mark colour keeps 4.8:1 against the fill of an unselected segment and
+       * 7.4:1 against the track in the light theme, and 6.0:1 and 12.7:1 in the dark theme. It
+       * never lies over the selected fill: while a segment is current, no In mark is pending.
        */}
       <div
         className="pointer-events-none absolute -inset-y-2 z-20 w-0"
@@ -128,15 +130,18 @@ interface PendingInTrailProps extends PendingInLayerProps {
  *
  * It has two parts:
  *
- * - The fill: the track colour under a tint of the mark colour that grows toward the playhead,
- *   so it hides the hatch of the source bar and reads as a trail. It has the rectangle of a
- *   segment (`inset-y-1`), so the segment that a press makes appears where the trail was. It
- *   lies under the segments (it has no z-index, and the segment layer is z-10), so a segment
- *   that the trail crosses stays in view.
+ * - The fill: the track colour at 70% under a tint of the mark colour that grows toward the
+ *   playhead, so it reads as a trail. The hatch of the source bar shows faintly through it,
+ *   most near the In, because the part is not a segment yet. An opaque fill read as a solid
+ *   block, and a user found it heavy. It has the rectangle of a segment (`inset-y-1`), so the
+ *   segment that a press makes appears where the trail was. It lies under the segments (it
+ *   has no z-index, and the segment layer is z-10), so a segment that the trail crosses stays
+ *   in view.
  * - The edges: two solid 2px lines in the 4px between the source bar and the rectangle of a
- *   segment, above and below it. No segment covers them, so they show the extent of the trail
- *   also where it crosses a segment. They carry no information that the In line and the
- *   playhead do not, so in the light theme they may keep less than 3:1 against the track.
+ *   segment, above and below it, at 40% of the mark colour. No segment covers them, so they
+ *   show the extent of the trail also where it crosses a segment. They carry no information
+ *   that the In line and the playhead do not, so they may keep less than 3:1 against the track
+ *   in both themes (2.0:1 in the light theme and 3.0:1 in the dark theme).
  */
 function PendingInTrail({
   pendingInPts,
@@ -160,11 +165,11 @@ function PendingInTrail({
   return (
     <>
       <div
-        className="pointer-events-none absolute inset-y-1 bg-timeline-track bg-linear-to-r from-timeline-mark/8 to-timeline-mark/35"
+        className="pointer-events-none absolute inset-y-1 bg-timeline-track/70 bg-linear-to-r from-timeline-mark/6 to-timeline-mark/30"
         style={style}
       />
       <div
-        className="pointer-events-none absolute inset-y-0.5 border-y-2 border-timeline-mark/60"
+        className="pointer-events-none absolute inset-y-0.5 border-y-2 border-timeline-mark/40"
         style={style}
       />
     </>
