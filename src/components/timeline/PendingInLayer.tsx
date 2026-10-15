@@ -125,18 +125,18 @@ interface PendingInTrailProps extends PendingInLayerProps {
  * The engine snapped that border and the playhead line to device pixels on their own, so the
  * border could show beside the playhead and look like a second mark. Its dashes and its rounded
  * corners also moved on every frame of playback, because a dashed border spaces its dashes over
- * the length of each side. The trail has no dash and no corner. Only its gradient stretches
- * with the width, smoothly.
+ * the length of each side. The trail has no dash, no corner and no gradient, so nothing in it
+ * moves while it grows.
  *
  * It has two parts:
  *
- * - The fill: the track colour at 70% under a tint of the mark colour that grows toward the
- *   playhead, so it reads as a trail. The hatch of the source bar shows faintly through it,
- *   most near the In, because the part is not a segment yet. An opaque fill read as a solid
- *   block, and a user found it heavy. It has the rectangle of a segment (`inset-y-1`), so the
- *   segment that a press makes appears where the trail was. It lies under the segments (it
- *   has no z-index, and the segment layer is z-10), so a segment that the trail crosses stays
- *   in view.
+ * - The fill: the track colour at 70%, under the mark colour at 16% (its `::before`). The
+ *   earlier tint grew toward the playhead, and a user did not like that gradient. The hatch of
+ *   the source bar shows faintly through the fill, because the part is not a segment yet. An
+ *   opaque fill read as a solid block, and a user found it heavy. It has the rectangle of a
+ *   segment (`inset-y-1`), so the segment that a press makes appears where the trail was. It
+ *   lies under the segments (it has no z-index, and the segment layer is z-10), so a segment
+ *   that the trail crosses stays in view.
  * - The edges: two solid 2px lines in the 4px between the source bar and the rectangle of a
  *   segment, above and below it, at 40% of the mark colour. No segment covers them, so they
  *   show the extent of the trail also where it crosses a segment. They carry no information
@@ -165,7 +165,7 @@ function PendingInTrail({
   return (
     <>
       <div
-        className="pointer-events-none absolute inset-y-1 bg-timeline-track/70 bg-linear-to-r from-timeline-mark/6 to-timeline-mark/30"
+        className="pointer-events-none absolute inset-y-1 bg-timeline-track/70 before:absolute before:inset-0 before:bg-timeline-mark/16"
         style={style}
       />
       <div
