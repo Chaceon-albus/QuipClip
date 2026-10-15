@@ -35,8 +35,15 @@ const ticks = (value: string): TickCount => value as TickCount;
 
 const SOURCE_ID = "source-1";
 
-/** Walks a dotted key through the English catalog, the way i18next resolves it. */
-function translate(key: string): string {
+/**
+ * Walks a dotted key through the English catalog, the way i18next resolves it. A count picks
+ * the plural form, `_one` or `_other`, and fills `{{count}}`.
+ */
+function translate(key: string, values?: { readonly count: number }): string {
+  if (values !== undefined) {
+    const form = values.count === 1 ? "_one" : "_other";
+    return translate(`${key}${form}`).replaceAll("{{count}}", String(values.count));
+  }
   const value = key.split(".").reduce<unknown>((node, part) => {
     if (node !== null && typeof node === "object" && part in node) {
       return (node as Record<string, unknown>)[part];
@@ -216,7 +223,11 @@ describe("createSegmentContextMenu", () => {
   describe("open", () => {
     it("selects the segment as a click does, and runs no command, so nothing seeks", () => {
       const harness = createHarness();
-      harness.timeline.setState({ currentSegmentId: null, pendingInPts: pts("30000") });
+      harness.timeline.setState({
+        currentSegmentId: null,
+        selectedSegmentIds: [],
+        pendingInPts: pts("30000"),
+      });
       expect(harness.open()).not.toBeNull();
       // A selection clears the pending In mark (ADR 007) and pushes no history entry.
       expect(harness.timeline.getState()).toMatchObject({
@@ -522,6 +533,70 @@ describe("createSegmentContextMenu", () => {
       harness.facts.isOverlayOpen = true;
       harness.lastShow().select("deleteSegment");
       expect(harness.runCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a selection of several segments (ADR 045)", () => {
+    function selectBoth() {
+      const harness = createHarness();
+      harness.timeline.getState().selectAllSegments();
+      expect(harness.timeline.getState().selectedSegmentIds).toEqual(["a", "b"]);
+      return harness;
+    }
+
+    it("keeps the selection when the request names one of its segments", () => {
+      const harness = selectBoth();
+      expect(harness.open({ segmentId: "b" })).not.toBeNull();
+      expect(harness.timeline.getState()).toMatchObject({
+        selectedSegmentIds: ["a", "b"],
+        currentSegmentId: null,
+      });
+      const { entries } = harness.lastShow();
+      expect(itemOf(entries, "deleteSegment")).toMatchObject({
+        text: "Delete 2 Segments\tDelete",
+        enabled: true,
+      });
+      for (const action of [
+        "goToSegmentIn",
+        "goToSegmentOut",
+        "playSegment",
+      ] as const) {
+        expect(itemOf(entries, action).enabled).toBe(false);
+      }
+    });
+
+    it("deletes every selected segment through the command of the key", () => {
+      const harness = selectBoth();
+      void harness.open({ segmentId: "a" });
+      harness.lastShow().select("deleteSegment");
+      expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith({
+        kind: "deleteSegment",
+      });
+    });
+
+    it("runs nothing when the selection changed while the menu was open", () => {
+      const harness = selectBoth();
+      void harness.open({ segmentId: "b" });
+      harness.timeline.getState().toggleSegmentSelection("a");
+      harness.lastShow().select("deleteSegment");
+      expect(harness.runCommand).not.toHaveBeenCalled();
+    });
+
+    it("selects only the segment of a request outside the selection", () => {
+      const harness = createHarness();
+      harness.timeline.setState({
+        segments: [
+          ...harness.timeline.getState().segments,
+          { id: "c", sourceId: SOURCE_ID, inPts: pts("540000"), outPts: pts("630000") },
+        ],
+      });
+      harness.timeline.getState().toggleSegmentSelection("b");
+      expect(harness.timeline.getState().selectedSegmentIds).toEqual(["a", "b"]);
+      void harness.open({ segmentId: "c" });
+      expect(harness.timeline.getState()).toMatchObject({
+        selectedSegmentIds: ["c"],
+        currentSegmentId: "c",
+      });
     });
   });
 

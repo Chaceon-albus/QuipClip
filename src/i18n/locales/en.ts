@@ -365,6 +365,10 @@ export const en = {
       goToOut: "Go to Out",
       playSegment: "Play Segment",
       deleteSegment: "Delete Segment",
+      // Delete Segment in the menu of a selection of several segments (ADR 045). `count` is the
+      // number of the selected segments, always 2 or more.
+      deleteSelectedSegments_one: "Delete {{count}} Segment",
+      deleteSelectedSegments_other: "Delete {{count}} Segments",
     },
   },
   mediaError: {

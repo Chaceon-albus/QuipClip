@@ -253,6 +253,8 @@ export const zhCN: TranslationCatalog = {
       goToOut: "跳转到出点",
       playSegment: "播放片段",
       deleteSegment: "删除片段",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      deleteSelectedSegments_other: "删除 {{count}} 个片段",
     },
   },
   mediaError: {

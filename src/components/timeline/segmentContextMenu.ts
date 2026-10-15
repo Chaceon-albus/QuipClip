@@ -8,7 +8,9 @@
  *
  * A request that opens the menu does these steps, in this order:
  *
- * 1. It selects the segment, as a click does. A selection does not seek (ADR 007).
+ * 1. It selects the segment, as a click does. A selection does not seek (ADR 007). When the
+ *    segment is one of several selected segments, it keeps that selection instead, and the menu
+ *    acts on all of it (`resolveSegmentMenuTarget`, ADR 045).
  * 2. It marks a native context menu as open (`nativeContextMenuState`), so the window keyboard
  *    layer, the timeline presses and the command items of the macOS menu do nothing until the
  *    menu closes (ADR 021).
@@ -19,7 +21,7 @@
  * grace period closes the mark (`NativeContextMenuMark.showing`), because a native menu takes
  * all input while it shows. The menu keeps its pending choice until the next show starts: a lost
  * popup reply is the likeliest cause, and the item event can still arrive on its own channel.
- * A late item event is safe, because the item plans again when it runs, names the segment of
+ * A late item event is safe, because the item plans again when it runs, names the target of
  * its menu, and does nothing while a dialog or a menu of the page is open.
  *
  * An item runs the command that its key plans at the moment the item runs
@@ -63,11 +65,14 @@ import {
   buildSegmentMenuEntries,
   canOpenSegmentMenu,
   planSegmentMenuCommand,
+  resolveSegmentMenuTarget,
   type SegmentMenuAction,
   type SegmentMenuEntry,
   type SegmentMenuItem,
   type SegmentMenuLabelKey,
+  type SegmentMenuLabelValues,
   type SegmentMenuPosition,
+  type SegmentMenuTarget,
 } from "./segmentMenuModel";
 
 /** The stores and the services that the menu reads and calls. The production values satisfy it. */
@@ -82,8 +87,11 @@ export interface SegmentContextMenuDependencies {
   readonly menuState: NativeContextMenuState;
   readonly backend: SegmentMenuBackend;
   readonly platform: ShortcutPlatform;
-  /** Reads a label or a key name from the catalog. */
-  readonly translate: (key: SegmentMenuLabelKey | ShortcutKeyNameKey) => string;
+  /** Reads a label or a key name from the catalog, with the values of a label. */
+  readonly translate: (
+    key: SegmentMenuLabelKey | ShortcutKeyNameKey,
+    values?: SegmentMenuLabelValues,
+  ) => string;
   /** Receives a failure of the native menu. The menu then did not show. */
   readonly onError?: (error: unknown) => void;
 }
@@ -125,14 +133,15 @@ export function createSegmentContextMenu(
   const onError = dependencies.onError ?? (() => {});
 
   /**
-   * Runs the item that the user chose in the menu of the segment.
+   * Runs the item that the user chose in the menu.
    *
+   * @param target The segments that the menu named.
    * @param entries The entries that the menu showed. The item runs only a command of the kind
    *   that it showed (`SegmentMenuItem.commandKind`).
    */
   const select = (
     action: SegmentMenuAction,
-    segmentId: string,
+    target: SegmentMenuTarget,
     entries: readonly SegmentMenuEntry[],
   ): void => {
     // The layer does nothing while a dialog or a menu of the page is open, and the item does
@@ -149,7 +158,7 @@ export function createSegmentContextMenu(
     }
     const command = planSegmentMenuCommand(
       action,
-      segmentId,
+      target,
       readSnapshot(),
       shown.commandKind,
     );
@@ -174,20 +183,25 @@ export function createSegmentContextMenu(
         return null;
       }
 
-      state.selectSegment(segmentId);
+      // A request on one of several selected segments keeps the selection, and the menu acts on
+      // all of it (ADR 045). Any other request selects only its segment, as a click does.
+      const target = resolveSegmentMenuTarget(segmentId, state);
+      if (target.kind === "segment") {
+        state.selectSegment(segmentId);
+      }
       const mark = menuState.open();
 
       let shown: Promise<void>;
       try {
         const entries = buildSegmentMenuEntries({
-          segmentId,
+          target,
           snapshot: readSnapshot(),
           platform,
           keyNames: resolveShortcutKeyNames(translate),
           translate,
         });
         shown = backend.show(entries, position, {
-          onSelect: (action) => select(action, segmentId, entries),
+          onSelect: (action) => select(action, target, entries),
           onPopup: mark.showing,
         });
       } catch (error) {
@@ -218,7 +232,7 @@ export const segmentContextMenu: SegmentContextMenu = createSegmentContextMenu({
   menuState: nativeContextMenuState,
   backend: tauriSegmentMenuBackend,
   platform: getShortcutPlatform(),
-  translate: (key) => i18n.t(key),
+  translate: (key, values) => i18n.t(key, values),
   // A menu that does not show loses one right-click, and the user can do it again, so the
   // failure goes to the console only.
   onError: (error) => {

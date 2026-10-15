@@ -17,11 +17,13 @@ import {
   resolveShortcutKeyNames,
   type ShortcutKeyNames,
 } from "@/components/layout/shortcutLabels";
+import { createI18nInstance } from "@/i18n";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import type { Pts, Segment, TickCount } from "@/types/project";
 import {
   SEGMENT_MENU_ACTIONS,
+  SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY,
   SEGMENT_MENU_LABEL_KEYS,
   SEGMENT_MENU_LAYOUT,
   SEGMENT_MENU_PAUSE_LABEL_KEY,
@@ -32,10 +34,12 @@ import {
   listenForSegmentMenuSourceReset,
   planSegmentMenuCommand,
   resolveSegmentMenuPosition,
+  resolveSegmentMenuTarget,
   takeSegmentContextMenuEvent,
   type SegmentMenuEntry,
   type SegmentMenuItem,
   type SegmentMenuOpenInput,
+  type SegmentMenuTarget,
 } from "./segmentMenuModel";
 
 const pts = (value: string): Pts => value as Pts;
@@ -57,8 +61,25 @@ function lookup(catalog: unknown, key: string): string {
   return value;
 }
 
-const enTranslate = (key: string) => lookup(en, key);
-const zhTranslate = (key: string) => lookup(zhCN, key);
+/**
+ * Reads a label, and a plural label with its count, the way i18next reads these catalogs:
+ * English has a `_one` form, and Chinese has the `_other` form only.
+ */
+function translateFrom(catalog: unknown, hasOneForm: boolean) {
+  return (key: string, values?: { readonly count: number }): string => {
+    if (values === undefined) {
+      return lookup(catalog, key);
+    }
+    const form = hasOneForm && values.count === 1 ? "_one" : "_other";
+    return lookup(catalog, `${key}${form}`).replaceAll(
+      "{{count}}",
+      String(values.count),
+    );
+  };
+}
+
+const enTranslate = translateFrom(en, true);
+const zhTranslate = translateFrom(zhCN, false);
 const EN_NAMES: ShortcutKeyNames = resolveShortcutKeyNames(enTranslate);
 const ZH_NAMES: ShortcutKeyNames = resolveShortcutKeyNames(zhTranslate);
 
@@ -68,6 +89,22 @@ function segment(id: string, inPts: string, outPts: string): Segment {
 
 const SEGMENT_A = segment("a", "90000", "180000");
 const SEGMENT_B = segment("b", "270000", "360000");
+
+/** The menu of segment `b` alone. */
+const SEGMENT_B_TARGET: SegmentMenuTarget = { kind: "segment", segmentId: "b" };
+
+/** The menu of the selection of `a` and `b` (ADR 045). */
+const SELECTION_TARGET: SegmentMenuTarget = {
+  kind: "selection",
+  segmentIds: ["a", "b"],
+};
+
+/** A snapshot with `a` and `b` selected, so nothing is current. */
+function selectionSnapshot(): ShortcutSnapshot {
+  return snapshot({
+    timeline: { currentSegmentId: null, selectedSegmentIds: ["a", "b"] },
+  });
+}
 
 function probe(): ShortcutProbe {
   return {
@@ -145,7 +182,7 @@ function build(
   options: { readonly zh?: boolean; readonly segmentId?: string } = {},
 ) {
   return buildSegmentMenuEntries({
-    segmentId: options.segmentId ?? "b",
+    target: { kind: "segment", segmentId: options.segmentId ?? "b" },
     snapshot: state,
     platform,
     keyNames: options.zh === true ? ZH_NAMES : EN_NAMES,
@@ -277,7 +314,7 @@ describe("buildSegmentMenuEntries", () => {
     for (const platform of ["macos", "windows"] as const) {
       const [first] = items(
         buildSegmentMenuEntries({
-          segmentId: "b",
+          target: SEGMENT_B_TARGET,
           snapshot: snapshot(),
           platform,
           keyNames: EN_NAMES,
@@ -292,7 +329,7 @@ describe("buildSegmentMenuEntries", () => {
   it("doubles an ampersand in the key after the tab on Windows too", () => {
     const [first] = items(
       buildSegmentMenuEntries({
-        segmentId: "b",
+        target: SEGMENT_B_TARGET,
         snapshot: snapshot(),
         platform: "windows",
         keyNames: { ...EN_NAMES, shift: "Sh&ift" },
@@ -482,19 +519,25 @@ describe("buildSegmentMenuEntries", () => {
 describe("planSegmentMenuCommand", () => {
   it("plans the command of the key while the segment of the menu is current", () => {
     const state = snapshot();
-    expect(planSegmentMenuCommand("goToSegmentIn", "b", state)).toStrictEqual({
+    expect(
+      planSegmentMenuCommand("goToSegmentIn", SEGMENT_B_TARGET, state),
+    ).toStrictEqual({
       kind: "seekToPts",
       pts: SEGMENT_B.inPts,
     });
-    expect(planSegmentMenuCommand("goToSegmentOut", "b", state)).toStrictEqual({
+    expect(
+      planSegmentMenuCommand("goToSegmentOut", SEGMENT_B_TARGET, state),
+    ).toStrictEqual({
       kind: "seekToPts",
       pts: SEGMENT_B.outPts,
     });
-    expect(planSegmentMenuCommand("deleteSegment", "b", state)).toStrictEqual({
+    expect(
+      planSegmentMenuCommand("deleteSegment", SEGMENT_B_TARGET, state),
+    ).toStrictEqual({
       kind: "deleteSegment",
     });
     for (const action of SEGMENT_MENU_ACTIONS) {
-      expect(planSegmentMenuCommand(action, "b", state)).toStrictEqual(
+      expect(planSegmentMenuCommand(action, SEGMENT_B_TARGET, state)).toStrictEqual(
         planShortcutCommand(action, state),
       );
     }
@@ -503,7 +546,7 @@ describe("planSegmentMenuCommand", () => {
   it("plans only the kind of command that the item showed", () => {
     const state = snapshot();
     expect(
-      planSegmentMenuCommand("playSegment", "b", state, "playSegment"),
+      planSegmentMenuCommand("playSegment", SEGMENT_B_TARGET, state, "playSegment"),
     ).toStrictEqual({
       kind: "playSegment",
       inPts: SEGMENT_B.inPts,
@@ -511,11 +554,15 @@ describe("planSegmentMenuCommand", () => {
     });
     // The item said Pause, but the segment reached its stop while the menu was open, so the
     // key would now start a new playback.
-    expect(planSegmentMenuCommand("playSegment", "b", state, "pause")).toBeNull();
-    // A disabled item runs nothing, whatever the state became.
-    expect(planSegmentMenuCommand("deleteSegment", "b", state, null)).toBeNull();
     expect(
-      planSegmentMenuCommand("deleteSegment", "b", state, "deleteSegment"),
+      planSegmentMenuCommand("playSegment", SEGMENT_B_TARGET, state, "pause"),
+    ).toBeNull();
+    // A disabled item runs nothing, whatever the state became.
+    expect(
+      planSegmentMenuCommand("deleteSegment", SEGMENT_B_TARGET, state, null),
+    ).toBeNull();
+    expect(
+      planSegmentMenuCommand("deleteSegment", SEGMENT_B_TARGET, state, "deleteSegment"),
     ).toStrictEqual({ kind: "deleteSegment" });
   });
 
@@ -523,9 +570,137 @@ describe("planSegmentMenuCommand", () => {
     for (const currentSegmentId of ["a", null]) {
       const state = snapshot({ timeline: { currentSegmentId } });
       for (const action of SEGMENT_MENU_ACTIONS) {
-        expect(planSegmentMenuCommand(action, "b", state)).toBeNull();
+        expect(planSegmentMenuCommand(action, SEGMENT_B_TARGET, state)).toBeNull();
       }
     }
+  });
+
+  it("plans only Delete for a selection, while the selection is the one of the menu", () => {
+    const state = selectionSnapshot();
+    expect(
+      planSegmentMenuCommand("deleteSegment", SELECTION_TARGET, state, "deleteSegment"),
+    ).toStrictEqual({ kind: "deleteSegment" });
+    // Go to In and Go to Out need one current segment, and Play Segment would act on the
+    // segment at the playhead, which the menu did not name (ADR 045).
+    for (const action of SEGMENT_MENU_ACTIONS) {
+      if (action !== "deleteSegment") {
+        expect(planSegmentMenuCommand(action, SELECTION_TARGET, state)).toBeNull();
+      }
+    }
+    // A selection that changed while the menu was open: the item runs nothing. The last case
+    // is a selection that grew, with a third segment.
+    const SEGMENT_C = segment("c", "450000", "540000");
+    for (const selectedSegmentIds of [["a"], ["b"], [], ["a", "b", "c"]]) {
+      const changed = snapshot({
+        timeline: {
+          segments: [SEGMENT_A, SEGMENT_B, SEGMENT_C],
+          currentSegmentId:
+            selectedSegmentIds.length === 1 ? selectedSegmentIds[0] : null,
+          selectedSegmentIds,
+        },
+      });
+      expect(
+        planSegmentMenuCommand("deleteSegment", SELECTION_TARGET, changed),
+      ).toBeNull();
+    }
+  });
+});
+
+describe("resolveSegmentMenuTarget", () => {
+  const segments = [SEGMENT_A, SEGMENT_B, segment("c", "450000", "540000")];
+
+  it("keeps a selection of several segments that holds the segment of the request", () => {
+    expect(
+      resolveSegmentMenuTarget("b", {
+        segments,
+        selectedSegmentIds: ["a", "b"],
+        sourceId: SOURCE_ID,
+      }),
+    ).toStrictEqual(SELECTION_TARGET);
+  });
+
+  it("names the segment alone in every other case", () => {
+    for (const selectedSegmentIds of [[], ["b"], ["a"], ["a", "c"]]) {
+      expect(
+        resolveSegmentMenuTarget("b", {
+          segments,
+          selectedSegmentIds,
+          sourceId: SOURCE_ID,
+        }),
+      ).toStrictEqual(SEGMENT_B_TARGET);
+    }
+  });
+
+  it("counts only the selected segments of the active source", () => {
+    const foreign = { ...segment("x", "0", "90000"), sourceId: "other" };
+    expect(
+      resolveSegmentMenuTarget("b", {
+        segments: [...segments, foreign],
+        selectedSegmentIds: ["b", "x"],
+        sourceId: SOURCE_ID,
+      }),
+    ).toStrictEqual(SEGMENT_B_TARGET);
+  });
+});
+
+describe("the menu of a selection of several segments", () => {
+  it("keeps the shape of the menu, names the count on Delete, and disables the rest", () => {
+    for (const platform of ["macos", "windows"] as const) {
+      const entries = buildSegmentMenuEntries({
+        target: SELECTION_TARGET,
+        snapshot: selectionSnapshot(),
+        platform,
+        keyNames: EN_NAMES,
+        translate: enTranslate,
+      });
+      expect(entries.map((entry) => entry.kind)).toStrictEqual(
+        SEGMENT_MENU_LAYOUT.map((slot) => slot.kind),
+      );
+      const list = items(entries);
+      const remove = list.find((item) => item.action === "deleteSegment");
+      expect(remove?.label).toBe("Delete 2 Segments");
+      expect(remove?.enabled).toBe(true);
+      expect(remove?.commandKind).toBe("deleteSegment");
+      for (const item of list) {
+        if (item.action !== "deleteSegment") {
+          expect(item.enabled).toBe(false);
+          expect(item.label).toBe(enTranslate(SEGMENT_MENU_LABEL_KEYS[item.action]));
+        }
+      }
+    }
+  });
+
+  it("reads the count label as i18next reads it, in both languages", async () => {
+    for (const [language, fake] of [
+      ["en", enTranslate],
+      ["zh-CN", zhTranslate],
+    ] as const) {
+      const instance = await createI18nInstance({
+        initialPreference: language,
+        systemLanguages: [],
+      });
+      for (const count of [2, 5]) {
+        expect(fake(SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY, { count })).toBe(
+          instance.t(SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY, { count }),
+        );
+      }
+    }
+  });
+
+  it("names the count in Chinese", () => {
+    const remove = items(
+      buildSegmentMenuEntries({
+        target: SELECTION_TARGET,
+        snapshot: selectionSnapshot(),
+        platform: "windows",
+        keyNames: ZH_NAMES,
+        translate: zhTranslate,
+      }),
+    ).find((item) => item.action === "deleteSegment");
+    expect(remove?.label).toBe("删除 2 个片段");
+    expect(zhTranslate(SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY, { count: 3 })).toBe(
+      "删除 3 个片段",
+    );
   });
 });
 

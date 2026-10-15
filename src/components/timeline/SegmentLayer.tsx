@@ -464,10 +464,11 @@ export const SegmentLayer = memo(function SegmentLayer({
    * - A right-click on the body or on an edge, a Control click on macOS, and the Menu key or
    *   Shift+F10 on a focused segment open the context menu of the segment
    *   (`segmentContextMenu`). The request selects the segment, as a click does, and does not
-   *   seek. It never starts a trim or a scrub: a segment is not a scrub surface, and a trim
-   *   starts only from a primary press, with no Control held on macOS (`isContextMenuPress`).
-   *   The menu opens at the pointer, or at the bottom left of the visible part of the segment
-   *   for a request from the keyboard (`SegmentMenuSourceTracker`).
+   *   seek. A request on a segment of a selection of several keeps that selection, and the menu
+   *   acts on all of it (ADR 045). It never starts a trim or a scrub: a segment is not a scrub
+   *   surface, and a trim starts only from a primary press, with no Control held on macOS
+   *   (`isContextMenuPress`). The menu opens at the pointer, or at the bottom left of the
+   *   visible part of the segment for a request from the keyboard (`SegmentMenuSourceTracker`).
    * - A press on an edge goes to the timeline panel (`edgePointerHandlers`). With the condition
    *   of a trim (`planSegmentTrimStart`), the panel holds the pointer: a release before the drag
    *   threshold is the click above, and a drag past it trims the edge (ADR 030). The browser
@@ -583,8 +584,9 @@ export const SegmentLayer = memo(function SegmentLayer({
               onKeyDown={() => menuSource.reset()}
               // The segment takes the event before the context menu policy of the window, which
               // listens in the bubble phase, so the menu of the web view never opens on a
-              // segment. The request selects the segment and opens its own menu, at the pointer
-              // or, from the keyboard, at the segment.
+              // segment. The request selects the segment, or keeps a selection of several that
+              // holds it. It opens its own menu at the pointer, or at the segment for a request
+              // from the keyboard.
               onContextMenu={(event) => {
                 const viewport = viewportRef.current;
                 const position = takeSegmentContextMenuEvent(

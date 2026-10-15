@@ -4,8 +4,10 @@
  *
  * A right-click on a segment, a Ctrl-click on macOS, and the Menu key or Shift+F10 on a focused
  * segment open the menu. The request selects the segment, as a click does, and never seeks
- * (ADR 007). The body and the edges of a segment open the same menu: a secondary press on an
- * edge is not a trim (ADR 030) and not a click of the edge.
+ * (ADR 007). A request on a segment of a selection of several keeps that selection, and the
+ * menu then acts on all of it (`SegmentMenuTarget`, ADR 045). The body and the edges of a
+ * segment open the same menu: a secondary press on an edge is not a trim (ADR 030) and not a
+ * click of the edge.
  *
  * Each item names an action of the key table (ADR 026), and its condition is the plan of that
  * action for the key (`planShortcutCommand`). One predicate therefore enables the item, lets
@@ -38,6 +40,8 @@ import {
   shortcutFor,
   type ShortcutKeyNames,
 } from "@/components/layout/shortcutLabels";
+import { findSelectedSegments } from "@/features/timeline/math";
+import type { TimelineState } from "@/features/timeline/types";
 import type { ClientRange } from "./edgeAutoScroll";
 
 /** The actions of the items of the menu, in the order of the menu. */
@@ -65,9 +69,77 @@ export const SEGMENT_MENU_LABEL_KEYS = {
  */
 export const SEGMENT_MENU_PAUSE_LABEL_KEY = "transport.action.pause";
 
+/**
+ * The label of Delete Segment in the menu of a selection of several segments (ADR 045). It
+ * takes the number of the segments as `count`.
+ */
+export const SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY =
+  "timeline.segmentMenu.deleteSelectedSegments";
+
 export type SegmentMenuLabelKey =
   | (typeof SEGMENT_MENU_LABEL_KEYS)[keyof typeof SEGMENT_MENU_LABEL_KEYS]
-  | typeof SEGMENT_MENU_PAUSE_LABEL_KEY;
+  | typeof SEGMENT_MENU_PAUSE_LABEL_KEY
+  | typeof SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY;
+
+/**
+ * The values of a label (`SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY`). A type alias and not an
+ * interface, so it fits the options of `i18n.t`, which have an index signature.
+ */
+export type SegmentMenuLabelValues = { readonly count: number };
+
+/**
+ * The segments that a menu names (ADR 045).
+ *
+ * - `segment`: the segment of the request. The request selected it alone, so it is current, and
+ *   every item acts on it.
+ * - `selection`: a selection of several segments that holds the segment of the request. The
+ *   request kept the selection, and nothing is current. Only Delete Segment acts on it. Go to In
+ *   and Go to Out need one current segment. Play Segment would play the segment at the playhead,
+ *   which the menu did not name. So these items are disabled, also while a segment plays.
+ */
+export type SegmentMenuTarget =
+  | { readonly kind: "segment"; readonly segmentId: string }
+  | { readonly kind: "selection"; readonly segmentIds: readonly string[] };
+
+/**
+ * The target of a request for the menu of `segmentId`, read before the request changes the
+ * selection.
+ *
+ * The target is the selection when several segments of the active source are selected and the
+ * segment is one of them. In every other case it is the segment alone, and the request then
+ * selects only that segment, as a click does (ADR 007).
+ */
+export function resolveSegmentMenuTarget(
+  segmentId: string,
+  timeline: Pick<TimelineState, "segments" | "selectedSegmentIds" | "sourceId">,
+): SegmentMenuTarget {
+  const selected = findSelectedSegments(
+    timeline.segments,
+    timeline.selectedSegmentIds,
+    timeline.sourceId,
+  ).map(({ segment }) => segment.id);
+  return selected.length > 1 && selected.includes(segmentId)
+    ? { kind: "selection", segmentIds: selected }
+    : { kind: "segment", segmentId };
+}
+
+/** True when the selection of the snapshot holds exactly the given segments. */
+function isSelectionOf(
+  snapshot: ShortcutSnapshot,
+  segmentIds: readonly string[],
+): boolean {
+  const { timeline } = snapshot;
+  const selected = findSelectedSegments(
+    timeline.segments,
+    timeline.selectedSegmentIds,
+    timeline.sourceId,
+  );
+  const expected = new Set(segmentIds);
+  return (
+    selected.length === expected.size &&
+    selected.every(({ segment }) => expected.has(segment.id))
+  );
+}
 
 /** One position of the menu: an item, or a separator. */
 export type SegmentMenuSlot =
@@ -120,13 +192,17 @@ export interface SegmentMenuItem {
 export type SegmentMenuEntry = SegmentMenuItem | { readonly kind: "separator" };
 
 /**
- * The command that an item runs now for the segment of the menu, or null when it runs nothing.
+ * The command that an item runs now for the target of the menu, or null when it runs nothing.
  *
  * It is the plan of the key of the same action (`planShortcutCommand`), with one more
- * condition: the segment of the menu must still be the current segment. The menu selects its
- * segment when it opens, and the key names the current segment (ADR 007), so while that holds
- * the item and the key act on the same segment. If another segment is current when the item
- * runs, the item runs nothing, because the menu named the segment under the pointer.
+ * condition: the target of the menu must still be what the key acts on.
+ *
+ * - For one segment, that segment must still be current. The menu selects its segment when it
+ *   opens, and the key names the current segment (ADR 007), so while that holds the item and the
+ *   key act on the same segment. If another segment is current when the item runs, the item runs
+ *   nothing, because the menu named the segment under the pointer.
+ * - For a selection, only Delete Segment acts, and the selection must still hold exactly the
+ *   segments of the menu. Delete then removes those segments, as its key does (ADR 045).
  *
  * With `shownKind`, the command must also be of the kind that the item showed. The state can
  * change while the menu is open: a segment that plays can reach its stop, and Play Segment then
@@ -136,11 +212,18 @@ export type SegmentMenuEntry = SegmentMenuItem | { readonly kind: "separator" };
  */
 export function planSegmentMenuCommand(
   action: SegmentMenuAction,
-  segmentId: string,
+  target: SegmentMenuTarget,
   snapshot: ShortcutSnapshot,
   shownKind?: ShortcutCommand["kind"] | null,
 ): ShortcutCommand | null {
-  if (snapshot.timeline.currentSegmentId !== segmentId) {
+  if (target.kind === "segment") {
+    if (snapshot.timeline.currentSegmentId !== target.segmentId) {
+      return null;
+    }
+  } else if (
+    action !== "deleteSegment" ||
+    !isSelectionOf(snapshot, target.segmentIds)
+  ) {
     return null;
   }
   const command = planShortcutCommand(action, snapshot);
@@ -152,15 +235,18 @@ export function planSegmentMenuCommand(
 
 /** The facts that the items read. */
 export interface SegmentMenuInput {
-  /** The segment of the menu. */
-  readonly segmentId: string;
-  /** One read of the stores, after the selection of the segment. */
+  /** The segments of the menu (`resolveSegmentMenuTarget`). */
+  readonly target: SegmentMenuTarget;
+  /** One read of the stores, after the request changed the selection. */
   readonly snapshot: ShortcutSnapshot;
   readonly platform: ShortcutPlatform;
   /** The key names that are words, from the catalog (`resolveShortcutKeyNames`). */
   readonly keyNames: ShortcutKeyNames;
-  /** Reads a label from the catalog. */
-  readonly translate: (key: SegmentMenuLabelKey) => string;
+  /** Reads a label from the catalog, with its values when it has some. */
+  readonly translate: (
+    key: SegmentMenuLabelKey,
+    values?: SegmentMenuLabelValues,
+  ) => string;
 }
 
 /**
@@ -176,22 +262,31 @@ function escapeMnemonic(label: string): string {
  *
  * An item is enabled when its command plans (`planSegmentMenuCommand`), from the same snapshot
  * that the item would run on at that moment. While a segment plays, Play Segment takes the label
- * Pause, because its key then pauses.
+ * Pause, because its key then pauses. In the menu of a selection, Delete Segment names the
+ * number of the segments, and the other items keep their labels and are disabled, so the menu
+ * keeps its shape.
  */
 export function buildSegmentMenuEntries(
   input: SegmentMenuInput,
 ): readonly SegmentMenuEntry[] {
-  const { segmentId, snapshot, platform, keyNames, translate } = input;
+  const { target, snapshot, platform, keyNames, translate } = input;
   return SEGMENT_MENU_LAYOUT.map((slot): SegmentMenuEntry => {
     if (slot.kind === "separator") {
       return slot;
     }
-    const command = planSegmentMenuCommand(slot.action, segmentId, snapshot);
-    const label = translate(
-      slot.action === "playSegment" && command?.kind === "pause"
-        ? SEGMENT_MENU_PAUSE_LABEL_KEY
-        : SEGMENT_MENU_LABEL_KEYS[slot.action],
-    );
+    const command = planSegmentMenuCommand(slot.action, target, snapshot);
+    let label: string;
+    if (slot.action === "deleteSegment" && target.kind === "selection") {
+      label = translate(SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY, {
+        count: target.segmentIds.length,
+      });
+    } else {
+      label = translate(
+        slot.action === "playSegment" && command?.kind === "pause"
+          ? SEGMENT_MENU_PAUSE_LABEL_KEY
+          : SEGMENT_MENU_LABEL_KEYS[slot.action],
+      );
+    }
     const binding = shortcutFor(slot.action, platform);
     const shortcut =
       binding === null ? null : formatShortcut(binding, platform, keyNames);
