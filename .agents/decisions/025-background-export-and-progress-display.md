@@ -202,8 +202,9 @@ its own changed the elapsed time.
   the status is `running`.
 - The smoothing runs only while the encode runs with a known total. It keeps its last position
   while the dialog closes. When the system asks for reduced motion, the bar, the percent and the
-  frame count show the reported values. A run that fails or stops shows the last reported frame,
-  so its bar can move back by up to one interval.
+  frame count show the reported values. (Changed on 2026-10-14: the smoothing now also runs under
+  reduced motion. See below.) A run that fails or stops shows the last reported frame, so its bar
+  can move back by up to one interval.
 - A dialog that opens during a run does not know when its first frame arrived. That frame
   therefore measures no rate and no interval. The next block also measures nothing, and the
   position moves only to its frame. The first measurement is the gap after that block.
@@ -228,14 +229,25 @@ animation frame, and WebKit started the 300 ms transition again at each change. 
 therefore stood still until a pause let one transition run. The bar showed 2.4% while the frame
 count showed 10%.
 
-Chrome eased the same changes with a delay of about 90 ms. Without the transition, the fill
-follows the position on each frame in both engines. The smoothing already moves the fill, so the
-transition only added a delay. The render that stops the smoothing also turns the transition on
-again. So the fill still eases from the run into its result. The bar of the status bar shows the
-reported values, and it keeps its transition.
+Chrome eased the same changes with a delay of about 0.1 to 0.3 s. Without the transition, the
+fill follows the position on each frame in both engines. The smoothing already moves the fill, so
+the transition only added a delay. The render that stops the smoothing also turns the transition
+on again. So the fill still eases from the run into its result. The bar of the status bar shows
+the reported values, and it keeps its transition.
 
 The fill now moves in steps of one whole frame. On a short export each step is a visible part of
 the bar: 1.7% for 60 frames. Such an export ends in a moment, so this record accepts the steps.
+
+(Changed on 2026-10-14.) The smoothing also runs when the system asks for reduced motion. A user
+saw the dialog bar step about twice a second on Windows. Windows had its animation effects off,
+and WebView2 then reports `prefers-reduced-motion: reduce`. So the dialog showed the reported
+values, as the rule above said. The user asked for a smooth bar and percent in this state too.
+
+The smoothed position fills a bar and changes text, in one direction while the encode runs. It
+carries the progress of the run. It is not the kind of motion that the setting asks to remove, such as a
+slide, a zoom or a bounce. The other motion of the bar still stops under reduced motion: the flow
+of its gradient and the transition of its width. So at the end of a run the fill moves to its
+result at once. The bar of the status bar still shows the reported values.
 
 ### The window shows progress on the Dock and the task bar
 
