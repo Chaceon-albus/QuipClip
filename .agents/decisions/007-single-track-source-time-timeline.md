@@ -178,7 +178,8 @@ colour, and it now shows on the track line and on the frame band only while a se
 current and no In is pending. Only the fill of the selected segment needs the ring for
 contrast. The ruler line has no ring.
 
-(Changed on 2026-10-04.) The pending In mark has its own colour, `--timeline-mark`. It is an
+(Changed on 2026-10-04. The colour and the opaque trail changed again on 2026-10-14, below.)
+The pending In mark has its own colour, `--timeline-mark`. It is an
 orange in the light theme and an amber in the dark theme, far from the teal of the playhead on
 the hue circle. While an In is pending, the Mark In button takes the same tint. A user found the
 mark hard to see right after Mark In, because the playhead stood on it in almost the same
@@ -197,6 +198,22 @@ Its tint grows toward the playhead, and it hides the hatch of the source bar. It
 the segments, so a segment that it crosses stays in view. Two solid edges lie above and below the
 rectangle of a segment, where no segment covers them, so the extent of the trail also shows where
 it crosses a segment.
+
+(Changed on 2026-10-14.) The mark colour is now a teal of the palette. It is darker than the
+playhead in the light theme and lighter in the dark theme. A user saw the orange mark as red, and
+found it out of place in the teal palette. The user accepted the colour of the timeline, on the
+condition that the mark stays easy to see. While the In is pending, the Mark In button takes the
+same tint, as before.
+
+The new colour has more contrast against the track and the segments than the orange had. Against
+the playhead it has only 1.4:1 in the light theme and 1.3:1 in the dark theme. So the shape tells
+the two apart: the flag stands beside the playhead line, where the playhead line draws nothing.
+The border of a segment has almost the same colour as the mark. When the In lies on the edge of a
+segment, the flag also tells the mark from that border.
+
+The trail is lighter. The hatch of the source bar shows faintly through its fill, because the
+track colour under its tint is at 70%. Its two edges are at 40% of the mark colour. The user found
+the opaque trail heavy, and a part that is not a segment yet must not look solid.
 
 The wheel zooms, and it holds the time under the pointer in place. A gesture that is
 clearly horizontal pans instead, and so does the shift key with the wheel. The panel gives
