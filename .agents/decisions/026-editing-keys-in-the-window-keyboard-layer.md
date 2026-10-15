@@ -64,8 +64,8 @@ ADR 021 does for a held `Space`.
 
 (Changed on 2026-10-14.) ADR 045 adds a row: `A` with `primary` selects every segment of the
 active source, and a repeated press is taken and does nothing. `Delete` and `Backspace` now
-delete every selected segment. The Delete Segment item of the context menu still acts on one
-segment, because the request for the menu selects only its segment.
+delete every selected segment. The Delete Segment item of the context menu changes too (see the
+section about the context menu below).
 
 (Changed on 2026-10-02.) ADR 037 replaces the two rows of the arrow keys. The arrows jump in
 time, `,` and `.` step frames, and `ArrowUp` and `ArrowDown` go to the edit points.
@@ -245,6 +245,14 @@ of an earlier menu never runs after a later menu opened. An item whose condition
 is disabled, not hidden. While a segment plays, `/` pauses, so the Play Segment item shows
 the label Pause and pauses; after the segment stopped, an item that showed Pause runs
 nothing.
+
+(Changed on 2026-10-14.) A request on a segment that is one of several selected segments keeps
+the selection, and the menu acts on all of it (ADR 045). Delete Segment then names the count and
+plans the command of `Delete`, which removes every selected segment. Go to In and Go to Out are
+disabled, because they need one current segment. Play Segment is disabled too, also while a
+segment plays, so it never shows Pause there. Its key would act on the segment at the playhead,
+which the menu did not name. The item runs nothing when the selection changed while the menu was
+open.
 
 The key of each item comes from the key table. On macOS the item carries the accelerator of
 its row, and the system draws it in the form of the tooltips, such as `⇧I`. On Windows the

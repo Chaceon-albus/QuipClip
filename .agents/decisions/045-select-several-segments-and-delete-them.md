@@ -38,7 +38,7 @@ These requests select only their own segment, as before:
 - a click on the body of a segment
 - a click on an edge
 - a press that starts a trim (ADR 030)
-- a request for the context menu of a segment
+- a request for the context menu of a segment that is not in a selection of several (see below)
 
 `primary` with a click on a segment adds that segment to the selection, or removes it when it is
 selected. This applies to the body and to an edge. It also applies to a click from the keyboard
@@ -82,6 +82,22 @@ Segments".
 - Play Segment plays the segment at the playhead, as with no current segment (ADR 026).
 - The duration in the transport bar shows nothing, because no segment is current.
 
+### The context menu of a selection
+
+(Added on 2026-10-14.) A request for the context menu of a segment keeps a selection of several
+segments when the segment is one of them. The menu then acts on the whole selection:
+
+- Delete Segment names the count, such as "Delete 3 Segments", and deletes every selected
+  segment. It plans the command of the `Delete` key, so it has the same condition.
+- Go to In and Go to Out are disabled, because they need one current segment. Play Segment is
+  disabled too, also while a segment plays. Its key would act on the segment at the playhead,
+  which the menu did not name. The menu keeps its shape, as ADR 026 requires for a disabled item.
+- The item plans again when it runs. It runs nothing when the selection changed while the menu
+  was open.
+
+A request on a segment outside the selection, or with one segment or none selected, selects only
+that segment, as before.
+
 ### The drawing
 
 Each selected segment takes the selected style of ADR 007: the brand fill, the inverted label,
@@ -99,8 +115,8 @@ from the restored selection.
 
 - Delete is the only action that acts on several segments. Every other edit still needs one
   named target.
-- A request for the context menu selects only its segment, so the menu never acts on a selection
-  of several. A later record can let the menu act on the whole selection.
+- The context menu of a selection offers only Delete. A later record can add more actions that
+  act on several segments.
 - The key table of ADR 026 gains one row. `primary` with `A` no longer reaches the web view
   outside a text field.
 - The Select All item of the macOS Edit menu does not select segments. A key press of `Cmd+A`

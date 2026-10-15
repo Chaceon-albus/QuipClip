@@ -251,6 +251,10 @@ open it. The request selects the segment, as a click does, and it does not seek.
 press on an edge does not trim the edge and does not seek to its boundary. On macOS the click
 that follows a Control press does nothing. On Windows a Control click stays a plain click.
 
+(Changed on 2026-10-14.) A request on a segment that is one of several selected segments keeps
+the selection, and the menu acts on all of it (ADR 045). On Windows a Control click now adds the
+segment to the selection or removes it.
+
 The menu opens at the pointer. A request from the keyboard opens the menu at the bottom left
 of the visible part of the segment. The menu does not open while a press, a scrub or a trim
 of the timeline runs, while a dialog or a menu is open, or for a segment of another source.
