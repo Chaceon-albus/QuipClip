@@ -87,7 +87,10 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       timeline.markOut(command.pts);
       return;
     case "deleteSegment":
-      timeline.deleteSegment();
+      timeline.deleteSelectedSegments();
+      return;
+    case "selectAllSegments":
+      timeline.selectAllSegments();
       return;
     case "finishSegment":
       timeline.finishSegment(command.outPts);

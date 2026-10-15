@@ -95,7 +95,7 @@ describe("advanceSegmentMotion: which segments fade in", () => {
     motion.advance();
 
     // Undo of Delete brings the deleted segment back.
-    store.getState().deleteSegment();
+    store.getState().deleteSelectedSegments();
     expect([...motion.advance().enteringIds]).toStrictEqual([]);
     store.getState().undo();
     expect([...motion.advance().enteringIds]).toStrictEqual(["segment-1"]);

@@ -48,13 +48,18 @@ import {
   type SegmentMenuPosition,
 } from "./segmentMenuModel";
 import { advanceSegmentMotion, createSegmentMotionState } from "./segmentMotion";
+import { isSelectionTogglePress } from "./segmentSelectionPress";
 import { SegmentTooltip, type SegmentTooltipEntry } from "./SegmentTooltip";
 import { createSegmentTooltipController } from "./segmentTooltipController";
 import { segmentTrimSession } from "./segmentTrimSession";
 
 const selectSegments = (state: TimelineStoreState) => state.segments;
 const selectCurrentSegmentId = (state: TimelineStoreState) => state.currentSegmentId;
+const selectSelectedSegmentIds = (state: TimelineStoreState) =>
+  state.selectedSegmentIds;
 const selectSelectSegment = (state: TimelineStoreState) => state.selectSegment;
+const selectToggleSegmentSelection = (state: TimelineStoreState) =>
+  state.toggleSegmentSelection;
 
 /** The segment that a trim moves, or null. It changes at the start and the end of a trim. */
 const readTrimmedSegmentId = () => segmentTrimSession.getView()?.segmentId ?? null;
@@ -198,7 +203,11 @@ export const SegmentLayer = memo(function SegmentLayer({
   const { t } = useTranslation();
   const segments = useTimelineStore(selectSegments);
   const currentSegmentId = useTimelineStore(selectCurrentSegmentId);
+  const selectedSegmentIds = useTimelineStore(selectSelectedSegmentIds);
   const selectSegment = useTimelineStore(selectSelectSegment);
+  const toggleSegmentSelection = useTimelineStore(selectToggleSegmentSelection);
+  // One set per change of the selection, so each segment tests its state in constant time.
+  const selectedIds = useMemo(() => new Set(selectedSegmentIds), [selectedSegmentIds]);
   const trimmedSegmentId = useSyncExternalStore(
     segmentTrimSession.subscribe,
     readTrimmedSegmentId,
@@ -380,7 +389,9 @@ export const SegmentLayer = memo(function SegmentLayer({
    * degree: a brand-strength fill, an inverted label, a 2px border in the strongest clip
    * colour of the theme, and a 1px inset line in the brand foreground. Each decoration is
    * inside the segment's box. An outer ring or shadow would make the segment look wider
-   * than its interval and cover the edge of a neighbour after a split.
+   * than its interval and cover the edge of a neighbour after a split. Several segments can
+   * be selected (ADR 045), and each of them takes the selected style. Only the current
+   * segment, the one segment of a selection of one, also shows its Out frame (below).
    *
    * The button and the outline both have the true extent of the segment. The button has no
    * horizontal padding and no border, so a narrow segment does not get a wider fill than its
@@ -446,6 +457,10 @@ export const SegmentLayer = memo(function SegmentLayer({
    *   on a boundary, it covers most of that edge, and a press there scrubs.
    * - A click on an edge selects the segment and seeks to the stored boundary PTS
    *   (`planSegmentEdgeSeek`). A click on the body, and a click from the keyboard, only select.
+   * - A click with the primary modifier, `Cmd` on macOS and `Ctrl` on Windows, adds the segment
+   *   to the selection or removes it, on the body and on an edge, and does not seek
+   *   (`isSelectionTogglePress`, ADR 045). Its press does not start a trim. A plain click
+   *   selects only its segment again.
    * - A right-click on the body or on an edge, a Control click on macOS, and the Menu key or
    *   Shift+F10 on a focused segment open the context menu of the segment
    *   (`segmentContextMenu`). The request selects the segment, as a click does, and does not
@@ -511,36 +526,41 @@ export const SegmentLayer = memo(function SegmentLayer({
           layout,
           edges,
         }) => {
-          // A string comparison at render time, so selection never rebuilds the memoized
-          // layouts.
-          const isCurrent = seg.id === currentSegmentId;
+          // A set lookup at render time, so selection never rebuilds the memoized layouts.
+          const isSelected = selectedIds.has(seg.id);
           const widthPx = calculateSegmentWidthPx(layout.widthPercent, laneWidthPx);
           const tier = resolveSegmentLabelTier(widthPx, labelWidths);
           const showsHandles = showsSegmentEdgeHandles(widthPx);
-          const focusRing = resolveSegmentFocusRing(widthPx, isCurrent);
+          const focusRing = resolveSegmentFocusRing(widthPx, isSelected);
           const isTrimmed = seg.id === trimmedSegmentId;
           const isEntering = nextMotion.enteringIds.has(seg.id);
           return (
             <button
               key={seg.id}
               type="button"
-              aria-pressed={isCurrent}
+              aria-pressed={isSelected}
               aria-label={label}
               aria-describedby={descriptionId}
               // A click on the body only selects: the playhead is the operand of Mark In, Mark
               // Out and Split, so a selection click must not move it. A click on an edge also
               // seeks to the boundary that the edge names. On macOS a Control click with the
               // pointer opens the context menu, and the click that the release sends does
-              // nothing more. A click from the keyboard (`detail` 0) with Control held still
-              // selects. While a native context menu is open or on its way, a click does nothing,
-              // as a key press does (ADR 021).
+              // nothing more. On macOS a click from the keyboard (`detail` 0) with Control held
+              // still selects. While a native context menu is open or on its way, a click does
+              // nothing, as a key press does (ADR 021). A click with the primary modifier adds the
+              // segment to the selection or removes it, and does not seek (ADR 045). That includes
+              // a click from the keyboard: Cmd+Enter on macOS and Ctrl+Enter on Windows.
               onClick={(event) => {
+                const platform = getShortcutPlatform();
                 if (
                   edgePointerHandlers.shouldIgnoreClick(event.detail) ||
-                  (event.detail > 0 &&
-                    isContextMenuPress(event, getShortcutPlatform())) ||
+                  (event.detail > 0 && isContextMenuPress(event, platform)) ||
                   nativeContextMenuState.isOpen()
                 ) {
+                  return;
+                }
+                if (isSelectionTogglePress(event, platform)) {
+                  toggleSegmentSelection(seg.id);
                   return;
                 }
                 selectSegment(seg.id);
@@ -607,7 +627,7 @@ export const SegmentLayer = memo(function SegmentLayer({
                   ? "outline-primary-foreground"
                   : "outline-foreground"
               } ${
-                isCurrent
+                isSelected
                   ? "z-20 bg-clip-video-selected text-primary-foreground focus-visible:inset-ring-2 focus-visible:inset-ring-clip-video-selected-border"
                   : "bg-clip-video text-clip-foreground before:absolute before:inset-y-0 before:left-1/2 before:-z-10 before:w-full before:min-w-3 before:-translate-x-1/2 hover:not-has-[[data-segment-edge]:hover]:bg-clip-video-hover focus-visible:inset-ring focus-visible:inset-ring-clip-video-border focus-visible:before:hidden has-[[data-segment-edge]:hover]:transition-none"
               } ${isTrimmed ? "opacity-40" : ""} ${
@@ -646,7 +666,7 @@ export const SegmentLayer = memo(function SegmentLayer({
                       style={{ width: SEGMENT_EDGE_HIT_WIDTH_PX }}
                     >
                       <span
-                        className={`hidden h-1/2 max-h-6 w-0.5 rounded-full group-hover/edge:block ${isCurrent ? "bg-primary-foreground" : "bg-timeline-selection"}`}
+                        className={`hidden h-1/2 max-h-6 w-0.5 rounded-full group-hover/edge:block ${isSelected ? "bg-primary-foreground" : "bg-timeline-selection"}`}
                       />
                     </span>
                   ),
@@ -660,7 +680,7 @@ export const SegmentLayer = memo(function SegmentLayer({
         },
       )}
       {segmentLayouts.map(({ segment: seg, layout }) => {
-        const isCurrent = seg.id === currentSegmentId;
+        const isSelected = selectedIds.has(seg.id);
         // The inset line is a box shadow, so the transition names it with the border colour.
         // The border width changes at once.
         return (
@@ -668,7 +688,7 @@ export const SegmentLayer = memo(function SegmentLayer({
             key={seg.id}
             aria-hidden="true"
             className={`pointer-events-none absolute inset-y-1 rounded-md inset-ring transition-[border-color,box-shadow] duration-(--motion-fast) ease-standard ${
-              isCurrent
+              isSelected
                 ? "z-40 border-2 border-clip-video-selected-border inset-ring-primary-foreground"
                 : "z-30 border border-clip-video-border inset-ring-clip-video"
             } ${seg.id === trimmedSegmentId ? "opacity-40" : ""} ${

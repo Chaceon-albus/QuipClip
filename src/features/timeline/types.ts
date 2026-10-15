@@ -51,8 +51,27 @@ export interface TimelineState {
    * Invariant: while a current segment resolves for the active source,
    * `pendingInPts` is null. The two fields describe the same thing — the segment
    * being built or adjusted — so only one of them is ever in progress.
+   *
+   * Invariant: it is the only selected segment while exactly one segment is selected, and
+   * null in every other case (`selectedSegmentIds`).
    */
   readonly currentSegmentId: string | null;
+
+  /**
+   * Identifiers of the selected segments, in project array order (ADR 045). A plain click
+   * selects one segment. The primary modifier with a click adds or removes one, and primary+A
+   * selects every segment of the active source.
+   *
+   * A selection of one segment makes that segment current. A selection of several segments
+   * leaves nothing current, so Mark In, Mark Out, Split and the boundary seeks do not guess
+   * between them (ADR 007). Delete removes every selected segment.
+   *
+   * Invariant: while any segment is selected, `pendingInPts` is null.
+   *
+   * Like `currentSegmentId`, an identifier can name a segment of an inactive source, so it is
+   * always read through `findSelectedSegments`.
+   */
+  readonly selectedSegmentIds: readonly string[];
 
   /**
    * True if there is an edit action in history available to undo.
@@ -82,7 +101,8 @@ export interface TimelineActions {
   /**
    * Marks an inclusive In point at the given presentation timestamp (PTS).
    *
-   * With no current segment, records the pending In mark and adds no history entry.
+   * With no current segment, records the pending In mark, clears a selection of several
+   * segments, and adds no history entry.
    * With a current segment and `pts` before its `outPts`, moves that segment's `inPts` and
    * adds one history entry.
    * With a current segment and `pts` at or after its `outPts`, finishes that segment and
@@ -148,7 +168,8 @@ export interface TimelineActions {
 
   /**
    * Ends whatever segment is in progress, so the next Mark In starts a new one. Clears both
-   * `currentSegmentId` and `pendingInPts`, because both describe the segment being built.
+   * `currentSegmentId` and `pendingInPts`, because both describe the segment being built. It
+   * also clears a selection of several segments (ADR 045).
    *
    * With a pending In mark and an `outPts` after it, first completes the pending mark into a
    * newly appended segment that ends at `outPts`, with one history entry, as Mark Out does. The
@@ -163,16 +184,18 @@ export interface TimelineActions {
   finishSegment: (outPts: Pts | null) => void;
 
   /**
-   * Removes the current segment and leaves nothing current.
+   * Removes every selected segment of the active source, with one history entry, and leaves
+   * nothing selected (ADR 045). Undo restores the segments and selects them again.
    * Does not select a neighbour, so the next Delete or Split cannot act on a segment the
    * user did not name. Preserves the array order of the remaining segments, which is the
    * export order (ADR 007).
-   * Does nothing when no current segment resolves.
+   * Does nothing when no selected segment resolves.
    */
-  deleteSegment: () => void;
+  deleteSelectedSegments: () => void;
 
   /**
-   * Makes an existing segment of the active source current, and clears the pending In mark.
+   * Selects only an existing segment of the active source, which makes it current, and clears
+   * the pending In mark.
    * Refuses an unknown identifier and a segment of another source.
    * Adds no history entry: selection is not an edit.
    *
@@ -181,18 +204,34 @@ export interface TimelineActions {
   selectSegment: (id: string) => void;
 
   /**
+   * Adds a segment of the active source to the selection, or removes it when it is selected
+   * (ADR 045), and clears the pending In mark. The selection stays in project array order.
+   * Refuses an unknown identifier and a segment of another source.
+   * Adds no history entry: selection is not an edit.
+   *
+   * @param id Identifier of a segment of the active source.
+   */
+  toggleSegmentSelection: (id: string) => void;
+
+  /**
+   * Selects every segment of the active source (ADR 045), and clears the pending In mark.
+   * Does nothing when the active source has no segment.
+   * Adds no history entry: selection is not an edit.
+   */
+  selectAllSegments: () => void;
+
+  /**
    * Undoes the last segment edit.
    * Restores the pending In mark of that edit only while the active source identity is
    * the one the edit was made on, otherwise clears it.
-   * Restores the current segment identifier of that edit only while the restored array
-   * still holds that segment and it belongs to the source active now.
+   * Restores the selection of that edit, and so its current segment, only for the segments
+   * that the restored array still holds and that belong to the source active now.
    */
   undo: () => void;
 
   /**
    * Redoes the last undone edit.
-   * Restores the pending In mark and the current segment identifier under the same
-   * conditions as `undo`.
+   * Restores the pending In mark and the selection under the same conditions as `undo`.
    */
   redo: () => void;
 

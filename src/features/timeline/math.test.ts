@@ -15,6 +15,7 @@ import {
   canSplitCurrentSegment,
   findCurrentSegment,
   findSegmentAtPts,
+  findSelectedSegments,
   getActiveSourceSegmentEntries,
   getCurrentSegmentTarget,
   getSegmentBounds,
@@ -66,6 +67,20 @@ describe("timeline PTS editing", () => {
     // Segment "c" belongs to source-b. ADR 002 forbids reading its PTS on this timeline.
     expect(findCurrentSegment(segments, "c", "source-a")).toBeNull();
     expect(findCurrentSegment(segments, "b", null)).toBeNull();
+  });
+
+  it("resolves the selected segments of the active source in project order (ADR 045)", () => {
+    // The selection order does not matter: the result follows the array, the export order.
+    expect(findSelectedSegments(segments, ["b", "a"], "source-a")).toEqual([
+      { index: 0, segment: segments[0] },
+      { index: 1, segment: segments[1] },
+    ]);
+    // An unknown ID and a segment of another source drop out.
+    expect(findSelectedSegments(segments, ["missing", "c", "b"], "source-a")).toEqual([
+      { index: 1, segment: segments[1] },
+    ]);
+    expect(findSelectedSegments(segments, [], "source-a")).toEqual([]);
+    expect(findSelectedSegments(segments, ["a"], null)).toEqual([]);
   });
 
   it("finds the one segment of the active source that holds a PTS, half open", () => {
@@ -224,6 +239,13 @@ describe("timeline PTS editing", () => {
     // Nothing in progress, or no active source: nothing to do.
     expect(planFinishSegment("ready", frame("60"), null, true, none)).toBeNull();
     expect(planFinishSegment("ready", frame("60"), pts("50"), false, none)).toBeNull();
+    // A selection of several segments only ends, whatever the frame (ADR 045).
+    for (const shown of [frame("60"), null]) {
+      expect(planFinishSegment("ready", shown, null, true, none, 2)).toEqual({
+        kind: "end",
+      });
+    }
+    expect(planFinishSegment("ready", frame("60"), null, false, none, 2)).toBeNull();
     // A current segment only ends, whatever the frame.
     for (const shown of [frame("60"), frame("100"), null]) {
       expect(planFinishSegment("ready", shown, null, true, target)).toEqual({

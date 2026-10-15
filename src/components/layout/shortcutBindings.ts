@@ -48,6 +48,7 @@ export const SHORTCUT_ACTIONS = [
   "goToSegmentIn",
   "goToSegmentOut",
   "deleteSegment",
+  "selectAllSegments",
   "finishSegment",
   "undo",
   "redo",
@@ -412,6 +413,14 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
   { key: letter("O"), modifiers: ["shift"], action: "goToSegmentOut", repeat: "taken" },
   { key: named("Delete"), modifiers: [], action: "deleteSegment", repeat: "taken" },
   { key: named("Backspace"), modifiers: [], action: "deleteSegment", repeat: "taken" },
+  // ADR 045. The layer does nothing inside a text field, so there the key still selects the
+  // text, and on macOS the Select All item of the Edit menu still gets it.
+  {
+    key: letter("A"),
+    modifiers: ["primary"],
+    action: "selectAllSegments",
+    repeat: "taken",
+  },
   {
     key: named("Escape"),
     modifiers: [],

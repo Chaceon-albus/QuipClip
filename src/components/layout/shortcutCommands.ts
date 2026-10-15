@@ -26,9 +26,11 @@ import {
   canMarkOut,
   findCurrentSegment,
   findSegmentAtPts,
+  findSelectedSegments,
   getCurrentSegmentTarget,
   getTimelineDurationSeconds,
   planFinishSegment,
+  selectActiveSourceSegmentCount,
   type CurrentSegmentRef,
   type TimelineState,
   type TimelineViewportState,
@@ -41,6 +43,7 @@ import {
   canExportMedia,
   canFitTimeline,
   canRedoEdit,
+  canSelectAllSegments,
   canStepFrames,
   canTogglePlayback,
   canUndoEdit,
@@ -119,6 +122,7 @@ export interface ShortcutSnapshot {
     | "sourceId"
     | "segments"
     | "currentSegmentId"
+    | "selectedSegmentIds"
     | "pendingInPts"
     | "canUndo"
     | "canRedo"
@@ -136,10 +140,11 @@ export interface ShortcutSnapshot {
 /**
  * The edit actions that do nothing while a drag trims a segment edge (ADR 030). The layer
  * still owns their key presses. An edit during the drag would change the segment under the
- * trim, and the limit, the snap and the preview of the trim would then be stale.
+ * trim, and the limit, the snap and the preview of the trim would then be stale. Select All
+ * would move the selection away from the segment that the trim selected (ADR 045).
  */
 export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(
-  ["markIn", "markOut", "deleteSegment", "undo", "redo"],
+  ["markIn", "markOut", "deleteSegment", "selectAllSegments", "undo", "redo"],
 );
 
 /**
@@ -192,6 +197,7 @@ export type ShortcutCommand =
   | { readonly kind: "markIn"; readonly pts: Pts }
   | { readonly kind: "markOut"; readonly pts: Pts }
   | { readonly kind: "deleteSegment" }
+  | { readonly kind: "selectAllSegments" }
   | {
       readonly kind: "finishSegment";
       /**
@@ -229,6 +235,15 @@ function currentSegmentOf(
     timeline.currentSegmentId,
     timeline.sourceId,
   );
+}
+
+/** The number of selected segments of the active source (ADR 045). */
+function selectedSegmentCountOf(timeline: ShortcutSnapshot["timeline"]): number {
+  return findSelectedSegments(
+    timeline.segments,
+    timeline.selectedSegmentIds,
+    timeline.sourceId,
+  ).length;
 }
 
 /**
@@ -722,6 +737,7 @@ function planFinishSegmentCommand(
     timeline.pendingInPts,
     hasActiveSource,
     getCurrentSegmentTarget(currentSegmentOf(timeline)),
+    selectedSegmentCountOf(timeline),
   );
   switch (plan?.kind) {
     case undefined:
@@ -881,8 +897,17 @@ export function planShortcutCommand(
       return planSegmentBoundarySeek(snapshot, hasActiveSource, "outPts");
 
     case "deleteSegment":
-      return canDeleteSegment(hasActiveSource, currentSegmentOf(timeline))
+      // Delete removes every selected segment (ADR 045).
+      return canDeleteSegment(hasActiveSource, selectedSegmentCountOf(timeline))
         ? { kind: "deleteSegment" }
+        : null;
+
+    case "selectAllSegments":
+      return canSelectAllSegments(
+        hasActiveSource,
+        selectActiveSourceSegmentCount(timeline),
+      )
+        ? { kind: "selectAllSegments" }
         : null;
 
     case "finishSegment":

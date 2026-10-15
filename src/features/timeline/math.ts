@@ -52,6 +52,33 @@ export function findCurrentSegment(
 }
 
 /**
+ * Resolves the selected segments of the active source, in project array order (ADR 045).
+ *
+ * Drops an unknown identifier and a segment of another source, as `findCurrentSegment` does.
+ *
+ * @param segments The project segment array, in export order.
+ * @param selectedSegmentIds The selected identifiers (`selectedSegmentIds`).
+ * @param activeSourceId The source that the timeline shows.
+ */
+export function findSelectedSegments(
+  segments: readonly Segment[],
+  selectedSegmentIds: readonly string[],
+  activeSourceId: string | null | undefined,
+): CurrentSegmentRef[] {
+  if (selectedSegmentIds.length === 0 || !activeSourceId) {
+    return [];
+  }
+  const selected = new Set(selectedSegmentIds);
+  const refs: CurrentSegmentRef[] = [];
+  segments.forEach((segment, index) => {
+    if (selected.has(segment.id) && segment.sourceId === activeSourceId) {
+      refs.push({ index, segment });
+    }
+  });
+  return refs;
+}
+
+/**
  * Finds the one segment of the active source whose half-open interval `[inPts, outPts)` holds
  * the PTS (ADR 002). Play Segment reads it for the frame on screen when no segment is current
  * (ADR 026). The comparison is exact, with `BigInt`, and a segment whose stored PTS does not
@@ -285,6 +312,7 @@ export type FinishSegmentPlan =
  *
  * - Nothing in progress: null.
  * - A current segment: `end`.
+ * - A selection of several segments: `end`, which clears the selection (ADR 045).
  * - A pending In mark and a frame on screen after it: `complete` at that frame. The Out is the
  *   frame on screen, the frame that Mark Out would write (ADR 003, ADR 022). So Finish Segment
  *   does what Mark Out and then Finish Segment did, in one action.
@@ -300,6 +328,10 @@ export type FinishSegmentPlan =
  * A null plan is the condition of the action: the keyboard layer owns the key and does
  * nothing, and the Finish button is disabled. Both read this rule, so the key and the button
  * act alike (ADR 026).
+ *
+ * `selectedSegmentCount` is the number of selected segments of the active source
+ * (`findSelectedSegments`). The store holds no pending In mark while a segment is selected, so
+ * the selection and a pending In mark never both apply.
  */
 export function planFinishSegment(
   calibrationStatus: CalibrationStatus,
@@ -307,11 +339,12 @@ export function planFinishSegment(
   pendingInPts: Pts | null,
   hasActiveSource: boolean,
   currentTarget?: CurrentSegmentTarget | null,
+  selectedSegmentCount = 0,
 ): FinishSegmentPlan | null {
   if (!hasActiveSource) {
     return null;
   }
-  if (currentTarget?.hasSegment) {
+  if (currentTarget?.hasSegment || selectedSegmentCount > 0) {
     return { kind: "end" };
   }
   if (pendingInPts === null) {

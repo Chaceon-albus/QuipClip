@@ -42,6 +42,7 @@ import {
   canMarkOut,
   canSplitCurrentSegment,
   findCurrentSegment,
+  findSelectedSegments,
   getCurrentSegmentTarget,
   planFinishSegment,
   timelineStore,
@@ -76,11 +77,13 @@ const selectPendingInPts = (s: TimelineStoreState) => s.pendingInPts;
 const selectSegments = (s: TimelineStoreState) => s.segments;
 const selectSourceId = (s: TimelineStoreState) => s.sourceId;
 const selectCurrentSegmentId = (s: TimelineStoreState) => s.currentSegmentId;
+const selectSelectedSegmentIds = (s: TimelineStoreState) => s.selectedSegmentIds;
 const selectMarkIn = (s: TimelineStoreState) => s.markIn;
 const selectMarkOut = (s: TimelineStoreState) => s.markOut;
 const selectSplit = (s: TimelineStoreState) => s.split;
 const selectFinishSegment = (s: TimelineStoreState) => s.finishSegment;
-const selectDeleteSegment = (s: TimelineStoreState) => s.deleteSegment;
+const selectDeleteSelectedSegments = (s: TimelineStoreState) =>
+  s.deleteSelectedSegments;
 const selectUndo = (s: TimelineStoreState) => s.undo;
 const selectRedo = (s: TimelineStoreState) => s.redo;
 
@@ -136,11 +139,12 @@ export function TransportBar() {
   const segments = useTimelineStore(selectSegments);
   const sourceId = useTimelineStore(selectSourceId);
   const currentSegmentId = useTimelineStore(selectCurrentSegmentId);
+  const selectedSegmentIds = useTimelineStore(selectSelectedSegmentIds);
   const markIn = useTimelineStore(selectMarkIn);
   const markOut = useTimelineStore(selectMarkOut);
   const split = useTimelineStore(selectSplit);
   const finishSegment = useTimelineStore(selectFinishSegment);
-  const deleteSegment = useTimelineStore(selectDeleteSegment);
+  const deleteSelectedSegments = useTimelineStore(selectDeleteSelectedSegments);
   const undo = useTimelineStore(selectUndo);
   const redo = useTimelineStore(selectRedo);
 
@@ -163,6 +167,11 @@ export function TransportBar() {
   const currentSegment = useMemo(
     () => findCurrentSegment(segments, currentSegmentId, sourceId),
     [segments, currentSegmentId, sourceId],
+  );
+  // Delete removes every selected segment, and Finish clears a selection of several (ADR 045).
+  const selectedSegmentCount = useMemo(
+    () => findSelectedSegments(segments, selectedSegmentIds, sourceId).length,
+    [segments, selectedSegmentIds, sourceId],
   );
   // Parsed once per change of the target, so the per-frame boundary tests stay cheap.
   const currentTarget = useMemo(
@@ -194,8 +203,8 @@ export function TransportBar() {
   // The reasons read the same facts as the three conditions above. Each selector settles on a
   // key or null, so a frame that does not change the reason does not render this tree.
   const reasonContext = useMemo<EditReasonContext>(
-    () => ({ hasActiveSource, pendingInPts, currentTarget }),
-    [hasActiveSource, pendingInPts, currentTarget],
+    () => ({ hasActiveSource, pendingInPts, currentTarget, selectedSegmentCount }),
+    [hasActiveSource, pendingInPts, currentTarget, selectedSegmentCount],
   );
   const markInReason = useSettledReason(
     usePlaybackStore((s) => presentEditDisabledReason("markIn", s, reasonContext)),
@@ -286,9 +295,20 @@ export function TransportBar() {
         pendingInPts,
         hasActiveSource,
         currentTarget,
+        selectedSegmentCount,
       ) === null,
   );
-  const isDeleteSegmentDisabled = !canDeleteSegment(hasActiveSource, currentSegment);
+  const isDeleteSegmentDisabled = !canDeleteSegment(
+    hasActiveSource,
+    selectedSegmentCount,
+  );
+  // The name of Delete gives the count only for a selection of several segments (ADR 045).
+  const deleteSegmentLabel =
+    selectedSegmentCount > 1
+      ? t("transport.action.deleteSelectedSegmentsAria", {
+          count: selectedSegmentCount,
+        })
+      : t("transport.action.deleteSegmentAria");
   const isStepDisabled = !canStepFrames(
     hasActiveSource,
     hasNominalRate,
@@ -630,6 +650,11 @@ export function TransportBar() {
                           timeline.sourceId,
                         ),
                       ),
+                      findSelectedSegments(
+                        timeline.segments,
+                        timeline.selectedSegmentIds,
+                        timeline.sourceId,
+                      ).length,
                     );
                     if (plan !== null) {
                       finishSegment(plan.kind === "complete" ? plan.outPts : null);
@@ -664,8 +689,8 @@ export function TransportBar() {
                 className="min-w-12 flex-col gap-0.5 px-1.5"
                 disabled={isDeleteSegmentDisabled}
                 onMouseDown={preventFocusOnMouseDown}
-                onClick={deleteSegment}
-                aria-label={t("transport.action.deleteSegmentAria")}
+                onClick={deleteSelectedSegments}
+                aria-label={deleteSegmentLabel}
                 aria-keyshortcuts={deleteSegmentShortcut?.aria}
               >
                 <Trash2 className="size-4" />
@@ -675,7 +700,7 @@ export function TransportBar() {
               </Button>
             </TooltipTrigger>
             <ShortcutTooltipContent
-              label={t("transport.action.deleteSegmentAria")}
+              label={deleteSegmentLabel}
               keys={deleteSegmentShortcut?.keys}
             />
           </Tooltip>

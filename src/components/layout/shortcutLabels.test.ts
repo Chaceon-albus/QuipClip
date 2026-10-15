@@ -235,6 +235,13 @@ const ROWS: readonly Row[] = [
     ariaWindows: "Backspace",
   },
   {
+    id: "selectAllSegments:primary:A",
+    macos: "⌘A",
+    windows: "Ctrl+A",
+    ariaMacos: "Meta+A",
+    ariaWindows: "Control+A",
+  },
+  {
     id: "finishSegment:Escape",
     macos: "Esc",
     windows: "Esc",

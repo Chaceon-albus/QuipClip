@@ -3,7 +3,8 @@
  * segment splitting, undo/redo history stacks, and active source transitions.
  *
  * Every segment operation names its target through `currentSegmentId`, so no operation
- * has to guess a segment from the playhead.
+ * has to guess a segment from the playhead. Delete names its targets through
+ * `selectedSegmentIds`, which can hold several segments (ADR 045).
  *
  * Implements ADR 002 (rational time / exclusive out points) and
  * ADR 007 (single-track source-time timeline).
@@ -15,6 +16,7 @@ import { isPtsInsideSegment, isPtsString, isValidSegmentRange } from "@/lib/time
 import type { Pts, Segment } from "@/types/project";
 import {
   findCurrentSegment,
+  findSelectedSegments,
   getCurrentSegmentTarget,
   splitSegment,
   type CurrentSegmentRef,
@@ -42,7 +44,8 @@ export function generateSegmentId(): string {
 interface TimelineHistoryEntry {
   segments: Segment[];
   pendingInPts: Pts | null;
-  currentSegmentId: string | null;
+  /** The selection, which also gives the current segment (`selectionOf`). */
+  selectedSegmentIds: readonly string[];
   /**
    * Active source identity at the time the entry was pushed.
    * The pending In mark is source-view state, so it is only restored while the
@@ -60,7 +63,7 @@ function historyEntry(state: TimelineState): TimelineHistoryEntry {
   return {
     segments: state.segments,
     pendingInPts: state.pendingInPts,
-    currentSegmentId: state.currentSegmentId,
+    selectedSegmentIds: state.selectedSegmentIds,
     sourceId: state.sourceId,
     sourceRevisionKey: state.sourceRevisionKey,
   };
@@ -86,24 +89,44 @@ function restorablePendingIn(
 }
 
 /**
- * Reads the current segment identifier of a history entry, but only while the segment it
- * names survives in the restored array and belongs to the source that is active now.
+ * The two selection fields for a list of selected identifiers. Every write of the selection
+ * goes through it, so `currentSegmentId` is the only selected segment while exactly one is
+ * selected, and null otherwise (ADR 045).
+ */
+function selectionOf(
+  ids: readonly string[],
+): Pick<TimelineState, "selectedSegmentIds" | "currentSegmentId"> {
+  return {
+    selectedSegmentIds: ids,
+    currentSegmentId: ids.length === 1 ? ids[0] : null,
+  };
+}
+
+const NO_SELECTION = selectionOf([]);
+
+/**
+ * Reads the selection of a history entry, but only the segments that survive in the restored
+ * array and belong to the source that is active now. The current segment follows from it.
  *
  * Keyed on `sourceId` alone, and deliberately NOT on the revision key: canonical segments
  * survive a revision change, while a pending PTS mark does not. That is why this rule and
  * `restorablePendingIn` are asymmetric.
  */
-function restorableCurrentSegmentId(
+function restorableSelection(
   entry: TimelineHistoryEntry,
   state: TimelineState,
   restoredSegments: readonly Segment[],
-): string | null {
-  if (entry.currentSegmentId === null || entry.sourceId !== state.sourceId) {
-    return null;
+): Pick<TimelineState, "selectedSegmentIds" | "currentSegmentId"> {
+  if (entry.selectedSegmentIds.length === 0 || entry.sourceId !== state.sourceId) {
+    return NO_SELECTION;
   }
-  return findCurrentSegment(restoredSegments, entry.currentSegmentId, state.sourceId)
-    ? entry.currentSegmentId
-    : null;
+  return selectionOf(
+    findSelectedSegments(
+      restoredSegments,
+      entry.selectedSegmentIds,
+      state.sourceId,
+    ).map(({ segment }) => segment.id),
+  );
 }
 
 /** Replaces one segment in place, preserving the array order that is the export order. */
@@ -176,13 +199,14 @@ export function createTimelineStore(
 
   /**
    * Ends whatever segment is in progress, so the next Mark In starts a new one. Both fields
-   * describe the segment being built, so both end together. No history entry: a completed
-   * segment is already canonical, and a pending In mark is not yet an edit.
+   * describe the segment being built, so both end together, and a selection of several
+   * segments ends with them (ADR 045). No history entry: a completed segment is already
+   * canonical, and a pending In mark is not yet an edit.
    */
   const endSegmentInProgress = (
     set: StoreApi<TimelineStoreState>["setState"],
   ): void => {
-    set({ currentSegmentId: null, pendingInPts: null });
+    set({ ...NO_SELECTION, pendingInPts: null });
   };
 
   /**
@@ -222,7 +246,7 @@ export function createTimelineStore(
     set({
       segments: [...state.segments, completedSegment],
       pendingInPts: null,
-      currentSegmentId: makeCurrent ? completedSegment.id : null,
+      ...selectionOf(makeCurrent ? [completedSegment.id] : []),
       canUndo: true,
       canRedo: false,
     });
@@ -234,7 +258,11 @@ export function createTimelineStore(
     sourceRevisionKey: initialState?.sourceRevisionKey ?? null,
     segments: initialState?.segments ? [...initialState.segments] : [],
     pendingInPts: initialState?.pendingInPts ?? null,
-    currentSegmentId: initialState?.currentSegmentId ?? null,
+    // A test can give the current segment alone, which is a selection of that one segment.
+    ...selectionOf(
+      initialState?.selectedSegmentIds ??
+        (initialState?.currentSegmentId ? [initialState.currentSegmentId] : []),
+    ),
     canUndo: initialState?.canUndo ?? false,
     canRedo: initialState?.canRedo ?? false,
 
@@ -284,10 +312,11 @@ export function createTimelineStore(
         state.sourceId,
       );
 
-      // Nothing is current, so the mark starts a segment instead of adjusting one.
-      // No history entry: the pending mark is not yet a canonical edit.
+      // Nothing is current, so the mark starts a segment instead of adjusting one. A
+      // selection of several segments ends, because no segment is selected while an In mark
+      // is pending (ADR 045). No history entry: the pending mark is not yet a canonical edit.
       if (current === null) {
-        set({ pendingInPts: pts });
+        set({ ...NO_SELECTION, pendingInPts: pts });
         return;
       }
 
@@ -309,7 +338,7 @@ export function createTimelineStore(
         redoStack = [];
 
         set({
-          currentSegmentId: null,
+          ...NO_SELECTION,
           pendingInPts: pts,
           canUndo: true,
           canRedo: false,
@@ -426,14 +455,14 @@ export function createTimelineStore(
       endSegmentInProgress(set);
     },
 
-    deleteSegment: () => {
+    deleteSelectedSegments: () => {
       const state = get();
-      const current = findCurrentSegment(
+      const selected = findSelectedSegments(
         state.segments,
-        state.currentSegmentId,
+        state.selectedSegmentIds,
         state.sourceId,
       );
-      if (current === null) {
+      if (selected.length === 0) {
         return;
       }
 
@@ -441,10 +470,11 @@ export function createTimelineStore(
       redoStack = [];
 
       // `filter` preserves array order, which is the export order (ADR 007). Nothing
-      // becomes current, so the next Delete or Split cannot act on an unnamed segment.
+      // becomes selected, so the next Delete or Split cannot act on an unnamed segment.
+      const removed = new Set(selected.map(({ segment }) => segment.id));
       set({
-        segments: state.segments.filter((segment) => segment.id !== current.segment.id),
-        currentSegmentId: null,
+        segments: state.segments.filter((segment) => !removed.has(segment.id)),
+        ...NO_SELECTION,
         canUndo: true,
         canRedo: false,
       });
@@ -458,7 +488,51 @@ export function createTimelineStore(
 
       // Selection is not an edit, so it pushes no history entry. It clears the pending
       // mark to hold the invariant that only one segment is ever in progress.
-      set({ currentSegmentId: id, pendingInPts: null });
+      set({ ...selectionOf([id]), pendingInPts: null });
+    },
+
+    toggleSegmentSelection: (id: string) => {
+      const state = get();
+      if (findCurrentSegment(state.segments, id, state.sourceId) === null) {
+        return;
+      }
+
+      // The resolution drops an identifier that no longer names a segment of the active
+      // source, and the rebuild keeps the project array order.
+      const selected = new Set(
+        findSelectedSegments(
+          state.segments,
+          state.selectedSegmentIds,
+          state.sourceId,
+        ).map(({ segment }) => segment.id),
+      );
+      if (selected.has(id)) {
+        selected.delete(id);
+      } else {
+        selected.add(id);
+      }
+      const ids = state.segments
+        .filter((segment) => selected.has(segment.id))
+        .map((segment) => segment.id);
+
+      // Not an edit, so no history entry. No In mark is pending while a segment is selected.
+      set({ ...selectionOf(ids), pendingInPts: null });
+    },
+
+    selectAllSegments: () => {
+      const state = get();
+      if (!state.sourceId) {
+        return;
+      }
+      const ids = state.segments
+        .filter((segment) => segment.sourceId === state.sourceId)
+        .map((segment) => segment.id);
+      if (ids.length === 0) {
+        return;
+      }
+
+      // Not an edit, so no history entry. No In mark is pending while a segment is selected.
+      set({ ...selectionOf(ids), pendingInPts: null });
     },
 
     undo: () => {
@@ -473,11 +547,7 @@ export function createTimelineStore(
       set({
         segments: previous.segments,
         pendingInPts: restorablePendingIn(previous, state),
-        currentSegmentId: restorableCurrentSegmentId(
-          previous,
-          state,
-          previous.segments,
-        ),
+        ...restorableSelection(previous, state, previous.segments),
         canUndo: undoStack.length > 0,
         canRedo: true,
       });
@@ -495,7 +565,7 @@ export function createTimelineStore(
       set({
         segments: next.segments,
         pendingInPts: restorablePendingIn(next, state),
-        currentSegmentId: restorableCurrentSegmentId(next, state, next.segments),
+        ...restorableSelection(next, state, next.segments),
         canUndo: true,
         canRedo: redoStack.length > 0,
       });
@@ -513,7 +583,7 @@ export function createTimelineStore(
         sourceRevisionKey: null,
         segments: [],
         pendingInPts: null,
-        currentSegmentId: null,
+        ...NO_SELECTION,
         canUndo: false,
         canRedo: false,
       });

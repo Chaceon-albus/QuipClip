@@ -46,6 +46,7 @@ export type TransportDisabledReasonKey =
   | "transport.disabledReason.preciseMarkingUnavailable"
   | "transport.disabledReason.markInFirst"
   | "transport.disabledReason.selectSegment"
+  | "transport.disabledReason.selectOneSegment"
   | "transport.disabledReason.playheadInsideSegment"
   | "transport.disabledReason.playheadAfterIn"
   | "transport.disabledReason.atInPoint"
@@ -102,6 +103,11 @@ export interface EditReasonContext {
   readonly hasActiveSource: boolean;
   readonly pendingInPts: Pts | null;
   readonly currentTarget: CurrentSegmentTarget;
+  /**
+   * The number of selected segments of the active source (`findSelectedSegments`). Absent
+   * means 0. A selection of several segments leaves nothing current (ADR 045).
+   */
+  readonly selectedSegmentCount?: number;
 }
 
 /**
@@ -215,7 +221,10 @@ export function presentEditDisabledReason(
   // The reasons that do not depend on the playhead come before the test for a pending seek.
   if (!currentTarget.hasSegment) {
     if (control === "split") {
-      return "transport.disabledReason.selectSegment";
+      // Several selected segments name no target, so Split asks for one of them (ADR 045).
+      return (context.selectedSegmentCount ?? 0) > 1
+        ? "transport.disabledReason.selectOneSegment"
+        : "transport.disabledReason.selectSegment";
     }
     if (control === "markOut") {
       if (pendingInPts === null) {

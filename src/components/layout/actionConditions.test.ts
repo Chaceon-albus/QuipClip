@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { CurrentSegmentRef } from "@/features/timeline";
-import type { Pts } from "@/types/project";
 import {
   canDeleteSegment,
   canExportMedia,
   canFitTimeline,
   canRedoEdit,
+  canSelectAllSegments,
   canStepFrames,
   canTogglePlayback,
   canUndoEdit,
@@ -15,11 +14,6 @@ import {
 } from "./actionConditions";
 
 const BOOLEANS = [false, true] as const;
-
-const current: CurrentSegmentRef = {
-  index: 0,
-  segment: { id: "a", sourceId: "s", inPts: "0" as Pts, outPts: "3000" as Pts },
-};
 
 describe("actionConditions", () => {
   it("makes a source active only with open media, an attached element and metadata", () => {
@@ -66,10 +60,17 @@ describe("actionConditions", () => {
     }
   });
 
-  it("deletes a segment only while one is current", () => {
-    expect(canDeleteSegment(true, current)).toBe(true);
-    expect(canDeleteSegment(true, null)).toBe(false);
-    expect(canDeleteSegment(false, current)).toBe(false);
+  it("deletes only while at least one segment is selected", () => {
+    expect(canDeleteSegment(true, 1)).toBe(true);
+    expect(canDeleteSegment(true, 3)).toBe(true);
+    expect(canDeleteSegment(true, 0)).toBe(false);
+    expect(canDeleteSegment(false, 1)).toBe(false);
+  });
+
+  it("selects all segments only while the active source has a segment", () => {
+    expect(canSelectAllSegments(true, 1)).toBe(true);
+    expect(canSelectAllSegments(true, 0)).toBe(false);
+    expect(canSelectAllSegments(false, 2)).toBe(false);
   });
 
   it("exports whenever media is open", () => {

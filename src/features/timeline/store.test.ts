@@ -31,6 +31,30 @@ function expectOneInProgress(store: Store) {
     state.sourceId,
   );
   expect(current !== null && state.pendingInPts !== null).toBe(false);
+  // The selection invariants (ADR 045): the current segment is the only selected one, and no
+  // In mark is pending while a segment is selected.
+  expect(state.currentSegmentId).toBe(
+    state.selectedSegmentIds.length === 1 ? state.selectedSegmentIds[0] : null,
+  );
+  expect(state.selectedSegmentIds.length > 0 && state.pendingInPts !== null).toBe(
+    false,
+  );
+}
+
+/** Makes three finished segments, `segment-1` to `segment-3`, with nothing selected. */
+function threeSegments(): Store {
+  const store = createStore();
+  store.getState().setSource("source-1", "revision-1");
+  for (const [inPts, outPts] of [
+    ["0", "10"],
+    ["20", "30"],
+    ["40", "50"],
+  ] as const) {
+    store.getState().markIn(pts(inPts));
+    store.getState().markOut(pts(outPts));
+    store.getState().finishSegment(null);
+  }
+  return store;
 }
 
 describe("timeline store source ownership", () => {
@@ -758,7 +782,7 @@ describe("timeline store current segment", () => {
     expectOneInProgress(store);
 
     // The split left `segment-1` current, so Delete has a named target.
-    store.getState().deleteSegment();
+    store.getState().deleteSelectedSegments();
     expect(store.getState().currentSegmentId).toBeNull();
     expect(shape(store).map((segment) => segment.id)).toEqual([
       "segment-3",
@@ -811,7 +835,7 @@ describe("timeline store current segment", () => {
     store.getState().markOut(pts("50"));
 
     store.getState().selectSegment("segment-2");
-    store.getState().deleteSegment();
+    store.getState().deleteSelectedSegments();
     expect(store.getState().segments.map((segment) => segment.id)).toEqual([
       "segment-1",
       "segment-3",
@@ -819,7 +843,7 @@ describe("timeline store current segment", () => {
     expect(store.getState().currentSegmentId).toBeNull();
 
     // Nothing is current, so a further Delete or Split cannot act on an unnamed segment.
-    store.getState().deleteSegment();
+    store.getState().deleteSelectedSegments();
     store.getState().split(pts("5"));
     expect(store.getState().segments.map((segment) => segment.id)).toEqual([
       "segment-1",
@@ -874,6 +898,224 @@ describe("timeline store current segment", () => {
     // The undo entry still carries the stale ID, and its array holds no such segment.
     store.getState().undo();
     expect(store.getState().segments).toEqual([]);
+    expect(store.getState().currentSegmentId).toBeNull();
+  });
+});
+
+describe("timeline store selection of several segments", () => {
+  it("toggles segments into the selection in project order, with no history entry", () => {
+    const store = threeSegments();
+
+    store.getState().toggleSegmentSelection("segment-3");
+    expect(store.getState().selectedSegmentIds).toEqual(["segment-3"]);
+    // One selected segment is current, as after a plain click.
+    expect(store.getState().currentSegmentId).toBe("segment-3");
+
+    store.getState().toggleSegmentSelection("segment-1");
+    expect(store.getState().selectedSegmentIds).toEqual(["segment-1", "segment-3"]);
+    expect(store.getState().currentSegmentId).toBeNull();
+    expectOneInProgress(store);
+
+    store.getState().toggleSegmentSelection("segment-3");
+    expect(store.getState().selectedSegmentIds).toEqual(["segment-1"]);
+    expect(store.getState().currentSegmentId).toBe("segment-1");
+
+    store.getState().toggleSegmentSelection("segment-1");
+    expect(store.getState().selectedSegmentIds).toEqual([]);
+    expect(store.getState().currentSegmentId).toBeNull();
+
+    // The toggles added no history entry, so one undo undoes the last edit: the Mark Out
+    // that made `segment-3`.
+    store.getState().undo();
+    expect(shape(store).map((segment) => segment.id)).toEqual([
+      "segment-1",
+      "segment-2",
+    ]);
+  });
+
+  it("refuses to toggle an unknown ID or a segment of another source", () => {
+    const store = createTimelineStore(
+      { generateId: () => "new" },
+      {
+        sourceId: "source-1",
+        sourceRevisionKey: "revision-1",
+        segments: [
+          { id: "a", sourceId: "source-1", inPts: pts("10"), outPts: pts("30") },
+          { id: "b", sourceId: "source-2", inPts: pts("10"), outPts: pts("30") },
+        ],
+        pendingInPts: pts("5"),
+      },
+    );
+
+    store.getState().toggleSegmentSelection("missing");
+    store.getState().toggleSegmentSelection("b");
+    expect(store.getState().selectedSegmentIds).toEqual([]);
+    expect(store.getState().pendingInPts).toBe("5");
+
+    // A toggle that selects clears the pending In mark, as a plain click does.
+    store.getState().toggleSegmentSelection("a");
+    expect(store.getState().selectedSegmentIds).toEqual(["a"]);
+    expect(store.getState().pendingInPts).toBeNull();
+  });
+
+  it("selects every segment of the active source and clears the pending In mark", () => {
+    const store = createTimelineStore(
+      { generateId: () => "new" },
+      {
+        sourceId: "source-1",
+        sourceRevisionKey: "revision-1",
+        segments: [
+          { id: "a", sourceId: "source-1", inPts: pts("10"), outPts: pts("30") },
+          { id: "b", sourceId: "source-2", inPts: pts("10"), outPts: pts("30") },
+          { id: "c", sourceId: "source-1", inPts: pts("40"), outPts: pts("60") },
+        ],
+        pendingInPts: pts("5"),
+      },
+    );
+
+    store.getState().selectAllSegments();
+    expect(store.getState().selectedSegmentIds).toEqual(["a", "c"]);
+    expect(store.getState().currentSegmentId).toBeNull();
+    expect(store.getState().pendingInPts).toBeNull();
+    expect(store.getState().canUndo).toBe(false);
+  });
+
+  it("makes the only segment current when Select All selects one segment", () => {
+    const store = createStore();
+    store.getState().setSource("source-1", "revision-1");
+    store.getState().markIn(pts("0"));
+    store.getState().markOut(pts("10"));
+    store.getState().finishSegment(null);
+
+    store.getState().selectAllSegments();
+    expect(store.getState().selectedSegmentIds).toEqual(["segment-1"]);
+    expect(store.getState().currentSegmentId).toBe("segment-1");
+  });
+
+  it("changes nothing on Select All when the active source has no segment", () => {
+    const store = createStore();
+    store.getState().setSource("source-1", "revision-1");
+    store.getState().markIn(pts("5"));
+
+    store.getState().selectAllSegments();
+    expect(store.getState().selectedSegmentIds).toEqual([]);
+    expect(store.getState().pendingInPts).toBe("5");
+  });
+
+  it("deletes every selected segment as one edit, and undo selects them again", () => {
+    const store = threeSegments();
+    store.getState().toggleSegmentSelection("segment-1");
+    store.getState().toggleSegmentSelection("segment-3");
+
+    store.getState().deleteSelectedSegments();
+    expect(shape(store).map((segment) => segment.id)).toEqual(["segment-2"]);
+    expect(store.getState().selectedSegmentIds).toEqual([]);
+    expect(store.getState().currentSegmentId).toBeNull();
+    expectOneInProgress(store);
+
+    // One undo restores both segments, in their old places, and selects them again.
+    store.getState().undo();
+    expect(shape(store).map((segment) => segment.id)).toEqual([
+      "segment-1",
+      "segment-2",
+      "segment-3",
+    ]);
+    expect(store.getState().selectedSegmentIds).toEqual(["segment-1", "segment-3"]);
+    expect(store.getState().currentSegmentId).toBeNull();
+    expectOneInProgress(store);
+
+    store.getState().redo();
+    expect(shape(store).map((segment) => segment.id)).toEqual(["segment-2"]);
+    expect(store.getState().selectedSegmentIds).toEqual([]);
+  });
+
+  it("restores no selection after a change of the source", () => {
+    const store = threeSegments();
+    store.getState().toggleSegmentSelection("segment-1");
+    store.getState().toggleSegmentSelection("segment-3");
+    store.getState().deleteSelectedSegments();
+
+    store.getState().setSource("source-2", "revision-2");
+    store.getState().undo();
+    // The segments are project state and come back. They belong to another source now, so
+    // the selection does not.
+    expect(store.getState().segments).toHaveLength(3);
+    expect(store.getState().selectedSegmentIds).toEqual([]);
+    expect(store.getState().currentSegmentId).toBeNull();
+  });
+
+  it("deletes every segment after Select All", () => {
+    const store = threeSegments();
+    store.getState().selectAllSegments();
+    store.getState().deleteSelectedSegments();
+    expect(store.getState().segments).toEqual([]);
+
+    store.getState().undo();
+    expect(store.getState().segments).toHaveLength(3);
+    expect(store.getState().selectedSegmentIds).toEqual([
+      "segment-1",
+      "segment-2",
+      "segment-3",
+    ]);
+  });
+
+  it("selects only the clicked segment after a selection of several", () => {
+    const store = threeSegments();
+    store.getState().selectAllSegments();
+    store.getState().selectSegment("segment-2");
+    expect(store.getState().selectedSegmentIds).toEqual(["segment-2"]);
+    expect(store.getState().currentSegmentId).toBe("segment-2");
+  });
+
+  it("ends a selection of several on Mark In and on Finish Segment", () => {
+    const store = threeSegments();
+    store.getState().selectAllSegments();
+
+    // Nothing is current, so Mark In starts a segment, and the selection ends.
+    store.getState().markIn(pts("60"));
+    expect(store.getState().pendingInPts).toBe("60");
+    expect(store.getState().selectedSegmentIds).toEqual([]);
+    expectOneInProgress(store);
+
+    store.getState().selectAllSegments();
+    store.getState().finishSegment(null);
+    expect(store.getState().selectedSegmentIds).toEqual([]);
+    expect(store.getState().currentSegmentId).toBeNull();
+  });
+
+  it("gives Split and Mark Out no target while several segments are selected", () => {
+    const store = threeSegments();
+    store.getState().toggleSegmentSelection("segment-1");
+    store.getState().toggleSegmentSelection("segment-2");
+
+    store.getState().split(pts("5"));
+    store.getState().markOut(pts("25"));
+    expect(shape(store)).toEqual([
+      { id: "segment-1", inPts: "0", outPts: "10" },
+      { id: "segment-2", inPts: "20", outPts: "30" },
+      { id: "segment-3", inPts: "40", outPts: "50" },
+    ]);
+  });
+
+  it("starts with the current segment selected when a test gives it alone", () => {
+    const store = createTimelineStore(
+      {},
+      {
+        sourceId: "source-1",
+        segments: [
+          { id: "a", sourceId: "source-1", inPts: pts("10"), outPts: pts("30") },
+        ],
+        currentSegmentId: "a",
+      },
+    );
+    expect(store.getState().selectedSegmentIds).toEqual(["a"]);
+  });
+
+  it("clears the selection on reset", () => {
+    const store = threeSegments();
+    store.getState().selectAllSegments();
+    store.getState().reset();
+    expect(store.getState().selectedSegmentIds).toEqual([]);
     expect(store.getState().currentSegmentId).toBeNull();
   });
 });

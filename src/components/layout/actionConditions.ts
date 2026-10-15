@@ -14,7 +14,7 @@
  * a boolean, and the tests need no document.
  */
 
-import { MIN_TIMELINE_ZOOM, type CurrentSegmentRef } from "@/features/timeline";
+import { MIN_TIMELINE_ZOOM } from "@/features/timeline";
 
 /**
  * True while media is open and an attached element of it has loaded metadata. Every
@@ -64,12 +64,31 @@ export function canRedoEdit(hasActiveSource: boolean, canRedo: boolean): boolean
   return hasActiveSource && canRedo;
 }
 
-/** Delete Segment needs an active source and a current segment to name its target (ADR 007). */
+/**
+ * Delete Segment needs an active source and at least one selected segment to name its targets
+ * (ADR 007, ADR 045).
+ *
+ * @param selectedSegmentCount The number of selected segments of the active source
+ *   (`findSelectedSegments`).
+ */
 export function canDeleteSegment(
   hasActiveSource: boolean,
-  currentSegment: CurrentSegmentRef | null,
+  selectedSegmentCount: number,
 ): boolean {
-  return hasActiveSource && currentSegment !== null;
+  return hasActiveSource && selectedSegmentCount > 0;
+}
+
+/**
+ * Select All Segments needs an active source and at least one segment of it (ADR 045).
+ *
+ * @param segmentCount The number of segments of the active source
+ *   (`selectActiveSourceSegmentCount`).
+ */
+export function canSelectAllSegments(
+  hasActiveSource: boolean,
+  segmentCount: number,
+): boolean {
+  return hasActiveSource && segmentCount > 0;
 }
 
 /**

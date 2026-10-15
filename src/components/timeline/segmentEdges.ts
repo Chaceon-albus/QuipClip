@@ -272,17 +272,17 @@ export interface SegmentFocusRing {
  * colour: the brand foreground has almost no contrast against the track in the light theme.
  *
  * @param widthPx The width of the segment in CSS pixels.
- * @param isCurrent True for the selected segment.
+ * @param isSelected True for a selected segment, which has the selected fill (ADR 045).
  */
 export function resolveSegmentFocusRing(
   widthPx: number,
-  isCurrent: boolean,
+  isSelected: boolean,
 ): SegmentFocusRing {
   if (!Number.isFinite(widthPx) || widthPx < SEGMENT_FOCUS_RING_INSET_MIN_WIDTH_PX) {
     return { placement: "outset", tone: "foreground" };
   }
   return {
     placement: "inset",
-    tone: isCurrent ? "primaryForeground" : "foreground",
+    tone: isSelected ? "primaryForeground" : "foreground",
   };
 }

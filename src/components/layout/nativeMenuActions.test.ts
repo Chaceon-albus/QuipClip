@@ -51,6 +51,7 @@ function createSnapshot(
       sourceId: probe === null ? null : "source-1",
       segments: [],
       currentSegmentId: null,
+      selectedSegmentIds: [],
       pendingInPts: null,
       canUndo: false,
       canRedo: false,

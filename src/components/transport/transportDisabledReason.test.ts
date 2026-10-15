@@ -343,6 +343,24 @@ describe("transportDisabledReason", () => {
         );
       });
 
+      it("asks for one segment while several segments are selected (ADR 045)", () => {
+        expect(
+          presentEditDisabledReason(
+            "split",
+            playbackAt(2000),
+            context({ selectedSegmentCount: 2 }),
+          ),
+        ).toBe("transport.disabledReason.selectOneSegment");
+        // Mark Out keeps its own reason: no In mark is pending.
+        expect(
+          presentEditDisabledReason(
+            "markOut",
+            playbackAt(2000),
+            context({ selectedSegmentCount: 2 }),
+          ),
+        ).toBe("transport.disabledReason.markInFirst");
+      });
+
       it("asks for the playhead between the In and Out points outside them or on one", () => {
         for (const value of [500, 1000, 3000, 4000]) {
           expect(
@@ -897,6 +915,7 @@ describe("transportDisabledReason", () => {
       "transport.disabledReason.preciseMarkingUnavailable",
       "transport.disabledReason.markInFirst",
       "transport.disabledReason.selectSegment",
+      "transport.disabledReason.selectOneSegment",
       "transport.disabledReason.playheadInsideSegment",
       "transport.disabledReason.playheadAfterIn",
       "transport.disabledReason.atInPoint",

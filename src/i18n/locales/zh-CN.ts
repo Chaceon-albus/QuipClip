@@ -165,7 +165,9 @@ export const zhCN: TranslationCatalog = {
       finishSegment: "结束",
       finishSegmentAria: "结束片段",
       deleteSegment: "删除",
-      deleteSegmentAria: "删除当前片段",
+      deleteSegmentAria: "删除所选片段",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      deleteSelectedSegmentsAria_other: "删除所选的 {{count}} 个片段",
       play: "播放",
       pause: "暂停",
       previousStep: "后退一帧",
@@ -187,6 +189,7 @@ export const zhCN: TranslationCatalog = {
       preciseMarkingUnavailable: "此视频无法精确标记。",
       markInFirst: "请先标记入点。",
       selectSegment: "请先选择一个片段。",
+      selectOneSegment: "请只选择一个片段。",
       playheadInsideSegment: "请将播放头移到入点与出点之间。",
       playheadAfterIn: "请将播放头移到入点之后。",
       atInPoint: "播放头已位于入点。",

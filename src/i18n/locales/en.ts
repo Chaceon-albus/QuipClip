@@ -229,7 +229,12 @@ export const en = {
       finishSegment: "Finish",
       finishSegmentAria: "Finish Segment",
       deleteSegment: "Delete",
-      deleteSegmentAria: "Delete Current Segment",
+      // The name and tooltip of Delete while one segment or none is selected (ADR 045).
+      deleteSegmentAria: "Delete Selected Segment",
+      // The name and tooltip of Delete while several segments are selected (ADR 045). `count`
+      // is the number of selected segments, always 2 or more.
+      deleteSelectedSegmentsAria_one: "Delete {{count}} Selected Segment",
+      deleteSelectedSegmentsAria_other: "Delete {{count}} Selected Segments",
       play: "Play",
       pause: "Pause",
       previousStep: "Step Back One Frame",
@@ -269,6 +274,8 @@ export const en = {
       preciseMarkingUnavailable: "Precise marking is unavailable for this video.",
       markInFirst: "Mark an In point first.",
       selectSegment: "Select a segment first.",
+      // Split while several segments are selected (ADR 045): Split cuts one segment only.
+      selectOneSegment: "Select only one segment.",
       playheadInsideSegment: "Move the playhead between the In and Out points.",
       playheadAfterIn: "Move the playhead after the In point.",
       atInPoint: "The playhead is already at the In point.",

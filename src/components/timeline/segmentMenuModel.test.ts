@@ -88,6 +88,22 @@ interface SnapshotOverrides {
 }
 
 /**
+ * Gives a timeline with no selection the selection that the store keeps: the current segment
+ * alone (ADR 045).
+ */
+function withSelection(
+  timeline: Omit<ShortcutSnapshot["timeline"], "selectedSegmentIds"> &
+    Partial<Pick<ShortcutSnapshot["timeline"], "selectedSegmentIds">>,
+): ShortcutSnapshot["timeline"] {
+  return {
+    ...timeline,
+    selectedSegmentIds:
+      timeline.selectedSegmentIds ??
+      (timeline.currentSegmentId === null ? [] : [timeline.currentSegmentId]),
+  };
+}
+
+/**
  * A calibrated, attached, ready and paused source with the frame at 5 s (PTS 450000) on screen,
  * two segments, and segment "b" current, as the menu leaves it when it opens on "b".
  */
@@ -105,7 +121,7 @@ function snapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
       approximateBrowserTimeSeconds: 5,
       ...overrides.playback,
     },
-    timeline: {
+    timeline: withSelection({
       sourceId: SOURCE_ID,
       segments: [SEGMENT_A, SEGMENT_B],
       currentSegmentId: "b",
@@ -113,7 +129,7 @@ function snapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
       canUndo: false,
       canRedo: false,
       ...overrides.timeline,
-    },
+    }),
     viewport: { zoom: 1, maxZoom: 8 },
     isTrimDragging: overrides.isTrimDragging ?? false,
   };

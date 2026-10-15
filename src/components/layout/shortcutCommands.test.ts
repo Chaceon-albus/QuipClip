@@ -62,6 +62,15 @@ interface SnapshotOverrides {
  * so every zoom action can act.
  */
 function createSnapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
+  const timeline = {
+    sourceId: SOURCE_ID,
+    segments: [],
+    currentSegmentId: null,
+    pendingInPts: null,
+    canUndo: false,
+    canRedo: false,
+    ...overrides.timeline,
+  };
   return {
     probe: overrides.probe === undefined ? createProbe() : overrides.probe,
     playback: {
@@ -76,13 +85,12 @@ function createSnapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
       ...overrides.playback,
     },
     timeline: {
-      sourceId: SOURCE_ID,
-      segments: [],
-      currentSegmentId: null,
-      pendingInPts: null,
-      canUndo: false,
-      canRedo: false,
-      ...overrides.timeline,
+      ...timeline,
+      // The store selects the current segment alone (ADR 045), so a snapshot that names only
+      // a current segment selects it.
+      selectedSegmentIds:
+        timeline.selectedSegmentIds ??
+        (timeline.currentSegmentId === null ? [] : [timeline.currentSegmentId]),
     },
     viewport: {
       zoom: 2,
@@ -1729,6 +1737,75 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("deleteSegment", pending)).toBeNull();
     });
 
+    it("deletes every selected segment, also with nothing current (ADR 045)", () => {
+      const several = createSnapshot({
+        timeline: {
+          segments: [segment("a", "0", "3000"), segment("b", "6000", "9000")],
+          currentSegmentId: null,
+          selectedSegmentIds: ["a", "b"],
+        },
+      });
+      expect(planShortcutCommand("deleteSegment", several)).toEqual({
+        kind: "deleteSegment",
+      });
+      // A selection that names no segment of the active source deletes nothing.
+      const stale = createSnapshot({
+        timeline: {
+          segments: [segment("a", "0", "3000")],
+          currentSegmentId: null,
+          selectedSegmentIds: ["missing"],
+        },
+      });
+      expect(planShortcutCommand("deleteSegment", stale)).toBeNull();
+      for (const [, inactive] of INACTIVE_SNAPSHOTS) {
+        expect(
+          planShortcutCommand("deleteSegment", {
+            ...inactive,
+            timeline: several.timeline,
+          }),
+        ).toBeNull();
+      }
+    });
+
+    it("selects all segments while the active source has a segment (ADR 045)", () => {
+      expect(planShortcutCommand("selectAllSegments", createSnapshot())).toBeNull();
+      const withSegments = createSnapshot({
+        timeline: {
+          segments: [segment("a", "0", "3000"), segment("b", "6000", "9000")],
+        },
+      });
+      expect(planShortcutCommand("selectAllSegments", withSegments)).toEqual({
+        kind: "selectAllSegments",
+      });
+      // A segment of another source does not count.
+      const foreign = createSnapshot({
+        timeline: { segments: [{ ...segment("a", "0", "3000"), sourceId: "other" }] },
+      });
+      expect(planShortcutCommand("selectAllSegments", foreign)).toBeNull();
+      for (const [, inactive] of INACTIVE_SNAPSHOTS) {
+        expect(
+          planShortcutCommand("selectAllSegments", {
+            ...inactive,
+            timeline: withSegments.timeline,
+          }),
+        ).toBeNull();
+      }
+    });
+
+    it("ends a selection of several segments with the finishSegment call", () => {
+      const several = createSnapshot({
+        timeline: {
+          segments: [segment("a", "0", "3000"), segment("b", "6000", "9000")],
+          currentSegmentId: null,
+          selectedSegmentIds: ["a", "b"],
+        },
+      });
+      expect(planShortcutCommand("finishSegment", several)).toEqual({
+        kind: "finishSegment",
+        outPts: null,
+      });
+    });
+
     it("finishes a current segment or a pending In mark, with the finishSegment call", () => {
       expect(planShortcutCommand("finishSegment", createSnapshot())).toBeNull();
       const current = createSnapshot({
@@ -1822,7 +1899,14 @@ describe("planShortcutCommand", () => {
         ).toBeNull();
       }
       expect([...TRIM_LOCKED_ACTIONS].sort()).toEqual(
-        ["deleteSegment", "markIn", "markOut", "redo", "undo"].sort(),
+        [
+          "deleteSegment",
+          "markIn",
+          "markOut",
+          "redo",
+          "selectAllSegments",
+          "undo",
+        ].sort(),
       );
       // Playback and the steps stay available.
       expect(

@@ -79,6 +79,7 @@ import {
   type SegmentEdgePointerHandlers,
 } from "./SegmentLayer";
 import { isContextMenuPress } from "./segmentMenuModel";
+import { isSelectionTogglePress } from "./segmentSelectionPress";
 import { SegmentSummary } from "./SegmentSummary";
 import {
   createTrimSnapBoundaryCache,
@@ -1058,8 +1059,10 @@ export function TimelinePanel({
    * edge (ADR 007). A source that is not on the exact grid therefore never starts a trim.
    *
    * A press that opens the context menu of the segment (`isContextMenuPress`) never starts a
-   * trim: the secondary button, and on macOS the primary button with Control held. No press
-   * starts a trim while a native context menu is open or on its way, as for `handlePointerDown`.
+   * trim: the secondary button, and on macOS the primary button with Control held. A press with
+   * the primary modifier (`isSelectionTogglePress`) never starts a trim either, because its
+   * click adds the segment to the selection or removes it (ADR 045). No press starts a trim
+   * while a native context menu is open or on its way, as for `handlePointerDown`.
    *
    * The trim runs on the gesture of the scrub, so it gets the scrub cursor of that gesture
    * (`scrubCursor.ts`): past the drag threshold the resize cursor shows everywhere in the window
@@ -1073,10 +1076,12 @@ export function TimelinePanel({
   ) => {
     const laneEl = laneRef.current;
     const gesture = getGesture();
+    const platform = getShortcutPlatform();
     if (
       event.button !== 0 ||
       !event.isPrimary ||
-      isContextMenuPress(event, getShortcutPlatform()) ||
+      isContextMenuPress(event, platform) ||
+      isSelectionTogglePress(event, platform) ||
       nativeContextMenuState.isOpen() ||
       !laneEl ||
       !canTrimEdges ||
