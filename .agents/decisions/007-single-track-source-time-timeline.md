@@ -183,7 +183,8 @@ colour, and it now shows on the track line and on the frame band only while a se
 current and no In is pending. Only the fill of the selected segment needs the ring for
 contrast. The ruler line has no ring.
 
-(Changed on 2026-10-04. The colour and the opaque trail changed again on 2026-10-14, below.)
+(Changed on 2026-10-04. The colour, the opaque trail and its gradient changed on 2026-10-14,
+below.)
 The pending In mark has its own colour, `--timeline-mark`. It is an
 orange in the light theme and an amber in the dark theme, far from the teal of the playhead on
 the hue circle. While an In is pending, the Mark In button takes the same tint. A user found the
@@ -219,6 +220,12 @@ segment, the flag also tells the mark from that border.
 The trail is lighter. The hatch of the source bar shows faintly through its fill, because the
 track colour under its tint is at 70%. Its two edges are at 40% of the mark colour. The user found
 the opaque trail heavy, and a part that is not a segment yet must not look solid.
+
+(Changed on 2026-10-14, after the change above.) The tint of the trail is even along its whole
+length: the mark colour at 16% over the track colour at 70%. Before, the tint grew from the In
+toward the playhead. The user liked the lighter trail but not the gradient from left to right.
+The user chose the even tint from three options. The other two were a stronger fill that hid the
+hatch, and the two edges with no fill.
 
 The wheel zooms, and it holds the time under the pointer in place. A gesture that is
 clearly horizontal pans instead, and so does the shift key with the wheel. The panel gives
