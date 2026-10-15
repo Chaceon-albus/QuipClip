@@ -221,6 +221,22 @@ The status bar and the task bar still show the reported values. The backend and 
 `ffmpeg` do not change. A shorter `-stats_period` would need FFmpeg 4.4 or later, and no ADR
 sets a minimum version.
 
+(Changed on 2026-10-14.) While the smoothing runs, the fill of the dialog bar has no width
+transition. A user saw the bar move only about once a second, and stay behind the percent. A
+measurement in WKWebView showed the cause. The whole frame of the position changed on up to each
+animation frame, and WebKit started the 300 ms transition again at each change. The fill
+therefore stood still until a pause let one transition run. The bar showed 2.4% while the frame
+count showed 10%.
+
+Chrome eased the same changes with a delay of about 90 ms. Without the transition, the fill
+follows the position on each frame in both engines. The smoothing already moves the fill, so the
+transition only added a delay. The render that stops the smoothing also turns the transition on
+again. So the fill still eases from the run into its result. The bar of the status bar shows the
+reported values, and it keeps its transition.
+
+The fill now moves in steps of one whole frame. On a short export each step is a visible part of
+the bar: 1.7% for 60 frames. Such an export ends in a moment, so this record accepts the steps.
+
 ### The window shows progress on the Dock and the task bar
 
 The frontend calls `setProgressBar` on the main window. The capability file grants
