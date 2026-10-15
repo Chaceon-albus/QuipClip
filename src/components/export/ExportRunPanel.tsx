@@ -77,6 +77,12 @@ export interface ExportRunPanelProps {
  * the percent, the value text of the bar, and the frame count all read that one frame, so they
  * agree. The smoothing runs only while the encode runs with a known total. It holds still while
  * the dialog closes, and it is off when the system asks for reduced motion.
+ *
+ * While the smoothing runs, the fill of the bar has no width transition (`easeFill`). The
+ * smoothed frame can change on each animation frame, and WebKit starts the transition again at
+ * each change, so the fill stood still and jumped about once a second, far behind the percent.
+ * The smoothing already moves the fill, so a transition only adds a delay. When the run ends,
+ * the transition returns in the same render, so the fill still eases into its result.
  */
 export function ExportRunPanel({
   step,
@@ -158,6 +164,7 @@ export function ExportRunPanel({
           value={bar.value}
           tone={bar.tone}
           flowing={bar.flowing}
+          easeFill={!smoothed.isLive}
           aria-label={t("export.title")}
           aria-valuetext={barText}
           aria-hidden={bar.decorative || undefined}

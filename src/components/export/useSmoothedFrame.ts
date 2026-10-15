@@ -26,6 +26,11 @@ export interface SmoothedFrame {
    * renders. Call it from a callback or an effect only, because it reads the model of the run.
    */
   positionAt: (now: number) => number | null;
+  /**
+   * True while the frame moves on the animation frames: the `live` mode, when the system does
+   * not ask for reduced motion.
+   */
+  isLive: boolean;
 }
 
 const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
@@ -175,5 +180,9 @@ export function useSmoothedFrame(
     [],
   );
 
-  return { frame: showReported ? frame : (smoothed ?? frame), positionAt };
+  return {
+    frame: showReported ? frame : (smoothed ?? frame),
+    positionAt,
+    isLive: effectiveMode === "live",
+  };
 }

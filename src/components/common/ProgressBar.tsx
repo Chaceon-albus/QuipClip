@@ -23,6 +23,13 @@ export interface ProgressBarProps extends Omit<
    * pauses the gradient where it is, so a bar that stops flowing does not jump.
    */
   flowing?: boolean;
+  /**
+   * Eases each change of the fill width over 300 ms. Default true. Pass false when the caller
+   * can move the value on each animation frame. WebKit starts the transition again at each
+   * change, and the fill then stands still until the changes stop: a smoothed export bar moved
+   * only about once a second and fell far behind its own percent.
+   */
+  easeFill?: boolean;
 }
 
 // The tone sets the two ends of the fill gradient on the track, and the fill inherits them.
@@ -64,6 +71,7 @@ export function ProgressBar({
   tone = "default",
   size = "md",
   flowing = true,
+  easeFill = true,
   className,
   ...props
 }: ProgressBarProps): React.JSX.Element {
@@ -83,7 +91,9 @@ export function ProgressBar({
       {model.mode === "determinate" ? (
         <div
           className={cn(
-            "h-full animate-progress-flow rounded-full progress-fill transition-[width] duration-300 ease-out motion-reduce:animate-none motion-reduce:transition-none",
+            "h-full animate-progress-flow rounded-full progress-fill motion-reduce:animate-none",
+            easeFill &&
+              "transition-[width] duration-300 ease-out motion-reduce:transition-none",
             !flowing && "[animation-play-state:paused]",
           )}
           style={{ width: `${model.fillPercent}%` }}
