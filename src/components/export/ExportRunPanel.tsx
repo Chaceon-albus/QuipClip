@@ -76,13 +76,15 @@ export interface ExportRunPanelProps {
  * therefore shows a smoothed frame (`useSmoothedFrame`) in place of the reported one. The bar,
  * the percent, the value text of the bar, and the frame count all read that one frame, so they
  * agree. The smoothing runs only while the encode runs with a known total. It holds still while
- * the dialog closes, and it is off when the system asks for reduced motion.
+ * the dialog closes. It also runs when the system asks for reduced motion (ADR 025).
  *
  * While the smoothing runs, the fill of the bar has no width transition (`easeFill`). The
  * smoothed frame can change on each animation frame, and WebKit starts the transition again at
  * each change, so the fill stood still and jumped about once a second, far behind the percent.
  * The smoothing already moves the fill, so a transition only adds a delay. When the run ends,
- * the transition returns in the same render, so the fill still eases into its result.
+ * the transition returns in the same render, so the fill still eases into its result. Under
+ * reduced motion the bar has no transition (`ProgressBar`), so the fill moves to its result at
+ * once.
  */
 export function ExportRunPanel({
   step,

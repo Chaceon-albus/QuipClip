@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createFrameSmoother, type FrameSmoother } from "./exportProgressSmoothing";
 
 /**
@@ -26,45 +19,8 @@ export interface SmoothedFrame {
    * renders. Call it from a callback or an effect only, because it reads the model of the run.
    */
   positionAt: (now: number) => number | null;
-  /**
-   * True while the frame moves on the animation frames: the `live` mode, when the system does
-   * not ask for reduced motion.
-   */
+  /** True while the frame moves on the animation frames: the `live` mode. */
   isLive: boolean;
-}
-
-const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
-
-/** The reduced-motion query, or null in a web view with no media queries. */
-function reducedMotionQuery(): MediaQueryList | null {
-  try {
-    if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
-      return window.matchMedia(REDUCED_MOTION_QUERY);
-    }
-  } catch {
-    // A web view with no media queries reads as no preference.
-  }
-  return null;
-}
-
-function subscribeReducedMotion(onChange: () => void): () => void {
-  const query = reducedMotionQuery();
-  if (query === null) {
-    return () => {};
-  }
-  query.addEventListener("change", onChange);
-  return () => {
-    query.removeEventListener("change", onChange);
-  };
-}
-
-function readReducedMotion(): boolean {
-  return reducedMotionQuery()?.matches ?? false;
-}
-
-/** True when the system asks for reduced motion. It follows a change of the setting. */
-function usePrefersReducedMotion(): boolean {
-  return useSyncExternalStore(subscribeReducedMotion, readReducedMotion, () => false);
 }
 
 /**
@@ -82,9 +38,15 @@ function usePrefersReducedMotion(): boolean {
  *
  * In the `live` mode, a loop of animation frames reads the position while it still moves. It
  * renders only when the whole frame changes, so a slow encode does not render on each animation
- * frame. The loop stops when the position holds, and the next report starts it again. When the
- * system asks for reduced motion, the `live` mode acts as `off`. In the `frozen` mode, the last
- * smoothed frame stays, so the display does not step back to the reported frame.
+ * frame. The loop stops when the position holds, and the next report starts it again. In the
+ * `frozen` mode, the last smoothed frame stays, so the display does not step back to the
+ * reported frame.
+ *
+ * The `live` mode also runs when the system asks for reduced motion (ADR 025). The position fills
+ * a bar and changes text, in one direction while the encode runs, and it carries the progress of
+ * the run.
+ * With reduced motion the bar stepped once for each report, about twice a second, and a user
+ * read that as a fault.
  *
  * `positionAt` reads the model in every mode, so a clock can sample the position even when the
  * display shows the reported frame.
@@ -94,11 +56,9 @@ export function useSmoothedFrame(
   expectedFrames: number | null,
   mode: FrameSmoothingMode,
 ): SmoothedFrame {
-  const reducedMotion = usePrefersReducedMotion();
-  const effectiveMode = mode === "live" && reducedMotion ? "off" : mode;
   const smootherRef = useRef<FrameSmoother>(null);
   const mountedRef = useRef(false);
-  const previousModeRef = useRef(effectiveMode);
+  const previousModeRef = useRef(mode);
   const expectedFramesRef = useRef(expectedFrames);
   const [smoothed, setSmoothed] = useState<number | null>(null);
 
@@ -110,7 +70,7 @@ export function useSmoothedFrame(
   // once. The state then changes only from the animation frames. Without this start, a report
   // that comes before the first animation frame would show for one frame and then step back
   // to the position of the model.
-  const showReported = frame === null || effectiveMode === "off";
+  const showReported = frame === null || mode === "off";
   if (showReported) {
     if (smoothed !== null) {
       setSmoothed(null);
@@ -141,15 +101,15 @@ export function useSmoothedFrame(
   // does not step back. The rule runs after the push above, so the model already has the frame.
   useLayoutEffect(() => {
     const previous = previousModeRef.current;
-    previousModeRef.current = effectiveMode;
-    if (previous === "off" && effectiveMode !== "off" && frame !== null) {
+    previousModeRef.current = mode;
+    if (previous === "off" && mode !== "off" && frame !== null) {
       smootherRef.current?.hold(frame);
     }
-  }, [effectiveMode, frame]);
+  }, [mode, frame]);
 
   useEffect(() => {
     const smoother = smootherRef.current;
-    if (effectiveMode !== "live" || smoother === null) {
+    if (mode !== "live" || smoother === null) {
       return;
     }
     let handle = 0;
@@ -172,7 +132,7 @@ export function useSmoothedFrame(
       window.cancelAnimationFrame(handle);
     };
     // A new frame can replace the model, and it starts a new segment, so it restarts the loop.
-  }, [effectiveMode, frame, expectedFrames]);
+  }, [mode, frame, expectedFrames]);
 
   const positionAt = useCallback(
     (now: number) =>
@@ -183,6 +143,6 @@ export function useSmoothedFrame(
   return {
     frame: showReported ? frame : (smoothed ?? frame),
     positionAt,
-    isLive: effectiveMode === "live",
+    isLive: mode === "live",
   };
 }
