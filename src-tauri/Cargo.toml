@@ -2,7 +2,7 @@
 name = "quipclip"
 # The only copy of the application version. Tauri reads it here, because tauri.conf.json has
 # no `version` field. Change it with `pnpm version:bump`, which also updates Cargo.lock.
-version = "0.1.0"
+version = "0.1.1"
 description = "Mark in and out points on a video, then export the segments joined in order."
 authors = ["capric98"]
 edition = "2021"
