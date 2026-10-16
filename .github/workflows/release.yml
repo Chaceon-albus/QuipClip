@@ -8,7 +8,7 @@ name: Release
 #
 # Release: pnpm version:bump <major|minor|patch>, commit, and push to main. When CI
 # passes, tag and push:
-#   git tag -a v0.2.0 -m "QuipClip 0.2.0" && git push origin v0.2.0
+#   git tag -a v0.2.0 -m "QuipClip v0.2.0" && git push origin v0.2.0
 #
 # The jobs run in this order: check the tag, run CI on the tagged commit, build the
 # bundles, attach them to a draft release, and publish the draft. Only the publish makes
@@ -197,7 +197,7 @@ jobs:
             id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
               -f tag_name="$TAG" \
               -f target_commitish="$SHA" \
-              -f name="QuipClip ${TAG#v}" \
+              -f name="QuipClip $TAG" \
               -F draft=true \
               -F generate_release_notes=true \
               --jq .id)

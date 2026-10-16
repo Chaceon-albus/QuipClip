@@ -38,6 +38,11 @@ release version. See [Pre-releases](#pre-releases).
 The release tag is `v` and the version, for example `v0.2.0`. It is an annotated tag on a
 commit on `main`.
 
+Write the version with the `v` in the subject of the release commit, in the tag message,
+and in the release title. The subject of the release commit is
+`chore(tauri): release v0.2.0`. The tag message and the release title are
+`QuipClip v0.2.0`. `Cargo.toml` keeps the version without the `v`.
+
 ## Setup before the first release
 
 A repository administrator does these steps one time.
@@ -84,7 +89,7 @@ all the steps after it.
 
    ```bash
    git add src-tauri/Cargo.toml src-tauri/Cargo.lock
-   git commit -m "chore(tauri): release 0.2.0"
+   git commit -m "chore(tauri): release v0.2.0"
    ```
 
 5. Push the commit to `main`. Wait until CI passes on that commit. When `main` takes
@@ -93,7 +98,7 @@ all the steps after it.
 6. Make the annotated tag on that commit, and check it:
 
    ```bash
-   git tag -a v0.2.0 -m "QuipClip 0.2.0"
+   git tag -a v0.2.0 -m "QuipClip v0.2.0"
    pnpm version:check --tag v0.2.0
    ```
 
@@ -106,7 +111,7 @@ all the steps after it.
 8. Open the **Actions** tab, and follow the **Release** run. When the `release`
    environment has required reviewers, the `publish` job waits. Then open the
    **Releases** page, and inspect the draft:
-   - The title is `QuipClip 0.2.0`, and the draft targets the tagged commit.
+   - The title is `QuipClip v0.2.0`, and the draft targets the tagged commit.
    - The draft holds three bundles: one `.dmg` for `aarch64`, one `.msi`, and one
      `-setup.exe`. Each name has the version. GitHub also shows two source code
      archives. They are not assets of the workflow.

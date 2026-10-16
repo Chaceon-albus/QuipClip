@@ -509,9 +509,9 @@ function bump(args) {
   console.log("");
   console.log("Next steps:");
   console.log("  git add src-tauri/Cargo.toml src-tauri/Cargo.lock");
-  console.log(`  git commit -m "chore(tauri): release ${next}"`);
+  console.log(`  git commit -m "chore(tauri): release ${tag}"`);
   console.log("  Push the commit to main, and wait for CI to pass. Then:");
-  console.log(`  git tag -a ${tag} -m "QuipClip ${next}"`);
+  console.log(`  git tag -a ${tag} -m "QuipClip ${tag}"`);
   console.log(`  pnpm version:check --tag ${tag}`);
   console.log(`  git push origin ${tag}`);
   return 0;
