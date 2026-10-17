@@ -26,7 +26,7 @@ import {
   lastFrameIndexOfExtent,
 } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
-import { scrubAudioController } from "./scrubAudio";
+import { scrubCue } from "./cue";
 import type {
   CalibrationStatus,
   FrameIndexSeekOptions,
@@ -68,6 +68,57 @@ export function getNominalFrameRate(
   }
   return null;
 }
+
+/**
+ * The media time of `videoStartPts` when the mapping of the source is known before its first
+ * frame (ADR 046), or null for a source that the first frame callback anchors (ADR 003).
+ */
+function knownAnchor(source: PlaybackSource | null): number | null {
+  const anchor = source?.anchorMediaTime;
+  return typeof anchor === "number" && Number.isFinite(anchor) ? anchor : null;
+}
+
+/**
+ * True when `time` lies in the buffered data of the element. An element that reports no
+ * buffered ranges counts as buffered, so the rule of a starving seek never applies to it.
+ */
+function isBufferedAt(element: PlaybackMediaElement, time: number): boolean {
+  const ranges = element.buffered;
+  if (ranges === undefined) {
+    return true;
+  }
+  try {
+    for (let index = 0; index < ranges.length; index++) {
+      if (ranges.start(index) <= time && time <= ranges.end(index)) {
+        return true;
+      }
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Half the nominal frame interval of the source, the tolerance of the self-check of a known
+ * anchor (ADR 046). Without a nominal rate it is 20 ms, half a frame at 25 fps.
+ */
+function halfFrameSeconds(source: PlaybackSource): number {
+  const rate = getNominalFrameRate(source);
+  return rate === null ? 0.02 : rate.d / rate.n / 2;
+}
+
+/**
+ * The part around the target of a seek that waits for a remux window, in which a newer request
+ * waits in the queue of ADR 022 (ADR 046). The window starts at the keyframe at or before the
+ * waiting target, so a target a little before it arrives with the same window. The preview
+ * waits for a running window when a target lies at most 10 s after the data that it appended
+ * (`WAIT_AHEAD_SECONDS` of the MediaSource controller), so the forward part is the same 10 s. A
+ * forward frame step and the exact seek at the release of a drag stay inside this part. A
+ * backward frame step stays inside for its first second only.
+ */
+const STARVING_SEEK_KEEP_BEHIND_SECONDS = 1;
+const STARVING_SEEK_KEEP_AHEAD_SECONDS = 10;
 
 /**
  * True when the source reports a valid average frame rate and a valid real frame rate, and the
@@ -457,6 +508,14 @@ export function createPlaybackStore(
   // own when metadata loads, is not recorded here; the position tests of the anchor guard cover
   // it.
   let seekedBeforeCalibration = false;
+  // The media time of the first frame that the first remux window of a MediaSource source
+  // presents (syncExpectedFirstFrame), and whether the first frame callback still has to be
+  // compared with it (ADR 046). Only a source with a known anchor runs the check.
+  let expectedFirstFrame: number | null = null;
+  let firstFrameCheckPending = false;
+  // True when a seek of the store before that first frame callback makes the callback name
+  // another frame, so the check is skipped.
+  let movedBeforeFirstFrame = false;
   // The navigation request that arrived while calibrationStatus was "calibrating", or null.
   // Issuing it would move the element away from the anchor baseline before the first frame
   // callback, and the attachment could then never calibrate (ADR 003). The store keeps the
@@ -521,12 +580,50 @@ export function createPlaybackStore(
       } else {
         element.currentTime = entry.mediaTime;
       }
+      if (firstFrameCheckPending && !movedBeforeFirstFrame) {
+        movedBeforeFirstFrame = !seekShowsExpectedFrame(entry);
+      }
       if (calibratedMediaTime === null) {
         // The element left the baseline of the anchor guard before any anchor, so a later first
         // callback cannot identify videoStartPts. Defence in depth: while the calibration is
         // open, no action reaches this line (see seekedBeforeCalibration).
         seekedBeforeCalibration = true;
       }
+    };
+
+    /**
+     * True when a seek before the first frame callback still shows the expected first frame
+     * (ADR 046): an exact seek into that frame, such as the seek over a start gap. The frame
+     * starts at the expected time and lasts one nominal interval. The bounds lie a quarter of an
+     * interval away from the start of the frame and from the start of the next frame, where the
+     * seeks of the store aim, so the rounding of the times never decides. A real frame of a
+     * source on milliseconds can start before its nominal start, so a seek to the next frame
+     * must fall outside. A scrub seek lands on a keyframe, so it shows another frame.
+     */
+    const seekShowsExpectedFrame = (entry: {
+      mediaTime: number;
+      scrub: boolean;
+    }): boolean => {
+      if (entry.scrub || expectedFirstFrame === null || attachedSource === null) {
+        return false;
+      }
+      const half = halfFrameSeconds(attachedSource);
+      return (
+        entry.mediaTime > expectedFirstFrame - half / 2 &&
+        entry.mediaTime < expectedFirstFrame + (3 * half) / 2
+      );
+    };
+
+    /**
+     * Takes the known anchor of a MediaSource source (ADR 046): the calibration of ADR 003 with
+     * the anchor at `anchor`, which is also the origin of the browser media timeline.
+     */
+    const takeKnownAnchor = (anchor: number): void => {
+      calibratedMediaTime = anchor;
+      anchorBaselineTime = anchor;
+      browserTimelineOriginSeconds = Math.max(0, anchor);
+      lastPresentedMediaTime = null;
+      lastInferredPts = null;
     };
 
     /**
@@ -555,12 +652,12 @@ export function createPlaybackStore(
       }
       lastScrubAudioTarget = mediaTime;
       if (direction < 0) {
-        scrubAudioController.stop();
+        scrubCue.stop();
         return;
       }
       // A drag keeps the sound near the pointer, so the controller applies the tight lag limit
       // of a drag (ADR 019).
-      scrubAudioController.request(mediaTime, direction, "drag");
+      scrubCue.request(mediaTime, direction, "drag");
     };
 
     /**
@@ -606,6 +703,36 @@ export function createPlaybackStore(
       keepPlaying: boolean | undefined,
     ): boolean =>
       keepPlaying === true && !scrub && get().isPlaying && element.paused !== true;
+
+    /**
+     * True when a request replaces the running seek at once instead of waiting behind it (ADR
+     * 046). On a MediaSource source, a seek outside the buffered data waits for a remux window.
+     * A newer request that is not a scrub sample, and whose target that window does not deliver,
+     * then replaces it, so a click elsewhere does not wait for the window of the previous one. A
+     * scrub sample still waits, so a drag shows a picture each time a window arrives (ADR 022).
+     */
+    const replacesStarvingSeek = (
+      element: PlaybackMediaElement,
+      mediaTime: number,
+      scrub: boolean,
+    ): boolean => {
+      if (scrub || attachedSource?.mediaSource !== true) {
+        return false;
+      }
+      const waiting = element.currentTime;
+      if (
+        typeof waiting !== "number" ||
+        !Number.isFinite(waiting) ||
+        isBufferedAt(element, waiting)
+      ) {
+        return false;
+      }
+      const distance = mediaTime - waiting;
+      return (
+        distance < -STARVING_SEEK_KEEP_BEHIND_SECONDS ||
+        distance > STARVING_SEEK_KEEP_AHEAD_SECONDS
+      );
+    };
 
     // A media element aborts a running seek when currentTime is assigned again, so a fast series
     // of seeks never presents a frame; one seek in flight with the latest request winning makes
@@ -657,7 +784,10 @@ export function createPlaybackStore(
         }
       }
 
-      if (element.seeking === true) {
+      if (
+        element.seeking === true &&
+        !replacesStarvingSeek(element, mediaTime, scrub)
+      ) {
         queuedSeek = { mediaTime, scrub };
         return true;
       }
@@ -1483,7 +1613,7 @@ export function createPlaybackStore(
         if (state.isPlaying) {
           get().pause();
         } else if (silencesCue) {
-          scrubAudioController.stop();
+          scrubCue.stop();
         }
         return;
       }
@@ -1498,11 +1628,11 @@ export function createPlaybackStore(
       // backward step, which stops it (silencesCue). An absolute target is a jump, as a click on
       // the ruler is, and it requests none: seekToFrameIndex stopped the cue as seekToPts does.
       if (silencesCue) {
-        scrubAudioController.stop();
+        scrubCue.stop();
       } else if (request.kind === "relative") {
         // A frame step: the default kind of the request, whose long lag limit keeps a held key
         // continuous (ADR 019).
-        scrubAudioController.request(targetTime, direction > 0 ? 1 : -1);
+        scrubCue.request(targetTime, direction > 0 ? 1 : -1);
       }
 
       // Do not update inferred PTS optimistically after assigning currentTime.
@@ -1566,7 +1696,7 @@ export function createPlaybackStore(
      */
     const pauseElement = (): void => {
       lastScrubAudioTarget = null;
-      scrubAudioController.stop();
+      scrubCue.stop();
 
       if (!attachedSource || !attachedElement) {
         set({ isPlaying: false });
@@ -2220,6 +2350,9 @@ export function createPlaybackStore(
         // the media timeline, so the origin waits for syncReady.
         browserTimelineOriginSeconds = 0;
         seekedBeforeCalibration = false;
+        expectedFirstFrame = null;
+        firstFrameCheckPending = knownAnchor(source) !== null;
+        movedBeforeFirstFrame = false;
         deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
@@ -2240,9 +2373,20 @@ export function createPlaybackStore(
           reload = null;
         }
 
+        // An element that already has its metadata gets no syncReady, so a known anchor is taken
+        // here (ADR 046).
+        const anchor = knownAnchor(source);
+        const anchoredAtAttach =
+          anchor !== null &&
+          isElementReady &&
+          initialCalibrationStatus === "calibrating";
+        if (anchoredAtAttach) {
+          takeKnownAnchor(anchor);
+        }
+
         set({
           presentedFrame: null,
-          calibrationStatus: initialCalibrationStatus,
+          calibrationStatus: anchoredAtAttach ? "ready" : initialCalibrationStatus,
           runtimeBrowserDurationSeconds: null,
           approximateBrowserTimeSeconds: null,
           seekTargetSeconds: keptTarget,
@@ -2271,7 +2415,7 @@ export function createPlaybackStore(
           return;
         }
 
-        scrubAudioController.stop();
+        scrubCue.stop();
         lastScrubAudioTarget = null;
 
         playSessionId++;
@@ -2290,6 +2434,9 @@ export function createPlaybackStore(
         anchorBaselineTime = null;
         browserTimelineOriginSeconds = 0;
         seekedBeforeCalibration = false;
+        expectedFirstFrame = null;
+        firstFrameCheckPending = false;
+        movedBeforeFirstFrame = false;
         deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
@@ -2356,7 +2503,22 @@ export function createPlaybackStore(
           browserTimelineOriginSeconds = Math.max(0, element.currentTime);
         }
 
-        set({ isReady: true });
+        // ADR 046: the remux windows of a MediaSource source keep the absolute source timestamps,
+        // and the page sets `timestampOffset` so that this media time is videoStartPts. The anchor
+        // is therefore known now, and the calibration does not wait for a first frame. The first
+        // frame of such a source need not be the frame of videoStartPts: FFmpeg and MSE drop the
+        // frames before the first keyframe.
+        const anchor = knownAnchor(attachedSource);
+        if (
+          anchor !== null &&
+          calibratedMediaTime === null &&
+          get().calibrationStatus === "calibrating"
+        ) {
+          takeKnownAnchor(anchor);
+          set({ isReady: true, calibrationStatus: "ready" });
+        } else {
+          set({ isReady: true });
+        }
 
         // The new element of a reload after a decode stall has its metadata. The request of the
         // reload becomes the deferred navigation, so it runs at the calibration anchor exactly
@@ -2437,7 +2599,7 @@ export function createPlaybackStore(
         // The element does not play or seek again, so nothing may wait for it: the cue, the
         // queued seek, a deferred navigation and the stop of a segment playback all go. A
         // reload of an earlier stall has already run, so the reload starts again with this one.
-        scrubAudioController.stop();
+        scrubCue.stop();
         lastScrubAudioTarget = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
@@ -2507,6 +2669,13 @@ export function createPlaybackStore(
           return;
         }
 
+        // A playing element reports to its frame callback only the latest frame since the last
+        // callback, so the first callback can name a later frame than the expected first frame
+        // (ADR 046).
+        if (firstFrameCheckPending) {
+          movedBeforeFirstFrame = true;
+        }
+
         const pending =
           queuedSeek ?? (lastAcceptedSeek?.scrub === true ? lastAcceptedSeek : null);
         if (pending !== null) {
@@ -2555,7 +2724,7 @@ export function createPlaybackStore(
 
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
-        scrubAudioController.stop();
+        scrubCue.stop();
 
         let result: Promise<void> | void;
         try {
@@ -2690,7 +2859,7 @@ export function createPlaybackStore(
         dropPlaybackStop();
         const scrub = options?.scrub === true;
         if (!scrub) {
-          scrubAudioController.stop();
+          scrubCue.stop();
         }
 
         // A failed request is the latest request, so it also drops the pending ones: the queued
@@ -2920,7 +3089,7 @@ export function createPlaybackStore(
         }
         // A jump to a frame, as a click on the ruler is, and not a frame step: it stops the cue
         // and requests none (ADR 019).
-        scrubAudioController.stop();
+        scrubCue.stop();
 
         const state = get();
         if (!attachedSource || !attachedElement || !state.isReady) {
@@ -2988,7 +3157,7 @@ export function createPlaybackStore(
         dropPlaybackStop();
         const scrub = options?.scrub === true;
         if (!scrub) {
-          scrubAudioController.stop();
+          scrubCue.stop();
         }
 
         const state = get();
@@ -3157,6 +3326,42 @@ export function createPlaybackStore(
           return;
         }
 
+        // ADR 046: a source with a known anchor takes it at the first callback too, if that
+        // callback comes before the metadata granted it, and then infers this frame as every
+        // later one.
+        const anchor = knownAnchor(attachedSource);
+        if (anchor !== null && calibratedMediaTime === null) {
+          takeKnownAnchor(anchor);
+          if (get().calibrationStatus === "calibrating") {
+            set({ calibrationStatus: "ready", hasDeferredNavigation: false });
+            runDeferredNavigation();
+          }
+        }
+
+        // The self-check of a known anchor: the first frame callback reports the frame that the
+        // first window presents first, whose media time the page read from its first moof. A
+        // seek before that callback can make it name another frame, and the check is then
+        // skipped (movedBeforeFirstFrame).
+        if (anchor !== null && firstFrameCheckPending) {
+          firstFrameCheckPending = false;
+          if (
+            !movedBeforeFirstFrame &&
+            expectedFirstFrame !== null &&
+            Math.abs(mediaTime - expectedFirstFrame) > halfFrameSeconds(attachedSource)
+          ) {
+            // The calibration becomes unavailable for this attachment only. A reload checks the
+            // first frame of its new element again.
+            console.warn(
+              `preview: the first frame shows at media time ${mediaTime}, not at the expected ${expectedFirstFrame}; the calibration is unavailable for this element`,
+            );
+            calibratedMediaTime = null;
+            lastPresentedMediaTime = null;
+            lastInferredPts = null;
+            markUnavailable();
+            return;
+          }
+        }
+
         const isFirstCallback = calibratedMediaTime === null;
 
         if (isFirstCallback) {
@@ -3283,6 +3488,46 @@ export function createPlaybackStore(
         });
         // A navigation deferred while the anchor was open now runs on the approximate path.
         runDeferredNavigation();
+      },
+
+      syncExpectedFirstFrame: (
+        sourceRevisionKey: string,
+        element: PlaybackMediaElement,
+        mediaTime: number,
+      ) => {
+        if (
+          !attachedSource ||
+          attachedElement !== element ||
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
+          typeof mediaTime !== "number" ||
+          !Number.isFinite(mediaTime)
+        ) {
+          return;
+        }
+        // Only the first window names the first frame. A later call, after the first frame
+        // callback or after a seek, has nothing to check.
+        if (firstFrameCheckPending && expectedFirstFrame === null) {
+          expectedFirstFrame = mediaTime;
+        }
+      },
+
+      denySourcePrecision: (
+        sourceRevisionKey: string,
+        element: PlaybackMediaElement,
+      ) => {
+        if (
+          !attachedSource ||
+          !attachedElement ||
+          attachedElement !== element ||
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey
+        ) {
+          return;
+        }
+        // The denial is a property of the source, so it holds for every later attachment of it
+        // (ADR 003).
+        precisionDeniedSources.add(sourceRevisionKey);
+        firstFrameCheckPending = false;
+        get().syncPresentationUnavailable(sourceRevisionKey, element);
       },
 
       syncBrowserDuration: (
@@ -3481,6 +3726,12 @@ export function createPlaybackStore(
           return;
         }
 
+        // A play that the store did not start, such as from a media key, can also make the first
+        // frame callback name a later frame (ADR 046).
+        if (firstFrameCheckPending) {
+          movedBeforeFirstFrame = true;
+        }
+
         // A stalled element does not play again, so a late `play` event changes nothing
         // (decodeStall).
         if (!get().isReady || get().decodeStall !== null) {
@@ -3579,7 +3830,7 @@ export function createPlaybackStore(
       },
 
       reset: () => {
-        scrubAudioController.stop();
+        scrubCue.stop();
         lastScrubAudioTarget = null;
         playSessionId++;
         if (attachedElement) {
@@ -3599,6 +3850,9 @@ export function createPlaybackStore(
         anchorBaselineTime = null;
         browserTimelineOriginSeconds = 0;
         seekedBeforeCalibration = false;
+        expectedFirstFrame = null;
+        firstFrameCheckPending = false;
+        movedBeforeFirstFrame = false;
         deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;

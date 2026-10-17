@@ -20,6 +20,18 @@ export interface PlaybackSource {
   readonly avgFrameRate?: Rational | null;
   readonly rFrameRate?: Rational | null;
   readonly reportedFrameCount?: FrameCount | null;
+  /**
+   * True when the element plays the source through a MediaSource fed with remux windows (ADR
+   * 046). A seek outside the buffered data then waits for a window.
+   */
+  readonly mediaSource?: boolean;
+  /**
+   * The media time of `videoStartPts`, when the mapping is known before the first frame. The
+   * remux windows of a MediaSource source keep the absolute source timestamps and the page sets
+   * `timestampOffset`, so this media time is known by construction, and the store takes the
+   * anchor of ADR 003 from it instead of from the first frame callback (ADR 046).
+   */
+  readonly anchorMediaTime?: number | null;
 }
 
 /**
@@ -48,6 +60,15 @@ export interface PlaybackMediaElement {
    * and the stop of a segment playback reads the end at the first of the two.
    */
   ended?: boolean;
+  /**
+   * `HTMLMediaElement.buffered`. For a MediaSource source a seek outside these ranges waits for
+   * a remux window, and a newer request does not wait behind it (ADR 046).
+   */
+  buffered?: {
+    readonly length: number;
+    start: (index: number) => number;
+    end: (index: number) => number;
+  };
 }
 
 /**
@@ -533,6 +554,29 @@ export interface PlaybackActions {
    * timing remain available. The deferred navigation then runs on the approximate path.
    */
   syncPresentationUnavailable: (
+    sourceRevisionKey: string,
+    element: PlaybackMediaElement,
+  ) => void;
+
+  /**
+   * Gives the media time of the first frame that the first remux window of a MediaSource source
+   * presents, which the page reads from its first `moof` (ADR 046). The first frame callback
+   * must report that time within half a frame interval, or the calibration becomes unavailable
+   * for the attachment. A play or a seek before that callback skips the check, because the
+   * callback then can name another frame. An exact seek into the expected frame keeps it.
+   */
+  syncExpectedFirstFrame: (
+    sourceRevisionKey: string,
+    element: PlaybackMediaElement,
+    mediaTime: number,
+  ) => void;
+
+  /**
+   * Turns precise editing off for the source, for as long as the application runs, as ADR 003
+   * does for indistinguishable timestamps. The page calls it when the timestamps of a source
+   * decrease (ADR 046).
+   */
+  denySourcePrecision: (
     sourceRevisionKey: string,
     element: PlaybackMediaElement,
   ) => void;

@@ -24,6 +24,7 @@ import {
   isFrameGridExact,
 } from "@/lib/timecode";
 import type { Pts, Rational, TickCount } from "@/types/project";
+import { setScrubCue } from "./cue";
 import { getDisplayedElapsedSeconds } from "./presentation";
 import { scrubAudioController } from "./scrubAudio";
 import {
@@ -64,6 +65,8 @@ function createFakeVideo(options?: {
   clampToDuration?: boolean;
   /** Reads a seek back rounded, or truncated, to the whole microsecond, as a web view can. */
   microsecondClock?: MicrosecondClock;
+  /** Reports the target of a `fastSeek` from `currentTime` while it runs, as WebKit does. */
+  fastSeekMovesTime?: boolean;
 }): PlaybackMediaElement & {
   playCalls: number;
   pauseCalls: number;
@@ -94,6 +97,9 @@ function createFakeVideo(options?: {
           }
           if (typeof options.fastSeek === "function") {
             options.fastSeek(val);
+          }
+          if (options.fastSeekMovesTime === true) {
+            currentTimeVal = val;
           }
           if (options?.autoSeeking !== false) {
             seekingVal = true;
@@ -8534,6 +8540,760 @@ describe("Playback Store & PTS Presentation Engine", () => {
 
         expect(video.currentTimeSets).toBe(1);
         expect(video.currentTime).toBe(3);
+      });
+    });
+  });
+
+  describe("A MediaSource Source With a Known Anchor (ADR 046)", () => {
+    /**
+     * A live recording on 1/1000 that starts at 1234.567 s, played through remux windows. One
+     * frame is 40 ticks, and half a frame is 20 ms.
+     */
+    const flvSource: PlaybackSource = {
+      path: "/media/live.flv",
+      size: 427000000,
+      mtime: 1729000000,
+      videoTimeBase: { n: 1, d: 1000 },
+      videoStartPts: "1234567" as Pts,
+      avgFrameRate: fps25,
+      rFrameRate: fps25,
+      approximateDurationSeconds: 240,
+      mediaSource: true,
+      anchorMediaTime: 0,
+    };
+    const flvKey = getSourceRevisionKey(flvSource);
+
+    let warnSpy: MockInstance<typeof console.warn>;
+
+    beforeEach(() => {
+      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    /** Attaches an element for `source` and loads its metadata. */
+    function attachWithMetadata(
+      store: PlaybackStore,
+      video: ReturnType<typeof createFakeVideo> = createFakeVideo({ duration: 240 }),
+      source: PlaybackSource = flvSource,
+    ): ReturnType<typeof createFakeVideo> {
+      store.getState().attach(source, video);
+      video.readyState = 1;
+      store.getState().syncReady(getSourceRevisionKey(source), video);
+      return video;
+    }
+
+    describe("the anchor", () => {
+      it("is ready at the metadata, before any frame callback", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 240 });
+        store.getState().attach(flvSource, video);
+        expect(store.getState().calibrationStatus).toBe("calibrating");
+
+        video.readyState = 1;
+        store.getState().syncReady(flvKey, video);
+        expect(store.getState().isReady).toBe(true);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame).toBeNull();
+      });
+
+      it("infers the first presented frame from the anchor, not from videoStartPts", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+
+        // The file starts in the middle of a GOP: the first keyframe is the third frame.
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame).toEqual({
+          mediaTime: 0.08,
+          inferredSourcePts: "1234647",
+        });
+
+        store.getState().syncPresentedFrame(flvKey, 0.12, 2, video);
+        expect(store.getState().presentedFrame).toEqual({
+          mediaTime: 0.12,
+          inferredSourcePts: "1234687",
+        });
+      });
+
+      it("takes the anchor at a first frame callback that comes before the metadata", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 240 });
+        store.getState().attach(flvSource, video);
+
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1234647");
+      });
+
+      it("takes the anchor at attach for an element that already has its metadata", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 240, readyState: 1 });
+        store.getState().attach(flvSource, video);
+        expect(store.getState().isReady).toBe(true);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1234647");
+      });
+
+      it("keeps the anchor when the element loses and regains its data", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+
+        store.getState().syncUnready(flvKey, video);
+        store.getState().syncReady(flvKey, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        store.getState().syncPresentedFrame(flvKey, 0.12, 2, video);
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1234687");
+      });
+
+      it.each([Number.NaN, Number.POSITIVE_INFINITY])(
+        "takes no known anchor from %s",
+        (anchorMediaTime) => {
+          const store = createPlaybackStore();
+          attachWithMetadata(store, createFakeVideo({ duration: 240 }), {
+            ...flvSource,
+            anchorMediaTime,
+          });
+          expect(store.getState().calibrationStatus).toBe("calibrating");
+        },
+      );
+
+      it("keeps the duplicate PTS rule", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+
+        // A distinct presented frame that infers the same PTS.
+        store.getState().syncPresentedFrame(flvKey, 0.0804, 2, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+      });
+
+      it("leaves a source without a known anchor to the first frame callback", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, createFakeVideo({ duration: 240 }), {
+          ...flvSource,
+          anchorMediaTime: null,
+        });
+        expect(store.getState().calibrationStatus).toBe("calibrating");
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1234567");
+      });
+
+      it("stays unavailable for a source that lost precise editing", () => {
+        const store = createPlaybackStore();
+        const first = attachWithMetadata(store);
+        store.getState().denySourcePrecision(flvKey, first);
+        store.getState().detach(flvKey, first);
+
+        const second = attachWithMetadata(store);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        store.getState().syncPresentedFrame(flvKey, 0, 1, second);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(store.getState().presentedFrame).toBeNull();
+      });
+
+      it("runs the request of a reload at once at the metadata of the new element", () => {
+        const store = createPlaybackStore();
+        const stalled = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0, 1, stalled);
+        store.getState().play();
+        stalled.currentTime = 10;
+        stalled.seeking = false;
+        store.getState().syncBrowserTime(flvKey, stalled);
+        expect(store.getState().syncDecodeStall(flvKey, stalled)).toBe(true);
+        store.getState().seekToPts("1239567" as Pts);
+
+        store.getState().detach(flvKey, stalled);
+        const next = createFakeVideo({ duration: 240 });
+        store.getState().attach(flvSource, next);
+        store.getState().syncExpectedFirstFrame(flvKey, next, 0);
+        next.readyState = 1;
+        store.getState().syncReady(flvKey, next);
+
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().hasDeferredNavigation).toBe(false);
+        expect(next.currentTimeSets).toBe(1);
+        expect(next.currentTime).toBe(5);
+
+        // The seek moved the element away from the first frame, so the check is skipped.
+        // (The element of the reload is the new attachment, which the check covers.)
+        fireSeeked(store, flvKey, next);
+        store.getState().syncPresentedFrame(flvKey, 5, 1, next);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1239567");
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    it("drops the request of a reload in the anchor frame, where the element stands", () => {
+      const store = createPlaybackStore();
+      const stalled = attachWithMetadata(store);
+      store.getState().syncPresentedFrame(flvKey, 0, 1, stalled);
+      store.getState().play();
+      stalled.currentTime = 10;
+      stalled.seeking = false;
+      store.getState().syncBrowserTime(flvKey, stalled);
+      expect(store.getState().syncDecodeStall(flvKey, stalled)).toBe(true);
+      // A click inside the first frame.
+      store.getState().seekToPts("1234587" as Pts);
+
+      store.getState().detach(flvKey, stalled);
+      const next = createFakeVideo({ duration: 240 });
+      store.getState().attach(flvSource, next);
+      next.readyState = 1;
+      store.getState().syncReady(flvKey, next);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(next.currentTimeSets).toBe(0);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    describe("the self-check of the first frame", () => {
+      it("passes when the first frame shows at the expected media time", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 240 });
+        store.getState().attach(flvSource, video);
+        // The page reads the first moof before it appends the window, which is before the
+        // metadata loads.
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+        video.readyState = 1;
+        store.getState().syncReady(flvKey, video);
+
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1234647");
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("passes within half a frame interval", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+
+        store.getState().syncPresentedFrame(flvKey, 0.099, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+      });
+
+      it("makes the calibration unavailable for the attachment when the first frame shows elsewhere", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+
+        store.getState().syncPresentedFrame(flvKey, 0.12, 1, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(store.getState().presentedFrame).toBeNull();
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        const message = String(warnSpy.mock.calls[0]?.[0]);
+        expect(message).toContain("0.12");
+        expect(message).toContain("0.08");
+
+        // The next attachment of the same file, such as a reload, calibrates and checks again.
+        store.getState().detach(flvKey, video);
+        const next = attachWithMetadata(store);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        store.getState().syncExpectedFirstFrame(flvKey, next, 0.08);
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, next);
+        expect(store.getState().calibrationStatus).toBe("ready");
+      });
+
+      it("keeps a pending display target on the timeline axis when the check fails", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+        store.getState().seekApproximate(0.08);
+        expect(store.getState().seekTargetSeconds).toBe(0.08);
+
+        // A frame that arrives while the seek still runs.
+        store.getState().syncPresentedFrame(flvKey, 0.2, 1, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(store.getState().seekTargetSeconds).toBe(0.08);
+      });
+
+      it("takes 20 ms as half a frame when the source reports no nominal rate", () => {
+        const noRate: PlaybackSource = {
+          ...flvSource,
+          avgFrameRate: null,
+          rFrameRate: null,
+        };
+        const noRateKey = getSourceRevisionKey(noRate);
+        for (const [mediaTime, status] of [
+          [0.099, "ready"],
+          [0.101, "unavailable"],
+        ] as const) {
+          const store = createPlaybackStore();
+          const video = attachWithMetadata(
+            store,
+            createFakeVideo({ duration: 240 }),
+            noRate,
+          );
+          store.getState().syncExpectedFirstFrame(noRateKey, video, 0.08);
+          store.getState().syncPresentedFrame(noRateKey, mediaTime, 1, video);
+          expect(store.getState().calibrationStatus).toBe(status);
+        }
+      });
+
+      it("checks the first frame callback only", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+
+        store.getState().syncPresentedFrame(flvKey, 5, 2, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1239567");
+      });
+
+      it("is skipped after a seek to another position before the first frame", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+
+        store.getState().seekApproximate(5);
+        expect(video.currentTime).toBe(5);
+        fireSeeked(store, flvKey, video);
+        store.getState().syncPresentedFrame(flvKey, 5, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1239567");
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("is skipped after a play before the first frame", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+
+        // A playing element can report a later frame at its first callback.
+        store.getState().play();
+        store.getState().syncPresentedFrame(flvKey, 0.2, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1234767");
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("is skipped after a play that the store did not start", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+
+        // A media key plays the element.
+        store.getState().syncPlay(flvKey, video);
+        store.getState().syncPresentedFrame(flvKey, 0.2, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("is skipped when a queued seek leaves the expected first frame", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+        store.getState().seekApproximate(0.08);
+        store.getState().seekApproximate(5);
+        expect(video.currentTime).toBe(0.08);
+
+        // The seeked event issues the queued seek.
+        fireSeeked(store, flvKey, video);
+        expect(video.currentTime).toBe(5);
+        fireSeeked(store, flvKey, video);
+        store.getState().syncPresentedFrame(flvKey, 5, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("still runs after a seek into the middle of the expected first frame", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+
+        // The frame covers 0.08 to 0.12, so 0.1 is in its middle, where a frame step aims.
+        store.getState().seekApproximate(0.1);
+        fireSeeked(store, flvKey, video);
+        store.getState().syncPresentedFrame(flvKey, 0.2, 1, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+      });
+
+      it.each([0.12, 0.119, 0.115, 0.069])(
+        "is skipped after a seek to %s, which can show another frame",
+        (target) => {
+          const store = createPlaybackStore();
+          const video = attachWithMetadata(store);
+          store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+
+          store.getState().seekApproximate(target);
+          fireSeeked(store, flvKey, video);
+          store.getState().syncPresentedFrame(flvKey, 0.12, 1, video);
+          expect(store.getState().calibrationStatus).toBe("ready");
+          expect(warnSpy).not.toHaveBeenCalled();
+        },
+      );
+
+      it("still runs after a seek to the expected first frame, as over a start gap", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+
+        store.getState().seekApproximate(0.08);
+        expect(video.currentTime).toBe(0.08);
+        fireSeeked(store, flvKey, video);
+        store.getState().syncPresentedFrame(flvKey, 0.2, 1, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it("is skipped after a scrub seek, which lands on a keyframe", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          createFakeVideo({ duration: 240, fastSeek: true }),
+        );
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+
+        store.getState().seekApproximate(0.08, { scrub: true });
+        expect(video.fastSeek).toHaveBeenCalledWith(0.08);
+        fireSeeked(store, flvKey, video);
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("is skipped when the page gave no expected first frame", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+
+        store.getState().syncPresentedFrame(flvKey, 0.5, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("1235067");
+      });
+
+      it("ignores an expected first frame that arrives after the first frame callback", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+
+        store.getState().syncExpectedFirstFrame(flvKey, video, 3);
+        store.getState().syncPresentedFrame(flvKey, 0.12, 2, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("keeps the first expected media time of an attachment", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, video, 0.08);
+        // A later window, such as a prefetch, names its own first frame.
+        store.getState().syncExpectedFirstFrame(flvKey, video, 60);
+
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+      });
+
+      it("ignores an expected first frame for another element or source", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncExpectedFirstFrame(flvKey, createFakeVideo(), 0.5);
+        store.getState().syncExpectedFirstFrame(identityA, video, 0.5);
+
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+      });
+
+      it("does not run for a source without a known anchor", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo();
+        store.getState().attach(sourceA, video);
+        store.getState().syncReady(identityA, video);
+        store.getState().syncExpectedFirstFrame(identityA, video, 5);
+
+        store.getState().syncPresentedFrame(identityA, 0, 1, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+        expect(store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+      });
+    });
+
+    describe("denySourcePrecision", () => {
+      it("turns precise editing off for the source and keeps the denial", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+
+        store.getState().denySourcePrecision(flvKey, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(store.getState().presentedFrame).toBeNull();
+        store.getState().syncPresentedFrame(flvKey, 0.12, 2, video);
+        expect(store.getState().presentedFrame).toBeNull();
+
+        store.getState().detach(flvKey, video);
+        attachWithMetadata(store);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+      });
+
+      it("ignores a call for another element or source", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().denySourcePrecision(flvKey, createFakeVideo());
+        store.getState().denySourcePrecision(identityA, video);
+        expect(store.getState().calibrationStatus).toBe("ready");
+      });
+    });
+
+    describe("a seek outside the buffered data", () => {
+      /** The `buffered` ranges of an element. */
+      function bufferedRanges(
+        ranges: ReadonlyArray<readonly [number, number]>,
+      ): NonNullable<PlaybackMediaElement["buffered"]> {
+        const range = (index: number): readonly [number, number] => {
+          const found = ranges[index];
+          if (found === undefined) {
+            throw new RangeError("The index is outside the ranges.");
+          }
+          return found;
+        };
+        return {
+          length: ranges.length,
+          start: (index) => range(index)[0],
+          end: (index) => range(index)[1],
+        };
+      }
+
+      function bufferedVideo(
+        ranges: ReadonlyArray<readonly [number, number]>,
+        options?: Parameters<typeof createFakeVideo>[0],
+      ) {
+        return Object.assign(createFakeVideo({ duration: 240, ...options }), {
+          buffered: bufferedRanges(ranges),
+        });
+      }
+
+      it("gives way at once to a newer exact seek that its window does not deliver", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0, 10]]));
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20);
+        expect(video.seeking).toBe(true);
+        store.getState().seekApproximate(60);
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.currentTime).toBe(60);
+        expect(store.getState().seekTargetSeconds).toBe(60);
+
+        // The seeked event of the new seek issues nothing more.
+        fireSeeked(store, flvKey, video);
+        expect(video.currentTimeSets).toBe(2);
+      });
+
+      it("gives way to a target more than one second before it", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0, 10]]));
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20);
+        store.getState().seekApproximate(19.5);
+        expect(video.currentTimeSets).toBe(1);
+        store.getState().seekApproximate(18.9);
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.currentTime).toBe(18.9);
+      });
+
+      it("keeps a target up to 10 s after the waiting target in the queue", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0, 10]]));
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20);
+        store.getState().seekApproximate(29.5);
+        expect(video.currentTimeSets).toBe(1);
+        store.getState().seekApproximate(30.5);
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.currentTime).toBe(30.5);
+      });
+
+      it("keeps the release after a fastSeek in the queue, and gives way to a far click", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          bufferedVideo([[0, 10]], { fastSeek: true, fastSeekMovesTime: true }),
+        );
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20, { scrub: true });
+        expect(video.fastSeek).toHaveBeenCalledWith(20);
+        expect(video.currentTime).toBe(20);
+        store.getState().seekApproximate(20);
+        expect(video.currentTimeSets).toBe(0);
+
+        store.getState().seekApproximate(80);
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBe(80);
+      });
+
+      it("keeps the exact seek at the release of a drag in the queue", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0, 10]]));
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20, { scrub: true });
+        store.getState().seekApproximate(20);
+        expect(video.currentTimeSets).toBe(1);
+        fireSeeked(store, flvKey, video);
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.currentTime).toBe(20);
+      });
+
+      it("keeps a frame step from the waiting target in the queue", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0, 10]]));
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20);
+        store.getState().seekNominal(1);
+        store.getState().seekNominal(1);
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBe(20);
+      });
+
+      it("drops a queued scrub sample when an exact seek replaces the running seek", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0, 10]]));
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20);
+        store.getState().seekApproximate(25, { scrub: true });
+        store.getState().seekApproximate(70);
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.currentTime).toBe(70);
+        fireSeeked(store, flvKey, video);
+        expect(video.currentTimeSets).toBe(2);
+      });
+
+      it("keeps the playback of a seek that keeps playing", async () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0, 10]]));
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        store.getState().play();
+        await flushAsync();
+        store.getState().syncPlay(flvKey, video);
+        const pausesBefore = video.pauseCalls;
+
+        store.getState().seekApproximate(20, { keepPlaying: true });
+        store.getState().seekApproximate(70, { keepPlaying: true });
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.pauseCalls).toBe(pausesBefore);
+        expect(store.getState().isPlaying).toBe(true);
+      });
+
+      it("counts buffered ranges that cannot be read as buffered", () => {
+        const store = createPlaybackStore();
+        const video = Object.assign(createFakeVideo({ duration: 240 }), {
+          buffered: {
+            get length(): number {
+              throw new DOMException(
+                "The source buffer was removed.",
+                "InvalidStateError",
+              );
+            },
+            start: () => 0,
+            end: () => 0,
+          },
+        });
+        attachWithMetadata(store, video);
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20);
+        store.getState().seekApproximate(70);
+        expect(video.currentTimeSets).toBe(1);
+      });
+
+      it("keeps the queue while the running seek lands in the buffered data", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0, 40]]));
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20);
+        store.getState().seekApproximate(70);
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBe(20);
+        fireSeeked(store, flvKey, video);
+        expect(video.currentTime).toBe(70);
+      });
+
+      it("reads every buffered range", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          bufferedVideo([
+            [0, 10],
+            [18, 25],
+          ]),
+        );
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20);
+        store.getState().seekApproximate(70);
+        expect(video.currentTimeSets).toBe(1);
+      });
+
+      it("keeps a scrub sample in the queue behind a starving seek", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0, 10]]));
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20);
+        store.getState().seekApproximate(80, { scrub: true });
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBe(20);
+      });
+
+      it("keeps the queue of a native source", () => {
+        const store = createPlaybackStore();
+        const video = Object.assign(createFakeVideo({ duration: 10 }), {
+          buffered: bufferedRanges([[0, 1]]),
+        });
+        store.getState().attach(sourceA, video);
+        store.getState().syncReady(identityA, video);
+        store.getState().syncPresentedFrame(identityA, 0, 1, video);
+
+        store.getState().seekApproximate(5);
+        store.getState().seekApproximate(9);
+        store.getState().seekApproximate(1);
+        expect(video.currentTimeSets).toBe(1);
+        expect(video.currentTime).toBe(5);
+      });
+
+      it("counts an element without buffered ranges as buffered", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+        store.getState().seekApproximate(20);
+        store.getState().seekApproximate(70);
+        expect(video.currentTimeSets).toBe(1);
+      });
+    });
+
+    describe("the scrub cue", () => {
+      afterEach(() => {
+        setScrubCue(null);
+      });
+
+      it("sends the bursts of the store to the cue that the preview set", () => {
+        const cue = { request: vi.fn(), stop: vi.fn() };
+        const elementRequest = vi.spyOn(scrubAudioController, "request");
+        try {
+          setScrubCue(cue);
+          const store = createPlaybackStore();
+          const video = attachWithMetadata(store);
+          store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+
+          store.getState().seekNominal(1);
+          // A calibrated step goes to the middle of the next frame.
+          expect(cue.request).toHaveBeenCalledWith(video.currentTime, 1);
+          expect(elementRequest).not.toHaveBeenCalled();
+        } finally {
+          elementRequest.mockRestore();
+        }
       });
     });
   });
