@@ -85,6 +85,12 @@ pub struct MediaProbe {
     pub video_time_base: Rational,
     pub video_start_pts: Option<Pts>,
     pub video_duration_ticks: Option<TickCount>,
+    /// The approximate length of the video in seconds, counted from the first video frame, as
+    /// `video_duration_ticks` counts it (ADR 002, ADR 046). It is the stream duration when
+    /// ffprobe gives one. Otherwise it is `format.duration` less the lead of the video start
+    /// over the container start. Matroska and FLV have their own rules, because their
+    /// `format.duration` can be the end timestamp: see [`approximate_duration`] and
+    /// [`correct_flv_probe`]. For UI layout and browser seeks only.
     pub approximate_duration_seconds: Option<f64>,
     pub avg_frame_rate: Option<Rational>,
     pub r_frame_rate: Option<Rational>,
@@ -425,7 +431,10 @@ pub fn probe_media_within(
     ];
     let run = run_probe_process(ffprobe_path, &arguments, timeout, PROBE_POLL_INTERVAL, None)
         .map_err(|source| ProbeError::Spawn { source })?;
-    finish_probe_run(run, timeout)
+    let mut probe = finish_probe_run(run, timeout)?;
+    // The tags give the length of an FLV better than ffprobe does.
+    correct_flv_file(&mut probe, media_path);
+    Ok(probe)
 }
 
 /// How one `ffprobe` run ended, and everything it wrote.
@@ -1314,17 +1323,45 @@ fn normalize(raw: RawProbe) -> Result<MediaProbe, ProbeDataError> {
             value: time_base_text.to_owned(),
         })?;
 
+    let format_names: Vec<String> = format_name
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let has_format = |wanted: &str| format_names.iter().any(|name| name == wanted);
+    let video_start_pts =
+        parse_optional_i64_value(video.start_pts.as_ref(), "streams.video.start_pts")?
+            .map(Pts::new);
+    let video_start = video_start_pts
+        .and_then(|pts| pts_seconds(pts, video_time_base))
+        .map(Rational::to_f64)
+        .or_else(|| {
+            video
+                .start_time
+                .as_deref()
+                .and_then(|text| text.trim().parse::<f64>().ok())
+                .filter(|value| value.is_finite())
+        });
+    let format_start_time =
+        parse_format_start_time(format.and_then(|value| value.start_time.as_deref()));
+    let approximate_duration_seconds = approximate_duration(
+        video.duration.as_deref(),
+        format.and_then(|value| value.duration.as_deref()),
+        video_start,
+        format_start_time.map(Rational::to_f64),
+        has_format("matroska") || has_format("flv"),
+    );
+    let r_frame_rate = optional_positive_rational(video.r_frame_rate.as_deref());
+    let mut avg_frame_rate = optional_positive_rational(video.avg_frame_rate.as_deref());
+    if has_format("flv") {
+        avg_frame_rate = flv_average_rate(avg_frame_rate, r_frame_rate);
+    }
+
     Ok(MediaProbe {
-        format_names: format_name
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-            .collect(),
+        format_names,
         format_long_name: format.and_then(|value| value.format_long_name.clone()),
-        format_start_time: parse_format_start_time(
-            format.and_then(|value| value.start_time.as_deref()),
-        ),
+        format_start_time,
         video_codec,
         video_profile: video.profile.clone(),
         pixel_format: video.pix_fmt.clone(),
@@ -1333,22 +1370,15 @@ fn normalize(raw: RawProbe) -> Result<MediaProbe, ProbeDataError> {
         height: height as u32,
         video_stream_index,
         video_time_base,
-        video_start_pts: parse_optional_i64_value(
-            video.start_pts.as_ref(),
-            "streams.video.start_pts",
-        )?
-        .map(Pts::new),
+        video_start_pts,
         video_duration_ticks: parse_optional_i64_value(
             video.duration_ts.as_ref(),
             "streams.video.duration_ts",
         )?
         .and_then(TickCount::new),
-        approximate_duration_seconds: approximate_duration(
-            video.duration.as_deref(),
-            format.and_then(|value| value.duration.as_deref()),
-        ),
-        avg_frame_rate: optional_positive_rational(video.avg_frame_rate.as_deref()),
-        r_frame_rate: optional_positive_rational(video.r_frame_rate.as_deref()),
+        approximate_duration_seconds,
+        avg_frame_rate,
+        r_frame_rate,
         reported_frame_count: parse_optional_text_i64(
             video.nb_frames.as_deref(),
             "streams.video.nb_frames",
@@ -1651,12 +1681,123 @@ fn parse_format_start_time(value: Option<&str>) -> Option<Rational> {
     Rational::from_decimal_str(text)
 }
 
-fn approximate_duration(stream: Option<&str>, format: Option<&str>) -> Option<f64> {
-    stream
-        .into_iter()
-        .chain(format)
-        .filter_map(|text| text.trim().parse::<f64>().ok())
-        .find(|value| value.is_finite() && *value >= 0.0)
+/// The approximate length of the video, counted from its first frame (ADR 046).
+///
+/// The stream duration already counts from the first frame of the stream. `format.duration`
+/// counts from the container start, so the lead of the video start over the container start
+/// comes off it. FFmpeg's matroska and flv muxers write the end timestamp as the duration of a
+/// file that starts away from 0 (ADR 046 measurements 5 and 16), so for these containers the
+/// video start comes off whole. When that gives less than 0, the duration was a length after all,
+/// as an MKV from another muxer or the `onMetaData` duration of an FLV gives it, and the lead
+/// comes off instead. A length with a small start offset still reads short by that start, which
+/// ADR 046 accepts.
+fn approximate_duration(
+    stream: Option<&str>,
+    format: Option<&str>,
+    video_start: Option<f64>,
+    format_start: Option<f64>,
+    end_timestamp: bool,
+) -> Option<f64> {
+    let parse = |text: &str| {
+        text.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+    };
+    if let Some(duration) = stream.and_then(parse) {
+        return Some(duration);
+    }
+    let duration = format.and_then(parse)?;
+    let valid = |value: f64| value.is_finite() && value >= 0.0;
+    if end_timestamp {
+        if let Some(length) = video_start
+            .or(format_start)
+            .map(|start| duration - start)
+            .filter(|length| valid(*length))
+        {
+            return Some(length);
+        }
+    }
+    let lead = video_start
+        .zip(format_start)
+        .map(|(video, format)| (video - format).max(0.0))
+        .unwrap_or(0.0);
+    Some(
+        Some(duration - lead)
+            .filter(|length| valid(*length))
+            .unwrap_or(duration),
+    )
+}
+
+/// The average rate of an FLV: `r_frame_rate` when the two rates lie within
+/// [`FLV_RATE_TOLERANCE`] of each other (ADR 046). It needs only what ffprobe reports, so the probe
+/// of the import and the probe of an export always agree.
+fn flv_average_rate(average: Option<Rational>, real: Option<Rational>) -> Option<Rational> {
+    match (average, real) {
+        (Some(average), Some(real))
+            if real.to_f64() > 0.0
+                && ((average.to_f64() - real.to_f64()) / real.to_f64()).abs()
+                    <= FLV_RATE_TOLERANCE =>
+        {
+            Some(real)
+        }
+        _ => average,
+    }
+}
+
+/// The largest relative difference between `avg_frame_rate` and `r_frame_rate` that an FLV
+/// treats as one constant rate. The millisecond timestamps of FLV make ffprobe report averages
+/// such as 989/33 and 1000/33 for 30 fps, 0.1 % and 1.01 % away (ADR 046 measurement 5).
+const FLV_RATE_TOLERANCE: f64 = 0.02;
+
+/// Correct the length of an FLV with what the tags of the file show (ADR 046).
+///
+/// The length counts from the first video frame to the end of the last one: the latest video
+/// presentation time, plus one frame interval, less the video start. ffprobe's `format.duration`
+/// is the end timestamp of an FLV without `onMetaData` and the length that the metadata gives
+/// otherwise, so it serves neither case exactly. A length below 0, as timestamps that restart
+/// give, keeps the probe as it is.
+pub fn correct_flv_probe(probe: &mut MediaProbe, extent: Option<crate::flv::locate::Extent>) {
+    let Some(extent) = extent else {
+        return;
+    };
+    let Some(last_ms) = extent.last_video_pts else {
+        return;
+    };
+    let start_ms = probe
+        .video_start_pts
+        .and_then(|pts| pts_seconds(pts, probe.video_time_base))
+        .map(|seconds| seconds.to_f64() * 1000.0)
+        .or(extent.first_video_pts.map(|pts| pts as f64));
+    let Some(start_ms) = start_ms else {
+        return;
+    };
+    // The average rate first: after `flv_average_rate` it is the real rate of a constant-rate
+    // file, and on a variable-rate file `r_frame_rate` can be a much higher guess.
+    let interval_ms = probe
+        .avg_frame_rate
+        .or(probe.r_frame_rate)
+        .map(|rate| 1000.0 / rate.to_f64())
+        .filter(|interval| interval.is_finite() && *interval > 0.0)
+        .unwrap_or(0.0);
+    let length = (last_ms as f64 + interval_ms - start_ms) / 1000.0;
+    if length.is_finite() && length >= 0.0 {
+        probe.approximate_duration_seconds = Some(length);
+    }
+}
+
+/// Correct the probe of the FLV at `path` with its tags, when it is an FLV that the reader can
+/// read. Any other file keeps the probe as ffprobe gave it.
+fn correct_flv_file(probe: &mut MediaProbe, path: &Path) {
+    if !probe.format_names.iter().any(|name| name == "flv")
+        || !crate::flv::has_signature(path).unwrap_or(false)
+    {
+        return;
+    }
+    let extent = crate::flv::FlvSource::open(path, None)
+        .and_then(|source| source.extent())
+        .ok();
+    correct_flv_probe(probe, extent);
 }
 
 #[cfg(test)]
@@ -1722,10 +1863,271 @@ mod tests {
         let mut value = base_probe();
         value["streams"][0]["duration"] = serde_json::json!("-1");
         value["format"]["duration"] = serde_json::json!("10.02");
+        // The fixture gives no container start, so no lead comes off.
         assert_eq!(
             parse_value(value).unwrap().approximate_duration_seconds,
             Some(10.02)
         );
+    }
+
+    #[test]
+    fn the_format_duration_fallback_counts_from_the_first_video_frame() {
+        // An MP4-shaped probe whose audio starts 23 ms before its video: the fallback is shorter
+        // than format.duration by exactly the lead of the video start over the container start.
+        let mut value = base_probe();
+        value["streams"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("duration");
+        value["streams"][0]["start_pts"] = serde_json::json!("6030");
+        value["format"]["duration"] = serde_json::json!("10.02");
+        value["format"]["start_time"] = serde_json::json!("0.044000");
+        let probe = parse_value(value).unwrap();
+        let expected = 10.02 - (6030.0 / 90_000.0 - 0.044);
+        let actual = probe.approximate_duration_seconds.unwrap();
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "{actual} against {expected}"
+        );
+    }
+
+    #[test]
+    fn a_matroska_duration_is_the_end_timestamp_less_the_video_start() {
+        // ADR 046 measurement 16: an MKV that starts at 1234.567 s reports 1354.588.
+        let mut value = base_probe();
+        value["streams"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("duration");
+        value["streams"][0]["time_base"] = serde_json::json!("1/1000");
+        value["streams"][0]["start_pts"] = serde_json::json!("1234567");
+        value["format"]["format_name"] = serde_json::json!("matroska,webm");
+        value["format"]["duration"] = serde_json::json!("1354.588000");
+        value["format"]["start_time"] = serde_json::json!("1234.567000");
+        let actual = parse_value(value)
+            .unwrap()
+            .approximate_duration_seconds
+            .unwrap();
+        assert!((actual - 120.021).abs() < 1e-9, "{actual}");
+    }
+
+    fn flv_probe() -> MediaProbe {
+        let mut value = base_probe();
+        value["streams"][0]["time_base"] = serde_json::json!("1/1000");
+        value["streams"][0]["start_pts"] = serde_json::json!("1234588");
+        value["streams"][0]["avg_frame_rate"] = serde_json::json!("1000/33");
+        value["streams"][0]["r_frame_rate"] = serde_json::json!("30/1");
+        value["streams"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("duration");
+        value["streams"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("duration_ts");
+        value["format"]["format_name"] = serde_json::json!("flv");
+        value["format"]["duration"] = serde_json::json!("1354.488000");
+        value["format"]["start_time"] = serde_json::json!("1234.567000");
+        parse_value(value).unwrap()
+    }
+
+    #[test]
+    fn an_flv_takes_its_length_from_the_tags_and_its_rate_from_r_frame_rate() {
+        // live.flv of the test of 2026-10-17: video from 1234.588 s to a last frame at
+        // 1354.555 s at 30 fps, and ffprobe's format.duration is the end timestamp.
+        let mut probe = flv_probe();
+        correct_flv_probe(
+            &mut probe,
+            Some(crate::flv::locate::Extent {
+                first_video_pts: Some(1_234_588),
+                last_video_pts: Some(1_354_555),
+            }),
+        );
+        assert_eq!(probe.avg_frame_rate, Some(Rational::new(30, 1).unwrap()));
+        let length = probe.approximate_duration_seconds.unwrap();
+        assert!((length - (119.967 + 1.0 / 30.0)).abs() < 1e-9, "{length}");
+    }
+
+    #[test]
+    fn the_flv_rate_rule_needs_only_the_probe_and_keeps_a_rate_more_than_2_percent_away() {
+        // 989/33 and 1000/33 are the measured averages of 30 fps files; 2943/100 lies 1.9 % below
+        // 30 and 2937/100 lies 2.1 % below it.
+        for (average, real, expected) in [
+            ("989/33", "30/1", "30/1"),
+            ("1000/33", "30/1", "30/1"),
+            ("989/33", "30000/1001", "30000/1001"),
+            ("2943/100", "30/1", "30/1"),
+            ("2937/100", "30/1", "2937/100"),
+            ("25/1", "30/1", "25/1"),
+        ] {
+            let mut value = base_probe();
+            value["format"]["format_name"] = serde_json::json!("flv");
+            value["streams"][0]["avg_frame_rate"] = serde_json::json!(average);
+            value["streams"][0]["r_frame_rate"] = serde_json::json!(real);
+            let probe = parse_value(value).unwrap();
+            assert_eq!(
+                probe.avg_frame_rate,
+                Rational::from_ffprobe(expected),
+                "average {average} against {real}"
+            );
+        }
+        // Another container keeps both rates as ffprobe gives them.
+        let mut value = base_probe();
+        value["streams"][0]["avg_frame_rate"] = serde_json::json!("989/33");
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.avg_frame_rate, Rational::from_ffprobe("989/33"));
+    }
+
+    #[test]
+    fn an_flv_without_metadata_reads_its_end_timestamp_as_a_length_from_the_video_start() {
+        // When the reader cannot read the file, the probe still takes the video start off the
+        // end timestamp that ffprobe reports.
+        let mut probe = flv_probe();
+        let length = probe.approximate_duration_seconds.unwrap();
+        assert!((length - (1354.488 - 1234.588)).abs() < 1e-9, "{length}");
+        correct_flv_probe(&mut probe, None);
+        assert_eq!(probe.approximate_duration_seconds, Some(length));
+    }
+
+    #[test]
+    fn a_length_that_the_tags_put_below_zero_keeps_the_probe() {
+        let mut probe = flv_probe();
+        let before = probe.approximate_duration_seconds;
+        correct_flv_probe(
+            &mut probe,
+            Some(crate::flv::locate::Extent {
+                first_video_pts: Some(1_234_588),
+                last_video_pts: Some(1_000),
+            }),
+        );
+        assert_eq!(probe.approximate_duration_seconds, before);
+    }
+
+    #[test]
+    fn the_tag_length_converts_a_start_in_another_time_base() {
+        let mut probe = flv_probe();
+        probe.video_time_base = Rational::new(1, 90_000).unwrap();
+        probe.video_start_pts = Some(Pts::new(90_000));
+        correct_flv_probe(
+            &mut probe,
+            Some(crate::flv::locate::Extent {
+                first_video_pts: None,
+                last_video_pts: Some(11_000),
+            }),
+        );
+        let length = probe.approximate_duration_seconds.unwrap();
+        assert!((length - (10.0 + 1.0 / 30.0)).abs() < 1e-9, "{length}");
+    }
+
+    #[test]
+    fn the_flv_correction_reads_the_tags_of_a_real_file() {
+        let recording =
+            crate::flv::test_support::recording(&crate::flv::test_support::RecordingOptions {
+                seconds: 20,
+                ..Default::default()
+            });
+        let dir = crate::flv::test_support::TestDirectory::new();
+        let path = dir.path.join("source.flv");
+        std::fs::write(&path, &recording.bytes).unwrap();
+        let mut probe = flv_probe();
+        probe.video_start_pts = Some(Pts::new(67));
+        correct_flv_file(&mut probe, &path);
+        let last = recording.frames.iter().map(|f| f.2).max().unwrap();
+        let expected = (last as f64 + 1000.0 / 30.0 - 67.0) / 1000.0;
+        let length = probe.approximate_duration_seconds.unwrap();
+        assert!(
+            (length - expected).abs() < 1e-9,
+            "{length} against {expected}"
+        );
+        // A file with another signature keeps the probe.
+        let other = dir.path.join("other.flv");
+        std::fs::write(&other, b"not an flv").unwrap();
+        let mut probe = flv_probe();
+        let before = probe.approximate_duration_seconds;
+        correct_flv_file(&mut probe, &other);
+        assert_eq!(probe.approximate_duration_seconds, before);
+    }
+
+    #[test]
+    fn the_video_start_comes_from_a_numeric_start_pts_or_from_start_time() {
+        let mut value = base_probe();
+        value["streams"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("duration");
+        value["streams"][0]["start_pts"] = serde_json::json!(6030);
+        value["format"]["duration"] = serde_json::json!("10.02");
+        value["format"]["start_time"] = serde_json::json!("0.044000");
+        let numeric = parse_value(value.clone()).unwrap();
+        assert_eq!(numeric.video_start_pts, Some(Pts::new(6030)));
+        let expected = 10.02 - (6030.0 / 90_000.0 - 0.044);
+        assert!((numeric.approximate_duration_seconds.unwrap() - expected).abs() < 1e-9);
+
+        value["streams"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("start_pts");
+        value["streams"][0]["start_time"] = serde_json::json!("0.067000");
+        let from_text = parse_value(value).unwrap();
+        let expected = 10.02 - (0.067 - 0.044);
+        assert!((from_text.approximate_duration_seconds.unwrap() - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_video_that_starts_before_the_container_takes_nothing_off() {
+        let mut value = base_probe();
+        value["streams"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("duration");
+        value["format"]["duration"] = serde_json::json!("10.02");
+        value["format"]["start_time"] = serde_json::json!("0.500000");
+        // The fixture video starts at -1800/90000 s, before the container start.
+        assert_eq!(
+            parse_value(value).unwrap().approximate_duration_seconds,
+            Some(10.02)
+        );
+    }
+
+    #[test]
+    fn a_matroska_length_with_a_large_start_falls_back_to_the_lead() {
+        // An MKV whose Duration is a length, as another muxer writes it, starting at 1000 s.
+        let mut value = base_probe();
+        value["streams"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("duration");
+        value["streams"][0]["time_base"] = serde_json::json!("1/1000");
+        value["streams"][0]["start_pts"] = serde_json::json!("1000033");
+        value["format"]["format_name"] = serde_json::json!("matroska,webm");
+        value["format"]["duration"] = serde_json::json!("120.000000");
+        value["format"]["start_time"] = serde_json::json!("1000.000000");
+        let length = parse_value(value)
+            .unwrap()
+            .approximate_duration_seconds
+            .unwrap();
+        assert!((length - (120.0 - 0.033)).abs() < 1e-9, "{length}");
+    }
+
+    #[test]
+    fn a_matroska_without_a_video_start_takes_the_container_start_off() {
+        let mut value = base_probe();
+        value["streams"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("duration");
+        value["streams"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("start_pts");
+        value["format"]["format_name"] = serde_json::json!("matroska,webm");
+        value["format"]["duration"] = serde_json::json!("1354.588000");
+        value["format"]["start_time"] = serde_json::json!("1234.567000");
+        let length = parse_value(value)
+            .unwrap()
+            .approximate_duration_seconds
+            .unwrap();
+        assert!((length - 120.021).abs() < 1e-9, "{length}");
     }
 
     #[test]

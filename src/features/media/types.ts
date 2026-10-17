@@ -122,7 +122,11 @@ export type MediaProbe = {
   videoStartPts: Pts | null;
   /** Reported stream duration in video time base ticks, or null if indeterminate. */
   videoDurationTicks: TickCount | null;
-  /** Approximate duration in seconds for UI layout and seek estimates, or null if unavailable. */
+  /**
+   * Approximate duration in seconds for UI layout and seek estimates, or null if unavailable.
+   * It counts from the first video frame, as `videoDurationTicks` does (ADR 046): the probe
+   * takes the lead of the video start off `format.duration`, and reads FLV from its tags.
+   */
   approximateDurationSeconds: number | null;
   /** Average frame rate as an exact positive rational fraction, or null if unstated. */
   avgFrameRate: Rational | null;
