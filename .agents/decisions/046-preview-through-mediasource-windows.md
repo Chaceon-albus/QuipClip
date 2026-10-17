@@ -293,8 +293,19 @@ correct for it. The first-frame anchor of ADR 003 would bind `videoStartPts` to 
 A self-check runs on each element. The page reads the first frame of the first window from its
 first `moof`: the `tfdt` plus the composition offset of the first sample. On FLV, Rust also
 reports the PTS of the first keyframe tag of the window, and the two must be equal. The first
-frame callback must report the media time of that frame within half a frame interval. Otherwise
-the calibration becomes unavailable for the attachment, and the page logs both values.
+frame callback must report the media time of that frame within half a frame interval, or within
+20 ms when the source has no nominal frame rate. Otherwise the calibration becomes unavailable
+for the attachment, and the store logs both values. A reload attaches a new element, which the
+check covers again.
+
+A play or a seek before the first frame callback can make that callback name another frame,
+so the check does not run. A playing element reports only the latest frame since the last
+callback. This holds for a play that the store did not start, such as from a media key. An exact
+seek into the expected frame is the exception, and the check still runs. The seek over a start
+gap is such a seek. The store counts a seek as one into the expected frame when its target lies
+in a set range. The range starts a quarter of a frame interval before the frame and ends three
+quarters into it. A seek to the start of the next frame therefore never counts, also on a source
+whose frames start before their nominal start.
 
 When no frame lies at the element's position after the first window, the page asks the store to
 seek to the first buffered frame. The store stays the only writer of `currentTime`. A file that
@@ -313,9 +324,15 @@ specification says the same of an append. The page therefore calls `endOfStream`
 each such change while the last window stays buffered.
 
 For a MediaSource source, a seek request that is not a scrub sample can replace the running seek
-at once (ADR 022 amendment). It does so when the target of the running seek is not buffered.
-Otherwise the next click waits for the window of the previous one. A scrub sample still waits in
-the queue of ADR 022, so a drag still shows a picture each time a window arrives.
+at once (ADR 022 amendment). It does so when the target of the running seek is not buffered and
+the window of that seek does not deliver the new target. Otherwise the next click waits for the
+window of the previous one. The store counts a target from 1 s before the running target to 10 s
+after it as delivered. The window starts at the keyframe at or before the running target. The
+page waits for a running window when the target lies at most 10 s after the data that the window
+appended. The exact seek at the release of a drag and a forward frame step stay in that
+part, so they wait in the queue and do not start the window again. A backward frame step stays
+in it for its first second only. A scrub sample always waits in the queue of ADR 022, so a drag
+still shows a picture each time a window arrives.
 
 ### The scrub cue
 
