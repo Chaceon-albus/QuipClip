@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 027, ADR 043
+- Amended by: ADR 027, ADR 043, ADR 046
 
 ## Context
 
@@ -63,6 +63,9 @@ guards to completion.
 
 The handler blocks the event loop thread inline. It therefore does not call `prevent_exit`,
 which would need a second path to resume the exit.
+
+(Added on 2026-10-17.) The same handler kills each FFmpeg process of a preview remux window
+(ADR 046). A remux window writes no file, so the handler gives it no part of the budget above.
 
 ## Consequences
 

@@ -4,7 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 019
-- Amended by: ADR 035, ADR 039
+- Amended by: ADR 035, ADR 039, ADR 046
 
 ## Context
 
@@ -132,6 +132,12 @@ speed of the decoder.
 `seekNominal` calculates its step from the queued target when one exists, and from
 `currentTime` when none exists. A held arrow key therefore continues from the last
 request.
+
+(Changed on 2026-10-17.) A source that plays through a `MediaSource` (ADR 046) has one
+exception. Its seek outside the buffered data stays `seeking` until a window delivers that data.
+A request that is not a scrub sample therefore replaces the running seek at once when the target
+of the running seek is not buffered. A scrub sample still waits in the queue, so a drag still
+shows a picture each time a window arrives.
 
 (Changed on 2026-09-23.) On the frame grid, the step aims at the middle of the target
 nominal frame, not at its nominal start. Containers such as Matroska store each PTS rounded

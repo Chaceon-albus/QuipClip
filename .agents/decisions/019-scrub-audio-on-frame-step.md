@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-20
 - Deciders: capric98
-- Amended by: ADR 022
+- Amended by: ADR 022, ADR 046
 
 ## Context
 
@@ -53,6 +53,12 @@ QuipClip takes the first design.
 A hidden `<audio>` element carries the same asset URL as the preview `<video>` element.
 `src/features/playback/scrubAudio.ts` holds one controller that owns that element. The
 controller has four operations: attach, detach, request and stop.
+
+(Changed on 2026-10-17.) A source that plays through a `MediaSource` (ADR 046) has no hidden
+`<audio>` element. WKWebView starts the media clock of such an element 210 to 250 ms after
+`play()`, so a burst ended about 425 ms after its request. The cue of that source plays PCM that
+FFmpeg decodes from each window, through Web Audio. The rules of this record for the burst
+length, the continuation, the stop, the backward repeat and the drag keep their behaviour.
 
 `seekNominal` is the only action that requests a burst. It requests one after it assigns
 `currentTime`. It passes the same target value it gave the preview element. Every other

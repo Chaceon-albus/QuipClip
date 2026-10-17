@@ -66,6 +66,7 @@ document summarizes them and shows how the parts fit together.
 | [`043-write-the-audio-in-a-second-process.md`](../.agents/decisions/043-write-the-audio-in-a-second-process.md)                             | The audio of an export with video comes from a second `ffmpeg`, by a pipe  |
 | [`044-arrow-keys-step-a-frame-while-paused.md`](../.agents/decisions/044-arrow-keys-step-a-frame-while-paused.md)                           | Paused arrows step a frame, playing arrows jump 5 s, D and F step frames   |
 | [`045-select-several-segments-and-delete-them.md`](../.agents/decisions/045-select-several-segments-and-delete-them.md)                     | `Cmd`/`Ctrl` with a click or `A` selects segments, Delete removes them all |
+| [`046-preview-through-mediasource-windows.md`](../.agents/decisions/046-preview-through-mediasource-windows.md)                             | A container the web view cannot open plays from fMP4 windows               |
 
 ## Shape
 
@@ -172,15 +173,24 @@ entry in the CSP, and a scope that Rust extends for each file the user opens, an
 file only. A file drop is the exception: Tauri itself adds every dropped file and
 folder to the scope. ADR 003 records why the application accepts that.
 
-The two target web views decode different codec sets. The planned proxy fallback will use
-probe metadata, `canPlayType()`, and the media error event to detect unsupported native
-decoding. FFmpeg will then create a compatible proxy in the application data directory.
+The two target web views decode different codec sets. A source whose container the web view
+cannot open plays through a `MediaSource` (ADR 046). This applies to FLV, MPEG-TS, and MKV on
+macOS, when `MediaSource.isTypeSupported` accepts the video codec. FFmpeg remuxes one window of
+the source at a time into fMP4 with `-c copy`. Rust sends the bytes to the page through a
+channel. For FLV, Rust finds the keyframe itself and writes the window to the stdin of FFmpeg.
+FFmpeg cannot seek in an FLV without a keyframe index: it reads the file from its start. For
+MPEG-TS and MKV, FFmpeg seeks with `-ss`. The preview reads only the windows that it plays. It
+writes only a small `head.flv` and a keyframe sidecar to the application data directory. AVI,
+ASF (WMV) and a video codec that the web view cannot decode keep the decode failure panel.
 
-A proxy must preserve the source timing mapping or supply an explicit map to source PTS.
-Proxy state and paths are runtime cache data. They do not enter the project file.
+The windows keep the absolute source timestamps, and the page sets `timestampOffset` so that
+media time 0 is `videoStartPts`. The calibration of such a source is therefore known before its
+first frame. A self-check compares the first frame callback with the first frame of the window. The page acknowledges each chunk, so FFmpeg and the reads of a network share stop while
+the page has 8 MiB that it did not append. A seek outside the buffered data requests a new window
+at the keyframe at or before the target.
 
-The first `requestVideoFrameCallback` after source load supplies a browser `mediaTime`
-anchor. QuipClip associates that value with `videoStartPts`. Later callbacks confirm the
+For every other source, the first `requestVideoFrameCallback` after source load supplies a
+browser `mediaTime` anchor. QuipClip associates that value with `videoStartPts`. Later callbacks confirm the
 browser-presented frame and its `mediaTime`. QuipClip infers source PTS through the
 calibrated mapping. RVFC does not report raw FFmpeg PTS.
 
@@ -226,7 +236,8 @@ carries the same asset URL as the preview element. One controller in
 `src/features/playback/scrubAudio.ts` seeks that element and plays 50 milliseconds of its
 media. `seekNominal` starts a burst, and so does a scrub seek during a drag of the playhead
 (ADR 022). Every other playback action stops one, so a cue and the real playback never
-sound together.
+sound together. A `MediaSource` source has no such element: its cue plays PCM that FFmpeg decodes
+from each window, through Web Audio, with the same rules (ADR 046).
 
 The controller stops the element when its media clock reaches one burst past the latest
 target. A timer is not correct, because the clock of Chrome can stand almost still for 300
@@ -342,6 +353,10 @@ come from the frame count and the `fps` value of `-progress`, and one presenter 
 for every display. The dialog smooths the frame count between two `-progress` blocks, and one
 clock changes its remaining time and its elapsed time together. One `ProgressBar` component in
 `src/components/common/` draws every bar.
+
+An FLV input does not use `-ss` (ADR 046). It opens a `concat` of `head.flv` and a `subfile`
+slice that starts at the keyframe at or before the seek. The export then reads only the parts of
+the file around its segments.
 
 The seek supplies the speed. The trim supplies the exactness. An input seek alone is not
 frame-exact: on MPEG-TS a seek lands only on key frames, and it can land after the target.

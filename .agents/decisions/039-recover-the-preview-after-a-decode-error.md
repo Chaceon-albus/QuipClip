@@ -4,6 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 003, ADR 022, ADR 026
+- Amended by: ADR 046
 
 ## Context
 
@@ -69,6 +70,12 @@ attach of the same source takes them again. An attach of another source, `syncUn
 
 Only a seek of the user reloads. Seeking into the bad part again stalls again, and the next seek
 reloads once more. There is no loop.
+
+(Changed on 2026-10-17.) For a source that plays through a `MediaSource` (ADR 046), the new
+element gets a new MediaSource. It loads the start of the file, as a new source does, and the
+request of the reload then seeks it. On an FLV source, a window that fails to decode first gets
+one scan of the tag headers for a new decoder configuration and one retry. The stall of this
+record applies after that.
 
 ### The notice
 

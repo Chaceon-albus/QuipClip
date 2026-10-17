@@ -4,6 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 002
+- Amended by: ADR 046
 
 ## Context
 
@@ -71,6 +72,10 @@ drop-frame or non-drop-frame timecode.
 The millisecond format is used when the source has no nominal frame rate. It is also used
 when the average frame rate and the real frame rate differ, because the source then has a
 variable frame rate and `FF` would not name a frame.
+
+(Changed on 2026-10-17.) An FLV with millisecond timestamps reports a wrong average rate, such
+as 989/33 for 30 fps. For FLV, the probe reports `r_frame_rate` as the average rate when the two
+lie within 2 % (ADR 046). Such a source then shows the frame timecode.
 
 The ruler labels follow the same format. A label names the frame that the preview shows at
 its tick, and it leaves out the parts that the tick step does not need: for example `00:05`

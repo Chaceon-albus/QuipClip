@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 039
+- Amended by: ADR 039, ADR 046
 
 ## Context
 
@@ -155,6 +155,16 @@ sidecar or source revision does not match.
 The cache needs a size limit and a clear-cache action. Proxy generation can use H.264,
 YUV 4:2:0, AAC, fast-start metadata, and a bounded keyframe interval for browser
 compatibility. It must not restore the obsolete CFR project-frame-grid conversion.
+
+(Changed on 2026-10-17.) ADR 046 replaces the proxy file. A source that the web view cannot
+open plays through a `MediaSource`. FFmpeg feeds it with fMP4 windows that it remuxes with
+`-c copy` on demand. The windows keep the absolute source timestamps, and the page sets
+`timestampOffset` so that media time 0 is `videoStartPts`. The calibration of such a source is
+therefore known before its first frame. The store takes the anchor at media time 0 when the
+metadata loads. A self-check compares the first frame callback with the first frame of the
+window. The first-frame anchor of the section "PTS calibration" stays for every other source.
+For FLV, the probe reports `r_frame_rate` as the average rate when the two lie within 2 %, so
+the nominal step above uses that rate (ADR 046).
 
 ### Preview modes
 

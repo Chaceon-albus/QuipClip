@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 028
+- Amended by: ADR 028, ADR 046
 
 ## Context
 
@@ -50,6 +50,12 @@ does not identify the end of the final presented frame.
 
 `approximateDurationSeconds` must be finite and non-negative when it exists. An invalid
 value is unavailable metadata. It cannot affect canonical project state.
+
+(Changed on 2026-10-17.) `approximateDurationSeconds` counts from the first video frame, as
+`videoDurationTicks` does (ADR 046). When ffprobe gives no stream duration, the probe subtracts
+the lead of the video start over the container start from `format.duration`. FLV and Matroska
+have their own rules in ADR 046. ADR 046 also gives a `MediaSource` this duration. That is a
+browser value for seeks, so the rule above still holds.
 
 A segment is a half-open source interval `[inPts, outPts)`. `inPts` is inclusive.
 `outPts` is the PTS of the first excluded presented frame. A valid segment has

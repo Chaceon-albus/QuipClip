@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-04
 - Deciders: capric98
-- Amended by: ADR 023, ADR 036, ADR 040, ADR 043
+- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046
 
 ## Context
 
@@ -569,6 +569,13 @@ The renderer must not emit a trailing `-ss 0`.
 
 `formatStartTime` is necessary because of measurement 8. `probe.rs` must report it.
 
+(Changed on 2026-10-17.) An FLV input does not use `-ss` (ADR 046). FFmpeg cannot seek in an
+FLV without a keyframe index, so `-ss` reads the file from its start. The input opens
+`concat:<head.flv>|subfile,,start,<X>,end,<size>,,:<path>`, where `X` is the byte offset of the
+keyframe at or before In − `SEEK_MARGIN_SECONDS`. `-copyts` and the trim on raw PTS do not
+change. ADR 046 lists the cases where an FLV input keeps `-ss`. The preview uses the same
+`SEEK_MARGIN_SECONDS` as its first margin for the windows of MPEG-TS and MKV.
+
 ### The command
 
 One process writes one output. The renderer opens one input for each segment.
@@ -825,6 +832,9 @@ filter through that enumeration. Version 1 has one value.
 The preset value `source` means the constant frame rate that `avg_frame_rate` reports, and
 then `r_frame_rate`. A later variable-frame-rate mode will need a different value, and the
 settings schema version will increase.
+
+(Changed on 2026-10-17.) For FLV, the probe reports `r_frame_rate` as the average rate when the
+two lie within 2 % (ADR 046), so `source` takes that rate.
 
 The expected frame count is optional on the interface. A variable-frame-rate mode cannot
 predict a frame count.
