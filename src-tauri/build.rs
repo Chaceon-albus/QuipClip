@@ -32,6 +32,9 @@ const APP_COMMANDS: &[&str] = &[
     "close_settings_window",
     "report_settings_draft",
     "broadcast_preference",
+    "open_preview_window",
+    "ack_preview_window",
+    "close_preview_window",
 ];
 
 fn main() {

@@ -33,6 +33,9 @@ export const BACKEND_COMMANDS = {
   CLOSE_SETTINGS_WINDOW: "close_settings_window",
   REPORT_SETTINGS_DRAFT: "report_settings_draft",
   BROADCAST_PREFERENCE: "broadcast_preference",
+  OPEN_PREVIEW_WINDOW: "open_preview_window",
+  ACK_PREVIEW_WINDOW: "ack_preview_window",
+  CLOSE_PREVIEW_WINDOW: "close_preview_window",
 } as const;
 
 export type BackendCommand = (typeof BACKEND_COMMANDS)[keyof typeof BACKEND_COMMANDS];

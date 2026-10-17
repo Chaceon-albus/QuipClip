@@ -27,7 +27,7 @@ pub(crate) mod test_support;
 
 use head::FlvHead;
 use locate::{Extent, LocateState, Located};
-use reader::{is_canceled, FileSource};
+use reader::{is_canceled, ByteSource, FileSource};
 use scan::configs_between;
 use std::fmt;
 use std::fs::File;
@@ -37,6 +37,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
 use table::{ConfigTag, KeyframeEntry, KeyframeTable};
 use tag::TagKind;
+
+/// How far [`FlvSource::next_keyframe_from`] walks: more than one GOP of a recording at a high
+/// bit rate.
+pub const NEXT_KEYFRAME_REACH: u64 = 64 * 1024 * 1024;
 
 /// Why the reader could not do what it was asked.
 #[derive(Debug)]
@@ -218,6 +222,52 @@ impl FlvSource {
         Ok(tag.header.kind == TagKind::Video
             && tag.is_keyframe()
             && scan::chain_holds(&mut source, offset, scan::RESYNC_CHAIN)?)
+    }
+
+    /// The tag at `offset`, when a valid tag starts there.
+    pub fn tag_at(&self, offset: u64) -> Result<Option<scan::Tag>, FlvError> {
+        let mut source = FileSource::open(&self.path, None)?;
+        Ok(scan::read_tag(&mut source, offset)?)
+    }
+
+    /// The first video keyframe at or after `offset`, which need not be a tag boundary: a
+    /// resync finds the next boundary first. The walk stops after [`NEXT_KEYFRAME_REACH`] bytes.
+    /// A window that stopped at a restart of the timestamps or at a damaged tag resumes there.
+    pub fn next_keyframe_from(
+        &self,
+        offset: u64,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Option<KeyframeEntry>, FlvError> {
+        let mut source = FileSource::open(&self.path, cancel)?;
+        let len = source.len();
+        let start = match scan::read_tag(&mut source, offset)? {
+            Some(tag) => Some(tag),
+            None => scan::resync(
+                &mut source,
+                offset,
+                offset.saturating_add(scan::RESYNC_REACH),
+            )?,
+        };
+        let Some(mut tag) = start else {
+            return Ok(None);
+        };
+        let limit = tag.offset.saturating_add(NEXT_KEYFRAME_REACH).min(len);
+        loop {
+            if tag.header.kind == TagKind::Video && tag.is_keyframe() {
+                return Ok(Some(KeyframeEntry {
+                    offset: tag.offset,
+                    dts: tag.dts(),
+                    pts: tag.pts(),
+                }));
+            }
+            if tag.end() >= limit {
+                return Ok(None);
+            }
+            match scan::read_tag(&mut source, tag.end())? {
+                Some(next) => tag = next,
+                None => return Ok(None),
+            }
+        }
     }
 
     /// The first and last video presentation times.

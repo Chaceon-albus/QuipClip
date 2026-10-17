@@ -253,6 +253,11 @@ impl<R: Read> TagStream<R> {
         self.offset
     }
 
+    /// The reader that the stream reads from.
+    pub fn reader(&self) -> &R {
+        &self.reader
+    }
+
     /// Read the next tag into `buf`, replacing its contents. Return `None` at the end of the
     /// stream, an `UnexpectedEof` error when the stream ends inside a tag, as at the end of a
     /// recording that was killed, and an `InvalidData` error for a damaged tag.

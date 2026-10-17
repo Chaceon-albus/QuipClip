@@ -89,12 +89,12 @@ impl ImportMediaError {
 }
 
 #[derive(Debug)]
-struct ValidatedMedia {
-    path: PathBuf,
-    path_text: String,
+pub(crate) struct ValidatedMedia {
+    pub(crate) path: PathBuf,
+    pub(crate) path_text: String,
     file_name: String,
-    size: u64,
-    mtime: i64,
+    pub(crate) size: u64,
+    pub(crate) mtime: i64,
 }
 
 /// Validate, inspect, and authorize exactly one user-selected media file.
@@ -190,7 +190,7 @@ fn read_source_revision_blocking(path: &str) -> Result<SourceRevision, ImportMed
     })
 }
 
-fn validate_media(path: &str) -> Result<ValidatedMedia, ImportMediaError> {
+pub(crate) fn validate_media(path: &str) -> Result<ValidatedMedia, ImportMediaError> {
     if path.trim().is_empty() || path.contains('\0') {
         return Err(ImportMediaError::new(ImportMediaErrorCode::InvalidPath));
     }

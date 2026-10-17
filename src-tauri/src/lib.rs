@@ -85,6 +85,9 @@ pub fn run() {
         // the registry and outlives the command that claimed it, so the managed value is the
         // `Arc` itself rather than the registry.
         .manage(Arc::new(ffmpeg::export::ExportRegistry::default()))
+        // The remux windows of the preview, one for each lane (ADR 046). The commands share it
+        // with the threads of each window, so the managed value is the `Arc`.
+        .manage(Arc::new(ffmpeg::preview::PreviewWindows::default()))
         // The destination of the last published export. The show command reads the path from
         // here, so the web view names a run and never a path.
         .manage(commands::export_output::PublishedExports::default())
@@ -102,6 +105,28 @@ pub fn run() {
         //
         // When the Settings window is destroyed, its page cannot report that its preset draft
         // is gone, so Rust does it for the quit guard of the main window (ADR 027).
+        // A new page in the main window, as after a reload or a crash of its content process, no
+        // longer reads the remux windows of the page before it, and Tauri still delivers to a
+        // channel of that page. The windows stop (ADR 046).
+        .on_page_load(|webview, payload| {
+            if webview.label() == MAIN_WINDOW_LABEL
+                && payload.event() == tauri::webview::PageLoadEvent::Started
+            {
+                // The page numbers its requests in microseconds since the Unix epoch, so every
+                // request of the new page lies above this floor and every late one of the old
+                // page below it.
+                let floor = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_micros() as u64)
+                    .unwrap_or(0);
+                if let Some(windows) = webview
+                    .app_handle()
+                    .try_state::<Arc<ffmpeg::preview::PreviewWindows>>()
+                {
+                    windows.cancel_all(floor);
+                }
+            }
+        })
         .on_window_event(|window, event| {
             if window.label() == SETTINGS_WINDOW_LABEL
                 && matches!(event, tauri::WindowEvent::Destroyed)
@@ -110,6 +135,8 @@ pub fn run() {
             }
             if window.label() == MAIN_WINDOW_LABEL && matches!(event, tauri::WindowEvent::Destroyed)
             {
+                // The page that read the remux windows is gone with its window (ADR 046).
+                stop_preview_windows(window.app_handle());
                 if let Some(settings) = window
                     .app_handle()
                     .get_webview_window(SETTINGS_WINDOW_LABEL)
@@ -162,7 +189,10 @@ pub fn run() {
             commands::settings_window::take_settings_window_request,
             commands::settings_window::close_settings_window,
             commands::settings_window::report_settings_draft,
-            commands::preferences::broadcast_preference
+            commands::preferences::broadcast_preference,
+            commands::preview::open_preview_window,
+            commands::preview::ack_preview_window,
+            commands::preview::close_preview_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -204,15 +234,27 @@ pub fn run() {
                     Err(error) => eprintln!("quit: the quit request was not sent: {error}"),
                 }
             }
+            stop_preview_windows(handle);
             stop_export_before_exit(handle);
         }
         // After an `ExitRequested` that was not prevented, the export was already asked to
         // stop and the deadline is already set, so this call waits only for what remains of
         // the budget. An exit that passes through both handlers waits at most
         // `EXIT_CANCEL_BUDGET` in total.
-        tauri::RunEvent::Exit => stop_export_before_exit(handle),
+        tauri::RunEvent::Exit => {
+            stop_preview_windows(handle);
+            stop_export_before_exit(handle);
+        }
         _ => {}
     });
+}
+
+/// Kill the FFmpeg processes of the preview remux windows and refuse new ones (ADR 046, ADR 017
+/// amendment). A window writes no file, so the exit waits for nothing more.
+fn stop_preview_windows(handle: &tauri::AppHandle) {
+    if let Some(windows) = handle.try_state::<Arc<ffmpeg::preview::PreviewWindows>>() {
+        windows.close_for_exit();
+    }
 }
 
 /// Stops a running export before the process ends, and waits until the exit deadline
@@ -582,6 +624,10 @@ mod tests {
         "load_settings",
         "save_settings",
         "open_settings_window",
+        // The remux windows of the MediaSource preview (ADR 046).
+        "open_preview_window",
+        "ack_preview_window",
+        "close_preview_window",
     ];
 
     /// The commands that the page of the Settings window calls: the settings file, its

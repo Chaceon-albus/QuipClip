@@ -3,6 +3,7 @@
 pub mod capabilities;
 pub mod export;
 pub mod locate;
+pub mod preview;
 pub mod probe;
 
 pub use capabilities::{
