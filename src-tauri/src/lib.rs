@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod ffmpeg;
+pub mod flv;
 pub mod fsutil;
 #[cfg(target_os = "macos")]
 mod menu;
