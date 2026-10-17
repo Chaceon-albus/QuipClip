@@ -349,12 +349,14 @@ window. It disables the cue for that source.
 and the ruler already assume:
 
 - The stream duration, when ffprobe gives it.
-- For FLV: the PTS of the last video tag, plus one interval of `r_frame_rate`, minus the video
-  start PTS. Rust reads the tags (measurement 5).
-- For Matroska: `format.duration` minus the video start (measurement 16). This follows the
-  convention of FFmpeg's muxer. An MKV from another muxer that starts away from 0 then reads
-  short by its start. QuipClip assumes that such files are rare, because their timestamps
-  usually start at 0.
+- For FLV that the reader can read: the PTS of the last video tag, plus one frame interval,
+  minus the video start PTS (measurement 5). The interval comes from the average rate after the
+  rule below.
+- For Matroska, and for FLV that the reader cannot read: `format.duration` minus the video
+  start. FFmpeg's muxers write the end timestamp as the duration of a file with a start offset
+  (measurements 5 and 16). When that gives less than 0, the duration was a length, as another
+  muxer or the `onMetaData` of an FLV gives it, and the next rule applies. QuipClip assumes that
+  a length with a small start offset is rare: such a file reads short by its start.
 - Otherwise: `format.duration` minus (video start − container start).
 
 This also changes the fallback of the native containers by the audio lead, so that it agrees
@@ -362,10 +364,13 @@ with `videoDurationTicks` (ADR 002 amendment). The MediaSource duration is
 `approximateDurationSeconds`. It is a browser value, and it never enters the project state.
 
 For FLV, when `r_frame_rate` is valid and `avg_frame_rate` lies within 2 % of it, the probe
-reports `r_frame_rate` as the average rate. The measured averages 989/33 and 1000/33 lie 0.1 %
-and 1.01 % from 30/1 (measurement 5). The nominal step of ADR 003, the frame grid of ADR 028 and
-the `source` rate of the export (ADR 014) then use 30/1. A rate that differs by more than 2 %
-stays as the probe gives it.
+reports `r_frame_rate` as the average rate. The rule reads only what ffprobe reports, so the
+probe of an import and the probe of an export agree. The measured averages 989/33 and 1000/33
+lie 0.1 % and 1.01 % from 30/1 (measurement 5). On an FLV of 30000/1001 frames per second,
+ffprobe reported `r_frame_rate` 30000/1001 and `avg_frame_rate` 989/33, and the rule gives
+30000/1001. The nominal step of ADR 003, the frame grid of ADR 028 and the `source` rate of the
+export (ADR 014) then use the real rate. A rate that differs by more than 2 % stays as the probe
+gives it.
 
 ### The export
 
