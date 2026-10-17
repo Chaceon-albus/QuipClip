@@ -224,6 +224,16 @@ Rust finds the keyframe at or before a target in this order:
    a timestamp more than 10 s below a timestamp at a lower offset, or a last tag before the first.
    Rust reports this to the page (see "Failures").
 
+When the walk of the head does not reach the first keyframe, as in a recording that starts in
+the middle of a long GOP, the locator walks the tags once to find it.
+
+On the files of the test of 2026-10-17, a locate with an empty table read 2.8 to 3.5 MB on the
+4 Mbit/s file with a GOP of 2 s. It read 6.5 to 21.9 MB on the 14 Mbit/s file with a GOP of
+10 s. Most of it is the walk back to the keyframe. The window that follows reads the same GOP
+again, so a seek with an empty table reads at most about two GOPs. A locate that the keyframe
+table answers reads nothing. The extent of the file (see "The probe") reads 0.2 to 0.6 MB at
+its end.
+
 The keyframe table grows with each window and each locate. Rust saves it beside `head.flv` in
 `<app_data>/flv-cache/<key>/`, where the key comes from the path, the size and the modification
 time of the source. The sidecar records that revision, and Rust ignores a sidecar of another
@@ -264,7 +274,9 @@ frame callback must report the media time of that frame within half a frame inte
 the calibration becomes unavailable for the attachment, and the page logs both values.
 
 When no frame lies at the element's position after the first window, the page asks the store to
-seek to the first buffered frame. The store stays the only writer of `currentTime`.
+seek to the first buffered frame. The store stays the only writer of `currentTime`. A file that
+starts in the middle of a GOP is such a case: media time 0 is then a frame that never shows, and
+the first window starts at the first keyframe.
 
 ### Seeks
 
@@ -413,6 +425,11 @@ The read of the audio gaps (ADR 014 measurement 28) uses the same input for FLV.
     keyframe PTS in a window. MSE drops them or shows errors, and the self-check then disables
     the calibration. QuipClip assumes that live encoders write closed GOPs.
   - An FLV whose timestamps decrease plays, but precise editing is disabled for it.
+  - The reader accepts a `PreviousTagSize` of 11 + data size only. FFmpeg also accepts other
+    values from some old muxers. Such a file fails the reader and keeps the decode failure
+    panel.
+  - The 32-bit timestamps of FLV wrap after 49.7 days. The reader reports a wrap as decreasing
+    timestamps.
 - Open checks:
   - The export with `concat` and `subfile` on Windows, with a drive letter, a UNC path and a
     `\\?\` path. Reading FFmpeg's `url_find_protocol` says that these work. Nothing on macOS

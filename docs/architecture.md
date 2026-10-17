@@ -87,6 +87,7 @@ document summarizes them and shows how the parts fit together.
 |                                                             |
 |  commands/   the IPC surface                                |
 |  ffmpeg/     locate, probe, capabilities, export            |
+|  flv/        FLV tags, keyframe locator, head.flv cache     |
 |  settings/   the settings file                              |
 |  fsutil.rs   atomic file replacement                        |
 |  procutil.rs child processes without a console window       |
