@@ -32,7 +32,7 @@ src/            React frontend
   types/            the project document types
   assets/brand/     the icon master
 src-tauri/      Rust backend
-  src/ffmpeg/       locate, probe, capabilities, export
+  src/ffmpeg/       locate, probe, capabilities, export, preview windows
   src/flv/          the FLV tag reader, the keyframe locator, head.flv and its cache
   src/settings/     the settings file
   src/menu.rs       the macOS application menu

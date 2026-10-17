@@ -86,7 +86,7 @@ document summarizes them and shows how the parts fit together.
 |  Rust backend    v                                          |
 |                                                             |
 |  commands/   the IPC surface                                |
-|  ffmpeg/     locate, probe, capabilities, export            |
+|  ffmpeg/     locate, probe, capabilities, export, preview   |
 |  flv/        FLV tags, keyframe locator, head.flv cache     |
 |  settings/   the settings file                              |
 |  fsutil.rs   atomic file replacement                        |

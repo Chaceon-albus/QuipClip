@@ -132,6 +132,13 @@ One more file is 1920x1080 at 14 Mbit/s with a GOP of 10 s.
       `play()`. The burst ended about 425 ms after the request.
     - A hidden `<video>` element and a window with video and audio gave the same delay in
       WKWebView.
+22. (Added with the window command.) The `first_pts` option of `aresample` counts samples of the
+    input rate of its filter, not of its output rate. With `aresample=48000:first_pts=N` on a
+    44.1 kHz source, N counted 44.1 kHz samples, and a large N cut every sample. With
+    `aresample=48000,aresample=async=1:first_pts=N`, a 1 kHz tone in the PCM started within
+    42 µs (44.1 kHz) and 333 µs (48 kHz) of the same tone in the FFmpeg decode of the source,
+    for a window from an FLV keyframe through stdin. For an MKV window with `-ss`, it started
+    within 250 µs and 167 µs.
 
 ## Decision
 
@@ -175,7 +182,9 @@ starts at a keyframe tag. It ends at the first of these:
 - the end of the file
 
 The next window starts at that keyframe tag. Two windows therefore never overlap, and no `-to` is
-necessary.
+necessary. The writer also ends the slice in front of a frame whose timestamp lies more than 10 s
+below an earlier one. The mp4 muxer refuses a decreasing timestamp and loses the fragment that it
+holds, so a slice that ran across a restart would lose the seconds before it.
 
 **MPEG-TS and MKV.** FFmpeg reads the file and seeks itself:
 
@@ -246,10 +255,24 @@ preview writes nothing else.
   30 s is buffered ahead of it.
 - One video window runs for each source at a time. A new request kills the running window. Each
   request takes a generation number, and Rust starts FFmpeg only while that number is still the
-  latest, so a slow locate never kills a newer window.
+  latest, so a slow locate never kills a newer window. The page also numbers the requests of
+  each lane, and Rust refuses a request with a lower number than one it already took, because
+  each request runs on its own thread and a slow check of the file can delay it.
+- A new page in the main window, as after a reload, stops every window. Tauri still delivers to
+  a channel of the page before, so Rust cannot see that page go. The page numbers its requests
+  in microseconds of the clock, and the reload sets the lowest number that each lane takes to
+  its own time. A late request of the old page then starts nothing, and every request of the new
+  page lies above the floor. After the exit, no request starts a window.
+- The lane of a window is free when its remux output ends. The next request then starts at once
+  and does not cut off the PCM of the window before it, which a close or the exit still stops.
 - The page acknowledges the bytes that it appended. Rust stops reading the stdout of FFmpeg while
   more than 8 MiB are not acknowledged. FFmpeg then stops, the stdin writer stops, and the reads
-  from the share stop. A window that the next request kills has read at most that much more.
+  from the share stop. The stdout and stdin pipes, one fragment that the muxer holds and the
+  1 MiB read buffer of the writer come on top, so about 10 MiB lie beyond the acknowledged
+  bytes. A window that the next request kills has read at most that much more.
+- An end message with the status `complete`, no resume point and no end of file comes from a
+  writer that did not report in time, as when a read of the share stalls. The page then resumes
+  by time from the last fragment that it appended.
 - An application exit kills every window process (ADR 017 amendment). A window writes no file,
   so the exit does not wait for it.
 
@@ -304,15 +327,15 @@ request (measurement 21). The user did not accept that delay. The page does not 
 An audio process decodes the audio of each window to PCM:
 
 ```
-ffmpeg ... -map 0:a:0 -af aresample=48000:async=1:first_pts=<start> -f s16le -ac 1 pipe:1
+ffmpeg ... -map 0:a:0 -af aresample=48000,aresample=async=1:first_pts=<start> -f s16le -ac 1 pipe:1
 ```
 
 `first_pts` makes sample 0 the start of the window, with silence or a cut against the
-timestamps. On FLV the stdin writer of the video window writes the same bytes to this process,
-so the source is read once. Measurement 11 tested this tee with an audio mux, and the unit that
-writes the PCM process measures it with the decode. The process starts only when the source has
-an audio stream. On MPEG-TS and MKV it runs its own `-ss` windows, and the cue requests one when its
-target lies outside the PCM that it holds. The output is about 96 KB/s.
+timestamps. It counts samples of the input rate of its filter, so the first `aresample` converts
+to 48 kHz (measurement 22). On FLV the stdin writer of the video window writes the same bytes to
+this process, so the source is read once (measurements 11 and 22). The process starts only when
+the source has an audio stream. On MPEG-TS and MKV it runs its own `-ss` windows, and the cue
+requests one when its target lies outside the PCM that it holds. The output is about 96 KB/s.
 
 The page keeps the PCM of the last windows. It plays each burst with an `AudioBufferSourceNode`
 that starts at the sample of the target, through a gain node that the Mute toggle sets. These
@@ -338,6 +361,10 @@ window. It disables the cue for that source.
   the last known config tag to the window start. The page then retries the window once with the
   config tags that the scan found. After that, the stall of ADR 039 applies.
 - A window fails before the source decoded: the panel that says that the file could not be read.
+- A read of the source fails, as on a share that stopped answering: the window ends as failed
+  with that reason, and the page can ask again. A damaged tag ends the window too, and the end
+  message names the first keyframe after the damage, so the page can play on from there. A
+  restart of the timestamps does the same.
 - FFmpeg is not found: the panel says that this preview needs FFmpeg.
 - The timestamps decrease: a notice says so, and the store disables precise editing for the
   source. MSE writes later data over earlier data of the same time, so marks there are not
@@ -439,6 +466,8 @@ The read of the audio gaps (ADR 014 measurement 28) uses the same input for FLV.
   - The export with `concat` and `subfile` on Windows, with a drive letter, a UNC path and a
     `\\?\` path. Reading FFmpeg's `url_find_protocol` says that these work. Nothing on macOS
     runs them.
-  - The preview through stdin on Windows.
+  - The preview through stdin on Windows. The anonymous pipes of Windows have small buffers,
+    so the time to the first fragment needs a measurement there. A slow feed would take a larger
+    buffer through a named pipe or a temporary slice file, not another design.
   - WebView2. Chrome is the only Chromium engine that the test measured.
   - HEVC. Both web views accept `hvc1`, but the test played only H.264.
