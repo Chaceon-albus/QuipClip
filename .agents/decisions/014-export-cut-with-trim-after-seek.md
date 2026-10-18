@@ -574,7 +574,10 @@ FLV without a keyframe index, so `-ss` reads the file from its start. The input 
 `concat:<head.flv>|subfile,,start,<X>,end,<size>,,:<path>`, where `X` is the byte offset of the
 keyframe at or before In − `SEEK_MARGIN_SECONDS`. `-copyts` and the trim on raw PTS do not
 change. ADR 046 lists the cases where an FLV input keeps `-ss`. The preview uses the same
-`SEEK_MARGIN_SECONDS` as its first margin for the windows of MPEG-TS and MKV.
+`SEEK_MARGIN_SECONDS` as its first margin for the windows of MPEG-TS and MKV. FFmpeg runs in the
+directory of `head.flv`, and the command names it by its file name. An FLV input is still longer
+than a seeked input, so fewer segments keep one input each before the renderer opens one input.
+ADR 046 gives the counts. The single input fits at the cap of 100 segments.
 
 ### The command
 

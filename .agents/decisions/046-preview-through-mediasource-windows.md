@@ -139,6 +139,14 @@ One more file is 1920x1080 at 14 Mbit/s with a GOP of 10 s.
     42 µs (44.1 kHz) and 333 µs (48 kHz) of the same tone in the FFmpeg decode of the source,
     for a window from an FLV keyframe through stdin. For an MKV window with `-ss`, it started
     within 250 µs and 167 µs.
+23. (Added with the export.) The test served a 212.9 MB FLV of 120 s without a keyframe index,
+    1920x1080 H.264 at about 14 Mbit/s with a GOP of 10 s and AAC, through the HTTP server of
+    items 1 to 6. It exported the segment from 100 s to 105 s with the trim of ADR 014. With
+    `-ss 95`, FFmpeg read 212.7 MB. With the `concat` input from the keyframe at 90.067 s, which
+    is the keyframe at or before In − 5 s, it read 30.9 MB. The `framemd5` of the 385 output
+    frames of video and audio was the same. The `concat` protocol limits the protocols of its
+    parts to `concat`, `file` and `subfile`, so the HTTP part needed `-protocol_whitelist`. The
+    export opens only files.
 
 ## Decision
 
@@ -474,15 +482,64 @@ gives it.
 An FLV input of the export uses the `concat` and `subfile` protocols (measurement 2) instead of
 `-ss`. This applies to both processes of an export with video and audio (ADR 043). It starts at
 the keyframe at or before In − `SEEK_MARGIN_SECONDS`, and `-copyts` and the trim on raw PTS of
-ADR 014 stay. Rust writes `head.flv` to the cache before the plan. The input keeps `-ss` in
-these cases:
+ADR 014 stay. For a late segment, this input read 30.9 MB where `-ss` read 212.7 MB, and the
+frames were the same (measurement 23).
 
-- A path holds `|`, which `concat` cannot escape.
+Before the plan, Rust locates the keyframe of each segment and writes `head.flv` to the cache.
+The export uses the same open source as the preview, so it knows what the windows found, and
+the cache keeps the directory of the source while the source is open. All the inputs of an
+export share one head: the head of the earliest slice. FFmpeg runs in the directory of the head,
+and the command names the head by its file name, so the path of the application data does not
+make each input longer. The single input of ADR 014 opens the earliest slice.
+
+Then ffprobe decodes the start of each slice in one run: the first 64 packets of both streams, or
+the first 8 video packets when the check leaves out the audio. All these runs share one
+`PROBE_TIMEOUT` of 30 s. The check looks for a config change that no read has seen,
+because a slice after such a change decodes with the configuration of the head:
+
+- The first video frame must decode with no error at the picture size of the probe.
+- When the export writes audio and the audio stream has packets, the audio frames must decode
+  with no error, with the channels of the probe. A raw AAC frame does not carry its sample
+  rate, so the audio of a slice after a change of the rate decodes with no error at the rate of
+  the head. The timestamps of the tags keep the real timing, so the check compares each step
+  between two frames with the samples of the first frame at the rate of the probe. It skips a
+  step longer than 1.5 times that time, which is a gap that the export fills, and it needs 4
+  other steps. The sum of these steps must be within 2 % of the time of their samples, and at
+  least within 3 ms. A change from 44100 Hz to 48000 Hz moves the timestamps by 8 %.
+
+The slice from the first frame of the file needs no check, because the head holds the
+configurations of the start of the file. The check is a heuristic. A frame can decode at the
+right size with no error and still use a wrong parameter of the head. A harmless error line
+refuses the slices. Audio that starts after the 64 packets, audio timestamps that do not
+advance, and more jitter than the tolerance also refuse them. The export then uses `-ss`, which
+reads more and is correct. A cancel during the locate or the check ends the export as canceled.
+
+The input keeps `-ss` in these cases:
+
+- A path holds `|`, which `concat` cannot escape. This includes the path of the head.
+- The reader cannot read the file, or the head cannot be written.
 - The stream order of the window differs from the stream indices of the probe.
 - The timestamps decrease.
-- The keyframe table knows a config change in the file.
+- The keyframe table knows a config change in the file. One head cannot hold two
+  configurations.
+- The start of a slice does not decode as the check requires, or the check does not end in
+  time.
 
-The read of the audio gaps (ADR 014 measurement 28) uses the same input for FLV.
+The reason goes to the log, and the export runs with `-ss`.
+
+An FLV input is longer than a seeked input: 42 bytes longer with numbers of 12 digits, and
+58 bytes longer with numbers of 20 digits. So the command line of ADR 014 reaches its budget with
+fewer segments. The budget tests use a Windows path of 106 characters. On that path, with a
+source smaller than 1 TB, the encoder keeps one input for each segment up to 81 segments, and the
+audio process of ADR 043 up to 69. With `-ss` the counts are 92 and 77. For the widest plan that
+the settings permit, with the largest numbers that a file can have, the counts are 52 and 45,
+against 59 and 50. Above these counts a process opens one input, which fits at the cap of 100
+segments.
+
+The read of the audio gaps (ADR 014 measurement 28) opens the same slices. It joins the ranges
+that overlap or touch. For each group, it reads the slice of the earliest range from its start
+to the end of the group, with `-read_intervals %<end>`. It names the head by its full path. All
+the runs share one `PROBE_TIMEOUT`.
 
 ## Rejected alternatives
 
@@ -522,7 +579,8 @@ The read of the audio gaps (ADR 014 measurement 28) uses the same input for FLV.
   releases. On a share the picture changes more slowly during a drag.
 - Known limitations:
   - A config change that no scan has seen yet gives a decode error and the stall of ADR 039.
-    The reload after it scans first.
+    The reload after it scans first. The export checks each slice, and it keeps `-ss` when a
+    slice does not decode.
   - An open GOP, where leading B-frames refer to the previous GOP, gives frames below the
     keyframe PTS in a window. MSE drops them or shows errors, and the self-check then disables
     the calibration. QuipClip assumes that live encoders write closed GOPs.

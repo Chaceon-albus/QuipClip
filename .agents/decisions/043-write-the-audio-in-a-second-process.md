@@ -142,12 +142,15 @@ ffmpeg -nostdin -hide_banner -loglevel error -nostats -copyts \
 ```
 
 It has no `-progress`, because its stdout carries the audio, and no `-y`, because it writes no file.
-
-(Changed on 2026-10-17.) An FLV input of both processes opens a `concat` of `head.flv` and a
-`subfile` slice in place of `[-ss <seek>] -i <source>` (ADR 046). That input is longer than a
-plain path, so the command line reaches the budget of ADR 014 with fewer segments.
 The `null` muxer opens no file. The stand-in video must go to that output and not to `nullsink`
 (measurement 3).
+
+(Changed on 2026-10-17.) An FLV input of both processes opens a `concat` of `head.flv` and a
+`subfile` slice in place of `[-ss <seek>] -i <source>` (ADR 046). Both processes run in the
+directory of the head. That input is longer than a seeked input, so the command line reaches the
+budget of ADR 014 with fewer segments. On the long Windows path of the tests, the audio process
+keeps one input for each segment up to 69 segments, against 77 with `-ss`. ADR 046 gives all the
+counts.
 
 ### The encoder
 
