@@ -138,8 +138,8 @@ exception. Its seek outside the buffered data stays `seeking` until a window del
 A request that is not a scrub sample therefore replaces the running seek at once in one case.
 The target of the running seek is not buffered, and the window of that seek does not deliver the
 new target. ADR 046 states the part that the window delivers. A forward frame step and the exact
-seek at the release of a drag still wait in the queue. A scrub sample still waits in the queue, so a drag
-still shows a picture each time a window arrives.
+seek at the release of a drag still wait in the queue. A scrub sample still waits in the queue,
+so a drag still shows a picture each time a window arrives.
 
 (Changed on 2026-09-23.) On the frame grid, the step aims at the middle of the target
 nominal frame, not at its nominal start. Containers such as Matroska store each PTS rounded

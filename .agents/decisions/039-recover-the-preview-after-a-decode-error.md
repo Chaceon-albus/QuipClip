@@ -73,17 +73,21 @@ reloads once more. There is no loop.
 
 (Changed on 2026-10-17.) For a source that plays through a `MediaSource` (ADR 046), the new
 element gets a new MediaSource. It loads the start of the file, as a new source does, and the
-request of the reload then seeks it. On an FLV source, a window that fails to decode first gets
-one scan of the tag headers for a new decoder configuration and one retry. The stall of this
-record applies after that.
+request of the reload then seeks it. A decode error stalls as this record states. On an FLV
+source, the first window that serves the seek of the reload first scans the tag headers for a new
+decoder configuration. A window that fails to read the file also stalls, and its notice says that
+the preview could not read that part of the file (`preview.decodeStall.readFailed`).
 
 ### The notice
 
 An amber notice shows while the stall lasts: "Preview stopped at about {{time}}. The preview
 cannot decode this part of the file (the picture size or the codec may change here). Move the
-playhead to another part to continue." The time uses the timecode format of the playhead. The
-close button hides the notice for that stall only. The export does not use the preview decoder,
-and the notice does not speak about it.
+playhead to another part to continue." The time uses the timecode format of the playhead. When
+a window of a `MediaSource` source fails to read the file (ADR 046), the notice says instead:
+"Preview stopped at about {{time}}. The preview could not read this part of the file. Move the
+playhead to try again." The reason on the disabled Play and frame step buttons follows the same
+cause. The close button hides the notice for that stall only. The export does not use the
+preview decoder, and the notice does not speak about it.
 
 A new import of the same file during a stall raises the generation once, and the new element
 loads at the start of the file.

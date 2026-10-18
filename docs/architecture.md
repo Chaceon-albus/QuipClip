@@ -188,7 +188,9 @@ The windows keep the absolute source timestamps, and the page sets `timestampOff
 media time 0 is `videoStartPts`. The calibration of such a source is therefore known before its
 first frame. A self-check compares the first frame callback with the first frame of the window. The page acknowledges each chunk, so FFmpeg and the reads of a network share stop while
 the page has 8 MiB that it did not append. A seek outside the buffered data requests a new window
-at the keyframe at or before the target.
+at the keyframe at or before the target. `src/features/playback/mse/` holds the page side: the
+fMP4 parser, the window client, the MediaSource controller, and the Web Audio cue.
+`src/components/preview/previewPath.ts` chooses the path of a source.
 
 For every other source, the first `requestVideoFrameCallback` after source load supplies a
 browser `mediaTime` anchor. QuipClip associates that value with `videoStartPts`. Later callbacks confirm the

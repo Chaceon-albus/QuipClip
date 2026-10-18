@@ -150,7 +150,8 @@ A source takes the MediaSource path when all of these are true:
 - The container is FLV, MPEG-TS or MKV. AVI and ASF (WMV) keep the decode failure panel. A copy
   window from AVI loses the PTS (measurement 14). The usual WMV codecs are not H.264 or HEVC.
 - `MediaSource` exists, and `MediaSource.isTypeSupported` accepts a codec string for the video
-  codec. H.264 is the main case. HEVC takes the path where the web view accepts `hvc1`.
+  codec. H.264 is the main case. HEVC takes the path where the web view accepts `hev1`, the
+  sample entry that FFmpeg writes into MP4.
 - The probe gives a duration.
 
 Any other source keeps the native element of ADR 003 or the decode failure panel. A source
@@ -202,12 +203,22 @@ start time (ADR 014 measurement 8) minus a margin, clamped at 0. The first margi
 the bitstream filter (measurement 6). The seek form adds `delay_moov` for both containers,
 because MPEG-TS needs it (measurement 12).
 A seek can land after the target (measurement 13). When a window holds no frame at or before the
-target, the page asks again with twice the margin, up to 60 s.
+target, the page asks again with twice the margin, up to 60 s. A window that continues the
+buffered data keeps that data, and only the window starts again. A window whose input seek reads
+from the start of the file cannot start earlier, so the gap rule of the section "Calibration"
+applies instead. A window that holds no frame, as after an input seek past the last keyframe,
+also asks again with twice the margin. At 60 s it fails: an end of the stream with no data would
+set the duration to 0. An MPEG-TS or MKV window that ends more than 1 s before its requested end
+reached the end of the file when its video ends within 5 s of the duration of the probe. An early
+end in the middle of the file goes on after it.
 
 **Audio.** `-map 0:a:0` is present when the source has an audio stream. When the web view
 rejects the audio codec, the window transcodes the audio to AAC with `-c:a aac` and no delay
 filter (measurement 15). When the transcode fails, the window has no audio, and the preview
-shows a notice that it plays without sound.
+shows a notice that it plays without sound. The page also checks the codec strings of the first
+init segment. When the web view refuses only the audio there, the window starts again with the
+audio transcoded, and then without audio. The track count of a SourceBuffer cannot change, so
+this choice happens before the first append.
 
 `-frag_duration 500000` writes a fragment for each 0.5 s of media. A long GOP therefore does not
 delay the first picture (measurement 10).
@@ -273,6 +284,30 @@ preview writes nothing else.
 - An end message with the status `complete`, no resume point and no end of file comes from a
   writer that did not report in time, as when a read of the share stalls. The page then resumes
   by time from the last fragment that it appended.
+- The page removes data behind the position only up to a keyframe, because the MSE
+  specification extends a remove to the next random access point: a remove to any other time
+  would drop the GOP that holds the position.
+- When the SourceBuffer is full, the page removes the data up to the last keyframe at least 2 s
+  behind the position. When no keyframe lies there, it waits until the position moves, and the
+  credit holds FFmpeg. A seek counts the room from its target. When the target waits for that
+  room, the page drops the data and starts a window at the target. Without known keyframes, it
+  removes the data more than 30 s behind the position.
+- The page decides from the video that the fragments of the windows hold, not from `buffered`.
+  The buffered ranges of a SourceBuffer with audio and video are the intersection of the two
+  tracks. A browser removes data on its own when the SourceBuffer is full, so the page clips
+  that video to the buffered ranges after each change. A browser removes video only up to a
+  keyframe. So a span that starts before a range loses its start up to the latest keyframe at
+  or before the range start, and keeps its start when no keyframe lies there, as for audio
+  that starts late. Fragments with no sync flags give no keyframes. A span then keeps at most
+  1 s before the range. The end of a span can lie up to 1 s after the range, where the audio
+  ended.
+- A later init segment with other codec strings, as after a reconnect, takes `changeType` first.
+- A window that goes on by time must start at least 1 s later than the one before it. Otherwise
+  the windows end at the same place each time. The video before that place plays, and the
+  preview stops when the position reaches it, as for a failed window (see "Failures"). The
+  element stops at the end of the buffered range, which can come first: the audio can end
+  earlier, and with B-frames the page estimates the end of the video a few frames late. So the
+  preview stops at the earlier of the two.
 - An application exit kills every window process (ADR 017 amendment). A window writes no file,
   so the exit does not wait for it.
 
@@ -310,7 +345,10 @@ whose frames start before their nominal start.
 When no frame lies at the element's position after the first window, the page asks the store to
 seek to the first buffered frame. The store stays the only writer of `currentTime`. A file that
 starts in the middle of a GOP is such a case: media time 0 is then a frame that never shows, and
-the first window starts at the first keyframe.
+the first window starts at the first keyframe. The same holds after a seek whose target lies
+before the first keyframe of the file, because no window can start earlier. The element still
+waits for that seek, which never completes, so the store replaces it with the seek over the gap,
+whose target is buffered (see "Seeks").
 
 ### Seeks
 
@@ -328,11 +366,16 @@ at once (ADR 022 amendment). It does so when the target of the running seek is n
 the window of that seek does not deliver the new target. Otherwise the next click waits for the
 window of the previous one. The store counts a target from 1 s before the running target to 10 s
 after it as delivered. The window starts at the keyframe at or before the running target. The
-page waits for a running window when the target lies at most 10 s after the data that the window
-appended. The exact seek at the release of a drag and a forward frame step stay in that
+page waits for a running window when the target lies at most 10 s after the video that the window
+read. The exact seek at the release of a drag and a forward frame step stay in that
 part, so they wait in the queue and do not start the window again. A backward frame step stays
-in it for its first second only. A scrub sample always waits in the queue of ADR 022, so a drag
-still shows a picture each time a window arrives.
+in it for its first second only. A request whose target is buffered also replaces the running
+seek, because it completes at once. The seek over a gap before the first frame (see
+"Calibration") always replaces it: the buffered ranges are the intersection of the audio and the
+video, so a first frame before the first audio sample is not buffered. When a request waits in
+the queue behind that seek, as a click during the wait does, that request replaces the stuck
+seek as an exact seek instead, and the seek over the gap goes. A scrub sample always
+waits in the queue of ADR 022, so a drag still shows a picture each time a window arrives.
 
 ### The scrub cue
 
@@ -373,19 +416,29 @@ window. It disables the cue for that source.
 ### Failures
 
 - The web view rejects the codec string of the first init segment: the decode failure panel
-  with the codec reason of ADR 003.
-- A window fails after the source decoded in part: on FLV, Rust first scans the tag headers from
-  the last known config tag to the window start. The page then retries the window once with the
-  config tags that the scan found. After that, the stall of ADR 039 applies.
-- A window fails before the source decoded: the panel that says that the file could not be read.
+  with the codec reason of ADR 003. The panel shows the refused type behind a disclosure. A
+  later rejection, after the source showed a frame, is the stall of ADR 039. An error of the
+  element with `MEDIA_ERR_SRC_NOT_SUPPORTED` before the first frame also takes the codec reason:
+  it comes from the MediaSource, not from a container that the web view cannot open.
+- The element reports a decode error after the source decoded in part: the stall of ADR 039.
+  The next seek loads a new element and a new controller, and the store seeks to the place of
+  the stall. On FLV, the first window that serves that seek asks Rust to scan the tag headers
+  from the last known config tag to the window start first. The head of that window then holds
+  the config tags that the scan found, which a reconnect can have changed. Only the element of
+  the reload that the stall asked for scans. A later reload does not scan again.
+- A window fails after the source decoded in part: the stall of ADR 039 too. Its notice says that
+  the preview could not read that part of the file.
+- A window fails before the source decoded: the panel that says that the file could not be read,
+  with the diagnostic text of the failure behind a disclosure (ADR 011).
 - A read of the source fails, as on a share that stopped answering: the window ends as failed
   with that reason, and the page can ask again. A damaged tag ends the window too, and the end
   message names the first keyframe after the damage, so the page can play on from there. A
   restart of the timestamps does the same.
 - FFmpeg is not found: the panel says that this preview needs FFmpeg.
-- The timestamps decrease: a notice says so, and the store disables precise editing for the
-  source. MSE writes later data over earlier data of the same time, so marks there are not
-  reliable.
+- The timestamps decrease: a notice says so once, and the store disables precise editing for
+  the source. A notice that the user dismisses stays hidden until the user opens another
+  video, also after a reload of the element. MSE writes later data over earlier data of the same
+  time, so marks there are not reliable.
 
 ### The probe
 
@@ -468,8 +521,8 @@ The read of the audio gaps (ADR 014 measurement 28) uses the same input for FLV.
 - A drag over a part that is not buffered starts a window for each sample that the queue
   releases. On a share the picture changes more slowly during a drag.
 - Known limitations:
-  - A config change that no scan has seen yet gives a decode error. The rescan and one retry
-    come first, and then the stall of ADR 039.
+  - A config change that no scan has seen yet gives a decode error and the stall of ADR 039.
+    The reload after it scans first.
   - An open GOP, where leading B-frames refer to the previous GOP, gives frames below the
     keyframe PTS in a window. MSE drops them or shows errors, and the self-check then disables
     the calibration. QuipClip assumes that live encoders write closed GOPs.
