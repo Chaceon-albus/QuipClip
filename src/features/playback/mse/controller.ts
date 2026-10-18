@@ -363,6 +363,11 @@ export function createMseController(
   let endTried = false;
   /** Where the windows go on after the last complete window, or null. */
   let resume: { readonly start: WindowStart; readonly end: number } | null = null;
+  /**
+   * The target of the seek that waits for the running window, or null. It goes at the next seek,
+   * at `seeked`, and when the page drops its data.
+   */
+  let waitingTarget: number | null = null;
   /** The source time of the last window that went on by time, for the progress check. */
   let lastTimeResume: number | null = null;
   /**
@@ -727,6 +732,7 @@ export function createMseController(
     }
     checkStartGap();
     checkProgress();
+    serveWaitingSeek();
     evict();
     prefetch();
   };
@@ -951,6 +957,7 @@ export function createMseController(
     active = null;
     const code = isPreviewWindowError(error) ? error.code : "commandExecutionFailed";
     if (code === "superseded") {
+      waitingTarget = null;
       return;
     }
     if (code === "ffmpegNotFound") {
@@ -1270,6 +1277,8 @@ export function createMseController(
       reportNonMonotonic();
     }
     if (end.status === "canceled") {
+      // Another request took the lane, so no waiting seek takes it back.
+      waitingTarget = null;
       return;
     }
     if (end.status === "failed") {
@@ -1412,6 +1421,40 @@ export function createMseController(
     startWindow(next.start, next.end, { continues: true });
   };
 
+  /**
+   * Serves a seek that waited for the window that ended, when that window stopped before the
+   * target, as at its byte limit. The next window starts at once when it starts at or before the
+   * target and the target lies within WAIT_AHEAD_SECONDS of its start, and the seek keeps
+   * waiting for it. Otherwise the data goes, and a window starts at the target, once for each
+   * seek, so a target in a hole of the data does not start windows again and again. The
+   * prefetch does not serve such a seek, because no video lies at the position.
+   */
+  const serveWaitingSeek = (): void => {
+    const target = waitingTarget;
+    if (target === null) {
+      return;
+    }
+    if (hasVideoAt(target)) {
+      waitingTarget = null;
+      return;
+    }
+    if (active !== null || failed || destroyed || clearing || tailBuffered) {
+      return;
+    }
+    if (
+      resume !== null &&
+      resume.end <= target + EPSILON_SECONDS &&
+      target - resume.end <= WAIT_AHEAD_SECONDS
+    ) {
+      const next = resume;
+      resume = null;
+      startWindow(next.start, next.end, { continues: true });
+      return;
+    }
+    waitingTarget = null;
+    restartAt(target);
+  };
+
   const closeSessions = (): void => {
     active?.session.close();
     active = null;
@@ -1423,6 +1466,7 @@ export function createMseController(
 
   /** Drops the data and the windows, and starts a window at `target`. */
   const restartAt = (target: number, margin: number = SEEK_MARGIN_SECONDS): void => {
+    waitingTarget = null;
     closeSessions();
     // The appends of the stopped window go, and the parser of the SourceBuffer starts again.
     dropOperationsOf(null);
@@ -1469,6 +1513,7 @@ export function createMseController(
       return;
     }
     gapPosition = null;
+    waitingTarget = null;
     const target = currentTime();
     // A full SourceBuffer waits for the position to move, and a seek moves it with no
     // `timeupdate`. The room counts from the new position.
@@ -1478,10 +1523,16 @@ export function createMseController(
       pump();
     }
     if (hasVideoAt(target)) {
+      // A target near the end of the appended video needs the next window, and a paused
+      // element that waits there sends no `timeupdate` that would start it. The decoder keeps
+      // back the last frames for the reorder of B-frames until more data or the end of the
+      // stream comes.
+      prefetch();
       return;
     }
     // The running window delivers the target soon, unless its appends wait for room.
     if (!quotaBlocked && activeWindowCovers(target)) {
+      waitingTarget = target;
       return;
     }
     // Before the first frame of the file no frame shows. When that frame is buffered, the
@@ -1515,6 +1566,11 @@ export function createMseController(
     }
   };
 
+  const onSeeked = (): void => {
+    waitingTarget = null;
+    onTimeUpdate();
+  };
+
   const onSourceOpen = (): void => {
     if (destroyed || firstWindowStarted) {
       return;
@@ -1530,7 +1586,7 @@ export function createMseController(
   mediaSource.addEventListener("sourceopen", onSourceOpen);
   element.addEventListener("seeking", onSeeking);
   element.addEventListener("timeupdate", onTimeUpdate);
-  element.addEventListener("seeked", onTimeUpdate);
+  element.addEventListener("seeked", onSeeked);
   element.src = url;
 
   return {
@@ -1544,7 +1600,7 @@ export function createMseController(
       mediaSource.removeEventListener("sourceopen", onSourceOpen);
       element.removeEventListener("seeking", onSeeking);
       element.removeEventListener("timeupdate", onTimeUpdate);
-      element.removeEventListener("seeked", onTimeUpdate);
+      element.removeEventListener("seeked", onSeeked);
       sourceBuffer?.removeEventListener("updateend", onUpdateEnd);
       try {
         element.removeAttribute("src");

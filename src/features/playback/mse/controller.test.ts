@@ -714,6 +714,78 @@ describe("createMseController", () => {
       expect(windows).toHaveLength(1);
     });
 
+    it("serves a waiting seek when the running window stops before its target", () => {
+      const { element, windows, last, buffer } = playing();
+      element.seek(35);
+      expect(windows).toHaveLength(1);
+      // The window stops at its byte limit, in front of the keyframe at 30 s.
+      last().end({ next: { offset: 900000, ptsMs: 40067 } });
+      buffer().drain();
+      expect(windows).toHaveLength(2);
+      expect(windows[1]?.request.start).toEqual({
+        kind: "resume",
+        offset: 900000,
+        ptsMs: 40067,
+      });
+    });
+
+    it("starts a window once at a waiting seek that the next window does not serve", () => {
+      const { element, windows, last, buffer, events } = playing(0, 30);
+      element.seek(35);
+      // The window read past the target, but the target lies in a hole of the data.
+      last().send(media(36, 4));
+      buffer().drain();
+      last().end({ next: { offset: 900000, ptsMs: 50067 } });
+      buffer().drain();
+      expect(windows).toHaveLength(2);
+      expect(windows[1]?.request.start).toEqual({ kind: "time", seconds: 45 });
+      // The window at the target delivers the same hole, and the page does not ask again.
+      // The store seeks over the hole to the first frame after it.
+      events.onStartGap.mockClear();
+      last().send(concat(init(), media(36, 4)));
+      buffer().drain();
+      last().end({ next: { offset: 900000, ptsMs: 50067 } });
+      buffer().drain();
+      expect(windows).toHaveLength(2);
+      expect(gapSeeks(events)).toEqual([36]);
+    });
+
+    it("serves no waiting seek after a window that another request canceled", () => {
+      const { element, windows, last, buffer } = playing();
+      element.seek(35);
+      last().end({ status: "canceled" });
+      buffer().drain();
+      expect(windows).toHaveLength(1);
+    });
+
+    it("serves no seek that ended", () => {
+      const { element, windows, last, buffer } = playing(0, 40);
+      element.seek(45);
+      element.fire("seeked");
+      last().end({ next: { offset: 900000, ptsMs: 50067 } });
+      buffer().drain();
+      expect(windows).toHaveLength(1);
+    });
+
+    it("lets the browser end a waiting seek after the last window of the file", () => {
+      const { element, windows, last, buffer, mediaSource } = playing(0, 40);
+      element.seek(45);
+      last().end({ reachedEnd: true });
+      buffer().drain();
+      expect(windows).toHaveLength(1);
+      expect(mediaSource.readyState).toBe("ended");
+    });
+
+    it("serves no seek that another seek replaced", () => {
+      const { element, windows, last, buffer } = playing(0, 40);
+      element.seek(45);
+      // The next seek lands in the data, more than 30 s before its end.
+      element.seek(5);
+      last().end({ next: { offset: 900000, ptsMs: 50067 } });
+      buffer().drain();
+      expect(windows).toHaveLength(1);
+    });
+
     it("drops the data and starts a window at a target that no window delivers", () => {
       const { element, windows, buffer } = playing();
       element.seek(100);
