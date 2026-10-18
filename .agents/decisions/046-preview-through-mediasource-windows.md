@@ -147,6 +147,10 @@ One more file is 1920x1080 at 14 Mbit/s with a GOP of 10 s.
     frames of video and audio was the same. The `concat` protocol limits the protocols of its
     parts to `concat`, `file` and `subfile`, so the HTTP part needed `-protocol_whitelist`. The
     export opens only files.
+24. (Added with the verification.) In HeadlessChrome and in WKWebView, a window across a
+    reconnect with a new AVC configuration and another picture size gave `MEDIA_ERR_DECODE` at
+    the join, and the seeks after the join stalled. With the end of the window at the changed
+    config tag, every seek after the join showed its frame in Chrome.
 
 ## Decision
 
@@ -188,12 +192,27 @@ starts at a keyframe tag. It ends at the first of these:
 
 - the first keyframe tag at or after the start plus 60 s
 - the first keyframe tag after 64 MiB of source
+- the first keyframe tag after a changed config tag (see below)
 - the end of the file
 
 The next window starts at that keyframe tag. Two windows therefore never overlap, and no `-to` is
 necessary. The writer also ends the slice in front of a frame whose timestamp lies more than 10 s
 below an earlier one. The mp4 muxer refuses a decreasing timestamp and loses the fragment that it
 holds, so a slice that ran across a restart would lose the seconds before it.
+
+(Added with the verification.) The mp4 muxer also keeps the configuration of the head for the
+whole output. A window across a reconnect with another picture size therefore gave a decode error
+in both web views (measurement 24). At a config tag that differs from the configuration of the
+same kind in the head, after a frame of that kind, the writer stops writing and closes both
+stdins, so the processes finish the output. It reads on to the next keyframe tag, records the
+config tags on the way, and checks the timestamps. The next window starts at that keyframe. The
+reader of the window waits for the writer while it reads on. At the end of the file the window
+reached the end, and the tags after the config tag never play. A read on that finds no keyframe
+within 64 MiB stops there, as at damage. A copy of the configuration of the head passes.
+
+The head of a window also takes each config tag that follows its keyframe before the first frame
+of its kind, within 64 tags, because FFmpeg's flv muxer writes the new configuration of a stream
+in front of its next packet.
 
 **MPEG-TS and MKV.** FFmpeg reads the file and seeks itself:
 
@@ -578,6 +597,10 @@ the runs share one `PROBE_TIMEOUT`.
 - A drag over a part that is not buffered starts a window for each sample that the queue
   releases. On a share the picture changes more slowly during a drag.
 - Known limitations:
+  - A reconnect that changes only the configuration of the audio in the middle of a GOP loses
+    the rest of that GOP, and a reconnect whose new part starts in the middle of a GOP leaves a
+    gap. The page jumps a gap only before the first frame, so the playback waits there until
+    the user moves the playhead.
   - A config change that no scan has seen yet gives a decode error and the stall of ADR 039.
     The reload after it scans first. The export checks each slice, and it keeps `-ss` when a
     slice does not decode.
