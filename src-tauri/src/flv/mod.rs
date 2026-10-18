@@ -42,6 +42,9 @@ use tag::TagKind;
 /// bit rate.
 pub const NEXT_KEYFRAME_REACH: u64 = 64 * 1024 * 1024;
 
+/// The tags after its keyframe that [`FlvSource::window_head`] reads at most.
+pub const WINDOW_HEAD_TAGS: usize = 64;
+
 /// Why the reader could not do what it was asked.
 #[derive(Debug)]
 pub enum FlvError {
@@ -285,6 +288,49 @@ impl FlvSource {
             .into_values()
             .cloned()
             .collect()
+    }
+
+    /// The head of a window that starts at the keyframe at `offset`: the configurations in force
+    /// there, and each configuration that follows the keyframe before the first frame of its
+    /// kind. A reconnect can write the new configuration of the audio after the keyframe of the
+    /// video, and the mp4 muxer takes the configuration of each stream from the head. The walk
+    /// records what it finds, and it stops when a frame of each kind of the head came, or after
+    /// [`WINDOW_HEAD_TAGS`] tags.
+    pub fn window_head(
+        &self,
+        offset: u64,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Vec<u8>, FlvError> {
+        let mut configs: std::collections::BTreeMap<TagKind, ConfigTag> = self
+            .configs_at(offset)
+            .into_iter()
+            .map(|config| (config.kind, config))
+            .collect();
+        let mut source = FileSource::open(&self.path, cancel)?;
+        let mut framed: Vec<TagKind> = Vec::new();
+        let mut position = offset;
+        for _ in 0..WINDOW_HEAD_TAGS {
+            if configs.keys().all(|kind| framed.contains(kind)) {
+                break;
+            }
+            let Some(tag) = scan::read_tag(&mut source, position)? else {
+                break;
+            };
+            let kind = tag.header.kind;
+            if tag.role == tag::TagRole::Config && !framed.contains(&kind) {
+                let config = scan::read_config(&mut source, &tag)?;
+                self.record_config(config.clone());
+                configs.insert(kind, config);
+            } else if tag.role.is_frame() && !framed.contains(&kind) {
+                framed.push(kind);
+            }
+            position = tag.end();
+        }
+        let map = configs
+            .iter()
+            .map(|(kind, config)| (*kind, config))
+            .collect();
+        Ok(self.head.bytes_with(&map))
     }
 
     /// The head bytes of a window that starts at `offset`.

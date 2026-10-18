@@ -5,7 +5,9 @@
 //! the stdin of the remux process and, when the scrub cue needs it, into the stdin of the PCM
 //! process. It records the keyframes and configurations that it passes, and it ends the slice
 //! itself: in front of the first keyframe after the time or byte limit, and in front of a tag
-//! whose timestamp decreases, so the mp4 muxer never sees a restart. The reader of the remux
+//! whose timestamp decreases, so the mp4 muxer never sees a restart. At a decoder configuration
+//! that differs from the one in the head, which one mp4 output cannot switch to, it stops writing
+//! and reads on to the next keyframe, where the next window starts. The reader of the remux
 //! output waits for the credit of the page, so a page that does not append stops the whole
 //! chain down to the reads of the share.
 
@@ -14,7 +16,7 @@ use crate::ffmpeg::capabilities::smoke::read_capped_tail;
 use crate::flv::locate::DECREASE_LIMIT_MS;
 use crate::flv::scan::TagStream;
 use crate::flv::table::{ConfigTag, KeyframeEntry};
-use crate::flv::tag::{TagKind, TagRole};
+use crate::flv::tag::{parse_tag_header, TagKind, TagRole, PREVIOUS_TAG_SIZE_LEN, TAG_HEADER_LEN};
 use crate::flv::FlvSource;
 use crate::procutil::command_without_console;
 use serde::{Deserialize, Serialize};
@@ -72,9 +74,10 @@ pub struct EndMessage {
     /// True when an FLV window reached the end of the file. A seek-form window leaves it false:
     /// the page sees its end in the buffered data.
     pub reached_end: bool,
-    /// Where the next window starts: the keyframe tag at the limit of this window, or, after a
-    /// restart of the timestamps or a damaged tag, the place where this window stopped, from
-    /// which the next request walks to the next keyframe. A complete window with
+    /// Where the next window starts: the keyframe tag at the limit of this window or after a
+    /// changed decoder configuration, or, after a restart of the timestamps or a damaged tag,
+    /// the place where this window stopped, from which the next request walks to the next
+    /// keyframe. A complete window with
     /// neither `next` nor `reached_end` is one whose writer did not report within the wait of
     /// its reader, as when a read of a share stalls. The page then resumes by time from the
     /// last fragment that it appended, and never takes it as the end of the file.
@@ -231,11 +234,13 @@ pub fn start_flv_window(
 
     let (outcome_sender, outcome_receiver) = mpsc::channel();
     let cancel = handle.cancel.clone();
+    let draining = Arc::new(AtomicBool::new(false));
+    let writer_draining = draining.clone();
     let writer_finisher = finisher.clone();
     thread::Builder::new()
         .name("preview-writer".to_owned())
         .spawn(move || {
-            let outcome = write_slice(&slice, video_stdin, pcm_stdin, &cancel);
+            let outcome = write_slice(&slice, video_stdin, pcm_stdin, &cancel, &writer_draining);
             let _ = outcome_sender.send(outcome);
             writer_finisher.part_done();
         })?;
@@ -257,13 +262,37 @@ pub fn start_flv_window(
         .name("preview-remux".to_owned())
         .spawn(move || {
             drain(remux.stdout, &*sink, Some(&handle.credit), &handle);
-            let outcome = outcome_receiver.recv_timeout(EXIT_WAIT).ok();
+            let outcome = wait_for_writer(&outcome_receiver, &draining, &handle);
             let message = finish_process(remux.child, remux.stderr, &handle, outcome);
             sink.end(&message);
             release();
             finisher.part_done();
         })?;
     Ok(())
+}
+
+/// The outcome of the writer of a window: within [`EXIT_WAIT`] after the remux output closed,
+/// or, while the writer reads on to the keyframe after a changed configuration, until it reports
+/// or the window is canceled. That read can take longer than the wait on a slow share, and an
+/// end message without its keyframe would make the page run the same window again.
+fn wait_for_writer(
+    receiver: &mpsc::Receiver<WriterOutcome>,
+    draining: &AtomicBool,
+    handle: &WindowHandle,
+) -> Option<WriterOutcome> {
+    match receiver.recv_timeout(EXIT_WAIT) {
+        Ok(outcome) => return Some(outcome),
+        Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        Err(mpsc::RecvTimeoutError::Timeout) => {}
+    }
+    while draining.load(Ordering::SeqCst) && !handle.is_canceled() {
+        match receiver.recv_timeout(EXIT_POLL) {
+            Ok(outcome) => return Some(outcome),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+    receiver.try_recv().ok()
 }
 
 /// Start a window of a container that FFmpeg seeks in: one process and one sink.
@@ -389,6 +418,7 @@ fn write_slice<V: Write, P: Write>(
     mut video: V,
     mut pcm: Option<P>,
     cancel: &AtomicBool,
+    draining: &AtomicBool,
 ) -> WriterOutcome {
     let mut outcome = WriterOutcome::default();
     let opened = File::open(slice.source.path()).and_then(|mut file| {
@@ -425,10 +455,17 @@ fn write_slice<V: Write, P: Write>(
         pcm = None;
     }
 
+    let held_configs = head_configs(&slice.head);
+    let mut video = Some(video);
     let mut buffer = Vec::new();
     let mut run = Vec::new();
     let mut latest_dts: Option<i64> = None;
     let mut written: u64 = 0;
+    let mut audio_written = false;
+    // The offset of a configuration that differs from the head, after which the window writes
+    // no more: the writer reads on to the next keyframe, where the next window starts with a head
+    // that holds the configurations that it passed.
+    let mut drain_from: Option<u64> = None;
     // Where a window that stops at a restart or at damage resumes from.
     let mut resume_from = None;
     loop {
@@ -477,7 +514,7 @@ fn write_slice<V: Write, P: Write>(
             run.push(entry);
             let past_limit = tag.dts() >= slice.start_dts.saturating_add(slice.limit_ms)
                 || written >= slice.limit_bytes;
-            if tag.offset != slice.start_offset && past_limit {
+            if tag.offset != slice.start_offset && (past_limit || drain_from.is_some()) {
                 outcome.next = Some(ResumePoint {
                     offset: tag.offset,
                     pts_ms: tag.pts(),
@@ -486,15 +523,54 @@ fn write_slice<V: Write, P: Write>(
             }
         }
         if tag.role == TagRole::Config {
-            slice.source.record_config(ConfigTag {
+            let config = ConfigTag {
                 offset: tag.offset,
                 kind: tag.header.kind,
                 bytes: buffer.clone(),
-            });
+            };
+            // A reconnect writes a new configuration, as for another picture size. The mp4
+            // muxer keeps the configuration of the head for the whole output, so the window
+            // writes nothing from the new one on. It closes the stdin of both processes, so
+            // they finish the output, and reads on to the next keyframe. On the way it records
+            // the configurations, as the one of the audio that a reconnect writes too, and it
+            // checks the timestamps. The page appends the init segment of the next window. A
+            // copy of the configuration of the head changes nothing and passes, and so does a
+            // configuration in front of the first frame of its kind, which the head of the
+            // window took (`FlvSource::window_head`).
+            let changes = held_configs
+                .iter()
+                .any(|(kind, held)| *kind == tag.header.kind && held.as_slice() != config.data());
+            let framed = match tag.header.kind {
+                TagKind::Video => !run.is_empty(),
+                TagKind::Audio => audio_written,
+                TagKind::Script => false,
+            };
+            slice.source.record_config(config);
+            if changes && framed && drain_from.is_none() {
+                drain_from = Some(tag.offset);
+                draining.store(true, Ordering::SeqCst);
+                video = None;
+                pcm = None;
+            }
         }
-        if video.write_all(&buffer).is_err() {
+        if let Some(from) = drain_from {
+            // A tail with no keyframe within the reach of a walk to the next keyframe ends
+            // the read there, and the next request walks on from it.
+            if tag.offset.saturating_sub(from) > crate::flv::NEXT_KEYFRAME_REACH {
+                resume_from = Some((tag.offset, tag.pts()));
+                break;
+            }
+            continue;
+        }
+        if video
+            .as_mut()
+            .is_none_or(|stdin| stdin.write_all(&buffer).is_err())
+        {
             // The remux process ended or was killed.
             break;
+        }
+        if tag.header.kind == TagKind::Audio && tag.role.is_frame() {
+            audio_written = true;
         }
         if pcm
             .as_mut()
@@ -519,6 +595,34 @@ fn write_slice<V: Write, P: Write>(
         outcome.next = Some(ResumePoint { offset, pts_ms });
     }
     outcome
+}
+
+/// The data of each decoder configuration in `head`, the head of a window: the FLV header, its
+/// `PreviousTagSize0`, and the configuration tags.
+fn head_configs(head: &[u8]) -> Vec<(TagKind, Vec<u8>)> {
+    let mut configs = Vec::new();
+    let Some(mut position) = head
+        .get(5..9)
+        .and_then(|offset| usize::try_from(u32::from_be_bytes(offset.try_into().ok()?)).ok())
+        .map(|offset| offset + PREVIOUS_TAG_SIZE_LEN)
+    else {
+        return configs;
+    };
+    while let Some(header) = head.get(position..).and_then(parse_tag_header) {
+        let start = position + TAG_HEADER_LEN;
+        let Some(end) = usize::try_from(header.data_size)
+            .ok()
+            .and_then(|size| start.checked_add(size))
+        else {
+            break;
+        };
+        let Some(data) = head.get(start..end) else {
+            break;
+        };
+        configs.push((header.kind, data.to_vec()));
+        position = end + PREVIOUS_TAG_SIZE_LEN;
+    }
+    configs
 }
 
 fn stream_count<R: Read>(stream: &TagStream<BufReader<Counting<R>>>) -> u64 {
@@ -793,6 +897,7 @@ mod tests {
             &mut video,
             Some(&mut pcm),
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
         );
         let stop = recording.keyframes.iter().find(|k| k.dts >= 5_000).unwrap();
         assert_eq!(
@@ -831,6 +936,7 @@ mod tests {
             Vec::new(),
             None::<Vec<u8>>,
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
         );
         let next = outcome.next.unwrap();
         assert!(next.offset - start >= 100_000);
@@ -840,6 +946,7 @@ mod tests {
             &slice(&source, start, 0, 600_000),
             Vec::new(),
             None::<Vec<u8>>,
+            &AtomicBool::new(false),
             &AtomicBool::new(false),
         );
         assert!(to_end.reached_end);
@@ -857,6 +964,7 @@ mod tests {
             Vec::new(),
             None::<Vec<u8>>,
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
         );
         assert!(outcome.non_monotonic);
         assert!(source.non_monotonic());
@@ -867,6 +975,223 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((keyframe.offset, keyframe.pts), (restart.1, restart.2));
+    }
+
+    use crate::flv::test_support::FlvBuilder;
+
+    /// The data of a configuration of AAC at 44100 Hz, which differs from the one of
+    /// `FlvBuilder::aac_config` at 48000 Hz.
+    const OTHER_AAC: [u8; 4] = [0xAF, 0, 0x12, 0x10];
+
+    /// A recording of 120 frames, 33 ms apart, with a keyframe each 30 frames and, with `audio`, an
+    /// audio frame after each video frame. In front of frame 60, `reconnect` writes its tags. The
+    /// answer holds the bytes and the offset of each keyframe.
+    fn recording_with(
+        audio: bool,
+        reconnect: impl Fn(&mut FlvBuilder, u32),
+    ) -> (Vec<u8>, Vec<u64>) {
+        let mut builder = FlvBuilder::new(audio, true);
+        if audio {
+            builder.aac_config(0);
+        }
+        builder.avc_config(0, 0);
+        let mut keyframes = Vec::new();
+        for frame in 0..120u32 {
+            if frame == 60 {
+                reconnect(&mut builder, frame * 33);
+            }
+            let offset = builder.video(frame * 33, frame % 30 == 0, 0, 500);
+            if frame % 30 == 0 {
+                keyframes.push(offset);
+            }
+            if audio {
+                builder.audio(frame * 33 + 10, 100);
+            }
+        }
+        (builder.finish(), keyframes)
+    }
+
+    /// A video-only recording of 120 frames with a configuration at frame 60 with `marker`, and
+    /// the offset of that configuration.
+    fn recording_with_a_config_at_frame_60(marker: u8) -> (Vec<u8>, u64) {
+        let config = std::cell::Cell::new(0);
+        let (bytes, _) = recording_with(false, |builder, at| {
+            config.set(builder.avc_config(at, marker));
+        });
+        (bytes, config.get())
+    }
+
+    /// Write the window of `source` from its first frame, with no limit.
+    fn whole_window(source: &Arc<FlvSource>) -> (WriterOutcome, Vec<u8>) {
+        let start = source.head().first_frame_offset;
+        let mut video = Vec::new();
+        let outcome = write_slice(
+            &slice(source, start, 0, 600_000),
+            &mut video,
+            None::<Vec<u8>>,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        (outcome, video)
+    }
+
+    #[test]
+    fn the_writer_stops_writing_at_a_new_configuration_and_names_the_keyframe_after_it() {
+        let dir = TestDirectory::new();
+        let (bytes, config) = recording_with_a_config_at_frame_60(1);
+        let source = write_file(&dir, &bytes);
+        let start = source.head().first_frame_offset;
+        let (outcome, video) = whole_window(&source);
+        assert!(!outcome.reached_end);
+        assert!(!outcome.non_monotonic);
+        // The window holds the head and the tags up to the new configuration, and nothing after.
+        let head = source.head_bytes_at(start);
+        assert_eq!(&video[..head.len()], head.as_slice());
+        assert_eq!(
+            &video[head.len()..],
+            &bytes[start as usize..config as usize]
+        );
+        // The next window starts at the keyframe after it, with a head that holds it.
+        let next = outcome.next.unwrap();
+        let keyframe = source.tag_at(next.offset).unwrap().unwrap();
+        assert!(keyframe.is_keyframe());
+        assert_eq!((keyframe.dts(), next.pts_ms), (60 * 33, 60 * 33));
+        assert!(source.has_config_change());
+        assert_ne!(source.window_head(next.offset, None).unwrap(), head);
+    }
+
+    #[test]
+    fn a_reconnect_that_changes_both_configurations_gives_the_next_window_both() {
+        let dir = TestDirectory::new();
+        let (bytes, keyframes) = recording_with(true, |builder, at| {
+            builder.tag(8, at, &OTHER_AAC);
+            builder.avc_config(at, 1);
+        });
+        let source = write_file(&dir, &bytes);
+        let (outcome, _) = whole_window(&source);
+        // The writer stops at the configuration of the audio, and it records the one of the
+        // video on its way to the keyframe.
+        let next = outcome.next.unwrap();
+        assert_eq!(next.offset, keyframes[2]);
+        let head = source.window_head(next.offset, None).unwrap();
+        let configs = head_configs(&head);
+        assert!(configs.contains(&(TagKind::Audio, OTHER_AAC.to_vec())));
+        assert!(configs.contains(&(TagKind::Video, vec![0x17, 0, 0, 0, 0, 1, 0x64, 0, 1])));
+    }
+
+    #[test]
+    fn a_configuration_of_the_audio_after_the_keyframe_goes_into_the_head_of_its_window() {
+        let dir = TestDirectory::new();
+        // FFmpeg's flv muxer writes the new configuration of a stream in front of its next
+        // packet, so the one of the audio can follow the keyframe.
+        let (mut bytes, keyframes) = recording_with(true, |builder, at| {
+            builder.avc_config(at, 1);
+        });
+        // Put the new configuration of the audio right after the keyframe at frame 60.
+        let keyframe = keyframes[2] as usize;
+        let after = keyframe + 11 + 500 + 4;
+        let mut audio_config = FlvBuilder::new(false, false);
+        audio_config.tag(8, 60 * 33, &OTHER_AAC);
+        let tag = audio_config.finish()[13..].to_vec();
+        bytes.splice(after..after, tag);
+        let source = write_file(&dir, &bytes);
+        let (outcome, _) = whole_window(&source);
+        let next = outcome.next.unwrap();
+        assert_eq!(next.offset, keyframes[2]);
+        let head = source.window_head(next.offset, None).unwrap();
+        assert!(head_configs(&head).contains(&(TagKind::Audio, OTHER_AAC.to_vec())));
+    }
+
+    #[test]
+    fn a_new_configuration_with_no_keyframe_after_it_reaches_the_end() {
+        let dir = TestDirectory::new();
+        let mut builder = FlvBuilder::new(false, true);
+        builder.avc_config(0, 0);
+        for frame in 0..120u32 {
+            if frame == 100 {
+                builder.avc_config(frame * 33, 1);
+            }
+            builder.video(frame * 33, frame % 30 == 0, 0, 500);
+        }
+        let source = write_file(&dir, &builder.finish());
+        let (outcome, _) = whole_window(&source);
+        assert!(outcome.reached_end);
+        assert_eq!(outcome.next, None);
+    }
+
+    #[test]
+    fn a_restart_after_a_new_configuration_is_found() {
+        let dir = TestDirectory::new();
+        let mut builder = FlvBuilder::new(false, true);
+        builder.avc_config(0, 0);
+        for frame in 0..120u32 {
+            // A reconnect writes a new configuration and starts its timestamps again.
+            if frame == 60 {
+                builder.avc_config(0, 1);
+            }
+            // The restart lies more than the 10 s of `DECREASE_LIMIT_MS` back.
+            let dts = if frame < 60 {
+                20_000 + frame * 33
+            } else {
+                (frame - 60) * 33
+            };
+            builder.video(dts, frame % 30 == 0, 0, 500);
+        }
+        let source = write_file(&dir, &builder.finish());
+        let (outcome, _) = whole_window(&source);
+        assert!(outcome.non_monotonic);
+        assert!(source.non_monotonic());
+        // The next window walks from the restart to the keyframe there.
+        let next = outcome.next.unwrap();
+        let keyframe = source
+            .next_keyframe_from(next.offset, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(keyframe.dts, 0);
+    }
+
+    #[test]
+    fn the_reader_waits_for_a_writer_that_reads_on_to_the_next_keyframe() {
+        let (sender, receiver) = mpsc::channel();
+        let draining = AtomicBool::new(true);
+        let window = handle();
+        thread::spawn(move || {
+            thread::sleep(EXIT_WAIT + Duration::from_millis(200));
+            let _ = sender.send(WriterOutcome {
+                reached_end: true,
+                ..WriterOutcome::default()
+            });
+        });
+        let outcome = wait_for_writer(&receiver, &draining, &window).unwrap();
+        assert!(outcome.reached_end);
+    }
+
+    #[test]
+    fn the_writer_passes_a_copy_of_the_configuration_of_its_head() {
+        let dir = TestDirectory::new();
+        let source = write_file(&dir, &recording_with_a_config_at_frame_60(0).0);
+        let start = source.head().first_frame_offset;
+        let outcome = write_slice(
+            &slice(&source, start, 0, 600_000),
+            Vec::new(),
+            None::<Vec<u8>>,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        assert!(outcome.reached_end);
+        assert_eq!(outcome.next, None);
+    }
+
+    #[test]
+    fn the_configurations_of_a_head_are_its_tags_after_the_header() {
+        let dir = TestDirectory::new();
+        let source = write_file(&dir, &recording_with_a_config_at_frame_60(1).0);
+        let head = source.head_bytes_at(source.head().first_frame_offset);
+        let configs = head_configs(&head);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].0, TagKind::Video);
+        assert!(head_configs(&head[..20]).is_empty());
+        assert!(head_configs(&[]).is_empty());
     }
 
     #[test]
@@ -885,6 +1210,7 @@ mod tests {
             &slice(&source, start, 0, 600_000),
             Vec::new(),
             None::<Vec<u8>>,
+            &AtomicBool::new(false),
             &AtomicBool::new(false),
         );
         assert!(outcome.damaged);
@@ -909,6 +1235,7 @@ mod tests {
             Vec::new(),
             None::<Vec<u8>>,
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
         );
         assert!(outcome.reached_end);
         assert!(!outcome.damaged);
@@ -927,6 +1254,7 @@ mod tests {
             &slice(&source, start, 0, 600_000),
             &mut video,
             Some(Broken),
+            &AtomicBool::new(false),
             &AtomicBool::new(false),
         );
         assert!(outcome.reached_end);

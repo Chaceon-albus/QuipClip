@@ -434,9 +434,12 @@ fn open_flv(
         return Err(error(PreviewWindowErrorCode::Superseded));
     }
 
+    let head = source
+        .window_head(offset, Some(ticket.cancel.clone()))
+        .map_err(map_flv)?;
     let slice = FlvSlice {
         source: source.clone(),
-        head: source.head_bytes_at(offset),
+        head,
         start_offset: offset,
         start_dts: dts,
         limit_ms: WINDOW_MS,
