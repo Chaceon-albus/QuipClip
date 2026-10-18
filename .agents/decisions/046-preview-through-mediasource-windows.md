@@ -151,6 +151,11 @@ One more file is 1920x1080 at 14 Mbit/s with a GOP of 10 s.
     reconnect with a new AVC configuration and another picture size gave `MEDIA_ERR_DECODE` at
     the join, and the seeks after the join stalled. With the end of the window at the changed
     config tag, every seek after the join showed its frame in Chrome.
+25. (Added with the verification.) In 200 random seeks in HeadlessChrome, two kinds of seek
+    stayed `seeking`: a seek that waited for a window that then stopped at its byte limit before
+    the target, and a seek less than one GOP before the end of the appended video after the
+    window had ended. With the rules of "Seeks", 200 seeks on each of two files passed, with a
+    median of 83 ms (720p) and 135 ms (1080p, GOP 10 s) to the frame, and at most 303 ms.
 
 ## Decision
 
@@ -403,6 +408,14 @@ video, so a first frame before the first audio sample is not buffered. When a re
 the queue behind that seek, as a click during the wait does, that request replaces the stuck
 seek as an exact seek instead, and the seek over the gap goes. A scrub sample always
 waits in the queue of ADR 022, so a drag still shows a picture each time a window arrives.
+
+(Added with the verification.) When the running window that a seek waits for ends before it
+delivers the target, as at its byte limit, the next window starts at once if it starts at or
+before the target and at most 10 s before it. Otherwise the page drops the buffered data and
+requests a window at the target, once for each seek. A seek into the buffered data also starts
+the next window when that data ends within 30 s of the target: a paused element that waits there
+sends no `timeupdate`, and the decoder keeps back the last frames for the reorder of B-frames until
+more data or the end of the stream comes (measurement 25).
 
 ### The scrub cue
 
