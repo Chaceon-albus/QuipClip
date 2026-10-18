@@ -156,6 +156,34 @@ One more file is 1920x1080 at 14 Mbit/s with a GOP of 10 s.
     the target, and a seek less than one GOP before the end of the appended video after the
     window had ended. With the rules of "Seeks", 200 seeks on each of two files passed, with a
     median of 83 ms (720p) and 135 ms (1080p, GOP 10 s) to the frame, and at most 303 ms.
+26. (Added with the verification.) In WKWebView, a seek that began before its data was buffered
+    ended wrongly when the data arrived, in 30 to 50 % of far seeks. Chrome showed none of these:
+    - The element showed the next keyframe: for a target of 64.533 s it showed the frame of
+      66.000 s, and `currentTime` stayed 64.533 s.
+    - The element moved `currentTime` itself near the next keyframe, as from 14.358 s to 16.448 s.
+    - The seek never ended, with the target buffered and the source ended, and the store queued
+      every later seek behind it.
+    A seek again to the same time, 1 ms away, or twice in one task changed nothing. A seek 3, 5
+    or 10 ms away, after WebKit ended its seek, showed the right frame. A seek during the
+    `seeked` of WebKit, or a seek back to the target of a seek that WebKit did not end, could
+    stay `seeking` for good. With the repair of "Seeks", 60 exact seeks on each of two files and
+    60 seeks of the ruler on 720p landed on the target frame in WKWebView, with a median of
+    101 ms (720p) and 240 ms (1080p, GOP 10 s).
+27. (Added with the verification.) A test page ran the real preview, playback store,
+    controller and cue in HeadlessChrome and in WKWebView on macOS, with the window code of the
+    backend behind a test server in place of the IPC of Tauri. It opened seven FLV files: 720p
+    with and without metadata, one that starts at 1234.567 s, one cut in the middle of a GOP,
+    one with audio 300 ms late, one with a reconnect, 1080p at 14 Mbit/s with a GOP of 10 s,
+    and one with MP3 audio.
+    - The calibration was ready at the metadata, and every presented frame matched a PTS of
+      ffprobe, also after seeks and frame steps. A frame step moved one frame.
+    - The first frame showed 150 to 310 ms after the import, the probe included.
+    - In Chrome a far seek showed its frame after 15 to 114 ms (720p) and 99 to 235 ms (1080p).
+    - The cue started each burst 10 ms ahead on the clock of the context. The output latency
+      was 24 ms in Chrome and 12.8 ms in WKWebView. In WKWebView the context started suspended
+      and ran 8 to 14 ms later, so the first burst played about 12 ms late.
+    - The first window of a 120 s file of 62 MB read 31.5 MB for its 60 s.
+    - Playback reached `ended` at the end of each file.
 
 ## Decision
 
@@ -417,6 +445,29 @@ the next window when that data ends within 30 s of the target: a paused element 
 sends no `timeupdate`, and the decoder keeps back the last frames for the reorder of B-frames until
 more data or the end of the stream comes (measurement 25).
 
+(Added with the verification.) In WKWebView, a seek that began with no video at its target can
+end on the wrong frame, or never end, when its data arrives (measurement 26). So on macOS the page
+repairs such a seek once, when the appended video holds the target. It waits until WebKit ends
+the seek and 100 ms more, or 1 s when WebKit does not end it. Then:
+
+- When a seek waits in the queue, it starts. It is a new seek for WebKit too.
+- When the element still stands at the target, the store seeks 3 ms from the target and reads
+  that position as the target. On an exact frame grid the seek goes toward the middle of the
+  nominal frame that holds the target, counted one tick later, because a PTS can lie up to a
+  tick before the nominal start of its frame. So it stays in that frame, unless the frame lasts
+  6 ms and four ticks or less, where no such seek runs. Off the grid, or before the calibration,
+  the seek goes 3 ms after the target, and it leaves the frame when the target lies in the last
+  3 ms of a frame. At the end of the file it goes 3 ms before the target.
+- When WebKit moved the element itself, the last seek of the store still names the target, no
+  playback runs, and the element does not seek any more, the store seeks to the target.
+- A scrub sample gets one fastSeek 3 ms away.
+
+A newer seek or a playback cancels the repair. A seek that keeps a playback running gets none,
+and that case was not measured. The repair also runs for the late seeks that landed right, so a
+late seek costs one more seek on macOS, a decode from the keyframe. A seek that takes more than
+1 s to decode is repaired during its decode and decodes again. WebView2 does not need the
+repair, and Windows does not do it.
+
 ### The scrub cue
 
 The scrub cue of a MediaSource source does not use an element. WKWebView starts the media clock
@@ -635,3 +686,7 @@ the runs share one `PROBE_TIMEOUT`.
     buffer through a named pipe or a temporary slice file, not another design.
   - WebView2. Chrome is the only Chromium engine that the test measured.
   - HEVC. Both web views accept `hvc1`, but the test played only H.264.
+  - The application itself. Measurements 24 to 27 ran the real preview in a test page, with a
+    test server in place of Tauri. The export of a segment and a share over SMB did not run.
+  - In WKWebView: a late seek during a playback, which gets no repair, and the repair at rates
+    other than 30 frames per second.
