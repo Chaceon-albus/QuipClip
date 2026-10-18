@@ -74,7 +74,7 @@ function fakeCue(): PcmCue & { added: unknown[][] } {
   };
 }
 
-function setup() {
+function setup(repairsLateSeeks = true) {
   const controllers: {
     element: MseVideoElement;
     source: MseSource;
@@ -90,6 +90,7 @@ function setup() {
     syncPresentationUnavailable: vi.fn(),
     denySourcePrecision: vi.fn(),
     seekOverGap: vi.fn(),
+    repairSeek: vi.fn(),
     whenReady: (run: () => void) => {
       if (ready) {
         run();
@@ -133,6 +134,7 @@ function setup() {
     },
     store,
     pane,
+    repairsLateSeeks,
     warn,
   });
   return {
@@ -185,6 +187,53 @@ describe("createMediaSourceOwner", () => {
     );
     expect(cues).toHaveLength(0);
     expect(installed).toEqual([]);
+  });
+
+  it("repairs a late seek 100 ms after its seeked, or after a second without one", () => {
+    vi.useFakeTimers();
+    try {
+      const { owner, controllers, store } = setup();
+      const element = Object.assign(fakeElement(), { seeking: true });
+      owner.attach(element, TARGET, false);
+      controllers[0]?.events.onSeekDataArrived?.(64.533, true);
+      vi.advanceTimersByTime(500);
+      element.seeking = false;
+      element.fire("seeked");
+      vi.advanceTimersByTime(99);
+      expect(store.repairSeek).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(store.repairSeek).toHaveBeenCalledWith("live", element, 64.533, true);
+      element.fire("seeked");
+      vi.advanceTimersByTime(2000);
+      expect(store.repairSeek).toHaveBeenCalledTimes(1);
+
+      // A seek that never ends gets the repair after a second.
+      element.seeking = true;
+      controllers[0]?.events.onSeekDataArrived?.(10, false);
+      vi.advanceTimersByTime(999);
+      expect(store.repairSeek).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(1);
+      expect(store.repairSeek).toHaveBeenLastCalledWith("live", element, 10, false);
+
+      // A seek that already ended gets it after 100 ms.
+      element.seeking = false;
+      controllers[0]?.events.onSeekDataArrived?.(12, true);
+      vi.advanceTimersByTime(100);
+      expect(store.repairSeek).toHaveBeenLastCalledWith("live", element, 12, true);
+
+      // Another web view lands right, and a released element gets none.
+      const other = setup(false);
+      other.owner.attach(fakeElement(), TARGET, false);
+      other.controllers[0]?.events.onSeekDataArrived?.(64.533, true);
+      vi.advanceTimersByTime(2000);
+      expect(other.store.repairSeek).not.toHaveBeenCalled();
+      controllers[0]?.events.onSeekDataArrived?.(20, true);
+      owner.detach(element);
+      vi.advanceTimersByTime(2000);
+      expect(store.repairSeek).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("connects the reports to the store and the pane", () => {
@@ -359,6 +408,7 @@ describe("the seek over the start gap, with the playback store", () => {
       listenForGestures: () => () => undefined,
       store: createMediaSourceStoreActions(store),
       pane: { onNonMonotonic: vi.fn(), onAudioOmitted: vi.fn(), onFailure: vi.fn() },
+      repairsLateSeeks: true,
       warn: vi.fn(),
     });
     const target = { ...TARGET, sourceRevisionKey: key };

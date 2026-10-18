@@ -416,6 +416,7 @@ function setup(options?: {
     onFailure: vi.fn<MseControllerEvents["onFailure"]>(),
     onPcm: vi.fn<NonNullable<MseControllerEvents["onPcm"]>>(),
     onPcmEnd: vi.fn<NonNullable<MseControllerEvents["onPcmEnd"]>>(),
+    onSeekDataArrived: vi.fn<NonNullable<MseControllerEvents["onSeekDataArrived"]>>(),
   };
   const controller = createMseController(
     element,
@@ -784,6 +785,102 @@ describe("createMseController", () => {
       last().end({ next: { offset: 900000, ptsMs: 50067 } });
       buffer().drain();
       expect(windows).toHaveLength(1);
+    });
+
+    it("reports the data of a seek that began with no video at its target", () => {
+      const { element, windows, buffer, events } = playing();
+      element.seek(12);
+      expect(events.onSeekDataArrived).not.toHaveBeenCalled();
+      element.seek(100);
+      expect(windows).toHaveLength(2);
+      buffer().drain();
+      windows[1]?.send(concat(init(), media(100, 2)));
+      expect(events.onSeekDataArrived).not.toHaveBeenCalled();
+      buffer().drain();
+      expect(events.onSeekDataArrived.mock.calls).toEqual([[100, true]]);
+      // Once for each seek.
+      windows[1]?.send(media(102, 2));
+      buffer().drain();
+      expect(events.onSeekDataArrived).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports the data of a seek that waited for the running window", () => {
+      const { element, last, buffer, events } = playing();
+      element.seek(35);
+      last().send(media(30, 6));
+      buffer().drain();
+      expect(events.onSeekDataArrived.mock.calls).toEqual([[35, true]]);
+    });
+
+    it("reports the data of a waiting seek after the page restarted it", () => {
+      const { element, windows, last, buffer, events } = playing(0, 30);
+      element.seek(35);
+      // The window read past the target, but the target lies in a hole, so the page restarts.
+      last().send(media(36, 4));
+      buffer().drain();
+      last().end({ next: { offset: 900000, ptsMs: 50067 } });
+      buffer().drain();
+      expect(windows).toHaveLength(2);
+      expect(events.onSeekDataArrived).not.toHaveBeenCalled();
+      last().send(concat(init(), media(34, 4)));
+      buffer().drain();
+      expect(events.onSeekDataArrived.mock.calls).toEqual([[35, true]]);
+    });
+
+    it("reports at the end of the file only when video lies before the target", () => {
+      const { element, windows, buffer, events } = playing();
+      element.seek(100.004);
+      buffer().drain();
+      // One frame of 5 ms at 100 s, so no video lies 10 ms before or after the target.
+      const short = fragment(
+        {
+          id: 1,
+          decodeTime: Math.round((100 + START) * VIDEO_TIMESCALE),
+          duration: Math.round(0.005 * VIDEO_TIMESCALE),
+          count: 1,
+          sync: true,
+        },
+        {
+          id: 2,
+          decodeTime: Math.round((100 + START) * AUDIO_TIMESCALE),
+          duration: Math.round(0.005 * AUDIO_TIMESCALE),
+          count: 1,
+        },
+      );
+      windows[1]?.send(concat(init(), short, box("mdat", new Uint8Array(64))));
+      buffer().drain();
+      windows[1]?.end({ reachedEnd: true });
+      buffer().drain();
+      expect(events.onSeekDataArrived).not.toHaveBeenCalled();
+    });
+
+    it("reports nothing for a target before the first frame of the file", () => {
+      const { element, buffer, events } = playing(0.08, 30);
+      element.seek(0);
+      buffer().drain();
+      expect(events.onSeekDataArrived).not.toHaveBeenCalled();
+    });
+
+    it("waits for video after the target, or for the end of the file", () => {
+      const { element, windows, buffer, events } = playing();
+      element.seek(100);
+      buffer().drain();
+      windows[1]?.send(concat(init(), media(98, 2)));
+      buffer().drain();
+      expect(events.onSeekDataArrived).not.toHaveBeenCalled();
+      windows[1]?.end({ reachedEnd: true });
+      buffer().drain();
+      // No video follows the target, so the repair seeks before it first.
+      expect(events.onSeekDataArrived.mock.calls).toEqual([[100, false]]);
+    });
+
+    it("reports no data of a seek that a newer seek replaced", () => {
+      const { element, last, buffer, events } = playing();
+      element.seek(35);
+      element.seek(12);
+      last().send(media(30, 6));
+      buffer().drain();
+      expect(events.onSeekDataArrived).not.toHaveBeenCalled();
     });
 
     it("drops the data and starts a window at a target that no window delivers", () => {

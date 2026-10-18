@@ -594,6 +594,21 @@ export interface PlaybackActions {
     element: PlaybackMediaElement,
   ) => void;
 
+  /**
+   * Seeks the element once more for a seek whose data arrived after it began, in WKWebView (ADR
+   * 046, measurement 26): 3 ms from `mediaTime`, toward the middle of its nominal frame, or before
+   * it when `videoAfter` is false, when the element still aims at `mediaTime`; to `mediaTime`
+   * itself when WebKit moved the element while the last seek of the store still names
+   * `mediaTime`, and neither that seek nor a later play kept a playback running. A seek that
+   * waits in the queue starts instead. A scrub sample gets one fastSeek 3 ms away.
+   */
+  repairSeek: (
+    sourceRevisionKey: string,
+    element: PlaybackMediaElement,
+    mediaTime: number,
+    videoAfter?: boolean,
+  ) => void;
+
   /** Reads and stores a finite non-negative browser duration for the matching source. */
   syncBrowserDuration: (
     sourceRevisionKey: string,

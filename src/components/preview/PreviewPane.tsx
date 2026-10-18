@@ -257,6 +257,9 @@ function createPreviewMediaSourceOwner(pane: MediaSourcePaneReports): MediaSourc
     },
     store: createMediaSourceStoreActions(playbackStore),
     pane,
+    // WKWebView, the web view of macOS, completes a seek whose data arrived late on the wrong
+    // frame (ADR 046). WebView2 does not.
+    repairsLateSeeks: isMacOS(),
     warn: (message) => {
       console.warn(message);
     },

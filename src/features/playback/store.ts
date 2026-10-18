@@ -121,6 +121,56 @@ const STARVING_SEEK_KEEP_BEHIND_SECONDS = 1;
 const STARVING_SEEK_KEEP_AHEAD_SECONDS = 10;
 
 /**
+ * How far from its target `repairSeek` seeks. WKWebView ignores a seek 1 ms away from the
+ * position and honors one 3 ms away (ADR 046, measurement 26). It hangs, though, on a seek back
+ * to the target of a seek that it did not end, so the element stays 3 ms from the target, toward
+ * the middle of its nominal frame.
+ */
+export const SEEK_REPAIR_OFFSET_SECONDS = 0.003;
+
+/**
+ * The offset of the seek of `repairSeek`, or null when the frame is too short for one.
+ *
+ * On an exact frame grid (hasExactFrameGrid) the seek goes 3 ms toward the middle of the nominal
+ * frame that holds the target, `elapsed` seconds after the frame of `videoStartPts`, so it stays
+ * in that frame. A PTS can lie up to a tick before the nominal start of its frame, as when a
+ * muxer rounds or truncates it to the millisecond, so the position inside the frame counts a tick
+ * more: a seek to the start of a frame goes after it. The seek before the target then stays in
+ * the frame only when the frame lasts more than 6 ms and four ticks, so a shorter frame is too
+ * short. Off the grid the seek goes
+ * after the target, and it can leave the frame when the target lies in the last 3 ms of a frame.
+ * When no video follows the target, at the end of the file, it goes before.
+ */
+function repairOffset(
+  source: PlaybackSource,
+  elapsed: number,
+  videoAfter: boolean,
+): number | null {
+  if (!videoAfter) {
+    return -SEEK_REPAIR_OFFSET_SECONDS;
+  }
+  const rate = getNominalFrameRate(source);
+  if (rate === null || !hasExactFrameGrid(source)) {
+    return SEEK_REPAIR_OFFSET_SECONDS;
+  }
+  const interval = rate.d / rate.n;
+  const tick = source.videoTimeBase.n / source.videoTimeBase.d;
+  if (interval <= 2 * SEEK_REPAIR_OFFSET_SECONDS + 4 * tick) {
+    return null;
+  }
+  const inFrame = (((elapsed + tick) % interval) + interval) % interval;
+  return inFrame < interval / 2
+    ? SEEK_REPAIR_OFFSET_SECONDS
+    : -SEEK_REPAIR_OFFSET_SECONDS;
+}
+
+/**
+ * The element still aims at the target of `repairSeek` when its position lies this close to
+ * it. A web view can read a position back rounded to the whole microsecond.
+ */
+const SEEK_REPAIR_MATCH_SECONDS = 0.001;
+
+/**
  * True when the source reports a valid average frame rate and a valid real frame rate, and the
  * two differ. The source then has a variable frame rate: the frame timecode falls back to
  * milliseconds (ADR 028), and a nominal frame step does not use the frame grid (ADR 022).
@@ -502,11 +552,11 @@ export function createPlaybackStore(
   // The store defers every navigation while the calibration is "calibrating"
   // (deferredNavigation), so no action of the store can make this true in that state, and a
   // test calls every action before the anchor to hold that invariant. The flag stays as defence
-  // in depth: issueSeek, the one place where the store moves the element, sets it whenever no
+  // in depth: issueSeek, where the store moves the element for a request, sets it whenever no
   // anchor exists, so a seek path that does not defer still cannot bind videoStartPts to a wrong
-  // frame. A seek that the store does not send, such as the browser moving currentTime on its
-  // own when metadata loads, is not recorded here; the position tests of the anchor guard cover
-  // it.
+  // frame. repairSeek moves the element only 3 ms from a target that issueSeek sent. A seek that
+  // the store does not send, such as the browser moving currentTime on its own when metadata
+  // loads, is not recorded here; the position tests of the anchor guard cover it.
   let seekedBeforeCalibration = false;
   // The media time of the first frame that the first remux window of a MediaSource source
   // presents (syncExpectedFirstFrame), and whether the first frame callback still has to be
@@ -557,12 +607,79 @@ export function createPlaybackStore(
   // It is also the key that keeps the target while a scrub seek is the last request, and the
   // pending target for play and seekNominal.
   let lastAcceptedSeek: { mediaTime: number; scrub: boolean } | null = null;
+  /**
+   * Where a repair (`repairSeek`) left the element, 3 ms from the target of its seek. The rules of
+   * `syncSeeked` read the position of the element as that target. A newer seek clears it.
+   */
+  let repairLanding: {
+    element: PlaybackMediaElement;
+    target: number;
+    landed: number;
+  } | null = null;
+  /** True when the last seek that issueSeek sent was a scrub seek with fastSeek. */
+  let issuedFastSeek = false;
+  /** The target of the last seek that issueSeek sent, which repairSeek compares. */
+  let issuedTarget: number | null = null;
+  /** True when the last seek that issueSeek sent kept the playback running. */
+  let issuedKeepsPlaying = false;
   // Position of the last scrub audio burst request, or of the last backward scrub sample, which
   // stops the burst instead, or of the last exact seek when that came later. Tracks drag
   // direction and skips audio on zero-distance moves (ADR 019, ADR 022).
   let lastScrubAudioTarget: number | null = null;
 
   return createStore<PlaybackStoreState>()((set, get) => {
+    /**
+     * The position of `element` for the rules of the seeks: the target of a repair while the
+     * element sits where the repair left it (repairSeek), and its own position otherwise.
+     */
+    const repairedPosition = (element: PlaybackMediaElement): number => {
+      const landing = repairLanding;
+      return landing !== null &&
+        landing.element === element &&
+        Math.abs(element.currentTime - landing.landed) <= SEEK_REPAIR_MATCH_SECONDS
+        ? landing.target
+        : element.currentTime;
+    };
+
+    /**
+     * Starts the seek that waits in the queue (ADR 022), as the `seeked` of the running seek does.
+     * A queued seek that kept the playback running (SeekOptions.keepPlaying) starts on the element
+     * that still plays, and issueSeek never pauses, so the playback goes on from its target.
+     */
+    const startQueuedSeek = (element: PlaybackMediaElement): void => {
+      const nextEntry = queuedSeek;
+      if (nextEntry === null) {
+        return;
+      }
+      queuedSeek = null;
+      try {
+        issueSeek(element, nextEntry);
+      } catch {
+        lastAcceptedSeek = null;
+        lastScrubAudioTarget = null;
+        if (get().isPlaying) {
+          // The queued seek kept the playback running. A failed seek leaves the element
+          // paused, as every failed seek does.
+          playSessionId++;
+          try {
+            element.pause();
+          } catch {
+            // Ignore DOM exception
+          }
+        }
+        set({
+          isPlaying: false,
+          error: "seekFailed",
+          seekTargetSeconds: null,
+          presentedFrame: null,
+        });
+        return;
+      }
+      if (nextEntry.scrub) {
+        requestScrubBurst(nextEntry.mediaTime);
+      }
+    };
+
     /**
      * Issues a seek to the media element (ADR 022).
      *
@@ -575,8 +692,14 @@ export function createPlaybackStore(
       element: PlaybackMediaElement,
       entry: { mediaTime: number; scrub: boolean },
     ): void => {
-      if (entry.scrub && typeof element.fastSeek === "function") {
-        element.fastSeek(entry.mediaTime);
+      repairLanding = null;
+      issuedTarget = entry.mediaTime;
+      // A seek that keeps the playback running needs no repair of a moved position: the playback
+      // moves it anyway (repairSeek). A seek that pauses has paused the element first.
+      issuedKeepsPlaying = element.paused === false;
+      issuedFastSeek = entry.scrub && typeof element.fastSeek === "function";
+      if (issuedFastSeek) {
+        element.fastSeek?.(entry.mediaTime);
       } else {
         element.currentTime = entry.mediaTime;
       }
@@ -1388,7 +1511,7 @@ export function createPlaybackStore(
     ): void => {
       const pending =
         queuedSeek ?? (lastAcceptedSeek?.scrub === true ? lastAcceptedSeek : null);
-      const currentBrowserTime = pending?.mediaTime ?? element.currentTime;
+      const currentBrowserTime = pending?.mediaTime ?? repairedPosition(element);
       if (
         typeof currentBrowserTime !== "number" ||
         !Number.isFinite(currentBrowserTime)
@@ -2339,6 +2462,10 @@ export function createPlaybackStore(
         activeSourceRevisionKey = newIdentity;
         attachedSource = source;
         attachedElement = element;
+        repairLanding = null;
+        issuedFastSeek = false;
+        issuedTarget = null;
+        issuedKeepsPlaying = false;
         calibratedMediaTime = null;
         lastPresentedMediaTime = null;
         lastInferredPts = null;
@@ -2432,6 +2559,10 @@ export function createPlaybackStore(
         }
         attachedSource = null;
         attachedElement = null;
+        repairLanding = null;
+        issuedFastSeek = false;
+        issuedTarget = null;
+        issuedKeepsPlaying = false;
         activeSourceRevisionKey = null;
         calibratedMediaTime = null;
         lastPresentedMediaTime = null;
@@ -2564,6 +2695,7 @@ export function createPlaybackStore(
           return;
         }
 
+        repairLanding = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
@@ -2602,6 +2734,7 @@ export function createPlaybackStore(
         ) {
           return false;
         }
+        repairLanding = null;
         if (get().decodeStall !== null) {
           return true;
         }
@@ -2666,7 +2799,9 @@ export function createPlaybackStore(
 
       play: () => {
         // A playback that the user starts plays with no stop point (ADR 026). playSegment sets
-        // its stop point after this call.
+        // its stop point after this call. A playback moves the position, so no repair of a
+        // late seek moves it back (repairSeek).
+        issuedKeepsPlaying = true;
         dropPlaybackStop();
         const state = get();
         // A stalled element does not play again (decodeStall). A seek reloads the preview.
@@ -2695,6 +2830,8 @@ export function createPlaybackStore(
             // A queued seek or issued scrub seek must be flushed as EXACT before playing, so
             // playback starts at the last target and not at a keyframe (ADR 022).
             issueSeek(attachedElement, { mediaTime: nextMediaTime, scrub: false });
+            // The playback starts from this seek and moves the position (repairSeek).
+            issuedKeepsPlaying = true;
           } catch {
             lastAcceptedSeek = null;
             lastScrubAudioTarget = null;
@@ -2979,7 +3116,7 @@ export function createPlaybackStore(
         if (options?.extentEnd === true && !scrub) {
           const pending =
             queuedSeek ?? (lastAcceptedSeek?.scrub === true ? lastAcceptedSeek : null);
-          const position = attachedElement.currentTime;
+          const position = repairedPosition(attachedElement);
           const runtimeDuration = state.runtimeBrowserDurationSeconds;
           const reachable =
             runtimeDuration === null
@@ -3557,6 +3694,91 @@ export function createPlaybackStore(
         get().syncPresentationUnavailable(sourceRevisionKey, element);
       },
 
+      repairSeek: (
+        sourceRevisionKey: string,
+        element: PlaybackMediaElement,
+        mediaTime: number,
+        videoAfter = true,
+      ) => {
+        if (
+          !attachedSource ||
+          attachedElement !== element ||
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
+          !get().isReady ||
+          get().decodeStall !== null ||
+          !Number.isFinite(mediaTime)
+        ) {
+          return;
+        }
+        // WebKit can also move the position itself, near the next keyframe. The store tells that
+        // from a newer seek by the target of the last seek that it sent. A newer seek is served by
+        // its own data, and a playback moves the position on its own, so neither is repaired.
+        // A seek to the target while WebKit still seeks there can hang (ADR 046), so that case
+        // gets no repair, and a click that waits in the queue starts instead.
+        const atTarget =
+          Math.abs(element.currentTime - mediaTime) <= SEEK_REPAIR_MATCH_SECONDS;
+        const lastSent =
+          issuedTarget !== null &&
+          Math.abs(issuedTarget - mediaTime) <= SEEK_REPAIR_MATCH_SECONDS;
+        // A seek that waits in the queue behind a seek that WebKit did not end is a new seek too,
+        // and the user asked for it.
+        if ((atTarget || lastSent) && queuedSeek !== null) {
+          startQueuedSeek(element);
+          return;
+        }
+        if (
+          !atTarget &&
+          (get().isPlaying ||
+            issuedKeepsPlaying ||
+            !lastSent ||
+            issuedFastSeek ||
+            element.seeking === true)
+        ) {
+          return;
+        }
+        // The same seek again, so the display target and the playback stay. A seek 3 ms from the
+        // target is a new seek for WebKit, and its data is buffered now. A scrub sample lands on a
+        // keyframe, so one fastSeek repairs it.
+        // The frame grid needs the calibration. Without it the seek goes after the target.
+        const origin = get().calibrationStatus === "ready" ? calibratedMediaTime : null;
+        const offset =
+          origin !== null
+            ? repairOffset(attachedSource, mediaTime - origin, videoAfter)
+            : videoAfter
+              ? SEEK_REPAIR_OFFSET_SECONDS
+              : -SEEK_REPAIR_OFFSET_SECONDS;
+        if (atTarget && offset === null) {
+          // A frame of 6 ms or less holds no seek 3 ms from its target.
+          return;
+        }
+        const landed = atTarget ? mediaTime + (offset ?? 0) : mediaTime;
+        // The first frame callback after this seek can name another frame than the expected one.
+        if (firstFrameCheckPending && !movedBeforeFirstFrame) {
+          movedBeforeFirstFrame = !seekShowsExpectedFrame({
+            mediaTime: landed,
+            scrub: false,
+          });
+        }
+        try {
+          if (!atTarget) {
+            // A seek to the target is a new seek for WebKit now, so one seek repairs it.
+            repairLanding = null;
+            element.currentTime = landed;
+            return;
+          }
+          if (issuedFastSeek && typeof element.fastSeek === "function") {
+            repairLanding = null;
+            element.fastSeek(landed);
+            return;
+          }
+          repairLanding = { element, target: mediaTime, landed };
+          element.currentTime = landed;
+        } catch {
+          // The element keeps the seek that it has.
+          repairLanding = null;
+        }
+      },
+
       syncBrowserDuration: (
         sourceRevisionKey: string,
         element: PlaybackMediaElement,
@@ -3588,7 +3810,7 @@ export function createPlaybackStore(
         ) {
           return;
         }
-        const time = element.currentTime;
+        const time = repairedPosition(element);
         // Report seconds elapsed from the start of the source, not the raw position on the
         // browser media timeline, so this clock and an inferred source PTS name one axis. The
         // origin is 0 until metadata loads, which leaves the raw position unchanged.
@@ -3645,37 +3867,7 @@ export function createPlaybackStore(
         }
 
         if (queuedSeek !== null) {
-          // A queued seek that kept the playback running (SeekOptions.keepPlaying) starts on the
-          // element that still plays, and issueSeek never pauses, so the playback goes on from
-          // its target.
-          const nextEntry = queuedSeek;
-          queuedSeek = null;
-          try {
-            issueSeek(element, nextEntry);
-          } catch {
-            lastAcceptedSeek = null;
-            lastScrubAudioTarget = null;
-            if (get().isPlaying) {
-              // The queued seek kept the playback running. A failed seek leaves the element
-              // paused, as every failed seek does.
-              playSessionId++;
-              try {
-                element.pause();
-              } catch {
-                // Ignore DOM exception
-              }
-            }
-            set({
-              isPlaying: false,
-              error: "seekFailed",
-              seekTargetSeconds: null,
-              presentedFrame: null,
-            });
-            return;
-          }
-          if (nextEntry.scrub) {
-            requestScrubBurst(nextEntry.mediaTime);
-          }
+          startQueuedSeek(element);
         } else if (
           lastAcceptedSeek?.scrub !== true &&
           deferredNavigation === null &&
@@ -3700,7 +3892,7 @@ export function createPlaybackStore(
               state,
               state.presentedFrame,
               attachedSource,
-              element.currentTime,
+              repairedPosition(element),
             )
           ) {
             set({ seekTargetSeconds: null });
@@ -3731,7 +3923,7 @@ export function createPlaybackStore(
                 state,
                 lastFrame,
                 attachedSource,
-                element.currentTime,
+                repairedPosition(element),
               )
             ) {
               set({ presentedFrame: lastFrame, seekTargetSeconds: null });
@@ -3752,6 +3944,8 @@ export function createPlaybackStore(
         if (attachedElement !== element) {
           return;
         }
+
+        issuedKeepsPlaying = true;
 
         // A play that the store did not start, such as from a media key, can also make the first
         // frame callback name a later frame (ADR 046).
@@ -3857,6 +4051,10 @@ export function createPlaybackStore(
       },
 
       reset: () => {
+        repairLanding = null;
+        issuedFastSeek = false;
+        issuedTarget = null;
+        issuedKeepsPlaying = false;
         scrubCue.stop();
         lastScrubAudioTarget = null;
         playSessionId++;

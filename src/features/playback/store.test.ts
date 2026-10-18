@@ -8730,6 +8730,242 @@ describe("Playback Store & PTS Presentation Engine", () => {
       });
     });
 
+    describe("repairSeek", () => {
+      it("seeks 3 ms toward the middle of the frame of the target, once", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().seekApproximate(64.533);
+        const sets = video.currentTimeSets;
+        // 25 frames per second: 64.533 s lies 13 ms into its frame of 40 ms.
+        store.getState().repairSeek(flvKey, video, 64.533);
+        expect(video.currentTimeSets).toBe(sets + 1);
+        expect(video.currentTime).toBeCloseTo(64.536, 9);
+        fireSeeked(store, flvKey, video);
+        expect(video.currentTimeSets).toBe(sets + 1);
+
+        // 35 ms into its frame, the seek goes before the target.
+        store.getState().seekApproximate(64.555);
+        store.getState().repairSeek(flvKey, video, 64.555);
+        expect(video.currentTime).toBeCloseTo(64.552, 9);
+      });
+
+      it("seeks before the target when no video follows it", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().seekApproximate(239.961);
+        store.getState().repairSeek(flvKey, video, video.currentTime, false);
+        expect(video.currentTime).toBeCloseTo(239.958, 9);
+      });
+
+      it("seeks to the target once when WebKit moved the position itself", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().seekApproximate(14.358);
+        // WebKit ends the seek near the next keyframe.
+        video.currentTime = 16.448;
+        video.seeking = true;
+        const before = video.currentTimeSets;
+        // While WebKit still seeks, a seek to the target can hang, so it gets no repair.
+        store.getState().repairSeek(flvKey, video, 14.358);
+        expect(video.currentTimeSets).toBe(before);
+        video.seeking = false;
+        const sets = video.currentTimeSets;
+        store.getState().repairSeek(flvKey, video, 14.358);
+        expect(video.currentTimeSets).toBe(sets + 1);
+        expect(video.currentTime).toBeCloseTo(14.358, 9);
+
+        // A newer seek of the store, and a playback, move the position, and stay.
+        fireSeeked(store, flvKey, video);
+        store.getState().seekApproximate(30);
+        expect(video.currentTime).toBe(30);
+        video.currentTime = 31;
+        store.getState().repairSeek(flvKey, video, 14.358);
+        expect(video.currentTime).toBe(31);
+        const playing = createPlaybackStore();
+        const element = attachWithMetadata(playing);
+        playing.getState().syncPresentedFrame(flvKey, 0, 1, element);
+        playing.getState().seekApproximate(14.358);
+        playing.getState().play();
+        element.currentTime = 15;
+        element.seeking = false;
+        playing.getState().repairSeek(flvKey, element, 14.358);
+        expect(element.currentTime).toBe(15);
+
+        // A play and a pause during the wait leave the position alone too.
+        playing.getState().pause();
+        playing.getState().repairSeek(flvKey, element, 14.358);
+        expect(element.currentTime).toBe(15);
+      });
+
+      it("seeks after a frame start whose PTS lies on a whole millisecond", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        // 25 frames per second on 1/1000 is an exact grid: the frame at 64.52 s starts there.
+        store.getState().seekApproximate(64.52);
+        store.getState().repairSeek(flvKey, video, 64.52);
+        expect(video.currentTime).toBeCloseTo(64.523, 9);
+
+        // At 30000/1001 the nominal start of frame 31 is 1034.37 ms, and its PTS is 1034 ms.
+        // A tick more puts it inside its frame, so the seek goes after it.
+        const ntsc = {
+          ...flvSource,
+          avgFrameRate: { n: 30000, d: 1001 },
+          rFrameRate: { n: 30000, d: 1001 },
+        };
+        const other = createPlaybackStore();
+        const element = attachWithMetadata(
+          other,
+          createFakeVideo({ duration: 240 }),
+          ntsc,
+        );
+        other.getState().seekApproximate(1.034);
+        other.getState().repairSeek(getSourceRevisionKey(ntsc), element, 1.034);
+        expect(element.currentTime).toBeCloseTo(1.037, 9);
+      });
+
+      it("seeks after an In whose PTS lies a tick before its nominal start", () => {
+        // At 30000/1001 the nominal start of frame 2 is 66.73 ms, and a muxer that truncates
+        // writes 66 ms. A whole tick more puts it inside its frame.
+        const ntsc = {
+          ...flvSource,
+          avgFrameRate: { n: 30000, d: 1001 },
+          rFrameRate: { n: 30000, d: 1001 },
+        };
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          createFakeVideo({ duration: 240 }),
+          ntsc,
+        );
+        store.getState().seekApproximate(0.066);
+        store.getState().repairSeek(getSourceRevisionKey(ntsc), video, 0.066);
+        expect(video.currentTime).toBeCloseTo(0.069, 9);
+      });
+
+      it("forgets the target when a play starts outside the store", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().seekApproximate(14.358);
+        video.seeking = false;
+        video.paused = false;
+        store.getState().syncPlay(flvKey, video);
+        video.paused = true;
+        store.getState().syncPause(flvKey, video);
+        video.currentTime = 15;
+        store.getState().repairSeek(flvKey, video, 14.358);
+        expect(video.currentTime).toBe(15);
+      });
+
+      it("repairs a click made during a playback, which paused it", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        store.getState().play();
+        store.getState().seekApproximate(14.358);
+        expect(video.paused).toBe(true);
+        // WebKit ends the seek near the next keyframe.
+        video.currentTime = 16.448;
+        video.seeking = false;
+        store.getState().repairSeek(flvKey, video, 14.358);
+        expect(video.currentTime).toBeCloseTo(14.358, 9);
+      });
+
+      it("starts a queued click behind a seek that kept the playback running", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        store.getState().play();
+        store.getState().seekApproximate(14.358, { keepPlaying: true });
+        // A click during the wait pauses and waits in the queue.
+        store.getState().seekApproximate(16);
+        video.currentTime = 16.448;
+        store.getState().repairSeek(flvKey, video, 14.358);
+        expect(video.currentTime).toBeCloseTo(16, 9);
+      });
+
+      it("starts a queued click behind a seek that WebKit moved and still runs", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        store.getState().seekApproximate(14.358);
+        store.getState().seekApproximate(16);
+        video.currentTime = 16.448;
+        expect(video.seeking).toBe(true);
+        store.getState().repairSeek(flvKey, video, 14.358);
+        expect(video.currentTime).toBeCloseTo(16, 9);
+      });
+
+      it("starts a seek that waits in the queue behind a seek that WebKit did not end", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        store.getState().seekApproximate(64.533);
+        // A click during the wait lies within the window of the seek, so it waits in the queue.
+        store.getState().seekApproximate(66);
+        expect(video.currentTime).toBeCloseTo(64.533, 9);
+        store.getState().repairSeek(flvKey, video, 64.533);
+        expect(video.currentTime).toBeCloseTo(66, 9);
+      });
+
+      it("reads the position where the repair left the element as the target", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        store.getState().seekApproximate(64.52);
+        // The frame of the target arrives while the element still seeks, so it keeps the target.
+        store.getState().syncPresentedFrame(flvKey, 64.52, 2, video);
+        expect(store.getState().seekTargetSeconds).not.toBeNull();
+        store.getState().repairSeek(flvKey, video, 64.52);
+        expect(video.currentTime).toBeCloseTo(64.523, 9);
+        // The seeked of the repair finds the frame of the target at the target.
+        fireSeeked(store, flvKey, video);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+      });
+
+      it("repairs a scrub sample with one fastSeek", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          createFakeVideo({ duration: 240, fastSeek: true, fastSeekMovesTime: true }),
+        );
+        store.getState().seekApproximate(64.533, { scrub: true });
+        expect(video.fastSeek).toHaveBeenCalledTimes(1);
+        const sets = video.currentTimeSets;
+        store.getState().repairSeek(flvKey, video, video.currentTime);
+        expect(video.fastSeek).toHaveBeenCalledTimes(2);
+        expect(video.fastSeek?.mock.calls[1]?.[0]).toBeCloseTo(64.536, 9);
+        expect(video.currentTimeSets).toBe(sets);
+      });
+
+      it("leaves an element that a newer seek moved, another element, and a stall", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        video.currentTime = 10;
+        const sets = video.currentTimeSets;
+        store.getState().repairSeek(flvKey, video, 64.533);
+        expect(video.currentTimeSets).toBe(sets);
+
+        const stranger = createFakeVideo({ duration: 240, initialCurrentTime: 64.533 });
+        store.getState().repairSeek(flvKey, stranger, 64.533);
+        expect(stranger.currentTimeSets).toBe(0);
+        store.getState().repairSeek("other", video, 10);
+        expect(video.currentTimeSets).toBe(sets);
+
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        expect(store.getState().syncDecodeStall(flvKey, video)).toBe(true);
+        store.getState().repairSeek(flvKey, video, 10);
+        expect(video.currentTimeSets).toBe(sets);
+      });
+
+      it("does nothing before the metadata", () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({ duration: 240 });
+        store.getState().attach(flvSource, video);
+        store.getState().repairSeek(flvKey, video, 0);
+        expect(video.currentTimeSets).toBe(0);
+      });
+    });
+
     it("drops the request of a reload in the anchor frame, where the element stands", () => {
       const store = createPlaybackStore();
       const stalled = attachWithMetadata(store);

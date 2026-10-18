@@ -44,6 +44,13 @@ export interface MediaSourceStoreActions {
   ) => void;
   /** The seek over a gap before the first frame. It keeps a running playback. */
   readonly seekOverGap: (mediaTime: number) => void;
+  /** The same seek again, after its data arrived (`PlaybackState.repairSeek`). */
+  readonly repairSeek: (
+    sourceRevisionKey: string,
+    element: HTMLVideoElement,
+    mediaTime: number,
+    videoAfter: boolean,
+  ) => void;
   /**
    * Runs `run` once the store is ready for seeks, at once when it is ready now. Returns a
    * function that cancels a run that waits.
@@ -66,6 +73,8 @@ export function createMediaSourceStoreActions(
     // first frame is its position on the timeline.
     seekOverGap: (mediaTime) =>
       store.getState().seekApproximate(mediaTime, { keepPlaying: true, overGap: true }),
+    repairSeek: (key, element, mediaTime, videoAfter) =>
+      store.getState().repairSeek(key, element, mediaTime, videoAfter),
     whenReady: (run) => whenStoreReady(store, run),
   };
 }
@@ -101,6 +110,11 @@ export interface MediaSourceOwnerDependencies {
   readonly listenForGestures: (callback: () => void) => () => void;
   readonly store: MediaSourceStoreActions;
   readonly pane: MediaSourcePaneReports;
+  /**
+   * True in WKWebView, where a seek whose data arrived after it began lands wrongly and the
+   * store seeks again (ADR 046, measurement 26).
+   */
+  readonly repairsLateSeeks: boolean;
   /** Reports a check of the first frame that failed, with both values. */
   readonly warn: (message: string) => void;
 }
@@ -122,6 +136,19 @@ export interface MediaSourceOwner {
 /** The precision of the test that the element still waits in the gap before the first frame. */
 const GAP_EPSILON_SECONDS = 1e-3;
 
+/**
+ * How long the repair of a late seek waits for the `seeked` of a seek that WebKit still runs.
+ * WebKit ends some such seeks never (ADR 046, measurement 26). A repair during a seek that WebKit
+ * still runs left the element seeking, so the repair waits for the end, or for this time.
+ */
+const LATE_SEEK_REPAIR_WAIT_MS = 1000;
+
+/**
+ * How long after a `seeked` the repair of a late seek starts. A seek that starts during the
+ * `seeked` of WebKit, or right after it, can stay seeking (measurement 26).
+ */
+const LATE_SEEK_REPAIR_DELAY_MS = 100;
+
 interface Owned {
   readonly element: HTMLVideoElement;
   readonly controller: MseController;
@@ -129,6 +156,8 @@ interface Owned {
   readonly onSeeking: (() => void) | null;
   /** Cancels a seek over a gap that waits for the store. */
   cancelGapSeek: (() => void) | null;
+  /** Cancels a repair of a late seek that waits for the end of the seek. */
+  cancelRepair: (() => void) | null;
   /** Stops the gestures that start the AudioContext of the cue. */
   readonly stopGestures: (() => void) | null;
 }
@@ -145,6 +174,7 @@ export function createMediaSourceOwner(
       return;
     }
     current.cancelGapSeek?.();
+    current.cancelRepair?.();
     current.stopGestures?.();
     if (current.onSeeking !== null) {
       current.element.removeEventListener("seeking", current.onSeeking);
@@ -196,6 +226,38 @@ export function createMediaSourceOwner(
             }
           });
         },
+        onSeekDataArrived: (mediaTime, videoAfter) => {
+          if (current === null || !isCurrent() || !dependencies.repairsLateSeeks) {
+            return;
+          }
+          const owner = current;
+          owner.cancelRepair?.();
+          const repair = (): void => {
+            owner.cancelRepair?.();
+            if (isCurrent()) {
+              dependencies.store.repairSeek(key, element, mediaTime, videoAfter);
+            }
+          };
+          // The store ends the seek at its `seeked`, and the repair seeks a little after it, or
+          // after the wait when WebKit never ends the seek.
+          let timer = setTimeout(
+            repair,
+            element.seeking ? LATE_SEEK_REPAIR_WAIT_MS : LATE_SEEK_REPAIR_DELAY_MS,
+          );
+          const onSeeked = (): void => {
+            element.removeEventListener("seeked", onSeeked);
+            clearTimeout(timer);
+            timer = setTimeout(repair, LATE_SEEK_REPAIR_DELAY_MS);
+          };
+          if (element.seeking) {
+            element.addEventListener("seeked", onSeeked);
+          }
+          owner.cancelRepair = () => {
+            owner.cancelRepair = null;
+            clearTimeout(timer);
+            element.removeEventListener("seeked", onSeeked);
+          };
+        },
         onNonMonotonic: () => {
           if (isCurrent()) {
             dependencies.store.denySourcePrecision(key, element);
@@ -242,6 +304,7 @@ export function createMediaSourceOwner(
         cue,
         onSeeking,
         cancelGapSeek: null,
+        cancelRepair: null,
         stopGestures,
       };
       owned = current;

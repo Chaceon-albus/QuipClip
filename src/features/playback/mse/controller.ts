@@ -91,6 +91,11 @@ const SPAN_BUFFERED_SLACK_SECONDS = 1;
 const NO_PROGRESS_REACH_SECONDS = 0.25;
 /** The time precision of the tests. */
 const EPSILON_SECONDS = 1e-3;
+/**
+ * The video after the target of a seek that the report of its data needs: more than the 3 ms of
+ * the repair of the store, with the precision of `hasVideoAt`.
+ */
+const SEEK_DATA_REACH_SECONDS = 0.01;
 
 /** `TimeRanges`. */
 export interface MseTimeRanges {
@@ -213,6 +218,13 @@ export interface MseControllerEvents {
   ) => void;
   /** The PCM of an FLV window ended. A failed audio process disables the cue. */
   readonly onPcmEnd?: (end: WindowEnd) => void;
+  /**
+   * An append brought the video at `mediaTime`, the target of a seek that began with no video
+   * there. WKWebView completes such a seek wrongly: it shows the next keyframe, or it stays
+   * seeking. A new seek after the data arrived lands right (ADR 046, measurement 26).
+   * `videoAfter` is false when no video follows the target, at the end of the file.
+   */
+  readonly onSeekDataArrived?: (mediaTime: number, videoAfter: boolean) => void;
 }
 
 export interface MseController {
@@ -368,6 +380,11 @@ export function createMseController(
    * at `seeked`, and when the page drops its data.
    */
   let waitingTarget: number | null = null;
+  /**
+   * The target of the seek that began with no video at its target, until an append brings that
+   * video (`onSeekDataArrived`). It goes at the next seek.
+   */
+  let unbufferedSeekTarget: number | null = null;
   /** The source time of the last window that went on by time, for the progress check. */
   let lastTimeResume: number | null = null;
   /**
@@ -732,6 +749,7 @@ export function createMseController(
     }
     checkStartGap();
     checkProgress();
+    checkSeekData();
     serveWaitingSeek();
     evict();
     prefetch();
@@ -759,7 +777,31 @@ export function createMseController(
       clearing = false;
     }
     clipSpansToBuffered();
+    checkSeekData();
     pump();
+  };
+
+  /**
+   * Reports the data of the seek that began with no video at its target, once the video holds
+   * the target and a little after it, or the last window of the file is buffered. The repair of
+   * the store seeks 3 ms after the target (ADR 046), so that place must hold video too.
+   */
+  const checkSeekData = (): void => {
+    const target = unbufferedSeekTarget;
+    if (target === null || !hasVideoAt(target)) {
+      return;
+    }
+    const videoAfter = hasVideoAt(target + SEEK_DATA_REACH_SECONDS);
+    // At the end of the file the repair seeks before the target first, so that place must hold
+    // video then.
+    if (
+      !videoAfter &&
+      !(tailBuffered && hasVideoAt(target - SEEK_DATA_REACH_SECONDS))
+    ) {
+      return;
+    }
+    unbufferedSeekTarget = null;
+    events.onSeekDataArrived?.(target, videoAfter);
   };
 
   /** Removes the data more than 20 s behind the position, up to a keyframe. */
@@ -1514,6 +1556,7 @@ export function createMseController(
     }
     gapPosition = null;
     waitingTarget = null;
+    unbufferedSeekTarget = null;
     const target = currentTime();
     // A full SourceBuffer waits for the position to move, and a seek moves it with no
     // `timeupdate`. The room counts from the new position.
@@ -1533,6 +1576,7 @@ export function createMseController(
     // The running window delivers the target soon, unless its appends wait for room.
     if (!quotaBlocked && activeWindowCovers(target)) {
       waitingTarget = target;
+      unbufferedSeekTarget = target;
       return;
     }
     // Before the first frame of the file no frame shows. When that frame is buffered, the
@@ -1545,6 +1589,7 @@ export function createMseController(
       events.onStartGap(fileFirstFrame);
       return;
     }
+    unbufferedSeekTarget = target;
     restartAt(target);
   };
 
