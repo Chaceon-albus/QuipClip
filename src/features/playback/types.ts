@@ -166,6 +166,13 @@ export interface SeekOptions {
    * it runs without the option when the calibration settles (ADR 003, ADR 022).
    */
   readonly keepPlaying?: boolean;
+  /**
+   * For `seekApproximate` only. The seek over the gap before the first frame of a MediaSource
+   * source (ADR 046). It replaces a running seek at once: that seek waits at a position that
+   * holds no frame, so it never completes. A request that waits in the queue behind that seek
+   * replaces it instead, and the seek over the gap goes.
+   */
+  readonly overGap?: boolean;
 }
 
 /**
@@ -222,6 +229,11 @@ export interface DecodeStall {
    * `currentTime`, so it is approximate. It is display state only, never an edit position.
    */
   readonly atSeconds: number;
+  /**
+   * `read` when a remux window of a MediaSource source failed to read the file there (ADR 046),
+   * and absent for a decode error of the element.
+   */
+  readonly cause?: "read";
 }
 
 /**
@@ -383,6 +395,7 @@ export interface PlaybackActions {
   syncDecodeStall: (
     sourceRevisionKey: string,
     element: PlaybackMediaElement,
+    cause?: "read",
   ) => boolean;
 
   /**

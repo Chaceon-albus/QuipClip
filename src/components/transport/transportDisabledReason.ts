@@ -51,7 +51,8 @@ export type TransportDisabledReasonKey =
   | "transport.disabledReason.playheadAfterIn"
   | "transport.disabledReason.atInPoint"
   | "transport.disabledReason.noFrameRate"
-  | "transport.disabledReason.decodeStalled";
+  | "transport.disabledReason.decodeStalled"
+  | "transport.disabledReason.readStalled";
 
 /** The description of Mark In while a press would finish the current segment. */
 export type MarkInFinishesSegmentKey = "transport.state.finishesSegment";
@@ -117,12 +118,14 @@ export interface EditReasonContext {
  * The condition of a step is an active source, a valid nominal frame rate (ADR 021), and no
  * decode stall (`canStepFrames`). The frame rate comes from the probe, so its reason holds for
  * the whole session, and it comes first. A decode stall ends at the next seek, and its reason
- * says so. The notice of the preview says the same, but the user can close it.
+ * says so. The notice of the preview says the same, but the user can close it. `isReadStall`
+ * marks a stall where the preview could not read the file (ADR 046), which has its own reason.
  */
 export function presentStepDisabledReason(
   hasActiveSource: boolean,
   hasNominalRate: boolean,
   isDecodeStalled: boolean,
+  isReadStall = false,
 ): TransportDisabledReasonKey | null {
   if (
     !hasActiveSource ||
@@ -130,9 +133,17 @@ export function presentStepDisabledReason(
   ) {
     return null;
   }
-  return hasNominalRate
-    ? "transport.disabledReason.decodeStalled"
-    : "transport.disabledReason.noFrameRate";
+  if (!hasNominalRate) {
+    return "transport.disabledReason.noFrameRate";
+  }
+  return stallReason(isReadStall);
+}
+
+/** The reason of a stall: a part that the preview cannot decode, or cannot read. */
+function stallReason(isReadStall: boolean): TransportDisabledReasonKey {
+  return isReadStall
+    ? "transport.disabledReason.readStalled"
+    : "transport.disabledReason.decodeStalled";
 }
 
 /**
@@ -142,11 +153,12 @@ export function presentStepDisabledReason(
 export function presentPlayDisabledReason(
   hasActiveSource: boolean,
   isDecodeStalled: boolean,
+  isReadStall = false,
 ): TransportDisabledReasonKey | null {
   if (!hasActiveSource || canTogglePlayback(hasActiveSource, isDecodeStalled)) {
     return null;
   }
-  return "transport.disabledReason.decodeStalled";
+  return stallReason(isReadStall);
 }
 
 function isEnabled(

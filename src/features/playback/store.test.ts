@@ -9110,6 +9110,61 @@ describe("Playback Store & PTS Presentation Engine", () => {
         expect(video.currentTime).toBe(30.5);
       });
 
+      it("gives way to a target in the buffered data, which the seek reaches at once", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0.08, 10]]));
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+
+        // A seek to the start waits before the first keyframe of the file, which never comes.
+        store.getState().seekApproximate(0);
+        store.getState().seekApproximate(0.08);
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.currentTime).toBe(0.08);
+      });
+
+      it("gives way at once to the seek over the gap before the first frame", () => {
+        const store = createPlaybackStore();
+        // The audio starts later than the video, so the buffered intersection starts after the
+        // first frame.
+        const video = attachWithMetadata(store, bufferedVideo([[0.36, 10]]));
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+
+        store.getState().seekApproximate(0);
+        store.getState().seekApproximate(0.08);
+        expect(video.currentTimeSets).toBe(1);
+        store.getState().seekApproximate(0.08, { overGap: true });
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.currentTime).toBe(0.08);
+      });
+
+      it("issues a click that waits behind the stuck seek instead of the seek over the gap", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0.08, 3]]));
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+
+        store.getState().seekApproximate(0);
+        // A click at 8 s waits in the queue behind the seek that never completes.
+        store.getState().seekApproximate(8);
+        expect(video.currentTimeSets).toBe(1);
+        store.getState().seekApproximate(0.08, { overGap: true });
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.currentTime).toBe(8);
+        expect(store.getState().seekTargetSeconds).toBe(8);
+      });
+
+      it("issues a scrub sample that waits behind the stuck seek as an exact seek", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store, bufferedVideo([[0.08, 3]]));
+        store.getState().syncPresentedFrame(flvKey, 0.08, 1, video);
+
+        store.getState().seekApproximate(0);
+        store.getState().seekApproximate(2, { scrub: true });
+        expect(video.currentTimeSets).toBe(1);
+        store.getState().seekApproximate(0.08, { overGap: true });
+        expect(video.currentTimeSets).toBe(2);
+        expect(video.currentTime).toBe(2);
+      });
+
       it("keeps the release after a fastSeek in the queue, and gives way to a far click", () => {
         const store = createPlaybackStore();
         const video = attachWithMetadata(
@@ -10765,6 +10820,15 @@ describe("Decode Stall and Reload (decodeStall)", () => {
   }
 
   describe("the stall", () => {
+    it("records a stall where a remux window could not read the file (ADR 046)", () => {
+      const store = createPlaybackStore();
+      const video = attachCalibrated(store);
+      video.currentTime = 7;
+      video.seeking = false;
+      expect(store.getState().syncDecodeStall(joinedKey, video, "read")).toBe(true);
+      expect(store.getState().decodeStall).toEqual({ atSeconds: 7, cause: "read" });
+    });
+
     it("pauses the element, drops what waits for it, and keeps the store attached and ready", () => {
       const store = createPlaybackStore();
       const video = attachCalibrated(store);

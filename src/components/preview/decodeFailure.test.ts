@@ -435,6 +435,65 @@ describe("findUnplayableContainer", () => {
 });
 
 describe("presentDecodeFailure", () => {
+  describe("the remux windows of a MediaSource source (ADR 046)", () => {
+    it("names the codec that the MediaSource refused, as for a missing picture", () => {
+      const refused = presentDecodeFailure(
+        input({ trigger: { kind: "codecRejected" } }),
+      );
+      const missing = presentDecodeFailure(
+        input({ trigger: { kind: "pictureMissing" } }),
+      );
+      expect(refused).toEqual(missing);
+      expect(refused.reason.key).toBe("preview.decodeFailure.unsupportedCodec.full");
+    });
+
+    it("says that the preview needs FFmpeg, and points to its settings", () => {
+      expect(
+        presentDecodeFailure(input({ trigger: { kind: "ffmpegMissing" } })),
+      ).toEqual({
+        reason: { shape: "plain", key: "preview.decodeFailure.ffmpegMissing" },
+        hintKey: "preview.decodeFailure.hint.installFfmpeg",
+      });
+    });
+
+    it("says that QuipClip could not read a file whose window failed", () => {
+      expect(
+        presentDecodeFailure(input({ trigger: { kind: "windowFailed" } })),
+      ).toEqual({
+        reason: { shape: "plain", key: "preview.decodeFailure.readFailed" },
+        hintKey: null,
+      });
+    });
+
+    it("passes the diagnostic text of the failure on", () => {
+      expect(
+        presentDecodeFailure(
+          input({
+            trigger: { kind: "windowFailed", detail: "spawnFailed: No such file" },
+          }),
+        ).detail,
+      ).toBe("spawnFailed: No such file");
+      expect(
+        presentDecodeFailure(
+          input({
+            trigger: { kind: "codecRejected", detail: 'video/mp4; codecs="hev1"' },
+          }),
+        ).detail,
+      ).toBe('video/mp4; codecs="hev1"');
+    });
+
+    it("names the button of the panel in the FFmpeg hint of both catalogs", () => {
+      for (const catalog of [en, zhCN]) {
+        const label = catalog.preview.decodeFailure.openAnother;
+        expect(label.endsWith("…")).toBe(true);
+        expect(catalog.preview.decodeFailure.hint.installFfmpeg).toContain(
+          label.slice(0, -1),
+        );
+        expect(catalog.preview.decodeFailure.hint.installFfmpeg).not.toContain(label);
+      }
+    });
+  });
+
   describe("a missing picture", () => {
     it("names the codec, the profile, and the pixel format when all are stated", () => {
       expect(presentDecodeFailure(input()).reason).toEqual({

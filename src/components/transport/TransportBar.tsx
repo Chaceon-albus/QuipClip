@@ -159,6 +159,7 @@ export function TransportBar() {
   // A stalled preview element does not play or step again, and a seek reloads it. The notice of
   // the preview says so.
   const isDecodeStalled = usePlaybackStore((s) => s.decodeStall !== null);
+  const isReadStall = usePlaybackStore((s) => s.decodeStall?.cause === "read");
   const togglePlayback = playbackStore.getState().togglePlayback;
 
   const hasNominalRate = hasNominalFrameRate(media?.probe);
@@ -235,8 +236,13 @@ export function TransportBar() {
     hasActiveSource,
     hasNominalRate,
     isDecodeStalled,
+    isReadStall,
   );
-  const playReason = presentPlayDisabledReason(hasActiveSource, isDecodeStalled);
+  const playReason = presentPlayDisabledReason(
+    hasActiveSource,
+    isDecodeStalled,
+    isReadStall,
+  );
   const reasonText = (key: TransportDisabledReasonKey | null) =>
     key === null ? null : t(key);
   // Each disabled-reason element is always in the document, and its button names it in

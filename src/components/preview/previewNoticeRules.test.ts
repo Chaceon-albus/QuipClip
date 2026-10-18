@@ -104,6 +104,11 @@ describe("resolveNoticeTimer", () => {
     expect(resolveNoticeTimer("import", "leaving", false)).toBeNull();
   });
 
+  it("never removes a notice about a video that plays through FFmpeg by itself", () => {
+    expect(resolveNoticeTimer("mediaSource", "shown", false)).toBeNull();
+    expect(resolveNoticeTimer("mediaSource", "leaving", false)).toBeNull();
+  });
+
   it("never removes the notice of a decode stall by itself", () => {
     expect(resolveNoticeTimer("decodeStall", "shown", false)).toBeNull();
     expect(resolveNoticeTimer("decodeStall", "shown", true)).toBeNull();
@@ -146,5 +151,9 @@ describe("previewNoticeTone", () => {
 
   it("shows a decode stall as a warning, because the preview continues at the next seek", () => {
     expect(previewNoticeTone("decodeStall")).toBe("warning");
+  });
+
+  it("shows a notice about a video that plays through FFmpeg as a warning", () => {
+    expect(previewNoticeTone("mediaSource")).toBe("warning");
   });
 });

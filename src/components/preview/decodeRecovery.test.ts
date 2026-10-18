@@ -14,6 +14,7 @@ import {
   DECODE_STALL_MESSAGE_KEY,
   NO_DECODE_EVIDENCE,
   presentDecodeStall,
+  DECODE_STALL_READ_KEY,
   provesPartialDecode,
   stepDecodeEvidence,
   type DecodeEvidence,
@@ -105,6 +106,13 @@ describe("presentDecodeStall", () => {
     expect(presentDecodeStall({ atSeconds: 10.0213 }, MILLISECONDS)).toEqual({
       key: DECODE_STALL_MESSAGE_KEY,
       values: { time: "00:00:10.021" },
+    });
+  });
+
+  it("says that the preview could not read a part that a remux window failed to read", () => {
+    expect(presentDecodeStall({ atSeconds: 4, cause: "read" }, MILLISECONDS)).toEqual({
+      key: DECODE_STALL_READ_KEY,
+      values: { time: "00:00:04.000" },
     });
   });
 

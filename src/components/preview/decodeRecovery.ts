@@ -132,9 +132,12 @@ export function classifyDecodeFailure(
 /** The catalog key of the notice of a stall. */
 export const DECODE_STALL_MESSAGE_KEY = "preview.decodeStall.message";
 
+/** The message of a stall where a remux window could not read the file (ADR 046). */
+export const DECODE_STALL_READ_KEY = "preview.decodeStall.readFailed";
+
 /** What the notice of a stall says. */
 export interface DecodeStallNotice {
-  readonly key: typeof DECODE_STALL_MESSAGE_KEY;
+  readonly key: typeof DECODE_STALL_MESSAGE_KEY | typeof DECODE_STALL_READ_KEY;
   readonly values: {
     /**
      * The position of the stall in the timecode format of the open source, the format of the
@@ -159,7 +162,7 @@ export function presentDecodeStall(
   const seconds =
     Number.isFinite(stall.atSeconds) && stall.atSeconds > 0 ? stall.atSeconds : 0;
   return {
-    key: DECODE_STALL_MESSAGE_KEY,
+    key: stall.cause === "read" ? DECODE_STALL_READ_KEY : DECODE_STALL_MESSAGE_KEY,
     values: { time: formatElapsedTimecode(seconds, display) },
   };
 }

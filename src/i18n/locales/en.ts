@@ -131,11 +131,24 @@ export const en = {
       unsupportedContainer:
         "The system player cannot open <mono>{{container}}</mono> files.",
       readFailed: "QuipClip could not read the file.",
+      // A video that the system player cannot open plays through FFmpeg (ADR 046), which
+      // QuipClip could not find. `hint.installFfmpeg` names the Settings window and its FFmpeg
+      // tab (`settings.title`, `settings.tab.ffmpeg`) and the `openAnother` button, without its
+      // ellipsis. `details.show` and `details.hide` label the disclosure of the diagnostic text
+      // of a failure, which is never translated. They match `importError.details`.
+      ffmpegMissing:
+        "QuipClip could not find FFmpeg, which the preview of this video needs.",
       hint: {
         installHevc:
           "Install the HEVC Video Extensions from the Microsoft Store, then restart QuipClip and open the file again.",
         convertH264: "Convert the video to H.264 (8-bit, 4:2:0) MP4 to preview it.",
         convertMp4: "Convert the video to MP4 to preview it.",
+        installFfmpeg:
+          "Install FFmpeg, or set its location in Settings > FFmpeg. Then open the file again with Open Another File.",
+      },
+      details: {
+        show: "Show Details",
+        hide: "Hide Details",
       },
       openAnother: "Open Another File…",
     },
@@ -147,12 +160,28 @@ export const en = {
     decodeStall: {
       message:
         "Preview stopped at about {{time}}. The preview cannot decode this part of the file (the picture size or the codec may change here). Move the playhead to another part to continue.",
+      // A video that plays through FFmpeg (ADR 046): the preview could not read the file at
+      // that position, as when a network share stops answering. A move of the playhead reads
+      // it again.
+      readFailed:
+        "Preview stopped at about {{time}}. The preview could not read this part of the file. Move the playhead to try again.",
     },
     // The notices over an open video. An import error stays until the user dismisses it or
     // opens another file. A playback error leaves by itself after a few seconds. `dismiss`
     // is the accessible name of the close button of a notice.
     notice: {
       dismiss: "Dismiss",
+    },
+    // The notices over a video that plays through FFmpeg (ADR 046). Each stays until the user
+    // dismisses it or opens another video. `timestampsDecrease`: the timestamps of the file go
+    // back, as after a reconnect of a live recording, so the preview cannot name the exact
+    // frame. The wording of "precise marking" matches `timeline.disabledReason`. `noSound`: the
+    // preview cannot convert the audio of the file for the system player.
+    mediaSource: {
+      timestampsDecrease:
+        "The timestamps of this video go back. The preview plays it, but precise marking is unavailable.",
+      noSound:
+        "The preview cannot convert the audio of this video, so it plays without sound.",
     },
     // An import that failed. With no video open, the error takes the place of the empty
     // state: `title`, then the `mediaError` message, then `ffmpegHint` for an error that the
@@ -284,6 +313,10 @@ export const en = {
       // cannot decode (`preview.decodeStall`). The next seek loads the video again.
       decodeStalled:
         "The preview stopped at a part it cannot decode. Move the playhead to another part to continue.",
+      // The same buttons while the preview of a video that plays through FFmpeg is stopped at
+      // a part that it could not read (`preview.decodeStall.readFailed`).
+      readStalled:
+        "The preview stopped at a part it could not read. Move the playhead to try again.",
     },
   },
   // The names of the keys that are words, for the key chips of the tooltips and menus. Each

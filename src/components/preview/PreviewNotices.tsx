@@ -17,6 +17,7 @@ import type { PlaybackErrorCode } from "@/features/playback";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { cn } from "@/lib/utils";
 import type { DecodeStallNotice } from "./decodeRecovery";
+import type { MediaSourceNoticeKey } from "./mediaSourceRules";
 import {
   importErrorActions,
   importErrorHintKey,
@@ -94,8 +95,9 @@ function ImportErrorDetails({ text }: { text: string }) {
  * and not the names of the controls.
  *
  * A playback notice leaves by itself (`resolveNoticeTimer`). The pointer over it, or the focus
- * in it, pauses it, and a pause stops an exit that has started. An import notice and the notice
- * of a decode stall stay until the user dismisses them or the store clears them.
+ * in it, pauses it, and a pause stops an exit that has started. An import notice, the notice of a
+ * decode stall and a notice about a video that plays through FFmpeg stay until the user dismisses
+ * them or their state clears them.
  */
 function NoticeBanner({
   kind,
@@ -308,6 +310,30 @@ export function DecodeStallBanner({
     <NoticeBanner
       kind="decodeStall"
       message={t(notice.key, notice.values)}
+      onDismiss={onDismiss}
+      onReturnFocus={onReturnFocus}
+    />
+  );
+}
+
+/**
+ * A notice about a video that plays through FFmpeg (ADR 046): its timestamps go back, or it
+ * plays without sound. It stays until the user dismisses it.
+ */
+export function MediaSourceNoticeBanner({
+  messageKey,
+  onDismiss,
+  onReturnFocus,
+}: {
+  messageKey: MediaSourceNoticeKey;
+  onDismiss: () => void;
+  onReturnFocus: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <NoticeBanner
+      kind="mediaSource"
+      message={t(messageKey)}
       onDismiss={onDismiss}
       onReturnFocus={onReturnFocus}
     />

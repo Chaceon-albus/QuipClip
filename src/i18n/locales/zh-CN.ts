@@ -99,20 +99,33 @@ export const zhCN: TranslationCatalog = {
       },
       unsupportedContainer: "系统播放器无法打开 <mono>{{container}}</mono> 文件。",
       readFailed: "QuipClip 无法读取此文件。",
+      ffmpegMissing: "QuipClip 无法找到预览此视频所需的 FFmpeg。",
       hint: {
         installHevc:
           "从 Microsoft Store 安装“HEVC 视频扩展”，然后重新启动 QuipClip 并再次打开此文件。",
         convertH264: "将视频转换为 H.264（8 位、4:2:0）MP4 后即可预览。",
         convertMp4: "将视频转换为 MP4 格式后再预览。",
+        installFfmpeg:
+          "请安装 FFmpeg，或在“设置 > FFmpeg”中设置其位置，然后点击“打开其他文件”重新打开此文件。",
+      },
+      details: {
+        show: "显示详细信息",
+        hide: "隐藏详细信息",
       },
       openAnother: "打开其他文件…",
     },
     decodeStall: {
       message:
         "预览在约 {{time}} 处中断：预览无法解码这部分内容（画面尺寸或编码可能在此变化）。把播放头移到别处即可继续。",
+      readFailed:
+        "预览在约 {{time}} 处中断：预览无法读取这部分文件。移动播放头即可重试。",
     },
     notice: {
       dismiss: "关闭提示",
+    },
+    mediaSource: {
+      timestampsDecrease: "此视频的时间戳出现回退。预览可以播放，但无法精确标记。",
+      noSound: "预览无法转换此视频的音频，因此播放时没有声音。",
     },
     importError: {
       title: "无法打开此视频",
@@ -195,6 +208,7 @@ export const zhCN: TranslationCatalog = {
       atInPoint: "播放头已位于入点。",
       noFrameRate: "源未报告帧率。",
       decodeStalled: "预览停在无法解码的位置。把播放头移到别处即可继续。",
+      readStalled: "预览停在无法读取的位置。移动播放头即可重试。",
     },
   },
   // A key keeps the label that is printed on its key cap. The space bar has no printed

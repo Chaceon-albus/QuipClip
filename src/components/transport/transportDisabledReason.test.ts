@@ -884,6 +884,15 @@ describe("transportDisabledReason", () => {
       );
     });
 
+    it("says that the preview could not read the file during a read stall", () => {
+      expect(presentStepDisabledReason(true, true, true, true)).toBe(
+        "transport.disabledReason.readStalled",
+      );
+      expect(presentStepDisabledReason(true, false, true, true)).toBe(
+        "transport.disabledReason.noFrameRate",
+      );
+    });
+
     it("gives no reason when the step is enabled or no source is active", () => {
       expect(presentStepDisabledReason(true, true, false)).toBeNull();
       for (const hasNominalRate of [false, true]) {
@@ -900,6 +909,9 @@ describe("transportDisabledReason", () => {
     it("says that the preview stopped during a decode stall", () => {
       expect(presentPlayDisabledReason(true, true)).toBe(
         "transport.disabledReason.decodeStalled",
+      );
+      expect(presentPlayDisabledReason(true, true, true)).toBe(
+        "transport.disabledReason.readStalled",
       );
     });
 
@@ -921,6 +933,7 @@ describe("transportDisabledReason", () => {
       "transport.disabledReason.atInPoint",
       "transport.disabledReason.noFrameRate",
       "transport.disabledReason.decodeStalled",
+      "transport.disabledReason.readStalled",
     ];
 
     it("name a message in both catalogs", () => {

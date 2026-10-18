@@ -10,6 +10,7 @@ import { Trans, useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { AlertCircle, Film, Loader2 } from "lucide-react";
 import { SHORT_STATE_INDICATOR_DELAY_MS } from "@/components/common/delayedIndicator";
+import { DiagnosticDetails } from "@/components/common/DiagnosticDetails";
 import { useDelayedVisibility } from "@/components/common/useDelayedIndicator";
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
@@ -26,10 +27,24 @@ import {
   playbackStore,
   resolveTimecodeDisplay,
   scrubAudioController,
+  setScrubCue,
   usePlaybackStore,
   type PlaybackSource,
 } from "@/features/playback";
-import { usePreviewMutePreference } from "@/features/settings/previewMutePreference";
+import {
+  createMseController,
+  type MseEnvironment,
+  type MseFailure,
+  type MseSource,
+} from "@/features/playback/mse/controller";
+import { createPcmCue } from "@/features/playback/mse/pcmCue";
+import { ANCHOR_MEDIA_TIME } from "@/features/playback/mse/timeline";
+import { createWebAudioOutput } from "@/features/playback/mse/webAudio";
+import { openPreviewWindow } from "@/features/playback/mse/windowClient";
+import {
+  previewMutePreferenceStore,
+  usePreviewMutePreference,
+} from "@/features/settings/previewMutePreference";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import {
   FRAME_TIMECODE_PLACEHOLDER,
@@ -72,9 +87,27 @@ import { formatSupportedVideoFormats } from "./previewEmptyState";
 import { PreviewBoundaryBadges } from "./PreviewBoundaryBadges";
 import { PreviewBufferingIndicator } from "./PreviewBufferingIndicator";
 import {
+  createMediaSourceOwner,
+  createMediaSourceStoreActions,
+  type MediaSourceOwner,
+  type MediaSourcePaneReports,
+} from "./mediaSourceOwner";
+import { choosePreviewPath, mediaSourceSupport, type PreviewPath } from "./previewPath";
+import {
+  addMediaSourceNotice,
+  dismissMediaSourceNotice,
+  mediaSourceNoticesFor,
+  mediaSourcePanelTrigger,
+  NO_MEDIA_SOURCE_NOTICES,
+  rescansAtAttach,
+  resolveMediaSourceFailure,
+  shownMediaSourceNotices as noticesShownFor,
+} from "./mediaSourceRules";
+import {
   DecodeStallBanner,
   ImportErrorBanner,
   ImportErrorEmptyState,
+  MediaSourceNoticeBanner,
   PlaybackErrorBanner,
 } from "./PreviewNotices";
 import { createSourceLifecycleGuard, formatPreviewTotalDuration } from "./previewFrame";
@@ -135,6 +168,101 @@ function stopPictureCheckTimer(check: PictureCheck | null): void {
   }
 }
 
+/** How the preview plays a source: the element opens it, or a MediaSource plays it (ADR 046). */
+function previewPathOf(media: ImportMediaResult): PreviewPath {
+  return choosePreviewPath({
+    probe: media.probe,
+    fileName: media.fileName,
+    platform: currentPlatform(),
+    isTypeSupported: mediaSourceSupport(),
+  });
+}
+
+/** The source as the remux windows of a MediaSource source need it (ADR 046). */
+function toMseSource(
+  media: ImportMediaResult,
+  path: Extract<PreviewPath, { kind: "mediaSource" }>,
+  rescanConfig: boolean,
+): MseSource {
+  return {
+    path: media.path,
+    size: media.size,
+    mtime: media.mtime,
+    container: path.container,
+    formatStartTime: media.probe.formatStartTime ?? null,
+    videoStartSeconds: path.videoStartSeconds,
+    durationSeconds: path.durationSeconds,
+    audio: path.audio,
+    audioCodec: media.probe.audio?.codec ?? null,
+    pcm: media.probe.audio !== null,
+    rescanConfig,
+  };
+}
+
+/** The browser side of the MediaSource controller. */
+const BROWSER_MSE_ENVIRONMENT: MseEnvironment = {
+  createMediaSource: () => {
+    const source = new MediaSource();
+    return { source, url: URL.createObjectURL(source) };
+  },
+  revokeObjectUrl: (url) => URL.revokeObjectURL(url),
+  isTypeSupported: (type) => MediaSource.isTypeSupported(type),
+  openWindow: (request, listener) => openPreviewWindow(request, listener),
+};
+
+/**
+ * The owner of the MediaSource controller and the Web Audio cue of the preview (ADR 046), with
+ * the browser, the window client and the playback store behind it. `pane` receives what the
+ * pane shows.
+ */
+function createPreviewMediaSourceOwner(pane: MediaSourcePaneReports): MediaSourceOwner {
+  return createMediaSourceOwner({
+    createController: (element, source, events) =>
+      createMseController(element, source, BROWSER_MSE_ENVIRONMENT, events),
+    createCue: (source, muted) =>
+      createPcmCue({
+        videoStartSeconds: source.videoStartSeconds,
+        createOutput: createWebAudioOutput,
+        muted,
+        // On FLV the PCM comes with the video windows. MPEG-TS and Matroska read their own PCM
+        // windows of the audio lane.
+        openPcmWindow:
+          source.container === "flv"
+            ? undefined
+            : (startSeconds, listener) =>
+                openPreviewWindow(
+                  {
+                    path: source.path,
+                    size: source.size,
+                    mtime: source.mtime,
+                    lane: "audio",
+                    container: source.container,
+                    start: { kind: "time", seconds: startSeconds },
+                    formatStartTime: source.formatStartTime,
+                    audio: "copy",
+                    audioCodec: source.audioCodec,
+                  },
+                  listener,
+                ),
+      }),
+    setScrubCue,
+    listenForGestures: (callback) => {
+      const options = { capture: true };
+      document.addEventListener("pointerdown", callback, options);
+      document.addEventListener("keydown", callback, options);
+      return () => {
+        document.removeEventListener("pointerdown", callback, options);
+        document.removeEventListener("keydown", callback, options);
+      };
+    },
+    store: createMediaSourceStoreActions(playbackStore),
+    pane,
+    warn: (message) => {
+      console.warn(message);
+    },
+  });
+}
+
 /**
  * Builds the timing descriptor the playback store attaches, or null when no media is open.
  */
@@ -142,6 +270,8 @@ function toPlaybackSource(media: ImportMediaResult | null): PlaybackSource | nul
   if (!media) {
     return null;
   }
+  // The anchor of a MediaSource source is known before its first frame (ADR 046).
+  const isMediaSource = previewPathOf(media).kind === "mediaSource";
   return {
     path: media.path,
     size: media.size,
@@ -153,6 +283,8 @@ function toPlaybackSource(media: ImportMediaResult | null): PlaybackSource | nul
     avgFrameRate: media.probe.avgFrameRate,
     rFrameRate: media.probe.rFrameRate,
     reportedFrameCount: media.probe.reportedFrameCount,
+    mediaSource: isMediaSource,
+    anchorMediaTime: isMediaSource ? ANCHOR_MEDIA_TIME : null,
   };
 }
 
@@ -283,6 +415,13 @@ export function PreviewPane() {
     () => new WeakMap<HTMLVideoElement, DecodeEvidence>(),
   );
   const [decodedSources] = useState(() => new Set<string>());
+  // For each MediaSource FLV source, the reload generation whose element scans for decoder
+  // configurations before the window at the place of a decode error (ADR 046, "Failures"). A
+  // stall reloads the element at the next seek, and that element asks for the scan.
+  const [rescanGenerations] = useState(() => new Map<string, number>());
+  // The notices about a video that plays through FFmpeg (ADR 046), for the source revision they
+  // belong to, and the ones that the user dismissed.
+  const [mediaSourceNotices, setMediaSourceNotices] = useState(NO_MEDIA_SOURCE_NOTICES);
   const recordDecodeEvidence = useCallback(
     (element: HTMLVideoElement, revisionKey: string, event: "frame" | "seeking") => {
       const next = stepDecodeEvidence(
@@ -326,6 +465,27 @@ export function PreviewPane() {
     ),
   );
 
+  // The failure handler of the latest render. The MediaSource controller outlives the render that
+  // started it, so it reports through this ref.
+  const mediaSourceFailureRef = useRef<
+    | ((
+        sourceRevisionKey: string,
+        element: HTMLVideoElement,
+        failure: MseFailure,
+      ) => void)
+    | null
+  >(null);
+
+  // The MediaSource controller and the Web Audio cue of the element of a MediaSource source
+  // (ADR 046). The video ref callback below builds the owner at its first call, starts them
+  // after the store attaches the element, and stops them when the element leaves the tree.
+  const mediaSourceOwnerRef = useRef<MediaSourceOwner | null>(null);
+
+  // The cue of a MediaSource source follows the mute toggle, as the elements do.
+  useEffect(() => {
+    mediaSourceOwnerRef.current?.setMuted(isMuted);
+  }, [isMuted]);
+
   // The wait follows the deferred navigation of the store, and it counts only while the
   // document is visible, because a hidden window presents no frames.
   useEffect(() => {
@@ -356,6 +516,11 @@ export function PreviewPane() {
   if (previousMedia !== media) {
     setPreviousMedia(media);
     setFailureTrigger(null);
+    // A new import of the open file keeps the element and its controller, so it keeps their
+    // notices too.
+    setMediaSourceNotices((notices) =>
+      mediaSourceNoticesFor(notices, getSourceRevisionKey(media)),
+    );
     // The ratio resets with no media, and a new source keeps it until its element reports.
     setFrameRatio((current) =>
       stepPreviewFrameRatio(current, {
@@ -382,10 +547,11 @@ export function PreviewPane() {
   // nothing.
   useEffect(() => {
     decodedSources.clear();
+    rescanGenerations.clear();
     if (media) {
       reloadStalledPreview(getSourceRevisionKey(media));
     }
-  }, [media, decodedSources]);
+  }, [media, decodedSources, rescanGenerations]);
 
   // Synchronously activate / deactivate source identity before browser paint (ADR 003)
   useLayoutEffect(() => {
@@ -398,6 +564,10 @@ export function PreviewPane() {
   const mediaPath = media?.path;
   const mediaProbe = media?.probe;
   const mediaFileName = media?.fileName;
+  // How the element plays the source: through the asset protocol, or through a MediaSource that
+  // the ref owner below starts (ADR 046).
+  const previewPath = useMemo(() => (media ? previewPathOf(media) : null), [media]);
+  const isMediaSource = previewPath?.kind === "mediaSource";
 
   // What the decode-failure panel says about this source and its trigger.
   const decodeFailure = useMemo(
@@ -472,13 +642,60 @@ export function PreviewPane() {
       ownerRef.current(element);
       if (element === null) {
         // A removed element ends its picture check and its wait for the anchor, so a pending
-        // wait cannot act on it.
+        // wait cannot act on it. Its MediaSource stops with it.
         stopPictureCheckTimer(pictureCheckRef.current);
         pictureCheckRef.current = null;
         anchorWait.disarm();
+        const owner = mediaSourceOwnerRef.current;
+        const held = owner?.element() ?? null;
+        if (owner && held !== null) {
+          owner.detach(held);
+        }
+        return;
+      }
+      // A MediaSource source starts its controller after the store attached the element, so
+      // the first reports find the attachment (ADR 046).
+      const current = mediaStore.getState().media;
+      const path = current === null ? null : previewPathOf(current);
+      if (current !== null && path?.kind === "mediaSource") {
+        const key = getSourceRevisionKey(current);
+        mediaSourceOwnerRef.current ??= createPreviewMediaSourceOwner({
+          onNonMonotonic: (sourceKey) =>
+            setMediaSourceNotices((notices) =>
+              addMediaSourceNotice(
+                notices,
+                sourceKey,
+                "preview.mediaSource.timestampsDecrease",
+              ),
+            ),
+          onAudioOmitted: (sourceKey) =>
+            setMediaSourceNotices((notices) =>
+              addMediaSourceNotice(notices, sourceKey, "preview.mediaSource.noSound"),
+            ),
+          onFailure: (sourceKey, node, failure) => {
+            mediaSourceFailureRef.current?.(sourceKey, node, failure);
+          },
+        });
+        mediaSourceOwnerRef.current.attach(
+          element,
+          {
+            sourceRevisionKey: key,
+            source: toMseSource(
+              current,
+              path,
+              rescansAtAttach(
+                rescanGenerations,
+                key,
+                playbackStore.getState().reloadGeneration,
+              ),
+            ),
+            hasAudio: current.probe.audio !== null,
+          },
+          previewMutePreferenceStore.getState().muted,
+        );
       }
     },
-    [anchorWait],
+    [anchorWait, rescanGenerations],
   );
 
   // Registers and unregisters the hidden scrub audio element with exact ownership (ADR 019).
@@ -655,20 +872,55 @@ export function PreviewPane() {
     if (!sourceGuard.isActive(sourceRevisionKey)) {
       return;
     }
-    const trigger: DecodeFailureTrigger = {
-      kind: "mediaError",
-      code: element.error?.code ?? null,
-    };
+    const code = element.error?.code ?? null;
     const decodesInPart =
       decodedSources.has(sourceRevisionKey) ||
       provesPartialDecode(decodeEvidence.get(element) ?? NO_DECODE_EVIDENCE);
+    const trigger: DecodeFailureTrigger = { kind: "mediaError", code };
     if (
       classifyDecodeFailure(trigger, decodesInPart) === "stall" &&
       syncDecodeStall(sourceRevisionKey, element)
     ) {
+      // A window of an FLV that fails to decode can lack a decoder configuration that its
+      // head does not hold. The element of the reload scans for one first (ADR 046).
+      if (previewPath?.kind === "mediaSource" && previewPath.container === "flv") {
+        rescanGenerations.set(
+          sourceRevisionKey,
+          playbackStore.getState().reloadGeneration + 1,
+        );
+      }
       return;
     }
-    handleDecodeFailure(element, trigger);
+    handleDecodeFailure(
+      element,
+      isMediaSource ? mediaSourcePanelTrigger(code) : trigger,
+    );
+  };
+
+  // A MediaSource controller that stopped (ADR 046): see `resolveMediaSourceFailure`. A stall
+  // that the store refuses takes the panel.
+  const handleMediaSourceFailure = (
+    key: string,
+    element: HTMLVideoElement,
+    failure: MseFailure,
+  ) => {
+    if (key !== sourceRevisionKey || !sourceGuard.isActive(key)) {
+      return;
+    }
+    if (failure.kind === "windowFailed") {
+      console.warn(
+        `preview: a remux window failed (${failure.code})`,
+        failure.detail ?? "",
+      );
+    }
+    const decodesInPart =
+      decodedSources.has(key) ||
+      provesPartialDecode(decodeEvidence.get(element) ?? NO_DECODE_EVIDENCE);
+    const outcome = resolveMediaSourceFailure(failure, decodesInPart);
+    if (outcome.stall !== null && syncDecodeStall(key, element, outcome.stall.cause)) {
+      return;
+    }
+    handleDecodeFailure(element, outcome.trigger);
   };
 
   // The ready path of a loaded element. `loadedmetadata` takes it at once when the element
@@ -749,9 +1001,11 @@ export function PreviewPane() {
     }
   };
 
-  // Publish the runner of this render for the frame callback loop and the wait timer.
+  // Publish the runner of this render for the frame callback loop and the wait timer, and the
+  // failure handler for the MediaSource controller.
   useLayoutEffect(() => {
     runPictureCheckRef.current = runPictureCheck;
+    mediaSourceFailureRef.current = handleMediaSourceFailure;
   });
 
   // The format of the open source: the user's preference, with milliseconds for a source
@@ -777,8 +1031,15 @@ export function PreviewPane() {
     decodeStall !== null && decodeStall !== dismissedStall && !decodeFailed
       ? decodeStall
       : null;
+  const shownMediaSourceNotices = decodeFailed
+    ? []
+    : noticesShownFor(mediaSourceNotices, sourceRevisionKey);
   const hasNotice =
-    showLoading || hasImportError || showsPlaybackErrorBanner || shownStall !== null;
+    showLoading ||
+    hasImportError ||
+    showsPlaybackErrorBanner ||
+    shownStall !== null ||
+    shownMediaSourceNotices.length > 0;
 
   const totalTimeDisplay = media
     ? formatPreviewTotalDuration(
@@ -828,7 +1089,7 @@ export function PreviewPane() {
                      that can make the file play, and the Open Media action for another file.
                      The panel scrolls when the preview is too small to hold it. */
                   <div
-                    className="flex max-h-full max-w-md flex-col items-center gap-2 overflow-y-auto p-4 text-center"
+                    className="flex max-h-full w-full max-w-md flex-col items-center gap-2 overflow-y-auto p-4 text-center"
                     aria-live="polite"
                     // The up and down arrows scroll the panel while it overflows and one of
                     // its controls has the focus (`SCROLL_KEYS_ATTRIBUTE`).
@@ -842,13 +1103,23 @@ export function PreviewPane() {
                       {t("preview.decodeFailure.title")}
                     </h2>
                     {decodeFailure && (
-                      <div className="flex flex-col gap-1 text-xs text-preview-muted">
+                      <div className="flex w-full flex-col gap-1 text-xs text-preview-muted">
                         {/* The values are identifiers a user can copy into a search. */}
                         <p className="select-text">
                           <DecodeFailureReasonText reason={decodeFailure.reason} />
                         </p>
                         {decodeFailure.hintKey !== null && (
                           <p>{t(decodeFailure.hintKey)}</p>
+                        )}
+                        {/* The diagnostic text of a failure of FFmpeg, which is not
+                            translated (ADR 011). */}
+                        {decodeFailure.detail !== undefined && (
+                          <DiagnosticDetails
+                            className="mt-1 w-full text-left"
+                            summary={t("preview.decodeFailure.details.show")}
+                            openSummary={t("preview.decodeFailure.details.hide")}
+                            text={decodeFailure.detail}
+                          />
                         )}
                       </div>
                     )}
@@ -877,7 +1148,8 @@ export function PreviewPane() {
                     disablePictureInPicture
                     disableRemotePlayback
                     controlsList="nodownload noplaybackrate noremoteplayback nofullscreen"
-                    src={videoSrc}
+                    // A MediaSource source gets its object URL from its controller (ADR 046).
+                    src={isMediaSource ? undefined : videoSrc}
                     aria-label={t("preview.videoPlayerLabel", {
                       fileName: media.fileName,
                     })}
@@ -962,6 +1234,7 @@ export function PreviewPane() {
                     picture, and it needs none of the native feature attributes of the video. */}
                 {media.probe.audio &&
                   !decodeFailed &&
+                  !isMediaSource &&
                   attachedSourceRevisionKey === sourceRevisionKey &&
                   calibrationStatus !== "calibrating" && (
                     <audio
@@ -1089,6 +1362,18 @@ export function PreviewPane() {
                       onReturnFocus={returnFocusToPreview}
                     />
                   )}
+                  {shownMediaSourceNotices.map((messageKey) => (
+                    <MediaSourceNoticeBanner
+                      key={messageKey}
+                      messageKey={messageKey}
+                      onDismiss={() =>
+                        setMediaSourceNotices((current) =>
+                          dismissMediaSourceNotice(current, messageKey),
+                        )
+                      }
+                      onReturnFocus={returnFocusToPreview}
+                    />
+                  ))}
                 </div>
               </div>
             </>

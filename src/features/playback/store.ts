@@ -709,7 +709,10 @@ export function createPlaybackStore(
      * 046). On a MediaSource source, a seek outside the buffered data waits for a remux window.
      * A newer request that is not a scrub sample, and whose target that window does not deliver,
      * then replaces it, so a click elsewhere does not wait for the window of the previous one. A
-     * scrub sample still waits, so a drag shows a picture each time a window arrives (ADR 022).
+     * request whose target is buffered replaces it too, because it completes at once: the seek
+     * over the gap before the first keyframe of a file is such a request, and the seek that it
+     * replaces never completes. A scrub sample still waits, so a drag shows a picture each time
+     * a window arrives (ADR 022).
      */
     const replacesStarvingSeek = (
       element: PlaybackMediaElement,
@@ -730,7 +733,8 @@ export function createPlaybackStore(
       const distance = mediaTime - waiting;
       return (
         distance < -STARVING_SEEK_KEEP_BEHIND_SECONDS ||
-        distance > STARVING_SEEK_KEEP_AHEAD_SECONDS
+        distance > STARVING_SEEK_KEEP_AHEAD_SECONDS ||
+        isBufferedAt(element, mediaTime)
       );
     };
 
@@ -748,6 +752,7 @@ export function createPlaybackStore(
       mediaTime: number,
       scrub: boolean,
       keepPlaying = false,
+      overGap = false,
     ): boolean => {
       // Duplicate rule (ADR 022): drop a SCRUB request (no dispatch, no state change)
       // when its mediaTime equals the last accepted request's mediaTime, whether that
@@ -786,6 +791,7 @@ export function createPlaybackStore(
 
       if (
         element.seeking === true &&
+        !overGap &&
         !replacesStarvingSeek(element, mediaTime, scrub)
       ) {
         queuedSeek = { mediaTime, scrub };
@@ -2582,7 +2588,11 @@ export function createPlaybackStore(
         });
       },
 
-      syncDecodeStall: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
+      syncDecodeStall: (
+        sourceRevisionKey: string,
+        element: PlaybackMediaElement,
+        cause?: "read",
+      ) => {
         if (
           !attachedSource ||
           !attachedElement ||
@@ -2622,7 +2632,7 @@ export function createPlaybackStore(
             : (get().approximateBrowserTimeSeconds ?? 0);
 
         set({
-          decodeStall: { atSeconds },
+          decodeStall: cause === undefined ? { atSeconds } : { atSeconds, cause },
           presentedFrame: null,
           isPlaying: false,
           seekTargetSeconds: null,
@@ -3216,7 +3226,24 @@ export function createPlaybackStore(
           scrub,
           options?.keepPlaying,
         );
-        if (!dispatchSeek(attachedElement, target, scrub, keepsPlaying)) {
+        // A request that waits behind the seek that never completes, such as a click during the
+        // wait, replaces that seek instead of the seek over the gap, and keeps its display
+        // target (ADR 046). It goes as an exact seek, because the duplicate rule of ADR 022 drops
+        // a scrub sample at the target of the last request, which a queued sample is.
+        const waiting = options?.overGap === true && !scrub ? queuedSeek : null;
+        if (waiting !== null) {
+          dispatchSeek(attachedElement, waiting.mediaTime, false, keepsPlaying, true);
+          return;
+        }
+        if (
+          !dispatchSeek(
+            attachedElement,
+            target,
+            scrub,
+            keepsPlaying,
+            options?.overGap === true && !scrub,
+          )
+        ) {
           return;
         }
 

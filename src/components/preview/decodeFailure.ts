@@ -166,7 +166,19 @@ export type DecodeFailureTrigger =
   /** The picture check failed: the element plays no picture. */
   | { readonly kind: "pictureMissing" }
   /** The element fired `error`. `code` is `element.error?.code`, or null without one. */
-  | { readonly kind: "mediaError"; readonly code: number | null };
+  | { readonly kind: "mediaError"; readonly code: number | null }
+  /**
+   * The MediaSource refused the codecs of the remux windows (ADR 046). `detail` names the type
+   * that it refused.
+   */
+  | { readonly kind: "codecRejected"; readonly detail?: string }
+  /** The remux windows need FFmpeg, which QuipClip cannot find (ADR 046). */
+  | { readonly kind: "ffmpegMissing" }
+  /**
+   * A remux window failed before the source showed a frame (ADR 046). `detail` is the
+   * diagnostic text of the failure, as FFmpeg or the window command gives it.
+   */
+  | { readonly kind: "windowFailed"; readonly detail?: string };
 
 /** The operating system of the web view. The two supported ones, and every other one. */
 export type PreviewPlatform = "windows" | "macos" | "other";
@@ -244,7 +256,8 @@ export type DecodeFailureReason =
     }
   | {
       readonly shape: "plain";
-      readonly key: "preview.decodeFailure.readFailed";
+      readonly key:
+        "preview.decodeFailure.readFailed" | "preview.decodeFailure.ffmpegMissing";
     };
 
 export type DecodeFailureReasonKey = DecodeFailureReason["key"];
@@ -252,12 +265,15 @@ export type DecodeFailureReasonKey = DecodeFailureReason["key"];
 export type DecodeFailureHintKey =
   | "preview.decodeFailure.hint.installHevc"
   | "preview.decodeFailure.hint.convertH264"
-  | "preview.decodeFailure.hint.convertMp4";
+  | "preview.decodeFailure.hint.convertMp4"
+  | "preview.decodeFailure.hint.installFfmpeg";
 
 export interface DecodeFailureView {
   readonly reason: DecodeFailureReason;
   /** The step that can make the file play, or null when the panel has none to offer. */
   readonly hintKey: DecodeFailureHintKey | null;
+  /** The diagnostic text of the failure, which the panel shows behind a disclosure (ADR 011). */
+  readonly detail?: string;
 }
 
 /**
@@ -421,16 +437,16 @@ function isBrowserSafeH264(probe: DecodeFailureProbe): boolean {
 }
 
 /**
- * Returns the display name of a container that the platform typically cannot open, or null.
+ * Returns the entry of a container that the platform typically cannot open, or null.
  *
  * A WebM file reports the same format names as a Matroska file, and WKWebView opens WebM, so
  * the `.webm` extension exempts a file from the Matroska entry.
  */
-export function findUnplayableContainer(
+function findUnplayableEntry(
   formatNames: readonly string[],
   fileName: string,
   platform: PreviewPlatform,
-): string | null {
+): (typeof UNPLAYABLE_CONTAINERS)[number] | null {
   const names = formatNames.map((name) => name.trim().toLowerCase());
   const isWebM = splitFileName(fileName).extension.toLowerCase() === ".webm";
   for (const entry of UNPLAYABLE_CONTAINERS) {
@@ -440,9 +456,30 @@ export function findUnplayableContainer(
     if (entry.formatName === "matroska" && isWebM) {
       continue;
     }
-    return entry.displayName;
+    return entry;
   }
   return null;
+}
+
+/** Returns the display name of a container that the platform typically cannot open, or null. */
+export function findUnplayableContainer(
+  formatNames: readonly string[],
+  fileName: string,
+  platform: PreviewPlatform,
+): string | null {
+  return findUnplayableEntry(formatNames, fileName, platform)?.displayName ?? null;
+}
+
+/**
+ * Returns the ffprobe format name of a container that the platform typically cannot open, such
+ * as `flv`, or null.
+ */
+export function findUnplayableFormat(
+  formatNames: readonly string[],
+  fileName: string,
+  platform: PreviewPlatform,
+): string | null {
+  return findUnplayableEntry(formatNames, fileName, platform)?.formatName ?? null;
 }
 
 /** Selects the variant of a codec message that matches the stated probe fields. */
@@ -496,7 +533,11 @@ function codecHint(
  * Returns the panel view for a source that the web view cannot play.
  *
  * - A missing picture names the codec, the profile, and the pixel format that the system
- *   player does not support.
+ *   player does not support. Codecs that the MediaSource of a remux window refuses get the
+ *   same message (ADR 046).
+ * - Remux windows that need FFmpeg, which QuipClip cannot find, say so and point to the
+ *   FFmpeg settings. A window that failed before the source showed a frame says that QuipClip
+ *   could not read the file.
  * - `MEDIA_ERR_ABORTED` and `MEDIA_ERR_NETWORK` say that QuipClip could not read the file.
  *   The panel has no hint for them.
  * - `MEDIA_ERR_SRC_NOT_SUPPORTED` for a container that the platform typically cannot open
@@ -512,10 +553,27 @@ function codecHint(
 export function presentDecodeFailure(input: DecodeFailureInput): DecodeFailureView {
   const { probe, trigger, platform } = input;
 
-  if (trigger.kind === "pictureMissing") {
+  if (trigger.kind === "pictureMissing" || trigger.kind === "codecRejected") {
+    const detail = trigger.kind === "codecRejected" ? trigger.detail : undefined;
     return {
       reason: codecReason("unsupportedCodec", probe),
       hintKey: codecHint(probe, platform),
+      ...(detail === undefined ? {} : { detail }),
+    };
+  }
+
+  if (trigger.kind === "ffmpegMissing") {
+    return {
+      reason: { shape: "plain", key: "preview.decodeFailure.ffmpegMissing" },
+      hintKey: "preview.decodeFailure.hint.installFfmpeg",
+    };
+  }
+
+  if (trigger.kind === "windowFailed") {
+    return {
+      reason: { shape: "plain", key: "preview.decodeFailure.readFailed" },
+      hintKey: null,
+      ...(trigger.detail === undefined ? {} : { detail: trigger.detail }),
     };
   }
 
