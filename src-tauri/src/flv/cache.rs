@@ -20,13 +20,18 @@ use std::sync::Mutex;
 pub const CACHE_DIR_NAME: &str = "flv-cache";
 /// The number of source directories that the cache keeps.
 pub const KEEP_SOURCES: usize = 16;
-const HEAD_FILE_NAME: &str = "head.flv";
+/// The file name of the head in the directory of a source.
+pub const HEAD_FILE_NAME: &str = "head.flv";
 const SIDECAR_FILE_NAME: &str = "keyframes.json";
 const SIDECAR_VERSION: u32 = 1;
 
 /// One lock for every write and every eviction, so two windows and an export never interleave
 /// their writes into one directory.
 static CACHE_LOCK: Mutex<()> = Mutex::new(());
+
+/// One save of a table at a time, from its copy to its write, so a copy that a window or an
+/// export took earlier never lands after a newer one.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 /// The revision of a source, as the frontend and `read_source_revision` give it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +165,16 @@ impl SourceCache {
             KeyframeTable::from_saved(keyframes, configs),
             sidecar.non_monotonic,
         ))
+    }
+
+    /// Write the sidecar from what `source` learned since its last save, when it learned
+    /// anything. The windows of the preview and the export both save this way.
+    pub fn save_changed(&self, source: &super::FlvSource) -> io::Result<()> {
+        let _guard = SAVE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        match source.take_changed() {
+            Some((table, non_monotonic)) => self.save_table(&table, non_monotonic),
+            None => Ok(()),
+        }
     }
 
     /// Write the sidecar for `table` and the decrease flag.

@@ -34,9 +34,6 @@ pub const WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 /// The media time of a PCM window of the audio lane.
 pub const PCM_WINDOW_SECONDS: f64 = 20.0;
 
-/// Serializes the copy of a table and its save to the sidecar.
-static SIDECAR_SAVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// Where a window starts.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -459,15 +456,8 @@ fn open_flv(
         let windows = windows.clone();
         Box::new(move || {
             windows.finish(id);
-            // One save at a time, so a copy of the table taken earlier never lands after a newer
-            // one.
-            let _guard = SIDECAR_SAVE
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if let Some((table, non_monotonic)) = source.take_changed() {
-                if let Err(failure) = cache.save_table(&table, non_monotonic) {
-                    eprintln!("preview: the keyframe sidecar was not saved: {failure}");
-                }
+            if let Err(failure) = cache.save_changed(&source) {
+                eprintln!("preview: the keyframe sidecar was not saved: {failure}");
             }
         })
     };

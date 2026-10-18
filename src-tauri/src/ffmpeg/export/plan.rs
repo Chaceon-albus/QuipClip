@@ -599,6 +599,7 @@ pub fn build_plan(
         segments: planned_segments,
         container: preset.container,
         total_duration,
+        flv_input: None,
     })
 }
 

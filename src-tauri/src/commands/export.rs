@@ -56,14 +56,18 @@
 //! It needs its own `ffmpeg -version` spawn and a capability-cache read, and it is a separate
 //! unit; the error code stays reserved, as it is in `ffmpeg::export`.
 
+use crate::ffmpeg::export::flv_input::{
+    locate_flv_input, FlvInput, FlvInputFallback, FlvInputRequest,
+};
 use crate::ffmpeg::export::{
     build_arguments, build_audio_arguments, build_audio_graph, build_plan,
     choose_audio_graph_shape, choose_graph_shape, encoder_graph, inspect_path, run_export_process,
     verify_audio_output, AudioOutputMismatch, ExportErrorCode, ExportPlan, ExportProcessOutcome,
     ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot, ExportStreams,
     PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary, AUDIO_FILL_MIN_GAP_MILLISECONDS,
-    MAX_EXPORT_SEGMENTS,
+    MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
 };
+use crate::ffmpeg::preview::PreviewWindows;
 use crate::ffmpeg::{
     self, AudioGap, AudioGapRead, AudioProbe, FfmpegPaths, FirstAudioPacket, LocateError,
     MediaProbe, OutputAudioProbe, ProbeError,
@@ -72,7 +76,7 @@ use crate::settings::{self, LoadedSettings, Preset, Settings, SettingsFileError}
 use crate::time::{pts_seconds, Pts, Rational};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -309,6 +313,7 @@ pub async fn start_export(
     app: tauri::AppHandle,
     registry: tauri::State<'_, Arc<ExportRegistry>>,
     published: tauri::State<'_, PublishedExports>,
+    preview_windows: tauri::State<'_, Arc<PreviewWindows>>,
     request: ExportRequestWire,
 ) -> Result<ExportStart, ExportCommandError> {
     let app_data_directory = app
@@ -328,22 +333,27 @@ pub async fn start_export(
     published.clear();
 
     // Preparation spawns ffprobe and touches the filesystem, so it does not belong on the
-    // async executor. It is bounded work -- at most three short-lived child processes, one after
-    // the other -- which is what the blocking pool is for; the export itself runs for minutes
-    // and gets its own thread.
+    // async executor. It runs short-lived child processes one after the other, and for an FLV
+    // source it also locates a keyframe for each segment in the file and checks each slice with
+    // ffprobe (ADR 046). That is what the blocking pool is for; the export itself runs for
+    // minutes and gets its own thread.
     //
     // The flag goes with it: preparation is the one stretch of a run that can last tens of
-    // seconds -- `ffmpeg::probe::PROBE_TIMEOUT` alone is 30 -- and a cancel that arrives
-    // inside it must not have to wait for every remaining step to finish. The reads of the audio
-    // stream after the re-probe also stop on the flag, because the first of them reads as far
-    // into the file as the audio starts.
+    // seconds -- `ffmpeg::probe::PROBE_TIMEOUT` alone is 30, and the check of the FLV slices and
+    // the read of the audio gaps have one each -- and a cancel that arrives inside it must not
+    // have to wait for every remaining step to finish. The reads of the audio stream after the
+    // re-probe also stop on the flag, because the first of them reads as far into the file as
+    // the audio starts. The FLV locate has no time bound. It stops at the next block read after
+    // a cancel, so on a share that holds a read, the cancel waits until that read returns.
     let cancel = slot.cancel_flag();
+    let preview_windows = preview_windows.inner().clone();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         prepare_export_with(
             PrepareRequest {
                 request: &request,
                 app_data_directory: &app_data_directory,
                 cancel: cancel.as_ref(),
+                preview_windows: &preview_windows,
             },
             discover_for_export,
             settings::load,
@@ -462,6 +472,8 @@ struct PrepareRequest<'a> {
     app_data_directory: &'a Path,
     /// This run's cancel flag, read between the steps.
     cancel: &'a AtomicBool,
+    /// The open FLV sources, which the FLV input shares with the preview (ADR 046).
+    preview_windows: &'a PreviewWindows,
 }
 
 /// Do every fallible step an export needs before ffmpeg starts, in ADR 016's order.
@@ -505,6 +517,7 @@ where
         request,
         app_data_directory,
         cancel,
+        preview_windows,
     } = prepare;
     // Read the same way `ExportSlot::is_canceled` reads it, so the ordering pairs with
     // `ExportRegistry::cancel`'s store.
@@ -558,11 +571,23 @@ where
             audio_sample_rate_at,
         )?;
     }
+    // ADR 046: an FLV source opens each input as its head and a slice from a keyframe, so the
+    // reads of the export, the read of the audio gaps included, do not read it from its start.
+    let flv_input = flv_input_for(
+        &executables.ffprobe,
+        &source,
+        &probe,
+        request,
+        app_data_directory,
+        preview_windows,
+        cancel,
+    )?;
     let audio_gaps = read_audio_gaps(
         &executables.ffprobe,
         &source,
         &probe,
         request,
+        flv_input.as_ref(),
         cancel,
         audio_gaps,
     )?;
@@ -584,7 +609,7 @@ where
 
     // Obligation 1: planning runs before the reservation. A destination that is a directory
     // reserves successfully and fails only at the rename, after the whole encode.
-    let plan = build_plan(
+    let mut plan = build_plan(
         &PlanRequest {
             source: &source,
             destination: &destination,
@@ -597,6 +622,7 @@ where
         inspect_path,
     )
     .map_err(ExportCommandError::new)?;
+    plan.flv_input = flv_input.filter(|flv| flv.segment_offsets.len() == plan.segments.len());
 
     // Before the reservation, which is the first step here that writes to the user's disk. A
     // cancel read after it would have to delete the file it created; read here, there is
@@ -755,6 +781,7 @@ fn read_audio_gaps<Gaps>(
     source: &Path,
     probe: &MediaProbe,
     request: &ExportRequestWire,
+    flv: Option<&FlvInput>,
     cancel: &AtomicBool,
     audio_gaps: Gaps,
 ) -> Result<Vec<AudioGap>, ExportCommandError>
@@ -793,6 +820,7 @@ where
         ranges: &ranges,
         min_gap: Rational::new(AUDIO_FILL_MIN_GAP_MILLISECONDS, 1000)
             .expect("AUDIO_FILL_MIN_GAP_MILLISECONDS/1000 always reduces to a valid Rational"),
+        flv,
     };
     match audio_gaps(ffprobe, source, &read, cancel) {
         Ok(gaps) => Ok(gaps),
@@ -801,6 +829,263 @@ where
         Err(_) => Ok(Vec::new()),
     }
 }
+
+/// The FLV input of an export of `source` (ADR 046), or `None` when the source keeps the input
+/// seek of ADR 014. The seek position of each segment is its In point less
+/// [`SEEK_MARGIN_SECONDS`], as the input seek would use it.
+///
+/// The locate reads the file, which on a share that stopped answering can hold a read, so a
+/// watcher copies the cancel flag of the run into the flag of the reader, which stops between two
+/// reads. A cancel ends the run as canceled. Every other reason to keep the input seek is not an
+/// error: the export runs as before, and the reason goes to the log.
+///
+/// A slice that starts after a change of the decoder configuration that the reader has not seen
+/// would decode with the configuration of the head. So ffprobe decodes the first frame of each
+/// slice first ([`check_slices`]), and a slice that does not decode as the probe keeps the input
+/// seek for the whole export.
+fn flv_input_for(
+    ffprobe: &Path,
+    source: &Path,
+    probe: &MediaProbe,
+    request: &ExportRequestWire,
+    app_data_directory: &Path,
+    preview_windows: &PreviewWindows,
+    cancel: &AtomicBool,
+) -> Result<Option<FlvInput>, ExportCommandError> {
+    // The plan refuses a request with too many segments, so the locates of such a request would
+    // be wasted.
+    if !probe.format_names.iter().any(|name| name == "flv")
+        || request.segments.is_empty()
+        || request.segments.len() > MAX_EXPORT_SEGMENTS
+    {
+        return Ok(None);
+    }
+    let margin = Rational::new(SEEK_MARGIN_SECONDS, 1)
+        .expect("SEEK_MARGIN_SECONDS/1 always reduces to a valid Rational");
+    let positions: Option<Vec<Rational>> = request
+        .segments
+        .iter()
+        .map(|segment| pts_seconds(segment.in_pts, probe.video_time_base)?.sub(margin))
+        .collect();
+    let Some(positions) = positions else {
+        return Ok(None);
+    };
+    // A cancel that came first stops the first read, before the watcher looks.
+    let reader_cancel = Arc::new(AtomicBool::new(cancel.load(Ordering::SeqCst)));
+    let done = AtomicBool::new(false);
+    let located = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(Ordering::SeqCst) {
+                if cancel.load(Ordering::SeqCst) {
+                    reader_cancel.store(true, Ordering::SeqCst);
+                    return;
+                }
+                std::thread::sleep(FLV_CANCEL_POLL);
+            }
+        });
+        // The watcher stops also when the locate panics.
+        let _done = SetOnDrop(&done);
+        locate_flv_input(&FlvInputRequest {
+            source,
+            probe,
+            seek_positions: &positions,
+            app_data: app_data_directory,
+            windows: preview_windows,
+            cancel: Some(reader_cancel.clone()),
+        })
+    });
+    let input = match located {
+        // A locate that the table answers reads nothing, so it does not see a cancel.
+        Ok(_) if cancel.load(Ordering::SeqCst) => {
+            return Err(ExportCommandError::new(ExportErrorCode::Canceled))
+        }
+        Ok(input) => input,
+        Err(FlvInputFallback::Canceled) => {
+            return Err(ExportCommandError::new(ExportErrorCode::Canceled))
+        }
+        Err(reason) => {
+            eprintln!("export: the FLV source keeps the input seek: {reason:?}");
+            return Ok(None);
+        }
+    };
+    // The same condition as the read of the audio gaps: an export that writes no audio, or an
+    // audio stream with no packets, needs no check of the audio.
+    let check_audio = request.streams.writes_audio()
+        && probe
+            .audio
+            .as_ref()
+            .is_some_and(|audio| !audio.holds_no_packets);
+    match check_slices(ffprobe, &input, source, probe, check_audio, cancel) {
+        Ok(()) => Ok(Some(input)),
+        Err(SliceCheck::Canceled) => Err(ExportCommandError::new(ExportErrorCode::Canceled)),
+        Err(SliceCheck::Refused(reason)) => {
+            eprintln!("export: the FLV source keeps the input seek: {reason}");
+            Ok(None)
+        }
+    }
+}
+
+/// Sets its flag when it drops, also during the unwind of a panic.
+struct SetOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for SetOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Why [`check_slices`] refused the slices.
+enum SliceCheck {
+    Canceled,
+    Refused(String),
+}
+
+/// The packets of all streams that [`check_slices`] decodes from the start of each slice when it
+/// checks the audio: enough for the first video frame and for about 15 to 40 audio frames of a
+/// recording.
+const CHECKED_PACKETS: u32 = 64;
+
+/// The video packets that [`check_slices`] decodes from the start of each slice when it does not
+/// check the audio.
+const CHECKED_VIDEO_PACKETS: u32 = 8;
+
+/// The fewest steps between two audio frames that [`audio_matches`] needs to compare.
+const CHECKED_AUDIO_STEPS: usize = 4;
+
+/// A step between two audio frames longer than this many times the time of the samples of the
+/// first frame is a gap in the audio, which the export fills, and [`audio_matches`] skips it.
+const AUDIO_GAP_FACTOR: f64 = 1.5;
+
+/// The difference that [`audio_matches`] accepts between the time that the compared steps span
+/// and the time of their samples at the rate of the probe: this share of that time, and at least
+/// [`AUDIO_TIMING_TOLERANCE_SECONDS`]. FLV timestamps are whole milliseconds, and some encoders
+/// give the audio a few milliseconds of jitter. A change from 44100 Hz to 48000 Hz moves the
+/// timestamps by 8 %.
+const AUDIO_TIMING_TOLERANCE_SHARE: f64 = 0.02;
+
+/// See [`AUDIO_TIMING_TOLERANCE_SHARE`].
+const AUDIO_TIMING_TOLERANCE_SECONDS: f64 = 0.003;
+
+/// Decode the start of each slice of `input` once, within one [`ffmpeg::PROBE_TIMEOUT`] for all
+/// of them, with one ffprobe run for each slice. The first video frame must decode with no error
+/// at the size of the probe. When `check_audio` is set, the audio frames must also match the
+/// probe ([`audio_matches`]): a raw AAC frame does not carry its rate, so the audio of a slice
+/// after a change of the rate that no read has seen decodes with no error at the rate of the
+/// head.
+///
+/// This is a heuristic. A frame can decode at the right size with no error and still use a
+/// wrong parameter of the head, and a harmless error line refuses the slices. A refusal keeps the
+/// input seek, which reads more and is correct. The slice from the first frame of the file needs
+/// no check: the head holds the configurations of the start of the file, and the first frame of
+/// a recording that starts in the middle of a GOP does not decode on its own.
+fn check_slices(
+    ffprobe: &Path,
+    input: &FlvInput,
+    source: &Path,
+    probe: &MediaProbe,
+    check_audio: bool,
+    cancel: &AtomicBool,
+) -> Result<(), SliceCheck> {
+    let head = input.head_path();
+    let head = head.to_string_lossy();
+    if head.contains('|') {
+        return Err(SliceCheck::Refused(
+            "the path of the head holds the concat separator".to_owned(),
+        ));
+    }
+    let audio = probe.audio.as_ref().filter(|_| check_audio);
+    let mut offsets = input.segment_offsets.clone();
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets.retain(|offset| *offset != input.first_frame_offset);
+    let deadline = std::time::Instant::now() + ffmpeg::PROBE_TIMEOUT;
+    for offset in offsets {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(SliceCheck::Refused(
+                "the check of the slices timed out".to_owned(),
+            ));
+        }
+        let url = input.url(&head, offset, source);
+        let start = match ffmpeg::probe_slice_start(
+            ffprobe,
+            std::ffi::OsStr::new(&url),
+            probe.video_stream_index,
+            audio.map(|audio| audio.index),
+            if audio.is_some() {
+                CHECKED_PACKETS
+            } else {
+                CHECKED_VIDEO_PACKETS
+            },
+            remaining,
+            cancel,
+        ) {
+            Ok(start) => start,
+            Err(ProbeError::Canceled) => return Err(SliceCheck::Canceled),
+            Err(error) => {
+                return Err(SliceCheck::Refused(format!(
+                    "the slice at byte {offset} was not read: {error:?}"
+                )))
+            }
+        };
+        let picture = start.clean && start.picture == Some((probe.width, probe.height));
+        let sound = audio.is_none_or(|audio| audio_matches(&start.audio, audio));
+        if !picture || !sound {
+            return Err(SliceCheck::Refused(format!(
+                "the slice at byte {offset} does not decode as the probe (picture {picture}, \
+                 audio {sound}): {start:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// True when the audio frames at the start of a slice decode as the probe found the audio: each
+/// with a time and the channels of the probe, and with steps between them that their samples
+/// fill at the rate of the probe. The rule skips the steps of gaps ([`AUDIO_GAP_FACTOR`]), and it
+/// needs [`CHECKED_AUDIO_STEPS`] others.
+fn audio_matches(frames: &[ffmpeg::DecodedAudioFrame], audio: &ffmpeg::AudioProbe) -> bool {
+    let mut times = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let Some(pts) = frame.pts else {
+            return false;
+        };
+        if audio
+            .channels
+            .is_some_and(|channels| frame.channels.is_some_and(|found| found != channels))
+        {
+            return false;
+        }
+        times.push(pts.num() as f64 / pts.den() as f64);
+    }
+    if times.len() < 2 {
+        return false;
+    }
+    let Some(rate) = audio.sample_rate.filter(|rate| *rate > 0) else {
+        return true;
+    };
+    let mut spanned = 0.0;
+    let mut expected = 0.0;
+    let mut steps = 0;
+    for (index, pair) in times.windows(2).enumerate() {
+        let step = pair[1] - pair[0];
+        let samples = f64::from(frames[index].nb_samples) / f64::from(rate);
+        if step <= 0.0 {
+            return false;
+        }
+        if step > samples * AUDIO_GAP_FACTOR {
+            continue;
+        }
+        spanned += step;
+        expected += samples;
+        steps += 1;
+    }
+    let tolerance = (expected * AUDIO_TIMING_TOLERANCE_SHARE).max(AUDIO_TIMING_TOLERANCE_SECONDS);
+    steps >= CHECKED_AUDIO_STEPS && (spanned - expected).abs() <= tolerance
+}
+
+/// How often the watcher of [`flv_input_for`] reads the cancel flag of the run.
+const FLV_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Resolve the preset an export renders with: the requested id, or the settings document's
 /// active id when the request named none.
@@ -1035,6 +1320,11 @@ where
             ffmpeg: &ffmpeg,
             arguments: &arguments,
             audio_arguments: audio_arguments.as_deref(),
+            // The inputs of an FLV source name the head by its file name (ADR 046).
+            working_directory: plan
+                .flv_input
+                .as_ref()
+                .map(|flv| flv.working_directory.as_path()),
             cancel: cancel.as_ref(),
             poll: PROGRESS_POLL_INTERVAL,
         },
@@ -1482,6 +1772,7 @@ mod tests {
             }],
             container: Container::Mp4,
             total_duration: Rational::new(1, 1).unwrap(),
+            flv_input: None,
         }
     }
 
@@ -1506,6 +1797,355 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    /// The ffmpeg and the ffprobe of this machine, or `None`, in which case the test does
+    /// nothing.
+    fn real_tools() -> Option<(PathBuf, PathBuf)> {
+        let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default();
+        directories.push(PathBuf::from("/opt/homebrew/bin"));
+        directories.push(PathBuf::from("/usr/local/bin"));
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
+        directories.into_iter().find_map(|directory| {
+            let ffmpeg = directory.join(format!("ffmpeg{suffix}"));
+            let ffprobe = directory.join(format!("ffprobe{suffix}"));
+            (ffmpeg.is_file() && ffprobe.is_file()).then_some((ffmpeg, ffprobe))
+        })
+    }
+
+    /// Write an FLV of 4 s of H.264 at `size`, with a keyframe each second, and AAC at `rate`,
+    /// made by ffmpeg.
+    fn write_real_flv(ffmpeg: &Path, path: &Path, size: &str, rate: u32) {
+        let status = crate::procutil::command_without_console(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg(format!("testsrc2=size={size}:rate=30"))
+            .args(["-f", "lavfi", "-i"])
+            .arg(format!("sine=frequency=440:sample_rate={rate}"))
+            .args([
+                "-t",
+                "4",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "30",
+                "-c:a",
+                "aac",
+                "-f",
+                "flv",
+            ])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// The input of the slice of `source` from its keyframe at 2 s, with the head of `head_of`,
+    /// written to the directory `name` of `directory`.
+    fn real_input(
+        directory: &TestDirectory,
+        name: &str,
+        source: &Path,
+        head_of: &Path,
+    ) -> FlvInput {
+        let reader = crate::flv::FlvSource::open(source, None).unwrap();
+        let offset = reader.locate(2_000, None).unwrap().0.keyframe.offset;
+        let head = crate::flv::FlvSource::open(head_of, None).unwrap();
+        let head_offset = if head_of == source {
+            offset
+        } else {
+            head.head().first_frame_offset
+        };
+        let working_directory = directory.path.join(name);
+        fs::create_dir_all(&working_directory).unwrap();
+        fs::write(
+            working_directory.join(crate::ffmpeg::export::flv_input::HEAD_NAME),
+            head.head_bytes_at(head_offset),
+        )
+        .unwrap();
+        FlvInput {
+            working_directory,
+            source_size: fs::metadata(source).unwrap().len(),
+            segment_offsets: vec![offset, offset],
+            first_frame_offset: reader.head().first_frame_offset,
+        }
+    }
+
+    #[test]
+    fn the_slice_check_refuses_a_slice_that_decodes_with_the_configuration_of_another_part() {
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let wide = directory.path.join("wide.flv");
+        let small = directory.path.join("small.flv");
+        write_real_flv(&ffmpeg, &wide, "320x180", 48_000);
+        write_real_flv(&ffmpeg, &small, "160x90", 48_000);
+        let probe = ffmpeg::probe_media(&ffprobe, &small).unwrap();
+        assert!(probe.audio.is_some());
+        let cancel = AtomicBool::new(false);
+
+        let own = real_input(&directory, "own", &small, &small);
+        assert!(check_slices(&ffprobe, &own, &small, &probe, true, &cancel).is_ok());
+
+        // The head of another recording holds the decoder configuration of another picture
+        // size, as the head of a file holds before a reconnect that no read has seen.
+        let foreign = real_input(&directory, "foreign", &small, &wide);
+        assert!(matches!(
+            check_slices(&ffprobe, &foreign, &small, &probe, true, &cancel),
+            Err(SliceCheck::Refused(_))
+        ));
+
+        cancel.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            check_slices(&ffprobe, &own, &small, &probe, true, &cancel),
+            Err(SliceCheck::Canceled)
+        ));
+    }
+
+    #[test]
+    fn the_slice_check_refuses_audio_that_decodes_with_the_rate_of_another_part() {
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        // The same picture, so the video decodes cleanly with either head. A raw AAC frame does
+        // not carry its rate, so the audio decodes with no error at the rate of the head. A file
+        // that starts at 44100 Hz has that rate in its probe and in the head of its start. After
+        // a change to 48000 Hz that no read has seen, the tags of a slice advance by 1024
+        // samples at 48000 Hz.
+        let directory = TestDirectory::new();
+        let low = directory.path.join("low.flv");
+        let high = directory.path.join("high.flv");
+        write_real_flv(&ffmpeg, &low, "160x90", 44_100);
+        write_real_flv(&ffmpeg, &high, "160x90", 48_000);
+        let cancel = AtomicBool::new(false);
+        let high_probe = ffmpeg::probe_media(&ffprobe, &high).unwrap();
+        let own = real_input(&directory, "own", &high, &high);
+        assert!(check_slices(&ffprobe, &own, &high, &high_probe, true, &cancel).is_ok());
+        let low_probe = ffmpeg::probe_media(&ffprobe, &low).unwrap();
+        let foreign = real_input(&directory, "foreign", &high, &low);
+        let Err(SliceCheck::Refused(reason)) =
+            check_slices(&ffprobe, &foreign, &high, &low_probe, true, &cancel)
+        else {
+            panic!("the slice with the head of another rate was not refused");
+        };
+        // The picture decodes cleanly, so the timing of the audio refused the slice.
+        assert!(reason.contains("picture true, audio false"), "{reason}");
+        // An export without audio does not check it.
+        assert!(check_slices(&ffprobe, &foreign, &high, &low_probe, false, &cancel).is_ok());
+    }
+
+    #[test]
+    fn the_audio_gaps_read_through_the_slices_agree_with_the_read_by_seek() {
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.flv");
+        write_real_flv(&ffmpeg, &source, "160x90", 48_000);
+        let input = real_input(&directory, "own", &source, &source);
+        let ranges = [
+            (Rational::new(5, 2).unwrap(), Rational::new(3, 1).unwrap()),
+            (Rational::new(2, 1).unwrap(), Rational::new(5, 2).unwrap()),
+        ];
+        let read = |flv: Option<&FlvInput>| {
+            ffmpeg::probe_audio_gaps(
+                &ffprobe,
+                &source,
+                &AudioGapRead {
+                    stream_index: 1,
+                    sample_rate: 48_000,
+                    ranges: &ranges,
+                    min_gap: Rational::new(1, 100).unwrap(),
+                    flv,
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+        };
+        // The plan counts a gap whose end lies inside a segment. A continuous tone has none
+        // either way. The read of a slice starts at its keyframe, before the seek of the other
+        // read lands, so the first frame that each read finds can differ.
+        let inside = |gaps: Vec<ffmpeg::AudioGap>| -> Vec<ffmpeg::AudioGap> {
+            gaps.into_iter()
+                .filter(|gap| {
+                    ranges
+                        .iter()
+                        .any(|(start, end)| gap.to > *start && gap.to < *end)
+                })
+                .collect()
+        };
+        let by_slices = read(Some(&input));
+        assert!(!by_slices.is_empty(), "the read found the first frame");
+        assert_eq!(inside(by_slices), vec![]);
+        assert_eq!(inside(read(None)), vec![]);
+    }
+
+    #[test]
+    fn an_flv_source_gets_its_slices_and_a_cancel_ends_the_run() {
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.flv");
+        write_real_flv(&ffmpeg, &source, "160x90", 48_000);
+        let probe = ffmpeg::probe_media(&ffprobe, &source).unwrap();
+        let tb = probe.video_time_base;
+        // In points at 3.5 s and 1 s, in that concat order, in the time base of the probe.
+        let at = |millis: i64| Pts::new(millis * tb.den() / (1_000 * tb.num()));
+        let request = ExportRequestWire {
+            source_path: source.to_string_lossy().into_owned(),
+            output_path: directory
+                .path
+                .join("out.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            segments: vec![
+                ExportSegmentBoundaryWire {
+                    in_pts: at(3_500),
+                    out_pts: at(3_900),
+                },
+                ExportSegmentBoundaryWire {
+                    in_pts: at(1_000),
+                    out_pts: at(1_500),
+                },
+            ],
+            preset_id: None,
+            streams: ExportStreams::VideoAndAudio,
+        };
+        let app_data = directory.path.join("app");
+        let windows = PreviewWindows::default();
+        let run = |probe: &MediaProbe, cancel: &AtomicBool| {
+            flv_input_for(
+                &ffprobe, &source, probe, &request, &app_data, &windows, cancel,
+            )
+        };
+        // Both seek positions lie before the first keyframe, so both slices start at the first
+        // frame of the file, which needs no check.
+        let input = run(&probe, &AtomicBool::new(false)).unwrap().unwrap();
+        assert_eq!(input.segment_offsets.len(), 2);
+        assert!(input
+            .segment_offsets
+            .iter()
+            .all(|offset| *offset == input.first_frame_offset));
+        assert!(input.head_path().is_file());
+
+        let mut not_flv = probe.clone();
+        not_flv.format_names = vec!["mov".to_owned()];
+        assert_eq!(run(&not_flv, &AtomicBool::new(false)).unwrap(), None);
+
+        let canceled = run(&probe, &AtomicBool::new(true));
+        assert!(matches!(
+            canceled,
+            Err(ExportCommandError {
+                code: ExportErrorCode::Canceled,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_slice_check_skips_the_slice_from_the_first_frame_of_the_file() {
+        // A recording that starts in the middle of a GOP has no picture in its first frame,
+        // and the head holds the configurations of the start of the file. The check runs no
+        // process for that slice, so even a missing ffprobe passes.
+        let directory = TestDirectory::new();
+        let input = FlvInput {
+            working_directory: directory.path.clone(),
+            source_size: 1_000,
+            segment_offsets: vec![13, 13],
+            first_frame_offset: 13,
+        };
+        let probe = sample_probe_with_audio();
+        assert!(check_slices(
+            &directory.path.join("no-ffprobe"),
+            &input,
+            Path::new("/media/live.flv"),
+            &probe,
+            true,
+            &AtomicBool::new(false),
+        )
+        .is_ok());
+        let later = FlvInput {
+            segment_offsets: vec![13, 500],
+            ..input
+        };
+        assert!(matches!(
+            check_slices(
+                &directory.path.join("no-ffprobe"),
+                &later,
+                Path::new("/media/live.flv"),
+                &probe,
+                true,
+                &AtomicBool::new(false),
+            ),
+            Err(SliceCheck::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn the_audio_of_a_slice_matches_when_its_samples_fill_its_timestamps() {
+        let audio = sample_probe_with_audio()
+            .audio
+            .expect("the fixture probe has audio");
+        let frames = |times: &[&str], channels: u32| -> Vec<ffmpeg::DecodedAudioFrame> {
+            times
+                .iter()
+                .map(|time| ffmpeg::DecodedAudioFrame {
+                    pts: Rational::from_decimal_str(time),
+                    nb_samples: 1024,
+                    channels: Some(channels),
+                })
+                .collect()
+        };
+        // AAC at 48000 Hz: 1024 samples, 21.333 ms, written as whole milliseconds.
+        let at_48k = [
+            "2.008", "2.029", "2.051", "2.072", "2.093", "2.115", "2.136", "2.157",
+        ];
+        assert!(audio_matches(&frames(&at_48k, 2), &audio));
+        assert!(!audio_matches(&frames(&at_48k, 1), &audio));
+        assert!(!audio_matches(&frames(&at_48k[..1], 2), &audio));
+        assert!(!audio_matches(&frames(&at_48k[..4], 2), &audio));
+        // A gap of 100 ms, which the export fills, and 2 ms of jitter still match.
+        let with_gap = [
+            "2.008", "2.029", "2.051", "2.072", "2.193", "2.214", "2.238", "2.257",
+        ];
+        assert!(audio_matches(&frames(&with_gap, 2), &audio));
+        // The timestamps of 44100 Hz audio, decoded with the rate of a 48000 Hz head.
+        let at_44k = [
+            "2.008", "2.031", "2.054", "2.078", "2.101", "2.124", "2.147", "2.171",
+        ];
+        assert!(!audio_matches(&frames(&at_44k, 2), &audio));
+        // Timestamps that go back, and a frame with no time.
+        let back = [
+            "2.008", "2.029", "2.051", "2.040", "2.093", "2.115", "2.136", "2.157",
+        ];
+        assert!(!audio_matches(&frames(&back, 2), &audio));
+        let mut untimed = frames(&at_48k, 2);
+        untimed[3].pts = None;
+        assert!(!audio_matches(&untimed, &audio));
+    }
+
+    #[test]
+    fn the_watcher_of_the_locate_stops_also_when_the_locate_panics() {
+        let done = AtomicBool::new(false);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _done = SetOnDrop(&done);
+            panic!("the locate failed");
+        }));
+        assert!(result.is_err());
+        assert!(done.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -1951,6 +2591,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -2001,6 +2642,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -2073,6 +2715,7 @@ mod tests {
                     request: &request,
                     app_data_directory: &directory.path,
                     cancel: &AtomicBool::new(false),
+                    preview_windows: &PreviewWindows::default(),
                 },
                 |_| {
                     Ok(FfmpegPaths {
@@ -2193,6 +2836,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -2243,6 +2887,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -2311,6 +2956,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -2403,6 +3049,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(true),
+                preview_windows: &PreviewWindows::default(),
             },
             |_| {
                 *discovered.borrow_mut() = true;
@@ -2456,6 +3103,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel: &cancel,
+                preview_windows: &PreviewWindows::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -2514,6 +3162,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel: &cancel,
+                preview_windows: &PreviewWindows::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -2567,6 +3216,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
             },
             |_| Err(LocateError::NotFound { inspected: vec![] }),
             |_| unreachable!(),
@@ -2618,6 +3268,7 @@ mod tests {
                     request: &request,
                     app_data_directory: &directory.path,
                     cancel: &AtomicBool::new(false),
+                    preview_windows: &PreviewWindows::default(),
                 },
                 |_| {
                     Ok(FfmpegPaths {
@@ -2961,6 +3612,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel,
+                preview_windows: &PreviewWindows::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3911,6 +4563,7 @@ mod tests {
                 request: &request,
                 app_data_directory: &directory.path,
                 cancel: &cancel,
+                preview_windows: &PreviewWindows::default(),
             },
             |_| {
                 Ok(FfmpegPaths {

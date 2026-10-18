@@ -43,6 +43,7 @@
 //! plan's [`Rational`], truncated at ffmpeg's own microsecond resolution; the private
 //! `render_seek` has the rounding rule and its one-sided guarantee.
 
+use super::flv_input::{FlvInput, HEAD_NAME};
 use super::graph::{build_audio_graph, build_filter_graph, build_video_graph};
 use super::{ExportPlan, GraphShape, PlannedAudio, PlannedVideo};
 use crate::settings::{Container, OptionStream, PresetOption, Quality, QualityKind};
@@ -434,8 +435,11 @@ const AUDIO_PIPE_FORMAT: &str = "wav";
 fn push_inputs(arguments: &mut Vec<String>, plan: &ExportPlan, shape: GraphShape) -> usize {
     match shape {
         GraphShape::InputPerSegment => {
-            for segment in &plan.segments {
-                push_input(arguments, segment.seek_seconds, &plan.source);
+            for (index, segment) in plan.segments.iter().enumerate() {
+                match flv_offset(plan, Some(index)) {
+                    Some((flv, offset)) => push_flv_input(arguments, flv, offset, &plan.source),
+                    None => push_input(arguments, segment.seek_seconds, &plan.source),
+                }
             }
             plan.segments.len()
         }
@@ -444,10 +448,33 @@ fn push_inputs(arguments: &mut Vec<String>, plan: &ExportPlan, shape: GraphShape
         // match source order, so the first array element is not necessarily the earliest one,
         // and seeking to it would skip material a later array element still needs.
         GraphShape::SingleInput => {
-            push_input(arguments, plan.single_input_seek_seconds(), &plan.source);
+            match flv_offset(plan, None) {
+                Some((flv, offset)) => push_flv_input(arguments, flv, offset, &plan.source),
+                None => push_input(arguments, plan.single_input_seek_seconds(), &plan.source),
+            }
             1
         }
     }
+}
+
+/// The FLV input of `plan` and the offset of the slice of the segment `index`, or of the single
+/// input when `index` is `None`. `None` when the plan has no FLV input, or no offset for the
+/// segment, which `commands::export` never makes.
+fn flv_offset(plan: &ExportPlan, index: Option<usize>) -> Option<(&FlvInput, u64)> {
+    let flv = plan.flv_input.as_ref()?;
+    let offset = match index {
+        Some(index) => flv.segment_offsets.get(index).copied()?,
+        None => flv.single_offset()?,
+    };
+    Some((flv, offset))
+}
+
+/// Append one FLV input of ADR 046: the head and the slice of the source from `offset`, joined
+/// with the concat protocol, and no seek. FFmpeg runs in the directory of the head, so the
+/// command names the head by its file name.
+fn push_flv_input(arguments: &mut Vec<String>, flv: &FlvInput, offset: u64, source: &Path) {
+    arguments.push("-i".to_owned());
+    arguments.push(flv.url(HEAD_NAME, offset, source));
 }
 
 /// Append the encoder arguments of each part a command writes: the video ones when `video` is
@@ -778,6 +805,7 @@ mod tests {
             segments: fixture_segments(count),
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
+            flv_input: None,
         }
     }
 
@@ -1106,6 +1134,80 @@ mod tests {
                 "/export/.out.mp4.tmp-4242-0",
             ]
         );
+    }
+
+    /// The fixture plan of three segments with an FLV input: a slice for each segment, in concat
+    /// order, of a source of 212700000 bytes. Element 1 starts first, as in the fixture.
+    fn flv_plan() -> ExportPlan {
+        let mut plan = fixture_plan(3);
+        plan.source = PathBuf::from("/media/live.flv");
+        plan.flv_input = Some(FlvInput {
+            working_directory: PathBuf::from("/app/flv-cache/0123456789abcdef"),
+            source_size: 212_700_000,
+            segment_offsets: vec![9_000_000, 4_000_000, 30_000_000],
+            first_frame_offset: 13,
+        });
+        plan
+    }
+
+    #[test]
+    fn an_flv_input_opens_each_slice_with_the_concat_protocol_and_no_seek() {
+        // FFmpeg runs in the directory of the head, so each input names the head by its file
+        // name. The slices start at the keyframes that the reader located, so no input carries
+        // `-ss`, and `-copyts` keeps the timestamps that the `trim` boundaries use.
+        assert_eq!(
+            input_arguments(&flv_plan(), GraphShape::InputPerSegment),
+            vec![
+                "-i",
+                "concat:head.flv|subfile,,start,9000000,end,212700000,,:/media/live.flv",
+                "-i",
+                "concat:head.flv|subfile,,start,4000000,end,212700000,,:/media/live.flv",
+                "-i",
+                "concat:head.flv|subfile,,start,30000000,end,212700000,,:/media/live.flv",
+                "-f",
+                "wav",
+                "-i",
+                "pipe:0",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_single_flv_input_starts_at_the_earliest_slice() {
+        // Element 1 starts first in the source, so its slice holds every segment.
+        assert_eq!(
+            input_arguments(&flv_plan(), GraphShape::SingleInput),
+            vec![
+                "-i",
+                "concat:head.flv|subfile,,start,4000000,end,212700000,,:/media/live.flv",
+                "-f",
+                "wav",
+                "-i",
+                "pipe:0",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_audio_process_opens_the_same_flv_slices_as_the_encoder() {
+        let plan = flv_plan();
+        let inputs = |arguments: &[String]| -> Vec<String> {
+            arguments
+                .windows(2)
+                .filter(|pair| pair[0] == "-i" && pair[1] != "pipe:0")
+                .map(|pair| pair[1].clone())
+                .collect()
+        };
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            let graph = build_audio_graph(&plan, shape);
+            let audio = build_audio_arguments(&plan, shape, &graph);
+            assert!(!audio.iter().any(|argument| argument == "-ss"), "{audio:?}");
+            assert_eq!(
+                inputs(&audio),
+                inputs(&arguments(&plan, shape)),
+                "{shape:?}"
+            );
+        }
     }
 
     #[test]
@@ -2512,6 +2614,7 @@ mod tests {
                 30_000,
             )
             .expect("the fixture duration is representable"),
+            flv_input: None,
         }
     }
 
@@ -2718,7 +2821,81 @@ mod tests {
                 30_000,
             )
             .expect("the fixture duration is representable"),
+            flv_input: None,
         }
+    }
+
+    /// `plan` with an FLV input whose numbers have the digits of `size`: a slice for each
+    /// segment, each from an offset just below `size`.
+    fn with_flv_input(mut plan: ExportPlan, size: u64) -> ExportPlan {
+        let count = u64::try_from(plan.segments.len()).expect("the count fits in a u64");
+        plan.flv_input = Some(FlvInput {
+            working_directory: PathBuf::from(longest_windows_path("")),
+            source_size: size,
+            segment_offsets: (0..count).map(|index| size - 1 - index).collect(),
+            first_frame_offset: 13,
+        });
+        plan
+    }
+
+    /// The largest segment count at which the first shape of `plan` fits the Windows budget,
+    /// for the encoder and for the audio process.
+    fn largest_count_with_one_input_each(make: impl Fn(usize) -> ExportPlan) -> (usize, usize) {
+        let mut largest = (0, 0);
+        for count in 1..=MAX_EXPORT_SEGMENTS {
+            let plan = make(count);
+            let shape = GraphShape::InputPerSegment;
+            if measured_length(&plan, shape, WINDOWS_OUTPUT) <= WINDOWS_COMMAND_LINE_BUDGET {
+                largest.0 = count;
+            }
+            if measured_audio_length(&plan, shape) <= WINDOWS_COMMAND_LINE_BUDGET {
+                largest.1 = count;
+            }
+        }
+        largest
+    }
+
+    #[test]
+    fn an_flv_input_keeps_one_input_for_each_segment_up_to_the_measured_count() {
+        // An FLV input is 42 bytes longer than a seeked input with numbers of 12 digits, and 58
+        // bytes longer with numbers of 20 digits: the concat spelling and two numbers, less `-ss`
+        // and its value. So the first shape fits fewer segments. ADR 046 records these counts.
+        // Change it with them.
+        //
+        // The realistic plan: the 106-character path and a source below 1 TB.
+        assert_eq!(largest_count_with_one_input_each(windows_plan), (92, 77));
+        assert_eq!(
+            largest_count_with_one_input_each(|count| {
+                with_flv_input(windows_plan(count), 999_999_999_999)
+            }),
+            (81, 69)
+        );
+        // The widest plan, with the largest numbers a file can have.
+        assert_eq!(largest_count_with_one_input_each(widest_plan), (59, 50));
+        assert_eq!(
+            largest_count_with_one_input_each(|count| with_flv_input(widest_plan(count), u64::MAX)),
+            (52, 45)
+        );
+    }
+
+    #[test]
+    fn the_widest_plan_with_an_flv_input_still_fits_at_the_segment_cap() {
+        // The single input carries one slice, so the fallback still fits at the cap, with the
+        // largest numbers a file can have. A long path of the application data does not count:
+        // the command names the head by its file name.
+        let plan = with_flv_input(widest_plan(MAX_EXPORT_SEGMENTS), u64::MAX);
+        let shape = choose_graph_shape_within(
+            &plan,
+            Path::new(WINDOWS_OUTPUT),
+            WINDOWS_COMMAND_LINE_BUDGET,
+        );
+        assert_eq!(shape, GraphShape::SingleInput);
+        let length = measured_length(&plan, shape, WINDOWS_OUTPUT);
+        assert!(length <= WINDOWS_COMMAND_LINE_BUDGET, "{length}");
+        let shape = choose_audio_graph_shape_within(&plan, WINDOWS_COMMAND_LINE_BUDGET);
+        assert_eq!(shape, GraphShape::SingleInput);
+        let length = measured_audio_length(&plan, shape);
+        assert!(length <= WINDOWS_COMMAND_LINE_BUDGET, "{length}");
     }
 
     /// The largest audio tick of twelve digits, which [`widest_plan`] assumes as the widest.

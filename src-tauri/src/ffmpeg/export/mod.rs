@@ -62,6 +62,7 @@
 //! of the plan's.
 
 pub mod arguments;
+pub mod flv_input;
 pub mod fsinspect;
 pub mod graph;
 pub mod output;
@@ -475,6 +476,11 @@ pub struct ExportPlan {
     pub container: Container,
     /// The exact total output duration: the rational sum of every segment's duration.
     pub total_duration: Rational,
+    /// The FLV input of ADR 046, which opens each input as the head of the source and a slice of
+    /// it from a keyframe in place of an input seek, or `None` for the input seek of ADR 014.
+    /// [`plan::build_plan`] leaves it `None`. `commands::export` sets it for an FLV source, with
+    /// one offset for each segment.
+    pub flv_input: Option<flv_input::FlvInput>,
 }
 
 impl ExportPlan {

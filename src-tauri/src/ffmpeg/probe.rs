@@ -864,6 +864,9 @@ pub struct AudioGapRead<'a> {
     /// The longest gap that the answer leaves out. The frames on the two sides of a shorter gap
     /// join.
     pub min_gap: Rational,
+    /// The FLV input of the export (ADR 046), whose slices the read opens in place of the seeks
+    /// of `-read_intervals`, with one offset for each range, or `None`.
+    pub flv: Option<&'a crate::ffmpeg::export::flv_input::FlvInput>,
 }
 
 /// Run the resolved ffprobe executable to find the gaps in the audio stream `read.stream_index` of
@@ -888,6 +891,12 @@ pub fn probe_audio_gaps(
 ) -> Result<Vec<AudioGap>, ProbeError> {
     if read.ranges.is_empty() {
         return Ok(Vec::new());
+    }
+    if let Some(flv) = read
+        .flv
+        .filter(|flv| flv.segment_offsets.len() == read.ranges.len())
+    {
+        return probe_audio_gaps_in_slices(ffprobe_path, media_path, read, flv, cancel);
     }
     let intervals = read_intervals_argument(read.ranges).ok_or_else(|| ProbeError::Parse {
         source: invalid_frames("a range cannot be written in microseconds"),
@@ -919,6 +928,235 @@ pub fn probe_audio_gaps(
     finish_probe_run_with(run, PROBE_TIMEOUT, |csv| {
         parse_audio_frames_csv(csv, read.sample_rate, read.min_gap)
     })
+}
+
+/// [`probe_audio_gaps`] for an FLV source (ADR 046). FFmpeg cannot seek in an FLV without a
+/// keyframe index, so each interval of `-read_intervals` would read the file from its start. The
+/// read therefore opens one slice for each group of ranges that overlap or touch: the head and
+/// the source from the keyframe of the earliest range of the group, which the export opens too.
+/// It reads the slice from its start to the end of the group, `-read_intervals %<end>`. The tags
+/// keep their timestamps, so the answers join in order of time and parse as one. All the runs
+/// share one [`PROBE_TIMEOUT`]. The head is named by its full path, so the read needs no working
+/// directory.
+fn probe_audio_gaps_in_slices(
+    ffprobe_path: &Path,
+    media_path: &Path,
+    read: &AudioGapRead<'_>,
+    flv: &crate::ffmpeg::export::flv_input::FlvInput,
+    cancel: &AtomicBool,
+) -> Result<Vec<AudioGap>, ProbeError> {
+    let parse_error = |message: &'static str| ProbeError::Parse {
+        source: invalid_frames(message),
+        stderr: Vec::new(),
+    };
+    let head = flv.head_path();
+    let head = head.to_string_lossy();
+    if head.contains('|') {
+        return Err(parse_error(
+            "the path of the head holds the concat separator",
+        ));
+    }
+    let groups = slice_groups(read.ranges, &flv.segment_offsets);
+    let microsecond = Rational::new(1, 1_000_000).expect("1/1000000 is a valid Rational");
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let stream = read.stream_index.to_string();
+    let mut csv = Vec::new();
+    for (end, offset) in groups {
+        let end = end
+            .add(microsecond)
+            .and_then(|end| format_seconds(end, 6))
+            .ok_or_else(|| parse_error("a range cannot be written in microseconds"))?;
+        let interval = format!("%{end}");
+        let input = flv.url(&head, offset, media_path);
+        let arguments = [
+            OsStr::new("-v"),
+            OsStr::new("error"),
+            OsStr::new("-select_streams"),
+            OsStr::new(&stream),
+            OsStr::new("-show_entries"),
+            OsStr::new("frame=pts_time,nb_samples"),
+            OsStr::new("-read_intervals"),
+            OsStr::new(&interval),
+            OsStr::new("-of"),
+            OsStr::new("csv=p=0"),
+            OsStr::new("-i"),
+            OsStr::new(&input),
+        ];
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ProbeError::TimedOut {
+                timeout: PROBE_TIMEOUT,
+                stderr: Vec::new(),
+            });
+        }
+        let run = run_probe_process(
+            ffprobe_path,
+            &arguments,
+            remaining,
+            PROBE_POLL_INTERVAL,
+            Some(cancel),
+        )
+        .map_err(|source| ProbeError::Spawn { source })?;
+        let answer = finish_probe_run_with(run, remaining, |bytes| Ok(bytes.to_vec()))?;
+        csv.extend_from_slice(&answer);
+        if !csv.ends_with(b"\n") {
+            csv.push(b'\n');
+        }
+    }
+    parse_audio_frames_csv(&csv, read.sample_rate, read.min_gap).map_err(|source| {
+        ProbeError::Parse {
+            source,
+            stderr: Vec::new(),
+        }
+    })
+}
+
+/// One audio frame that [`probe_slice_start`] decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedAudioFrame {
+    /// The presentation time in seconds, or `None` when the frame has none.
+    pub pts: Option<Rational>,
+    pub nb_samples: u32,
+    pub channels: Option<u32>,
+}
+
+/// The frames that [`probe_slice_start`] decoded from the start of an input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceStart {
+    /// The width and the height of the first frame of the video stream, or `None` when the read
+    /// decoded none.
+    pub picture: Option<(u32, u32)>,
+    /// The frames of the audio stream, in order.
+    pub audio: Vec<DecodedAudioFrame>,
+    /// True when the decoder reported no error. A frame decoded with the decoder configuration of
+    /// another part of the file makes the decoder report errors.
+    pub clean: bool,
+}
+
+/// Run the resolved ffprobe executable to decode the first `packets` packets of `input` within
+/// `timeout`, and stop it when `cancel` is set. The answer holds the first frame of the stream
+/// `video_stream` and the frames of the stream `audio_stream`. With an audio stream the count is
+/// of the packets of all streams. Without one, the run reads the video stream alone, so an error
+/// of the audio decoder does not count.
+///
+/// The export checks each FLV slice with it before it uses the slices (ADR 046): a slice that
+/// starts after a change of the decoder configuration that no read has seen decodes with the
+/// configuration of the head. `input` is the input as FFmpeg reads it, such as a `concat:`
+/// input. One run reads both streams, so a check costs one process for each slice.
+pub fn probe_slice_start(
+    ffprobe_path: &Path,
+    input: &OsStr,
+    video_stream: u32,
+    audio_stream: Option<u32>,
+    packets: u32,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<SliceStart, ProbeError> {
+    let interval = format!("%+#{packets}");
+    let video = video_stream.to_string();
+    let mut arguments = vec![OsStr::new("-v"), OsStr::new("error")];
+    if audio_stream.is_none() {
+        arguments.extend([OsStr::new("-select_streams"), OsStr::new(&video)]);
+    }
+    arguments.extend([
+        OsStr::new("-show_entries"),
+        OsStr::new("frame=media_type,stream_index,pts_time,nb_samples,channels,width,height"),
+        OsStr::new("-read_intervals"),
+        OsStr::new(&interval),
+        OsStr::new("-of"),
+        OsStr::new("csv=p=0"),
+        OsStr::new("-i"),
+        input,
+    ]);
+    let run = run_probe_process(
+        ffprobe_path,
+        &arguments,
+        timeout,
+        PROBE_POLL_INTERVAL,
+        Some(cancel),
+    )
+    .map_err(|source| ProbeError::Spawn { source })?;
+    let clean = run.stderr.iter().all(u8::is_ascii_whitespace);
+    finish_probe_run_with(run, timeout, |csv| {
+        parse_slice_start(csv, video_stream, audio_stream, clean)
+    })
+}
+
+/// Read the answer of [`probe_slice_start`]. FFprobe writes the fields of a frame in its own
+/// order: the media type, the stream, the time, and then the width and the height of a video
+/// frame, or the samples and the channels of an audio frame.
+fn parse_slice_start(
+    csv: &[u8],
+    video_stream: u32,
+    audio_stream: Option<u32>,
+    clean: bool,
+) -> Result<SliceStart, ProbeParseError> {
+    let text = std::str::from_utf8(csv).map_err(|_| invalid_frames("the answer is not UTF-8"))?;
+    let mut picture = None;
+    let mut audio = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+        let field = |index: usize| fields.get(index).copied().unwrap_or("");
+        let Ok(stream) = field(1).parse::<u32>() else {
+            return Err(invalid_frames("a frame has no stream index"));
+        };
+        match field(0) {
+            "video" if stream == video_stream && picture.is_none() => {
+                match (field(3).parse::<u32>(), field(4).parse::<u32>()) {
+                    (Ok(width), Ok(height)) => picture = Some((width, height)),
+                    _ => return Err(invalid_frames("a frame has no picture size")),
+                }
+            }
+            "audio" if Some(stream) == audio_stream => {
+                let pts = match field(2) {
+                    "N/A" => None,
+                    text => Some(
+                        Rational::from_decimal_str(text)
+                            .ok_or_else(|| invalid_frames("a pts_time is not a decimal"))?,
+                    ),
+                };
+                let nb_samples = field(3)
+                    .parse::<u32>()
+                    .map_err(|_| invalid_frames("an nb_samples is not a count"))?;
+                audio.push(DecodedAudioFrame {
+                    pts,
+                    nb_samples,
+                    channels: field(4).parse::<u32>().ok(),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(SliceStart {
+        picture,
+        audio,
+        clean,
+    })
+}
+
+/// The groups of `ranges` that overlap or touch, in order of time, each as its end and the
+/// smallest offset of its ranges: the slice that holds all of them.
+fn slice_groups(ranges: &[(Rational, Rational)], offsets: &[u64]) -> Vec<(Rational, u64)> {
+    let mut sorted: Vec<(Rational, Rational, u64)> = ranges
+        .iter()
+        .zip(offsets)
+        .map(|(&(start, end), &offset)| (start, end, offset))
+        .collect();
+    sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut groups: Vec<(Rational, Rational, u64)> = Vec::with_capacity(sorted.len());
+    for (start, end, offset) in sorted {
+        match groups.last_mut() {
+            Some(last) if start <= last.1 => {
+                last.1 = last.1.max(end);
+                last.2 = last.2.min(offset);
+            }
+            _ => groups.push((start, end, offset)),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, end, offset)| (end, offset))
+        .collect()
 }
 
 /// Spell `ranges` for `-read_intervals`, or `None` when a bound cannot be written in
@@ -3156,6 +3394,72 @@ mod tests {
                  100.333332%100.666668"
             )
         );
+    }
+
+    #[test]
+    fn the_slices_of_an_flv_gap_read_join_the_ranges_that_overlap_or_touch() {
+        // In concat order, as the segments are. Each group reads from the earliest slice of its
+        // ranges to its end.
+        let ranges = [
+            (seconds("60"), seconds("62.5")),
+            (seconds("0"), seconds("2")),
+            (seconds("1"), seconds("3")),
+            (seconds("3"), seconds("4")),
+        ];
+        assert_eq!(
+            slice_groups(&ranges, &[9_000, 500, 100, 800]),
+            vec![(seconds("4"), 100), (seconds("62.5"), 9_000)]
+        );
+        assert_eq!(slice_groups(&[], &[]), vec![]);
+    }
+
+    #[test]
+    fn the_start_of_a_slice_answers_its_picture_and_its_audio_frames() {
+        let csv = b"audio,1,2.008000,1024,2\n\
+                    audio,1,N/A,1024,2\n\
+                    video,0,2.067000,1280,720\n\
+                    video,0,2.100000,640,360\n\
+                    audio,1,2.051000,1024,\n\
+                    audio,2,2.051000,1024,2\n\
+                    data,3,2.0,,\n";
+        let start = parse_slice_start(csv, 0, Some(1), true).unwrap();
+        assert!(start.clean);
+        // The first frame of the video stream counts.
+        assert_eq!(start.picture, Some((1280, 720)));
+        assert_eq!(
+            start.audio,
+            vec![
+                DecodedAudioFrame {
+                    pts: Some(seconds("2.008")),
+                    nb_samples: 1024,
+                    channels: Some(2),
+                },
+                DecodedAudioFrame {
+                    pts: None,
+                    nb_samples: 1024,
+                    channels: Some(2),
+                },
+                DecodedAudioFrame {
+                    pts: Some(seconds("2.051")),
+                    nb_samples: 1024,
+                    channels: None,
+                },
+            ]
+        );
+        let video_only = parse_slice_start(csv, 0, None, false).unwrap();
+        assert!(video_only.audio.is_empty());
+        assert!(!video_only.clean);
+        assert_eq!(
+            parse_slice_start(b"", 0, Some(1), true).unwrap(),
+            SliceStart {
+                picture: None,
+                audio: vec![],
+                clean: true,
+            }
+        );
+        assert!(parse_slice_start(b"video,0,2.0,N/A,N/A\n", 0, None, true).is_err());
+        assert!(parse_slice_start(b"audio,1,2.0,many,1\n", 0, Some(1), true).is_err());
+        assert!(parse_slice_start(b"audio,x,2.0,1024,1\n", 0, Some(1), true).is_err());
     }
 
     #[test]

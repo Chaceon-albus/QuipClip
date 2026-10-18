@@ -203,6 +203,10 @@ pub struct ExportProcessRequest<'a> {
     /// pipe, and the export then fails with the audio process's error although the encoder may
     /// have written a whole file.
     pub audio_arguments: Option<&'a [String]>,
+    /// The directory both processes run in, or `None` for the directory of this process. An
+    /// export of an FLV source runs in the directory of its head, which its inputs name by the
+    /// file name alone (ADR 046).
+    pub working_directory: Option<&'a Path>,
     /// The cancellation flag, normally [`super::registry::ExportSlot::cancel_flag`].
     ///
     /// Read with [`Ordering::SeqCst`], to pair with [`super::registry::ExportRegistry::cancel`]'s
@@ -352,9 +356,18 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
         ffmpeg,
         arguments,
         audio_arguments,
+        working_directory,
         cancel,
         poll,
     } = request;
+    // A command for `ffmpeg`, in the working directory of the export when it has one.
+    let ffmpeg_command = || {
+        let mut command = command_without_console(ffmpeg);
+        if let Some(directory) = working_directory {
+            command.current_dir(directory);
+        }
+        command
+    };
 
     // Before the spawn, not after it. See the section above.
     if cancel.load(Ordering::SeqCst) {
@@ -370,7 +383,7 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
     // encoder kills it on the way out.
     let mut audio = match audio_arguments {
         Some(audio_arguments) => Some(ChildGuard::new(
-            command_without_console(ffmpeg)
+            ffmpeg_command()
                 .args(audio_arguments)
                 // The audio process reads only its own inputs, so it gets a null stdin for the
                 // reason the encoder below gets one.
@@ -403,7 +416,7 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
     // progress callback most of all -- and a bare `Child` local would survive that unwind as an
     // orphaned encoder; see [`ChildGuard`].
     let mut child = ChildGuard::new(
-        command_without_console(ffmpeg)
+        ffmpeg_command()
             .args(arguments)
             // A null handle, or the audio process's stdout. With the pipe, `-nostdin` still
             // holds: it turns off the console interaction, and `pipe:0` reads the handle as an
@@ -1095,6 +1108,7 @@ mod tests {
                 ffmpeg: program,
                 arguments,
                 audio_arguments: None,
+                working_directory: None,
                 cancel: &cancel,
                 poll: TEST_POLL,
             },
@@ -1147,6 +1161,7 @@ mod tests {
                 ffmpeg: &program,
                 arguments: &arguments,
                 audio_arguments: None,
+                working_directory: None,
                 cancel: &cancel,
                 poll: TEST_POLL,
             },
@@ -1217,6 +1232,7 @@ mod tests {
                     ffmpeg: &program,
                     arguments: &arguments,
                     audio_arguments: None,
+                    working_directory: None,
                     cancel: &cancel,
                     poll: TEST_POLL,
                 },
@@ -1252,6 +1268,7 @@ mod tests {
                 ffmpeg: &missing,
                 arguments: &[],
                 audio_arguments: None,
+                working_directory: None,
                 cancel: &cancel,
                 poll: TEST_POLL,
             },
@@ -1318,6 +1335,7 @@ mod tests {
                 ffmpeg: &program,
                 arguments: &arguments,
                 audio_arguments: None,
+                working_directory: None,
                 cancel: &cancel,
                 poll: Duration::ZERO,
             },
@@ -1522,6 +1540,41 @@ mod tests {
     #[cfg(windows)]
     const SLEEP: &str = "Start-Sleep -Seconds 120";
 
+    /// Both processes of an export of an FLV source run in the directory of its head, which
+    /// their inputs name by its file name (ADR 046). Each script writes its directory to a file
+    /// with a relative name, which lands in the working directory only.
+    #[cfg(unix)]
+    #[test]
+    fn both_processes_run_in_the_working_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("quipclip-process-directory-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let pair = pair("pwd > audio.txt", "pwd > encoder.txt; exec cat");
+        let outcome = run_export_process(
+            ExportProcessRequest {
+                ffmpeg: &pair.program,
+                arguments: &pair.encoder,
+                audio_arguments: Some(&pair.audio),
+                working_directory: Some(&directory),
+                cancel: &AtomicBool::new(false),
+                poll: TEST_POLL,
+            },
+            |_| {},
+        )
+        .expect("both processes should spawn");
+        assert!(matches!(
+            outcome.status,
+            ExportProcessStatus::Exited { success: true, .. }
+        ));
+        let canonical = std::fs::canonicalize(&directory).unwrap();
+        for name in ["audio.txt", "encoder.txt"] {
+            let written = std::fs::read_to_string(directory.join(name)).unwrap();
+            assert_eq!(std::fs::canonicalize(written.trim()).unwrap(), canonical);
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// Run `pair` with `cancel`, collecting every snapshot delivered.
     fn run_pair(
         pair: &Pair,
@@ -1533,6 +1586,7 @@ mod tests {
                 ffmpeg: &pair.program,
                 arguments: &pair.encoder,
                 audio_arguments: Some(&pair.audio),
+                working_directory: None,
                 cancel,
                 poll: TEST_POLL,
             },
@@ -1741,6 +1795,7 @@ mod tests {
                 ffmpeg: &failing.program,
                 arguments: &failing.encoder,
                 audio_arguments: Some(&failing.audio),
+                working_directory: None,
                 cancel: &AtomicBool::new(false),
                 poll: TEST_POLL,
             },
@@ -1771,6 +1826,7 @@ mod tests {
                 ffmpeg: &both.program,
                 arguments: &both.encoder,
                 audio_arguments: Some(&both.audio),
+                working_directory: None,
                 cancel: &AtomicBool::new(false),
                 poll: Duration::from_secs(4),
             },
