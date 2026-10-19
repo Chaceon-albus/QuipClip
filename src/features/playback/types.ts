@@ -599,10 +599,12 @@ export interface PlaybackActions {
   /**
    * Seeks the element once more for a seek whose data arrived after it began, in WKWebView (ADR
    * 046, measurement 26): 3 ms from `mediaTime`, toward the middle of its nominal frame, or before
-   * it when `videoAfter` is false, when the element still aims at `mediaTime`; to `mediaTime`
-   * itself when WebKit moved the element while the last seek of the store still names
-   * `mediaTime`, and neither that seek nor a later play kept a playback running. A seek that
-   * waits in the queue starts instead. A scrub sample gets one fastSeek 3 ms away.
+   * it when `videoAfter` is false. It does so when the element still aims at `mediaTime`, and
+   * when WebKit moved the element while the last seek of the store still names `mediaTime` and
+   * neither that seek nor a later play kept a playback running. The store reads the landing as
+   * `mediaTime`. A frame too short for the 3 ms gets no repair when the element aims at
+   * `mediaTime`, and it gets a seek to `mediaTime` itself after a move. A seek that waits in the
+   * queue starts instead. A scrub sample gets one fastSeek 3 ms away.
    */
   repairSeek: (
     sourceRevisionKey: string,

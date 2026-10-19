@@ -3741,7 +3741,9 @@ export function createPlaybackStore(
         }
         // The same seek again, so the display target and the playback stay. A seek 3 ms from the
         // target is a new seek for WebKit, and its data is buffered now. A scrub sample lands on a
-        // keyframe, so one fastSeek repairs it.
+        // keyframe, so one fastSeek repairs it. After WebKit moved the element, a seek back to
+        // the target itself sometimes ended at once with no new frame (ADR 046, measurement 26),
+        // so that repair goes 3 ms from the target too.
         // The frame grid needs the calibration. Without it the seek goes after the target.
         const origin = get().calibrationStatus === "ready" ? calibratedMediaTime : null;
         const offset =
@@ -3751,10 +3753,10 @@ export function createPlaybackStore(
               ? SEEK_REPAIR_OFFSET_SECONDS
               : -SEEK_REPAIR_OFFSET_SECONDS;
         if (atTarget && offset === null) {
-          // A frame of 6 ms or less holds no seek 3 ms from its target.
+          // A frame of 6 ms and four ticks or less holds no seek 3 ms from its target.
           return;
         }
-        const landed = atTarget ? mediaTime + (offset ?? 0) : mediaTime;
+        const landed = mediaTime + (offset ?? 0);
         // The first frame callback after this seek can name another frame than the expected one.
         if (firstFrameCheckPending && !movedBeforeFirstFrame) {
           movedBeforeFirstFrame = !seekShowsExpectedFrame({
@@ -3763,8 +3765,9 @@ export function createPlaybackStore(
           });
         }
         try {
-          if (!atTarget) {
-            // A seek to the target is a new seek for WebKit now, so one seek repairs it.
+          if (offset === null) {
+            // A frame of 6 ms and four ticks or less holds no seek 3 ms from the target, so the
+            // element that WebKit moved seeks to the target itself.
             repairLanding = null;
             element.currentTime = landed;
             return;

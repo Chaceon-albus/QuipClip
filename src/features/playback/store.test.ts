@@ -8757,7 +8757,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
         expect(video.currentTime).toBeCloseTo(239.958, 9);
       });
 
-      it("seeks to the target once when WebKit moved the position itself", () => {
+      it("seeks 3 ms from the target once when WebKit moved the position itself", () => {
         const store = createPlaybackStore();
         const video = attachWithMetadata(store);
         store.getState().seekApproximate(14.358);
@@ -8770,9 +8770,11 @@ describe("Playback Store & PTS Presentation Engine", () => {
         expect(video.currentTimeSets).toBe(before);
         video.seeking = false;
         const sets = video.currentTimeSets;
+        // A seek back to the target itself can end at once with no new frame. 14.358 s lies
+        // 38 ms into its frame of 40 ms, so the seek goes 3 ms before the target.
         store.getState().repairSeek(flvKey, video, 14.358);
         expect(video.currentTimeSets).toBe(sets + 1);
-        expect(video.currentTime).toBeCloseTo(14.358, 9);
+        expect(video.currentTime).toBeCloseTo(14.355, 9);
 
         // A newer seek of the store, and a playback, move the position, and stay.
         fireSeeked(store, flvKey, video);
@@ -8867,7 +8869,7 @@ describe("Playback Store & PTS Presentation Engine", () => {
         video.currentTime = 16.448;
         video.seeking = false;
         store.getState().repairSeek(flvKey, video, 14.358);
-        expect(video.currentTime).toBeCloseTo(14.358, 9);
+        expect(video.currentTime).toBeCloseTo(14.355, 9);
       });
 
       it("starts a queued click behind a seek that kept the playback running", () => {
@@ -8920,6 +8922,46 @@ describe("Playback Store & PTS Presentation Engine", () => {
         // The seeked of the repair finds the frame of the target at the target.
         fireSeeked(store, flvKey, video);
         expect(store.getState().seekTargetSeconds).toBeNull();
+      });
+
+      it("reads the landing of the repair after a move as the target", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(store);
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        store.getState().seekApproximate(14.358);
+        // WebKit ends the seek near the next keyframe and shows that frame.
+        video.currentTime = 16.448;
+        fireSeeked(store, flvKey, video);
+        store.getState().repairSeek(flvKey, video, 14.358);
+        expect(video.currentTime).toBeCloseTo(14.355, 9);
+        // The clock shows the target, not the landing.
+        store.getState().syncBrowserTime(flvKey, video);
+        expect(store.getState().approximateBrowserTimeSeconds).toBeCloseTo(14.358, 9);
+        // The frame of the target arrives while the element still seeks, and the seeked of the
+        // repair finds the frame of the target at the target.
+        store.getState().syncPresentedFrame(flvKey, 14.32, 2, video);
+        fireSeeked(store, flvKey, video);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+        expect(store.getState().presentedFrame?.mediaTime).toBeCloseTo(14.32, 9);
+      });
+
+      it("seeks to the target itself after a move when the frame is too short", () => {
+        const fast = {
+          ...flvSource,
+          avgFrameRate: { n: 200, d: 1 },
+          rFrameRate: { n: 200, d: 1 },
+        };
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          createFakeVideo({ duration: 240 }),
+          fast,
+        );
+        store.getState().seekApproximate(14.358);
+        video.currentTime = 16.448;
+        video.seeking = false;
+        store.getState().repairSeek(getSourceRevisionKey(fast), video, 14.358);
+        expect(video.currentTime).toBeCloseTo(14.358, 9);
       });
 
       it("repairs a scrub sample with one fastSeek", () => {
