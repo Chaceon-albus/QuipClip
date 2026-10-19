@@ -345,6 +345,12 @@ the system while the segment plays therefore keeps the stop, and a frame past th
 is pulled back. So does a frame callback that finds the
 element playing before its `play` event arrived.
 
+(Changed on 2026-10-18.) The seek over a gap of a source that plays through a `MediaSource`
+(ADR 046) keeps the field. It continues the playback that the user started. In the `stopped`
+phase the element is paused, and the page asks for that seek only from a seek into a gap. That
+seek cleared the field: a seek of the store clears it before it starts, and the `seeking` event
+of a seek from the system clears it.
+
 **A window that presents no frames.** A hidden or minimized window presents no frames, so no
 frame callback stops the playback. Each `timeupdate` in the `playing` phase, while no seek
 runs or waits, therefore compares the position with `outPts` on the calibrated mapping. When

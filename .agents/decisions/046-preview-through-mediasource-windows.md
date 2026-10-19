@@ -3,7 +3,8 @@
 - Status: Accepted
 - Date: 2026-10-17
 - Deciders: capric98
-- Amends: ADR 002, ADR 003, ADR 014, ADR 017, ADR 019, ADR 022, ADR 028, ADR 039, ADR 043
+- Amends: ADR 002, ADR 003, ADR 014, ADR 017, ADR 019, ADR 022, ADR 026, ADR 028, ADR 039,
+  ADR 043
 
 ## Context
 
@@ -184,6 +185,26 @@ One more file is 1920x1080 at 14 Mbit/s with a GOP of 10 s.
       and ran 8 to 14 ms later, so the first burst played about 12 ms late.
     - The first window of a 120 s file of 62 MB read 31.5 MB for its 60 s.
     - Playback reached `ended` at the end of each file.
+28. (Added with the gap rule.) The same test page opened three FLV files with a stretch that the
+    windows skip: a reconnect whose new part starts 1 s into a GOP, where the buffered data has
+    a hole of 4.1 s, the reconnect file of measurement 27, with a hole of 2.1 s, and a 720p file
+    with 200 KB of damage, with a hole of 2.3 s.
+    - Both engines stopped at the end of the buffered range before the hole and stayed there.
+      Chrome sent `waiting` and reported a position up to 0.29 s before the end while it waited.
+      It showed no frame of the last 0.26 s before the hole. WebKit stopped at the end.
+    - A seek into the hole stayed `seeking`. Its window started at the keyframe before the target
+      and ended before it, and no window started after it.
+    - In Chrome, a seek with less than about 200 ms of buffered data after its target showed its
+      frame but stayed `seeking`: a target 0.237 s before the end completed, and one 0.187 s
+      before it did not. The store then queued every later seek behind it.
+    - WebKit completed a seek 0.05 s before the end of the range and showed its frame.
+    - With the rule of "Seeks", the playback went on after the hole in both engines. A seek into
+      the hole showed the first frame after it after 13 to 54 ms. Frame steps crossed the hole
+      forward and back. In WKWebView they reached each frame before the hole.
+    - Files without a hole played as in measurement 27, with no seek over a gap: nine files in
+      Chrome and seven in WKWebView. 60 exact seeks on each of three files passed in Chrome. In
+      WKWebView 60 passed on the 720p file and 59 on the 1080p file. In the miss, WebKit moved
+      the element itself, and the seek back of the repair (measurement 26) showed no new frame.
 
 ## Decision
 
@@ -430,9 +451,9 @@ page waits for a running window when the target lies at most 10 s after the vide
 read. The exact seek at the release of a drag and a forward frame step stay in that
 part, so they wait in the queue and do not start the window again. A backward frame step stays
 in it for its first second only. A request whose target is buffered also replaces the running
-seek, because it completes at once. The seek over a gap before the first frame (see
-"Calibration") always replaces it: the buffered ranges are the intersection of the audio and the
-video, so a first frame before the first audio sample is not buffered. When a request waits in
+seek, because it completes at once. The seek over a gap (see "Calibration" and below) always
+replaces it: the buffered ranges are the intersection of the audio and the video, so a first
+frame before the first audio sample is not buffered. When a request waits in
 the queue behind that seek, as a click during the wait does, that request replaces the stuck
 seek as an exact seek instead, and the seek over the gap goes. A scrub sample always
 waits in the queue of ADR 022, so a drag still shows a picture each time a window arrives.
@@ -467,6 +488,41 @@ and that case was not measured. The repair also runs for the late seeks that lan
 late seek costs one more seek on macOS, a decode from the keyframe. A seek that takes more than
 1 s to decode is repaired during its decode and decodes again. WebView2 does not need the
 repair, and Windows does not do it.
+
+(Added with the gap rule.) The windows can skip a stretch in the middle of the file. After a
+reconnect whose new part starts in the middle of a GOP, and after damage, a window ends before the
+stretch, and the next window starts at the keyframe after it. The buffered data then has a hole.
+Both engines stop at the end of the range before the hole, and a seek into the hole never
+completes (measurement 28).
+
+A hole that the running window has passed is permanent, because the windows append in time order.
+A window that starts by time, as an MPEG-TS or Matroska window does, rewrites the end of the data.
+The browser then drops the old frames up to the next old keyframe, because they depend on the
+frames that the window replaces. That hole lies after the first frame of the window, and it goes
+when the window appends past it, so it does not count until then. The page asks the store to seek
+over a permanent hole of at most 15 s:
+
+- When the playback waits at the end of the range, the store seeks to the start of the next range
+  and plays on. The playback waits when the element plays, has no data after its frame, and
+  stands at most 0.5 s before the end. The page tests this at `waiting`, at `timeupdate`, and
+  after each append.
+- A seek into the hole goes on in its direction. It goes to the start of the next range. A seek of
+  a paused element that came from that range or later goes back to the end of the range before
+  the hole. So a frame step back from the first frame after the hole crosses it. A seek during
+  the playback, as the seek to the In of a segment playback, goes on after the hole, so it plays
+  no frame before its target.
+- In Chromium, a seek with less than about 0.2 s of data after it, before a hole, shows its frame
+  but never completes (measurement 28). So a seek into the last 0.25 s of the range counts as a
+  seek into the hole, and the seek back goes to 0.25 s before the end. WebKit completes such a
+  seek, so on macOS neither applies.
+- When the window of a seek ends before the target, the next window starts when the target lies
+  at most 15 s after the video of that window. The hole then shows. Such a seek never starts a
+  window at its target again.
+
+The page asks once until the next seek. The seek over a gap, before the first frame or over a
+hole, keeps a running playback and the stop point of a segment playback (ADR 026), because it
+continues the playback that the user started. The frames of the hole are out of reach of a seek.
+In Chromium, so are the frames of the last 0.25 s before it.
 
 ### The scrub cue
 
@@ -662,9 +718,11 @@ the runs share one `PROBE_TIMEOUT`.
   releases. On a share the picture changes more slowly during a drag.
 - Known limitations:
   - A reconnect that changes only the configuration of the audio in the middle of a GOP loses
-    the rest of that GOP, and a reconnect whose new part starts in the middle of a GOP leaves a
-    gap. The page jumps a gap only before the first frame, so the playback waits there until
-    the user moves the playhead.
+    the rest of that GOP. A reconnect whose new part starts in the middle of a GOP, and damage,
+    leave a hole that the preview seeks over (see "Seeks"). The frames of the hole do not show
+    in the preview, and on Windows neither do the frames of the last 0.25 s before it. The
+    export still reads them. A hole of more than 15 s stops the playback until the user moves
+    the playhead.
   - A config change that no scan has seen yet gives a decode error and the stall of ADR 039.
     The reload after it scans first. The export checks each slice, and it keeps `-ss` when a
     slice does not decode.

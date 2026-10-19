@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 021
-- Amended by: ADR 035, ADR 037, ADR 038, ADR 039
+- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046
 
 ## Context
 
@@ -230,6 +230,8 @@ The actions behave as follows:
     playback, Go to In finds its frame on screen and does nothing. A seek from the system
     ends it only after the stop: while the segment plays, the stop stays, and a frame past
     the last frame is pulled back. A playback that starts later has no stop point.
+  - (Changed on 2026-10-18.) The seek over a gap of a source that plays through a
+    `MediaSource` does not end the segment playback (ADR 046). It continues the playback.
   - ADR 022 gives the stop rule.
 
 ### The context menu of a segment
