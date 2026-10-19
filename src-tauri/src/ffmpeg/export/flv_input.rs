@@ -375,6 +375,8 @@ mod tests {
         );
     }
 
+    // Windows file names cannot contain '|'.
+    #[cfg(unix)]
     #[test]
     fn a_path_with_the_concat_separator_keeps_the_input_seek() {
         let recording = recording(&RecordingOptions::default());
