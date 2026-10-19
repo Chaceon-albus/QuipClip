@@ -3301,7 +3301,10 @@ export function createPlaybackStore(
       },
 
       seekApproximate: (seconds: number, options?: SeekOptions) => {
-        dropPlaybackStop();
+        // The seek over a gap continues the playback that the user started (ADR 046).
+        if (options?.overGap !== true) {
+          dropPlaybackStop();
+        }
         const scrub = options?.scrub === true;
         if (!scrub) {
           scrubCue.stop();
@@ -3835,13 +3838,16 @@ export function createPlaybackStore(
         ) {
           return;
         }
-        // Every seek of the store clears the stop point before it moves the element: each seek
-        // action calls dropPlaybackStop, and the seek back of the stop (seekToStopFrame) clears it
-        // first. So a seek that starts in the "stopped" phase comes from outside the store, such
-        // as the media controls of the system, and the stop is over. Without this, the later
-        // frame of that seek could lie in the seek-back window and be pulled back. In the
-        // "playing" phase the late `seeking` event of the seek to the In still arrives after
-        // playSegment set the stop point, so that phase keeps it.
+        // Every seek of the store in the "stopped" phase clears the stop point before it moves
+        // the element: each seek action calls dropPlaybackStop, and the seek back of the stop
+        // (seekToStopFrame) clears it first. The seek over a gap keeps the stop point, but the
+        // element is paused in that phase, and a paused element asks for that seek only from a
+        // seek that cleared it: a seek of the store clears it before it starts, and this rule
+        // clears it for a seek from outside. So a seek that starts in the "stopped" phase comes
+        // from outside the store, such as the media controls of the system, and the stop is
+        // over. Without this, the later frame of that seek could lie in the seek-back window and
+        // be pulled back. In the "playing" phase the late `seeking` event of the seek to the In
+        // still arrives after playSegment set the stop point, so that phase keeps it.
         if (get().playbackStop?.phase === "stopped") {
           set({ playbackStop: null });
         }

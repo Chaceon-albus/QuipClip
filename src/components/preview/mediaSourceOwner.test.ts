@@ -275,7 +275,7 @@ describe("createMediaSourceOwner", () => {
     const { owner, controllers, store, setReady } = setup();
     setReady(false);
     owner.attach(fakeElement(), TARGET, false);
-    controllers[0]?.events.onStartGap(0.08);
+    controllers[0]?.events.onGap(0.08, 0);
     expect(store.seekOverGap).not.toHaveBeenCalled();
     setReady(true);
     expect(store.seekOverGap).toHaveBeenCalledWith(0.08);
@@ -286,10 +286,35 @@ describe("createMediaSourceOwner", () => {
     setReady(false);
     const element = fakeElement();
     owner.attach(element, TARGET, false);
-    controllers[0]?.events.onStartGap(0.08);
+    controllers[0]?.events.onGap(0.08, 0);
     // The seek of a reload ran first.
     element.currentTime = 120;
     setReady(true);
+    expect(store.seekOverGap).not.toHaveBeenCalled();
+  });
+
+  it("seeks back over a gap for an element that waits after its start", () => {
+    const { owner, controllers, store } = setup();
+    const element = fakeElement();
+    owner.attach(element, TARGET, false);
+    element.currentTime = 33.98;
+    controllers[0]?.events.onGap(29.749, 33.98);
+    expect(store.seekOverGap).toHaveBeenCalledWith(29.749);
+  });
+
+  it("drops a gap seek when a seek took the element past the end of the gap", () => {
+    const { owner, controllers, store, setReady } = setup();
+    setReady(false);
+    const element = fakeElement();
+    owner.attach(element, TARGET, false);
+    controllers[0]?.events.onGap(0.08, 0);
+    // The seek of a reload landed just after the first frame.
+    element.currentTime = 0.09;
+    setReady(true);
+    expect(store.seekOverGap).not.toHaveBeenCalled();
+
+    element.currentTime = 29.7;
+    controllers[0]?.events.onGap(29.749, 33.98);
     expect(store.seekOverGap).not.toHaveBeenCalled();
   });
 
@@ -298,7 +323,7 @@ describe("createMediaSourceOwner", () => {
     setReady(false);
     const element = fakeElement();
     owner.attach(element, TARGET, false);
-    controllers[0]?.events.onStartGap(0.08);
+    controllers[0]?.events.onGap(0.08, 0);
     owner.detach(element);
     setReady(true);
     expect(store.seekOverGap).not.toHaveBeenCalled();
@@ -367,7 +392,7 @@ describe("createMediaSourceOwner", () => {
   });
 });
 
-describe("the seek over the start gap, with the playback store", () => {
+describe("the seek over a gap, with the playback store", () => {
   const FLV: PlaybackSource = {
     path: SOURCE.path,
     size: SOURCE.size,
@@ -420,13 +445,37 @@ describe("the seek over the start gap, with the playback store", () => {
     const video = element();
     store.getState().attach(FLV, video);
     owner.attach(video, target, false);
-    controllers[0]?.onStartGap(0.08);
+    controllers[0]?.onGap(0.08, 0);
     expect(video.currentTime).toBe(0);
 
     video.readyState = 1;
     store.getState().syncReady(key, video);
     await Promise.resolve();
     expect(video.currentTime).toBeCloseTo(0.08, 6);
+  });
+
+  it("seeks over a gap in the middle, and keeps the playback and the segment stop", async () => {
+    const { store, owner, controllers, target } = setupWithStore();
+    const video = element();
+    store.getState().attach(FLV, video);
+    owner.attach(video, target, false);
+    video.readyState = 1;
+    store.getState().syncReady(key, video);
+    store.getState().syncPresentedFrame(key, 0, 1, video);
+    // A segment from 18 s to 30 s plays across a stretch from 20 s to 24 s that the windows skip.
+    store.getState().playSegment("1252567" as Pts, "1264567" as Pts);
+    video.paused = false;
+    store.getState().syncSeeked(key, video);
+    video.currentTime = 19.9;
+    const pause = vi.spyOn(video, "pause");
+    pause.mockClear();
+
+    controllers[0]?.onGap(24, 19.9);
+    await Promise.resolve();
+    expect(video.currentTime).toBeCloseTo(24, 6);
+    expect(pause).not.toHaveBeenCalled();
+    expect(store.getState().isPlaying).toBe(true);
+    expect(store.getState().playbackStop?.phase).toBe("playing");
   });
 
   it("leaves the seek of a reload after a stall to its target", async () => {
@@ -449,7 +498,7 @@ describe("the seek over the start gap, with the playback store", () => {
     const next = element();
     store.getState().attach(FLV, next);
     owner.attach(next, target, false);
-    controllers[0]?.onStartGap(0.08);
+    controllers[0]?.onGap(0.08, 0);
     next.readyState = 1;
     store.getState().syncReady(key, next);
     expect(next.currentTime).toBe(5);

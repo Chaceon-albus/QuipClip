@@ -9401,6 +9401,36 @@ describe("Playback Store & PTS Presentation Engine", () => {
         expect(video.currentTime).toBe(2);
       });
 
+      it("keeps the playback and the stop point of a segment at the seek over a gap", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          bufferedVideo([
+            [0, 20],
+            [24, 60],
+          ]),
+        );
+        store.getState().syncPresentedFrame(flvKey, 0, 1, video);
+        // A segment from 18 s to 30 s plays across a stretch from 20 s to 24 s that the windows
+        // skip.
+        store.getState().playSegment("1252567" as Pts, "1264567" as Pts);
+        fireSeeked(store, flvKey, video);
+        expect(store.getState().playbackStop?.phase).toBe("playing");
+        // The playback stops at the end of the first range.
+        video.currentTime = 19.9;
+        video.seeking = false;
+
+        store.getState().seekApproximate(24, { keepPlaying: true, overGap: true });
+        expect(video.currentTime).toBe(24);
+        expect(video.paused).toBe(false);
+        expect(store.getState().isPlaying).toBe(true);
+        expect(store.getState().playbackStop?.phase).toBe("playing");
+
+        // Every other seek ends the segment playback (ADR 026).
+        store.getState().seekApproximate(26, { keepPlaying: true });
+        expect(store.getState().playbackStop).toBeNull();
+      });
+
       it("keeps the release after a fastSeek in the queue, and gives way to a far click", () => {
         const store = createPlaybackStore();
         const video = attachWithMetadata(

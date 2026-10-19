@@ -167,10 +167,12 @@ export interface SeekOptions {
    */
   readonly keepPlaying?: boolean;
   /**
-   * For `seekApproximate` only. The seek over the gap before the first frame of a MediaSource
-   * source (ADR 046). It replaces a running seek at once: that seek waits at a position that
-   * holds no frame, so it never completes. A request that waits in the queue behind that seek
-   * replaces it instead, and the seek over the gap goes.
+   * For `seekApproximate` only. The seek over a gap of a MediaSource source (ADR 046): the gap
+   * before the first frame, or a stretch in the middle that the windows skip. It replaces a
+   * running seek at once: that seek waits at a position that holds no frame, so it never
+   * completes. A request that waits in the queue behind that seek replaces it instead, and the
+   * seek over the gap goes. The seek keeps the stop point of a segment playback (ADR 026),
+   * because it continues the playback that the user started.
    */
   readonly overGap?: boolean;
 }

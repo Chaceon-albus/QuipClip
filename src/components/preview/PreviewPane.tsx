@@ -32,6 +32,7 @@ import {
   type PlaybackSource,
 } from "@/features/playback";
 import {
+  CHROMIUM_SEEK_TAIL_SECONDS,
   createMseController,
   type MseEnvironment,
   type MseFailure,
@@ -208,6 +209,9 @@ const BROWSER_MSE_ENVIRONMENT: MseEnvironment = {
   revokeObjectUrl: (url) => URL.revokeObjectURL(url),
   isTypeSupported: (type) => MediaSource.isTypeSupported(type),
   openWindow: (request, listener) => openPreviewWindow(request, listener),
+  // WebView2 is Chromium, which completes no seek just before a hole of the buffered data.
+  // WKWebView, the web view of macOS, does (ADR 046).
+  seekTailSeconds: isMacOS() ? 0 : CHROMIUM_SEEK_TAIL_SECONDS,
 };
 
 /**

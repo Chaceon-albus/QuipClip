@@ -10,8 +10,8 @@
  * tracks, so they start at the later first sample and end at the earlier last one.
  *
  * The controller never writes `currentTime`: the playback store is the only writer of the
- * position. When the element needs a move, such as over a gap before the first frame, the
- * controller asks the preview, which asks the store.
+ * position. When the element needs a move, such as over a gap before the first frame or over a
+ * stretch that the windows skip, the controller asks the preview, which asks the store.
  */
 
 import type { Rational } from "@/types/project";
@@ -55,10 +55,27 @@ export const SEEK_MARGIN_SECONDS = 5;
 /** The largest seek margin. A window that still starts after its target then fails. */
 export const MAX_SEEK_MARGIN_SECONDS = 60;
 /**
- * The largest gap between a waiting position and the first frame after it that the controller
- * asks the store to seek over. Such a gap lies before the first keyframe of the file.
+ * The largest gap that the controller asks the store to seek over: from a waiting position before
+ * the first keyframe of the file to the first frame, or a hole between two buffered ranges in the
+ * middle of the file, where the windows skip a stretch.
  */
-export const START_GAP_LIMIT_SECONDS = 15;
+export const GAP_LIMIT_SECONDS = 15;
+/**
+ * A playing element that waits this close to the end of a buffered range stopped there. While
+ * it waits, Chrome reports a position up to about 0.3 s before the end, and WebKit stops about
+ * 83 ms before the end.
+ */
+const GAP_REACH_SECONDS = 0.5;
+/**
+ * The end of a buffered range before a hole where a seek in Chromium does not complete. Chromium
+ * completes a seek only when about 200 ms of data follow the target, or at the end of the stream.
+ * Before a hole, no more data comes, so a seek into the last 200 ms of the range shows its frame
+ * but stays `seeking`, and the seeks of the store wait behind it. The 0.25 s holds a margin.
+ * WebKit completes such a seek (ADR 046, measurement 28).
+ */
+export const CHROMIUM_SEEK_TAIL_SECONDS = 0.25;
+/** `HTMLMediaElement.HAVE_CURRENT_DATA`: no data follows the frame at the position. */
+const HAVE_CURRENT_DATA = 2;
 /**
  * The slack of the end test of an MPEG-TS or Matroska window: a window whose video ends more
  * than this before its requested end stopped early.
@@ -129,13 +146,15 @@ export interface MseMediaSource {
 }
 
 /** The element events that the controller follows. */
-export type MseElementEvent = "seeking" | "timeupdate" | "seeked";
+export type MseElementEvent = "seeking" | "timeupdate" | "seeked" | "waiting";
 
 /** The narrow surface of the video element. */
 export interface MseVideoElement {
   src: string;
   readonly currentTime: number;
   readonly seeking: boolean;
+  readonly paused: boolean;
+  readonly readyState: number;
   removeAttribute: (name: "src") => void;
   load: () => void;
   addEventListener: (type: MseElementEvent, listener: () => void) => void;
@@ -152,6 +171,12 @@ export interface MseEnvironment {
     request: WindowRequest,
     listener: WindowListener,
   ) => WindowSession;
+  /**
+   * The end of a buffered range before a hole where a seek of the web view does not complete:
+   * `CHROMIUM_SEEK_TAIL_SECONDS` in Chromium, 0 in WebKit. A seek there counts as a seek into the
+   * hole.
+   */
+  readonly seekTailSeconds: number;
 }
 
 /** The source as the windows need it. */
@@ -198,10 +223,14 @@ export interface MseControllerEvents {
   /** The first keyframe tag of the FLV and the first sample of the window disagree. */
   readonly onFirstFrameMismatch: (detail: string) => void;
   /**
-   * No frame lies at the position, and the first frame after it is at `mediaTime`. The element
-   * can still be seeking to the position, a seek that never completes.
+   * Asks for a seek over a gap to `mediaTime`. The element waits at `position`, and it can still
+   * be seeking there, a seek that never completes. Before the first frame of the file, no frame
+   * lies at the position, and `mediaTime` is the first frame after it. In the middle of the file,
+   * the playback stopped at the end of a buffered range, or a seek waits in the hole after it,
+   * which no window fills. `mediaTime` then lies after the hole, or before it for a seek that
+   * came from after it.
    */
-  readonly onStartGap: (mediaTime: number) => void;
+  readonly onGap: (mediaTime: number, position: number) => void;
   /** The timestamps of the source decrease. */
   readonly onNonMonotonic: () => void;
   /** The windows play without sound, because the audio could not be transcoded. */
@@ -380,6 +409,14 @@ export function createMseController(
    * at `seeked`, and when the page drops its data.
    */
   let waitingTarget: number | null = null;
+  /** True when the window that `waitingTarget` waits for started at that target. */
+  let waitingStarted = false;
+  /** True from a request for a seek over a gap in the middle of the file until the next seek. */
+  let gapRequested = false;
+  /** The position at the last `seeking`, `seeked`, or `timeupdate` that no seek ran at. */
+  let lastPosition: number | null = null;
+  /** The position before the running seek, or null. */
+  let seekOrigin: number | null = null;
   /**
    * The target of the seek that began with no video at its target, until an append brings that
    * video (`onSeekDataArrived`). It goes at the next seek.
@@ -495,6 +532,23 @@ export function createMseController(
     }
   };
 
+  /** The buffered ranges of the SourceBuffer, in order. */
+  const bufferedRanges = (): VideoSpan[] => {
+    if (sourceBuffer === null) {
+      return [];
+    }
+    const ranges: VideoSpan[] = [];
+    try {
+      const buffered = sourceBuffer.buffered;
+      for (let index = 0; index < buffered.length; index++) {
+        ranges.push({ start: buffered.start(index), end: buffered.end(index) });
+      }
+    } catch {
+      return [];
+    }
+    return ranges;
+  };
+
   /** True when the appended video holds `time`, its end included. */
   const hasVideoAt = (time: number): boolean =>
     !clearing &&
@@ -533,15 +587,7 @@ export function createMseController(
     if (sourceBuffer === null || clearing) {
       return;
     }
-    const ranges: VideoSpan[] = [];
-    try {
-      const buffered = sourceBuffer.buffered;
-      for (let index = 0; index < buffered.length; index++) {
-        ranges.push({ start: buffered.start(index), end: buffered.end(index) });
-      }
-    } catch {
-      return;
-    }
+    const ranges = bufferedRanges();
     const clipped: VideoSpan[] = [];
     for (const span of spans) {
       for (const range of ranges) {
@@ -748,6 +794,7 @@ export function createMseController(
       return;
     }
     checkStartGap();
+    checkGap();
     checkProgress();
     checkSeekData();
     serveWaitingSeek();
@@ -831,10 +878,90 @@ export function createMseController(
       return;
     }
     const next = spans.find((span) => span.start > position);
-    if (next !== undefined && next.start - position <= START_GAP_LIMIT_SECONDS) {
+    if (next !== undefined && next.start - position <= GAP_LIMIT_SECONDS) {
       gapPosition = null;
-      events.onStartGap(next.start);
+      events.onGap(next.start, position);
     }
+  };
+
+  /**
+   * Asks for a seek over a hole between two buffered ranges in the middle of the file (ADR 046).
+   * The windows skip a stretch that holds no decodable video: after a reconnect whose new part
+   * starts in the middle of a GOP, or after damage, the next window starts at the next keyframe.
+   * The element stops at the end of the range before the hole, and a seek into the hole never
+   * completes, as a seek into the end of that range in Chromium (`seekTailSeconds`).
+   *
+   * A hole that the running window has passed is permanent: the windows append in time order. A
+   * window that starts by time rewrites the end of the data, and the browser then drops the old
+   * frames up to the next old keyframe, because they depend on the frames that the window
+   * replaces. That hole lies after the first frame of the window, and it goes when the window
+   * appends past it, so it does not count until then.
+   *
+   * When the playback waits at the end of the range, the store seeks to the start of the next
+   * range and plays on. A seek into the hole goes on in its direction: to the start of the next
+   * range, or, for a seek of a paused element that came from that range or later, to the end of
+   * the range before the hole, where a seek completes. The controller asks once until the next
+   * seek. Returns true when it asked.
+   */
+  const checkGap = (): boolean => {
+    if (gapRequested || clearing || failed || destroyed) {
+      return false;
+    }
+    const position = currentTime();
+    let before: VideoSpan | null = null;
+    let next: VideoSpan | null = null;
+    for (const range of bufferedRanges()) {
+      if (range.start - EPSILON_SECONDS <= position) {
+        before = range;
+      } else {
+        next = range;
+        break;
+      }
+    }
+    // With no range before the position, the gap lies before the first frame (checkStartGap).
+    if (
+      before === null ||
+      next === null ||
+      next.start - before.end > GAP_LIMIT_SECONDS
+    ) {
+      return false;
+    }
+    // The window rewrites the data from its first frame on, so a hole before that frame does
+    // not come from it.
+    const filling = active;
+    if (
+      filling !== null &&
+      filling.request.start.kind === "time" &&
+      (filling.firstVideoTime === null ||
+        before.end > filling.firstVideoTime - EPSILON_SECONDS) &&
+      (filling.appendedEnd === null ||
+        filling.appendedEnd < next.start - EPSILON_SECONDS)
+    ) {
+      return false;
+    }
+    const left = before.end - position;
+    const tail = environment.seekTailSeconds;
+    const stopped = !element.paused && element.readyState <= HAVE_CURRENT_DATA;
+    let target: number;
+    if (element.seeking) {
+      if (left >= tail) {
+        return false;
+      }
+      // A seek during the playback, as the seek to the In of a segment playback, goes on after
+      // the hole, so it plays no frame before its target.
+      const backward =
+        element.paused &&
+        seekOrigin !== null &&
+        seekOrigin >= next.start - EPSILON_SECONDS;
+      target = backward ? before.end - tail - EPSILON_SECONDS : next.start;
+    } else if (stopped && left <= GAP_REACH_SECONDS) {
+      target = next.start;
+    } else {
+      return false;
+    }
+    gapRequested = true;
+    events.onGap(target, position);
+    return true;
   };
 
   const windowRequest = (
@@ -1470,6 +1597,12 @@ export function createMseController(
    * waiting for it. Otherwise the data goes, and a window starts at the target, once for each
    * seek, so a target in a hole of the data does not start windows again and again. The
    * prefetch does not serve such a seek, because no video lies at the position.
+   *
+   * A window that started at the target and stopped before it skipped the target: the target
+   * lies in a stretch with no decodable video, and the next window starts at the keyframe after
+   * that stretch. That window starts when the target lies within GAP_LIMIT_SECONDS of the end of
+   * the video, so the hole shows (checkGap). Such a seek never starts a window at its target
+   * again. A requested seek over a gap replaces the seek, so nothing serves it then.
    */
   const serveWaitingSeek = (): void => {
     const target = waitingTarget;
@@ -1480,13 +1613,21 @@ export function createMseController(
       waitingTarget = null;
       return;
     }
-    if (active !== null || failed || destroyed || clearing || tailBuffered) {
+    if (
+      active !== null ||
+      failed ||
+      destroyed ||
+      clearing ||
+      tailBuffered ||
+      gapRequested
+    ) {
       return;
     }
+    const reach = waitingStarted ? GAP_LIMIT_SECONDS : WAIT_AHEAD_SECONDS;
     if (
       resume !== null &&
       resume.end <= target + EPSILON_SECONDS &&
-      target - resume.end <= WAIT_AHEAD_SECONDS
+      target - resume.end <= reach
     ) {
       const next = resume;
       resume = null;
@@ -1494,7 +1635,9 @@ export function createMseController(
       return;
     }
     waitingTarget = null;
-    restartAt(target);
+    if (!waitingStarted) {
+      restartAt(target);
+    }
   };
 
   const closeSessions = (): void => {
@@ -1506,9 +1649,14 @@ export function createMseController(
     finishedSessions = [];
   };
 
-  /** Drops the data and the windows, and starts a window at `target`. */
+  /**
+   * Drops the data and the windows, and starts a window at `target`, the target of a seek. The
+   * seek then waits for that window.
+   */
   const restartAt = (target: number, margin: number = SEEK_MARGIN_SECONDS): void => {
-    waitingTarget = null;
+    waitingTarget = target;
+    waitingStarted = true;
+    gapRequested = false;
     closeSessions();
     // The appends of the stopped window go, and the parser of the SourceBuffer starts again.
     dropOperationsOf(null);
@@ -1557,13 +1705,20 @@ export function createMseController(
     gapPosition = null;
     waitingTarget = null;
     unbufferedSeekTarget = null;
+    gapRequested = false;
     const target = currentTime();
+    seekOrigin = lastPosition;
+    lastPosition = target;
     // A full SourceBuffer waits for the position to move, and a seek moves it with no
     // `timeupdate`. The room counts from the new position.
     if (quotaBlocked) {
       quotaBlocked = false;
       makeRoom();
       pump();
+    }
+    // A target in a hole of the buffered data asks for the seek over it, and the data stays.
+    if (checkGap()) {
+      return;
     }
     if (hasVideoAt(target)) {
       // A target near the end of the appended video needs the next window, and a paused
@@ -1576,6 +1731,7 @@ export function createMseController(
     // The running window delivers the target soon, unless its appends wait for room.
     if (!quotaBlocked && activeWindowCovers(target)) {
       waitingTarget = target;
+      waitingStarted = false;
       unbufferedSeekTarget = target;
       return;
     }
@@ -1586,7 +1742,7 @@ export function createMseController(
       target < fileFirstFrame - EPSILON_SECONDS &&
       hasVideoAt(fileFirstFrame)
     ) {
-      events.onStartGap(fileFirstFrame);
+      events.onGap(fileFirstFrame, target);
       return;
     }
     unbufferedSeekTarget = target;
@@ -1596,6 +1752,9 @@ export function createMseController(
   const onTimeUpdate = (): void => {
     if (destroyed || failed) {
       return;
+    }
+    if (!element.seeking) {
+      lastPosition = currentTime();
     }
     if (quotaBlocked) {
       quotaBlocked = false;
@@ -1613,7 +1772,15 @@ export function createMseController(
 
   const onSeeked = (): void => {
     waitingTarget = null;
+    seekOrigin = null;
     onTimeUpdate();
+  };
+
+  // The element stopped for data, as at the end of a buffered range before a hole.
+  const onWaiting = (): void => {
+    if (!destroyed && !failed) {
+      checkGap();
+    }
   };
 
   const onSourceOpen = (): void => {
@@ -1632,6 +1799,7 @@ export function createMseController(
   element.addEventListener("seeking", onSeeking);
   element.addEventListener("timeupdate", onTimeUpdate);
   element.addEventListener("seeked", onSeeked);
+  element.addEventListener("waiting", onWaiting);
   element.src = url;
 
   return {
@@ -1646,6 +1814,7 @@ export function createMseController(
       element.removeEventListener("seeking", onSeeking);
       element.removeEventListener("timeupdate", onTimeUpdate);
       element.removeEventListener("seeked", onSeeked);
+      element.removeEventListener("waiting", onWaiting);
       sourceBuffer?.removeEventListener("updateend", onUpdateEnd);
       try {
         element.removeAttribute("src");

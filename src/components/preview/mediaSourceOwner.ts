@@ -42,7 +42,10 @@ export interface MediaSourceStoreActions {
     sourceRevisionKey: string,
     element: HTMLVideoElement,
   ) => void;
-  /** The seek over a gap before the first frame. It keeps a running playback. */
+  /**
+   * The seek over a gap: before the first frame, or over a stretch that the windows skip. It
+   * keeps a running playback and the stop point of a segment playback.
+   */
   readonly seekOverGap: (mediaTime: number) => void;
   /** The same seek again, after its data arrived (`PlaybackState.repairSeek`). */
   readonly repairSeek: (
@@ -69,8 +72,8 @@ export function createMediaSourceStoreActions(
       store.getState().syncPresentationUnavailable(key, element),
     denySourcePrecision: (key, element) =>
       store.getState().denySourcePrecision(key, element),
-    // The anchor and the origin of the timeline are media time 0, so the media time of the
-    // first frame is its position on the timeline.
+    // The anchor and the origin of the timeline are media time 0, so the media time of a frame
+    // is its position on the timeline.
     seekOverGap: (mediaTime) =>
       store.getState().seekApproximate(mediaTime, { keepPlaying: true, overGap: true }),
     repairSeek: (key, element, mediaTime, videoAfter) =>
@@ -133,7 +136,13 @@ export interface MediaSourceOwner {
   readonly element: () => HTMLVideoElement | null;
 }
 
-/** The precision of the test that the element still waits in the gap before the first frame. */
+/**
+ * The distance from the position where the controller saw the element wait at a gap, within
+ * which the element still waits there. A seek in the meantime moves it farther.
+ */
+const GAP_POSITION_SLACK_SECONDS = 0.1;
+
+/** The precision of the test that the element still stands before the end of a gap. */
 const GAP_EPSILON_SECONDS = 1e-3;
 
 /**
@@ -212,16 +221,27 @@ export function createMediaSourceOwner(
             dependencies.store.syncPresentationUnavailable(key, element);
           }
         },
-        onStartGap: (mediaTime) => {
+        onGap: (mediaTime, position) => {
           if (current === null || !isCurrent()) {
             return;
           }
-          // The gap can show before the metadata made the store ready for seeks.
+          // A gap before the first frame can show before the metadata made the store ready for
+          // seeks.
           current.cancelGapSeek?.();
           current.cancelGapSeek = dependencies.store.whenReady(() => {
             // A seek that ran in the meantime, such as the seek of a reload after a stall
-            // (ADR 039), took the element out of the gap, and it keeps its target.
-            if (isCurrent() && element.currentTime < mediaTime - GAP_EPSILON_SECONDS) {
+            // (ADR 039), took the element away from the gap or over it, and it keeps its
+            // target.
+            const time = element.currentTime;
+            const beforeEnd =
+              mediaTime > position
+                ? time < mediaTime - GAP_EPSILON_SECONDS
+                : time > mediaTime + GAP_EPSILON_SECONDS;
+            if (
+              isCurrent() &&
+              beforeEnd &&
+              Math.abs(time - position) <= GAP_POSITION_SLACK_SECONDS
+            ) {
               dependencies.store.seekOverGap(mediaTime);
             }
           });

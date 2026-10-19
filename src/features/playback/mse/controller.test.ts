@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  CHROMIUM_SEEK_TAIL_SECONDS,
   createMseController,
   mimeTypeFor,
   type MseControllerEvents,
@@ -266,6 +267,8 @@ class FakeElement implements MseVideoElement {
   src = "";
   currentTime = 0;
   seeking = false;
+  paused = true;
+  readyState = 4;
   loads = 0;
   private listeners = new Map<MseElementEvent, Set<() => void>>();
 
@@ -308,7 +311,18 @@ class FakeElement implements MseVideoElement {
   play(time: number): void {
     this.currentTime = time;
     this.seeking = false;
+    this.paused = false;
+    this.readyState = 4;
     this.fire("timeupdate");
+  }
+
+  /** The playback stops for data at `time`. */
+  stall(time: number): void {
+    this.currentTime = time;
+    this.seeking = false;
+    this.paused = false;
+    this.readyState = 2;
+    this.fire("waiting");
   }
 }
 
@@ -343,6 +357,8 @@ async function flush(): Promise<void> {
 function setup(options?: {
   source?: Partial<MseSource>;
   supported?: (type: string) => boolean;
+  /** The seek tail of the web view: Chromium by default. */
+  seekTail?: number;
 }) {
   const mediaSource = new FakeMediaSource();
   const element = new FakeElement();
@@ -352,6 +368,7 @@ function setup(options?: {
     createMediaSource: () => ({ source: mediaSource, url: "blob:preview" }),
     revokeObjectUrl: (url) => revoked.push(url),
     isTypeSupported: options?.supported ?? (() => true),
+    seekTailSeconds: options?.seekTail ?? CHROMIUM_SEEK_TAIL_SECONDS,
     openWindow: (request, listener) => {
       let resolve: (opened: WindowOpened) => void = () => undefined;
       let reject: (error: unknown) => void = () => undefined;
@@ -410,7 +427,7 @@ function setup(options?: {
   const events = {
     onExpectedFirstFrame: vi.fn<MseControllerEvents["onExpectedFirstFrame"]>(),
     onFirstFrameMismatch: vi.fn<MseControllerEvents["onFirstFrameMismatch"]>(),
-    onStartGap: vi.fn<MseControllerEvents["onStartGap"]>(),
+    onGap: vi.fn<MseControllerEvents["onGap"]>(),
     onNonMonotonic: vi.fn<MseControllerEvents["onNonMonotonic"]>(),
     onAudioOmitted: vi.fn<MseControllerEvents["onAudioOmitted"]>(),
     onFailure: vi.fn<MseControllerEvents["onFailure"]>(),
@@ -437,10 +454,8 @@ function setup(options?: {
 }
 
 /** The targets of the seeks over a gap, to the microsecond. */
-function gapSeeks(events: { onStartGap: { mock: { calls: number[][] } } }): number[] {
-  return events.onStartGap.mock.calls.map(
-    ([time]) => Math.round((time ?? 0) * 1e6) / 1e6,
-  );
+function gapSeeks(events: { onGap: { mock: { calls: number[][] } } }): number[] {
+  return events.onGap.mock.calls.map(([time]) => Math.round((time ?? 0) * 1e6) / 1e6);
 }
 
 /** The init segment of a window. */
@@ -620,7 +635,7 @@ describe("createMseController", () => {
       // The audio starts 0.28 s after the video, so `buffered` starts at 0.28 s.
       const { events, buffer } = playing(0, 30, undefined, { audioLag: 0.28 });
       expect(buffer().buffered.start(0)).toBeCloseTo(0.28, 6);
-      expect(events.onStartGap).not.toHaveBeenCalled();
+      expect(events.onGap).not.toHaveBeenCalled();
 
       const late = playing(0.08, 30, undefined, { audioLag: 0.28 });
       expect(gapSeeks(late.events)).toEqual([0.08]);
@@ -733,21 +748,37 @@ describe("createMseController", () => {
     it("starts a window once at a waiting seek that the next window does not serve", () => {
       const { element, windows, last, buffer, events } = playing(0, 30);
       element.seek(35);
-      // The window read past the target, but the target lies in a hole of the data.
-      last().send(media(36, 4));
+      // The window read past the target, but the target lies in a hole of the data, farther
+      // than the gap limit from the next frame.
+      last().send(media(51, 4));
       buffer().drain();
-      last().end({ next: { offset: 900000, ptsMs: 50067 } });
+      last().end({ next: { offset: 900000, ptsMs: 65067 } });
       buffer().drain();
       expect(windows).toHaveLength(2);
       expect(windows[1]?.request.start).toEqual({ kind: "time", seconds: 45 });
       // The window at the target delivers the same hole, and the page does not ask again.
-      // The store seeks over the hole to the first frame after it.
-      events.onStartGap.mockClear();
-      last().send(concat(init(), media(36, 4)));
+      events.onGap.mockClear();
+      last().send(concat(init(), media(51, 4)));
       buffer().drain();
-      last().end({ next: { offset: 900000, ptsMs: 50067 } });
+      last().end({ next: { offset: 900000, ptsMs: 65067 } });
       buffer().drain();
       expect(windows).toHaveLength(2);
+      expect(events.onGap).not.toHaveBeenCalled();
+    });
+
+    it("asks for the seek over a hole that the running window left, and starts no window", () => {
+      const { element, windows, last, buffer, events } = playing(0, 30);
+      events.onGap.mockClear();
+      element.seek(35);
+      last().send(media(36, 4));
+      expect(events.onGap).not.toHaveBeenCalled();
+      buffer().drain();
+      expect(gapSeeks(events)).toEqual([36]);
+      // The seek over the gap replaces the waiting seek, so the end of the window starts no
+      // window at the target.
+      last().end({ next: { offset: 900000, ptsMs: 50067 } });
+      buffer().drain();
+      expect(windows).toHaveLength(1);
       expect(gapSeeks(events)).toEqual([36]);
     });
 
@@ -816,9 +847,9 @@ describe("createMseController", () => {
       const { element, windows, last, buffer, events } = playing(0, 30);
       element.seek(35);
       // The window read past the target, but the target lies in a hole, so the page restarts.
-      last().send(media(36, 4));
+      last().send(media(51, 4));
       buffer().drain();
-      last().end({ next: { offset: 900000, ptsMs: 50067 } });
+      last().end({ next: { offset: 900000, ptsMs: 65067 } });
       buffer().drain();
       expect(windows).toHaveLength(2);
       expect(events.onSeekDataArrived).not.toHaveBeenCalled();
@@ -918,7 +949,7 @@ describe("createMseController", () => {
 
     it("asks for the gap seek at once for a target before the first keyframe of the file", () => {
       const { element, windows, events } = playing(0.08, 30);
-      events.onStartGap.mockClear();
+      events.onGap.mockClear();
       element.play(20);
       element.seek(0);
       expect(windows).toHaveLength(1);
@@ -927,7 +958,7 @@ describe("createMseController", () => {
 
     it("waits over the gap when the data before the first keyframe was dropped", () => {
       const { element, windows, events, last, buffer } = playing(0.08, 30);
-      events.onStartGap.mockClear();
+      events.onGap.mockClear();
       element.seek(150);
       element.seek(0);
       expect(windows).toHaveLength(3);
@@ -943,6 +974,279 @@ describe("createMseController", () => {
       buffer().drain();
       expect(buffer().aborts).toBe(0);
       expect(buffer().log.slice(-1)).toEqual(["remove 0 Infinity"]);
+    });
+  });
+
+  describe("gaps in the middle of the file", () => {
+    /**
+     * Delivers video to 30 s, and lets the next window start at a keyframe at `next` s, as after a
+     * reconnect whose new part starts in the middle of a GOP.
+     */
+    function skipped(
+      next = 34,
+      mediaOptions?: Parameters<typeof media>[2],
+      options?: Parameters<typeof setup>[0],
+    ) {
+      const harness = playing(0, 30, options, mediaOptions);
+      harness.events.onGap.mockClear();
+      harness.last().end({ next: { offset: 900000, ptsMs: (next + START) * 1000 } });
+      harness.buffer().drain();
+      // Less than 30 s of video lies ahead, so the next window starts at once.
+      harness.last().send(concat(init(), media(next, 10, mediaOptions)));
+      harness.buffer().drain();
+      return harness;
+    }
+
+    it("asks for the seek over a gap where the playback stops, once until the next seek", () => {
+      const { element, events, windows } = skipped();
+      expect(windows).toHaveLength(2);
+      element.play(29.6);
+      expect(events.onGap).not.toHaveBeenCalled();
+      // While Chrome waits, it reports a position up to 0.3 s before the end of the range.
+      element.stall(29.7);
+      expect(gapSeeks(events)).toEqual([34]);
+      element.fire("waiting");
+      element.fire("timeupdate");
+      expect(events.onGap).toHaveBeenCalledTimes(1);
+
+      // The seek over the gap lands after it. A later stop at the same gap asks again.
+      element.seek(34);
+      element.play(35);
+      element.seek(28);
+      element.stall(29.95);
+      expect(gapSeeks(events)).toEqual([34, 34]);
+      expect(windows).toHaveLength(2);
+    });
+
+    it("asks nothing while the playback runs, stops before the end, or is paused", () => {
+      const { element, events } = skipped();
+      element.stall(29.4);
+      expect(events.onGap).not.toHaveBeenCalled();
+      element.play(29.9);
+      expect(events.onGap).not.toHaveBeenCalled();
+      element.paused = true;
+      element.readyState = 2;
+      element.fire("waiting");
+      expect(events.onGap).not.toHaveBeenCalled();
+    });
+
+    it("asks when the range after the gap arrives after the playback stopped", () => {
+      const { element, events, last, buffer } = playing(0, 30);
+      events.onGap.mockClear();
+      last().end({ next: { offset: 900000, ptsMs: 44000 } });
+      buffer().drain();
+      element.stall(29.9);
+      last().send(concat(init(), media(34, 10)));
+      expect(events.onGap).not.toHaveBeenCalled();
+      buffer().drain();
+      expect(gapSeeks(events)).toEqual([34]);
+    });
+
+    it("asks when the playback stopped and only a timeupdate comes", () => {
+      const { element, events } = skipped();
+      element.currentTime = 29.9;
+      element.paused = false;
+      element.readyState = 2;
+      element.fire("timeupdate");
+      expect(gapSeeks(events)).toEqual([34]);
+    });
+
+    it("asks nothing while the remove of a seek waits", () => {
+      const { element, events, last, buffer } = skipped();
+      // An append runs, so the remove of the next seek waits behind it.
+      last().send(media(44, 2));
+      element.seek(100);
+      expect(buffer().updating).toBe(true);
+      element.seek(32);
+      expect(events.onGap).not.toHaveBeenCalled();
+    });
+
+    it("asks nothing for a gap longer than the limit", () => {
+      const { element, events } = skipped(46);
+      element.stall(29.9);
+      element.seek(30.5);
+      expect(events.onGap).not.toHaveBeenCalled();
+    });
+
+    it("asks for the seek over the gap at once for a seek into it, and keeps the data", () => {
+      const { element, events, windows, buffer } = skipped();
+      element.seek(32);
+      expect(gapSeeks(events)).toEqual([34]);
+      expect(windows).toHaveLength(2);
+      expect(buffer().log).not.toContain("remove 0 Infinity");
+    });
+
+    it("asks for the seek over the gap for a seek into the end of the range before it", () => {
+      const { element, events } = skipped();
+      // Chrome completes no seek with less than 200 ms of data after its target.
+      element.seek(29.7);
+      expect(events.onGap).not.toHaveBeenCalled();
+      element.seek(29.8);
+      expect(gapSeeks(events)).toEqual([34]);
+    });
+
+    it("seeks back before the gap for a seek that came from after it", () => {
+      const { element, events } = skipped();
+      element.seek(36);
+      element.seeking = false;
+      element.fire("seeked");
+      // A frame step back from the first frame after the gap lands in the hole.
+      element.seek(33.98);
+      expect(gapSeeks(events)).toEqual([29.749]);
+      // The seek back lands where a seek completes.
+      element.seek(29.749);
+      expect(events.onGap).toHaveBeenCalledTimes(1);
+      element.seeking = false;
+      element.fire("seeked");
+
+      // A click from after the gap into the end of the range goes there too.
+      element.seek(40);
+      element.seeking = false;
+      element.fire("seeked");
+      element.seek(29.9);
+      expect(gapSeeks(events)).toEqual([29.749, 29.749]);
+      // The playback always goes on after the gap.
+      element.seek(29.749);
+      element.seeking = false;
+      element.fire("seeked");
+      element.stall(29.95);
+      expect(gapSeeks(events)).toEqual([29.749, 29.749, 34]);
+    });
+
+    it("goes on after the gap for a seek from after it during the playback", () => {
+      const { element, events } = skipped();
+      element.play(36);
+      // The seek to the In of a segment playback, which plays at once.
+      element.seek(32);
+      expect(gapSeeks(events)).toEqual([34]);
+    });
+
+    it("lets WebKit complete a seek into the end of the range before a hole", () => {
+      const { element, events } = skipped(34, undefined, { seekTail: 0 });
+      element.seek(29.95);
+      expect(events.onGap).not.toHaveBeenCalled();
+      element.seek(30.5);
+      expect(gapSeeks(events)).toEqual([34]);
+      // A seek from after the hole goes back to the end of the range before it.
+      element.seek(36);
+      element.seeking = false;
+      element.fire("seeked");
+      element.seek(33.98);
+      expect(gapSeeks(events)).toEqual([34, 29.999]);
+    });
+
+    it("reads the hole from the buffered ranges, which end where the audio ends", () => {
+      // The audio ends 0.5 s before the video, so the video holds the target, but the element
+      // cannot play there.
+      const { element, events, windows } = skipped(34, { audioLag: -0.5 });
+      element.seek(29.8);
+      expect(gapSeeks(events)).toEqual([34]);
+      expect(windows).toHaveLength(2);
+    });
+
+    it("goes on with the next window when the window of a seek stops before its target", () => {
+      const { element, windows, last, buffer, events } = playing(0, 30);
+      events.onGap.mockClear();
+      element.seek(100);
+      expect(windows).toHaveLength(2);
+      buffer().drain();
+      // The window starts at the keyframe before the target, and it stops at a new decoder
+      // configuration before the target. The next window starts at the keyframe after the
+      // stretch that it skips.
+      last().send(concat(init(), media(96, 3)));
+      buffer().drain();
+      last().end({ next: { offset: 900000, ptsMs: 112000 } });
+      buffer().drain();
+      expect(windows).toHaveLength(3);
+      expect(windows[2]?.request.start).toEqual({
+        kind: "resume",
+        offset: 900000,
+        ptsMs: 112000,
+      });
+      expect(events.onGap).not.toHaveBeenCalled();
+      last().send(concat(init(), media(102, 4)));
+      buffer().drain();
+      expect(gapSeeks(events)).toEqual([102]);
+      expect(events.onSeekDataArrived).not.toHaveBeenCalled();
+    });
+
+    it("ignores the hole that a window by time leaves while it rewrites the data", () => {
+      const { buffer, last, element, events, windows } = playing(0, 64, {
+        source: { container: "matroska" },
+      });
+      events.onGap.mockClear();
+      last().end();
+      buffer().drain();
+      element.play(40);
+      expect(windows).toHaveLength(2);
+      // The window starts by time before the end of the data, and its first fragment replaces
+      // old frames. The browser drops the old frames up to the next old keyframe, so `buffered`
+      // has a hole until the window fills it.
+      last().send(concat(init(), media(58, 0.5)));
+      buffer().drain();
+      buffer().video = [
+        [0, 58.5],
+        [60, 64],
+      ];
+      buffer().audio = [
+        [0, 58.5],
+        [60, 64],
+      ];
+      element.stall(58.4);
+      element.seek(59);
+      expect(events.onGap).not.toHaveBeenCalled();
+      expect(windows).toHaveLength(2);
+      last().send(media(58.5, 2));
+      buffer().drain();
+      expect(buffer().buffered.length).toBe(1);
+      expect(events.onGap).not.toHaveBeenCalled();
+
+      // A hole that stays after the window appended past it is permanent.
+      buffer().video = [
+        [0, 58.5],
+        [60, 64],
+      ];
+      buffer().audio = [
+        [0, 58.5],
+        [60, 64],
+      ];
+      element.stall(58.4);
+      expect(gapSeeks(events)).toEqual([60]);
+    });
+
+    it("counts a hole before the first frame of a window by time", () => {
+      const { buffer, last, element, events } = playing(0, 64, {
+        source: { container: "matroska" },
+      });
+      events.onGap.mockClear();
+      last().end();
+      buffer().drain();
+      element.play(40);
+      // The first fragment of the window is known, and its append runs.
+      last().send(concat(init(), media(58, 0.5)));
+      buffer().video = [
+        [0, 50],
+        [53, 58.5],
+      ];
+      buffer().audio = [
+        [0, 50],
+        [53, 58.5],
+      ];
+      element.stall(49.9);
+      expect(gapSeeks(events)).toEqual([53]);
+    });
+
+    it("starts no window for a target far after the video of its window", () => {
+      const { element, windows, last, buffer, events } = playing(0, 30);
+      events.onGap.mockClear();
+      element.seek(100);
+      buffer().drain();
+      last().send(concat(init(), media(80, 4)));
+      buffer().drain();
+      last().end({ next: { offset: 900000, ptsMs: 95000 } });
+      buffer().drain();
+      expect(windows).toHaveLength(2);
+      expect(events.onGap).not.toHaveBeenCalled();
     });
   });
 
@@ -1141,7 +1445,7 @@ describe("createMseController", () => {
       );
       last().send(concat(init(), moof));
       buffer().drain();
-      expect(events.onStartGap).not.toHaveBeenCalled();
+      expect(events.onGap).not.toHaveBeenCalled();
       last().send(box("mdat", new Uint8Array(64)));
       buffer().drain();
       expect(gapSeeks(events)).toEqual([0.08]);
@@ -1223,7 +1527,7 @@ describe("createMseController", () => {
       last().send(concat(init(), media(0.5, 30)));
       buffer().drain();
       expect(windows).toHaveLength(3);
-      expect(events.onStartGap).toHaveBeenCalledTimes(2);
+      expect(events.onGap).toHaveBeenCalledTimes(2);
     });
 
     it("keeps the data when the next window starts after its target, and resets the parser", () => {
