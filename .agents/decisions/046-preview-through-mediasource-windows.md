@@ -170,6 +170,13 @@ One more file is 1920x1080 at 14 Mbit/s with a GOP of 10 s.
     stay `seeking` for good. With the repair of "Seeks", 60 exact seeks on each of two files and
     60 seeks of the ruler on 720p landed on the target frame in WKWebView, with a median of
     101 ms (720p) and 240 ms (1080p, GOP 10 s).
+    (Added on 2026-10-18.) After WebKit moved the element by itself, the seek back to exactly the
+    target ended 1 ms after it began, so WebKit did not seek again. In 2 of 11 such repairs the
+    picture kept the frame where WebKit had moved. With the repair 3 ms from the target, that seek
+    ended 16 to 164 ms after it began, and it showed the target frame in each of 16 such repairs.
+    The runs with that repair had 720 exact seeks over six random series and 400 seeks to targets
+    that were not buffered, on the 1080p and the 720p FLV, and each seek landed on its target
+    frame.
 27. (Added with the verification.) A test page ran the real preview, playback store,
     controller and cue in HeadlessChrome and in WKWebView on macOS, with the window code of the
     backend behind a test server in place of the IPC of Tauri. It opened seven FLV files: 720p
@@ -205,6 +212,7 @@ One more file is 1920x1080 at 14 Mbit/s with a GOP of 10 s.
       Chrome and seven in WKWebView. 60 exact seeks on each of three files passed in Chrome. In
       WKWebView 60 passed on the 720p file and 59 on the 1080p file. In the miss, WebKit moved
       the element itself, and the seek back of the repair (measurement 26) showed no new frame.
+      (Added on 2026-10-18.) The repair seeks 3 ms from the target there.
 
 ## Decision
 
@@ -480,7 +488,12 @@ the seek and 100 ms more, or 1 s when WebKit does not end it. Then:
   the seek goes 3 ms after the target, and it leaves the frame when the target lies in the last
   3 ms of a frame. At the end of the file it goes 3 ms before the target.
 - When WebKit moved the element itself, the last seek of the store still names the target, no
-  playback runs, and the element does not seek any more, the store seeks to the target.
+  playback runs, and the element does not seek any more, the store also seeks 3 ms from the
+  target by the rule above, and reads that position as the target. A seek back to exactly the
+  target did not make WebKit seek again, and in 2 of 11 repairs the wrong frame stayed
+  (measurement 26). Where a frame is too short for the 3 ms, the store seeks to the target itself.
+  That case keeps the risk, and the test did not measure it. On the 1 ms ticks of FLV it applies
+  from 100 frames per second.
 - A scrub sample gets one fastSeek 3 ms away.
 
 A newer seek or a playback cancels the repair. A seek that keeps a playback running gets none,
