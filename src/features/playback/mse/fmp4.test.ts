@@ -136,21 +136,65 @@ describe("parseMovie", () => {
 
 describe("parseFragments", () => {
   it("reads the fragment of each track of a remux window", () => {
+    const [video, audio] = parseFragments(
+      fromBase64(WINDOW_MOOF),
+      parseMovie(fromBase64(WINDOW_MOOV)),
+    );
+    // 1280 / 16000 = 80 ms, the PTS of the first video packet of the FLV. 13 frames of 640 ticks
+    // from the default of the tfhd. The first-sample flags mark a sync sample.
+    expect(video).toMatchObject({
+      trackId: 1,
+      decodeTime: 0,
+      presentationTime: 1280,
+      duration: 8320,
+      sync: true,
+    });
+    // The frames of the 25 fps window, in presentation order, from the keyframe on.
+    expect([...(video?.presentationTimes ?? [])].sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 13 }, (_, index) => 1280 + 640 * index),
+    );
+    // 2832 / 48000 = 59 ms. 22 frames whose durations the trun states.
+    expect(audio).toMatchObject({
+      trackId: 2,
+      decodeTime: 2832,
+      presentationTime: 2832,
+      duration: 22520,
+      sync: true,
+    });
+    expect(audio?.presentationTimes).toHaveLength(22);
+    expect(audio?.presentationTimes?.[0]).toBe(2832);
+  });
+
+  it("gives the presentation time of each sample", () => {
+    const moof = (...runs: Uint8Array[]) =>
+      box(
+        "moof",
+        box(
+          "traf",
+          box("tfhd", full(0, 0), u32(7)),
+          box("tfdt", full(0, 0), u32(1000)),
+          ...runs,
+        ),
+      );
+    // Durations and composition offsets per sample, over two runs: a keyframe that shows two
+    // frames late, a B-frame and a P-frame.
     expect(
-      parseFragments(fromBase64(WINDOW_MOOF), parseMovie(fromBase64(WINDOW_MOOV))),
-    ).toEqual([
-      // 1280 / 16000 = 80 ms, the PTS of the first video packet of the FLV. 13 frames of
-      // 640 ticks from the default of the tfhd. The first-sample flags mark a sync sample.
-      { trackId: 1, decodeTime: 0, presentationTime: 1280, duration: 8320, sync: true },
-      // 2832 / 48000 = 59 ms. 22 frames whose durations the trun states.
-      {
-        trackId: 2,
-        decodeTime: 2832,
-        presentationTime: 2832,
-        duration: 22520,
-        sync: true,
-      },
-    ]);
+      parseFragments(
+        moof(
+          box("trun", full(0, 0x900), u32(2), u32(40), u32(80), u32(40), u32(0)),
+          box("trun", full(0, 0x900), u32(1), u32(40), u32(40)),
+        ),
+      )[0]?.presentationTimes,
+    ).toEqual([1080, 1040, 1120]);
+    // With no duration, only a single sample has a known time.
+    expect(
+      parseFragments(moof(box("trun", full(0, 0x800), u32(1), u32(5))))[0]
+        ?.presentationTimes,
+    ).toEqual([1005]);
+    expect(
+      parseFragments(moof(box("trun", full(0, 0x800), u32(2), u32(5), u32(0))))[0]
+        ?.presentationTimes,
+    ).toBeNull();
   });
 
   it("reads a 32-bit decode time, a negative offset of a version 1 trun, and every field", () => {
@@ -191,6 +235,7 @@ describe("parseFragments", () => {
         presentationTime: 87000,
         duration: 6003,
         sync: false,
+        presentationTimes: [87000, 93000],
       },
       {
         trackId: 4,
@@ -198,6 +243,7 @@ describe("parseFragments", () => {
         presentationTime: 2 ** 40,
         duration: null,
         sync: null,
+        presentationTimes: [],
       },
     ]);
   });

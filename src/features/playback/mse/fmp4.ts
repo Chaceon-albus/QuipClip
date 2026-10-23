@@ -2,9 +2,9 @@
  * The parts of fragmented MP4 that the MediaSource preview reads (ADR 046).
  *
  * A remux window is an fMP4 stream: `ftyp`, `moov`, then `moof` and `mdat` pairs. The page needs
- * the codec strings of the `moov` to create its SourceBuffer, and the time of the first sample
- * of the first `moof` for the self-check of the calibration. Everything else goes to the
- * SourceBuffer as it comes.
+ * the codec strings of the `moov` to create its SourceBuffer, the time of the first sample of
+ * the first `moof` for the self-check of the calibration, and the presentation time of each video
+ * sample for the frame step (ADR 022). Everything else goes to the SourceBuffer as it comes.
  */
 
 /** The kind of a track, from the handler of its media. */
@@ -38,6 +38,11 @@ export interface Fmp4Fragment {
   readonly duration: number | null;
   /** True when the first sample is a sync sample, or null when no flags state it. */
   readonly sync: boolean | null;
+  /**
+   * The presentation time of each sample in ticks, in the order of the samples, or null when the
+   * boxes state no duration for a sample that another sample follows.
+   */
+  readonly presentationTimes: readonly number[] | null;
 }
 
 /** The sample flag that marks a sample that is not a sync sample (ISO/IEC 14496-12 8.8.3). */
@@ -452,9 +457,42 @@ export function parseFragments(
       presentationTime: decodeTime + (first?.firstOffset ?? 0),
       duration: runs.length === 0 ? null : duration,
       sync: flags === null ? null : (flags & NON_SYNC_SAMPLE) === 0,
+      presentationTimes: samplePresentationTimes(decodeTime, runs, header.duration),
     });
   }
   return fragments;
+}
+
+/**
+ * The presentation time of each sample of the runs of a track fragment: its decode time, which
+ * the durations of the samples before it add up from `decodeTime`, and its composition offset.
+ * Null when a sample that another sample follows has no duration, neither its own nor
+ * `defaultDuration`.
+ */
+function samplePresentationTimes(
+  decodeTime: number,
+  runs: readonly TrackRun[],
+  defaultDuration: number,
+): number[] | null {
+  const times: number[] = [];
+  let sampleTime = decodeTime;
+  let known = true;
+  for (const run of runs) {
+    for (let index = 0; index < run.count; index++) {
+      if (!known) {
+        return null;
+      }
+      times.push(sampleTime + (run.compositionOffsets?.[index] ?? 0));
+      const sampleDuration =
+        run.sampleDurations?.[index] ?? (defaultDuration > 0 ? defaultDuration : null);
+      if (sampleDuration === null) {
+        known = false;
+      } else {
+        sampleTime += sampleDuration;
+      }
+    }
+  }
+  return times;
 }
 
 /** The default duration and flags of the samples of a track fragment. */
@@ -498,6 +536,10 @@ interface TrackRun {
   readonly firstFlags: number | null;
   /** The composition offset of the first sample, or 0 when the run states none. */
   readonly firstOffset: number;
+  /** The duration of each sample, or null when the run states none. */
+  readonly sampleDurations: readonly number[] | null;
+  /** The composition offset of each sample, or null when the run states none. */
+  readonly compositionOffsets: readonly number[] | null;
 }
 
 function readRun(bytes: Uint8Array, trun: ChildBox): TrackRun {
@@ -522,9 +564,13 @@ function readRun(bytes: Uint8Array, trun: ChildBox): TrackRun {
   }
   let durations: number | null = flags & 0x100 ? 0 : null;
   let firstOffset = 0;
+  const sampleDurations: number[] | null = flags & 0x100 ? [] : null;
+  const compositionOffsets: number[] | null = flags & 0x800 ? [] : null;
   for (let index = 0; index < count; index++) {
     if (flags & 0x100) {
-      durations = (durations ?? 0) + data.getUint32(offset);
+      const sampleDuration = data.getUint32(offset);
+      durations = (durations ?? 0) + sampleDuration;
+      sampleDurations?.push(sampleDuration);
       offset += 4;
     }
     if (flags & 0x200) {
@@ -537,13 +583,23 @@ function readRun(bytes: Uint8Array, trun: ChildBox): TrackRun {
       offset += 4;
     }
     if (flags & 0x800) {
+      const compositionOffset =
+        version === 0 ? data.getUint32(offset) : data.getInt32(offset);
       if (index === 0) {
-        firstOffset = version === 0 ? data.getUint32(offset) : data.getInt32(offset);
+        firstOffset = compositionOffset;
       }
+      compositionOffsets?.push(compositionOffset);
       offset += 4;
     }
   }
-  return { count, durations, firstFlags, firstOffset };
+  return {
+    count,
+    durations,
+    firstFlags,
+    firstOffset,
+    sampleDurations,
+    compositionOffsets,
+  };
 }
 
 /**

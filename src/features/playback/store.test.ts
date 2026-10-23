@@ -9317,6 +9317,193 @@ describe("Playback Store & PTS Presentation Engine", () => {
       });
     });
 
+    describe("the frame step by real frames (ADR 022)", () => {
+      /** A live recording that the probe gives as 30 fps, whose frames here come each 50 ms. */
+      const liveSource: PlaybackSource = {
+        ...flvSource,
+        avgFrameRate: { n: 30, d: 1 },
+        rFrameRate: { n: 30, d: 1 },
+      };
+      const liveKey = getSourceRevisionKey(liveSource);
+      /** The frame starts at 20 fps, from 10.049 s. */
+      const starts = Array.from(
+        { length: 40 },
+        (_, index) => Math.round((10.049 + 0.05 * index) * 1000) / 1000,
+      );
+      const HALF = 1 / 60;
+
+      /** An element of the live source on the frame at `mediaTime`, with a frame table. */
+      function onFrame(store: PlaybackStore, mediaTime: number, table = true) {
+        const video = attachWithMetadata(
+          store,
+          createFakeVideo({ duration: 240 }),
+          liveSource,
+        );
+        if (table) {
+          store
+            .getState()
+            .syncFrameTable(liveKey, video, { frameStarts: () => starts });
+        }
+        video.currentTime = mediaTime;
+        video.seeking = false;
+        store.getState().syncPresentedFrame(liveKey, mediaTime, 1, video);
+        return video;
+      }
+
+      /** Ends the seek of `video` on the frame at `mediaTime`. */
+      function land(
+        store: PlaybackStore,
+        video: ReturnType<typeof createFakeVideo>,
+        mediaTime: number,
+      ) {
+        video.seeking = false;
+        store.getState().syncSeeked(liveKey, video);
+        store.getState().syncPresentedFrame(liveKey, mediaTime, 2, video);
+      }
+
+      it("aims the grid step inside the frame on screen, where no table is given", () => {
+        const store = createPlaybackStore();
+        const video = onFrame(store, 10.149, false);
+        store.getState().seekNominal(1);
+        // The middle of nominal frame 305 lies inside the frame of 10.149 s, which lasts to
+        // 10.199 s: the fault that the table removes.
+        expect(video.currentTime).toBeCloseTo(305.5 / 30, 9);
+      });
+
+      it("moves one real frame for each press, forward and back", () => {
+        const store = createPlaybackStore();
+        const video = onFrame(store, 10.149);
+
+        store.getState().seekNominal(1);
+        expect(video.currentTime).toBeCloseTo(10.199 + HALF, 9);
+        expect(store.getState().seekTargetSeconds).toBeCloseTo(10.199, 9);
+        land(store, video, 10.199);
+        expect(store.getState().seekTargetSeconds).toBeNull();
+
+        store.getState().seekNominal(1);
+        expect(video.currentTime).toBeCloseTo(10.249 + HALF, 9);
+        land(store, video, 10.249);
+
+        store.getState().seekNominal(-2);
+        expect(video.currentTime).toBeCloseTo(10.149 + HALF, 9);
+      });
+
+      it("counts a held key from the target of the step that runs", () => {
+        const store = createPlaybackStore();
+        const video = onFrame(store, 10.149);
+        store.getState().seekNominal(1, { held: true });
+        store.getState().seekNominal(1, { held: true });
+        // The second step waits behind the first and starts at its seeked.
+        expect(video.currentTime).toBeCloseTo(10.199 + HALF, 9);
+        video.seeking = false;
+        store.getState().syncSeeked(liveKey, video);
+        expect(video.currentTime).toBeCloseTo(10.249 + HALF, 9);
+      });
+
+      it("counts from the position of the element when no frame is on screen", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          createFakeVideo({ duration: 240 }),
+          liveSource,
+        );
+        store.getState().syncFrameTable(liveKey, video, { frameStarts: () => starts });
+        video.currentTime = 10.17;
+        video.seeking = false;
+        store.getState().seekNominal(1);
+        expect(video.currentTime).toBeCloseTo(10.199 + HALF, 9);
+      });
+
+      it("keeps the grid step where the table does not know the next frame", () => {
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          createFakeVideo({ duration: 240 }),
+          liveSource,
+        );
+        store
+          .getState()
+          .syncFrameTable(liveKey, video, { frameStarts: () => [10.049, 10.099] });
+        video.currentTime = 10.099;
+        video.seeking = false;
+        store.getState().syncPresentedFrame(liveKey, 10.099, 1, video);
+        store.getState().seekNominal(1);
+        // round(302.97) is 303, so the grid aims at the middle of nominal frame 304.
+        expect(video.currentTime).toBeCloseTo(304.5 / 30, 9);
+      });
+
+      it("keeps the edge of the grid for a frame that the extent leaves out", () => {
+        // The extent holds 306 frames of 30 fps, and the table knows frame 306 after it.
+        const endSource: PlaybackSource = {
+          ...liveSource,
+          approximateDurationSeconds: 10.2,
+          videoDurationTicks: "10200" as TickCount,
+        };
+        const endKey = getSourceRevisionKey(endSource);
+        const table = Array.from({ length: 307 }, (_, index) => index / 30);
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          createFakeVideo({ duration: 240 }),
+          endSource,
+        );
+        store.getState().syncFrameTable(endKey, video, { frameStarts: () => table });
+        video.currentTime = 305 / 30;
+        video.seeking = false;
+        store.getState().syncPresentedFrame(endKey, 305 / 30, 1, video);
+        const seeks = video.currentTimeSets;
+
+        // A step forward from the last frame of the extent moves nothing (ADR 026).
+        store.getState().seekNominal(1);
+        expect(video.currentTimeSets).toBe(seeks);
+        expect(store.getState().presentedFrame?.mediaTime).toBe(305 / 30);
+      });
+
+      it("runs a deferred frame index on the grid", () => {
+        const noAnchor: PlaybackSource = { ...liveSource, anchorMediaTime: null };
+        const noAnchorKey = getSourceRevisionKey(noAnchor);
+        const table = Array.from({ length: 40 }, (_, index) => index * 0.05);
+        const store = createPlaybackStore();
+        const video = attachWithMetadata(
+          store,
+          createFakeVideo({ duration: 240 }),
+          noAnchor,
+        );
+        store
+          .getState()
+          .syncFrameTable(noAnchorKey, video, { frameStarts: () => table });
+        expect(store.getState().calibrationStatus).toBe("calibrating");
+        store.getState().seekToFrameIndex(10);
+        store.getState().syncPresentedFrame(noAnchorKey, 0, 1, video);
+        // The middle of nominal frame 10, not real frame 10 at 0.5 s.
+        expect(video.currentTime).toBeCloseTo(10.5 / 30, 9);
+      });
+
+      it("drops the table of an element at its detach and takes none for another element", () => {
+        const store = createPlaybackStore();
+        const first = onFrame(store, 10.149);
+        store.getState().detach(liveKey, first);
+
+        const second = attachWithMetadata(
+          store,
+          createFakeVideo({ duration: 240 }),
+          liveSource,
+        );
+        store.getState().syncFrameTable(liveKey, first, { frameStarts: () => starts });
+        second.currentTime = 10.149;
+        second.seeking = false;
+        store.getState().syncPresentedFrame(liveKey, 10.149, 1, second);
+        store.getState().seekNominal(1);
+        expect(second.currentTime).toBeCloseTo(305.5 / 30, 9);
+
+        store.getState().syncFrameTable(liveKey, second, { frameStarts: () => starts });
+        land(store, second, 10.149);
+        store.getState().syncFrameTable(liveKey, second, null);
+        store.getState().seekNominal(1);
+        expect(second.currentTime).toBeCloseTo(305.5 / 30, 9);
+      });
+    });
+
     describe("a seek outside the buffered data", () => {
       /** The `buffered` ranges of an element. */
       function bufferedRanges(

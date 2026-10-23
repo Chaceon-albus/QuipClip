@@ -10,6 +10,7 @@
 
 import type { PlaybackStore } from "@/features/playback";
 import type { ScrubCue } from "@/features/playback/cue";
+import type { FrameTable } from "@/features/playback/frameTable";
 import type {
   MseController,
   MseControllerEvents,
@@ -42,6 +43,12 @@ export interface MediaSourceStoreActions {
     sourceRevisionKey: string,
     element: HTMLVideoElement,
   ) => void;
+  /** The real frames of the element for the frame step, or null when the element goes. */
+  readonly syncFrameTable: (
+    sourceRevisionKey: string,
+    element: HTMLVideoElement,
+    table: FrameTable | null,
+  ) => void;
   /**
    * The seek over a gap: before the first frame, or over a stretch that the windows skip. It
    * keeps a running playback and the stop point of a segment playback.
@@ -72,6 +79,8 @@ export function createMediaSourceStoreActions(
       store.getState().syncPresentationUnavailable(key, element),
     denySourcePrecision: (key, element) =>
       store.getState().denySourcePrecision(key, element),
+    syncFrameTable: (key, element, table) =>
+      store.getState().syncFrameTable(key, element, table),
     // The anchor and the origin of the timeline are media time 0, so the media time of a frame
     // is its position on the timeline.
     seekOverGap: (mediaTime) =>
@@ -159,6 +168,7 @@ const LATE_SEEK_REPAIR_WAIT_MS = 1000;
 const LATE_SEEK_REPAIR_DELAY_MS = 100;
 
 interface Owned {
+  readonly sourceRevisionKey: string;
   readonly element: HTMLVideoElement;
   readonly controller: MseController;
   readonly cue: PcmCue | null;
@@ -188,6 +198,7 @@ export function createMediaSourceOwner(
     if (current.onSeeking !== null) {
       current.element.removeEventListener("seeking", current.onSeeking);
     }
+    dependencies.store.syncFrameTable(current.sourceRevisionKey, current.element, null);
     current.controller.destroy();
     if (current.cue !== null) {
       dependencies.setScrubCue(null);
@@ -319,6 +330,7 @@ export function createMediaSourceOwner(
       const stopGestures =
         cue === null ? null : dependencies.listenForGestures(() => cue.prime());
       current = {
+        sourceRevisionKey: key,
         element,
         controller,
         cue,
@@ -328,6 +340,10 @@ export function createMediaSourceOwner(
         stopGestures,
       };
       owned = current;
+      // The frame step of the store moves by the frames that the controller appended (ADR 022).
+      dependencies.store.syncFrameTable(key, element, {
+        frameStarts: controller.frameStarts,
+      });
       if (cue !== null) {
         dependencies.setScrubCue(cue);
       }

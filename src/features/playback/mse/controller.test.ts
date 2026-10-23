@@ -1482,6 +1482,60 @@ describe("createMseController", () => {
       expect(windows[1]?.request.start).toEqual({ kind: "time", seconds: 15 });
     });
 
+    it("knows the start of each appended frame and forgets the frames that go", () => {
+      const { buffer, element, controller } = playing(0, 80, undefined, { gop: 10 });
+      const starts = controller.frameStarts();
+      expect(starts).toHaveLength(80 * 25);
+      expect(starts[0]).toBeCloseTo(0, 9);
+      expect(starts[1]).toBeCloseTo(0.04, 9);
+      expect(starts[starts.length - 1]).toBeCloseTo(79.96, 9);
+      // A remove behind the position drops the frames before the keyframe at 30 s.
+      element.play(55);
+      expect(buffer().removed).toEqual([[0, 30]]);
+      expect(controller.frameStarts()[0]).toBeCloseTo(30, 9);
+      // A seek that drops the data drops every frame.
+      element.seek(150);
+      expect(controller.frameStarts()).toEqual([]);
+    });
+
+    it("gives no frames once a fragment states no frame times, until a seek drops the data", () => {
+      const { buffer, element, controller, last } = playing(0, 4);
+      expect(controller.frameStarts()).toHaveLength(100);
+      // A fragment of 25 frames with no sample duration.
+      last().send(
+        concat(
+          fragment({
+            id: 1,
+            decodeTime: Math.round((4 + START) * VIDEO_TIMESCALE),
+            duration: 0,
+            count: 25,
+            sync: true,
+          }),
+          box("mdat", new Uint8Array(64)),
+        ),
+      );
+      buffer().drain();
+      expect(controller.frameStarts()).toEqual([]);
+
+      element.seek(100);
+      buffer().drain();
+      last().send(concat(init(), media(100, 2)));
+      buffer().drain();
+      expect(controller.frameStarts()).toHaveLength(50);
+    });
+
+    it("forgets the frames of the data that the browser removed on its own", () => {
+      const { buffer, last, element, controller } = playing(0, 30);
+      element.play(25);
+      buffer().video = buffer().video.map(([, end]) => [12, end]);
+      buffer().audio = buffer().audio.map(([, end]) => [12, end]);
+      last().send(media(30, 2));
+      buffer().drain();
+      const starts = controller.frameStarts();
+      expect(starts[0]).toBeCloseTo(12, 9);
+      expect(starts[starts.length - 1]).toBeCloseTo(31.96, 9);
+    });
+
     it("waits for the position when no keyframe lies behind it", () => {
       // One GOP of 30 s: no remove can keep the frame on screen.
       const { buffer, last, element } = playing(0, 30, undefined, { gop: 30 });

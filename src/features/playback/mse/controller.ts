@@ -3,7 +3,9 @@
  *
  * The controller fills a MediaSource with the fMP4 windows of the source. It requests a window
  * where the element needs data, appends the window in order, acknowledges each append so Rust
- * reads more, removes data behind the playback, and ends the stream after the last window.
+ * reads more, removes data behind the playback, and ends the stream after the last window. It
+ * keeps the start of each appended video frame, so the frame step of the store moves by real
+ * frames (ADR 022).
  *
  * The decisions read the video that the fragments of the windows hold, not `buffered`: the
  * buffered ranges of a SourceBuffer with audio and video are the intersection of the two
@@ -15,6 +17,7 @@
  */
 
 import type { Rational } from "@/types/project";
+import { mergeFrameStarts } from "../frameTable";
 import {
   Fmp4Error,
   Fmp4Scanner,
@@ -259,6 +262,12 @@ export interface MseControllerEvents {
 export interface MseController {
   /** Stops every window and detaches the MediaSource from the element. */
   readonly destroy: () => void;
+  /**
+   * The media times at which the video frames of the appended data start, ascending and with no
+   * duplicates, for the frame step of the store (ADR 022). The answer is valid until the next
+   * append or remove.
+   */
+  readonly frameStarts: () => readonly number[];
 }
 
 /** One window, from its request to the processing of its end. */
@@ -308,6 +317,11 @@ interface VideoFragment {
   readonly start: number;
   readonly end: number;
   readonly sync: boolean;
+  /**
+   * The start of each frame of the fragment, in the order of its samples, or null when the
+   * fragment states no time for one of them.
+   */
+  readonly frames: readonly number[] | null;
 }
 
 type Operation =
@@ -330,6 +344,9 @@ type Operation =
   | { readonly kind: "changeType"; readonly key: number; readonly type: string }
   | { readonly kind: "endOfStream" }
   | { readonly kind: "done"; readonly key: number; readonly end: WindowEnd };
+
+/** The frame list of a controller whose frames are not all known. */
+const NO_FRAMES: readonly number[] = [];
 
 /** The session of a window record before its request returns a session. */
 const NO_SESSION: WindowSession = {
@@ -448,6 +465,14 @@ export function createMseController(
   let reportedNonMonotonic = false;
   /** The media times of the keyframes that start fragments, in order. */
   let keyframes: number[] = [];
+  /** The media times at which the appended video frames start, ascending. */
+  let frames: number[] = [];
+  /**
+   * False once an appended fragment gave no frame times, or a `moof` did not parse, until a seek
+   * drops the data. The list then lacks frames, and a step by it would skip them, so the
+   * controller gives no frames and the step of the store keeps the grid.
+   */
+  let framesKnown = true;
 
   const reportNonMonotonic = (): void => {
     if (!reportedNonMonotonic) {
@@ -611,13 +636,13 @@ export function createMseController(
       }
     }
     spans = clipped;
-    keyframes = keyframes.filter((keyframe) =>
+    const inSpans = (time: number): boolean =>
       spans.some(
         (span) =>
-          span.start - EPSILON_SECONDS <= keyframe &&
-          keyframe <= span.end + EPSILON_SECONDS,
-      ),
-    );
+          span.start - EPSILON_SECONDS <= time && time <= span.end + EPSILON_SECONDS,
+      );
+    keyframes = keyframes.filter(inSpans);
+    frames = frames.filter(inSpans);
   };
 
   const addKeyframe = (time: number): void => {
@@ -646,6 +671,7 @@ export function createMseController(
       .filter((span) => span.end > time)
       .map((span) => ({ start: Math.max(span.start, time), end: span.end }));
     keyframes = keyframes.filter((keyframe) => keyframe >= time - EPSILON_SECONDS);
+    frames = frames.filter((frame) => frame >= time - EPSILON_SECONDS);
   };
 
   /**
@@ -812,6 +838,11 @@ export function createMseController(
         addSpan(fragment.start, fragment.end);
         if (fragment.sync) {
           addKeyframe(fragment.start);
+        }
+        if (fragment.frames === null) {
+          framesKnown = false;
+        } else if (fragment.frames.length > 0) {
+          frames = mergeFrameStarts(frames, fragment.frames);
         }
         if (active?.key === operation.key) {
           active.appendedEnd = Math.max(
@@ -1368,6 +1399,8 @@ export function createMseController(
         (item) => item.trackId === track.id,
       );
     } catch {
+      // The frames of this fragment stay unknown, so the frame list is no longer whole.
+      framesKnown = false;
       return;
     }
     if (fragment === undefined) {
@@ -1384,7 +1417,13 @@ export function createMseController(
     window.lastVideoTime = time;
     window.videoEnd = Math.max(window.videoEnd ?? end, end);
     // The video counts as appended once the append of its `mdat` ends.
-    window.pendingFragment = { start: time, end, sync: fragment.sync === true };
+    window.pendingFragment = {
+      start: time,
+      end,
+      sync: fragment.sync === true,
+      frames:
+        fragment.presentationTimes?.map((ticks) => mediaTimeOf(ticks, track)) ?? null,
+    };
   };
 
   /**
@@ -1667,6 +1706,8 @@ export function createMseController(
     noProgressAt = null;
     spans = [];
     keyframes = [];
+    frames = [];
+    framesKnown = true;
     if (sourceBuffer !== null) {
       clearing = true;
       operations.push(
@@ -1824,5 +1865,6 @@ export function createMseController(
       }
       environment.revokeObjectUrl(url);
     },
+    frameStarts: () => (framesKnown ? frames : NO_FRAMES),
   };
 }

@@ -27,6 +27,7 @@ import {
 } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
 import { scrubCue } from "./cue";
+import { realFrameStep, type FrameTable } from "./frameTable";
 import type {
   CalibrationStatus,
   FrameIndexSeekOptions,
@@ -598,6 +599,12 @@ export function createPlaybackStore(
   // Source revision keys that lost precise editing. ADR 003 denies precision per source, so the
   // denial must outlive the attachment that detected it.
   const precisionDeniedSources = new Set<string>();
+  // The real video frames of the attached element of a MediaSource source (syncFrameTable), or
+  // null. A relative frame step moves by them (ADR 022, ADR 046).
+  let frameTable: FrameTable | null = null;
+  // True while runDeferredNavigation runs the steps of a deferred navigation. They count nominal
+  // frames, as a deferred frame index does, so they keep the grid.
+  let deferredStepsRunning = false;
   // Queued seek target for coalescing rapid seeks. A media element aborts a running seek when
   // currentTime is assigned again, so a fast series of seeks never presents a frame; one seek
   // in flight with the latest request winning makes each seek complete (ADR 022).
@@ -1389,6 +1396,14 @@ export function createPlaybackStore(
           get().seekApproximate(settled.seconds, { scrub: settled.scrub });
         }
       };
+      const runSteps = (frames: number): void => {
+        deferredStepsRunning = true;
+        try {
+          get().seekNominal(frames);
+        } finally {
+          deferredStepsRunning = false;
+        }
+      };
       if (entry.frames === 0) {
         if (seek !== null) {
           runSeek(seek);
@@ -1396,7 +1411,7 @@ export function createPlaybackStore(
         return;
       }
       if (seek === null) {
-        get().seekNominal(entry.frames);
+        runSteps(entry.frames);
         return;
       }
       const startPts = attachedSource.videoStartPts;
@@ -1413,12 +1428,12 @@ export function createPlaybackStore(
               );
       if (seekMediaTime === null) {
         runSeek(seek);
-        get().seekNominal(entry.frames);
+        runSteps(entry.frames);
         return;
       }
       const placeholder = { mediaTime: seekMediaTime, scrub: seek.scrub };
       queuedSeek = placeholder;
-      get().seekNominal(entry.frames);
+      runSteps(entry.frames);
       if (queuedSeek === placeholder) {
         queuedSeek = null;
         runSeek(seek);
@@ -1573,11 +1588,48 @@ export function createPlaybackStore(
         readonly targetFrame: number;
         readonly frameIndexAt: (browserTime: number) => number;
       } | null = null;
+      // A source that plays through a MediaSource knows where each frame of its buffered data
+      // starts (syncFrameTable, ADR 046). While a calibration holds, a relative step moves by
+      // those frames and not by the nominal grid. A live recording can change its frame rate,
+      // and its timestamps can drift from the grid, so a grid target can lie inside the frame on
+      // screen, and the next press would then aim at the same place and do nothing (ADR 022). The
+      // step counts from the frame on screen when no seek is pending, no display target is set
+      // and a frame is on screen, as on the grid, and otherwise from the start position. It aims
+      // inside the frame it reaches, at most half a nominal interval after its start. Where the
+      // table does not know the frame it counts from or the frame it reaches, as beyond the
+      // appended data, the step keeps the grid or the relative target below. So does a step to a
+      // frame outside the bounds, as a frame that the extent leaves out: the clamp, the edge rules
+      // and the display of the grid then apply (ADR 026). The steps of a deferred navigation count
+      // nominal frames (DeferredNavigation), so they keep the grid too.
+      const onScreen = state.presentedFrame;
+      const realCandidate =
+        request.kind === "relative" &&
+        calibratedOrigin !== null &&
+        frameTable !== null &&
+        !deferredStepsRunning
+          ? realFrameStep(
+              frameTable.frameStarts(),
+              pending === null && state.seekTargetSeconds === null && onScreen !== null
+                ? onScreen.mediaTime
+                : stepStart,
+              request.deltaFrames,
+              fps.d / (2 * fps.n),
+            )
+          : null;
+      const real =
+        realCandidate !== null &&
+        realCandidate.target >= lowerBound &&
+        realCandidate.target <= upperBound
+          ? realCandidate
+          : null;
       let unclampedTarget: number;
       // The sign of the step: the sign of the relative step, or for an absolute target the side
       // of the start frame on which the target frame lies, and 0 when it is the start frame.
       let direction: number;
-      if (gridOrigin === null) {
+      if (real !== null && request.kind === "relative") {
+        unclampedTarget = real.target;
+        direction = Math.sign(request.deltaFrames);
+      } else if (gridOrigin === null) {
         // An absolute target needs the grid (seekToFrameIndex checks it first).
         if (request.kind === "absolute") {
           return;
@@ -1779,8 +1831,17 @@ export function createPlaybackStore(
       // while a calibration holds, the origin of the elapsed seconds of the presented frame and
       // of seekToPts, and from the start of the timeline, the origin of the approximate clock,
       // without one.
+      //
+      // A step by real frames shows the start of the frame it reaches, which the frame callback
+      // then reports, so the playhead does not move when the frame arrives.
       let seekTargetSeconds: number;
-      if (grid !== null && targetTime === unclampedTarget) {
+      if (
+        real !== null &&
+        calibratedOrigin !== null &&
+        targetTime === unclampedTarget
+      ) {
+        seekTargetSeconds = Math.max(0, real.start - calibratedOrigin);
+      } else if (grid !== null && targetTime === unclampedTarget) {
         seekTargetSeconds = Math.max(0, (grid.targetFrame * fps.d) / fps.n);
       } else if (grid !== null && targetTime < unclampedTarget) {
         // The end position lies one interval after the start of the last frame, so the frame
@@ -2462,6 +2523,8 @@ export function createPlaybackStore(
         activeSourceRevisionKey = newIdentity;
         attachedSource = source;
         attachedElement = element;
+        // The controller of a new element gives its own table after this attach.
+        frameTable = null;
         repairLanding = null;
         issuedFastSeek = false;
         issuedTarget = null;
@@ -2559,6 +2622,7 @@ export function createPlaybackStore(
         }
         attachedSource = null;
         attachedElement = null;
+        frameTable = null;
         repairLanding = null;
         issuedFastSeek = false;
         issuedTarget = null;
@@ -3697,6 +3761,21 @@ export function createPlaybackStore(
         get().syncPresentationUnavailable(sourceRevisionKey, element);
       },
 
+      syncFrameTable: (
+        sourceRevisionKey: string,
+        element: PlaybackMediaElement,
+        table: FrameTable | null,
+      ) => {
+        if (
+          !attachedSource ||
+          attachedElement !== element ||
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey
+        ) {
+          return;
+        }
+        frameTable = table;
+      },
+
       repairSeek: (
         sourceRevisionKey: string,
         element: PlaybackMediaElement,
@@ -4076,6 +4155,7 @@ export function createPlaybackStore(
         }
         attachedSource = null;
         attachedElement = null;
+        frameTable = null;
         activeSourceRevisionKey = null;
         calibratedMediaTime = null;
         lastPresentedMediaTime = null;

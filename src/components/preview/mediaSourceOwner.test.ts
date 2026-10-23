@@ -89,6 +89,7 @@ function setup(repairsLateSeeks = true) {
     syncExpectedFirstFrame: vi.fn(),
     syncPresentationUnavailable: vi.fn(),
     denySourcePrecision: vi.fn(),
+    syncFrameTable: vi.fn(),
     seekOverGap: vi.fn(),
     repairSeek: vi.fn(),
     whenReady: (run: () => void) => {
@@ -116,7 +117,7 @@ function setup(repairsLateSeeks = true) {
     createController: (element, source, events) => {
       const destroy = vi.fn();
       controllers.push({ element, source, events, destroy });
-      return { destroy };
+      return { destroy, frameStarts: () => [1, 1.05] };
     },
     createCue: (source, muted) => {
       void source;
@@ -175,6 +176,23 @@ describe("createMediaSourceOwner", () => {
 
     owner.attach(element, TARGET, false);
     expect(controllers).toHaveLength(1);
+  });
+
+  it("gives the store the frames of the controller, and takes them back when it stops", () => {
+    const { owner, store } = setup();
+    const element = fakeElement();
+    owner.attach(element, TARGET, false);
+    expect(store.syncFrameTable).toHaveBeenCalledTimes(1);
+    const [key, given, table] = store.syncFrameTable.mock.calls[0] as [
+      string,
+      HTMLVideoElement,
+      { frameStarts: () => readonly number[] },
+    ];
+    expect([key, given]).toEqual(["live", element]);
+    expect(table.frameStarts()).toEqual([1, 1.05]);
+
+    owner.detach(element);
+    expect(store.syncFrameTable).toHaveBeenLastCalledWith("live", element, null);
   });
 
   it("starts no cue for a source without audio or with its audio left out", () => {
@@ -426,7 +444,7 @@ describe("the seek over a gap, with the playback store", () => {
     const owner = createMediaSourceOwner({
       createController: (_element, _source, events) => {
         controllers.push(events);
-        return { destroy: vi.fn() };
+        return { destroy: vi.fn(), frameStarts: () => [] };
       },
       createCue: () => fakeCue(),
       setScrubCue: vi.fn(),

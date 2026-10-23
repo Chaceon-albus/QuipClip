@@ -5,6 +5,7 @@
  */
 
 import type { FrameCount, Pts, Rational, TickCount } from "@/types/project";
+import type { FrameTable } from "./frameTable";
 
 /**
  * Timing and revision descriptor required to model a playback source attachment.
@@ -594,6 +595,18 @@ export interface PlaybackActions {
   denySourcePrecision: (
     sourceRevisionKey: string,
     element: PlaybackMediaElement,
+  ) => void;
+
+  /**
+   * Gives the real video frames of the attached element of a MediaSource source, or null when
+   * its controller goes (ADR 046). While a calibration holds, a relative frame step moves by these
+   * frames, and it keeps the nominal step only where the table does not know a frame (ADR 022).
+   * The attach and the detach of an element drop the table.
+   */
+  syncFrameTable: (
+    sourceRevisionKey: string,
+    element: PlaybackMediaElement,
+    table: FrameTable | null,
   ) => void;
 
   /**
