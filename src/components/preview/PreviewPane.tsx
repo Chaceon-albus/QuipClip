@@ -70,6 +70,7 @@ import {
 } from "./anchorWait";
 import {
   classifyDecodeFailure,
+  describeMediaError,
   NO_DECODE_EVIDENCE,
   presentDecodeStall,
   provesPartialDecode,
@@ -880,6 +881,7 @@ export function PreviewPane() {
       return;
     }
     const code = element.error?.code ?? null;
+    console.warn(describeMediaError(code, element.error?.message));
     const decodesInPart =
       decodedSources.has(sourceRevisionKey) ||
       provesPartialDecode(decodeEvidence.get(element) ?? NO_DECODE_EVIDENCE);

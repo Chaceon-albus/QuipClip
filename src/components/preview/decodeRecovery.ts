@@ -129,6 +129,22 @@ export function classifyDecodeFailure(
   return "failure";
 }
 
+/**
+ * The log line of an `error` event of the video element: its code and the message of the web
+ * view. The notice of a stall does not show the message, and Chromium's message tells an append
+ * that failed to parse, such as `CHUNK_DEMUXER_ERROR_APPEND_FAILED`, from a decoder that failed.
+ */
+export function describeMediaError(
+  code: number | null,
+  message: string | null | undefined,
+): string {
+  const codeText = code === null ? "no code" : `code ${code}`;
+  const detail = typeof message === "string" ? message.trim() : "";
+  return `preview: the video element reported a media error (${codeText})${
+    detail === "" ? "" : `: ${detail}`
+  }`;
+}
+
 /** The catalog key of the notice of a stall. */
 export const DECODE_STALL_MESSAGE_KEY = "preview.decodeStall.message";
 

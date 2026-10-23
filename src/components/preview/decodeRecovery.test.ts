@@ -11,6 +11,7 @@ import {
 } from "./decodeFailure";
 import {
   classifyDecodeFailure,
+  describeMediaError,
   DECODE_STALL_MESSAGE_KEY,
   NO_DECODE_EVIDENCE,
   presentDecodeStall,
@@ -98,6 +99,29 @@ describe("classifyDecodeFailure", () => {
   it("keeps the failure panel for a failed picture check", () => {
     expect(classifyDecodeFailure({ kind: "pictureMissing" }, false)).toBe("failure");
     expect(classifyDecodeFailure({ kind: "pictureMissing" }, true)).toBe("failure");
+  });
+});
+
+describe("describeMediaError", () => {
+  it("names the code and the message of the web view", () => {
+    expect(
+      describeMediaError(
+        MEDIA_ERR_DECODE,
+        "PipelineStatus::CHUNK_DEMUXER_ERROR_APPEND_FAILED: Failed to prepare video sample for decode",
+      ),
+    ).toBe(
+      "preview: the video element reported a media error (code 3): " +
+        "PipelineStatus::CHUNK_DEMUXER_ERROR_APPEND_FAILED: Failed to prepare video sample for decode",
+    );
+  });
+
+  it("leaves out a message that is empty or missing", () => {
+    expect(describeMediaError(MEDIA_ERR_NETWORK, "  ")).toBe(
+      "preview: the video element reported a media error (code 2)",
+    );
+    expect(describeMediaError(null, undefined)).toBe(
+      "preview: the video element reported a media error (no code)",
+    );
   });
 });
 
