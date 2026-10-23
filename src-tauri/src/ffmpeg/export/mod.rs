@@ -58,10 +58,12 @@
 //! [`process::ExportProcessStatus::Exited`] for the measured case where `ffmpeg` writes no frames
 //! and still exits zero.
 //!
-//! [`verify`] is the success check of an export that writes no video. The frame count cannot
-//! verify such an export, so [`verify::verify_audio_output`] reads the finished file back through
+//! [`verify`] holds the checks that read the finished file back. The frame count cannot verify an
+//! export that writes no video, so [`verify::verify_audio_output`] reads its file back through
 //! ffprobe instead: one audio stream, no video stream, and a duration inside a measured tolerance
-//! of the plan's.
+//! of the plan's. An export with video that copies its audio passes the frame count and then
+//! [`verify::verify_copy_streams`], which reads back that the file holds the copied audio
+//! (ADR 048).
 
 pub mod arguments;
 pub mod flv_input;
@@ -87,7 +89,7 @@ pub use process::{
 };
 pub use progress::{ProgressReader, ProgressSnapshot};
 pub use registry::{ExportRegistry, ExportSlot};
-pub use verify::{verify_audio_output, AudioOutputMismatch};
+pub use verify::{verify_audio_output, verify_copy_streams, AudioOutputMismatch};
 
 use crate::project::Resolution;
 use crate::settings::{AudioChannels, Container, PresetOption, Quality};

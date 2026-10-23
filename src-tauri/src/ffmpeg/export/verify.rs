@@ -1,4 +1,5 @@
-//! The success check of an export that writes no video.
+//! The success check of an export that writes no video, and the stream check of an export with
+//! video that copies its audio.
 //!
 //! ADR 016 lets the frame count, not the exit status, decide whether an export succeeded: ffmpeg
 //! exits **zero** when it refuses the reserved file, having written nothing at all. An export
@@ -16,8 +17,11 @@
 //!    [`AUDIO_DURATION_LONG_TOLERANCE_MS`] above [`super::PlannedAudio::expected_duration`], the
 //!    planned duration of the segments.
 //!
-//! The function is pure, like the rest of the renderer's checks: it runs no process and reads no
-//! file, so every outcome is testable without ffmpeg installed.
+//! An export with video that copies its audio passes the frame count, and then
+//! [`verify_copy_streams`], which requires one audio stream and one video stream (ADR 048).
+//!
+//! Both functions are pure, like the rest of the renderer's checks: they run no process and read
+//! no file, so every outcome is testable without ffmpeg installed.
 
 use crate::ffmpeg::probe::OutputAudioProbe;
 use crate::time::Rational;
@@ -187,6 +191,30 @@ pub fn verify_audio_output(
     }
 }
 
+/// Decide whether the finished file of an export with video that copies its audio holds both of
+/// its streams: one video stream and one audio stream (ADR 048).
+///
+/// The frame count checks the video of that export, and nothing else checks its audio. FFmpeg
+/// can exit 0 with a file that holds no audio track, and the frame count passes that file (ADR 014
+/// measurement 23). No measured copy wrote such a file, so this check is a defence: it reads the
+/// stream set of the file back before the file replaces the one the user chose. The duration is
+/// not checked: the frame count bounds the video, and the plan copies only audio that covers its
+/// segment, which ends within one packet of the Out point.
+///
+/// # Errors
+///
+/// [`AudioOutputMismatch::Streams`] for any other stream set.
+pub fn verify_copy_streams(probe: &OutputAudioProbe) -> Result<(), AudioOutputMismatch> {
+    if probe.audio_streams == 1 && probe.video_streams == 1 {
+        Ok(())
+    } else {
+        Err(AudioOutputMismatch::Streams {
+            audio_streams: probe.audio_streams,
+            video_streams: probe.video_streams,
+        })
+    }
+}
+
 /// A whole number of milliseconds as an exact number of seconds.
 fn milliseconds(value: i64) -> Rational {
     Rational::new(value, 1_000).expect("a whole number of milliseconds is a valid Rational")
@@ -205,6 +233,22 @@ mod tests {
             audio_streams,
             video_streams,
             duration: duration.map(seconds),
+        }
+    }
+
+    #[test]
+    fn a_copy_with_video_passes_with_one_stream_of_each_kind_whatever_its_duration() {
+        for duration in [Some("1.000000"), Some("0.500000"), None] {
+            assert_eq!(verify_copy_streams(&probe(1, 1, duration)), Ok(()));
+        }
+        for (audio_streams, video_streams) in [(0, 1), (1, 0), (2, 1), (1, 2), (0, 0)] {
+            assert_eq!(
+                verify_copy_streams(&probe(audio_streams, video_streams, Some("1.000000"))),
+                Err(AudioOutputMismatch::Streams {
+                    audio_streams,
+                    video_streams,
+                }),
+            );
         }
     }
 

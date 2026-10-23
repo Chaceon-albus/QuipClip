@@ -49,7 +49,8 @@
 //!    file, writes nothing, and still exits zero. [`verified_frame_count`] is what separates
 //!    that outcome from a real one for an export with video. An export without video writes
 //!    no frames to count, and [`verified_audio_output`] separates the two outcomes for it: it
-//!    reads the finished file back through ffprobe.
+//!    reads the finished file back through ffprobe. An export with video that copies its audio
+//!    also reads its file back, for its streams ([`verified_copy_streams`], ADR 048).
 //! 5. The cancel flag is read once more after the process exits, after the success check, and
 //!    **before** the rename. ADR 016 requires it: without that read, a cancel arriving in the
 //!    last seconds of an encode still renames the output over the file the user chose while
@@ -65,9 +66,9 @@ use crate::ffmpeg::export::flv_input::{
 use crate::ffmpeg::export::{
     build_arguments, build_audio_arguments, build_audio_graph, build_copy_arguments, build_plan,
     choose_audio_graph_shape, choose_graph_shape, encoder_graph, inspect_path, run_export_process,
-    verify_audio_output, AudioOutputMismatch, CopyOutput, ExportErrorCode, ExportPlan,
-    ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot,
-    ExportStreams, PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary,
+    verify_audio_output, verify_copy_streams, AudioOutputMismatch, CopyOutput, ExportErrorCode,
+    ExportPlan, ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus, ExportRegistry,
+    ExportSlot, ExportStreams, PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary,
     AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::preview::PreviewWindows;
@@ -1291,13 +1292,15 @@ fn run_export(
 }
 
 /// Run the process stage, verify what it produced, and publish the output, reporting through
-/// `emit`, running the child through `process`, and reading a finished file without video back
-/// through `probe_output`.
+/// `emit`, running the child through `process`, and reading a finished file back through
+/// `probe_output`: the file of an export without video, and the file of an export with video that
+/// copies its audio.
 ///
 /// The three checks between the process exiting and the rename are obligations 4 and 5 of
 /// this module's documentation, in the order ADR 016 requires them: the success check, then
 /// the cancel flag, then the publication. The success check is the frame count for a plan
-/// with video, and [`verified_audio_output`] for a plan without it. A failed check returns
+/// with video, followed by [`verified_copy_streams`] when that plan copies its audio (ADR 048),
+/// and [`verified_audio_output`] for a plan without video. A failed check returns
 /// before the cancel flag is read and before `publishing` is emitted, and the early return
 /// drops the reservation, whose guard deletes the temporary file as on every other failure.
 ///
@@ -1380,11 +1383,19 @@ where
     // key, and `out_time_us` is wrong under `-copyts` (ADR 014 measurement 12). So the check
     // reads the finished file back instead, and an export without video reports no frames.
     let frames = if plan.video.is_some() {
-        verified_frame_count(
+        let frames = verified_frame_count(
             expected_frames,
             outcome.last_progress.as_ref(),
             outcome.stderr_detail(),
-        )?
+        )?;
+        // The frame count says nothing about audio that the export copies, so the file is read
+        // back for its streams too (ADR 048).
+        if plan.copied_audio.is_some() {
+            verified_copy_streams(outcome.stderr_detail(), || {
+                probe_output(&ffprobe, pending.path(), cancel.as_ref())
+            })?;
+        }
+        frames
     } else {
         // A plan without video encodes its audio or copies it (ADR 048). The copy has no
         // `PlannedAudio`, and its expected duration is the total duration, as for the encode.
@@ -1519,20 +1530,10 @@ fn verified_audio_output(
     detail: Option<String>,
     probe: impl FnOnce() -> Result<OutputAudioProbe, ProbeError>,
 ) -> Result<(), ExportCommandError> {
-    let streams_mismatch = |detail: Option<String>| ExportCommandError {
-        detail,
-        ..ExportCommandError::new(ExportErrorCode::OutputStreamsMismatch)
-    };
     if last_progress.is_none() {
         return Err(streams_mismatch(detail));
     }
-    let answer = probe().map_err(|error| match error {
-        ProbeError::ProcessFailed { .. } | ProbeError::Parse { .. } => {
-            streams_mismatch(detail.clone())
-        }
-        ProbeError::Canceled => ExportCommandError::new(ExportErrorCode::Canceled),
-        ProbeError::Spawn { .. } | ProbeError::TimedOut { .. } => map_reprobe_error(error),
-    })?;
+    let answer = read_finished_output(probe, &detail)?;
     verify_audio_output(&answer, expected).map_err(|mismatch| match mismatch {
         AudioOutputMismatch::Streams { .. } => streams_mismatch(detail),
         AudioOutputMismatch::Duration { measured, expected } => ExportCommandError {
@@ -1542,6 +1543,58 @@ fn verified_audio_output(
             ..ExportCommandError::new(ExportErrorCode::AudioDurationMismatch)
         },
     })
+}
+
+/// Decide whether the finished file of an export with video that copies its audio holds the copied
+/// audio, after [`verified_frame_count`] passed (ADR 048).
+///
+/// `probe` reads the file as it does for [`verified_audio_output`], and a probe that fails is
+/// reported as there. [`verify_copy_streams`] then requires one video stream and one audio stream,
+/// and any other set reports `outputStreamsMismatch`. Unlike the conditions that make the plan
+/// encode the audio instead of copying it, this check fails the export: the file is wrong, and
+/// publishing it would replace the file of the user with a video that lost its sound.
+///
+/// `detail` is the process's own stderr tail, as for the frame count.
+fn verified_copy_streams(
+    detail: Option<String>,
+    probe: impl FnOnce() -> Result<OutputAudioProbe, ProbeError>,
+) -> Result<(), ExportCommandError> {
+    let answer = read_finished_output(probe, &detail)?;
+    verify_copy_streams(&answer).map_err(|mismatch| match mismatch {
+        AudioOutputMismatch::Streams { .. } => streams_mismatch(detail),
+        // `verify_copy_streams` reads no duration today. A check that does would report it as
+        // the check of an export without video does.
+        AudioOutputMismatch::Duration { measured, expected } => ExportCommandError {
+            detail,
+            measured_duration_us: measured.map(duration_microseconds),
+            expected_duration_us: Some(duration_microseconds(expected)),
+            ..ExportCommandError::new(ExportErrorCode::AudioDurationMismatch)
+        },
+    })
+}
+
+/// Read the finished file of an export back through `probe`, and report a probe that fails as
+/// [`verified_audio_output`] documents: a fault in the file is `outputStreamsMismatch` with
+/// `detail`, a cancel is `canceled`, and a fault of ffprobe keeps its own code.
+fn read_finished_output(
+    probe: impl FnOnce() -> Result<OutputAudioProbe, ProbeError>,
+    detail: &Option<String>,
+) -> Result<OutputAudioProbe, ExportCommandError> {
+    probe().map_err(|error| match error {
+        ProbeError::ProcessFailed { .. } | ProbeError::Parse { .. } => {
+            streams_mismatch(detail.clone())
+        }
+        ProbeError::Canceled => ExportCommandError::new(ExportErrorCode::Canceled),
+        ProbeError::Spawn { .. } | ProbeError::TimedOut { .. } => map_reprobe_error(error),
+    })
+}
+
+/// `outputStreamsMismatch` with `detail`: the finished file does not hold the planned streams.
+fn streams_mismatch(detail: Option<String>) -> ExportCommandError {
+    ExportCommandError {
+        detail,
+        ..ExportCommandError::new(ExportErrorCode::OutputStreamsMismatch)
+    }
 }
 
 /// Turn one progress snapshot into the event the frontend accepts, or into nothing.
@@ -1577,9 +1630,10 @@ fn progress_event(
 ///
 /// The re-probe runs the same ffprobe the import ran, so it fails in the same four ways.
 /// Reusing `map_probe_error` keeps one mapping from a `ProbeError` to a code, a diagnostic,
-/// and an exit code, rather than letting a second copy drift away from it. The probe of the
-/// finished file of an export without video ([`verified_audio_output`]) runs the same ffprobe
-/// through the same runner. It uses this mapping only for a probe that cannot start or that
+/// and an exit code, rather than letting a second copy drift away from it. The probe of a
+/// finished file ([`read_finished_output`], for [`verified_audio_output`] and
+/// [`verified_copy_streams`]) runs the same ffprobe through the same runner. It uses this mapping
+/// only for a probe that cannot start or that
 /// times out: an exit failure or a parse failure there is a wrong output, not a fault of the
 /// source, and a cancel ends the run as canceled.
 ///
@@ -1650,7 +1704,7 @@ mod tests {
         ResolutionSetting,
     };
     use crate::time::{FrameCount, TickCount};
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::fs;
 
     fn sample_snapshot(frame: Option<u64>) -> ProgressSnapshot {
@@ -5138,9 +5192,10 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_with_video_is_verified_by_its_frame_count_and_never_probed() {
+    fn a_plan_with_video_that_copies_no_audio_is_verified_by_its_frame_count_and_never_probed() {
         // Video and audio, and video only, keep the frame count as their success check. The
-        // output probe below must never run for either.
+        // output probe below must never run for either. Only a plan that copies its audio reads
+        // its file back (ADR 048).
         for streams in [ExportStreams::VideoAndAudio, ExportStreams::VideoOnly] {
             let directory = TestDirectory::new();
             let destination = directory.path.join("out.mp4");
@@ -5168,13 +5223,191 @@ mod tests {
                     fs::write(&reserved, b"the finished video").unwrap();
                     Ok(exited_zero(Some(sample_snapshot(Some(30)))))
                 },
-                |_, _, _| unreachable!("a plan with video is verified by its frame count"),
+                |_, _, _| {
+                    unreachable!("a plan that copies no audio is verified by its frame count")
+                },
             )
             .unwrap();
 
             assert_eq!(frames, 30, "{streams:?}");
             assert_eq!(fs::read(&destination).unwrap(), b"the finished video");
         }
+    }
+
+    // -- the copy of the audio: the stream check of an export with video (ADR 048) ---------
+
+    /// A run of the one-second sample plan with video that copies its audio, ready for
+    /// [`run_export_with`], and the reserved path it writes.
+    fn prepared_copy_run(destination: &Path) -> (PreparedExport, PathBuf) {
+        let pending = PendingOutput::reserve(destination).unwrap();
+        let reserved = pending.path().to_path_buf();
+        let mut plan = sample_plan(destination);
+        plan.copied_audio = Some(crate::ffmpeg::export::CopiedAudio {
+            stream_index: 1,
+            start: Rational::new(0, 1).unwrap(),
+            end: Rational::new(1, 1).unwrap(),
+            adts_to_asc: false,
+        });
+        let prepared = PreparedExport {
+            preset_id: "active".to_owned(),
+            streams: ExportStreams::VideoAndAudio,
+            plan,
+            ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe: PathBuf::from("/usr/bin/ffprobe"),
+            arguments: vec![],
+            audio_arguments: Some(vec![]),
+            pending,
+        };
+        (prepared, reserved)
+    }
+
+    /// Run the copy plan with video over a destination that already holds a previous export: the
+    /// process exits zero after `frames` frames, and the output probe answers `answer`. Returns
+    /// the result, the number of `publishing` events, whether the probe ran, and the contents of
+    /// the destination afterwards.
+    fn copy_run(
+        frames: u64,
+        answer: Result<OutputAudioProbe, ProbeError>,
+    ) -> (Result<u64, ExportCommandError>, usize, bool, Vec<u8>) {
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("out.mp4");
+        fs::write(&destination, b"a previous export").unwrap();
+        let (prepared, reserved) = prepared_copy_run(&destination);
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+        let events: RefCell<Vec<ExportEvent>> = RefCell::new(Vec::new());
+        let probed = Cell::new(false);
+
+        let result = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |event| events.borrow_mut().push(event),
+            |_request, _on_progress| {
+                fs::write(&reserved, b"the finished video").unwrap();
+                Ok(exited_zero(Some(sample_snapshot(Some(frames)))))
+            },
+            |_, file, _| {
+                // The check reads the reservation, before the publication.
+                assert_eq!(file, reserved);
+                assert_eq!(published(&events), 0);
+                probed.set(true);
+                answer
+            },
+        );
+        assert!(!reserved.exists());
+        assert_eq!(leftover_reservations(&directory), 0);
+        let contents = fs::read(&destination).unwrap();
+        (result, published(&events), probed.get(), contents)
+    }
+
+    #[test]
+    fn a_copy_with_both_streams_is_published_after_the_frame_count_and_the_stream_check() {
+        let (result, publishing, probed, contents) =
+            copy_run(30, Ok(output_probe(1, 1, Some("1.010000"))));
+
+        assert_eq!(result.unwrap(), 30);
+        assert!(probed);
+        assert_eq!(publishing, 1);
+        assert_eq!(contents, b"the finished video");
+    }
+
+    #[test]
+    fn a_copy_whose_file_lost_a_stream_is_not_published() {
+        for (audio, video) in [(0, 1), (1, 0), (2, 1), (0, 0)] {
+            let (result, publishing, probed, contents) =
+                copy_run(30, Ok(output_probe(audio, video, Some("1.000000"))));
+
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.code,
+                ExportErrorCode::OutputStreamsMismatch,
+                "{audio} audio, {video} video"
+            );
+            assert_eq!(error.detail.as_deref(), Some("stderr tail"));
+            assert!(probed);
+            assert_eq!(publishing, 0);
+            assert_eq!(contents, b"a previous export");
+        }
+    }
+
+    #[test]
+    fn a_copy_that_lost_frames_fails_on_its_frame_count_without_probing() {
+        let (result, publishing, probed, contents) =
+            copy_run(29, Ok(output_probe(1, 1, Some("1.000000"))));
+
+        assert_eq!(
+            result.unwrap_err().code,
+            ExportErrorCode::FrameCountMismatch
+        );
+        assert!(!probed);
+        assert_eq!(publishing, 0);
+        assert_eq!(contents, b"a previous export");
+    }
+
+    #[test]
+    fn a_failed_read_of_a_copy_is_reported_by_where_the_fault_is() {
+        // A fault in the file is a wrong output, with the stderr of ffmpeg. A cancel is a cancel.
+        // A fault of ffprobe keeps its own code.
+        let (result, ..) = copy_run(
+            30,
+            Err(ProbeError::ProcessFailed {
+                code: Some(1),
+                stderr: b"moov atom not found".to_vec(),
+            }),
+        );
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::OutputStreamsMismatch);
+        assert_eq!(error.detail.as_deref(), Some("stderr tail"));
+
+        let (result, publishing, _, contents) = copy_run(30, Err(ProbeError::Canceled));
+        assert_eq!(result.unwrap_err().code, ExportErrorCode::Canceled);
+        assert_eq!(publishing, 0);
+        assert_eq!(contents, b"a previous export");
+
+        let (result, publishing, _, contents) = copy_run(
+            30,
+            Err(ProbeError::TimedOut {
+                timeout: std::time::Duration::from_secs(30),
+                stderr: Vec::new(),
+            }),
+        );
+        assert_eq!(result.unwrap_err().code, ExportErrorCode::FfprobeTimedOut);
+        assert_eq!(publishing, 0);
+        assert_eq!(contents, b"a previous export");
+    }
+
+    #[test]
+    fn a_cancel_during_the_stream_check_of_a_copy_publishes_nothing() {
+        // The cancel arrives while ffprobe reads a correct file. The second cancel test of ADR 016
+        // runs after the check, so the run ends as canceled.
+        let directory = TestDirectory::new();
+        let destination = directory.path.join("out.mp4");
+        let (prepared, reserved) = prepared_copy_run(&destination);
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+        let events: RefCell<Vec<ExportEvent>> = RefCell::new(Vec::new());
+
+        let error = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |event| events.borrow_mut().push(event),
+            |_request, _on_progress| {
+                fs::write(&reserved, b"the finished video").unwrap();
+                Ok(exited_zero(Some(sample_snapshot(Some(30)))))
+            },
+            |_, _, _| {
+                registry.cancel("42-7");
+                Ok(output_probe(1, 1, Some("1.000000")))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::Canceled);
+        assert_eq!(published(&events), 0);
+        assert!(!destination.exists());
+        assert!(!reserved.exists());
     }
 
     #[cfg(unix)]
