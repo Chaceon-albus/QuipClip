@@ -7,7 +7,8 @@
 //!
 //! The timestamp of a tag is its decode time in milliseconds. A video tag of H.264 or HEVC also
 //! carries a composition time offset, so its presentation time is the timestamp plus that offset
-//! (ADR 046).
+//! (ADR 046). Its frame data is a chain of NAL units, each after its length, and its decoder
+//! configuration gives the size of that length.
 
 /// The signature at the start of every FLV file.
 pub const SIGNATURE: &[u8; 3] = b"FLV";
@@ -215,6 +216,84 @@ fn classify_video(data: &[u8]) -> TagRole {
     }
 }
 
+/// The size in bytes of the NAL unit lengths in the frames of the video configuration tag
+/// `data`, from its AVC or HEVC decoder configuration record (ISO/IEC 14496-15). `None` for
+/// another codec, a record too short to hold the size, or a size of 3, which Chromium refuses.
+pub fn nal_length_size(data: &[u8]) -> Option<usize> {
+    let first = *data.first()?;
+    let hevc = if first & VIDEO_EX_HEADER != 0 {
+        if first & 0x0F != VIDEO_PACKET_SEQUENCE_START {
+            return None;
+        }
+        match data.get(1..5)? {
+            b"avc1" => false,
+            b"hvc1" => true,
+            _ => return None,
+        }
+    } else {
+        // Packet type 0 is the sequence header of the legacy tag.
+        if data.get(1) != Some(&0) {
+            return None;
+        }
+        match first & 0x0F {
+            VIDEO_CODEC_AVC => false,
+            VIDEO_CODEC_HEVC_EXTENSION => true,
+            _ => return None,
+        }
+    };
+    // Both forms put the record after five bytes: the legacy header and the composition time, or
+    // the enhanced header and the FourCC.
+    let record = data.get(5..)?;
+    let size_byte = *record.get(if hevc { 21 } else { 4 })?;
+    match (size_byte & 0x03) + 1 {
+        3 => None,
+        size => Some(usize::from(size)),
+    }
+}
+
+/// The NAL units of the H.264 or HEVC video frame tag `data`, or `None` for any other tag.
+pub fn frame_nal_units(data: &[u8]) -> Option<&[u8]> {
+    let first = *data.first()?;
+    if (first >> 4) & 0x07 == VIDEO_FRAME_TYPE_COMMAND {
+        return None;
+    }
+    if first & VIDEO_EX_HEADER != 0 {
+        let four_cc = data.get(1..5)?;
+        if four_cc != b"avc1" && four_cc != b"hvc1" {
+            return None;
+        }
+        return match first & 0x0F {
+            // The composition time comes after the FourCC.
+            VIDEO_PACKET_CODED_FRAMES => data.get(8..),
+            VIDEO_PACKET_CODED_FRAMES_X => data.get(5..),
+            _ => None,
+        };
+    }
+    match (first & 0x0F, data.get(1)) {
+        // Packet type 1 is a frame, after the packet type and the composition time.
+        (VIDEO_CODEC_AVC | VIDEO_CODEC_HEVC_EXTENSION, Some(1)) => data.get(5..),
+        _ => None,
+    }
+}
+
+/// True when `units` is a chain of NAL units, each after a length of `length_size` bytes, that
+/// ends exactly at its end, with no unit of length 0. This is the test of Chromium's MP4 parser
+/// (`AVC::ConvertFrameToAnnexB`), which fails the append of the whole segment when a sample does
+/// not pass it. An empty frame passes this test. FFmpeg's FLV demuxer gives no packet for it.
+pub fn nal_units_fill(units: &[u8], length_size: usize) -> bool {
+    let mut position = 0usize;
+    while position.saturating_add(length_size) < units.len() {
+        let size = units[position..position + length_size]
+            .iter()
+            .fold(0usize, |size, byte| (size << 8) | usize::from(*byte));
+        if size == 0 {
+            return false;
+        }
+        position = position.saturating_add(length_size).saturating_add(size);
+    }
+    position == units.len()
+}
+
 const SOUND_FORMAT_AAC: u8 = 10;
 const SOUND_FORMAT_EX_HEADER: u8 = 9;
 const AUDIO_PACKET_SEQUENCE_START: u8 = 0;
@@ -359,6 +438,83 @@ mod tests {
             TagRole::Other
         );
         assert_eq!(classify(TagKind::Video, &[0x91, b'h']), TagRole::Other);
+    }
+
+    #[test]
+    fn a_chain_of_nal_units_must_end_exactly_at_the_end_of_the_frame() {
+        assert!(nal_units_fill(&[], 4));
+        assert!(nal_units_fill(&[0, 0, 0, 2, 0x65, 0x88], 4));
+        assert!(nal_units_fill(
+            &[0, 0, 0, 1, 0x09, 0, 0, 0, 2, 0x65, 0x88],
+            4
+        ));
+        assert!(nal_units_fill(&[2, 0x65, 0x88, 1, 0x41], 1));
+        assert!(nal_units_fill(&[0, 2, 0x65, 0x88], 2));
+        // The last frame of a recording that was cut: a length of 202 with no unit after it.
+        assert!(!nal_units_fill(&[0, 0, 0, 0xCA], 4));
+        assert!(!nal_units_fill(&[0, 0, 0, 0, 0, 0, 0, 1, 0x41], 4));
+        for trailing in 1..=3 {
+            let mut units = vec![0, 0, 0, 1, 0x41];
+            units.extend(std::iter::repeat_n(0, trailing));
+            assert!(!nal_units_fill(&units, 4), "{trailing} trailing bytes");
+        }
+        assert!(!nal_units_fill(&[0, 0, 0, 9, 0x65, 0x88], 4));
+        assert!(!nal_units_fill(&[0xFF, 0xFF, 0xFF, 0xFF, 0x65], 4));
+    }
+
+    #[test]
+    fn reads_the_nal_length_size_of_an_avc_or_hevc_configuration() {
+        let avc = |size_byte: u8| vec![0x17, 0, 0, 0, 0, 1, 0x64, 0, 0x28, size_byte, 0xE1];
+        assert_eq!(nal_length_size(&avc(0xFF)), Some(4));
+        assert_eq!(nal_length_size(&avc(0xFD)), Some(2));
+        assert_eq!(nal_length_size(&avc(0xFC)), Some(1));
+        assert_eq!(nal_length_size(&avc(0xFE)), None);
+        // A record too short to hold the size, as the configuration of the test recordings.
+        assert_eq!(nal_length_size(&[0x17, 0, 0, 0, 0, 1, 0x64, 0, 1]), None);
+        // A frame is no configuration.
+        assert_eq!(
+            nal_length_size(&[0x17, 1, 0, 0, 0, 1, 0x64, 0, 0x28, 0xFF]),
+            None
+        );
+
+        let mut hevc = vec![0x1C, 0, 0, 0, 0];
+        hevc.extend(std::iter::repeat_n(0, 21));
+        hevc.push(0xF3);
+        assert_eq!(nal_length_size(&hevc), Some(4));
+        assert_eq!(nal_length_size(&hevc[..hevc.len() - 1]), None);
+
+        let mut enhanced = vec![0x90, b'h', b'v', b'c', b'1'];
+        enhanced.extend(std::iter::repeat_n(0, 21));
+        enhanced.push(0xF1);
+        assert_eq!(nal_length_size(&enhanced), Some(2));
+        let enhanced_avc = [0x90, b'a', b'v', b'c', b'1', 1, 0x64, 0, 0x28, 0xFF];
+        assert_eq!(nal_length_size(&enhanced_avc), Some(4));
+        assert_eq!(
+            nal_length_size(&[0x90, b'a', b'v', b'0', b'1', 0x81, 0, 0, 0, 0]),
+            None
+        );
+        assert_eq!(nal_length_size(&[0x12, 0, 0, 0, 0, 1, 0, 0, 0, 0xFF]), None);
+        assert_eq!(nal_length_size(&[]), None);
+    }
+
+    #[test]
+    fn finds_the_nal_units_of_each_form_of_video_frame() {
+        let units: &[u8] = &[0, 0, 0, 1, 0x41];
+        let legacy = [&[0x27, 1, 0, 0, 33][..], units].concat();
+        assert_eq!(frame_nal_units(&legacy), Some(units));
+        let hevc = [&[0x1C, 1, 0, 0, 0][..], units].concat();
+        assert_eq!(frame_nal_units(&hevc), Some(units));
+        let coded = [&[0x91, b'h', b'v', b'c', b'1', 0, 0, 40][..], units].concat();
+        assert_eq!(frame_nal_units(&coded), Some(units));
+        let coded_x = [&[0xA3, b'a', b'v', b'c', b'1'][..], units].concat();
+        assert_eq!(frame_nal_units(&coded_x), Some(units));
+        // A configuration, a sequence end, a legacy codec, AV1 and a command frame hold none.
+        assert_eq!(frame_nal_units(&[0x17, 0, 0, 0, 0, 1, 0x64]), None);
+        assert_eq!(frame_nal_units(&[0x17, 2, 0, 0, 0]), None);
+        assert_eq!(frame_nal_units(&[0x24, 1, 2, 3]), None);
+        assert_eq!(frame_nal_units(&[0x91, b'a', b'v', b'0', b'1', 1, 2]), None);
+        assert_eq!(frame_nal_units(&[0x57, 1, 0, 0, 0]), None);
+        assert_eq!(frame_nal_units(&[]), None);
     }
 
     #[test]

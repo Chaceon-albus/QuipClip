@@ -7,16 +7,22 @@
 //! itself: in front of the first keyframe after the time or byte limit, and in front of a tag
 //! whose timestamp decreases, so the mp4 muxer never sees a restart. At a decoder configuration
 //! that differs from the one in the head, which one mp4 output cannot switch to, it stops writing
-//! and reads on to the next keyframe, where the next window starts. The reader of the remux
-//! output waits for the credit of the page, so a page that does not append stops the whole
-//! chain down to the reads of the share.
+//! and reads on to the next keyframe, where the next window starts. A video frame whose NAL units
+//! do not fill its data, as the last frame of a recording that was cut, fails the append of the
+//! whole window in Chromium, so the writer leaves out the video from that frame up to the next
+//! keyframe that passes, and it keeps the audio. The reader of the remux output waits for the
+//! credit of the page, so a page that does not append stops the whole chain down to the reads of
+//! the share.
 
 use super::registry::{WindowHandle, CREDIT_LIMIT};
 use crate::ffmpeg::capabilities::smoke::read_capped_tail;
 use crate::flv::locate::DECREASE_LIMIT_MS;
 use crate::flv::scan::TagStream;
 use crate::flv::table::{ConfigTag, KeyframeEntry};
-use crate::flv::tag::{parse_tag_header, TagKind, TagRole, PREVIOUS_TAG_SIZE_LEN, TAG_HEADER_LEN};
+use crate::flv::tag::{
+    frame_nal_units, nal_length_size, nal_units_fill, parse_tag_header, TagKind, TagRole,
+    PREVIOUS_TAG_SIZE_LEN, TAG_HEADER_LEN,
+};
 use crate::flv::FlvSource;
 use crate::procutil::command_without_console;
 use serde::{Deserialize, Serialize};
@@ -75,12 +81,12 @@ pub struct EndMessage {
     /// the page sees its end in the buffered data.
     pub reached_end: bool,
     /// Where the next window starts: the keyframe tag at the limit of this window or after a
-    /// changed decoder configuration, or, after a restart of the timestamps or a damaged tag,
-    /// the place where this window stopped, from which the next request walks to the next
-    /// keyframe. A complete window with
-    /// neither `next` nor `reached_end` is one whose writer did not report within the wait of
-    /// its reader, as when a read of a share stalls. The page then resumes by time from the
-    /// last fragment that it appended, and never takes it as the end of the file.
+    /// changed decoder configuration, or, after a restart of the timestamps, a damaged tag, or
+    /// video left out for more than [`crate::flv::NEXT_KEYFRAME_REACH`] bytes, the place where
+    /// this window stopped, from which the next request walks to the next keyframe. A complete
+    /// window with neither `next` nor `reached_end` is one whose writer did not report within
+    /// the wait of its reader, as when a read of a share stalls. The page then resumes by time
+    /// from the last fragment that it appended, and never takes it as the end of the file.
     pub next: Option<ResumePoint>,
     /// The bytes that Rust read from the source for this window.
     pub bytes_read: u64,
@@ -456,6 +462,13 @@ fn write_slice<V: Write, P: Write>(
     }
 
     let held_configs = head_configs(&slice.head);
+    // The init segment of the window carries the video configuration of the head, and the web
+    // view splits each video sample of the window into NAL units with its length size. Without a
+    // length size, as for another codec, no frame is checked.
+    let nal_length = held_configs
+        .iter()
+        .find(|(kind, _)| *kind == TagKind::Video)
+        .and_then(|(_, data)| nal_length_size(data));
     let mut video = Some(video);
     let mut buffer = Vec::new();
     let mut run = Vec::new();
@@ -468,6 +481,13 @@ fn write_slice<V: Write, P: Write>(
     let mut drain_from: Option<u64> = None;
     // Where a window that stops at a restart or at damage resumes from.
     let mut resume_from = None;
+    // The offset of a video frame whose NAL units do not fill its data, while the writer leaves
+    // out the video from it up to the next keyframe whose NAL units do. Chromium fails the append
+    // of the whole window at such a frame. The audio goes on. For a stretch of up to 10 s, the
+    // interleave limit of FFmpeg, the mp4 muxer then lines up the last video sample with the next
+    // frame that it gets, and the web view keeps one buffered range. A longer stretch leaves a
+    // hole, which the page seeks over (ADR 046).
+    let mut dropped_from: Option<u64> = None;
     loop {
         if cancel.load(Ordering::SeqCst) {
             break;
@@ -504,6 +524,12 @@ fn write_slice<V: Write, P: Write>(
             }
             latest_dts = latest_dts.max(Some(tag.dts()));
         }
+        let video_frame = tag.header.kind == TagKind::Video && tag.role.is_frame();
+        let whole = !video_frame
+            || nal_length.is_none_or(|length_size| {
+                frame_nal_units(&buffer[TAG_HEADER_LEN..buffer.len() - PREVIOUS_TAG_SIZE_LEN])
+                    .is_none_or(|units| nal_units_fill(units, length_size))
+            });
         let keyframe = tag.header.kind == TagKind::Video && tag.is_keyframe();
         if keyframe {
             let entry = KeyframeEntry {
@@ -514,7 +540,12 @@ fn write_slice<V: Write, P: Write>(
             run.push(entry);
             let past_limit = tag.dts() >= slice.start_dts.saturating_add(slice.limit_ms)
                 || written >= slice.limit_bytes;
-            if tag.offset != slice.start_offset && (past_limit || drain_from.is_some()) {
+            // The limit ends the window only at a keyframe that it writes and that does not end
+            // video left out. Otherwise the next window would start with no video there, or the
+            // last sample in front of the stretch would get no later frame in its own window to
+            // line up with.
+            let ends_at_limit = past_limit && whole && dropped_from.is_none();
+            if tag.offset != slice.start_offset && (ends_at_limit || drain_from.is_some()) {
                 outcome.next = Some(ResumePoint {
                     offset: tag.offset,
                     pts_ms: tag.pts(),
@@ -561,6 +592,30 @@ fn write_slice<V: Write, P: Write>(
                 break;
             }
             continue;
+        }
+        if video_frame {
+            if !whole && dropped_from.is_none() {
+                eprintln!(
+                    "preview: the video frame at byte {} ({} ms) does not split into NAL units; \
+                     the window leaves out the video up to the next keyframe that does",
+                    tag.offset,
+                    tag.dts()
+                );
+                dropped_from = Some(tag.offset);
+            } else if whole && keyframe {
+                dropped_from = None;
+            }
+        }
+        if let Some(from) = dropped_from {
+            // A stretch with no keyframe that passes within the reach of a walk to the next
+            // keyframe ends the read there, as the drain does.
+            if tag.offset.saturating_sub(from) > crate::flv::NEXT_KEYFRAME_REACH {
+                resume_from = Some((tag.offset, tag.pts()));
+                break;
+            }
+            if video_frame {
+                continue;
+            }
         }
         if video
             .as_mut()
@@ -977,7 +1032,7 @@ mod tests {
         assert_eq!((keyframe.offset, keyframe.pts), (restart.1, restart.2));
     }
 
-    use crate::flv::test_support::FlvBuilder;
+    use crate::flv::test_support::{nal_chain, FlvBuilder};
 
     /// The data of a configuration of AAC at 44100 Hz, which differs from the one of
     /// `FlvBuilder::aac_config` at 48000 Hz.
@@ -1023,16 +1078,7 @@ mod tests {
 
     /// Write the window of `source` from its first frame, with no limit.
     fn whole_window(source: &Arc<FlvSource>) -> (WriterOutcome, Vec<u8>) {
-        let start = source.head().first_frame_offset;
-        let mut video = Vec::new();
-        let outcome = write_slice(
-            &slice(source, start, 0, 600_000),
-            &mut video,
-            None::<Vec<u8>>,
-            &AtomicBool::new(false),
-            &AtomicBool::new(false),
-        );
-        (outcome, video)
+        window_from(source, source.head().first_frame_offset, 0, 600_000)
     }
 
     #[test]
@@ -1239,6 +1285,197 @@ mod tests {
         );
         assert!(outcome.reached_end);
         assert!(!outcome.damaged);
+    }
+
+    /// The data of the frame that a recording that was cut ends with: a NAL unit length of 202
+    /// and no unit after it.
+    const CUT_FRAME: [u8; 4] = [0, 0, 0, 0xCA];
+
+    /// A recording of 120 frames, 33 ms apart, whose NAL units carry a length of 4 bytes, with a
+    /// keyframe each 30 frames and an audio frame after each video frame. The frames in
+    /// `malformed` hold [`CUT_FRAME`]. With `config_at_50`, another configuration comes in front
+    /// of frame 50. The answer holds the bytes and the offset of each video frame.
+    fn checked_recording(malformed: &[u32], config_at_50: bool) -> (Vec<u8>, Vec<u64>) {
+        let mut builder = FlvBuilder::new(true, true);
+        builder.aac_config(0);
+        builder.avcc_config(0, 4, 0);
+        let mut frames = Vec::new();
+        for frame in 0..120u32 {
+            if config_at_50 && frame == 50 {
+                builder.avcc_config(frame * 33, 4, 1);
+            }
+            let units = if malformed.contains(&frame) {
+                CUT_FRAME.to_vec()
+            } else {
+                nal_chain(4, &[12, 300])
+            };
+            frames.push(builder.video_units(frame * 33, frame % 30 == 0, 0, &units));
+            builder.audio(frame * 33 + 10, 100);
+        }
+        (builder.finish(), frames)
+    }
+
+    /// The video frames that `video` holds after its head of `head_len` bytes, as their index in
+    /// a recording of frames 33 ms apart, and the number of its audio frames.
+    fn written_frames(video: &[u8], head_len: usize) -> (Vec<u32>, usize) {
+        let mut stream = TagStream::new(&video[head_len..], 0);
+        let mut buffer = Vec::new();
+        let mut frames = Vec::new();
+        let mut audio = 0;
+        while let Some(tag) = stream.next_tag(&mut buffer).unwrap() {
+            if tag.header.kind == TagKind::Video && tag.role.is_frame() {
+                frames.push(u32::try_from(tag.dts()).unwrap() / 33);
+            } else if tag.header.kind == TagKind::Audio && tag.role.is_frame() {
+                audio += 1;
+            }
+        }
+        (frames, audio)
+    }
+
+    /// Write the window of `source` from `offset` at `dts`, up to `limit_ms`.
+    fn window_from(
+        source: &Arc<FlvSource>,
+        offset: u64,
+        dts: i64,
+        limit_ms: i64,
+    ) -> (WriterOutcome, Vec<u8>) {
+        let mut video = Vec::new();
+        let outcome = write_slice(
+            &slice(source, offset, dts, limit_ms),
+            &mut video,
+            None::<Vec<u8>>,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        (outcome, video)
+    }
+
+    #[test]
+    fn the_writer_leaves_out_the_video_from_a_cut_frame_up_to_the_next_keyframe() {
+        let dir = TestDirectory::new();
+        let source = write_file(&dir, &checked_recording(&[40], false).0);
+        let start = source.head().first_frame_offset;
+        let mut video = Vec::new();
+        let mut pcm = Vec::new();
+        let outcome = write_slice(
+            &slice(&source, start, 0, 600_000),
+            &mut video,
+            Some(&mut pcm),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        assert!(outcome.reached_end);
+        assert_eq!(outcome.next, None);
+        let (frames, audio) = written_frames(&video, source.head_bytes_at(start).len());
+        assert_eq!(frames, (0..40).chain(60..120).collect::<Vec<_>>());
+        assert_eq!(audio, 120);
+        // The PCM process takes the same bytes, so its audio goes on through the stretch.
+        assert_eq!(video, pcm);
+    }
+
+    #[test]
+    fn video_left_out_does_not_count_toward_the_byte_limit() {
+        let dir = TestDirectory::new();
+        let (bytes, offsets) = checked_recording(&[40], false);
+        let source = write_file(&dir, &bytes);
+        let start = source.head().first_frame_offset;
+        // Counted with frames 40 to 59, the bytes in front of keyframe 90 would reach the limit.
+        let outcome = write_slice(
+            &FlvSlice {
+                limit_bytes: offsets[90] - start - 1,
+                ..slice(&source, start, 0, 600_000)
+            },
+            Vec::new(),
+            None::<Vec<u8>>,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        assert!(outcome.reached_end);
+        assert_eq!(outcome.next, None);
+    }
+
+    #[test]
+    fn a_cut_last_frame_leaves_the_rest_of_the_window_whole() {
+        // A recording that was cut: only its last frame goes, and the audio after it stays.
+        let dir = TestDirectory::new();
+        let source = write_file(&dir, &checked_recording(&[119], false).0);
+        let start = source.head().first_frame_offset;
+        let (outcome, video) = whole_window(&source);
+        assert!(outcome.reached_end);
+        assert_eq!(outcome.next, None);
+        let (frames, audio) = written_frames(&video, source.head_bytes_at(start).len());
+        assert_eq!(frames, (0..119).collect::<Vec<_>>());
+        assert_eq!(audio, 120);
+    }
+
+    #[test]
+    fn a_window_whose_start_keyframe_is_cut_starts_its_video_at_the_next_keyframe() {
+        let dir = TestDirectory::new();
+        let (bytes, offsets) = checked_recording(&[30], false);
+        let source = write_file(&dir, &bytes);
+        let (outcome, video) = window_from(&source, offsets[30], 30 * 33, 600_000);
+        assert!(outcome.reached_end);
+        let (frames, audio) = written_frames(&video, source.head_bytes_at(offsets[30]).len());
+        assert_eq!(frames, (60..120).collect::<Vec<_>>());
+        assert_eq!(audio, 90);
+    }
+
+    #[test]
+    fn a_window_ends_neither_at_a_cut_keyframe_nor_at_the_keyframe_after_a_cut() {
+        // The time limit of 900 ms lies at keyframe 30.
+        let dir = TestDirectory::new();
+        let (bytes, offsets) = checked_recording(&[30], false);
+        let source = write_file(&dir, &bytes);
+        let start = source.head().first_frame_offset;
+        let (outcome, _) = window_from(&source, start, 0, 900);
+        assert_eq!(outcome.next.map(|next| next.offset), Some(offsets[90]));
+
+        let other = TestDirectory::new();
+        let (bytes, offsets) = checked_recording(&[20], false);
+        let source = write_file(&other, &bytes);
+        let start = source.head().first_frame_offset;
+        let (outcome, _) = window_from(&source, start, 0, 900);
+        assert_eq!(outcome.next.map(|next| next.offset), Some(offsets[60]));
+    }
+
+    #[test]
+    fn a_new_configuration_after_a_cut_frame_still_ends_the_window_at_the_next_keyframe() {
+        let dir = TestDirectory::new();
+        let (bytes, offsets) = checked_recording(&[40], true);
+        let source = write_file(&dir, &bytes);
+        let (outcome, _) = whole_window(&source);
+        assert_eq!(outcome.next.map(|next| next.offset), Some(offsets[60]));
+        assert!(source.has_config_change());
+
+        // The window after a new configuration checks with its own head, so the read on after
+        // the configuration ends at a cut keyframe too.
+        let other = TestDirectory::new();
+        let (bytes, offsets) = checked_recording(&[40, 60], true);
+        let source = write_file(&other, &bytes);
+        let (outcome, _) = whole_window(&source);
+        assert_eq!(outcome.next.map(|next| next.offset), Some(offsets[60]));
+    }
+
+    #[test]
+    fn the_frames_of_a_real_encoder_split_into_nal_units() {
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let dir = TestDirectory::new();
+        let path = sample_flv(&ffmpeg, &dir);
+        let source = Arc::new(FlvSource::open(&path, None).unwrap());
+        let start = source.head().first_frame_offset;
+        let head = source.head_bytes_at(start);
+        let (_, config) = head_configs(&head)
+            .into_iter()
+            .find(|(kind, _)| *kind == TagKind::Video)
+            .unwrap();
+        assert_eq!(nal_length_size(&config), Some(4));
+        let (outcome, video) = window_from(&source, start, 0, 600_000);
+        assert!(outcome.reached_end);
+        // Every frame passed the check, so the window holds every byte of the file.
+        let len = std::fs::metadata(&path).unwrap().len() as usize;
+        assert_eq!(video.len(), head.len() + len - start as usize);
     }
 
     #[test]

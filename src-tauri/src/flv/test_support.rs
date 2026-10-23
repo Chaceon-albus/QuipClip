@@ -84,6 +84,17 @@ impl FlvBuilder {
         self.tag(9, timestamp, &[0x17, 0, 0, 0, 0, 1, 0x64, 0, marker])
     }
 
+    /// An AVC sequence header whose decoder configuration record gives NAL unit lengths of
+    /// `length_size` bytes. `marker` makes two configurations differ.
+    pub fn avcc_config(&mut self, timestamp: u32, length_size: u8, marker: u8) -> u64 {
+        let size_byte = 0xFC | (length_size - 1);
+        self.tag(
+            9,
+            timestamp,
+            &[0x17, 0, 0, 0, 0, 1, 0x64, 0, marker, size_byte, 0xE0, 0],
+        )
+    }
+
     pub fn aac_config(&mut self, timestamp: u32) -> u64 {
         self.tag(8, timestamp, &[0xAF, 0, 0x11, 0x90])
     }
@@ -93,6 +104,14 @@ impl FlvBuilder {
         let mut data = vec![if key { 0x17 } else { 0x27 }, 1];
         data.extend_from_slice(&composition_ms.to_be_bytes()[1..]);
         data.extend(self.noise(len.saturating_sub(5)));
+        self.tag(9, dts, &data)
+    }
+
+    /// An AVC frame whose data after the composition time is `units`.
+    pub fn video_units(&mut self, dts: u32, key: bool, composition_ms: i32, units: &[u8]) -> u64 {
+        let mut data = vec![if key { 0x17 } else { 0x27 }, 1];
+        data.extend_from_slice(&composition_ms.to_be_bytes()[1..]);
+        data.extend_from_slice(units);
         self.tag(9, dts, &data)
     }
 
@@ -136,6 +155,16 @@ impl FlvBuilder {
         out.truncate(len);
         out
     }
+}
+
+/// A chain of NAL units of `sizes` bytes, each after its length of `length_size` bytes.
+pub fn nal_chain(length_size: usize, sizes: &[usize]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for &size in sizes {
+        out.extend_from_slice(&(size as u32).to_be_bytes()[4 - length_size..]);
+        out.extend(std::iter::repeat_n(0x41, size));
+    }
+    out
 }
 
 fn amf_string(out: &mut Vec<u8>, text: &str) {
