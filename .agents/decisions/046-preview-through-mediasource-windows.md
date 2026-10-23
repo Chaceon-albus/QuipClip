@@ -492,6 +492,13 @@ before the first keyframe of the file, because no window can start earlier. The 
 waits for that seek, which never completes, so the store replaces it with the seek over the gap,
 whose target is buffered (see "Seeks").
 
+(Added with the real-frame step.) The page reads the presentation time of each video sample
+from the `tfdt`, `tfhd` and `trun` boxes of each video fragment. It keeps these frame starts as
+it keeps its keyframes: it adds the frames of a fragment when the append of its `mdat` ends, it
+clips them to the spans, and a remove and a seek that drops the data drop them. While a
+calibration holds, the store moves a relative frame step by these frames (ADR 022). After a
+fragment with no frame times, the page gives none until a seek drops the data.
+
 ### Seeks
 
 A seek outside the buffered data stays `seeking` until the window delivers it. The page sets

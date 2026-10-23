@@ -192,6 +192,62 @@ On a coarse time base or a variable-rate source, the step keeps the relative tar
 the picture and the frame label can still repeat or skip a frame, as they did before this
 change. Such sources are rare.
 
+(Added with the real-frame step.) A live recording can meet the conditions of "When the grid
+applies", and its frames can still lie off the grid. The probe gave an FLV of 1360 s as 30/1 on
+a time base of 1/1000. Its first frame lies about 7 ms after the grid of the frames that follow
+it. Most of the frames after it start 1 to 1.33 ms before their nominal start. From 19:28 the
+frames come every 50 ms, and after 22:20 about every 45 ms. These measurements came from that
+file:
+
+- A replay of the step on those frames found forward steps that aimed inside the frame on
+  screen. This was 48 % of the frames from 19:28 to 22:20 and 36 % after 22:20. At 30 fps, it
+  was 0 to 6 frames a minute.
+- In Chromium 152, a paused seek inside the frame on screen brought one frame callback with the
+  same media time. So the store had that frame on screen again, and the next press aimed at the
+  same place. The edge no-op dropped that press, and every press after it. The forward step
+  stopped at that frame.
+- The statement above that such a seek "may bring no frame callback" did not apply in that
+  test: Chromium 152 brought a callback each time. WebKit was not measured.
+
+A source that plays through a MediaSource (ADR 046) knows the start of each frame of its
+buffered data. While a calibration holds, a relative step of such a source moves by these
+frames:
+
+- It counts from the frame on screen, by the rule of "The frame the step starts from" above, or
+  else from the frame that holds the position the step starts from.
+- It seeks into the frame that it reaches. The target lies halfway to the start of the next
+  frame, and at most half a nominal interval after the start of the frame. For the last known
+  frame, the interval in front of it takes the place of the next frame.
+- The display target is the start of that frame, which its frame callback then reports.
+
+The step keeps the rules of the grid, or the relative target, in these cases:
+
+- The table does not know the frame that the step counts from or the frame that it reaches, as
+  beyond the appended data.
+- The target lies outside the bounds of the step, as for a frame that the extent leaves out.
+  The clamp, the edge no-op and the display of ADR 026 then apply.
+- The steps of a deferred navigation count nominal frames, as a deferred frame index does.
+  This includes the presses during the calibration.
+- An appended fragment gave no frame times, or a `moof` did not parse. The page then gives no
+  frames until a seek drops the data.
+
+A test page ran the store and the controller of this rule on that file in Chromium 152. Six
+presses from 1181.149 s showed six new frames, forward and back. On the grid they showed none.
+At 30 fps both rules showed the same frames.
+
+These parts stay on the grid, for a later decision:
+
+- `seekToFrameIndex`, the typed frame of ADR 028, and the frame timecode `FF`. On that file the
+  frame timecode repeats about 30 % of the frames and skips about 30 %, also at 30 fps.
+- The test at `seeked` that a frame holds the position. A step by real frames aims inside its
+  frame. On the grid, the index of that position can differ from the index of the frame. Off the
+  grid, the test needs a position less than one tick after the frame start, so it fails. When
+  the frame callback arrives during the seek, the display target can then stay set until the
+  next callback. Mark In and Mark Out read the frame on screen, so they stay available. Go to In,
+  Go to Out and End can then seek again onto the frame on screen.
+- A video `traf` with no `tfhd` or no `tfdt` gives no fragment and no frame times. A step can
+  then pass over its frames. The windows of FFmpeg always hold both boxes.
+
 This supersedes two statements of ADR 021: that the step reads `currentTime` and adds one
 nominal frame interval, and that calibration never enters that path. The step now reads the
 calibration to choose the grid. ADR 021 still lets the step keys and buttons act without a
