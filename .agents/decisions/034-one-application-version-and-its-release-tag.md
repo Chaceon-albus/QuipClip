@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-25
 - Deciders: capric98
-- Amended by: ADR 042
+- Amended by: ADR 042, ADR 047
 
 ## Context
 
@@ -64,6 +64,9 @@ Windows build makes an MSI package. The MSI format accepts a pre-release part on
 is all digits. A version with a pre-release part needs a separate decision. ADR 042 lets
 the maintainer mark a published release with the GitHub pre-release flag. Its version is
 still a release version.
+
+(Changed on 2026-10-23.) The application shows the source of each build, its commit and
+branch, beside the version. The source is not part of the version (ADR 047).
 
 **Release tag.** The release tag is `v` and the version, for example `v0.2.0`. It is an
 annotated tag on a commit on `main`, and the `Cargo.toml` of that commit has the version.

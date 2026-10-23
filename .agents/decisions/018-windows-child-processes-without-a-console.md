@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-20
 - Deciders: capric98
-- Amended by: ADR 043
+- Amended by: ADR 043, ADR 047
 
 ## Context
 
@@ -47,6 +47,10 @@ that mistake. A rule that only a reader can apply is not sufficient here, so `cl
 puts `Command::new` in `disallowed-methods`. The constructor module holds the one `allow`
 that the rule permits. The gate runs `cargo clippy --all-targets -- -D warnings`, so a new
 direct call fails the build.
+
+(Changed on 2026-10-23.) `build.rs` holds a second `allow`, for `git` at compile time (ADR
+047). The build script runs inside cargo, never in the application, and it cannot use the
+constructor of the library.
 
 The constructor changes only the console window. The caller keeps full control of the
 program, the arguments, the three streams, the timeout and the termination.

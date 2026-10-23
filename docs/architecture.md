@@ -67,6 +67,7 @@ document summarizes them and shows how the parts fit together.
 | [`044-arrow-keys-step-a-frame-while-paused.md`](../.agents/decisions/044-arrow-keys-step-a-frame-while-paused.md)                           | Paused arrows step a frame, playing arrows jump 5 s, D and F step frames   |
 | [`045-select-several-segments-and-delete-them.md`](../.agents/decisions/045-select-several-segments-and-delete-them.md)                     | `Cmd`/`Ctrl` with a click or `A` selects segments, Delete removes them all |
 | [`046-preview-through-mediasource-windows.md`](../.agents/decisions/046-preview-through-mediasource-windows.md)                             | A container the web view cannot open plays from fMP4 windows               |
+| [`047-show-the-source-of-each-build.md`](../.agents/decisions/047-show-the-source-of-each-build.md)                                         | The version shows with the commit and the branch of the build              |
 
 ## Shape
 
@@ -456,8 +457,8 @@ The settings are edited in their own window, labelled `settings`, with the title
 system (ADR 038). Both windows load one chunk and render different roots. Each write of the
 file sends `settings:changed`, and a window takes only a newer revision, so the two windows
 never overwrite each other. Tauri checks each command against the capability of the window
-that calls it, and the Settings window may call only the settings commands, the probe, and
-the close of its own window.
+that calls it, and the Settings window may call only the settings commands, the probe, the
+close of its own window, and the build info of its About tab (ADR 047).
 
 A damaged file fails the read, and a save refuses to write over a file it could not read.
 Losing a preset library is not the same as losing a cache entry. A separate permissive
@@ -625,12 +626,17 @@ TypeScript is held at 5.9, because `typescript-eslint` caps its peer range below
 
 ## Version and release
 
-See ADR 034 and ADR 042.
+See ADR 034, ADR 042, and ADR 047.
 
 `src-tauri/Cargo.toml` holds the only copy of the application version. `tauri.conf.json`
 and `package.json` have no `version` field, so Tauri reads the version from `Cargo.toml`.
 `scripts/version.mjs` shows, checks, and bumps the version, and a Vitest test runs its check
 on the repository. The release tag is `v` and the version.
+
+Each build also records its source: the abbreviated commit hash, the branch when it is not
+`main`, and a modified flag. `build.rs` reads them from git at compile time. The macOS
+About panel and the About tab of Settings show them after the version, for example
+`0.1.1 (feature/trim a1b2c3d, modified)`. The version itself does not change.
 
 The push of a release tag starts `.github/workflows/release.yml`. It checks the tag, runs
 `ci.yml` on the tagged commit, and builds the macOS and Windows bundles with a token that
