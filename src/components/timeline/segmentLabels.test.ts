@@ -337,6 +337,7 @@ describe("numberSegmentsInExportOrder", () => {
       activeSourceId: "B",
       segments,
       streams: "videoAndAudio",
+      audioMode: "encode",
     });
     expect(request?.segments).toHaveLength(numbering.total);
   });

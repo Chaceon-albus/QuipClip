@@ -296,6 +296,7 @@ describe("startTaskbarProgressSync", () => {
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
       presetId: "mp4-h264",
       streams: "videoAndAudio",
+      audioMode: "encode",
     });
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();

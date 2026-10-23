@@ -304,6 +304,7 @@ describe("startExportAttentionSync", () => {
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
       presetId: "mp4-h264",
       streams: "videoAndAudio",
+      audioMode: "encode",
     });
     emit({
       event: "started",
@@ -357,6 +358,7 @@ describe("startExportAttentionSync", () => {
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
       presetId: "mp4-h264",
       streams: "videoAndAudio",
+      audioMode: "encode",
     });
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();
@@ -410,6 +412,7 @@ describe("startExportAttentionSync", () => {
         segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
         presetId: "mp4-h264",
         streams: "videoAndAudio",
+        audioMode: "encode",
       });
       return { store, isFocused, requestAttention, stop, started };
     }

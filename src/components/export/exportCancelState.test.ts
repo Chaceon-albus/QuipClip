@@ -71,6 +71,7 @@ describe("resolveExportDismissal", () => {
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
       presetId: "mp4-h264",
       streams: "videoAndAudio",
+      audioMode: "encode",
     };
     const START: ExportStart = {
       runId: "run-live",
@@ -360,6 +361,7 @@ describe("isCancelEnabled on the state of a real store", () => {
     segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
     presetId: "mp4-h264",
     streams: "videoAndAudio",
+    audioMode: "encode",
   };
   const START: ExportStart = {
     runId: "run-live",

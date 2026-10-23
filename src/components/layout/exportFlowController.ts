@@ -18,6 +18,7 @@ import {
   isExportRunLive,
   openExportSaveDialog,
   ExportError,
+  type ExportAudioMode,
   type ExportErrorCode,
   type ExportRequest,
   type ExportStart,
@@ -344,15 +345,19 @@ export class ExportFlowController {
    * 3. When the save dialog throws, reports `dialogFailed`, keeps the modal open, and returns false.
    * 4. When the user cancels (the dialog returns null), returns false and changes nothing (the dialog
    *    stays on the setup step).
-   * 5. Re-reads media, segments, and the active source id, and builds the request with `presetId`
-   *    and `streams`. A null request reports `noSegments` or `sourceNotFound`.
+   * 5. Re-reads media, segments, and the active source id, and builds the request with `presetId`,
+   *    `streams` and `audioMode`. A null request reports `noSegments` or `sourceNotFound`.
    * 6. Calls `setModalOpen(true)` and `startExport(request)` without awaiting it.
    * 7. Re-reads settings. When non-null and still containing `presetId` where
    *    `presetId !== settings.activePresetId`, persists the choice via `saveSettings`.
    *    The save is fire-and-forget; rejections are caught and ignored (ADR 024).
    * 8. Returns true.
    */
-  async confirm(presetId: string, streams: ExportStreams): Promise<boolean> {
+  async confirm(
+    presetId: string,
+    streams: ExportStreams,
+    audioMode: ExportAudioMode,
+  ): Promise<boolean> {
     const settings = this.getSettingsFn();
     const preset = settings?.presets.find((p) => p.id === presetId);
     if (!settings || !preset) {
@@ -402,6 +407,7 @@ export class ExportFlowController {
       activeSourceId: currentSourceId,
       presetId,
       streams,
+      audioMode,
     });
 
     if (!request) {
@@ -557,13 +563,14 @@ export async function runExportFlow(
 }
 
 /**
- * Convenience helper to run the export flow START step with a chosen preset and the streams
- * that the export writes.
+ * Convenience helper to run the export flow START step with a chosen preset, the streams that
+ * the export writes, and how it writes the audio.
  */
 export function confirmExportFlow(
   options: ExportFlowControllerOptions,
   presetId: string,
   streams: ExportStreams,
+  audioMode: ExportAudioMode,
 ): Promise<boolean> {
-  return new ExportFlowController(options).confirm(presetId, streams);
+  return new ExportFlowController(options).confirm(presetId, streams, audioMode);
 }

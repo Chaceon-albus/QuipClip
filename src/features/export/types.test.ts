@@ -5,6 +5,7 @@ import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import {
   BACKEND_EXPORT_ERROR_CODES,
+  EXPORT_AUDIO_MODES,
   EXPORT_ERROR_CODES,
   EXPORT_STATUSES,
   EXPORT_STREAMS,
@@ -97,6 +98,25 @@ function readRustExportStreams(): string[] {
   return Array.from(wireStrings, (match) => match[1]);
 }
 
+/**
+ * Reads the wire strings of every `ExportAudioMode` variant out of the Rust source, in their
+ * order, as `readRustExportStreams` reads the stream choices (ADR 048).
+ */
+function readRustExportAudioModes(): string[] {
+  const source = readFileSync(
+    fileURLToPath(
+      new URL("../../../src-tauri/src/ffmpeg/export/mod.rs", import.meta.url),
+    ),
+    "utf8",
+  );
+
+  const body = /\npub enum ExportAudioMode \{\n([\s\S]*?)\n\}\n/.exec(source);
+  expect(body).not.toBeNull();
+
+  const wireStrings = body![1].matchAll(/#\[serde\(rename = "([A-Za-z]+)"\)\]/g);
+  return Array.from(wireStrings, (match) => match[1]);
+}
+
 describe("Export Types & Wire Constants", () => {
   describe("Rust vocabulary parity", () => {
     it("names the Rust bound of the held audio silence in the message of audioGapTooLong", () => {
@@ -133,6 +153,15 @@ describe("Export Types & Wire Constants", () => {
       expect(rustStreams.length).toBe(3);
 
       expect([...EXPORT_STREAMS]).toEqual(rustStreams);
+    });
+
+    it("names exactly the audio modes the Rust ExportAudioMode enum accepts, in its order", () => {
+      const rustAudioModes = readRustExportAudioModes();
+
+      // Guards the parse itself, as above.
+      expect(rustAudioModes.length).toBe(2);
+
+      expect([...EXPORT_AUDIO_MODES]).toEqual(rustAudioModes);
     });
   });
 

@@ -35,6 +35,7 @@ function createValidRequest(overrides: Partial<ExportRequest> = {}): ExportReque
     ],
     presetId: "mp4-h264",
     streams: "videoAndAudio",
+    audioMode: "encode",
     ...overrides,
   };
 }

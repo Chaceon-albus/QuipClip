@@ -373,6 +373,7 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
       presetId: "default",
       streams: "videoAndAudio",
+      audioMode: "encode",
     });
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();

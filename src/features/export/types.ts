@@ -30,6 +30,21 @@ export const EXPORT_STREAMS = ["videoAndAudio", "videoOnly", "audioOnly"] as con
 export type ExportStreams = (typeof EXPORT_STREAMS)[number];
 
 /**
+ * How an export writes the audio of the source (ADR 048).
+ *
+ * The wire strings of the Rust `ExportAudioMode` enum, in its order. `types.test.ts` reads the
+ * Rust enum and asserts that this list names the same strings.
+ *
+ * - `encode`: decode, cut and encode the audio with the settings of the preset.
+ * - `copy`: copy the packets of the source audio. The backend copies only where its plan
+ *   agrees: one segment, a source format, a sample rate and a codec that it measured, and audio
+ *   that covers the segment. Otherwise it writes the audio as for `encode`, without an error.
+ */
+export const EXPORT_AUDIO_MODES = ["encode", "copy"] as const;
+
+export type ExportAudioMode = (typeof EXPORT_AUDIO_MODES)[number];
+
+/**
  * Request payload sent to the backend `start_export` command.
  */
 export type ExportRequest = {
@@ -39,6 +54,8 @@ export type ExportRequest = {
   presetId?: string;
   /** Required. The backend refuses a request without it, and has no default for it. */
   streams: ExportStreams;
+  /** Required, as `streams` is. `ExportStart` does not echo it. */
+  audioMode: ExportAudioMode;
 };
 
 /**

@@ -611,6 +611,8 @@ export function ExportDialog({
         },
         effectivePresetId,
         streams,
+        // The setup step offers no copy of the audio yet (ADR 048).
+        "encode",
       );
       if (started) {
         // Clear the user's manual selection once the export has started so that a subsequent

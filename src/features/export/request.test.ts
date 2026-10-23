@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Pts, Segment } from "@/types/project";
 import { buildExportRequest } from "./request";
-import { EXPORT_STREAMS } from "./types";
+import { EXPORT_AUDIO_MODES, EXPORT_STREAMS } from "./types";
 
 describe("Export Request Builder", () => {
   const activeSourceId = "source-1";
@@ -35,6 +35,7 @@ describe("Export Request Builder", () => {
       outputPath,
       activeSourceId,
       streams: "videoAndAudio",
+      audioMode: "encode",
       segments,
       presetId: "h264-mp4",
     });
@@ -44,6 +45,7 @@ describe("Export Request Builder", () => {
       outputPath: "/media/output.mp4",
       presetId: "h264-mp4",
       streams: "videoAndAudio",
+      audioMode: "encode",
       segments: [
         { inPts: "100", outPts: "200" },
         { inPts: "500", outPts: "600" },
@@ -64,6 +66,7 @@ describe("Export Request Builder", () => {
       outputPath,
       activeSourceId,
       streams: "videoAndAudio",
+      audioMode: "encode",
       segments,
     });
 
@@ -83,6 +86,7 @@ describe("Export Request Builder", () => {
       outputPath,
       activeSourceId,
       streams: "videoAndAudio",
+      audioMode: "encode",
       segments,
     });
 
@@ -91,6 +95,7 @@ describe("Export Request Builder", () => {
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0", outPts: "1000" }],
       streams: "videoAndAudio",
+      audioMode: "encode",
     });
   });
 
@@ -103,6 +108,7 @@ describe("Export Request Builder", () => {
       outputPath,
       activeSourceId,
       streams: "videoAndAudio",
+      audioMode: "encode",
       segments,
     });
 
@@ -118,6 +124,7 @@ describe("Export Request Builder", () => {
       outputPath,
       activeSourceId,
       streams: "videoAndAudio",
+      audioMode: "encode",
       segments,
     });
 
@@ -133,6 +140,7 @@ describe("Export Request Builder", () => {
       outputPath: "  /media/trimmed-output.mp4  ",
       activeSourceId,
       streams: "videoAndAudio",
+      audioMode: "encode",
       segments,
     });
 
@@ -148,6 +156,7 @@ describe("Export Request Builder", () => {
       outputPath,
       activeSourceId,
       streams: "videoAndAudio",
+      audioMode: "encode",
       segments,
     });
     expect(resUndefined?.presetId).toBeUndefined();
@@ -157,6 +166,7 @@ describe("Export Request Builder", () => {
       outputPath,
       activeSourceId,
       streams: "videoAndAudio",
+      audioMode: "encode",
       segments,
       presetId: "   ",
     });
@@ -172,9 +182,25 @@ describe("Export Request Builder", () => {
       activeSourceId,
       segments,
       streams,
+      audioMode: "encode",
     });
 
     expect(result?.streams).toBe(streams);
+  });
+
+  it.each(EXPORT_AUDIO_MODES)("forwards the audio mode '%s' unchanged", (audioMode) => {
+    const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
+
+    const result = buildExportRequest({
+      sourcePath,
+      outputPath,
+      activeSourceId,
+      segments,
+      streams: "videoAndAudio",
+      audioMode,
+    });
+
+    expect(result?.audioMode).toBe(audioMode);
   });
 
   describe("Returns null when requirements are not met", () => {
@@ -190,6 +216,7 @@ describe("Export Request Builder", () => {
           outputPath,
           activeSourceId,
           streams: "videoAndAudio",
+          audioMode: "encode",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -200,6 +227,7 @@ describe("Export Request Builder", () => {
           outputPath,
           activeSourceId,
           streams: "videoAndAudio",
+          audioMode: "encode",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -212,6 +240,7 @@ describe("Export Request Builder", () => {
           outputPath: null,
           activeSourceId,
           streams: "videoAndAudio",
+          audioMode: "encode",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -222,6 +251,7 @@ describe("Export Request Builder", () => {
           outputPath: "   ",
           activeSourceId,
           streams: "videoAndAudio",
+          audioMode: "encode",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -234,6 +264,7 @@ describe("Export Request Builder", () => {
           outputPath,
           activeSourceId: null,
           streams: "videoAndAudio",
+          audioMode: "encode",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -244,6 +275,7 @@ describe("Export Request Builder", () => {
           outputPath,
           activeSourceId: "",
           streams: "videoAndAudio",
+          audioMode: "encode",
           segments: validSegments,
         }),
       ).toBeNull();
@@ -256,6 +288,7 @@ describe("Export Request Builder", () => {
           outputPath,
           activeSourceId,
           streams: "videoAndAudio",
+          audioMode: "encode",
           segments: [],
         }),
       ).toBeNull();
@@ -266,6 +299,7 @@ describe("Export Request Builder", () => {
           outputPath,
           activeSourceId,
           streams: "videoAndAudio",
+          audioMode: "encode",
           segments: null,
         }),
       ).toBeNull();
@@ -282,6 +316,7 @@ describe("Export Request Builder", () => {
           outputPath,
           activeSourceId,
           streams: "videoAndAudio",
+          audioMode: "encode",
           segments: otherSegments,
         }),
       ).toBeNull();

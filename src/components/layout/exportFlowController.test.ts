@@ -10,6 +10,7 @@ import {
 import {
   cancelActiveExport as clientCancelActiveExport,
   createExportStore,
+  type ExportAudioMode,
   type ExportProgressEvent,
   type ExportRequest,
   type ExportStart,
@@ -353,6 +354,7 @@ describe("ExportFlowController", () => {
           segments: [{ inPts: "0" as Pts, outPts: "100" as Pts }],
           presetId: "default",
           streams: "videoAndAudio",
+          audioMode: "encode",
         });
         await vi.waitFor(() => {
           expect(startFn).toHaveBeenCalled();
@@ -913,7 +915,11 @@ describe("ExportFlowController", () => {
         getSettings: () => createSettings([createPreset({ id: "p1" })]),
       });
 
-      const result = await controller.confirm("non-existent-preset", "videoAndAudio");
+      const result = await controller.confirm(
+        "non-existent-preset",
+        "videoAndAudio",
+        "encode",
+      );
 
       expect(result).toBe(false);
       expect(reportError).toHaveBeenCalledWith(
@@ -946,7 +952,7 @@ describe("ExportFlowController", () => {
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p-mov", "videoAndAudio");
+      const result = await controller.confirm("p-mov", "videoAndAudio", "encode");
 
       expect(result).toBe(true);
       expect(openSaveDialog).toHaveBeenCalledWith({
@@ -959,7 +965,11 @@ describe("ExportFlowController", () => {
     describe("the stream choice", () => {
       const media = createMedia("/media/clip.mov", "clip.mov");
 
-      function confirmWith(preset: Preset, streams: ExportStreams) {
+      function confirmWith(
+        preset: Preset,
+        streams: ExportStreams,
+        audioMode: ExportAudioMode = "encode",
+      ) {
         const openSaveDialog = vi.fn().mockResolvedValue("/out/chosen.name");
         const startExport = vi.fn().mockResolvedValue(null);
         const controller = createExportFlowController({
@@ -975,7 +985,7 @@ describe("ExportFlowController", () => {
           getSegments: () => [createSegment("seg1", "s1", "0", "100")],
         });
         return {
-          result: controller.confirm(preset.id, streams),
+          result: controller.confirm(preset.id, streams, audioMode),
           openSaveDialog,
           startExport,
         };
@@ -1012,6 +1022,19 @@ describe("ExportFlowController", () => {
           );
         },
       );
+
+      it.each(["encode", "copy"] as const)(
+        "starts the export with the audio mode %s",
+        async (audioMode) => {
+          const preset = createPreset({ id: "p1", container: "mp4" });
+          const { result, startExport } = confirmWith(preset, "audioOnly", audioMode);
+
+          expect(await result).toBe(true);
+          expect(startExport).toHaveBeenCalledWith(
+            expect.objectContaining({ streams: "audioOnly", audioMode }),
+          );
+        },
+      );
     });
 
     it("confirm with the save dialog cancelled starts nothing and saves nothing", async () => {
@@ -1041,7 +1064,7 @@ describe("ExportFlowController", () => {
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p2", "videoAndAudio");
+      const result = await controller.confirm("p2", "videoAndAudio", "encode");
 
       expect(result).toBe(false);
       expect(openSaveDialog).toHaveBeenCalledOnce();
@@ -1067,7 +1090,7 @@ describe("ExportFlowController", () => {
         getSettings: () => createSettings([createPreset({ id: "p1" })]),
       });
 
-      const result = await controller.confirm("p1", "videoAndAudio");
+      const result = await controller.confirm("p1", "videoAndAudio", "encode");
 
       expect(result).toBe(false);
       expect(reportError).toHaveBeenCalledWith(
@@ -1094,7 +1117,7 @@ describe("ExportFlowController", () => {
         getSettings: () => createSettings([createPreset({ id: "p1" })]),
       });
 
-      const result = await controller.confirm("p1", "videoAndAudio");
+      const result = await controller.confirm("p1", "videoAndAudio", "encode");
 
       expect(result).toBe(false);
       expect(openSaveDialog).toHaveBeenCalledOnce();
@@ -1130,7 +1153,7 @@ describe("ExportFlowController", () => {
         getSegments: () => segments,
       });
 
-      const result = await controller.confirm("custom-p", "videoAndAudio");
+      const result = await controller.confirm("custom-p", "videoAndAudio", "encode");
 
       expect(result).toBe(true);
       expect(setModalOpen).toHaveBeenCalledWith(true);
@@ -1139,12 +1162,13 @@ describe("ExportFlowController", () => {
         startExport.mock.invocationCallOrder[0],
       );
       const passedRequest = startExport.mock.calls[0][0] as ExportRequest;
-      // The request carries the stream choice that the setup step passed.
+      // The request carries the stream choice and the audio mode that the setup step passed.
       expect(passedRequest).toStrictEqual({
         sourcePath: "/media/source.mp4",
         outputPath: "/out/destination.mp4",
         presetId: "custom-p",
         streams: "videoAndAudio",
+        audioMode: "encode",
         segments: [
           { inPts: "1000", outPts: "2000" },
           { inPts: "5000", outPts: "6000" },
@@ -1174,7 +1198,7 @@ describe("ExportFlowController", () => {
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      await controllerDiff.confirm("p2", "videoAndAudio");
+      await controllerDiff.confirm("p2", "videoAndAudio", "encode");
       expect(saveSettingsDiff).toHaveBeenCalledOnce();
       expect(saveSettingsDiff).toHaveBeenCalledWith(
         expect.objectContaining({ activePresetId: "p2" }),
@@ -1195,7 +1219,7 @@ describe("ExportFlowController", () => {
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      await controllerSame.confirm("p1", "videoAndAudio");
+      await controllerSame.confirm("p1", "videoAndAudio", "encode");
       expect(saveSettingsSame).not.toHaveBeenCalled();
     });
 
@@ -1221,7 +1245,7 @@ describe("ExportFlowController", () => {
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p2", "videoAndAudio");
+      const result = await controller.confirm("p2", "videoAndAudio", "encode");
 
       expect(result).toBe(true);
       expect(startExport).toHaveBeenCalledOnce();
@@ -1257,7 +1281,7 @@ describe("ExportFlowController", () => {
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p2", "videoAndAudio");
+      const result = await controller.confirm("p2", "videoAndAudio", "encode");
 
       expect(result).toBe(true);
       expect(getSettings).toHaveBeenCalledTimes(2);
@@ -1295,7 +1319,7 @@ describe("ExportFlowController", () => {
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p2", "videoAndAudio");
+      const result = await controller.confirm("p2", "videoAndAudio", "encode");
 
       expect(result).toBe(true);
       expect(getSettings).toHaveBeenCalledTimes(2);
@@ -1328,7 +1352,7 @@ describe("ExportFlowController", () => {
         getSegments: () => [createSegment("seg1", "s1", "0", "100")],
       });
 
-      const result = await controller.confirm("p2", "videoAndAudio");
+      const result = await controller.confirm("p2", "videoAndAudio", "encode");
 
       expect(result).toBe(true);
       expect(getSettings).toHaveBeenCalledTimes(2);
@@ -1352,7 +1376,11 @@ describe("ExportFlowController", () => {
         getMedia: () => null,
       });
 
-      const resNoMedia = await controllerNoMedia.confirm("p1", "videoAndAudio");
+      const resNoMedia = await controllerNoMedia.confirm(
+        "p1",
+        "videoAndAudio",
+        "encode",
+      );
       expect(resNoMedia).toBe(false);
       expect(reportErrorNoMedia).toHaveBeenCalledWith(
         expect.objectContaining({ code: "sourceNotFound" }),
@@ -1375,7 +1403,7 @@ describe("ExportFlowController", () => {
         getSegments: () => [],
       });
 
-      const resNoSeg = await controllerNoSeg.confirm("p1", "videoAndAudio");
+      const resNoSeg = await controllerNoSeg.confirm("p1", "videoAndAudio", "encode");
       expect(resNoSeg).toBe(false);
       expect(reportErrorNoSeg).toHaveBeenCalledWith(
         expect.objectContaining({ code: "noSegments" }),
@@ -1397,6 +1425,7 @@ describe("ExportFlowController", () => {
         },
         "p1",
         "audioOnly",
+        "encode",
       );
 
       expect(result).toBe(false);

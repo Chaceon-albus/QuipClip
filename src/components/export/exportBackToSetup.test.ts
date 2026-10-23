@@ -49,6 +49,7 @@ const EXPORT_REQUEST: ExportRequest = {
   segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
   presetId: "mp4-h264",
   streams: "videoAndAudio",
+  audioMode: "encode",
 };
 
 function startAnswer(runId: string): ExportStart {

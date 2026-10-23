@@ -903,6 +903,37 @@ mod tests {
     }
 
     #[test]
+    fn every_audio_mode_crosses_the_wire_as_its_stable_string() {
+        // The frontend sends these exact strings (`EXPORT_AUDIO_MODES` in
+        // `src/features/export/types.ts`), and its parity test reads the `rename` attributes of
+        // this enum, as for the stream choice below.
+        let all = [ExportAudioMode::Encode, ExportAudioMode::Copy];
+        for audio_mode in all {
+            match audio_mode {
+                ExportAudioMode::Encode | ExportAudioMode::Copy => {}
+            }
+        }
+        let serialized: Vec<String> = all
+            .iter()
+            .map(|audio_mode| {
+                let value = serde_json::to_value(audio_mode).unwrap();
+                assert_eq!(
+                    serde_json::from_value::<ExportAudioMode>(value.clone()).unwrap(),
+                    *audio_mode
+                );
+                value.as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(serialized, vec!["encode", "copy"]);
+        for refused in ["Encode", "Copy", "passthrough", ""] {
+            assert!(
+                serde_json::from_value::<ExportAudioMode>(serde_json::json!(refused)).is_err(),
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
     fn every_stream_choice_crosses_the_wire_as_its_stable_camel_case_string() {
         // The frontend sends these exact strings (`EXPORT_STREAMS` in
         // `src/features/export/types.ts`), and its parity test reads the `rename` attributes of

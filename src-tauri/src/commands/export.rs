@@ -139,6 +139,12 @@ pub struct ExportRequestWire {
     /// forgot to send the user's choice would then export a file the user did not ask for and
     /// report a success.
     pub streams: ExportStreams,
+    /// Whether the export copies the audio of the source or encodes it (ADR 048). **Required**,
+    /// with no default, for the reason of [`Self::streams`]. The plan copies only where
+    /// [`crate::ffmpeg::export::copy::decide`] agrees, and otherwise writes the audio as for an
+    /// encode, or writes none for a choice of the video only. The value is therefore a request,
+    /// and [`ExportStart`] does not echo it.
+    pub audio_mode: ExportAudioMode,
 }
 
 /// The immediate payload `start_export` resolves with when it accepts a run.
@@ -623,8 +629,7 @@ where
             preset,
             streams: request.streams,
             audio_frames: &audio_frames,
-            // The request carries no choice of the audio yet; every export encodes it.
-            audio_mode: ExportAudioMode::Encode,
+            audio_mode: request.audio_mode,
         },
         inspect_path,
     )
@@ -2125,6 +2130,7 @@ mod tests {
             ],
             preset_id: None,
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
         let app_data = directory.path.join("app");
         let windows = PreviewWindows::default();
@@ -2408,6 +2414,7 @@ mod tests {
             "outputPath": "/movies/out.mp4",
             "segments": [{ "inPts": "9007199254740993", "outPts": "9007199254740994" }],
             "streams": "videoAndAudio",
+            "audioMode": "encode",
         }))
         .unwrap();
 
@@ -2420,18 +2427,68 @@ mod tests {
         assert_eq!(request.segments[0].out_pts, Pts::new(9_007_199_254_740_994));
     }
 
-    /// A request payload in its wire form, with `streams` set to `streams` or left out.
+    /// A request payload in its wire form, with `streams` set to `streams` or left out, and the
+    /// audio encoded.
     fn request_json(streams: Option<serde_json::Value>) -> serde_json::Value {
         let mut value = serde_json::json!({
             "sourcePath": "/media/source.mp4",
             "outputPath": "/movies/out.mp4",
             "segments": [{ "inPts": "0", "outPts": "90000" }],
             "presetId": "active",
+            "audioMode": "encode",
         });
         if let Some(streams) = streams {
             value["streams"] = streams;
         }
         value
+    }
+
+    /// A request payload in its wire form that writes video and audio, with `audioMode` set to
+    /// `audio_mode` or left out.
+    fn request_json_with_audio_mode(audio_mode: Option<serde_json::Value>) -> serde_json::Value {
+        let mut value = request_json(Some(serde_json::json!("videoAndAudio")));
+        let object = value.as_object_mut().unwrap();
+        object.remove("audioMode");
+        if let Some(audio_mode) = audio_mode {
+            object.insert("audioMode".to_owned(), audio_mode);
+        }
+        value
+    }
+
+    #[test]
+    fn the_request_carries_each_audio_mode_by_its_wire_string() {
+        for (wire, audio_mode) in [
+            ("encode", ExportAudioMode::Encode),
+            ("copy", ExportAudioMode::Copy),
+        ] {
+            let request: ExportRequestWire =
+                serde_json::from_value(request_json_with_audio_mode(Some(serde_json::json!(wire))))
+                    .unwrap();
+            assert_eq!(request.audio_mode, audio_mode, "{wire}");
+        }
+    }
+
+    #[test]
+    fn a_request_without_an_audio_mode_or_with_an_unknown_one_is_refused() {
+        // As for `streams`, no value stands in for the choice of the user (ADR 048).
+        let error = serde_json::from_value::<ExportRequestWire>(request_json_with_audio_mode(None))
+            .unwrap_err();
+        assert!(error.to_string().contains("audioMode"), "{error}");
+        for refused in [
+            serde_json::json!("Copy"),
+            serde_json::json!("passthrough"),
+            serde_json::json!(""),
+            serde_json::json!(null),
+            serde_json::json!(true),
+        ] {
+            assert!(
+                serde_json::from_value::<ExportRequestWire>(request_json_with_audio_mode(Some(
+                    refused.clone()
+                )))
+                .is_err(),
+                "{refused}"
+            );
+        }
     }
 
     #[test]
@@ -2686,6 +2743,7 @@ mod tests {
             }],
             preset_id: Some("missing".to_owned()),
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
 
         let error = prepare_export_with(
@@ -2737,6 +2795,7 @@ mod tests {
             }],
             preset_id: None,
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
 
         let prepared = prepare_export_with(
@@ -2810,6 +2869,7 @@ mod tests {
             }],
             preset_id: Some("default-h264-mp4".to_owned()),
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
         let prepare = || {
             prepare_export_with(
@@ -2931,6 +2991,7 @@ mod tests {
             }],
             preset_id: None,
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
 
         let error = prepare_export_with(
@@ -2982,6 +3043,7 @@ mod tests {
             }],
             preset_id: None,
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
 
         let error = prepare_export_with(
@@ -3051,6 +3113,7 @@ mod tests {
             }],
             preset_id: None,
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
 
         let result = prepare_export_with(
@@ -3144,6 +3207,7 @@ mod tests {
             }],
             preset_id: None,
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
 
         let error = prepare_export_with(
@@ -3198,6 +3262,7 @@ mod tests {
             }],
             preset_id: None,
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
 
         let error = prepare_export_with(
@@ -3257,6 +3322,7 @@ mod tests {
             }],
             preset_id: None,
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
 
         let error = prepare_export_with(
@@ -3311,6 +3377,7 @@ mod tests {
             segments: vec![],
             preset_id: None,
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
 
         let error = prepare_export_with(
@@ -3363,6 +3430,7 @@ mod tests {
                 segments: vec![],
                 preset_id: None,
                 streams: ExportStreams::VideoAndAudio,
+                audio_mode: ExportAudioMode::Encode,
             };
 
             let error = prepare_export_with(
@@ -3708,6 +3776,7 @@ mod tests {
                 .collect(),
             preset_id: None,
             streams,
+            audio_mode: ExportAudioMode::Encode,
         };
         prepare_export_with(
             PrepareRequest {
@@ -4665,6 +4734,7 @@ mod tests {
             }],
             preset_id: None,
             streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
         };
         let error = prepare_export_with(
             PrepareRequest {
@@ -5265,6 +5335,334 @@ mod tests {
 
             assert_eq!(frames, 30, "{streams:?}");
             assert_eq!(fs::read(&destination).unwrap(), b"the finished video");
+        }
+    }
+
+    // -- the copy of the audio: the commands of a request that asks for it (ADR 048) -------
+
+    /// What the read of the frames finds when the audio covers the segment from 10 s to 15 s.
+    fn frames_covering_10_to_15() -> AudioFrames {
+        let front = vec![ffmpeg::AudioGap {
+            from: None,
+            to: Rational::from_decimal_str("9.99").unwrap(),
+        }];
+        AudioFrames {
+            gaps: front.clone(),
+            fine_gaps: front,
+            end: Rational::from_decimal_str("15.01"),
+            longest_frame: Rational::new(1024, 48_000),
+        }
+    }
+
+    /// Prepare a request that asks to copy the audio of the segment from 10 s to 15 s of a
+    /// source with 48000 Hz AAC from 0 s to 120 s, after the read `frames`, against injected
+    /// discovery, settings and probe.
+    fn prepare_copy(
+        directory: &TestDirectory,
+        streams: ExportStreams,
+        frames: AudioFrames,
+    ) -> Result<PreparedExport, ExportCommandError> {
+        prepare_audio_mode(directory, streams, ExportAudioMode::Copy, frames)
+    }
+
+    /// [`prepare_copy`] with the audio mode `audio_mode`.
+    fn prepare_audio_mode(
+        directory: &TestDirectory,
+        streams: ExportStreams,
+        audio_mode: ExportAudioMode,
+        frames: AudioFrames,
+    ) -> Result<PreparedExport, ExportCommandError> {
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let request = ExportRequestWire {
+            source_path: source.to_string_lossy().into_owned(),
+            output_path: directory
+                .path
+                .join("out.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            segments: vec![ExportSegmentBoundaryWire {
+                in_pts: Pts::new(10 * 90_000),
+                out_pts: Pts::new(15 * 90_000),
+            }],
+            preset_id: None,
+            streams,
+            audio_mode,
+        };
+        prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_| {
+                Ok(LoadedSettings {
+                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
+                    seeded: false,
+                })
+            },
+            |_, _| Ok(sample_probe_with_a_missed_audio_start()),
+            first_packet_unread,
+            sample_rate_not_read,
+            move |_, _, _, _| Ok(frames),
+        )
+    }
+
+    /// The value that follows `flag` in `arguments`.
+    fn value_of<'a>(arguments: &'a [String], flag: &str) -> &'a str {
+        let index = arguments
+            .iter()
+            .position(|argument| argument == flag)
+            .unwrap();
+        &arguments[index + 1]
+    }
+
+    #[test]
+    fn a_copy_with_video_runs_the_copy_process_beside_the_encoder() {
+        let directory = TestDirectory::new();
+        let prepared = prepare_copy(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            frames_covering_10_to_15(),
+        )
+        .unwrap();
+
+        assert!(prepared.plan.copied_audio.is_some());
+        assert_eq!(prepared.plan.audio, None);
+        // The encoder reads NUT from its stdin and copies the audio of it.
+        let encoder = &prepared.arguments;
+        assert!(encoder
+            .windows(4)
+            .any(|four| four == ["-f", "nut", "-i", "pipe:0"]));
+        assert_eq!(value_of(encoder, "-c:a"), "copy");
+        assert!(encoder.iter().any(|argument| argument == "-filter_complex"));
+        // The copy process cuts at the In and Out points and writes NUT to its stdout.
+        let copy = prepared.audio_arguments.as_deref().unwrap();
+        assert_eq!(value_of(copy, "-c:a"), "copy");
+        assert_eq!(value_of(copy, "-to"), "15");
+        assert_eq!(copy[copy.len() - 3..], ["-f", "nut", "pipe:1"]);
+        assert!(!copy.iter().any(|argument| argument == "-filter_complex"));
+    }
+
+    #[test]
+    fn an_audio_only_copy_runs_one_command_without_a_graph_into_the_reservation() {
+        let directory = TestDirectory::new();
+        let prepared = prepare_copy(
+            &directory,
+            ExportStreams::AudioOnly,
+            frames_covering_10_to_15(),
+        )
+        .unwrap();
+
+        assert!(prepared.plan.copied_audio.is_some());
+        assert_eq!(prepared.audio_arguments, None);
+        let command = &prepared.arguments;
+        assert!(!command.iter().any(|argument| argument == "-filter_complex"));
+        assert_eq!(value_of(command, "-c:a"), "copy");
+        assert_eq!(value_of(command, "-to"), "15");
+        assert_eq!(value_of(command, "-f"), "mp4");
+        assert_eq!(
+            command.last().map(PathBuf::from),
+            Some(prepared.pending.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn a_request_to_encode_encodes_where_a_copy_would_be_possible() {
+        let directory = TestDirectory::new();
+        let prepared = prepare_audio_mode(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            ExportAudioMode::Encode,
+            frames_covering_10_to_15(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.plan.copied_audio, None);
+        assert_eq!(prepared.plan.audio_copy_refusal, None);
+        assert!(prepared
+            .arguments
+            .windows(4)
+            .any(|four| four == ["-f", "wav", "-i", "pipe:0"]));
+        assert_eq!(value_of(&prepared.arguments, "-c:a"), "aac");
+    }
+
+    #[test]
+    fn a_copy_that_the_plan_refuses_prepares_the_encode() {
+        // The read found no frame inside the segment, so the export encodes the audio in the
+        // audio process of ADR 043, as without the request.
+        let directory = TestDirectory::new();
+        let prepared = prepare_copy(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            AudioFrames::default(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.plan.copied_audio, None);
+        assert_eq!(
+            prepared.plan.audio_copy_refusal,
+            Some(crate::ffmpeg::export::copy::CopyRefusal::NoFrames)
+        );
+        assert!(prepared.plan.audio.is_some());
+        assert!(prepared
+            .arguments
+            .windows(4)
+            .any(|four| four == ["-f", "wav", "-i", "pipe:0"]));
+        let audio = prepared.audio_arguments.as_deref().unwrap();
+        assert_eq!(value_of(audio, "-c:a"), "pcm_f32le");
+    }
+
+    /// Run a real export of the segment from 1 s to 2.5 s of `source` that asks to copy the audio,
+    /// with `streams`, into `output`, and return the codec of its audio and its number of audio
+    /// packets.
+    fn real_copy(
+        ffmpeg: &Path,
+        ffprobe: &Path,
+        directory: &TestDirectory,
+        source: &Path,
+        streams: ExportStreams,
+        output: &Path,
+    ) -> (String, usize) {
+        let probe = ffmpeg::probe_media(ffprobe, source).unwrap();
+        let tb = probe.video_time_base;
+        let at = |millis: i64| Pts::new(millis * tb.den() / (1_000 * tb.num()));
+        let request = ExportRequestWire {
+            source_path: source.to_string_lossy().into_owned(),
+            output_path: output.to_string_lossy().into_owned(),
+            segments: vec![ExportSegmentBoundaryWire {
+                in_pts: at(1_000),
+                out_pts: at(2_500),
+            }],
+            preset_id: None,
+            streams,
+            audio_mode: ExportAudioMode::Copy,
+        };
+        // An encode would write AC-3, so AAC in the output can only be the copy.
+        let mut preset = sample_preset("active");
+        preset.audio_encoder = "ac3".to_owned();
+        preset.quality = Quality {
+            kind: QualityKind::Crf,
+            value: 30,
+        };
+        let prepared = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path.join("app"),
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: ffmpeg.to_path_buf(),
+                    ffprobe: ffprobe.to_path_buf(),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_| {
+                Ok(LoadedSettings {
+                    settings: sample_settings(Some("active"), vec![preset]),
+                    seeded: false,
+                })
+            },
+            ffmpeg::probe_media,
+            ffmpeg::probe_first_audio_packet,
+            ffmpeg::probe_audio_sample_rate_at,
+            ffmpeg::probe_audio_gaps,
+        )
+        .unwrap();
+        assert_eq!(prepared.plan.audio_copy_refusal, None, "{streams:?}");
+        assert!(prepared.plan.copied_audio.is_some());
+
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+        run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |_event| {},
+            |request, on_progress| run_export_process(request, on_progress),
+            ffmpeg::probe_output_audio,
+        )
+        .unwrap();
+
+        let answer = crate::procutil::command_without_console(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_name:packet=size",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(output)
+            .output()
+            .unwrap();
+        // One line for the stream, its codec, and one line for each packet, its size. A packet
+        // with side data ends its line with an empty field.
+        let text = String::from_utf8(answer.stdout).unwrap();
+        let fields: Vec<&str> = text
+            .lines()
+            .map(|line| line.trim().trim_end_matches(','))
+            .filter(|line| !line.is_empty())
+            .collect();
+        let packets = fields
+            .iter()
+            .filter(|field| field.parse::<u64>().is_ok())
+            .count();
+        let codec = fields
+            .iter()
+            .find(|field| field.parse::<u64>().is_err())
+            .copied()
+            .unwrap_or_default()
+            .to_owned();
+        (codec, packets)
+    }
+
+    #[test]
+    fn a_real_copy_of_one_segment_writes_the_aac_of_the_source() {
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let flv = directory.path.join("source.flv");
+        write_real_flv(&ffmpeg, &flv, "160x90", 48_000);
+        let mp4 = directory.path.join("source.mp4");
+        let status = crate::procutil::command_without_console(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&flv)
+            .args(["-c", "copy", "-f", "mp4"])
+            .arg(&mp4)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        for source in [&mp4, &flv] {
+            for (streams, name) in [
+                (ExportStreams::VideoAndAudio, "out.mp4"),
+                (ExportStreams::AudioOnly, "out.m4a"),
+            ] {
+                let output = directory.path.join(name);
+                let (codec, packets) =
+                    real_copy(&ffmpeg, &ffprobe, &directory, source, streams, &output);
+                // 1.5 s of 1024-sample AAC at 48000 Hz is 70.3 packets; each end can add or lose
+                // one.
+                assert_eq!(codec, "aac", "{source:?} {streams:?} {packets}");
+                assert!(
+                    (69..=72).contains(&packets),
+                    "{source:?} {streams:?}: {packets} packets"
+                );
+            }
         }
     }
 

@@ -9,7 +9,12 @@
 
 import { getActiveSourceSegmentEntries } from "@/features/timeline/math";
 import type { Segment } from "@/types/project";
-import type { ExportRequest, ExportSegmentBoundary, ExportStreams } from "./types";
+import type {
+  ExportAudioMode,
+  ExportRequest,
+  ExportSegmentBoundary,
+  ExportStreams,
+} from "./types";
 
 /**
  * Parameters for assembling an `ExportRequest`.
@@ -45,6 +50,11 @@ export interface BuildExportRequestOptions {
    * request without it, so each caller states the choice rather than inheriting a default.
    */
   streams: ExportStreams;
+  /**
+   * Whether the export copies the audio of the source or encodes it (ADR 048). Required, for
+   * the reason of `streams`.
+   */
+  audioMode: ExportAudioMode;
 }
 
 /**
@@ -55,7 +65,7 @@ export interface BuildExportRequestOptions {
  * - Multi-source aware: filters segments to `activeSourceId` while strictly PRESERVING ARRAY ORDER (ADR 007).
  * - Never sorts segments; array order is export order.
  * - Maps each Segment to `{ inPts, outPts }`, dropping `id` and `sourceId`.
- * - Forwards `streams` unchanged.
+ * - Forwards `streams` and `audioMode` unchanged.
  * - Returns `null` when there is no media, no output path, or no segments for the active source.
  *
  * @param options Export assembly parameters.
@@ -101,6 +111,7 @@ export function buildExportRequest(
     outputPath: options.outputPath.trim(),
     segments,
     streams: options.streams,
+    audioMode: options.audioMode,
   };
 
   if (options.presetId !== undefined && options.presetId.trim().length > 0) {
