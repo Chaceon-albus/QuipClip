@@ -639,6 +639,15 @@ window. It disables the cue for that source.
   from the last known config tag to the window start first. The head of that window then holds
   the config tags that the scan found, which a reconnect can have changed. Only the element of
   the reload that the stall asked for scans. A later reload does not scan again.
+  (Added with the walked ranges.) The scan reads only the parts of its range that no earlier read
+  of the open source covers. Such a read is the walk of the head, a window that the writer wrote,
+  or a scan that completed. Each of these reads takes its tags in sequence and records every
+  config tag in its range. A scan that a damaged tag stops covers its range only up to that tag.
+  A scan that fails or is canceled covers nothing. The ranges stay in memory, and they go when
+  the backend closes the source. The sidecar does not keep them. On a recording of 307 MB whose
+  only config tag is at its start, the range of the scan for a window at 21 minutes was about
+  290 MB, from the offsets. The rule removes only the parts that earlier reads covered. A first
+  stall after a far seek still reads most of it, and a second stall reads none of it.
 - A window fails after the source decoded in part: the stall of ADR 039 too. Its notice says that
   the preview could not read that part of the file.
 - A window fails before the source decoded: the panel that says that the file could not be read,
