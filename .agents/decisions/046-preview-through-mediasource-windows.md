@@ -213,6 +213,28 @@ One more file is 1920x1080 at 14 Mbit/s with a GOP of 10 s.
       WKWebView 60 passed on the 720p file and 59 on the 1080p file. In the miss, WebKit moved
       the element itself, and the seek back of the repair (measurement 26) showed no new frame.
       (Added on 2026-10-18.) The repair seeks 3 ms from the target there.
+29. (Added with the NAL check.) A recording of 1360 s ended with a video tag whose frame data was
+    `00 00 00 ca`. Its video is H.264 High at 1080x1920 with a NAL length size of 4, and its audio
+    is AAC. The data is a length of 202 with no NAL unit after it. Probably the recording stopped
+    there.
+    - FFmpeg copied the frame into the window as a sample of 4 bytes and exited with 0.
+    - Chromium 152 failed the append of that window with `MEDIA_ERR_DECODE`
+      (`CHUNK_DEMUXER_ERROR_APPEND_FAILED: Failed to prepare video sample for decode`). The
+      MediaSource went to `ended`, and the picture of the position stayed on screen.
+    - The page prefetches the last window, so the stall of ADR 039 showed 20 to 60 s before that
+      tag. Each reload that reached the last window stalled again.
+    - The same window without that tag played to `ended`. A temporary test ran the writer with
+      the NAL check of "The window" on the file. Its window also played to `ended`.
+    - No other sample of the file failed the NAL check. The file also has two or three IDR frames
+      in a row at four places. Their PTS lie 2.5 to 7.3 s after their DTS. The file also has video
+      gaps of 2.4 to 3 s with continuous audio. The real controller in Chromium played, sought
+      and decoded these parts with no error.
+    - FFmpeg gave the sample in front of a video gap of 2.4 s a duration of 2.4 s, and the
+      buffered data stayed one range. A test with libx264 files found the same for gaps of 1.7 s
+      and 9 s. For gaps of 11 s and 14 s, the last sample kept the duration of one frame. These
+      gaps are longer than the default 10 s of `max_interleave_delta`. Reading FFmpeg's mp4 muxer
+      says that it takes the duration from the next packet of the track in its interleave
+      queue.
 
 ## Decision
 
@@ -275,6 +297,37 @@ within 64 MiB stops there, as at damage. A copy of the configuration of the head
 The head of a window also takes each config tag that follows its keyframe before the first frame
 of its kind, within 64 tags, because FFmpeg's flv muxer writes the new configuration of a stream
 in front of its next packet.
+
+(Added with the NAL check.) Chromium's MP4 parser splits each H.264 and HEVC sample into NAL
+units. It fails the append of the whole segment when the chain of units does not end exactly at
+the end of the sample. It also fails the append when a unit has the length 0. This is the rule of
+Chromium's `AVC::ConvertFrameToAnnexB`, and measurement 29 shows the first case. A recording that
+stopped while it wrote a frame can end with such a frame. So the writer applies this rule, the NAL
+check, to each video frame. It takes the NAL length size from the video configuration in the head:
+
+- From the first frame that fails the NAL check, the writer leaves out the video frames up to the
+  next keyframe that passes it. It writes that keyframe. The writer still writes the audio, the
+  config tags and the other tags, so the sound stays continuous. For a stretch of up to about
+  10 s, FFmpeg gives the last video sample in front of the stretch the duration up to that
+  keyframe (measurement 29).
+- Only the time limit and the byte limit of the list above wait for a keyframe that passes the
+  NAL check and that ends no such stretch. If a window ends at a keyframe that the writer leaves
+  out, the next window starts with no video. If a window ends at the keyframe after the stretch,
+  FFmpeg gets no later frame for the last sample in front of the stretch. That sample then keeps
+  the duration of one frame. The read on after a changed config tag still ends at the next
+  keyframe tag, also when that keyframe fails the NAL check.
+- The 64 MiB of the list count only the tags that the writer writes. Because of that, and because
+  the limits wait for such a keyframe, a window with a stretch can be longer than 60 s and 64 MiB.
+- The writer measures a stretch from the first frame that fails the NAL check. When the stretch
+  is longer than 64 MiB, it ends the read at the current tag. The read on after a changed config
+  tag does the same. The window names that place, and the next request walks from it to the next
+  keyframe.
+- The writer checks no frame when it has no NAL length size. That is the case for another codec,
+  for a record that is too short, for a size of 3, and for a head with no video configuration.
+  The read on after a changed config tag writes nothing, and the next window checks with its own
+  head.
+- The NAL check runs on every platform, because each sample that fails it breaks the sample
+  format of ISO/IEC 14496-15. The test of WebKit with such a sample is open (see "Open checks").
 
 **MPEG-TS and MKV.** FFmpeg reads the file and seeks itself:
 
@@ -594,6 +647,9 @@ window. It disables the cue for that source.
   with that reason, and the page can ask again. A damaged tag ends the window too, and the end
   message names the first keyframe after the damage, so the page can play on from there. A
   restart of the timestamps does the same.
+- (Added with the NAL check.) A video frame that fails the NAL check no longer fails the append.
+  The writer leaves out the video frames from that frame up to the next keyframe that passes the
+  NAL check (see "The window").
 - FFmpeg is not found: the panel says that this preview needs FFmpeg.
 - The timestamps decrease: a notice says so once, and the store disables precise editing for
   the source. A notice that the user dismisses stays hidden until the user opens another
@@ -748,6 +804,28 @@ the runs share one `PROBE_TIMEOUT`.
     panel.
   - The 32-bit timestamps of FLV wrap after 49.7 days. The reader reports a wrap as decreasing
     timestamps.
+  - (Added with the NAL check.) The video frames that the writer leaves out from a frame that
+    fails the NAL check do not show. The frame in front of them stays on screen. The export does
+    not use the NAL check.
+  - (Added with the NAL check.) Some stretches become a hole in the video:
+    - a stretch of more than about 10 s, the default `max_interleave_delta` of FFmpeg
+    - a stretch that the read on after a changed config tag or the 64 MiB reach ends, because
+      the window has no later frame
+    - a stretch at the start of a window that continues the data, which can follow the read on
+      after a changed config tag or the 64 MiB reach
+
+    The gap rule of "Seeks" handles a hole of up to 15 s. A longer hole stops the playback with
+    no notice until the user moves the playhead. At the end of the file, the video ends at the
+    frame in front of the stretch.
+  - (Added with the NAL check.) When the start keyframe of a window that serves a seek fails the
+    NAL check, the video of the window starts at the next keyframe that passes it. The store
+    seeks over that gap, as before the first frame, up to 15 s. Over 15 s the seek waits with no
+    notice. When the first window of an element starts at such a keyframe, the self-check of the
+    first frame disables the calibration for that attachment.
+  - (Added with the NAL check.) A window that leaves out all of its video, as at a last keyframe
+    that fails the NAL check, ends with no video fragment and fails (`noFrames`). After a part of
+    the source decoded, this is the stall of ADR 039. Before that, the panel says that the file
+    could not be read. No test measured this case.
 - Open checks:
   - The export with `concat` and `subfile` on Windows, with a drive letter, a UNC path and a
     `\\?\` path. Reading FFmpeg's `url_find_protocol` says that these work. Nothing on macOS
@@ -761,3 +839,5 @@ the runs share one `PROBE_TIMEOUT`.
     test server in place of Tauri. The export of a segment and a share over SMB did not run.
   - In WKWebView: a late seek during a playback, which gets no repair, and the repair at rates
     other than 30 frames per second.
+  - (Added with the NAL check.) WebKit with a sample that fails the NAL check, the NAL check on
+    HEVC, and the application itself on Windows with the recording of measurement 29.
