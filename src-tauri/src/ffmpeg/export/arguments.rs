@@ -747,7 +747,10 @@ fn push_options(arguments: &mut Vec<String>, options: &[PresetOption], stream: O
 /// container"). A custom PCM encoder from a MOV preset may need a newer ffmpeg in the `mp4` muxer.
 /// Beside an MKV preset the file is an `.mka`, which the `matroska` muxer writes as it writes an
 /// `.mkv`.
-const fn muxer_of(container: Container, with_video: bool) -> (&'static str, bool) {
+///
+/// The plan reads the muxer too, to decide whether the output can hold copied audio
+/// (`super::copy::decide`, ADR 048).
+pub(crate) const fn muxer_of(container: Container, with_video: bool) -> (&'static str, bool) {
     match (container, with_video) {
         (Container::Mp4, _) | (Container::Mov, false) => ("mp4", true),
         (Container::Mov, true) => ("mov", true),
@@ -960,6 +963,7 @@ mod tests {
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
             copied_audio: None,
+            audio_copy_refusal: None,
             flv_input: None,
         }
     }
@@ -2770,6 +2774,7 @@ mod tests {
             )
             .expect("the fixture duration is representable"),
             copied_audio: None,
+            audio_copy_refusal: None,
             flv_input: None,
         }
     }
@@ -2978,6 +2983,7 @@ mod tests {
             )
             .expect("the fixture duration is representable"),
             copied_audio: None,
+            audio_copy_refusal: None,
             flv_input: None,
         }
     }

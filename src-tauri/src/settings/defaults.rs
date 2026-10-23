@@ -594,7 +594,8 @@ mod tests {
                 probe: &probe(),
                 preset,
                 streams: ExportStreams::VideoAndAudio,
-                audio_gaps: &[],
+                audio_frames: &crate::ffmpeg::AudioFrames::default(),
+                audio_mode: crate::ffmpeg::ExportAudioMode::Encode,
             },
             |path: &Path| {
                 if path == source {

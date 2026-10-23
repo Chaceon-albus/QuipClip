@@ -482,6 +482,13 @@ pub struct OutputAudioProbe {
     /// demuxer reports no stream duration for an `.mka`, and keeps the length in the segment
     /// header, which ffprobe shows as `format.duration`. In an `.m4a` the two agree.
     pub duration: Option<Rational>,
+    /// The `start_time` of the one audio stream, in seconds, exact, or `None` when the file holds
+    /// another number of audio streams or ffprobe reports none.
+    ///
+    /// An `.m4a` whose audio was copied starts its audio where the first packet lies after the In
+    /// point, less the priming of AAC, and its `duration` counts from that start (ADR 048). The
+    /// check of a copy adds the two.
+    pub audio_start: Option<Rational>,
 }
 
 /// Run the resolved ffprobe executable on the finished file of an export that writes no video,
@@ -540,13 +547,13 @@ pub fn parse_output_audio_json(json: &[u8]) -> Result<OutputAudioProbe, ProbePar
     };
     let audio_streams = count("audio");
     let video_streams = count("video");
-    let stream_duration = || {
+    let only_audio = || {
         let mut audio = raw
             .streams
             .iter()
             .filter(|stream| stream.codec_type.as_deref() == Some("audio"));
         match (audio.next(), audio.next()) {
-            (Some(stream), None) => parse_decimal_seconds(stream.duration.as_deref()),
+            (Some(stream), None) => Some(stream),
             _ => None,
         }
     };
@@ -554,11 +561,16 @@ pub fn parse_output_audio_json(json: &[u8]) -> Result<OutputAudioProbe, ProbePar
         .format
         .as_ref()
         .and_then(|format| parse_decimal_seconds(format.duration.as_deref()))
-        .or_else(stream_duration);
+        .or_else(|| {
+            only_audio().and_then(|stream| parse_decimal_seconds(stream.duration.as_deref()))
+        });
+    let audio_start =
+        only_audio().and_then(|stream| parse_decimal_seconds(stream.start_time.as_deref()));
     Ok(OutputAudioProbe {
         audio_streams,
         video_streams,
         duration,
+        audio_start,
     })
 }
 
@@ -573,6 +585,7 @@ struct RawOutputProbe {
 struct RawOutputStream {
     codec_type: Option<String>,
     duration: Option<String>,
+    start_time: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -851,6 +864,38 @@ pub struct AudioGap {
     pub to: Rational,
 }
 
+/// The answer of [`probe_audio_gaps`]: the gaps, and what the decision on a copy of the audio
+/// reads about the frames (ADR 048).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioFrames {
+    /// The gaps longer than the `min_gap` of the read, in order of time, with the stretch in front
+    /// of the first frame. Empty when the read found no frame.
+    pub gaps: Vec<AudioGap>,
+    /// The gaps longer than [`FINE_GAP_MILLISECONDS`], in the form of [`Self::gaps`].
+    ///
+    /// The `min_gap` of the export joins the frames on the two sides of a gap of up to 0.1 s,
+    /// because the fill of a chain writes no silence for such a gap. A copy writes no silence at
+    /// all, so it needs the shorter gaps too.
+    pub fine_gaps: Vec<AudioGap>,
+    /// The end of the last frame that the read found, in seconds on the timeline of the
+    /// container, or `None` when it found none.
+    ///
+    /// A read stops at the first packet at or after the end of its last range, so where the
+    /// stream covers that end, this lies at it or after it. The stretch after the last frame is
+    /// not a gap, so only this shows audio that ends inside a segment.
+    pub end: Option<Rational>,
+    /// The length of the longest frame that the read found, in seconds, or `None` when it found
+    /// none: one packet of the stream, as the copy keeps it.
+    pub longest_frame: Option<Rational>,
+}
+
+/// The longest gap, in milliseconds, between two frames that [`AudioFrames::fine_gaps`] joins.
+///
+/// Matroska and FLV store their timestamps in milliseconds. A frame of 1024 samples at 48000 Hz
+/// lasts 21.333 ms, so the next frame can start up to a millisecond after the end of the one in
+/// front of it, with no audio missing between them.
+pub const FINE_GAP_MILLISECONDS: i64 = 2;
+
 /// What [`probe_audio_gaps`] reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioGapRead<'a> {
@@ -880,17 +925,17 @@ pub struct AudioGapRead<'a> {
 /// not enough: an MP4 file stores a gap as the length of the packet in front of it, and the decoder
 /// gives that packet the samples of one frame.
 ///
-/// The answer lists the gaps longer than `read.min_gap`, in order of time
-/// ([`parse_audio_frames_csv`]). An empty `read.ranges` reads nothing. The runner, the deadline
-/// and the cancel rule are those of [`probe_output_audio`] (`procutil`, ADR 018).
+/// The answer lists the gaps longer than `read.min_gap`, in order of time, and the end of the last
+/// frame ([`parse_audio_frames_csv`]). An empty `read.ranges` reads nothing. The runner, the
+/// deadline and the cancel rule are those of [`probe_output_audio`] (`procutil`, ADR 018).
 pub fn probe_audio_gaps(
     ffprobe_path: &Path,
     media_path: &Path,
     read: &AudioGapRead<'_>,
     cancel: &AtomicBool,
-) -> Result<Vec<AudioGap>, ProbeError> {
+) -> Result<AudioFrames, ProbeError> {
     if read.ranges.is_empty() {
-        return Ok(Vec::new());
+        return Ok(AudioFrames::default());
     }
     if let Some(flv) = read
         .flv
@@ -944,7 +989,7 @@ fn probe_audio_gaps_in_slices(
     read: &AudioGapRead<'_>,
     flv: &crate::ffmpeg::export::flv_input::FlvInput,
     cancel: &AtomicBool,
-) -> Result<Vec<AudioGap>, ProbeError> {
+) -> Result<AudioFrames, ProbeError> {
     let parse_error = |message: &'static str| ProbeError::Parse {
         source: invalid_frames(message),
         stderr: Vec::new(),
@@ -1196,8 +1241,10 @@ fn read_intervals_argument(ranges: &[(Rational, Rational)]) -> Option<String> {
 /// without a timestamp starts where the frame in front of it ends, as FFmpeg times it. A frame in
 /// front of the first timestamp of the answer ends where the next frame with a timestamp starts.
 /// Frames that overlap, or lie at most `min_gap` apart, join. The gaps are the stretches between
-/// the joined frames, and the stretch in front of the first frame, which has no `from`. An answer
-/// without frames has no gap.
+/// the joined frames, and the stretch in front of the first frame, which has no `from`. The fine
+/// gaps are the same with frames joined across [`FINE_GAP_MILLISECONDS`] only. The end is the end
+/// of the last joined stretch, and the longest frame is the longest that a line gives. An answer
+/// without frames has no gap, no end and no longest frame.
 ///
 /// These fail: an answer that reaches the capture limit, which can be cut, an answer that is not
 /// UTF-8, a line that is not two fields, optionally followed by empty fields, a timestamp that is
@@ -1208,7 +1255,7 @@ pub fn parse_audio_frames_csv(
     csv: &[u8],
     sample_rate: u32,
     min_gap: Rational,
-) -> Result<Vec<AudioGap>, ProbeParseError> {
+) -> Result<AudioFrames, ProbeParseError> {
     if csv.len() >= STDOUT_CAPTURE_LIMIT {
         return Err(invalid_frames("the answer reached the capture limit"));
     }
@@ -1219,6 +1266,15 @@ pub fn parse_audio_frames_csv(
     let overflow = || invalid_frames("a time is out of range");
     let zero = Rational::new(0, 1).expect("0/1 always reduces to a valid Rational");
     let mut covered = CoveredStretches::new(min_gap);
+    let mut fine = CoveredStretches::new(
+        Rational::new(FINE_GAP_MILLISECONDS, 1000)
+            .expect("FINE_GAP_MILLISECONDS/1000 always reduces to a valid Rational"),
+    );
+    let mut add = |start: Rational, end: Rational| {
+        covered.add(start, end)?;
+        fine.add(start, end)
+    };
+    let mut longest_frame: Option<Rational> = None;
     // The end of the frame in front, which a frame without a timestamp starts at.
     let mut end_in_front: Option<Rational> = None;
     // The length of the frames without a timestamp in front of the first frame with one.
@@ -1248,12 +1304,11 @@ pub fn parse_audio_frames_csv(
                 .and_then(|count| Rational::new(i64::from(count), i64::from(sample_rate)))
                 .ok_or_else(|| invalid_frames("an nb_samples is not a count"))?,
         };
+        longest_frame = Some(longest_frame.map_or(length, |longest| longest.max(length)));
         let start = match (start, end_in_front) {
             (Some(start), _) => {
                 if unplaced > zero {
-                    covered
-                        .add(start.sub(unplaced).ok_or_else(overflow)?, start)
-                        .ok_or_else(overflow)?;
+                    add(start.sub(unplaced).ok_or_else(overflow)?, start).ok_or_else(overflow)?;
                     unplaced = zero;
                 }
                 start
@@ -1265,10 +1320,18 @@ pub fn parse_audio_frames_csv(
             }
         };
         let end = start.add(length).ok_or_else(overflow)?;
-        covered.add(start, end).ok_or_else(overflow)?;
+        add(start, end).ok_or_else(overflow)?;
         end_in_front = Some(end);
     }
-    covered.gaps().ok_or_else(overflow)
+    let (gaps, end) = covered.gaps_and_end().ok_or_else(overflow)?;
+    let (fine_gaps, _) = fine.gaps_and_end().ok_or_else(overflow)?;
+    Ok(AudioFrames {
+        gaps,
+        fine_gaps,
+        // Frames without a timestamp and nothing behind them have no place, so no length either.
+        longest_frame: end.and(longest_frame),
+        end,
+    })
 }
 
 /// A [`ProbeParseError`] for an answer of [`probe_audio_gaps`] that cannot be read.
@@ -1293,7 +1356,7 @@ impl CoveredStretches {
     /// Add the frame from `start` to `end`, or `None` when the time overflows.
     ///
     /// The frames of one read come in order, so most of them join the last stretch here. The
-    /// others are joined by [`Self::gaps`].
+    /// others are joined by [`Self::gaps_and_end`].
     fn add(&mut self, start: Rational, end: Rational) -> Option<()> {
         if let Some(last) = self.stretches.last_mut() {
             if start >= last.0 && start <= last.1.add(self.min_gap)? {
@@ -1305,8 +1368,9 @@ impl CoveredStretches {
         Some(())
     }
 
-    /// The gaps between the stretches, in order of time, or `None` when the time overflows.
-    fn gaps(mut self) -> Option<Vec<AudioGap>> {
+    /// The gaps between the stretches, in order of time, and the end of the last stretch, or
+    /// `None` when the time overflows.
+    fn gaps_and_end(mut self) -> Option<(Vec<AudioGap>, Option<Rational>)> {
         self.stretches.sort_unstable();
         let mut joined: Vec<(Rational, Rational)> = Vec::with_capacity(self.stretches.len());
         for (start, end) in self.stretches {
@@ -1316,16 +1380,16 @@ impl CoveredStretches {
             }
         }
         let mut from = None;
-        Some(
-            joined
-                .into_iter()
-                .map(|(start, end)| {
-                    let gap = AudioGap { from, to: start };
-                    from = Some(end);
-                    gap
-                })
-                .collect(),
-        )
+        let gaps = joined
+            .into_iter()
+            .map(|(start, end)| {
+                let gap = AudioGap { from, to: start };
+                from = Some(end);
+                gap
+            })
+            .collect();
+        // `from` now holds the end of the last stretch.
+        Some((gaps, from))
     }
 }
 
@@ -3244,7 +3308,83 @@ mod tests {
     /// The gaps that [`parse_audio_frames_csv`] reads from `csv` at `sample_rate`, with the
     /// minimum gap of the export, 0.1 s.
     fn gaps_of(csv: &str, sample_rate: u32) -> Vec<AudioGap> {
+        frames_of(csv, sample_rate).gaps
+    }
+
+    /// The whole answer that [`parse_audio_frames_csv`] reads from `csv`, as [`gaps_of`] reads it.
+    fn frames_of(csv: &str, sample_rate: u32) -> AudioFrames {
         parse_audio_frames_csv(csv.as_bytes(), sample_rate, seconds("0.1")).unwrap()
+    }
+
+    #[test]
+    fn the_end_is_the_end_of_the_last_frame_after_the_frames_join() {
+        // The last frame starts at 9.984 s and lasts 1024 samples at 48000 Hz.
+        let csv = "9.920000,1024\n9.941000,1024\n9.963000,1024\n9.984000,1024\n";
+        assert_eq!(
+            frames_of(csv, 48_000).end,
+            Some(
+                seconds("9.984")
+                    .add(Rational::new(1024, 48_000).unwrap())
+                    .unwrap()
+            )
+        );
+        // Frames that arrive out of order: the end is that of the latest stretch, not of the last
+        // line.
+        assert_eq!(
+            frames_of("5,1000\n1,1000\n", 1000),
+            AudioFrames {
+                gaps: vec![gap(None, "1"), gap(Some("2"), "5")],
+                fine_gaps: vec![gap(None, "1"), gap(Some("2"), "5")],
+                end: Some(seconds("6")),
+                longest_frame: Some(seconds("1")),
+            }
+        );
+        // An answer without frames has no end, and frames without a place have no length.
+        assert_eq!(frames_of("", 48_000), AudioFrames::default());
+        assert_eq!(frames_of("N/A,1000\n", 1000), AudioFrames::default());
+    }
+
+    #[test]
+    fn the_fine_gaps_show_the_gaps_that_the_bound_joins_and_not_the_rounding_of_milliseconds() {
+        // Frames of 1024 samples at 48000 Hz timed to the millisecond, as Matroska and FLV store
+        // them, with a hole of 85 ms after the second frame and one of 0.5 s later.
+        let csv = "10.000,1024\n10.021,1024\n10.128,1024\n10.149,1024\n11.000,1024\n";
+        let frames = frames_of(csv, 48_000);
+        // The bound joins the frames across 0.1 s, so it sees only the hole of 0.5 s.
+        assert_eq!(
+            frames.gaps,
+            vec![
+                gap(None, "10"),
+                AudioGap {
+                    from: Some(
+                        seconds("10.149")
+                            .add(Rational::new(1024, 48_000).unwrap())
+                            .unwrap()
+                    ),
+                    to: seconds("11"),
+                }
+            ]
+        );
+        // The fine gaps join only across 2 ms: the 1/3 ms of rounding between the first two
+        // frames is no gap, and the hole of 85 ms is one.
+        assert_eq!(frames.fine_gaps.len(), 3);
+        assert_eq!(
+            frames.fine_gaps[1],
+            AudioGap {
+                from: Some(
+                    seconds("10.021")
+                        .add(Rational::new(1024, 48_000).unwrap())
+                        .unwrap()
+                ),
+                to: seconds("10.128"),
+            }
+        );
+        assert_eq!(frames.longest_frame, Rational::new(1024, 48_000));
+        // The longest frame is the longest line.
+        assert_eq!(
+            frames_of("0,1024\n0.5,2048\n", 48_000).longest_frame,
+            Rational::new(2048, 48_000)
+        );
     }
 
     fn gap(from: Option<&str>, to: &str) -> AudioGap {
@@ -3480,7 +3620,12 @@ mod tests {
                 parse
             )
             .unwrap(),
-            vec![gap(None, "1"), gap(Some("2"), "3")]
+            AudioFrames {
+                gaps: vec![gap(None, "1"), gap(Some("2"), "3")],
+                fine_gaps: vec![gap(None, "1"), gap(Some("2"), "3")],
+                end: Some(seconds("4")),
+                longest_frame: Some(seconds("1")),
+            }
         );
         assert!(matches!(
             finish_probe_run_with(run(ProbeEnd::TimedOut), PROBE_TIMEOUT, parse),
@@ -3732,6 +3877,7 @@ mod tests {
                 "index": 0,
                 "codec_type": "audio",
                 "codec_name": "aac",
+                "start_time": "0.016000",
                 "duration": "5.000000"
             }],
             "format": { "format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.000000" }
@@ -3742,8 +3888,18 @@ mod tests {
                 audio_streams: 1,
                 video_streams: 0,
                 duration: Some(seconds("5")),
+                audio_start: Some(seconds("0.016")),
             }
         );
+        // Two audio streams have no one start.
+        let two = parse_output(serde_json::json!({
+            "streams": [
+                { "codec_type": "audio", "start_time": "0.016000" },
+                { "codec_type": "audio", "start_time": "0.016000" }
+            ],
+            "format": { "duration": "5.000000" }
+        }));
+        assert_eq!(two.audio_start, None);
     }
 
     #[test]
@@ -3812,6 +3968,7 @@ mod tests {
                 audio_streams: 0,
                 video_streams: 0,
                 duration: None,
+                audio_start: None,
             }
         );
         let scientific = parse_output(serde_json::json!({

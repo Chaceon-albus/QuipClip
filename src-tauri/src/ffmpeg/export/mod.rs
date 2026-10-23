@@ -66,6 +66,7 @@
 //! (ADR 048).
 
 pub mod arguments;
+pub mod copy;
 pub mod flv_input;
 pub mod fsinspect;
 pub mod graph;
@@ -89,7 +90,9 @@ pub use process::{
 };
 pub use progress::{ProgressReader, ProgressSnapshot};
 pub use registry::{ExportRegistry, ExportSlot};
-pub use verify::{verify_audio_output, verify_copy_streams, AudioOutputMismatch};
+pub use verify::{
+    verify_audio_output, verify_copied_audio_output, verify_copy_streams, AudioOutputMismatch,
+};
 
 use crate::project::Resolution;
 use crate::settings::{AudioChannels, Container, PresetOption, Quality};
@@ -138,6 +141,21 @@ impl ExportStreams {
     pub const fn writes_audio(self) -> bool {
         matches!(self, Self::VideoAndAudio | Self::AudioOnly)
     }
+}
+
+/// How an export writes the audio of the source: encoded by the preset, or copied (ADR 048).
+///
+/// [`plan::build_plan`] copies the audio only when [`copy::decide`] agrees, and otherwise encodes
+/// it as for [`ExportAudioMode::Encode`]: no refusal fails the export. Each variant names its wire
+/// string explicitly, as [`ExportStreams`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExportAudioMode {
+    /// Decode, cut and encode the audio with the settings of the preset.
+    #[serde(rename = "encode")]
+    Encode,
+    /// Copy the packets of the source audio, when the plan can.
+    #[serde(rename = "copy")]
+    Copy,
 }
 
 /// The largest number of segments [`plan::build_plan`] accepts in one export request.
@@ -514,6 +532,10 @@ pub struct ExportPlan {
     /// packets into the output file, and the command has no filter graph
     /// ([`arguments::build_copy_arguments`]).
     pub copied_audio: Option<CopiedAudio>,
+    /// Why the plan encodes the audio that the request asked it to copy, or `None` when the
+    /// request asked for no copy or the plan copies (ADR 048). No stage of the renderer reads it:
+    /// `commands::export` writes it to the log, and the export runs as an encode.
+    pub audio_copy_refusal: Option<copy::CopyRefusal>,
     /// The segments to render, in the order they must appear in the concatenated output.
     pub segments: Vec<PlannedSegment>,
     /// The output container, which selects the muxer (ADR 004).

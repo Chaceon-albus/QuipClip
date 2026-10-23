@@ -66,14 +66,15 @@ use crate::ffmpeg::export::flv_input::{
 use crate::ffmpeg::export::{
     build_arguments, build_audio_arguments, build_audio_graph, build_copy_arguments, build_plan,
     choose_audio_graph_shape, choose_graph_shape, encoder_graph, inspect_path, run_export_process,
-    verify_audio_output, verify_copy_streams, AudioOutputMismatch, CopyOutput, ExportErrorCode,
-    ExportPlan, ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus, ExportRegistry,
-    ExportSlot, ExportStreams, PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary,
-    AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
+    verify_audio_output, verify_copied_audio_output, verify_copy_streams, AudioOutputMismatch,
+    CopyOutput, ExportAudioMode, ExportErrorCode, ExportPlan, ExportProcessOutcome,
+    ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot, ExportStreams,
+    PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary, AUDIO_FILL_MIN_GAP_MILLISECONDS,
+    MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::preview::PreviewWindows;
 use crate::ffmpeg::{
-    self, AudioGap, AudioGapRead, AudioProbe, FfmpegPaths, FirstAudioPacket, LocateError,
+    self, AudioFrames, AudioGapRead, AudioProbe, FfmpegPaths, FirstAudioPacket, LocateError,
     MediaProbe, OutputAudioProbe, ProbeError,
 };
 use crate::settings::{self, LoadedSettings, Preset, Settings, SettingsFileError};
@@ -515,7 +516,7 @@ where
     FirstPacket:
         FnOnce(&Path, &Path, u32, &AtomicBool) -> Result<Option<FirstAudioPacket>, ProbeError>,
     RateAt: FnOnce(&Path, &Path, u64, u32, &AtomicBool) -> Result<Option<u32>, ProbeError>,
-    Gaps: FnOnce(&Path, &Path, &AudioGapRead<'_>, &AtomicBool) -> Result<Vec<AudioGap>, ProbeError>,
+    Gaps: FnOnce(&Path, &Path, &AudioGapRead<'_>, &AtomicBool) -> Result<AudioFrames, ProbeError>,
 {
     let PrepareRequest {
         request,
@@ -586,7 +587,7 @@ where
         preview_windows,
         cancel,
     )?;
-    let audio_gaps = read_audio_gaps(
+    let audio_frames = read_audio_gaps(
         &executables.ffprobe,
         &source,
         &probe,
@@ -621,12 +622,19 @@ where
             probe: &probe,
             preset,
             streams: request.streams,
-            audio_gaps: &audio_gaps,
+            audio_frames: &audio_frames,
+            // The request carries no choice of the audio yet; every export encodes it.
+            audio_mode: ExportAudioMode::Encode,
         },
         inspect_path,
     )
     .map_err(ExportCommandError::new)?;
     plan.flv_input = flv_input.filter(|flv| flv.segment_offsets.len() == plan.segments.len());
+    // A copy that the plan refused is no error: the export encodes the audio, or writes none
+    // (ADR 048).
+    if let Some(refusal) = plan.audio_copy_refusal {
+        eprintln!("export: the audio is not copied: {refusal:?}");
+    }
 
     // Before the reservation, which is the first step here that writes to the user's disk. A
     // cancel read after it would have to delete the file it created; read here, there is
@@ -797,6 +805,10 @@ where
 /// unsuccessfully, writes an answer that does not parse, or times out gives no gaps. The plan then
 /// bounds only the silence in front of the first sample, as before this read existed. A cancel
 /// that stops the read ends the run as canceled. The flag is also read before the read starts.
+///
+/// The answer also tells where the frames start and end, and the shorter gaps between them, which
+/// the decision on a copy of the audio reads (ADR 048). A read that failed tells nothing, and the
+/// plan then encodes the audio.
 fn read_audio_gaps<Gaps>(
     ffprobe: &Path,
     source: &Path,
@@ -805,9 +817,9 @@ fn read_audio_gaps<Gaps>(
     flv: Option<&FlvInput>,
     cancel: &AtomicBool,
     audio_gaps: Gaps,
-) -> Result<Vec<AudioGap>, ExportCommandError>
+) -> Result<AudioFrames, ExportCommandError>
 where
-    Gaps: FnOnce(&Path, &Path, &AudioGapRead<'_>, &AtomicBool) -> Result<Vec<AudioGap>, ProbeError>,
+    Gaps: FnOnce(&Path, &Path, &AudioGapRead<'_>, &AtomicBool) -> Result<AudioFrames, ProbeError>,
 {
     let Some((audio, sample_rate)) = probe
         .audio
@@ -815,10 +827,10 @@ where
         .filter(|audio| request.streams.writes_audio() && !audio.holds_no_packets)
         .and_then(|audio| Some((audio, audio.sample_rate?)))
     else {
-        return Ok(Vec::new());
+        return Ok(AudioFrames::default());
     };
     if request.segments.is_empty() || request.segments.len() > MAX_EXPORT_SEGMENTS {
-        return Ok(Vec::new());
+        return Ok(AudioFrames::default());
     }
     let ranges: Option<Vec<(Rational, Rational)>> = request
         .segments
@@ -830,7 +842,7 @@ where
         })
         .collect();
     let Some(ranges) = ranges else {
-        return Ok(Vec::new());
+        return Ok(AudioFrames::default());
     };
     if cancel.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
@@ -844,10 +856,10 @@ where
         flv,
     };
     match audio_gaps(ffprobe, source, &read, cancel) {
-        Ok(gaps) => Ok(gaps),
+        Ok(frames) => Ok(frames),
         Err(ProbeError::Canceled) => Err(ExportCommandError::new(ExportErrorCode::Canceled)),
         // A read that failed: the plan bounds no gap inside the stream.
-        Err(_) => Ok(Vec::new()),
+        Err(_) => Ok(AudioFrames::default()),
     }
 }
 
@@ -1398,13 +1410,15 @@ where
         frames
     } else {
         // A plan without video encodes its audio or copies it (ADR 048). The copy has no
-        // `PlannedAudio`, and its expected duration is the total duration, as for the encode.
+        // `PlannedAudio`, and its expected duration is the total duration, as for the encode. Its
+        // check adds the start of the audio, which a copy keeps.
         let expected = plan
             .audio
             .as_ref()
             .map_or(plan.total_duration, |audio| audio.expected_duration);
         verified_audio_output(
             expected,
+            plan.copied_audio.is_some(),
             outcome.last_progress.as_ref(),
             outcome.stderr_detail(),
             || probe_output(&ffprobe, pending.path(), cancel.as_ref()),
@@ -1521,11 +1535,14 @@ fn verified_frame_count(
 ///    [`crate::ffmpeg::export::PlannedAudio::expected_duration`], the planned duration of the
 ///    segments. A wrong stream set reports `outputStreamsMismatch`. A duration outside the
 ///    tolerance, or none, reports `audioDurationMismatch`, with the measured and the expected
-///    duration as named values.
+///    duration as named values. When `copied` is true, the plan copied the audio, and
+///    [`verify_copied_audio_output`] compares instead: it adds the start of the audio stream to
+///    the duration, because a copy keeps the place of its first packet (ADR 048).
 ///
 /// `detail` is the process's own stderr tail, as for the frame count.
 fn verified_audio_output(
     expected: Rational,
+    copied: bool,
     last_progress: Option<&ProgressSnapshot>,
     detail: Option<String>,
     probe: impl FnOnce() -> Result<OutputAudioProbe, ProbeError>,
@@ -1534,7 +1551,12 @@ fn verified_audio_output(
         return Err(streams_mismatch(detail));
     }
     let answer = read_finished_output(probe, &detail)?;
-    verify_audio_output(&answer, expected).map_err(|mismatch| match mismatch {
+    let verify = if copied {
+        verify_copied_audio_output
+    } else {
+        verify_audio_output
+    };
+    verify(&answer, expected).map_err(|mismatch| match mismatch {
         AudioOutputMismatch::Streams { .. } => streams_mismatch(detail),
         AudioOutputMismatch::Duration { measured, expected } => ExportCommandError {
             detail,
@@ -1802,8 +1824,8 @@ mod tests {
         _: &Path,
         _: &AudioGapRead<'_>,
         _: &AtomicBool,
-    ) -> Result<Vec<AudioGap>, ProbeError> {
-        Ok(Vec::new())
+    ) -> Result<AudioFrames, ProbeError> {
+        Ok(AudioFrames::default())
     }
 
     /// A read of the sample rate that a test expects never to run.
@@ -1847,6 +1869,7 @@ mod tests {
             container: Container::Mp4,
             total_duration: Rational::new(1, 1).unwrap(),
             copied_audio: None,
+            audio_copy_refusal: None,
             flv_input: None,
         }
     }
@@ -2062,9 +2085,13 @@ mod tests {
                 .collect()
         };
         let by_slices = read(Some(&input));
-        assert!(!by_slices.is_empty(), "the read found the first frame");
-        assert_eq!(inside(by_slices), vec![]);
-        assert_eq!(inside(read(None)), vec![]);
+        assert!(!by_slices.gaps.is_empty(), "the read found the first frame");
+        // The read stops at the first packet at or after the end of the last range, 3 s.
+        assert!(by_slices
+            .end
+            .is_some_and(|end| end >= Rational::new(3, 1).unwrap()));
+        assert_eq!(inside(by_slices.gaps), vec![]);
+        assert_eq!(inside(read(None).gaps), vec![]);
     }
 
     #[test]
@@ -3622,7 +3649,7 @@ mod tests {
             &Path,
             &AudioGapRead<'_>,
             &AtomicBool,
-        ) -> Result<Vec<AudioGap>, ProbeError>,
+        ) -> Result<AudioFrames, ProbeError>,
     ) -> Result<PreparedExport, ExportCommandError> {
         prepare_reading_audio_and_gaps(
             directory,
@@ -3661,7 +3688,7 @@ mod tests {
             &Path,
             &AudioGapRead<'_>,
             &AtomicBool,
-        ) -> Result<Vec<AudioGap>, ProbeError>,
+        ) -> Result<AudioFrames, ProbeError>,
     ) -> Result<PreparedExport, ExportCommandError> {
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
@@ -3981,7 +4008,7 @@ mod tests {
         _: &Path,
         _: &AudioGapRead<'_>,
         _: &AtomicBool,
-    ) -> Result<Vec<AudioGap>, ProbeError> {
+    ) -> Result<AudioFrames, ProbeError> {
         unreachable!("the test expects no read of the gaps inside the audio stream")
     }
 
@@ -3991,17 +4018,23 @@ mod tests {
         _: &Path,
         _: &AudioGapRead<'_>,
         _: &AtomicBool,
-    ) -> Result<Vec<AudioGap>, ProbeError> {
-        Ok(vec![
-            AudioGap {
+    ) -> Result<AudioFrames, ProbeError> {
+        let gaps = vec![
+            ffmpeg::AudioGap {
                 from: None,
                 to: Rational::new(0, 1).unwrap(),
             },
-            AudioGap {
+            ffmpeg::AudioGap {
                 from: Some(Rational::new(10, 1).unwrap()),
                 to: Rational::new(100, 1).unwrap(),
             },
-        ])
+        ];
+        Ok(AudioFrames {
+            fine_gaps: gaps.clone(),
+            gaps,
+            end: Some(Rational::new(120, 1).unwrap()),
+            longest_frame: Rational::new(1024, 48_000),
+        })
     }
 
     #[test]
@@ -4022,7 +4055,7 @@ mod tests {
                     gap_read.ranges.to_vec(),
                     gap_read.min_gap,
                 ));
-                Ok(Vec::new())
+                Ok(AudioFrames::default())
             },
         )
         .unwrap();
@@ -4066,7 +4099,7 @@ mod tests {
     #[test]
     fn a_failed_read_of_the_gaps_bounds_no_gap_and_a_cancel_ends_the_run() {
         let directory = TestDirectory::new();
-        let prepare = |cancel: &AtomicBool, gaps: Result<Vec<AudioGap>, ProbeError>| {
+        let prepare = |cancel: &AtomicBool, gaps: Result<AudioFrames, ProbeError>| {
             prepare_reading_gaps(
                 &directory,
                 ExportStreams::VideoAndAudio,
@@ -4813,6 +4846,7 @@ mod tests {
             audio_streams: audio,
             video_streams: video,
             duration: duration.map(|text| Rational::from_decimal_str(text).unwrap()),
+            audio_start: None,
         }
     }
 

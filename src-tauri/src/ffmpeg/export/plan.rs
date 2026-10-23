@@ -9,12 +9,13 @@
 //! specifically so an existing file with no usable identity cannot be represented; see its
 //! doc comment for why that distinction is load-bearing.
 
+use super::copy::{self, CopyQuestion};
 use super::{
-    ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PlannedAudio, PlannedSegment,
-    PlannedVideo, AUDIO_PREFIX_MARGIN_MILLISECONDS, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
-    MAX_HELD_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
+    ExportAudioMode, ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PlannedAudio,
+    PlannedSegment, PlannedVideo, AUDIO_PREFIX_MARGIN_MILLISECONDS, MAX_AUDIO_PREFIXES,
+    MAX_EXPORT_SEGMENTS, MAX_HELD_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
 };
-use crate::ffmpeg::probe::{AudioGap, AudioProbe, MediaProbe};
+use crate::ffmpeg::probe::{AudioFrames, AudioGap, AudioProbe, MediaProbe};
 use crate::settings::{
     AudioChannels, AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting,
 };
@@ -58,12 +59,16 @@ pub struct PlanRequest<'a> {
     /// Which streams of the source the export writes, as the user chose them. This decides
     /// which parts of [`ExportPlan`] exist; see [`ExportStreams`].
     pub streams: ExportStreams,
-    /// The gaps inside the audio stream of [`MediaProbe::audio`] that the export read inside the
-    /// segments, in order of time, from `ffmpeg::probe::probe_audio_gaps`. Empty when the export
-    /// read none, or the read failed. The fill of a chain holds the silence of each gap in memory,
-    /// so the plan bounds the longest gap of each segment with the silence in front of the first
-    /// sample (check 15).
-    pub audio_gaps: &'a [AudioGap],
+    /// What the export read about the frames of the audio stream of [`MediaProbe::audio`] inside
+    /// the segments, from `ffmpeg::probe::probe_audio_gaps`. Empty when the export read none, or
+    /// the read failed.
+    ///
+    /// The fill of a chain holds the silence of each gap of [`AudioFrames::gaps`] in memory, so the
+    /// plan bounds the longest gap of each segment with the silence in front of the first sample
+    /// (check 15). The decision on a copy of the audio reads the rest (step 13a).
+    pub audio_frames: &'a AudioFrames,
+    /// Whether the request asks to copy the audio rather than encode it (ADR 048, step 13a).
+    pub audio_mode: ExportAudioMode,
 }
 
 /// An opaque, comparable identity for one file on disk, used only to detect that two
@@ -185,6 +190,12 @@ pub enum PathFacts {
 ///     the one question about the audio that comes before its sample rate: a stream that is
 ///     absent has no rate to ask about. An export of only the audio of an empty stream would
 ///     write a file of silence and nothing else.
+///
+///     Step 13a is no check: a request with [`ExportAudioMode::Copy`] asks [`copy::decide`]
+///     whether the plan copies the audio (ADR 048). When it does, the plan carries
+///     [`ExportPlan::copied_audio`] and no [`ExportPlan::audio`], so checks 14 and 15, which are
+///     about the decode of the stream, do not run. When it does not, the plan carries the reason
+///     in [`ExportPlan::audio_copy_refusal`], and every later step runs as for an encode.
 /// 14. The export writes audio ([`ExportStreams::writes_audio`]), and the probe reports an
 ///     audio stream whose sample rate is absent, not positive, or larger than `u32` --
 ///     [`ExportErrorCode::SourceAudioRateUnknown`]. A video-only export never reads the
@@ -196,7 +207,7 @@ pub enum PathFacts {
 ///     ([`PlannedSegment::audio_prefix`]). A segment that ends at or before the sample counts
 ///     nothing, because the end pad of its chain writes its silence frame by frame, without
 ///     holding it (`graph::audio_end_pad`). The second is the longest gap of
-///     [`PlanRequest::audio_gaps`] that the segment holds audio behind (`longest_held_gap`). Each
+///     [`PlanRequest::audio_frames`] that the segment holds audio behind (`longest_held_gap`). Each
 ///     segment counts the longer of the two, because one chain holds one of them at a time. The
 ///     sum is checked once every segment is planned, because the prefixes go to the longest
 ///     silences of all segments. A probe that reports no start of the stream bounds no silence in
@@ -227,14 +238,16 @@ pub enum PathFacts {
 /// (`graph::audio_end_pad`).
 ///
 /// The plan carries [`ExportPlan::video`] exactly when the export writes video. It carries
-/// [`ExportPlan::audio`] exactly when the export writes audio and the probe reports an audio
-/// stream. Check 13 makes the two rules leave no plan with neither part: the one choice
-/// without video is refused when there is no audio to write. When that stream holds no packets,
-/// the audio part carries [`PlannedAudio::silence_layout`], and its chains generate silence
-/// instead of reading the stream.
+/// [`ExportPlan::audio`] exactly when the export writes audio, the probe reports an audio
+/// stream, and the plan does not copy it (step 13a). Check 13 makes the rules leave no plan that
+/// writes nothing: the one choice without video is refused when there is no audio to write, and
+/// otherwise its plan encodes or copies the audio. When that stream holds no packets, the audio
+/// part carries [`PlannedAudio::silence_layout`], and its chains generate silence instead of
+/// reading the stream.
 ///
-/// [`ExportStreams::VideoAndAudio`] plans exactly what every export planned before the choice
-/// existed, so a request with that value renders the same command as before, byte for byte.
+/// [`ExportStreams::VideoAndAudio`] with [`ExportAudioMode::Encode`] plans exactly what every
+/// export planned before the two choices existed, so such a request renders the same command as
+/// before, byte for byte.
 ///
 /// No step here uses floating point. Every quantity is either an integer or a [`Rational`],
 /// per ADR 002.
@@ -376,6 +389,24 @@ pub fn build_plan(
     {
         return Err(ExportErrorCode::SourceHasNoAudio);
     }
+    // Step 13a: a request that asks to copy the audio gets a copy when `copy::decide` agrees, and
+    // an encode otherwise, with the reason for the log. A copy plans no `PlannedAudio`, so the
+    // checks below that read the audio stream, the rate and the silence of the fills, are those of
+    // an encode only (ADR 048).
+    let copy = match request.audio_mode {
+        ExportAudioMode::Encode => None,
+        ExportAudioMode::Copy => Some(copy::decide(&CopyQuestion {
+            probe,
+            streams,
+            container: preset.container,
+            segments,
+            frames: request.audio_frames,
+        })),
+    };
+    let audio_copy_refusal = copy
+        .as_ref()
+        .and_then(|answer| answer.as_ref().err().copied());
+    let copied_audio = copy.and_then(Result::ok);
     // An audio stream with no usable sample rate is refused, not dropped. ADR 014 cuts audio
     // at integer ticks of `1 / sample_rate` and forbids the microsecond `atrim` fallback, so
     // there is no exact way to cut this track. Planning it away instead would set `concat=a=0`
@@ -394,7 +425,10 @@ pub fn build_plan(
     // name, and `silence_layout` gives it. The rate range and the bitrate range are not re-checked
     // here: `settings::validate_settings` bounds both, and `commands::export` plans only from a
     // preset it read out of the settings document through the validating `settings::load`.
-    let source_audio = probe.audio.as_ref().filter(|_| streams.writes_audio());
+    let source_audio = probe
+        .audio
+        .as_ref()
+        .filter(|_| streams.writes_audio() && copied_audio.is_none());
     let audio = match source_audio {
         None => None,
         Some(audio) => {
@@ -475,8 +509,13 @@ pub fn build_plan(
             };
         leading_silences.push(leading_silence);
         longest_gaps.push(match source_audio {
-            Some(_) => longest_held_gap(request.audio_gaps, in_seconds, out_seconds, audio_start)
-                .ok_or(ExportErrorCode::InvalidSegment)?,
+            Some(_) => longest_held_gap(
+                &request.audio_frames.gaps,
+                in_seconds,
+                out_seconds,
+                audio_start,
+            )
+            .ok_or(ExportErrorCode::InvalidSegment)?,
             None => zero,
         });
 
@@ -596,7 +635,8 @@ pub fn build_plan(
             expected_frames: Some(total_frames),
         }),
         audio,
-        copied_audio: None,
+        copied_audio,
+        audio_copy_refusal,
         segments: planned_segments,
         container: preset.container,
         total_duration,
@@ -853,6 +893,8 @@ fn round_rational_to_i128(value: Rational) -> Option<i128> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffmpeg::export::copy::CopyRefusal;
+    use crate::ffmpeg::export::CopiedAudio;
     use crate::ffmpeg::probe::AudioProbe;
     use crate::project::Resolution;
     use crate::settings::{AudioChannels, Container, Quality, QualityKind};
@@ -1081,18 +1123,62 @@ mod tests {
         facts: HashMap<PathBuf, PathFacts>,
         audio_gaps: &[AudioGap],
     ) -> Result<ExportPlan, ExportErrorCode> {
-        let source = Path::new(SOURCE);
-        let destination = Path::new(DESTINATION);
+        let frames = AudioFrames {
+            gaps: audio_gaps.to_vec(),
+            ..AudioFrames::default()
+        };
+        plan_read(
+            streams,
+            segments,
+            probe,
+            preset,
+            facts,
+            &frames,
+            ExportAudioMode::Encode,
+        )
+    }
+
+    /// Plan a request with the audio mode `audio_mode`, after the read of the frames `frames`.
+    fn plan_read(
+        streams: ExportStreams,
+        segments: &[SegmentBoundary],
+        probe: &MediaProbe,
+        preset: &Preset,
+        facts: HashMap<PathBuf, PathFacts>,
+        frames: &AudioFrames,
+        audio_mode: ExportAudioMode,
+    ) -> Result<ExportPlan, ExportErrorCode> {
         let request = PlanRequest {
-            source,
-            destination,
+            source: Path::new(SOURCE),
+            destination: Path::new(DESTINATION),
             segments,
             probe,
             preset,
             streams,
-            audio_gaps,
+            audio_frames: frames,
+            audio_mode,
         };
         build_plan(&request, inspect_from(facts))
+    }
+
+    /// Plan a request that asks to copy the audio (ADR 048), after the read of the frames
+    /// `frames`, against valid paths.
+    fn plan_copy(
+        streams: ExportStreams,
+        segments: &[SegmentBoundary],
+        probe: &MediaProbe,
+        preset: &Preset,
+        frames: &AudioFrames,
+    ) -> Result<ExportPlan, ExportErrorCode> {
+        plan_read(
+            streams,
+            segments,
+            probe,
+            preset,
+            valid_path_facts(),
+            frames,
+            ExportAudioMode::Copy,
+        )
     }
 
     // -- preflight: segment count and ordering --------------------------------------------
@@ -1160,7 +1246,8 @@ mod tests {
                 probe: &sample_probe(),
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
-                audio_gaps: &[],
+                audio_frames: &AudioFrames::default(),
+                audio_mode: ExportAudioMode::Encode,
             };
             let error = build_plan(&request, inspect_from(valid_path_facts())).unwrap_err();
             assert_eq!(
@@ -1216,7 +1303,8 @@ mod tests {
                 probe: &sample_probe(),
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
-                audio_gaps: &[],
+                audio_frames: &AudioFrames::default(),
+                audio_mode: ExportAudioMode::Encode,
             };
             let error = build_plan(&request, inspect_from(valid_path_facts())).unwrap_err();
             assert_eq!(
@@ -1293,7 +1381,8 @@ mod tests {
             probe: &sample_probe(),
             preset: &sample_preset(),
             streams: ExportStreams::VideoAndAudio,
-            audio_gaps: &[],
+            audio_frames: &AudioFrames::default(),
+            audio_mode: ExportAudioMode::Encode,
         };
         let mut facts = valid_path_facts();
         facts.insert(PathBuf::from(SOURCE), present_file(1));
@@ -3264,6 +3353,479 @@ mod tests {
                 .expect("audio only plans audio")
                 .expected_duration,
             decimal("2")
+        );
+    }
+
+    // -- the copy of the audio (ADR 048) --------------------------------------------------
+
+    /// An MP4 source as the probe splits its format names, with 48000 Hz AAC from 0 s to 100 s.
+    fn copy_probe() -> MediaProbe {
+        let mut probe = probe_with_audio_extent(Some("0"), Some("100"));
+        probe.format_names = ["mov", "mp4", "m4a", "3gp", "3g2", "mj2"]
+            .map(str::to_owned)
+            .to_vec();
+        probe
+    }
+
+    /// The one segment of the copy tests, from 10 s to 15 s.
+    fn copy_segment() -> SegmentBoundary {
+        seconds_boundary("10", "15")
+    }
+
+    /// The length of one AAC frame at 48000 Hz, 1024/48000 s.
+    fn aac_frame() -> Rational {
+        Rational::new(1024, 48_000).unwrap()
+    }
+
+    /// What the read of the frames finds from `first` to `end` seconds with `fine` gaps between
+    /// them, in AAC frames at 48000 Hz. The gaps of the bound join across 0.1 s.
+    fn read(first: &str, fine: &[(&str, &str)], end: &str) -> AudioFrames {
+        let front = AudioGap {
+            from: None,
+            to: decimal(first),
+        };
+        let between = fine.iter().map(|(from, to)| AudioGap {
+            from: Some(decimal(from)),
+            to: decimal(to),
+        });
+        let long = |gap: &AudioGap| {
+            gap.from
+                .is_none_or(|from| gap.to.sub(from).unwrap() > Rational::new(1, 10).unwrap())
+        };
+        let fine_gaps: Vec<AudioGap> = std::iter::once(front).chain(between).collect();
+        AudioFrames {
+            gaps: fine_gaps.iter().copied().filter(long).collect(),
+            fine_gaps,
+            end: Some(decimal(end)),
+            longest_frame: Some(aac_frame()),
+        }
+    }
+
+    /// The read of the frames when the audio covers the copy segment: the first frame starts in
+    /// front of the In point, and the last one ends after the Out point.
+    fn covered() -> AudioFrames {
+        read("9.99", &[], "15.01")
+    }
+
+    /// Plan a copy of `segments` from `probe` with `preset`, after the read `frames`.
+    fn copy_of(
+        streams: ExportStreams,
+        segments: &[SegmentBoundary],
+        probe: &MediaProbe,
+        preset: &Preset,
+        frames: &AudioFrames,
+    ) -> ExportPlan {
+        plan_copy(streams, segments, probe, preset, frames).unwrap()
+    }
+
+    /// Assert that a request to copy plans exactly the encode of the same request after the same
+    /// read, and carries `refusal` as the reason.
+    fn assert_refused(
+        refusal: CopyRefusal,
+        streams: ExportStreams,
+        segments: &[SegmentBoundary],
+        probe: &MediaProbe,
+        preset: &Preset,
+        frames: &AudioFrames,
+    ) {
+        let mut copy = copy_of(streams, segments, probe, preset, frames);
+        assert_eq!(copy.audio_copy_refusal, Some(refusal));
+        assert_eq!(copy.copied_audio, None);
+        copy.audio_copy_refusal = None;
+        let encode = plan_read(
+            streams,
+            segments,
+            probe,
+            preset,
+            valid_path_facts(),
+            frames,
+            ExportAudioMode::Encode,
+        )
+        .unwrap();
+        assert_eq!(copy, encode, "{refusal:?}");
+    }
+
+    /// [`assert_refused`] for the copy segment of [`copy_probe`] with the sample preset, in both
+    /// choices of streams that write audio.
+    fn assert_refused_both(refusal: CopyRefusal, frames: &AudioFrames) {
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            assert_refused(
+                refusal,
+                streams,
+                &[copy_segment()],
+                &copy_probe(),
+                &sample_preset(),
+                frames,
+            );
+        }
+    }
+
+    /// Whether the copy segment of [`copy_probe`] copies after the read `frames`, in both choices
+    /// of streams that write audio.
+    fn copies_both(frames: &AudioFrames) -> bool {
+        [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly]
+            .into_iter()
+            .all(|streams| {
+                copy_of(
+                    streams,
+                    &[copy_segment()],
+                    &copy_probe(),
+                    &sample_preset(),
+                    frames,
+                )
+                .copied_audio
+                .is_some()
+            })
+    }
+
+    #[test]
+    fn a_copy_of_one_covered_segment_plans_the_copy_and_no_encode_of_the_audio() {
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            let plan = copy_of(
+                streams,
+                &[copy_segment()],
+                &copy_probe(),
+                &sample_preset(),
+                &covered(),
+            );
+            assert_eq!(
+                plan.copied_audio,
+                Some(CopiedAudio {
+                    stream_index: 1,
+                    start: decimal("10"),
+                    end: decimal("15"),
+                    adts_to_asc: false,
+                }),
+                "{streams:?}"
+            );
+            assert_eq!(plan.audio_copy_refusal, None);
+            assert_eq!(plan.audio, None);
+            assert_eq!(plan.video.is_some(), streams.writes_video());
+            // No chain reads the audio, so no segment has ticks or a prefix.
+            assert_eq!(plan.segments[0].audio_in_tick, None);
+            assert_eq!(plan.segments[0].audio_out_tick, None);
+            assert_eq!(plan.segments[0].audio_prefix, None);
+            assert_eq!(plan.total_duration, decimal("5"));
+        }
+    }
+
+    #[test]
+    fn a_request_to_encode_plans_no_copy_and_ignores_what_only_a_copy_reads() {
+        let plan = |frames: &AudioFrames| {
+            plan_read(
+                ExportStreams::VideoAndAudio,
+                &[copy_segment()],
+                &copy_probe(),
+                &sample_preset(),
+                valid_path_facts(),
+                frames,
+                ExportAudioMode::Encode,
+            )
+            .unwrap()
+        };
+        let encode = plan(&covered());
+        assert_eq!(encode.copied_audio, None);
+        assert_eq!(encode.audio_copy_refusal, None);
+        assert!(encode.audio.is_some());
+        // The fine gaps, the end and the longest frame change nothing in an encode.
+        let gaps_only = AudioFrames {
+            gaps: covered().gaps,
+            ..AudioFrames::default()
+        };
+        assert_eq!(encode, plan(&gaps_only));
+    }
+
+    #[test]
+    fn a_copy_that_the_request_or_the_source_does_not_allow_is_an_encode() {
+        let preset = sample_preset();
+        let video_and_audio = ExportStreams::VideoAndAudio;
+        // Two segments.
+        assert_refused(
+            CopyRefusal::NotOneSegment,
+            video_and_audio,
+            &[copy_segment(), seconds_boundary("20", "25")],
+            &copy_probe(),
+            &preset,
+            &covered(),
+        );
+        // No audio to write.
+        assert_refused(
+            CopyRefusal::NoAudioWritten,
+            ExportStreams::VideoOnly,
+            &[copy_segment()],
+            &copy_probe(),
+            &preset,
+            &covered(),
+        );
+        // A stream that holds no packets.
+        let mut empty = copy_probe();
+        empty.audio.as_mut().unwrap().holds_no_packets = true;
+        assert_refused(
+            CopyRefusal::NoAudio,
+            video_and_audio,
+            &[copy_segment()],
+            &empty,
+            &preset,
+            &covered(),
+        );
+        // A demuxer that was not measured.
+        let mut avi = copy_probe();
+        avi.format_names = vec!["avi".to_owned()];
+        assert_refused(
+            CopyRefusal::SourceFormat,
+            video_and_audio,
+            &[copy_segment()],
+            &avi,
+            &preset,
+            &covered(),
+        );
+        // A rate below the minimum.
+        let mut low = copy_probe();
+        low.audio.as_mut().unwrap().sample_rate = Some(22_050);
+        assert_refused(
+            CopyRefusal::SampleRate,
+            video_and_audio,
+            &[copy_segment()],
+            &low,
+            &preset,
+            &covered(),
+        );
+        // Opus into MP4, FLAC anywhere, E-AC-3, and a codec that the probe does not name.
+        for codec in [Some("opus"), Some("flac"), Some("eac3"), None] {
+            let mut probe = copy_probe();
+            probe.audio.as_mut().unwrap().codec = codec.map(str::to_owned);
+            assert_refused(
+                CopyRefusal::Codec,
+                video_and_audio,
+                &[copy_segment()],
+                &probe,
+                &preset,
+                &covered(),
+            );
+        }
+        // An In point before zero, where an output `-ss` was not measured.
+        assert_refused(
+            CopyRefusal::Boundary,
+            video_and_audio,
+            &[boundary(-90_000, 90_000)],
+            &copy_probe(),
+            &preset,
+            &read("-1.01", &[], "1.01"),
+        );
+    }
+
+    #[test]
+    fn a_read_that_found_no_frame_or_failed_is_an_encode() {
+        // The probe says that the audio covers the segment, but the read found nothing there: a
+        // dropout across the segment, or a read that failed. Nothing shows a packet to copy.
+        assert_refused_both(CopyRefusal::NoFrames, &AudioFrames::default());
+        // An FLV source, whose probe reports no length of its audio, encodes as well.
+        let mut flv = copy_probe();
+        flv.format_names = vec!["flv".to_owned()];
+        flv.audio.as_mut().unwrap().duration = None;
+        assert_refused(
+            CopyRefusal::NoFrames,
+            ExportStreams::VideoAndAudio,
+            &[copy_segment()],
+            &flv,
+            &sample_preset(),
+            &AudioFrames::default(),
+        );
+        // The read gives the frames of the FLV source, and the copy runs.
+        let plan = copy_of(
+            ExportStreams::AudioOnly,
+            &[copy_segment()],
+            &flv,
+            &sample_preset(),
+            &covered(),
+        );
+        assert!(plan.copied_audio.is_some(), "{:?}", plan.audio_copy_refusal);
+    }
+
+    #[test]
+    fn the_first_frame_may_lie_up_to_one_packet_and_a_rounding_after_the_in_point() {
+        // A Matroska read leaves out the frame that holds the In point, and a decoder can drop
+        // that frame after its seek. Matroska and FLV time the frames in whole milliseconds.
+        let latest = Rational::new(10, 1)
+            .unwrap()
+            .add(aac_frame())
+            .unwrap()
+            .add(decimal("0.002"))
+            .unwrap();
+        let at = |first: Rational| AudioFrames {
+            fine_gaps: vec![AudioGap {
+                from: None,
+                to: first,
+            }],
+            ..covered()
+        };
+        assert!(copies_both(&at(latest)));
+        let later = latest.add(Rational::new(1, 48_000).unwrap()).unwrap();
+        assert_refused_both(CopyRefusal::LateStart, &at(later));
+    }
+
+    #[test]
+    fn a_segment_shorter_than_three_frames_is_an_encode() {
+        // One frame of video at 60 fps holds no AAC packet start when the In point falls just after
+        // one, and the copy would write a stream without packets. The bound is three of the longest
+        // frames, not capped.
+        let three = Rational::new(3, 1).unwrap().mul(aac_frame()).unwrap();
+        let ticks = three.mul(Rational::new(90_000, 1).unwrap()).unwrap();
+        assert_eq!(
+            ticks.den(),
+            1,
+            "three AAC frames are whole ticks of 1/90000"
+        );
+        let from = 900_000;
+        let read_around = || read("9.99", &[], "10.1");
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            assert_refused(
+                CopyRefusal::ShortSegment,
+                streams,
+                &[boundary(from, from + ticks.num() - 1)],
+                &copy_probe(),
+                &sample_preset(),
+                &read_around(),
+            );
+            let plan = copy_of(
+                streams,
+                &[boundary(from, from + ticks.num())],
+                &copy_probe(),
+                &sample_preset(),
+                &read_around(),
+            );
+            assert!(plan.copied_audio.is_some(), "{:?}", plan.audio_copy_refusal);
+        }
+        // Long frames make a longer shortest segment: 120 ms Opus frames ask for 0.36 s.
+        let long = AudioFrames {
+            longest_frame: Some(decimal("0.12")),
+            ..read("9.99", &[], "10.5")
+        };
+        assert_refused(
+            CopyRefusal::ShortSegment,
+            ExportStreams::VideoAndAudio,
+            &[seconds_boundary("10", "10.35")],
+            &copy_probe(),
+            &sample_preset(),
+            &long,
+        );
+    }
+
+    #[test]
+    fn a_gap_longer_than_one_packet_inside_the_segment_is_an_encode() {
+        // 85 ms behind the frame that holds the In point: the gaps of the bound join it, and the
+        // fine gaps show it.
+        let joined = read("9.99", &[("10.011", "10.096")], "15.01");
+        assert!(joined.gaps.iter().all(|gap| gap.from.is_none()));
+        assert_refused_both(CopyRefusal::Gap, &joined);
+        // A gap that starts inside the segment and ends after it, and one that holds the In point.
+        assert_refused_both(CopyRefusal::Gap, &read("9.99", &[("14.9", "15.5")], "16"));
+        assert_refused_both(CopyRefusal::Gap, &read("9", &[("9.95", "10.05")], "15.01"));
+        // A gap of one packet or less is one packet of error, as at the ends.
+        assert!(copies_both(&read("9.99", &[("12", "12.02")], "15.01")));
+        // A gap that ends in front of the In point leaves the segment covered.
+        assert!(copies_both(&read("0", &[("1", "9.99")], "15.01")));
+    }
+
+    #[test]
+    fn the_last_frame_may_end_up_to_one_packet_before_the_out_point() {
+        let one = Rational::new(15, 1).unwrap().sub(aac_frame()).unwrap();
+        let ending = |end: Rational| AudioFrames {
+            end: Some(end),
+            ..covered()
+        };
+        assert!(copies_both(&ending(one)));
+        let earlier = one.sub(Rational::new(1, 48_000).unwrap()).unwrap();
+        assert_refused_both(CopyRefusal::EarlyEnd, &ending(earlier));
+    }
+
+    #[test]
+    fn one_packet_is_never_more_than_the_cap() {
+        // Frames of 120 ms, as Opus can write them: each end may still lie only 60 ms off.
+        let long = |end: &str| AudioFrames {
+            longest_frame: Some(decimal("0.12")),
+            ..read("9.99", &[], end)
+        };
+        assert!(copies_both(&long("14.94")));
+        assert_refused_both(CopyRefusal::EarlyEnd, &long("14.939"));
+    }
+
+    #[test]
+    fn the_muxer_of_the_output_decides_which_codecs_copy() {
+        let mut mkv = sample_preset();
+        mkv.container = Container::Mkv;
+        let mut mov = sample_preset();
+        mov.container = Container::Mov;
+        let copies = |codec: &str, preset: &Preset, streams: ExportStreams| {
+            let mut probe = copy_probe();
+            probe.audio.as_mut().unwrap().codec = Some(codec.to_owned());
+            copy_of(streams, &[copy_segment()], &probe, preset, &covered())
+                .copied_audio
+                .is_some()
+        };
+        let video_and_audio = ExportStreams::VideoAndAudio;
+        assert!(copies("opus", &mkv, video_and_audio));
+        assert!(copies("opus", &mkv, ExportStreams::AudioOnly));
+        assert!(!copies("opus", &mov, video_and_audio));
+        // An audio-only export of a MOV preset writes through the `mp4` muxer.
+        assert!(!copies("opus", &mov, ExportStreams::AudioOnly));
+        for codec in ["aac", "mp3", "ac3"] {
+            for preset in [&sample_preset(), &mkv, &mov] {
+                for streams in [video_and_audio, ExportStreams::AudioOnly] {
+                    assert!(copies(codec, preset, streams), "{codec} {streams:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_aac_of_an_mpeg_ts_source_converts_from_adts() {
+        let mut probe = copy_probe();
+        probe.format_names = vec!["mpegts".to_owned()];
+        let plan = copy_of(
+            ExportStreams::VideoAndAudio,
+            &[copy_segment()],
+            &probe,
+            &sample_preset(),
+            &covered(),
+        );
+        assert!(plan.copied_audio.unwrap().adts_to_asc);
+        probe.audio.as_mut().unwrap().codec = Some("mp3".to_owned());
+        let plan = copy_of(
+            ExportStreams::VideoAndAudio,
+            &[copy_segment()],
+            &probe,
+            &sample_preset(),
+            &covered(),
+        );
+        assert!(!plan.copied_audio.unwrap().adts_to_asc);
+    }
+
+    #[test]
+    fn a_copy_never_hides_a_refusal_of_the_plan() {
+        // A source whose audio has no rate is refused as for an encode, and an audio-only export
+        // of a source without audio too.
+        let mut unknown = copy_probe();
+        unknown.audio.as_mut().unwrap().sample_rate = None;
+        assert_eq!(
+            plan_copy(
+                ExportStreams::VideoAndAudio,
+                &[copy_segment()],
+                &unknown,
+                &sample_preset(),
+                &covered(),
+            ),
+            Err(ExportErrorCode::SourceAudioRateUnknown)
+        );
+        assert_eq!(
+            plan_copy(
+                ExportStreams::AudioOnly,
+                &[copy_segment()],
+                &sample_probe(),
+                &sample_preset(),
+                &covered(),
+            ),
+            Err(ExportErrorCode::SourceHasNoAudio)
         );
     }
 }

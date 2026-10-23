@@ -191,6 +191,38 @@ pub fn verify_audio_output(
     }
 }
 
+/// Decide whether the finished file of an export without video that copies its audio holds the
+/// audio that was planned (ADR 048): [`verify_audio_output`], with the start of the audio stream
+/// added to the duration of the file.
+///
+/// A copy starts its audio with the first packet at or after the In point, and keeps that place,
+/// which the plan allows to lie a little after the In point (`copy::decide`). An `.m4a` starts its
+/// audio stream there, less the priming of AAC, and counts its duration from that start, so the sum
+/// is where the audio ends against the In point: what the tolerance of [`verify_audio_output`] was
+/// measured for. An `.mka` counts its duration from zero, so the sum counts the start twice, and
+/// lies past the end by that start, which is a few packets inside the tolerance above the expected
+/// duration (ADR 048). A start that is absent or not after zero adds nothing.
+///
+/// # Errors
+///
+/// As [`verify_audio_output`], with the sum as the measured duration.
+pub fn verify_copied_audio_output(
+    probe: &OutputAudioProbe,
+    expected: Rational,
+) -> Result<(), AudioOutputMismatch> {
+    let end = match (probe.duration, probe.audio_start) {
+        (Some(duration), Some(start)) if start.num() > 0 => duration.add(start),
+        (duration, _) => duration,
+    };
+    verify_audio_output(
+        &OutputAudioProbe {
+            duration: end,
+            ..*probe
+        },
+        expected,
+    )
+}
+
 /// Decide whether the finished file of an export with video that copies its audio holds both of
 /// its streams: one video stream and one audio stream (ADR 048).
 ///
@@ -233,7 +265,55 @@ mod tests {
             audio_streams,
             video_streams,
             duration: duration.map(seconds),
+            audio_start: None,
         }
+    }
+
+    #[test]
+    fn the_check_of_an_audio_only_copy_adds_the_start_of_its_audio() {
+        // The `.m4a` of measurement 6: the first packet 16 ms after the In point, the last one 8 ms
+        // past the Out point of a segment of 5 s.
+        let m4a = OutputAudioProbe {
+            audio_start: Some(seconds("0.016")),
+            ..probe(1, 0, Some("4.992"))
+        };
+        assert_eq!(verify_copied_audio_output(&m4a, seconds("5")), Ok(()));
+        // A copy that starts 0.09 s late and ends 0.037 s early is 0.127 s short as a duration,
+        // and 0.037 s short as an end.
+        let late = OutputAudioProbe {
+            audio_start: Some(seconds("0.09")),
+            ..probe(1, 0, Some("4.873"))
+        };
+        assert!(verify_audio_output(&late, seconds("5")).is_err());
+        assert_eq!(verify_copied_audio_output(&late, seconds("5")), Ok(()));
+        // The end still has to reach the Out point within the tolerance.
+        let short = OutputAudioProbe {
+            audio_start: Some(seconds("0.016")),
+            ..probe(1, 0, Some("4.8"))
+        };
+        assert_eq!(
+            verify_copied_audio_output(&short, seconds("5")),
+            Err(AudioOutputMismatch::Duration {
+                measured: Some(seconds("4.816")),
+                expected: seconds("5"),
+            })
+        );
+        // An `.mka` counts its duration from zero, so its start counts twice: a few packets inside
+        // the tolerance above.
+        let mka = OutputAudioProbe {
+            audio_start: Some(seconds("0.09")),
+            ..probe(1, 0, Some("5.053"))
+        };
+        assert_eq!(verify_copied_audio_output(&mka, seconds("5")), Ok(()));
+        // No start, or one at zero, adds nothing, and the stream set comes first.
+        assert_eq!(
+            verify_copied_audio_output(&probe(1, 0, Some("5")), seconds("5")),
+            Ok(())
+        );
+        assert!(matches!(
+            verify_copied_audio_output(&probe(1, 1, Some("5")), seconds("5")),
+            Err(AudioOutputMismatch::Streams { .. })
+        ));
     }
 
     #[test]
@@ -282,6 +362,7 @@ mod tests {
                     audio_streams: 1,
                     video_streams: 0,
                     duration: Some(measured),
+                    audio_start: None,
                 },
                 expected,
             );

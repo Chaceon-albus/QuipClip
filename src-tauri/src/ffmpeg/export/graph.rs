@@ -1060,6 +1060,7 @@ mod tests {
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
             copied_audio: None,
+            audio_copy_refusal: None,
             flv_input: None,
         }
     }
@@ -1872,7 +1873,8 @@ mod tests {
                 probe: &probe,
                 preset: &preset,
                 streams,
-                audio_gaps: &[],
+                audio_frames: &crate::ffmpeg::AudioFrames::default(),
+                audio_mode: crate::ffmpeg::ExportAudioMode::Encode,
             },
             move |path: &Path| {
                 if path == Path::new(PLANNED_SOURCE) {
