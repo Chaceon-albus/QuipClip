@@ -28,7 +28,7 @@ pub(crate) mod test_support;
 use head::FlvHead;
 use locate::{Extent, LocateState, Located};
 use reader::{is_canceled, ByteSource, FileSource};
-use scan::configs_between;
+use scan::walk_configs;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
@@ -100,6 +100,49 @@ struct Knowledge {
     state: LocateState,
     /// True when `state.non_monotonic` changed since the sidecar was last taken.
     state_changed: bool,
+    /// The byte ranges `[start, end)` whose tags a window or a scan read one after another, with
+    /// every configuration among them in the table. Sorted and disjoint. Both ends of a range lie
+    /// on tag boundaries. The sidecar does not keep them.
+    walked: Vec<(u64, u64)>,
+}
+
+/// Add `[start, end)` to the sorted, disjoint `ranges`, and join the ranges that overlap or touch.
+fn add_range(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
+    if start >= end {
+        return;
+    }
+    ranges.push((start, end));
+    ranges.sort_unstable();
+    let mut joined: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for &(range_start, range_end) in ranges.iter() {
+        match joined.last_mut() {
+            Some(last) if range_start <= last.1 => last.1 = last.1.max(range_end),
+            _ => joined.push((range_start, range_end)),
+        }
+    }
+    *ranges = joined;
+}
+
+/// The parts of `[from, until)` that no range of the sorted, disjoint `ranges` covers.
+fn uncovered(ranges: &[(u64, u64)], from: u64, until: u64) -> Vec<(u64, u64)> {
+    let mut gaps = Vec::new();
+    let mut position = from;
+    for &(start, end) in ranges {
+        if position >= until || start >= until {
+            break;
+        }
+        if end <= position {
+            continue;
+        }
+        if start > position {
+            gaps.push((position, start));
+        }
+        position = end;
+    }
+    if position < until {
+        gaps.push((position, until));
+    }
+    gaps
 }
 
 /// An FLV source: its head, and the keyframes and configurations found so far.
@@ -123,6 +166,13 @@ impl FlvSource {
             table.record_config(config.clone());
         }
         table.take_changed();
+        // The walk of the head read every tag in front of the first frame.
+        let mut walked = Vec::new();
+        add_range(
+            &mut walked,
+            head.first_tag_offset(),
+            head.first_frame_offset,
+        );
         Ok(Self {
             path: path.to_path_buf(),
             head,
@@ -130,6 +180,7 @@ impl FlvSource {
                 table,
                 state: LocateState::default(),
                 state_changed: false,
+                walked,
             }),
         })
     }
@@ -357,6 +408,12 @@ impl FlvSource {
         self.knowledge().table.record_config(config);
     }
 
+    /// Record that a window stream read the tags of `[start, end)` one after another and recorded
+    /// every configuration among them. Both offsets must lie on tag boundaries.
+    pub fn record_walked(&self, start: u64, end: u64) {
+        add_range(&mut self.knowledge().walked, start, end);
+    }
+
     /// Record that a window stream found timestamps that decrease.
     pub fn record_non_monotonic(&self) {
         let mut knowledge = self.knowledge();
@@ -386,12 +443,14 @@ impl FlvSource {
 
     /// Scan the tag headers from the last known configuration at or before `offset` up to
     /// `offset`, and record the configurations found. A window whose decode failed runs this
-    /// once before its retry (ADR 046).
+    /// once before its retry (ADR 046). The scan skips the ranges that a window or an earlier
+    /// scan walked, because those walks recorded every configuration in them. Returns the number
+    /// of configurations found and the bytes read.
     pub fn rescan_configs(
         &self,
         offset: u64,
         cancel: Option<Arc<AtomicBool>>,
-    ) -> Result<usize, FlvError> {
+    ) -> Result<(usize, u64), FlvError> {
         // The scan starts at the oldest of the latest configurations of each kind that has one.
         // Starting at the newest one of any kind could miss a configuration of another kind just
         // before it. A kind with no configuration at all, as MP3 audio, takes no part, or the scan
@@ -402,14 +461,32 @@ impl FlvSource {
             .map(|c| c.offset)
             .min()
             .unwrap_or(self.head.first_frame_offset);
-        let mut source = FileSource::open(&self.path, cancel)?;
-        let configs = configs_between(&mut source, from, offset)?;
+        // Each gap starts and ends at a tag boundary: at `from`, at `offset`, or at an end of a
+        // walked range.
+        let gaps = uncovered(&self.knowledge().walked, from, offset);
+        let mut configs = Vec::new();
+        // The part of each gap that the walk read. A damaged tag stops the walk of its gap, and
+        // the rest of that gap stays for a later scan.
+        let mut read = Vec::new();
+        let mut bytes_read = 0;
+        if !gaps.is_empty() {
+            let mut source = FileSource::open(&self.path, cancel)?;
+            for (start, end) in gaps {
+                let (found, stopped) = walk_configs(&mut source, start, end)?;
+                configs.extend(found);
+                read.push((start, stopped));
+            }
+            bytes_read = source.bytes_read();
+        }
         let count = configs.len();
         let mut knowledge = self.knowledge();
         for config in configs {
             knowledge.table.record_config(config);
         }
-        Ok(count)
+        for (start, end) in read {
+            add_range(&mut knowledge.walked, start, end);
+        }
+        Ok((count, bytes_read))
     }
 }
 
@@ -514,6 +591,96 @@ mod tests {
         let head = source.head_bytes_at(late_key);
         let config = &source.configs_at(late_key)[0];
         assert!(head.ends_with(&config.bytes));
+    }
+
+    #[test]
+    fn a_rescan_reads_only_what_no_walk_read() {
+        let mut builder = FlvBuilder::new(false, true);
+        builder.avc_config(0, 1);
+        for frame in 0..300u32 {
+            builder.video(frame * 33, frame % 60 == 0, 0, 800);
+        }
+        let reconnect = builder.avc_config(10_000, 2);
+        let mut late_key = 0;
+        for frame in 0..300u32 {
+            let offset = builder.video(10_000 + frame * 33, frame % 60 == 0, 0, 800);
+            if frame == 120 {
+                late_key = offset;
+            }
+        }
+        let dir = TestDirectory::new();
+        let path = write(&dir, &builder.finish());
+        let (_, full) = FlvSource::open(&path, None)
+            .unwrap()
+            .rescan_configs(late_key, None)
+            .unwrap();
+
+        let source = FlvSource::open(&path, None).unwrap();
+        // A window read the first part up to the reconnect, so the scan reads the rest only.
+        source.record_walked(source.head().first_frame_offset, reconnect);
+        let (_, partial) = source.rescan_configs(late_key, None).unwrap();
+        assert!(partial > 0 && partial < full, "{partial} of {full} bytes");
+        assert_eq!(source.configs_at(late_key)[0].offset, reconnect);
+        // The scan walked the range itself, so a second scan reads nothing.
+        assert_eq!(source.rescan_configs(late_key, None).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn a_rescan_records_only_what_it_read() {
+        let mut builder = FlvBuilder::new(false, true);
+        builder.avc_config(0, 1);
+        let mut damaged_at = 0;
+        for frame in 0..300u32 {
+            let offset = builder.video(frame * 33, frame % 60 == 0, 0, 800);
+            if frame == 100 {
+                damaged_at = offset;
+            }
+        }
+        let late_key = builder.video(10_000, true, 0, 800);
+        let mut bytes = builder.finish();
+        // A wrong stream id makes the tag header invalid, so the walk stops there.
+        bytes[damaged_at as usize + 9] = 7;
+        let dir = TestDirectory::new();
+        let path = write(&dir, &bytes);
+
+        let source = FlvSource::open(&path, None).unwrap();
+        let first_tag = source.head().first_tag_offset();
+        source.rescan_configs(late_key, None).unwrap();
+        assert_eq!(source.knowledge().walked, vec![(first_tag, damaged_at)]);
+
+        // A canceled scan records nothing, so the next scan reads again.
+        let other = FlvSource::open(&path, None).unwrap();
+        let canceled = Arc::new(AtomicBool::new(true));
+        assert!(matches!(
+            other.rescan_configs(late_key, Some(canceled)),
+            Err(FlvError::Canceled)
+        ));
+        let (_, read) = other.rescan_configs(late_key, None).unwrap();
+        assert!(read > 0);
+    }
+
+    #[test]
+    fn the_walked_ranges_join_and_leave_gaps() {
+        let mut ranges = Vec::new();
+        add_range(&mut ranges, 100, 200);
+        add_range(&mut ranges, 300, 400);
+        add_range(&mut ranges, 50, 60);
+        add_range(&mut ranges, 70, 70);
+        assert_eq!(ranges, vec![(50, 60), (100, 200), (300, 400)]);
+        add_range(&mut ranges, 200, 300);
+        add_range(&mut ranges, 55, 120);
+        assert_eq!(ranges, vec![(50, 400)]);
+
+        let ranges = vec![(100, 200), (300, 400)];
+        assert_eq!(
+            uncovered(&ranges, 0, 500),
+            vec![(0, 100), (200, 300), (400, 500)]
+        );
+        assert_eq!(uncovered(&ranges, 150, 350), vec![(200, 300)]);
+        assert_eq!(uncovered(&ranges, 100, 200), Vec::<(u64, u64)>::new());
+        assert_eq!(uncovered(&ranges, 210, 290), vec![(210, 290)]);
+        assert_eq!(uncovered(&[], 10, 20), vec![(10, 20)]);
+        assert_eq!(uncovered(&ranges, 20, 20), Vec::<(u64, u64)>::new());
     }
 
     #[test]

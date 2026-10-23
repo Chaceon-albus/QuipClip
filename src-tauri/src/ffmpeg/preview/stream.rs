@@ -640,6 +640,11 @@ fn write_slice<V: Write, P: Write>(
     drop(pcm);
     outcome.bytes_read = stream_count(&stream);
     slice.source.record_run(&run, outcome.reached_end);
+    // The stream stands at the end of the last tag that it read whole, and the loop recorded
+    // every configuration up to there, so a later scan for configurations skips this range.
+    slice
+        .source
+        .record_walked(slice.start_offset, stream.offset());
     if outcome.non_monotonic {
         slice.source.record_non_monotonic();
     }
@@ -1476,6 +1481,29 @@ mod tests {
         // Every frame passed the check, so the window holds every byte of the file.
         let len = std::fs::metadata(&path).unwrap().len() as usize;
         assert_eq!(video.len(), head.len() + len - start as usize);
+    }
+
+    #[test]
+    fn a_scan_for_configurations_skips_what_a_window_read() {
+        let recording = crate::flv::test_support::recording(
+            &crate::flv::test_support::RecordingOptions::default(),
+        );
+        let dir = TestDirectory::new();
+        let source = write_file(&dir, &recording.bytes);
+        let (outcome, _) = whole_window(&source);
+        assert!(outcome.reached_end);
+        let last = recording.keyframes.last().unwrap();
+        assert_eq!(source.rescan_configs(last.offset, None).unwrap(), (0, 0));
+
+        // A window that read on past a new configuration recorded it and the tags up to the next
+        // keyframe, so the scan in front of that keyframe reads nothing either.
+        let other = TestDirectory::new();
+        let (bytes, config) = recording_with_a_config_at_frame_60(1);
+        let source = write_file(&other, &bytes);
+        let (outcome, _) = whole_window(&source);
+        let next = outcome.next.unwrap();
+        assert_eq!(source.rescan_configs(next.offset, None).unwrap(), (0, 0));
+        assert_eq!(source.configs_at(next.offset)[0].offset, config);
     }
 
     #[test]

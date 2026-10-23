@@ -208,6 +208,17 @@ pub fn configs_between(
     from: u64,
     until: u64,
 ) -> io::Result<Vec<ConfigTag>> {
+    walk_configs(source, from, until).map(|(configs, _)| configs)
+}
+
+/// [`configs_between`], and the offset where the walk stopped: `until`, or the start of the first
+/// tag that it did not read, as a tag that is damaged or that does not end at or before `until`.
+/// The walk read every tag in front of that offset.
+pub fn walk_configs(
+    source: &mut dyn ByteSource,
+    from: u64,
+    until: u64,
+) -> io::Result<(Vec<ConfigTag>, u64)> {
     let mut configs = Vec::new();
     let mut position = from;
     let smallest = (TAG_HEADER_LEN + PREVIOUS_TAG_SIZE_LEN) as u64;
@@ -230,7 +241,7 @@ pub fn configs_between(
         }
         position = tag.end();
     }
-    Ok(configs)
+    Ok((configs, position))
 }
 
 /// Reads whole tags from a stream that starts at a tag boundary.
