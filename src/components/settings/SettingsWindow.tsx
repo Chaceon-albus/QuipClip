@@ -38,6 +38,7 @@ import {
   type PresetDraftGuard,
 } from "./presetDraftGuard";
 import { presentSettingsError } from "./settingsErrorPresenter";
+import { AboutSection } from "./AboutSection";
 import { FfmpegPathSection } from "./FfmpegPathSection";
 import { GeneralSection } from "./GeneralSection";
 import {
@@ -377,6 +378,7 @@ export function SettingsWindow() {
           <SettingsTab value="general">{t("settings.tab.general")}</SettingsTab>
           <SettingsTab value="ffmpeg">{t("settings.tab.ffmpeg")}</SettingsTab>
           <SettingsTab value="presets">{t("settings.tab.presets")}</SettingsTab>
+          <SettingsTab value="about">{t("settings.tab.about")}</SettingsTab>
         </TabsPrimitive.List>
 
         {/* Scrollable body keeps the tabs and the footer pinned. It is a flex column, so the
@@ -427,6 +429,9 @@ export function SettingsWindow() {
               visible={section === PRESETS_SECTION}
               selectionRequest={selectionRequest}
             />
+          </SettingsPanel>
+          <SettingsPanel value="about">
+            <AboutSection />
           </SettingsPanel>
         </div>
       </TabsPrimitive.Root>

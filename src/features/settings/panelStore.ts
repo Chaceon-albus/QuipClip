@@ -10,7 +10,7 @@ import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 
 /** The tabs of the Settings window, in display order. */
-export const SETTINGS_SECTIONS = ["general", "ffmpeg", "presets"] as const;
+export const SETTINGS_SECTIONS = ["general", "ffmpeg", "presets", "about"] as const;
 
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 

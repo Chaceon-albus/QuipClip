@@ -39,7 +39,7 @@ describe("Settings Panel Store", () => {
   });
 
   it("lists the sections in tab order", () => {
-    expect(SETTINGS_SECTIONS).toEqual(["general", "ffmpeg", "presets"]);
+    expect(SETTINGS_SECTIONS).toEqual(["general", "ffmpeg", "presets", "about"]);
   });
 
   it("lists the sections that Rust accepts in a request", () => {

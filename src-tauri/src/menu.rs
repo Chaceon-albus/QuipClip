@@ -137,6 +137,9 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
     let about = AboutMetadata {
         name: Some(package.name.clone()),
         version: Some(package.version.to_string()),
+        // The source of the build, which macOS shows in parentheses after the version (ADR
+        // 047). A build with no git checkout keeps the bundle version there.
+        short_version: crate::build_info::BuildSource::current().map(|source| source.label()),
         copyright: config.bundle.copyright.clone(),
         authors: config
             .bundle

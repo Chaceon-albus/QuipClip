@@ -96,7 +96,7 @@ describe("validateSettingsWindowRequest", () => {
     expect(validateSettingsWindowRequest(null)).toBeNull();
     expect(validateSettingsWindowRequest("presets")).toBeNull();
     expect(
-      validateSettingsWindowRequest({ section: "about", presetId: null }),
+      validateSettingsWindowRequest({ section: "licenses", presetId: null }),
     ).toBeNull();
     expect(validateSettingsWindowRequest({ section: null, presetId: "" })).toBeNull();
     expect(validateSettingsWindowRequest({ section: null, presetId: 3 })).toBeNull();

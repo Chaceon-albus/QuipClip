@@ -482,6 +482,7 @@ export const en = {
       general: "General",
       ffmpeg: "FFmpeg",
       presets: "Export Presets",
+      about: "About",
     },
     resetDamaged: "Reset Settings",
     resetDamagedHint:
@@ -777,6 +778,19 @@ export const en = {
         "Give -{{name}} a value of 1 to {{max}} characters, with no line break and no double quote, that does not end in a backslash.",
       optionsTooLong:
         "The extra parameters are too long. Use {{max}} bytes or fewer for the video and audio parameters together.",
+    },
+    // The version line of the About tab (ADR 047). {{version}} is the application version,
+    // such as 0.1.1. {{commit}} is the short hash of the git commit of the build, such as
+    // a1b2c3d. {{branch}} is the name of a git branch, such as feature/trim. "modified" tells
+    // that the files of the build differed from that commit. The macOS About panel shows the
+    // same text in English after "Version".
+    about: {
+      version: "Version {{version}}",
+      versionCommit: "Version {{version}} ({{commit}})",
+      versionBranchCommit: "Version {{version}} ({{branch}} {{commit}})",
+      versionCommitModified: "Version {{version}} ({{commit}}, modified)",
+      versionBranchCommitModified:
+        "Version {{version}} ({{branch}} {{commit}}, modified)",
     },
   },
   common: {

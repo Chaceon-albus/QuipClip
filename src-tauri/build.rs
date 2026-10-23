@@ -1,3 +1,6 @@
+use std::path::Path;
+use std::process::Command;
+
 /// Every command that `src/lib.rs` registers with `tauri::generate_handler!`.
 ///
 /// With an app manifest, Tauri checks each application command against the capabilities, as
@@ -35,6 +38,7 @@ const APP_COMMANDS: &[&str] = &[
     "open_preview_window",
     "ack_preview_window",
     "close_preview_window",
+    "build_info",
 ];
 
 fn main() {
@@ -45,5 +49,86 @@ fn main() {
     if let Err(error) = tauri_build::try_build(attributes) {
         println!("{error:#}");
         std::process::exit(1);
+    }
+    emit_build_source();
+}
+
+/// Gives the crate the source of this build, for `src/build_info.rs` (ADR 047).
+///
+/// Each value is a compile-time environment variable. This function always sets all three, so
+/// the crate reads them with `env!`. An empty commit means that git gave no answer: the source
+/// is not a git checkout, git is not installed, or HEAD has no commit.
+///
+/// - `QUIPCLIP_GIT_COMMIT`: the abbreviated hash of HEAD.
+/// - `QUIPCLIP_GIT_BRANCH`: the branch that HEAD names. It is empty when HEAD is detached, as
+///   in the checkout of a release tag.
+/// - `QUIPCLIP_GIT_MODIFIED`: `true` when a tracked file differs from HEAD, else `false`.
+fn emit_build_source() {
+    let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    let (branch, modified) = if commit.is_empty() {
+        (String::new(), false)
+    } else {
+        (
+            git(&["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default(),
+            // An untracked file does not count. Scratch files would otherwise mark almost every
+            // local build as modified, and a new source file usually comes with a change to a
+            // tracked file that names it. A new file alone under `public/` or `capabilities/`
+            // does change the build and is not marked. The submodules under `.agents/` are not
+            // part of the build. `--no-optional-locks` stops git from writing the index.
+            git(&[
+                "--no-optional-locks",
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+                "--ignore-submodules",
+            ])
+            .is_some_and(|status| !status.is_empty()),
+        )
+    };
+    println!("cargo:rustc-env=QUIPCLIP_GIT_COMMIT={commit}");
+    println!("cargo:rustc-env=QUIPCLIP_GIT_BRANCH={branch}");
+    println!("cargo:rustc-env=QUIPCLIP_GIT_MODIFIED={modified}");
+
+    // tauri-build names the files that it reads, so cargo runs this script again only when a
+    // named file changes. A pull, a commit, a checkout, and a reset write HEAD, a loose branch
+    // ref, or the packed refs. A repository in the reftable format writes `reftable` instead.
+    // git gives their paths, so a linked worktree works too.
+    for name in ["HEAD", "refs/heads", "packed-refs", "reftable"] {
+        if let Some(path) = git(&["rev-parse", "--git-path", name]) {
+            rerun_if_changed(Path::new(&path));
+        }
+    }
+    // A change to the Rust sources compiles the crate again, so the modified flag is read again
+    // with it.
+    rerun_if_changed(Path::new("src"));
+    // A bundled build embeds `dist`, and tauri-codegen includes each file of it, so a change to
+    // `dist` compiles the crate again. `pnpm tauri build` writes `dist` first, so each bundled
+    // build reads the modified flag again. A dev build reads its pages from the dev server.
+    if !tauri_build::is_dev() {
+        rerun_if_changed(Path::new("../dist"));
+    }
+}
+
+/// Runs git in the package directory, and returns its trimmed output, or `None` when git did
+/// not run or failed.
+// The second exemption from the rule of ADR 018, which ADR 047 adds. The rule keeps a console
+// window away from a child of the application. This script runs inside cargo at compile time,
+// never in the application, and it cannot reach `procutil`, which is part of the library.
+#[allow(clippy::disallowed_methods)]
+fn git(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
+/// Names `path` to cargo, when the path exists. When a build script names a missing path,
+/// cargo runs the script again on every build.
+fn rerun_if_changed(path: &Path) {
+    if path.exists() {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 }

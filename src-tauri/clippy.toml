@@ -2,6 +2,7 @@
 too-many-arguments-threshold = 8
 type-complexity-threshold = 350
 # ADR 018: a child process starts through `procutil::command_without_console`, which is the only
-# place that may call this and holds the only `#[allow(clippy::disallowed_methods)]` for it. A spawn
-# anywhere else shows a console window on Windows and gives a macOS build no signal at all.
+# place in the application that may call this and holds its `#[allow(clippy::disallowed_methods)]`.
+# A spawn anywhere else shows a console window on Windows and gives a macOS build no signal at all.
+# `build.rs` holds the one other allow, for git at compile time (ADR 047).
 disallowed-methods = ["std::process::Command::new"]

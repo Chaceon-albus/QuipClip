@@ -338,6 +338,7 @@ export const zhCN: TranslationCatalog = {
       general: "常规",
       ffmpeg: "FFmpeg",
       presets: "导出预设",
+      about: "关于",
     },
     resetDamaged: "重置设置",
     resetDamagedHint:
@@ -600,6 +601,14 @@ export const zhCN: TranslationCatalog = {
       optionValue:
         "请为 -{{name}} 提供 1 到 {{max}} 个字符的值，不能包含换行和双引号，也不能以反斜杠结尾。",
       optionsTooLong: "额外参数过长。视频参数和音频参数合计最多 {{max}} 字节。",
+    },
+    about: {
+      version: "版本 {{version}}",
+      versionCommit: "版本 {{version}}（{{commit}}）",
+      versionBranchCommit: "版本 {{version}}（{{branch}} {{commit}}）",
+      versionCommitModified: "版本 {{version}}（{{commit}}，含未提交改动）",
+      versionBranchCommitModified:
+        "版本 {{version}}（{{branch}} {{commit}}，含未提交改动）",
     },
   },
   common: {

@@ -26,7 +26,8 @@
 //! failure mode are `#[cfg(windows)]`, so on macOS the mistake compiles, lints and passes every
 //! test. `clippy.toml` is what stops it: it disallows `std::process::Command::new` for the whole
 //! crate, so a spawn added anywhere else fails the gate on either platform, and the two
-//! `#[allow(clippy::disallowed_methods)]` in this file are the single exemption.
+//! `#[allow(clippy::disallowed_methods)]` in this file are the single exemption under `src/`.
+//! The build script holds one more, for git at compile time, outside the application (ADR 047).
 //!
 //! The constructor configures the console window and nothing else. The program, the arguments, the
 //! three standard streams, the timeout discipline and how the child is ended all stay with the

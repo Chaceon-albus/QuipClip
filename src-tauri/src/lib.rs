@@ -1,3 +1,4 @@
+pub mod build_info;
 pub mod commands;
 pub mod ffmpeg;
 pub mod flv;
@@ -192,7 +193,8 @@ pub fn run() {
             commands::preferences::broadcast_preference,
             commands::preview::open_preview_window,
             commands::preview::ack_preview_window,
-            commands::preview::close_preview_window
+            commands::preview::close_preview_window,
+            commands::build_info::build_info
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -635,7 +637,8 @@ mod tests {
     /// (`features/ffmpeg/client.ts`), its own request and close (`settingsWindowClient.ts`,
     /// `SettingsWindow.tsx`), and the two reports that Rust sends on as events: the unsaved
     /// draft for the quit guard (`settingsWindowDraft.ts`) and a changed preference
-    /// (`preferenceSync.ts`). It cannot quit, export, import, or open a window.
+    /// (`preferenceSync.ts`). It also reads the build info of the About tab
+    /// (`lib/buildInfo.ts`). It cannot quit, export, import, or open a window.
     const SETTINGS_WINDOW_COMMANDS: &[&str] = &[
         "load_settings",
         "save_settings",
@@ -649,6 +652,8 @@ mod tests {
         "close_settings_window",
         "report_settings_draft",
         "broadcast_preference",
+        // The version and the source of the build (ADR 047).
+        "build_info",
     ];
 
     /// Registered commands that no window may call: no frontend code calls them. Version 1

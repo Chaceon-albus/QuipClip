@@ -197,6 +197,8 @@ pub enum SettingsSection {
     General,
     Ffmpeg,
     Presets,
+    /// The version and the source of the build (ADR 047).
+    About,
 }
 
 impl SettingsSection {
@@ -207,6 +209,7 @@ impl SettingsSection {
             "general" => Some(Self::General),
             "ffmpeg" => Some(Self::Ffmpeg),
             "presets" => Some(Self::Presets),
+            "about" => Some(Self::About),
             _ => None,
         }
     }
@@ -631,7 +634,7 @@ mod tests {
     };
 
     #[test]
-    fn the_three_section_names_parse_and_nothing_else_does() {
+    fn the_four_section_names_parse_and_nothing_else_does() {
         assert_eq!(
             SettingsSection::parse("general"),
             Some(SettingsSection::General)
@@ -644,7 +647,11 @@ mod tests {
             SettingsSection::parse("presets"),
             Some(SettingsSection::Presets)
         );
-        for name in ["", "General", "FFmpeg", "preset", " presets", "about"] {
+        assert_eq!(
+            SettingsSection::parse("about"),
+            Some(SettingsSection::About)
+        );
+        for name in ["", "General", "FFmpeg", "preset", " presets", "About"] {
             assert_eq!(SettingsSection::parse(name), None, "{name:?}");
         }
     }
@@ -655,6 +662,7 @@ mod tests {
             SettingsSection::General,
             SettingsSection::Ffmpeg,
             SettingsSection::Presets,
+            SettingsSection::About,
         ] {
             let wire = serde_json::to_value(section).expect("a section serializes");
             let name = wire.as_str().expect("a section is a string");
