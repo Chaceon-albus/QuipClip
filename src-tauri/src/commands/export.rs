@@ -34,13 +34,16 @@
 //!    touches the parent directory, and `build_plan` rejects it as `outputReadOnly` rather than
 //!    letting the rename discard a finished encode.
 //! 2. [`choose_graph_shape`] and [`build_arguments`] both receive [`PendingOutput::path`],
-//!    never `plan.destination`. ffmpeg writes the reservation, and the rename that publishes
-//!    the destination happens after the process has exited.
+//!    never `plan.destination`, and so does [`build_copy_arguments`] for an export without video
+//!    that copies its audio (ADR 048). ffmpeg writes the reservation, and the rename that
+//!    publishes the destination happens after the process has exited.
 //! 3. [`choose_graph_shape`] is called once and its result is passed to **both**
 //!    [`encoder_graph`] and [`build_arguments`]. The shapes disagree about how many
 //!    inputs the graph's labels refer to, so a mismatch produces a command ffmpeg rejects. The
 //!    command of an audio process (ADR 043) follows the same rule with its own shape:
-//!    [`choose_audio_graph_shape`], [`build_audio_graph`] and [`build_audio_arguments`].
+//!    [`choose_audio_graph_shape`], [`build_audio_graph`] and [`build_audio_arguments`]. A command
+//!    that copies the audio (ADR 048) has no graph and no shape: it opens the one input of its one
+//!    segment.
 //! 4. A zero exit status is not a successful export. `reserve` creates the reserved file
 //!    before ffmpeg starts, so ADR 014 requires `-y`; without it ffmpeg refuses the existing
 //!    file, writes nothing, and still exits zero. [`verified_frame_count`] is what separates
@@ -60,12 +63,12 @@ use crate::ffmpeg::export::flv_input::{
     locate_flv_input, FlvInput, FlvInputFallback, FlvInputRequest,
 };
 use crate::ffmpeg::export::{
-    build_arguments, build_audio_arguments, build_audio_graph, build_plan,
+    build_arguments, build_audio_arguments, build_audio_graph, build_copy_arguments, build_plan,
     choose_audio_graph_shape, choose_graph_shape, encoder_graph, inspect_path, run_export_process,
-    verify_audio_output, AudioOutputMismatch, ExportErrorCode, ExportPlan, ExportProcessOutcome,
-    ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot, ExportStreams,
-    PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary, AUDIO_FILL_MIN_GAP_MILLISECONDS,
-    MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
+    verify_audio_output, AudioOutputMismatch, CopyOutput, ExportErrorCode, ExportPlan,
+    ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot,
+    ExportStreams, PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary,
+    AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::preview::PreviewWindows;
 use crate::ffmpeg::{
@@ -645,14 +648,31 @@ where
     })?;
 
     // Obligations 2 and 3: ffmpeg writes the reservation, not the destination, and one shape
-    // decision serves both the graph and the arguments of each process.
-    let shape = choose_graph_shape(&plan, pending.path());
-    let graph = encoder_graph(&plan, shape);
-    let arguments = build_arguments(&plan, shape, &graph, pending.path());
-    let audio_arguments = plan.separate_audio_process().then(|| {
-        let shape = choose_audio_graph_shape(&plan);
-        build_audio_arguments(&plan, shape, &build_audio_graph(&plan, shape))
+    // decision serves both the graph and the arguments of each process. An export without video
+    // that copies its audio has no graph: one command copies the packets into the reservation
+    // (ADR 048).
+    let copy_to_file = if plan.video.is_none() {
+        build_copy_arguments(&plan, CopyOutput::File(pending.path()))
+    } else {
+        None
+    };
+    let arguments = copy_to_file.unwrap_or_else(|| {
+        let shape = choose_graph_shape(&plan, pending.path());
+        let graph = encoder_graph(&plan, shape);
+        build_arguments(&plan, shape, &graph, pending.path())
     });
+    let audio_arguments = if plan.separate_audio_process() {
+        let shape = choose_audio_graph_shape(&plan);
+        Some(build_audio_arguments(
+            &plan,
+            shape,
+            &build_audio_graph(&plan, shape),
+        ))
+    } else if plan.separate_copy_process() {
+        build_copy_arguments(&plan, CopyOutput::Pipe)
+    } else {
+        None
+    };
 
     Ok(PreparedExport {
         preset_id: preset.id.clone(),
@@ -1366,8 +1386,8 @@ where
             outcome.stderr_detail(),
         )?
     } else {
-        // `build_plan` plans audio for every plan without video; the total duration only
-        // stands in for a hand-built plan that has neither part.
+        // A plan without video encodes its audio or copies it (ADR 048). The copy has no
+        // `PlannedAudio`, and its expected duration is the total duration, as for the encode.
         let expected = plan
             .audio
             .as_ref()
@@ -1772,6 +1792,7 @@ mod tests {
             }],
             container: Container::Mp4,
             total_duration: Rational::new(1, 1).unwrap(),
+            copied_audio: None,
             flv_input: None,
         }
     }

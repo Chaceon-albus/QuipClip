@@ -596,6 +596,7 @@ pub fn build_plan(
             expected_frames: Some(total_frames),
         }),
         audio,
+        copied_audio: None,
         segments: planned_segments,
         container: preset.container,
         total_duration,

@@ -23,11 +23,12 @@
 //!   muxer named `matroska`, not `mkv`; the other two names match their enum variants, except
 //!   that an audio-only export of a MOV preset writes an `.m4a` through the `mp4` muxer (see
 //!   `muxer_of`).
-//! - **`-ss` is omitted, never zeroed.** ADR 014's "The seek" section clamps a negative seek at
-//!   zero and reports it as [`None`], and measurement 7 records that the legacy trailing
+//! - **An input `-ss` is omitted, never zeroed.** ADR 014's "The seek" section clamps a negative
+//!   seek at zero and reports it as [`None`], and measurement 7 records that the legacy trailing
 //!   `-ss 0` idiom has had no effect since ffmpeg 2.1. A literal zero would be dead weight, so
 //!   an input whose [`seek_seconds`](super::PlannedSegment::seek_seconds) is `None` carries no
-//!   `-ss` at all.
+//!   `-ss` at all. The output `-ss` of a copy of the audio is not that seek, and it is written at
+//!   zero too ([`build_copy_arguments`], ADR 048).
 //! - **The graph rides inline.** Measurement 13 leaves no portable spelling for a graph file:
 //!   `-filter_complex_script` is gone from ffmpeg 9.0.1, and its replacement `-/filter_complex`
 //!   did not exist before 7.1. The graph is therefore one ordinary argument, and it competes
@@ -45,7 +46,7 @@
 
 use super::flv_input::{FlvInput, HEAD_NAME};
 use super::graph::{build_audio_graph, build_filter_graph, build_video_graph};
-use super::{ExportPlan, GraphShape, PlannedAudio, PlannedVideo};
+use super::{CopiedAudio, ExportPlan, GraphShape, PlannedAudio, PlannedVideo};
 use crate::settings::{Container, OptionStream, PresetOption, Quality, QualityKind};
 use crate::time::Rational;
 use std::path::Path;
@@ -234,7 +235,9 @@ fn choose_shape(fits: impl Fn(GraphShape) -> bool) -> GraphShape {
 }
 
 /// The graph of the encoder of `plan` in `shape`: [`build_video_graph`] when the audio has its
-/// own process, and the graph of one process, [`build_filter_graph`], otherwise.
+/// own process of ADR 043, and the graph of one process, [`build_filter_graph`], otherwise. A plan
+/// that copies its audio has no [`ExportPlan::audio`], so [`build_filter_graph`] renders the graph
+/// of its video alone, whether a copy process runs beside the encoder or not (ADR 048).
 #[must_use]
 pub fn encoder_graph(plan: &ExportPlan, shape: GraphShape) -> String {
     if plan.separate_audio_process() {
@@ -297,7 +300,8 @@ fn command_line_length(arguments: &[String]) -> usize {
 ///
 /// # Audio
 ///
-/// A `-map` of the audio and `-c:a` appear exactly when [`ExportPlan::audio`] is [`Some`]. For
+/// A `-map` of the audio and an audio encoder appear exactly when [`ExportPlan::audio`] is
+/// [`Some`], and the copy below is the one other case that maps audio. For
 /// a plan of one process, the map is `-map "[a]"`, and for every plan
 /// [`super::plan::build_plan`] produces, [`build_filter_graph`] then writes an `[a]` output
 /// label. (The two can only disagree for a hand-built plan that carries an audio stream but leaves
@@ -307,6 +311,13 @@ fn command_line_length(arguments: &[String]) -> usize {
 /// inputs of the source, and the map is `-map <n>:a`, the audio of that pipe, outside the graph
 /// (ADR 043). Neither the audio encoder name nor an audio bitrate reaches the command line
 /// otherwise.
+///
+/// A plan with video that copies its audio ([`ExportPlan::separate_copy_process`]) opens
+/// `-f nut -i pipe:0` in the same place, maps `-map <n>:a`, and writes `-c:a copy` after the video
+/// flags, with `-bsf:a aac_adtstoasc` for AAC from MPEG-TS (ADR 048). Its graph is the graph of a
+/// plan without audio, and the command carries no output `-ss`, `-to`, `-t` or `-shortest`: the
+/// copy process ends the stream, and the encoder reads `pipe:0` to its end. A plan without video
+/// that copies its audio has no graph, and [`build_copy_arguments`] writes its command.
 ///
 /// `-b:a <n>k` follows `-c:a` directly when the audio part also carries a
 /// [`super::PlannedAudio::bitrate`] (ADR 023). [`Quality`] still describes the video stream
@@ -337,12 +348,25 @@ pub fn build_arguments(
     // `SingleInput` opens one input and would carry one copy either way.
     arguments.push("-copyts".to_owned());
 
+    debug_assert!(
+        plan.audio.is_none() || plan.copied_audio.is_none(),
+        "a plan encodes its audio or copies it, never both"
+    );
+    debug_assert!(
+        plan.video.is_some() || plan.copied_audio.is_none(),
+        "the copy of an export without video has no graph; build_copy_arguments writes it"
+    );
+
     let inputs = push_inputs(&mut arguments, plan, shape);
     // The audio of an export whose audio has its own process arrives as a WAV stream on stdin
-    // (ADR 043). It follows the inputs of the source, so the graph's input numbers do not move.
-    // `-f wav` is necessary: a pipe has no name to infer a demuxer from.
+    // (ADR 043), and copied packets arrive as a NUT stream (ADR 048). The pipe follows the inputs
+    // of the source, so the graph's input numbers do not move. `-f` is necessary: a pipe has no
+    // name to infer a demuxer from.
     if plan.separate_audio_process() {
         push_pair(&mut arguments, "-f", AUDIO_PIPE_FORMAT);
+        push_pair(&mut arguments, "-i", "pipe:0");
+    } else if plan.separate_copy_process() {
+        push_pair(&mut arguments, "-f", COPY_PIPE_FORMAT);
         push_pair(&mut arguments, "-i", "pipe:0");
     }
 
@@ -359,9 +383,14 @@ pub fn build_arguments(
             "[a]".to_owned()
         };
         push_pair(&mut arguments, "-map", &audio);
+    } else if plan.separate_copy_process() {
+        push_pair(&mut arguments, "-map", &format!("{inputs}:a"));
     }
 
     push_encoder_arguments(&mut arguments, plan.video.as_ref(), plan.audio.as_ref());
+    if let Some(copied) = plan.copied_audio.as_ref() {
+        push_copy_codec(&mut arguments, copied);
+    }
     push_muxer_arguments(&mut arguments, plan.container, plan.video.is_some());
     arguments.push(path_argument(output));
     arguments
@@ -426,6 +455,120 @@ const AUDIO_PIPE_CODEC: &str = "pcm_f32le";
 
 /// The container of the audio in the pipe from the audio process to the encoder.
 const AUDIO_PIPE_FORMAT: &str = "wav";
+
+/// The container of the packets in the pipe from the copy process to the encoder (ADR 048).
+///
+/// NUT keeps the timestamps of the packets in the time base of the stream, so the encoder writes
+/// them exactly as the copy process moved them. Matroska rounds them to milliseconds. NUT gives E-AC-3 the codec
+/// of AC-3 on the other side, and the `mp4` muxer then refuses it, so E-AC-3 is not copied (ADR 048
+/// measurement 7).
+const COPY_PIPE_FORMAT: &str = "nut";
+
+/// The bitstream filter that converts AAC from ADTS to the configuration MP4 and Matroska store.
+const ADTS_TO_ASC_FILTER: &str = "aac_adtstoasc";
+
+/// Where the command of [`build_copy_arguments`] writes the packets that it copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyOutput<'a> {
+    /// The stdout of the copy process of an export with video, as NUT, which the encoder reads as
+    /// its `pipe:0` ([`ExportPlan::separate_copy_process`]).
+    Pipe,
+    /// The output file of an export without video: the reserved temporary path that
+    /// [`super::output::PendingOutput::path`] returns.
+    File(&'a Path),
+}
+
+/// Build the argument vector of the command that copies the audio packets of `plan` (ADR 048), or
+/// [`None`] when the plan copies no audio ([`ExportPlan::copied_audio`]).
+///
+/// The command opens the input of the one segment as the encoder does, with the same seek or the
+/// same FLV slice, and maps the audio stream by its absolute index with `-c:a copy`. It has no
+/// filter graph. The cut is an output `-ss` and `-to` at the absolute In and Out points:
+///
+/// - Under `-copyts`, an output `-ss` drops the packets whose decoding time is before it, and
+///   moves the timestamps of the rest back by it. `-to` ends the output at the first packet whose
+///   decoding time is at or after it. Where the source audio covers the segment, the audio of the
+///   output therefore starts and ends within one packet of the In and the Out point, at the place
+///   it holds in the source (ADR 048 measurements 3 and 4). The plan copies only such a segment.
+/// - The output `-ss` is written at an In point of zero too, unlike the input seek of ADR 014. It
+///   then drops the priming packet of AAC, whose timestamp is negative (measurement 5).
+/// - ADR 046 measurement 6 found that an output `-t` under `-copyts` writes no frames. An output
+///   `-ss` with `-to` reads both on the timeline of the source, so the cut works (measurement 3).
+///
+/// For [`CopyOutput::Pipe`], the flags are those of the audio process of ADR 043, and the command
+/// writes NUT to its stdout: no `-progress pipe:1`, which would write text into that stdout, and no
+/// `-y`. The encoder ([`build_arguments`]) reads the stream as `pipe:0`, and its own command
+/// converts AAC from ADTS where the plan asks, because the muxer of the output file needs the
+/// result.
+///
+/// For [`CopyOutput::File`], the command is the whole export of a plan without video: the flags of
+/// every export command, the conversion from ADTS, and the muxer of an audio-only export
+/// ([`muxer_of`]).
+///
+/// # Panics
+///
+/// In a debug build, when the plan has more than one segment or also encodes audio, or when
+/// `output` does not match the plan: [`CopyOutput::Pipe`] for a plan with video, and
+/// [`CopyOutput::File`] for a plan without it.
+#[must_use]
+pub fn build_copy_arguments(plan: &ExportPlan, output: CopyOutput<'_>) -> Option<Vec<String>> {
+    let copied = plan.copied_audio.as_ref()?;
+    debug_assert!(
+        plan.segments.len() == 1,
+        "an export copies the audio of one segment only"
+    );
+    debug_assert!(
+        plan.audio.is_none(),
+        "a plan encodes its audio or copies it, never both"
+    );
+    debug_assert!(
+        matches!(output, CopyOutput::Pipe) == plan.video.is_some(),
+        "a copy with video writes to the pipe, and a copy without video writes the file"
+    );
+
+    let flags: &[&str] = match output {
+        CopyOutput::Pipe => &AUDIO_PROCESS_FLAGS,
+        CopyOutput::File(_) => &PROCESS_FLAGS,
+    };
+    let mut arguments: Vec<String> = flags.iter().map(|flag| (*flag).to_owned()).collect();
+    arguments.push("-copyts".to_owned());
+    push_inputs(&mut arguments, plan, GraphShape::InputPerSegment);
+    push_pair(
+        &mut arguments,
+        "-map",
+        &format!("0:{}", copied.stream_index),
+    );
+    match output {
+        CopyOutput::Pipe => push_pair(&mut arguments, "-c:a", COPY_CODEC),
+        CopyOutput::File(_) => push_copy_codec(&mut arguments, copied),
+    }
+    push_pair(&mut arguments, "-ss", &render_time(copied.start));
+    push_pair(&mut arguments, "-to", &render_time(copied.end));
+    match output {
+        CopyOutput::Pipe => {
+            push_pair(&mut arguments, "-f", COPY_PIPE_FORMAT);
+            arguments.push("pipe:1".to_owned());
+        }
+        CopyOutput::File(path) => {
+            // The file of a copy holds the audio alone.
+            push_muxer_arguments(&mut arguments, plan.container, false);
+            arguments.push(path_argument(path));
+        }
+    }
+    Some(arguments)
+}
+
+/// The name of the codec that copies packets.
+const COPY_CODEC: &str = "copy";
+
+/// Append the codec of the copied audio for the command that writes the output file:
+/// `-c:a copy`, and the conversion from ADTS when [`CopiedAudio::adts_to_asc`] asks for it.
+fn push_copy_codec(arguments: &mut Vec<String>, copied: &CopiedAudio) {
+    push_pair(arguments, "-c:a", COPY_CODEC);
+    if copied.adts_to_asc {
+        push_pair(arguments, "-bsf:a", ADTS_TO_ASC_FILTER);
+    }
+}
 
 /// Append the inputs of the source for `shape`, and return how many there are.
 ///
@@ -685,6 +828,17 @@ fn render_seek(seek: Rational) -> Option<String> {
     Some(format!("{sign}{whole}.{digits}"))
 }
 
+/// Render an exact rational number of seconds as the output `-ss` or `-to` of a copy (ADR 048):
+/// [`render_seek`]'s spelling, except that a zero renders as `0`.
+///
+/// The output `-ss` of a copy is not the input seek that ADR 014 never writes as zero. At an In
+/// point of zero it drops the packets before the In point, the priming packet of AAC among them,
+/// so it must be written. The truncation toward zero moves a bound by less than a microsecond,
+/// and the cut keeps whole packets.
+fn render_time(seconds: Rational) -> String {
+    render_seek(seconds).unwrap_or_else(|| "0".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,6 +959,7 @@ mod tests {
             segments: fixture_segments(count),
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
+            copied_audio: None,
             flv_input: None,
         }
     }
@@ -2614,6 +2769,7 @@ mod tests {
                 30_000,
             )
             .expect("the fixture duration is representable"),
+            copied_audio: None,
             flv_input: None,
         }
     }
@@ -2821,6 +2977,7 @@ mod tests {
                 30_000,
             )
             .expect("the fixture duration is representable"),
+            copied_audio: None,
             flv_input: None,
         }
     }
@@ -3177,5 +3334,356 @@ mod tests {
                     || COMMAND_LINE_BUDGET == UNIX_COMMAND_LINE_BUDGET
             );
         }
+    }
+
+    /// The fixture plan of one segment that copies its audio (ADR 048): the video-only plan with
+    /// a [`CopiedAudio`] of stream 2, cut at the In and Out points of the segment,
+    /// 148480/12800 = 11.6 s and 151552/12800 = 11.84 s.
+    fn copy_plan(container: Container) -> ExportPlan {
+        let mut plan = video_only_plan(1, container);
+        plan.copied_audio = Some(CopiedAudio {
+            stream_index: 2,
+            start: Rational::new(148_480, 12_800).unwrap(),
+            end: Rational::new(151_552, 12_800).unwrap(),
+            adts_to_asc: false,
+        });
+        plan
+    }
+
+    /// The copy plan without its video part, as an audio-only export plans it.
+    fn audio_only_copy_plan(container: Container) -> ExportPlan {
+        let mut plan = copy_plan(container);
+        plan.video = None;
+        plan
+    }
+
+    /// The copy plan of an MPEG-TS source, whose AAC needs the conversion from ADTS.
+    fn adts_copy_plan(container: Container) -> ExportPlan {
+        let mut plan = copy_plan(container);
+        plan.copied_audio.as_mut().unwrap().adts_to_asc = true;
+        plan
+    }
+
+    /// The command of the copy process of `plan`.
+    fn copy_process(plan: &ExportPlan) -> Vec<String> {
+        build_copy_arguments(plan, CopyOutput::Pipe).expect("the plan copies its audio")
+    }
+
+    /// The command of an export without video that copies its audio, against `OUTPUT`.
+    fn copy_to_file(plan: &ExportPlan) -> Vec<String> {
+        build_copy_arguments(plan, CopyOutput::File(Path::new(OUTPUT)))
+            .expect("the plan copies its audio")
+    }
+
+    #[test]
+    fn a_plan_with_video_that_copies_its_audio_runs_a_copy_process() {
+        let plan = copy_plan(Container::Mp4);
+        assert!(plan.separate_copy_process());
+        // The copy process is not the audio process of ADR 043, which decodes the audio.
+        assert!(!plan.separate_audio_process());
+        assert!(!audio_only_copy_plan(Container::Mp4).separate_copy_process());
+        assert!(!fixture_plan(1).separate_copy_process());
+    }
+
+    #[test]
+    fn the_copy_process_writes_the_cut_packets_as_nut_to_its_stdout() {
+        // The input of the encoder, the stream by its absolute index, and the cut as an output
+        // `-ss` and `-to` at the absolute In and Out points. The flags of the audio process: no
+        // `-progress pipe:1` and no `-y`. No graph, and no conversion from ADTS, which the encoder
+        // writes.
+        assert_eq!(
+            copy_process(&adts_copy_plan(Container::Mp4)),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostats",
+                "-copyts",
+                "-ss",
+                "6.6",
+                "-i",
+                "/media/source.mp4",
+                "-map",
+                "0:2",
+                "-c:a",
+                "copy",
+                "-ss",
+                "11.6",
+                "-to",
+                "11.84",
+                "-f",
+                "nut",
+                "pipe:1",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_encoder_of_a_copy_process_copies_the_audio_of_its_stdin() {
+        // The graph is the graph of a plan without audio, the pipe is NUT, and the audio is
+        // copied. Nothing cuts the output of the encoder: the copy process ends the stream.
+        assert_eq!(
+            arguments(&copy_plan(Container::Mp4), GraphShape::InputPerSegment),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-ss",
+                "6.6",
+                "-i",
+                "/media/source.mp4",
+                "-f",
+                "nut",
+                "-i",
+                "pipe:0",
+                "-filter_complex",
+                "<graph>",
+                "-map",
+                "[v]",
+                "-map",
+                "1:a",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-crf",
+                "20",
+                "-c:a",
+                "copy",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "/export/.out.mp4.tmp-4242-0",
+            ]
+        );
+        let graph = |plan: &ExportPlan| encoder_graph(plan, GraphShape::InputPerSegment);
+        assert_eq!(
+            graph(&copy_plan(Container::Mp4)),
+            graph(&video_only_plan(1, Container::Mp4))
+        );
+    }
+
+    #[test]
+    fn the_encoder_of_a_copy_writes_the_muxer_of_its_container_and_converts_adts() {
+        let tail = |plan: &ExportPlan| {
+            let all = arguments(plan, GraphShape::InputPerSegment);
+            let codec = all.iter().position(|a| a == "-c:a").unwrap();
+            all[codec..].to_vec()
+        };
+        assert_eq!(
+            tail(&copy_plan(Container::Mov)),
+            [
+                "-c:a",
+                "copy",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mov",
+                OUTPUT
+            ]
+        );
+        assert_eq!(
+            tail(&copy_plan(Container::Mkv)),
+            ["-c:a", "copy", "-f", "matroska", OUTPUT]
+        );
+        assert_eq!(
+            tail(&adts_copy_plan(Container::Mp4)),
+            [
+                "-c:a",
+                "copy",
+                "-bsf:a",
+                "aac_adtstoasc",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                OUTPUT
+            ]
+        );
+    }
+
+    #[test]
+    fn an_audio_only_copy_writes_the_output_file_in_one_command_without_a_graph() {
+        assert_eq!(
+            copy_to_file(&audio_only_copy_plan(Container::Mp4)),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-ss",
+                "6.6",
+                "-i",
+                "/media/source.mp4",
+                "-map",
+                "0:2",
+                "-c:a",
+                "copy",
+                "-ss",
+                "11.6",
+                "-to",
+                "11.84",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "/export/.out.mp4.tmp-4242-0",
+            ]
+        );
+        // A MOV preset writes an `.m4a` through the `mp4` muxer, as every audio-only export does,
+        // and an MKV preset an `.mka` through `matroska`.
+        let muxer = |plan: &ExportPlan| {
+            let all = copy_to_file(plan);
+            let to = all.iter().position(|a| a == "-to").unwrap();
+            all[to + 2..].to_vec()
+        };
+        assert_eq!(
+            muxer(&audio_only_copy_plan(Container::Mov)),
+            ["-movflags", "+faststart", "-f", "mp4", OUTPUT]
+        );
+        assert_eq!(
+            muxer(&audio_only_copy_plan(Container::Mkv)),
+            ["-f", "matroska", OUTPUT]
+        );
+        let mut adts = audio_only_copy_plan(Container::Mp4);
+        adts.copied_audio.as_mut().unwrap().adts_to_asc = true;
+        let all = copy_to_file(&adts);
+        assert!(all
+            .windows(4)
+            .any(|four| four == ["-c:a", "copy", "-bsf:a", "aac_adtstoasc"]));
+    }
+
+    #[test]
+    fn the_copy_writes_its_output_seek_at_an_in_point_of_zero() {
+        // An In point of zero needs no input seek, which ADR 014 never writes as zero. The output
+        // `-ss 0` still drops the priming packet of AAC, so it stays.
+        let mut plan = copy_plan(Container::Mp4);
+        plan.segments[0].seek_seconds = None;
+        let copied = plan.copied_audio.as_mut().unwrap();
+        copied.start = Rational::new(0, 1).unwrap();
+        copied.end = Rational::new(5, 1).unwrap();
+        assert_eq!(
+            copy_process(&plan)[5..13],
+            ["-copyts", "-i", SOURCE, "-map", "0:2", "-c:a", "copy", "-ss"]
+        );
+        assert_eq!(copy_process(&plan)[13..16], ["0", "-to", "5"]);
+    }
+
+    #[test]
+    fn the_copy_process_opens_the_flv_slice_of_the_encoder() {
+        let mut plan = copy_plan(Container::Mp4);
+        plan.source = PathBuf::from("/media/live.flv");
+        plan.flv_input = Some(FlvInput {
+            working_directory: PathBuf::from("/app/flv-cache/0123456789abcdef"),
+            source_size: 212_700_000,
+            segment_offsets: vec![9_000_000],
+            first_frame_offset: 13,
+        });
+        let slice = "concat:head.flv|subfile,,start,9000000,end,212700000,,:/media/live.flv";
+        assert_eq!(copy_process(&plan)[5..8], ["-copyts", "-i", slice]);
+        assert_eq!(
+            input_arguments(&plan, GraphShape::InputPerSegment),
+            ["-i", slice, "-f", "nut", "-i", "pipe:0"]
+        );
+    }
+
+    #[test]
+    fn no_copy_command_cuts_the_encoder_or_carries_a_graph() {
+        // The encoder must read `pipe:0` to its end, and an output option of the encoder would cut
+        // the video too. So `-ss` appears in the encoder only in front of its input, and `-to`,
+        // `-t` and `-shortest` never. A copy command has no graph, and each command has one
+        // `-copyts`.
+        let count = |all: &[String], flag: &str| all.iter().filter(|a| *a == flag).count();
+        for container in [Container::Mp4, Container::Mov, Container::Mkv] {
+            for plan in [copy_plan(container), adts_copy_plan(container)] {
+                let encoder = arguments(&plan, GraphShape::InputPerSegment);
+                for flag in ["-to", "-t", "-shortest"] {
+                    assert_eq!(count(&encoder, flag), 0, "{flag} in {encoder:?}");
+                }
+                let first_input = encoder.iter().position(|a| a == "-i").unwrap();
+                assert!(encoder[first_input..].iter().all(|a| a != "-ss"));
+                assert_eq!(count(&encoder, "-copyts"), 1);
+                let copy = copy_process(&plan);
+                assert_eq!(count(&copy, "-filter_complex"), 0);
+                assert_eq!(count(&copy, "-copyts"), 1);
+                assert_eq!(count(&copy, "-to"), 1);
+            }
+            let file = copy_to_file(&audio_only_copy_plan(container));
+            assert_eq!(count(&file, "-filter_complex"), 0);
+            assert_eq!(count(&file, "-copyts"), 1);
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the copy of an export without video has no graph")]
+    fn the_encoder_command_of_an_audio_only_copy_trips_the_debug_assertion() {
+        // `commands::export` writes that export with `build_copy_arguments` alone. Its graph
+        // would have neither part, which ffmpeg rejects.
+        let _ = arguments(
+            &audio_only_copy_plan(Container::Mp4),
+            GraphShape::InputPerSegment,
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "never both")]
+    fn a_plan_that_encodes_and_copies_its_audio_trips_the_debug_assertion() {
+        let mut plan = copy_plan(Container::Mp4);
+        plan.audio = fixture_plan(1).audio;
+        let _ = arguments(&plan, GraphShape::InputPerSegment);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a copy with video writes to the pipe")]
+    fn a_copy_with_video_into_the_file_trips_the_debug_assertion() {
+        // The file of a copy holds the audio alone. With video, the encoder writes the file.
+        let _ = copy_to_file(&copy_plan(Container::Mp4));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "one segment only")]
+    fn a_copy_of_two_segments_trips_the_debug_assertion() {
+        let mut plan = copy_plan(Container::Mp4);
+        plan.segments = video_only_plan(2, Container::Mp4).segments;
+        let _ = copy_process(&plan);
+    }
+
+    #[test]
+    fn a_plan_that_copies_no_audio_has_no_copy_command() {
+        for plan in [fixture_plan(1), video_only_plan(1, Container::Mp4)] {
+            assert_eq!(build_copy_arguments(&plan, CopyOutput::Pipe), None);
+            assert_eq!(
+                build_copy_arguments(&plan, CopyOutput::File(Path::new(OUTPUT))),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn the_time_of_a_copy_renders_a_zero_and_truncates_as_a_seek() {
+        assert_eq!(render_time(Rational::new(0, 1).unwrap()), "0");
+        assert_eq!(render_time(Rational::new(1, 3_000_000).unwrap()), "0");
+        assert_eq!(render_time(Rational::new(58, 5).unwrap()), "11.6");
+        assert_eq!(
+            render_time(Rational::new(1001, 30_000).unwrap()),
+            "0.033366"
+        );
     }
 }

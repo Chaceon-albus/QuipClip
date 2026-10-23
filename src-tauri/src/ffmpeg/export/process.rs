@@ -190,7 +190,9 @@ pub struct ExportProcessRequest<'a> {
     /// refusal the module documentation describes.
     pub arguments: &'a [String],
     /// The complete argument list of a second `ffmpeg` that writes the audio of the export to its
-    /// stdout, or `None` for an export of one process.
+    /// stdout, or `None` for an export of one process. That process decodes the audio and writes
+    /// PCM (ADR 043), or it copies the packets of the source (ADR 048); this module treats both
+    /// alike.
     ///
     /// The audio process starts first, and its stdout becomes the stdin of the process that
     /// [`Self::arguments`] runs, which reads it as `pipe:0`. Its stdin is null and its stderr is
@@ -388,7 +390,8 @@ pub fn run_export_process<F: FnMut(&ProgressSnapshot)>(
                 // The audio process reads only its own inputs, so it gets a null stdin for the
                 // reason the encoder below gets one.
                 .stdin(Stdio::null())
-                // The WAV stream the encoder reads as `pipe:0`.
+                // The stream the encoder reads as `pipe:0`: WAV of PCM (ADR 043), or NUT of the
+                // copied packets (ADR 048).
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()?,

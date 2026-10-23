@@ -12,7 +12,9 @@
 //! exposes [`ExportPlan::single_input_seek_seconds`], the one extra value ADR 014's second
 //! graph shape (one input for the whole source) needs beyond the per-segment plan, and
 //! [`ExportPlan::separate_audio_process`], which writes the audio of an export with video in a
-//! second `ffmpeg` (ADR 043).
+//! second `ffmpeg` (ADR 043). A plan of one segment can copy the packets of the source audio
+//! instead ([`CopiedAudio`], ADR 048), and [`ExportPlan::separate_copy_process`] says when that
+//! copy runs in a second `ffmpeg`.
 //!
 //! [`fsinspect`] is the one production implementation of that injected closure: it turns a real
 //! path into the [`PathFacts`] the planner reads, and it reports a file only when it could also
@@ -73,8 +75,8 @@ pub mod registry;
 pub mod verify;
 
 pub use arguments::{
-    build_arguments, build_audio_arguments, choose_audio_graph_shape, choose_graph_shape,
-    encoder_graph,
+    build_arguments, build_audio_arguments, build_copy_arguments, choose_audio_graph_shape,
+    choose_graph_shape, encoder_graph, CopyOutput,
 };
 pub use fsinspect::inspect_path;
 pub use graph::{build_audio_graph, build_filter_graph, build_video_graph, GraphShape};
@@ -429,6 +431,35 @@ pub struct PlannedAudio {
     pub silence_layout: Option<String>,
 }
 
+/// The audio part of a plan that copies the packets of the source audio stream into the output
+/// (`-c:a copy`), in place of a [`PlannedAudio`] that decodes, cuts and encodes them (ADR 048).
+///
+/// A copy keeps whole packets. The command keeps the packets from the first one whose decoding
+/// time is at or after [`Self::start`] to the last one whose decoding time is before
+/// [`Self::end`], and it moves their timestamps back by [`Self::start`]. Where the source audio
+/// covers the segment, each end of the copied audio therefore lies within one packet of the In
+/// point or the Out point, which the user accepts for this mode, and the audio keeps its place
+/// against the video. A copy writes no silence, so audio that starts late, ends early or has a gap
+/// inside the segment stays so in the output, and the plan encodes such audio instead. ADR 048
+/// holds the measurements.
+///
+/// The cut reads the absolute times of the source that `-copyts` keeps, so neither value is
+/// relative to the container start, as the seek of [`PlannedSegment::seek_seconds`] is. They are
+/// bounds for the command, and never edit boundaries (ADR 002).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopiedAudio {
+    /// The absolute index of the audio stream whose packets the export copies.
+    pub stream_index: u32,
+    /// The In point of the segment, in seconds: `inPts * videoTimeBase`, exact.
+    pub start: Rational,
+    /// The Out point of the segment, in seconds: `outPts * videoTimeBase`, exact.
+    pub end: Rational,
+    /// Whether the command that writes the output file converts the AAC of the stream from ADTS
+    /// to the configuration that MP4 and Matroska store (`-bsf:a aac_adtstoasc`). This is the
+    /// AAC of an MPEG-TS source, as the preview copies it (ADR 046).
+    pub adts_to_asc: bool,
+}
+
 /// A fully resolved, ready-to-render export: one source, its segments in concat order, and
 /// the video and audio parts with the encoder settings a preset selected.
 ///
@@ -439,7 +470,8 @@ pub struct PlannedAudio {
 /// Both parts are optional, and each one is a whole decision for the graph: a part that is
 /// `None` writes no chain, no label, no map, and no encoder flag anywhere. [`plan::build_plan`]
 /// plans each part from the [`ExportStreams`] choice of the request, and it never produces a
-/// plan with neither part.
+/// plan that writes nothing: a plan with neither part copies its audio
+/// ([`Self::copied_audio`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportPlan {
     /// The source media file every segment cuts from.
@@ -463,13 +495,23 @@ pub struct ExportPlan {
     /// no ADR-014-compliant way to be cut at all, and [`plan::build_plan`] refuses the whole
     /// export with [`ExportErrorCode::SourceAudioRateUnknown`] rather than reaching this
     /// field: dropping the track here would write a video-only file for a source the
-    /// preview played with sound, and report nothing. `None` therefore means one of two
-    /// things, and both are stated, never silent: the source has no audio, or the user chose
-    /// [`ExportStreams::VideoOnly`]. Bundling the stream index and the sample rate into
+    /// preview played with sound, and report nothing. `None` therefore means one of three
+    /// things, and all are stated, never silent: the source has no audio, the user chose
+    /// [`ExportStreams::VideoOnly`], or the plan copies the audio ([`Self::copied_audio`]). Bundling the stream index and the sample rate into
     /// one [`PlannedAudio`] makes "an audio stream to address, but no exact way to address
     /// it" unrepresentable, instead of leaving that combination as an unstated policy
     /// question for the graph builder.
     pub audio: Option<PlannedAudio>,
+    /// The audio this plan copies from the source, or `None` when the plan encodes its audio or
+    /// writes none (ADR 048).
+    ///
+    /// A plan holds at most one of [`Self::audio`] and this part, and this part only with one
+    /// segment. With video, a second `ffmpeg` copies the packets into a pipe, and the encoder
+    /// copies them from it into the output ([`Self::separate_copy_process`]); the graph of the
+    /// encoder is the graph of a plan without audio. Without video, one `ffmpeg` copies the
+    /// packets into the output file, and the command has no filter graph
+    /// ([`arguments::build_copy_arguments`]).
+    pub copied_audio: Option<CopiedAudio>,
     /// The segments to render, in the order they must appear in the concatenated output.
     pub segments: Vec<PlannedSegment>,
     /// The output container, which selects the muxer (ADR 004).
@@ -501,6 +543,19 @@ impl ExportPlan {
                 .audio
                 .as_ref()
                 .is_some_and(|audio| audio.silence_layout.is_none())
+    }
+
+    /// True when a second `ffmpeg` copies the audio packets of the source into a pipe, and the
+    /// encoder copies them from that pipe into the output (ADR 048): the plan writes video and
+    /// copies its audio ([`Self::copied_audio`]).
+    ///
+    /// The cut of a copy is an output `-ss` and `-to` of the command that copies, and an output
+    /// option applies to every stream of its output. In the encoder it would also cut the video,
+    /// so the copy has a command of its own. This is not [`Self::separate_audio_process`]: that
+    /// process decodes the audio, and its encoder reads PCM.
+    #[must_use]
+    pub fn separate_copy_process(&self) -> bool {
+        self.video.is_some() && self.copied_audio.is_some()
     }
 
     /// The expected final `frame` count, for ADR 014's progress and frame-count comparison:

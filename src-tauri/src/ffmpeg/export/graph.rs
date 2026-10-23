@@ -1059,6 +1059,7 @@ mod tests {
             segments: fixture_segments(count),
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
+            copied_audio: None,
             flv_input: None,
         }
     }
