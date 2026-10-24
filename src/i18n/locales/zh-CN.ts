@@ -712,7 +712,7 @@ export const zhCN: TranslationCatalog = {
       keepOneStream: "至少导出视频或音频之一",
       sourceHasNoAudio: "源文件没有音频",
       videoRequired: "源文件没有音频，因此始终导出视频",
-      copyAudio: "复制音频",
+      copyAudio: "复制",
       copiedAudio: "从源复制（{{codec}}）",
       audioOnlyContainer: "{{extension}}（{{format}}）",
       estimatedSize: "预计大小：约 {{size}}",

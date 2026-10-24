@@ -347,6 +347,23 @@ describe("the summary of a copy of the audio", () => {
     }
   });
 
+  it("keeps the Encoder row first, by its id, with and without the copy", () => {
+    // The switch of the copy sits at the end of this row, so the row must not move or change its
+    // id when the switch turns the copy on or off.
+    const source = createSource(STEREO);
+    for (const preset of [
+      createPreset(),
+      createPreset({ audioEncoder: "flac", audioBitrate: undefined }),
+    ]) {
+      expect(
+        presentPresetSummary(preset, formatter, source).groups[1].rows[0]?.id,
+      ).toBe("audioEncoder");
+      expect(
+        presentPresetSummary(preset, formatter, source, "copy").groups[1].rows[0]?.id,
+      ).toBe("audioEncoder");
+    }
+  });
+
   it("still shows the note of a source without audio", () => {
     const audio = presentPresetSummary(
       createPreset(),

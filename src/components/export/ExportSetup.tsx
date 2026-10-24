@@ -5,6 +5,7 @@ import {
   useId,
   useMemo,
   useRef,
+  type ReactNode,
   type Ref,
 } from "react";
 import { useTranslation } from "react-i18next";
@@ -122,25 +123,39 @@ function SummarySentence({
 /**
  * The rows of one part of the preset summary. Every list has the same label column, so the
  * values of the container row and of both groups start at one edge.
+ *
+ * `trailing` puts a control at the end of the row that `rowId` names, on the first line of its
+ * value, so the control needs no row of its own and does not move when the value wraps. The
+ * value keeps the rest of the line and wraps in front of the control.
  */
 function SummaryRows({
   rows,
+  trailing = null,
   translate,
 }: {
   rows: readonly PresetSummaryRowView[];
+  trailing?: { readonly rowId: string; readonly node: ReactNode } | null;
   translate: Translate;
 }) {
   return (
     <dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-1">
-      {rows.map((row) => (
-        <Fragment key={row.id}>
-          <dt className="text-muted-foreground">{translate(row.labelKey)}</dt>
-          {/* An encoder name is free text of up to 64 characters with no space in it. */}
-          <dd className="wrap-anywhere text-foreground">
-            {translate(row.valueKey, row.valueValues)}
-          </dd>
-        </Fragment>
-      ))}
+      {rows.map((row) => {
+        // An encoder name is free text of up to 64 characters with no space in it.
+        const value = translate(row.valueKey, row.valueValues);
+        return (
+          <Fragment key={row.id}>
+            <dt className="text-muted-foreground">{translate(row.labelKey)}</dt>
+            {trailing !== null && trailing.rowId === row.id ? (
+              <dd className="flex items-start justify-between gap-3">
+                <span className="min-w-0 wrap-anywhere text-foreground">{value}</span>
+                {trailing.node}
+              </dd>
+            ) : (
+              <dd className="wrap-anywhere text-foreground">{value}</dd>
+            )}
+          </Fragment>
+        );
+      })}
     </dl>
   );
 }
@@ -302,10 +317,14 @@ function StreamSwitch({
 }
 
 /**
- * The switch that asks for a copy of the audio, with its visible label, in front of the switch
- * of the Audio heading (ADR 048). The step renders it only where it offers the copy. While the
- * save panel is open it is frozen as the stream switches are: it carries `aria-disabled`, keeps
- * the focus, and ignores a toggle.
+ * The switch that asks for a copy of the audio, with its visible label, at the end of the
+ * Encoder row of the Audio group, under the switch of the Audio heading (ADR 048). The step
+ * renders it only where it offers the copy. While the save panel is open it is frozen as the
+ * stream switches are: it carries `aria-disabled`, keeps the focus, and ignores a toggle.
+ *
+ * The switch is 6 px under the switch of the heading. Its click area reaches 4 px above and
+ * below it, not the 8 px of a switch, so it stops in the space between the two switches and
+ * does not cover the track of the switch above it.
  */
 function CopyAudioSwitch({
   view,
@@ -340,7 +359,7 @@ function CopyAudioSwitch({
           }
         }}
         aria-disabled={frozen ? true : undefined}
-        className="aria-disabled:opacity-70"
+        className="after:-inset-y-1 aria-disabled:opacity-70"
       />
     </span>
   );
@@ -349,7 +368,9 @@ function CopyAudioSwitch({
 /**
  * One group of the preset summary, named by its heading, with the switch of its stream at the
  * end of the heading. The Audio group can also carry the switch that asks for a copy of the
- * audio, in front of the switch of its stream.
+ * audio, at the end of its Encoder row. That row names the encoder of the preset, or the codec
+ * of the source while the copy is on, so the switch keeps its place and its focus when it
+ * changes.
  */
 function SummaryGroup({
   group,
@@ -375,25 +396,33 @@ function SummaryGroup({
         <h3 id={headingId} className="font-medium text-foreground">
           {translate(group.headingKey)}
         </h3>
-        <span className="inline-flex items-center gap-3">
-          {copyAudioSwitch ? (
-            <CopyAudioSwitch
-              view={copyAudioSwitch}
-              frozen={streamsFrozen}
-              onCheckedChange={onCopyAudioChange}
-              translate={translate}
-            />
-          ) : null}
-          <StreamSwitch
-            view={streamSwitch}
-            frozen={streamsFrozen}
-            onCheckedChange={onStreamChange}
-            translate={translate}
-          />
-        </span>
+        <StreamSwitch
+          view={streamSwitch}
+          frozen={streamsFrozen}
+          onCheckedChange={onStreamChange}
+          translate={translate}
+        />
       </div>
       {group.rows.length > 0 ? (
-        <SummaryRows rows={group.rows} translate={translate} />
+        <SummaryRows
+          rows={group.rows}
+          trailing={
+            copyAudioSwitch
+              ? {
+                  rowId: "audioEncoder",
+                  node: (
+                    <CopyAudioSwitch
+                      view={copyAudioSwitch}
+                      frozen={streamsFrozen}
+                      onCheckedChange={onCopyAudioChange}
+                      translate={translate}
+                    />
+                  ),
+                }
+              : null
+          }
+          translate={translate}
+        />
       ) : null}
       {group.noteKey ? (
         <p className="text-muted-foreground">{translate(group.noteKey)}</p>
@@ -555,9 +584,9 @@ export interface ExportSetupProps {
  *   that the export writes (ADR 036). A group that the export does not write shows one line in
  *   place of its rows, and the Container row names the file of an audio-only export. The size
  *   estimate, the encoder marks and the blocker follow the choice.
- * - Puts a Copy Audio switch in front of the switch of the Audio heading, where the step offers
- *   a copy of the audio of one segment (ADR 048). While the copy is on, the Audio group names
- *   the codec, the sample rate and the channels of the source, and the step has no size
+ * - Puts a Copy Audio switch at the end of the Encoder row of the Audio group, where the step
+ *   offers a copy of the audio of one segment (ADR 048). While the copy is on, the Audio group
+ *   names the codec, the sample rate and the channels of the source, and the step has no size
  *   estimate. The blocker and the mark of the audio encoder stay, because the backend encodes
  *   the audio with the preset when it cannot copy it.
  * - Estimates the output size when the bitrate of each stream that the export writes is

@@ -5,8 +5,9 @@
  * each heading chooses whether the export writes that stream. This module presents the two
  * switches and applies the choice to the summary: the Container row names the file that the
  * export writes, and a group whose stream the export does not write shows one line in place
- * of its rows. It also presents the switch at the end of the Audio heading that asks for a copy
- * of the audio, where the step offers one (ADR 048). Pure module with no React dependencies.
+ * of its rows. It also presents the switch at the end of the Encoder row of the Audio group that
+ * asks for a copy of the audio, where the step offers one (ADR 048). Pure module with no React
+ * dependencies.
  */
 
 import { presentContainer } from "@/components/settings/presetPresenter";
@@ -101,7 +102,10 @@ export function presentStreamSwitches(
   };
 }
 
-/** The switch at the end of the Audio heading that asks for a copy of the audio (ADR 048). */
+/**
+ * The switch at the end of the Encoder row of the Audio group that asks for a copy of the audio
+ * (ADR 048).
+ */
 export type CopyAudioSwitchView = {
   /** True when the user asked for the copy. */
   readonly checked: boolean;

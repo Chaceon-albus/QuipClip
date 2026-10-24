@@ -912,12 +912,13 @@ export const en = {
       sourceHasNoAudio: "The source has no audio",
       // The tooltip of the locked video switch when the source has no audio.
       videoRequired: "The source has no audio, so the video is always exported",
-      // The label of the switch in front of the audio switch. It shows only for an export of
-      // one segment whose source audio the output can hold. When it is on, the export copies
-      // the audio of the source as it is, and the preset does not encode it.
+      // The label of the switch at the end of the Encoder row of the Audio group, under the
+      // audio switch. It shows only for an export of one segment whose source audio the output
+      // can hold. When it is on, the export copies the audio of the source as it is, and the
+      // preset does not encode it.
       copyAudio: "Copy audio",
-      // The Encoder row of the Audio group while the switch above is on. {{codec}} is the
-      // codec of the source audio as FFmpeg names it, such as "aac" or "ac3".
+      // The value of the same Encoder row while the switch is on. {{codec}} is the codec of the
+      // source audio as FFmpeg names it, such as "aac" or "ac3".
       copiedAudio: "Copied from Source ({{codec}})",
       // The Container row of an export of the audio only. {{extension}} is the extension of
       // the output file, ".m4a" or ".mka", and {{format}} is the name of its format, "MP4"
