@@ -24,8 +24,10 @@ import {
   runExportFlow,
 } from "@/components/layout/exportFlowController";
 import {
+  canCopyAudio,
   exportStore,
   isExportRunLive,
+  resolveExportAudioMode,
   resolveExportStreams,
   sourceHasAudio,
   useExportOutputActionStore,
@@ -37,6 +39,7 @@ import {
   type ExportState,
 } from "@/features/export";
 import { openMediaFileDialog, useMediaStore } from "@/features/media";
+import { selectActiveSourceSegmentCount, useTimelineStore } from "@/features/timeline";
 import { useSettingsStore, type SettingsSection } from "@/features/settings";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { isMacOS } from "@/lib/platform";
@@ -340,6 +343,23 @@ export function ExportDialog({
   const setStream = useExportStreamChoice((state) => state.setStream);
   const probe = useMediaStore((state) => state.media?.probe ?? null);
   const streams = resolveExportStreams(streamChoice, sourceHasAudio(probe));
+  // The copy of the audio (ADR 048): the request asks for it only while the setup step offers
+  // it, which the setup step resolves the same way for its switch and its summary.
+  const copyAudio = useExportStreamChoice((state) => state.copyAudio);
+  const setCopyAudio = useExportStreamChoice((state) => state.setCopyAudio);
+  const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
+  const audioMode = resolveExportAudioMode(
+    copyAudio,
+    selectedPreset !== null &&
+      canCopyAudio({
+        probe,
+        container: selectedPreset.container,
+        streams,
+        segmentCount,
+      }),
+  );
+  // The blocker does not read the copy: the backend encodes the audio with the preset when it
+  // cannot copy it.
   const blocker = presentSetupBlocker(selectedPreset, streams);
   const exportDisabled =
     effectivePresetId === null ||
@@ -611,8 +631,7 @@ export function ExportDialog({
         },
         effectivePresetId,
         streams,
-        // The setup step offers no copy of the audio yet (ADR 048).
-        "encode",
+        audioMode,
       );
       if (started) {
         // Clear the user's manual selection once the export has started so that a subsequent
@@ -781,6 +800,8 @@ export function ExportDialog({
             onSelect={setRequestedPresetId}
             streamChoice={streamChoice}
             onStreamChange={setStream}
+            copyAudio={copyAudio}
+            onCopyAudioChange={setCopyAudio}
             streamsFrozen={frame.choosingDestination}
             onOpenSettings={(section) => {
               handleOpenSettings(section, effectivePresetId);

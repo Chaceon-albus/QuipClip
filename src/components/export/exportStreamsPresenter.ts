@@ -5,7 +5,8 @@
  * each heading chooses whether the export writes that stream. This module presents the two
  * switches and applies the choice to the summary: the Container row names the file that the
  * export writes, and a group whose stream the export does not write shows one line in place
- * of its rows. Pure module with no React dependencies.
+ * of its rows. It also presents the switch at the end of the Audio heading that asks for a copy
+ * of the audio, where the step offers one (ADR 048). Pure module with no React dependencies.
  */
 
 import { presentContainer } from "@/components/settings/presetPresenter";
@@ -98,6 +99,32 @@ export function presentStreamSwitches(
       lockKey: audioLockKey,
     },
   };
+}
+
+/** The switch at the end of the Audio heading that asks for a copy of the audio (ADR 048). */
+export type CopyAudioSwitchView = {
+  /** True when the user asked for the copy. */
+  readonly checked: boolean;
+  /** The visible label of the switch, which is also its accessible name. */
+  readonly labelKey: "export.setup.copyAudio";
+};
+
+/**
+ * Presents the switch that asks for a copy of the audio, or null when the setup step does not
+ * offer the copy (`canCopyAudio`). The step then shows no switch, and the request asks for an
+ * encode, whatever the choice holds.
+ *
+ * The switch shows the choice of the user and not the resolved mode: while it shows, the two
+ * agree (`resolveExportAudioMode`).
+ *
+ * @param chosen The choice of the user (`copyAudio` of the stream choice).
+ * @param offered True when the step offers the copy.
+ */
+export function presentCopyAudioSwitch(
+  chosen: boolean,
+  offered: boolean,
+): CopyAudioSwitchView | null {
+  return offered ? { checked: chosen, labelKey: "export.setup.copyAudio" } : null;
 }
 
 /**

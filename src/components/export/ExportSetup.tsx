@@ -22,6 +22,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useExportStore } from "@/features/export/store";
+import { canCopyAudio, resolveExportAudioMode } from "@/features/export/audioCopy";
 import {
   resolveExportStreams,
   sourceHasAudio,
@@ -75,8 +76,10 @@ import {
   type SetupBlockerView,
 } from "./exportSetupPresenter";
 import {
+  presentCopyAudioSwitch,
   presentStreamSummary,
   presentStreamSwitches,
+  type CopyAudioSwitchView,
   type StreamSwitchView,
 } from "./exportStreamsPresenter";
 
@@ -299,20 +302,70 @@ function StreamSwitch({
 }
 
 /**
+ * The switch that asks for a copy of the audio, with its visible label, in front of the switch
+ * of the Audio heading (ADR 048). The step renders it only where it offers the copy. While the
+ * save panel is open it is frozen as the stream switches are: it carries `aria-disabled`, keeps
+ * the focus, and ignores a toggle.
+ */
+function CopyAudioSwitch({
+  view,
+  frozen,
+  onCheckedChange,
+  translate,
+}: {
+  view: CopyAudioSwitchView;
+  frozen: boolean;
+  onCheckedChange: (on: boolean) => void;
+  translate: Translate;
+}) {
+  const switchId = useId();
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <label
+        htmlFor={switchId}
+        className={cn(
+          "whitespace-nowrap text-muted-foreground select-none",
+          frozen && "opacity-70",
+        )}
+      >
+        {translate(view.labelKey)}
+      </label>
+      <Switch
+        id={switchId}
+        size="sm"
+        checked={view.checked}
+        onCheckedChange={(checked) => {
+          if (!frozen) {
+            onCheckedChange(checked);
+          }
+        }}
+        aria-disabled={frozen ? true : undefined}
+        className="aria-disabled:opacity-70"
+      />
+    </span>
+  );
+}
+
+/**
  * One group of the preset summary, named by its heading, with the switch of its stream at the
- * end of the heading.
+ * end of the heading. The Audio group can also carry the switch that asks for a copy of the
+ * audio, in front of the switch of its stream.
  */
 function SummaryGroup({
   group,
   streamSwitch,
+  copyAudioSwitch,
   streamsFrozen,
   onStreamChange,
+  onCopyAudioChange,
   translate,
 }: {
   group: PresetSummaryGroupView;
   streamSwitch: StreamSwitchView;
+  copyAudioSwitch: CopyAudioSwitchView | null;
   streamsFrozen: boolean;
   onStreamChange: (kind: ExportStreamKind, on: boolean) => void;
+  onCopyAudioChange: (on: boolean) => void;
   translate: Translate;
 }) {
   const headingId = useId();
@@ -322,12 +375,22 @@ function SummaryGroup({
         <h3 id={headingId} className="font-medium text-foreground">
           {translate(group.headingKey)}
         </h3>
-        <StreamSwitch
-          view={streamSwitch}
-          frozen={streamsFrozen}
-          onCheckedChange={onStreamChange}
-          translate={translate}
-        />
+        <span className="inline-flex items-center gap-3">
+          {copyAudioSwitch ? (
+            <CopyAudioSwitch
+              view={copyAudioSwitch}
+              frozen={streamsFrozen}
+              onCheckedChange={onCopyAudioChange}
+              translate={translate}
+            />
+          ) : null}
+          <StreamSwitch
+            view={streamSwitch}
+            frozen={streamsFrozen}
+            onCheckedChange={onStreamChange}
+            translate={translate}
+          />
+        </span>
       </div>
       {group.rows.length > 0 ? (
         <SummaryRows rows={group.rows} translate={translate} />
@@ -443,8 +506,15 @@ export interface ExportSetupProps {
    */
   onStreamChange: (kind: ExportStreamKind, on: boolean) => void;
   /**
-   * True while the save panel is open. The request already holds the stream choice, so the
-   * switches do not change until the panel closes.
+   * True when the user asked for a copy of the audio for this session (ADR 048). The switch
+   * shows only where the step offers the copy.
+   */
+  copyAudio: boolean;
+  /** Callback fired when the user turns the copy of the audio on or off. */
+  onCopyAudioChange: (on: boolean) => void;
+  /**
+   * True while the save panel is open. The request already holds the stream choice and the
+   * copy of the audio, so the switches do not change until the panel closes.
    */
   streamsFrozen?: boolean;
   /**
@@ -485,6 +555,11 @@ export interface ExportSetupProps {
  *   that the export writes (ADR 036). A group that the export does not write shows one line in
  *   place of its rows, and the Container row names the file of an audio-only export. The size
  *   estimate, the encoder marks and the blocker follow the choice.
+ * - Puts a Copy Audio switch in front of the switch of the Audio heading, where the step offers
+ *   a copy of the audio of one segment (ADR 048). While the copy is on, the Audio group names
+ *   the codec, the sample rate and the channels of the source, and the step has no size
+ *   estimate. The blocker and the mark of the audio encoder stay, because the backend encodes
+ *   the audio with the preset when it cannot copy it.
  * - Estimates the output size when the bitrate of each stream that the export writes is
  *   known.
  * - Shows the test of the selected preset on this machine at the top of the summary, and
@@ -498,6 +573,8 @@ export function ExportSetup({
   onSelect,
   streamChoice,
   onStreamChange,
+  copyAudio,
+  onCopyAudioChange,
   streamsFrozen = false,
   onOpenSettings,
   firstControlRef,
@@ -613,6 +690,14 @@ export function ExportSetup({
   // request.
   const streams = resolveExportStreams(streamChoice, sourceHasAudio(probe));
   const streamSwitches = presentStreamSwitches(streamChoice, probe);
+  // The copy of the audio (ADR 048), as the dialog resolves it for the request. The encoder
+  // mark and the blocker do not read it: the backend encodes the audio with the preset when it
+  // cannot copy it.
+  const copyOffered =
+    selectedPreset !== null &&
+    canCopyAudio({ probe, container: selectedPreset.container, streams, segmentCount });
+  const copyAudioSwitch = presentCopyAudioSwitch(copyAudio, copyOffered);
+  const audioMode = resolveExportAudioMode(copyAudio, copyOffered);
   const options = settings
     ? presentPresetOptions(settings, ffmpegState, numberFormatter, streams)
     : [];
@@ -623,7 +708,7 @@ export function ExportSetup({
     : null;
   const summary = selectedPreset
     ? presentStreamSummary(
-        presentPresetSummary(selectedPreset, numberFormatter, probe),
+        presentPresetSummary(selectedPreset, numberFormatter, probe, audioMode),
         selectedPreset.container,
         streams,
       )
@@ -636,6 +721,7 @@ export function ExportSetup({
             streams,
             durationTicks,
             videoTimeBase: probe.videoTimeBase,
+            audioMode,
           },
           numberFormatter,
         )
@@ -730,8 +816,10 @@ export function ExportSetup({
               key={group.id}
               group={group}
               streamSwitch={streamSwitches[group.id]}
+              copyAudioSwitch={group.id === "audio" ? copyAudioSwitch : null}
               streamsFrozen={streamsFrozen}
               onStreamChange={onStreamChange}
+              onCopyAudioChange={onCopyAudioChange}
               translate={translate}
             />
           ))}

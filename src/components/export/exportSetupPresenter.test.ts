@@ -1684,3 +1684,27 @@ describe("decideSetupAutoTest", () => {
     expect(decideSetupAutoTest({ ...base, exportStatus: "running" })).toBe("skip");
   });
 });
+
+describe("the setup step of a copy of the audio (ADR 048)", () => {
+  it("estimates no size while the audio is copied, whose bitrate the probe does not report", () => {
+    const bitrate = createPreset({ quality: { kind: "bitrate", value: 8000 } });
+    const input: ExportSizeInput = {
+      preset: bitrate,
+      streams: "videoAndAudio",
+      durationTicks: 900_000n,
+      videoTimeBase: { n: 1, d: 90_000 },
+    };
+    expect(estimateExportBytes(input)).not.toBeNull();
+    expect(estimateExportBytes({ ...input, audioMode: "encode" })).toStrictEqual(
+      estimateExportBytes(input),
+    );
+    expect(estimateExportBytes({ ...input, audioMode: "copy" })).toBeNull();
+    expect(
+      estimateExportBytes({ ...input, streams: "audioOnly", audioMode: "copy" }),
+    ).toBeNull();
+    // An export of the video only writes no audio, so the mode changes nothing.
+    expect(
+      estimateExportBytes({ ...input, streams: "videoOnly", audioMode: "copy" }),
+    ).toStrictEqual(estimateExportBytes({ ...input, streams: "videoOnly" }));
+  });
+});

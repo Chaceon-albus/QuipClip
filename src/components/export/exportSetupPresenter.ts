@@ -18,7 +18,11 @@ import {
   presentPresetTestStatus,
   type PresetTestStatusView,
 } from "@/components/settings/presetTestPresenter";
-import type { ExportStatus, ExportStreams } from "@/features/export/types";
+import type {
+  ExportAudioMode,
+  ExportStatus,
+  ExportStreams,
+} from "@/features/export/types";
 import type { FfmpegState } from "@/features/ffmpeg/types";
 import type {
   PresetTestView,
@@ -516,14 +520,22 @@ function presentChannelsRow(
  * When the probe reports no audio stream, the export writes no audio. The Audio group then
  * shows a note in place of its rows.
  *
+ * When the request asks for a copy of the audio (ADR 048), the Audio group names the codec of
+ * the source in place of the encoder, and the sample rate and the channels of the source, which
+ * the copy keeps, with no bitrate and no extra parameters. The backend can still encode the
+ * audio with the preset, for a reason that only the export reads, and the summary does not show
+ * that.
+ *
  * @param preset The selected preset.
  * @param formatter Formats numbers for the resolved interface language.
  * @param source The probe of the open source, or null with no source.
+ * @param audioMode How the request writes the audio (`resolveExportAudioMode`).
  */
 export function presentPresetSummary(
   preset: Preset,
   formatter: Intl.NumberFormat,
   source: PresetSummarySource | null,
+  audioMode: ExportAudioMode = "encode",
 ): PresetSummaryView {
   // Encoder names and the container are technical identifiers, passed through untranslated.
   const container: PresetSummaryRowView = {
@@ -566,22 +578,42 @@ export function presentPresetSummary(
           rows: [],
           noteKey: "export.setup.noSourceAudio",
         }
-      : {
-          id: "audio",
-          headingKey: "settings.preset.groupAudio",
-          rows: [
-            {
-              id: "audioEncoder",
-              labelKey: "settings.preset.audioEncoderLabel",
-              valueKey: "export.setup.value",
-              valueValues: { value: preset.audioEncoder },
-            },
-            presentAudioBitrateRow(preset, formatter),
-            presentSampleRateRow(preset, source, formatter),
-            presentChannelsRow(preset, source),
-            ...(audioOptions === null ? [] : [audioOptions]),
-          ],
-        };
+      : audioMode === "copy"
+        ? {
+            id: "audio",
+            headingKey: "settings.preset.groupAudio",
+            rows: [
+              {
+                id: "audioEncoder",
+                labelKey: "settings.preset.audioEncoderLabel",
+                valueKey: "export.setup.copiedAudio",
+                // The codec name is a technical identifier, passed through untranslated.
+                valueValues: { codec: source?.audio?.codec ?? "" },
+              },
+              presentSampleRateRow(
+                { ...preset, audioSampleRate: "source" },
+                source,
+                formatter,
+              ),
+              presentChannelsRow({ ...preset, audioChannels: "source" }, source),
+            ],
+          }
+        : {
+            id: "audio",
+            headingKey: "settings.preset.groupAudio",
+            rows: [
+              {
+                id: "audioEncoder",
+                labelKey: "settings.preset.audioEncoderLabel",
+                valueKey: "export.setup.value",
+                valueValues: { value: preset.audioEncoder },
+              },
+              presentAudioBitrateRow(preset, formatter),
+              presentSampleRateRow(preset, source, formatter),
+              presentChannelsRow(preset, source),
+              ...(audioOptions === null ? [] : [audioOptions]),
+            ],
+          };
 
   return { container, groups: [video, audio] };
 }
@@ -635,6 +667,11 @@ export type ExportSizeInput = {
   readonly durationTicks: bigint | null;
   /** The video time base of the open source, or null with no source. */
   readonly videoTimeBase: Rational | null;
+  /**
+   * How the request writes the audio (ADR 048), or absent for an encode. A copy keeps the
+   * bitrate of the source, which the probe does not report.
+   */
+  readonly audioMode?: ExportAudioMode;
 };
 
 /**
@@ -647,8 +684,8 @@ export type ExportSizeInput = {
  * - The video has a bitrate only in bitrate mode. A CRF or a quality scale sets a quality and
  *   not a size, so any number would be a guess. An audio-only export ignores the quality.
  * - The audio has no known bitrate with an encoder that is lossless, or that uses its default
- *   bitrate. A video-only export, and an export of a source with no audio stream, ignore the
- *   audio settings.
+ *   bitrate, or when the export copies the audio of the source (ADR 048). A video-only export,
+ *   and an export of a source with no audio stream, ignore the audio settings.
  *
  * The estimate leaves out the container overhead.
  *
@@ -680,6 +717,7 @@ export function estimateExportBytes(input: ExportSizeInput): ExactBytes | null {
   let audioKbps = 0;
   if (writesAudio) {
     if (
+      input.audioMode === "copy" ||
       isLosslessAudioEncoder(preset.audioEncoder) ||
       !isPositiveSafeInteger(preset.audioBitrate)
     ) {
@@ -849,6 +887,8 @@ export function presentSizeEstimate(
  * and the preset pairs an incompatible container and audio encoder (e.g. mov + flac, mov +
  * libopus per ADR 023). A video-only export writes no audio. An audio-only export of a MOV
  * preset uses the `mp4` muxer, which accepts both encoders (ADR 036). Neither is blocked.
+ * A request that asks for a copy of the audio is blocked as an encode: the backend encodes the
+ * audio with the preset when it cannot copy it (ADR 048).
  * Otherwise returns `null`, indicating the setup step allows proceeding to file destination selection.
  */
 export function presentSetupBlocker(
@@ -979,8 +1019,9 @@ export function presentPresetOptions(
  * The encoder mark of a preset in the setup step: the mark of the preset list row
  * (`presentPresetEncoderMark`), for the encoders of the streams that the export writes only
  * (ADR 036). An audio-only export runs no video encoder, and a video-only export runs no audio
- * encoder, so an encoder that does not run is not marked. The mark does not block the export
- * (ADR 024).
+ * encoder, so an encoder that does not run is not marked. A request that asks for a copy of the
+ * audio keeps the mark of the audio encoder: the backend encodes the audio with it when it cannot
+ * copy (ADR 048). The mark does not block the export (ADR 024).
  */
 export function presentSetupEncoderMark(
   ffmpegState: Pick<FfmpegState, "status" | "results">,

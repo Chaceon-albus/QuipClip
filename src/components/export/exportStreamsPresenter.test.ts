@@ -10,6 +10,7 @@ import {
   type PresetSummaryView,
 } from "./exportSetupPresenter";
 import {
+  presentCopyAudioSwitch,
   presentStreamSummary,
   presentStreamSwitches,
   type StreamSwitchesView,
@@ -257,5 +258,103 @@ describe("presentStreamSummary", () => {
     }
     expect(en.export.setup.audioOnlyContainer).toBe("{{extension}} ({{format}})");
     expect(zhCN.export.setup.audioOnlyContainer).toBe("{{extension}}（{{format}}）");
+  });
+});
+
+describe("presentCopyAudioSwitch", () => {
+  it("shows the choice of the user where the step offers the copy", () => {
+    expect(presentCopyAudioSwitch(false, true)).toStrictEqual({
+      checked: false,
+      labelKey: "export.setup.copyAudio",
+    });
+    expect(presentCopyAudioSwitch(true, true)).toStrictEqual({
+      checked: true,
+      labelKey: "export.setup.copyAudio",
+    });
+  });
+
+  it("shows no switch where the step does not offer the copy, whatever the choice", () => {
+    expect(presentCopyAudioSwitch(true, false)).toBeNull();
+    expect(presentCopyAudioSwitch(false, false)).toBeNull();
+  });
+
+  it("names a label that both catalogs define", () => {
+    expect(typeof lookup(en, "export.setup.copyAudio")).toBe("string");
+    expect(typeof lookup(zhCN, "export.setup.copyAudio")).toBe("string");
+  });
+});
+
+describe("the summary of a copy of the audio", () => {
+  it("names the codec, the sample rate and the channels of the source, and nothing of the preset", () => {
+    const preset = createPreset({
+      audioEncoder: "libopus",
+      audioBitrate: 128,
+      audioSampleRate: 44100,
+      audioChannels: "mono",
+      audioOptions: [{ name: "vbr", value: "on" }],
+    });
+    const audio = presentPresetSummary(preset, formatter, createSource(STEREO), "copy")
+      .groups[1];
+    expect(audio.rows).toStrictEqual([
+      {
+        id: "audioEncoder",
+        labelKey: "settings.preset.audioEncoderLabel",
+        valueKey: "export.setup.copiedAudio",
+        valueValues: { codec: "aac" },
+      },
+      {
+        id: "audioSampleRate",
+        labelKey: "settings.preset.audioSampleRateLabel",
+        valueKey: "export.setup.sourceSampleRate",
+        valueValues: { value: "48" },
+      },
+      {
+        id: "audioChannels",
+        labelKey: "settings.preset.audioChannelsLabel",
+        valueKey: "export.setup.sourceChannels",
+        valueValues: { count: 2 },
+      },
+    ]);
+    // The video group does not change.
+    expect(
+      presentPresetSummary(preset, formatter, createSource(STEREO), "copy").groups[0],
+    ).toStrictEqual(
+      presentPresetSummary(preset, formatter, createSource(STEREO)).groups[0],
+    );
+  });
+
+  it("names a value that both catalogs define, with the same placeholder", () => {
+    expect(en.export.setup.copiedAudio).toContain("{{codec}}");
+    expect(zhCN.export.setup.copiedAudio).toContain("{{codec}}");
+  });
+
+  it("keeps the Container row of an audio-only export", () => {
+    for (const [container, extension] of [
+      ["mp4", ".m4a"],
+      ["mov", ".m4a"],
+      ["mkv", ".mka"],
+    ] as const) {
+      const preset = createPreset({ container });
+      const shown = presentStreamSummary(
+        presentPresetSummary(preset, formatter, createSource(STEREO), "copy"),
+        container,
+        "audioOnly",
+      );
+      expect(shown.container.valueKey).toBe("export.setup.audioOnlyContainer");
+      expect(shown.container.valueValues?.extension).toBe(extension);
+      expect(shown.groups[1].rows[0]?.valueKey).toBe("export.setup.copiedAudio");
+      expect(shown.groups[0].noteKey).toBe("export.setup.notExported");
+    }
+  });
+
+  it("still shows the note of a source without audio", () => {
+    const audio = presentPresetSummary(
+      createPreset(),
+      formatter,
+      createSource(null),
+      "copy",
+    ).groups[1];
+    expect(audio.rows).toStrictEqual([]);
+    expect(audio.noteKey).toBe("export.setup.noSourceAudio");
   });
 });
