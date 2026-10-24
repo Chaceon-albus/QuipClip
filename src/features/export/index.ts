@@ -15,3 +15,4 @@ export * from "./request";
 export * from "./runState";
 export * from "./runTiming";
 export * from "./streamChoice";
+export * from "./audioCopy";

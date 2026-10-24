@@ -165,6 +165,36 @@ describe("createExportStreamChoiceStore", () => {
     store.getState().reset();
     expect(listener).not.toHaveBeenCalled();
   });
+
+  it("starts with the copy of the audio off, and turns it on and off", () => {
+    const store = createExportStreamChoiceStore();
+    expect(store.getState().copyAudio).toBe(false);
+    store.getState().setCopyAudio(true);
+    expect(store.getState().copyAudio).toBe(true);
+    store.getState().setCopyAudio(false);
+    expect(store.getState().copyAudio).toBe(false);
+  });
+
+  it("keeps the copy of the audio while a stream changes, and turns it off at a reset", () => {
+    const store = createExportStreamChoiceStore();
+    store.getState().setCopyAudio(true);
+    store.getState().setStream("video", false);
+    expect(store.getState().copyAudio).toBe(true);
+    store.getState().setStream("video", true);
+
+    // A reset with both streams on still turns the copy off.
+    store.getState().reset();
+    expect(store.getState().copyAudio).toBe(false);
+    expect(store.getState().choice).toStrictEqual(BOTH_EXPORT_STREAMS);
+  });
+
+  it("notifies no listener for a copy that changes nothing", () => {
+    const store = createExportStreamChoiceStore(BOTH_EXPORT_STREAMS, true);
+    const listener = vi.fn();
+    store.subscribe(listener);
+    store.getState().setCopyAudio(true);
+    expect(listener).not.toHaveBeenCalled();
+  });
 });
 
 describe("bindStreamChoiceToMedia", () => {
@@ -178,10 +208,25 @@ describe("bindStreamChoiceToMedia", () => {
 
     await media.getState().importPath("/media/first.mp4");
     choice.getState().setStream("video", false);
+    choice.getState().setCopyAudio(true);
     expect(choice.getState().choice).toStrictEqual(AUDIO_ONLY);
 
     await media.getState().importPath("/media/second.mp4");
     expect(choice.getState().choice).toStrictEqual(BOTH_EXPORT_STREAMS);
+    expect(choice.getState().copyAudio).toBe(false);
+  });
+
+  it("turns the copy of the audio off when the same file opens again", async () => {
+    const media = createMediaStore({
+      importMedia: () => Promise.resolve(createMediaResult("clip.mp4", STEREO)),
+    });
+    const choice = createExportStreamChoiceStore();
+    bindStreamChoiceToMedia(media, choice);
+
+    await media.getState().importPath("/media/clip.mp4");
+    choice.getState().setCopyAudio(true);
+    await media.getState().importPath("/media/clip.mp4");
+    expect(choice.getState().copyAudio).toBe(false);
   });
 
   it("turns both streams on when the same file opens again, and when the media closes", async () => {

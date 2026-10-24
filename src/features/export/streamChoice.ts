@@ -1,11 +1,13 @@
 /**
- * The choice of the output streams in the export setup step (ADR 036).
+ * The choice of the output streams in the export setup step (ADR 036), and of a copy of the
+ * audio (ADR 048).
  *
  * The setup step shows one switch for the video and one for the audio. Both are on by
- * default, and the user can turn one off but never both. The choice lasts for the session:
- * it is not a field of the preset, and nothing stores it in the settings file or in the web
- * view. `bindStreamChoiceToMedia` turns both streams on again each time the open media
- * changes, so a choice made for one file never applies to the next.
+ * default, and the user can turn one off but never both. Where the step offers a copy of the
+ * audio (`canCopyAudio`), a third switch asks for it, and it is off by default. The choice lasts
+ * for the session: it is not a field of the preset, and nothing stores it in the settings file
+ * or in the web view. `bindStreamChoiceToMedia` turns both streams on and the copy off again
+ * each time the open media changes, so a choice made for one file never applies to the next.
  */
 
 import { useStore } from "zustand";
@@ -73,6 +75,12 @@ export function exportOutputExtension(
 
 export type ExportStreamChoiceState = {
   choice: ExportStreamChoice;
+  /**
+   * True when the user asked for a copy of the audio. It asks for a copy only while the setup
+   * step offers one (`resolveExportAudioMode`), so it can stay true while the step offers none,
+   * and apply again when the step offers it again.
+   */
+  copyAudio: boolean;
 };
 
 export type ExportStreamChoiceActions = {
@@ -81,7 +89,9 @@ export type ExportStreamChoiceActions = {
    * nothing, so at least one stream stays on.
    */
   setStream: (kind: ExportStreamKind, on: boolean) => void;
-  /** Turns both streams on. */
+  /** Asks for a copy of the audio, or for an encode. */
+  setCopyAudio: (on: boolean) => void;
+  /** Turns both streams on and the copy of the audio off. */
   reset: () => void;
 };
 
@@ -90,9 +100,11 @@ export type ExportStreamChoiceStoreState = ExportStreamChoiceState &
 
 export function createExportStreamChoiceStore(
   initialChoice: ExportStreamChoice = BOTH_EXPORT_STREAMS,
+  initialCopyAudio = false,
 ): StoreApi<ExportStreamChoiceStoreState> {
   return createStore<ExportStreamChoiceStoreState>()((set, get) => ({
     choice: initialChoice,
+    copyAudio: initialCopyAudio,
     setStream: (kind, on) => {
       const current = get().choice;
       if (current[kind] === on) {
@@ -104,10 +116,15 @@ export function createExportStreamChoiceStore(
       }
       set({ choice: next });
     },
+    setCopyAudio: (on) => {
+      if (get().copyAudio !== on) {
+        set({ copyAudio: on });
+      }
+    },
     reset: () => {
-      const current = get().choice;
-      if (!current.video || !current.audio) {
-        set({ choice: BOTH_EXPORT_STREAMS });
+      const { choice, copyAudio } = get();
+      if (!choice.video || !choice.audio || copyAudio) {
+        set({ choice: BOTH_EXPORT_STREAMS, copyAudio: false });
       }
     },
   }));
@@ -116,9 +133,10 @@ export function createExportStreamChoiceStore(
 export type ExportStreamChoiceStore = ReturnType<typeof createExportStreamChoiceStore>;
 
 /**
- * Turns both streams of `choice` on again each time the media of `source` changes: another
- * file opens, the same file opens again, or the media closes. The media store makes a new
- * media object only for each of these. Returns the function that ends the binding.
+ * Turns both streams of `choice` on, and its copy of the audio off, again each time the media
+ * of `source` changes: another file opens, the same file opens again, or the media closes. The
+ * media store makes a new media object only for each of these. Returns the function that ends
+ * the binding.
  */
 export function bindStreamChoiceToMedia(
   source: StoreApi<Pick<MediaState, "media">>,

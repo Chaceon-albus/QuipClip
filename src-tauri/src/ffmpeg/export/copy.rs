@@ -6,8 +6,9 @@
 //! encodes the audio instead. No reason fails the export: an encode writes the audio that the user
 //! asked for, cut to the sample, and the reason goes to the log. The interface offers the copy only
 //! where its own facts allow it, by the same lists of codecs and demuxers and the same lowest
-//! sample rate. The other reasons are facts that only the export reads: where the audio starts and
-//! ends inside the segment, and the gaps inside it.
+//! sample rate (`src/features/export/audioCopy.ts`, whose test compares them with these). The
+//! other reasons are facts that only the export reads: where the audio starts and ends inside the
+//! segment, and the gaps inside it.
 //!
 //! A copy keeps whole packets, so each end of the copied audio lies within one packet of its point
 //! where the audio covers the segment. It writes no silence. Audio that starts late, ends early or
