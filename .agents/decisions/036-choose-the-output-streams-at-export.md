@@ -183,9 +183,9 @@ extension of the output, `.m4a` or `.mka` for the audio only, and the filter nam
 Video Files. A name that the user types with another extension is kept, as for an export with
 video; the muxer is set explicitly, so the file is still valid.
 
-(Added on 2026-10-23.) A third switch, Copy audio, can show in front of the audio switch, for an
-export of one segment (ADR 048). While it is on, the Audio group and the size estimate follow
-the copy. The blocker and the marks of the encoders do not, because the plan can still encode.
+(Added on 2026-10-23.) A third switch, Copy audio, can show at the end of the Encoder row of the
+Audio group, under the audio switch, for an export of one segment (ADR 048). While it is on, the
+Audio group and the size estimate follow the copy. The blocker and the marks of the encoders do not, because the plan can still encode.
 
 ## Consequences
 

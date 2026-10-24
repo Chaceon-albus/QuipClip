@@ -107,10 +107,14 @@ two processes. The encoder used `libx264 -preset ultrafast`.
 
 ### The switch
 
-The setup step (ADR 024) shows a switch with the label "Copy audio" in front of the switch of
-the Audio heading. The switch is off by default. It lasts for the session, as the stream
-switches of ADR 036 do. Nothing stores it, and the step sets it to off when the open media
-changes. While the save panel is open, it does not change.
+The setup step (ADR 024) shows a switch with the label "Copy audio" at the end of the Encoder
+row of the Audio group, under the switch of the Audio heading. The switch is off by default. It
+lasts for the session, as the stream switches of ADR 036 do. Nothing stores it, and the step
+sets it to off when the open media changes. While the save panel is open, it does not change.
+
+(Changed on 2026-10-23.) The switch first showed in front of the switch of the Audio heading.
+The user asked for the two switches one above the other, and for no new row. The switch is now
+in the Encoder row, which is the first row of the Audio group with and without the copy.
 
 The step shows the switch only where the facts of the import probe allow a copy
 (`canCopyAudio` in `src/features/export/audioCopy.ts`):
