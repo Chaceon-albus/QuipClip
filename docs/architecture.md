@@ -68,6 +68,7 @@ document summarizes them and shows how the parts fit together.
 | [`045-select-several-segments-and-delete-them.md`](../.agents/decisions/045-select-several-segments-and-delete-them.md)                     | `Cmd`/`Ctrl` with a click or `A` selects segments, Delete removes them all |
 | [`046-preview-through-mediasource-windows.md`](../.agents/decisions/046-preview-through-mediasource-windows.md)                             | A container the web view cannot open plays from fMP4 windows               |
 | [`047-show-the-source-of-each-build.md`](../.agents/decisions/047-show-the-source-of-each-build.md)                                         | The version shows with the commit and the branch of the build              |
+| [`048-copy-the-audio-of-one-segment.md`](../.agents/decisions/048-copy-the-audio-of-one-segment.md)                                         | An export of one segment can copy the packets of the source audio          |
 
 ## Shape
 
@@ -305,6 +306,14 @@ for the half of the other process, so that `concat` places each segment as one p
 graph of the encoder has no audio input, so FFmpeg never keeps decoded video while it waits for
 audio that comes late, never, or after a gap. An export without video, an export without audio, and
 an export whose audio stream holds no packets stay one process.
+
+An export of one segment can copy the packets of the source audio in place of the audio chain
+(ADR 048). The setup step shows a Copy audio switch where the import probe allows a copy. The plan
+copies only when the read of the frames shows audio that covers the segment, and the segment lasts
+three audio frames or more. Otherwise it encodes the audio, and the export does not fail. With video, a second `ffmpeg` cuts the packets with an
+output `-ss` and `-to` under `-copyts` and writes them as NUT to the encoder. Without video, one
+`ffmpeg` writes the file and has no graph. Each end of the copied audio lies within one packet of
+its point, and the audio keeps its place against the video.
 
 The export probes the source again before it plans. The probe analyzes about the first 5 s of the
 file, so it misses a later audio start in MKV, MPEG-TS and MPEG-PS. An export that writes audio

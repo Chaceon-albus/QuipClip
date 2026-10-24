@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-22
 - Deciders: capric98
-- Amended by: ADR 038, ADR 036
+- Amended by: ADR 038, ADR 036, ADR 048
 
 ## Context
 
@@ -98,6 +98,11 @@ Settings… open that window on the Presets tab with the preset of the step, and
 dialog stays open. The return to the setup step and its second source check are removed. The
 list of presets of the step follows each write of the settings file, and a preset selected in
 Settings does not become the choice of the step.
+
+(Changed on 2026-10-23.) The preset summary can carry a Copy audio switch in front of the switch
+of the Audio heading, for an export of one segment (ADR 048). While it is on, the Audio group
+names the codec, the sample rate and the channels of the source, and the step shows no size
+estimate.
 
 ## Consequences
 

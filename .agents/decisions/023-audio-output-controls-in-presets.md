@@ -4,7 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 006, ADR 013, ADR 014
-- Amended by: ADR 036, ADR 040
+- Amended by: ADR 036, ADR 040, ADR 048
 
 ## Context
 
@@ -130,6 +130,12 @@ for the hardware video encoders of other platforms.
 The capability cache schema version changes from 1 to 2, because ADR 006 requires a new
 version for each change to the tested set. The first start after the upgrade runs the probe
 again.
+
+(Added on 2026-10-23.) An export that copies the audio of the source (ADR 048) applies none of
+the audio settings of the preset: the encoder, the bitrate, the sample rate, the channels and
+the options. The audio keeps the format of the source. When the plan refuses the copy, the
+export encodes the audio with these settings, so the editor and the setup step still check
+them.
 
 ## Consequences
 

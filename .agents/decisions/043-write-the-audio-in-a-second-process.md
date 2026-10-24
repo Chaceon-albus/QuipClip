@@ -4,7 +4,7 @@
 - Date: 2026-10-03
 - Deciders: capric98
 - Amends: ADR 014, ADR 016, ADR 017, ADR 018, ADR 036
-- Amended by: ADR 046
+- Amended by: ADR 046, ADR 048
 
 ## Context
 
@@ -162,6 +162,10 @@ The encoder runs the command of ADR 014 with three changes:
   source. The audio encoder settings of the preset apply to that stream as before.
 
 The encoder reads `pipe:0` to its end. No command may carry `-shortest` or an output `-t`.
+
+(Changed on 2026-10-23.) The second process can also copy the audio packets of the source into
+a NUT pipe, for an export of one segment (ADR 048). That process cuts its stream with an output
+`-ss` and `-to`. The encoder still carries no output `-ss`, `-to`, `-t` or `-shortest`.
 
 ### The processes
 

@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-04
 - Deciders: capric98
-- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046
+- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046, ADR 048
 
 ## Context
 
@@ -917,6 +917,12 @@ stereo. FFmpeg 4.3 to 5.0 have no default layout for most larger counts, and FFm
 The export reads the cancel flag again after the reads of the audio and before the plan. A cancel
 that arrives at the end of the last read therefore ends the run as canceled. The plan does not
 refuse the export first for what the read found.
+
+(Added on 2026-10-23.) An export of one segment can copy the packets of the source audio in
+place of the audio chain (ADR 048). Its audio has no `atrim`: an output `-ss` and `-to` cut it,
+and it keeps whole packets. Such a plan holds no fill, so the bound of 60 s on the held silence
+does not apply to it. The read of the gaps also gives the frames that decide whether the plan
+copies.
 
 ## Consequences
 

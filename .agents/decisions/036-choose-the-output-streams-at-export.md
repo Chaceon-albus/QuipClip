@@ -4,7 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 014, ADR 016, ADR 023, ADR 024, ADR 025
-- Amended by: ADR 043
+- Amended by: ADR 043, ADR 048
 
 ## Context
 
@@ -30,6 +30,9 @@ is not correct under `-copyts`, so the progress cannot measure time either.
 `audioOnly`. It has no default, and an unknown value is refused, as for every field of the
 request. `ExportStart` echoes the value. The TypeScript types hold the same three values, and a
 test compares them with the Rust names.
+
+(Added on 2026-10-23.) The request also holds a required field `audioMode`, `encode` or `copy`
+(ADR 048). `ExportStart` does not echo it, because the plan decides the mode that the run uses.
 
 ### The plan
 
@@ -127,6 +130,10 @@ nothing, and the guard of the reservation deletes the temporary file. The output
 cancel flag of the run every 25 ms. A cancel kills and reaps FFprobe, and the run ends as
 canceled, inside the exit budget of ADR 017.
 
+(Added on 2026-10-23.) For an export that copies its audio (ADR 048), the measured value is the
+duration of the file plus the start of its audio stream, when that start is after zero. A copy
+keeps the place of its first packet, and an `.m4a` leaves that start out of its duration.
+
 ### Measurement
 
 FFmpeg and FFprobe 9.0.2 on macOS, with the exact command that the code builds, in 1044 runs.
@@ -175,6 +182,10 @@ because an audio-only export of a MOV preset uses the `mp4` muxer. The save pane
 extension of the output, `.m4a` or `.mka` for the audio only, and the filter names Audio Files or
 Video Files. A name that the user types with another extension is kept, as for an export with
 video; the muxer is set explicitly, so the file is still valid.
+
+(Added on 2026-10-23.) A third switch, Copy audio, can show in front of the audio switch, for an
+export of one segment (ADR 048). While it is on, the Audio group and the size estimate follow
+the copy. The blocker and the marks of the encoders do not, because the plan can still encode.
 
 ## Consequences
 

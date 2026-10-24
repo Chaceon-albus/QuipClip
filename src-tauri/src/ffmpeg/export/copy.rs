@@ -12,10 +12,11 @@
 //!
 //! A copy keeps whole packets, so each end of the copied audio lies within one packet of its point
 //! where the audio covers the segment. It writes no silence. Audio that starts late, ends early or
-//! has a gap inside the segment would stay so in the output: an export without video could then
-//! fail its duration check, an export with video could find no packet to copy, and a player that
-//! ignores an MP4 edit list would play the audio early. The plan encodes such audio, and the fill
-//! of the graph writes its silence (ADR 014).
+//! has a gap inside the segment would stay so in the output: it would start or stop more than one
+//! packet from its point, an export without video that ends early would fail its duration check,
+//! a segment with no audio would give no packet to copy, and a player that ignores an MP4 edit
+//! list would play the audio early. The plan encodes such audio, and the fill of the graph writes
+//! its silence (ADR 014).
 
 use super::arguments::muxer_of;
 use super::plan::SegmentBoundary;
@@ -160,7 +161,7 @@ pub struct CopyQuestion<'a> {
 ///   [`FINE_GAP_MILLISECONDS`] more for the timestamps of Matroska and FLV, which are whole
 ///   milliseconds. The read of a Matroska source leaves out the frame that holds the In point, and
 ///   a decoder can drop that frame after its seek, so the first frame of a stream that covers the
-///   In point lies within one packet after it (ADR 048 measurement 13). A later first frame is a
+///   In point lies within one packet after it (ADR 048 measurement 14). A later first frame is a
 ///   late start.
 /// - A gap between two frames ([`AudioFrames::fine_gaps`]) that reaches into the segment and is
 ///   longer than one packet is a gap. A shorter one is one packet of error, as at the ends.

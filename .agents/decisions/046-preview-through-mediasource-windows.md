@@ -5,6 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 014, ADR 017, ADR 019, ADR 022, ADR 026, ADR 028, ADR 039,
   ADR 043
+- Amended by: ADR 048
 
 ## Context
 
@@ -61,6 +62,10 @@ One more file is 1920x1080 at 14 Mbit/s with a GOP of 10 s.
    the absolute timestamps and writes zero frames on MPEG-TS and on MKV. An input `-t`, before
    `-i`, works. `-movflags negative_cts_offsets` moved the first video PTS by one frame (from
    1072 to 1616 ticks of 1/16000).
+
+   (Added on 2026-10-23.) An output `-ss` with `-to` is compared with the same absolute
+   timestamps, so the two cut a stream copy under `-copyts` (ADR 048 measurement 3).
+
 7. The test fed a window through stdin, with
    `head + slice | ffmpeg -f flv -copyts -i pipe:0 ... -c copy -f mp4`. The window from the
    keyframe at 60 s holds the same 300 video packets as the source: the same PTS, DTS, size and
@@ -708,6 +713,9 @@ An FLV input of the export uses the `concat` and `subfile` protocols (measuremen
 the keyframe at or before In − `SEEK_MARGIN_SECONDS`, and `-copyts` and the trim on raw PTS of
 ADR 014 stay. For a late segment, this input read 30.9 MB where `-ss` read 212.7 MB, and the
 frames were the same (measurement 23).
+
+(Added on 2026-10-23.) The process that copies the audio of an export of one segment (ADR 048)
+opens the same slice, and so does the command of such an export without video.
 
 Before the plan, Rust locates the keyframe of each segment and writes `head.flv` to the cache.
 The export uses the same open source as the preview, so it knows what the windows found, and

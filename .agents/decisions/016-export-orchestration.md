@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 036, ADR 041, ADR 043
+- Amended by: ADR 036, ADR 041, ADR 043, ADR 048
 
 ## Context
 
@@ -146,6 +146,11 @@ second cancel check and before `publishing`, so a failed check publishes nothing
 only when both exit successfully, and the frame count of the encoder decides success as before. A
 failure of either process fails the export with `ffmpegProcessFailed`, and the other process is
 killed at once.
+
+(Added on 2026-10-23.) An export with video that copies its audio (ADR 048) passes the frame
+count, and then reads its file back. The file must hold one video stream and one audio stream.
+A wrong stream set fails the export with `outputStreamsMismatch`, and a probe that fails is
+reported as for an export without video (ADR 036). A failed check publishes nothing.
 
 ### A cancel during preparation names the slot, not the run
 
