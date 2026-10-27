@@ -3,8 +3,8 @@
 //! The command here takes a run id and not a path. The export worker records the destination
 //! of each run that it publishes, and the command acts only on the recorded destination of the
 //! run that it names. The web view therefore cannot tell the operating system to show a path of
-//! its choice. The most that a compromised web view can do through this command is to show the
-//! file that the last export wrote.
+//! its choice. The most that a compromised web view can do through this command is to show a
+//! path that one of the recent exports published to.
 //!
 //! Show has no check of the file extension, because it only selects the file in the file
 //! manager and runs nothing.
@@ -22,6 +22,7 @@
 //! the capability file grants the web view no opener permission.
 
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -31,9 +32,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// `src/features/export/output.test.ts` can read the vocabulary out of this file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ExportOutputErrorCode {
-    /// No export published a file under the run id in this process, or a later export
-    /// replaced the record. The application decides this without a system call, so the code
-    /// carries no diagnostic.
+    /// No export published a file under the run id in this process, or the record is gone: a
+    /// later export published to the same path, or [`PUBLISHED_EXPORT_LIMIT`] later exports
+    /// published. The application decides this without a system call, so the code carries no
+    /// diagnostic.
     #[serde(rename = "outputUnknown")]
     OutputUnknown,
     /// The recorded file is not at its path now. The user moved, renamed, or deleted it after
@@ -69,18 +71,43 @@ impl ExportOutputError {
     }
 }
 
-/// The destination of the last export that this process published.
+/// How many published exports [`PublishedExports`] remembers.
 ///
-/// `lib.rs` stores one value as Tauri managed state. The export worker writes it after the
-/// rename and before it emits the `finished` event, so a request that follows that event finds
-/// the record. `start_export` clears it when a new run takes the export slot. The command in
-/// this module reads it.
+/// The interface lists the runs of one batch of queued exports, and each finished run offers
+/// Show. A batch that is longer than this loses Show on its oldest runs, which then answer
+/// `outputUnknown`. The bound keeps a session that exports all day from growing the record
+/// without end.
+pub const PUBLISHED_EXPORT_LIMIT: usize = 64;
+
+/// The destinations of the recent exports that this process published.
 ///
-/// The record holds one run. The interface shows the result of one run at a time, and a new
-/// run gets a new run id, so an older run id stops matching when a newer run publishes.
+/// `lib.rs` stores one value as Tauri managed state. The export worker writes a record after
+/// the rename and before it emits the `finished` event, so a request that follows that event
+/// finds the record. The command in this module reads it.
+///
+/// A record stays while later runs export, because a queue of exports shows the result of each
+/// run, and the user can ask to show the file of an earlier run while a later one writes. A
+/// run that writes elsewhere cannot change the file of the earlier run. A run that writes to the
+/// same path writes a temporary file first and replaces the earlier file only at its rename, so
+/// until then the earlier file is still the one that its run published. After a successful
+/// rename, the worker always records the new run, and that record removes the record of the
+/// earlier run for the same path. Between the rename and the record, Show for the earlier run
+/// selects the file of the new run. That is harmless: Show runs nothing, and the path is one
+/// that the user chose for both runs.
+///
+/// On Windows, File Explorer can read the earlier file for a thumbnail while it shows it, and so
+/// hold it open for a moment while the new run renames over it. The rename retries for the
+/// publication budget of ADR 016, which covers a short hold.
+///
+/// The comparison is by path as written. Two spellings of one file keep both records: two
+/// letter cases or two Unicode normalizations on a volume that ignores them, or a path through
+/// a symbolic link such as `/tmp` and `/private/tmp`. Show for the earlier run then selects the
+/// file that the later run wrote, which is harmless for the same reason.
 #[derive(Debug, Default)]
 pub struct PublishedExports {
-    last: Mutex<Option<PublishedExport>>,
+    /// The list of records, oldest first, at most [`PUBLISHED_EXPORT_LIMIT`] long, with no two
+    /// records for one path.
+    records: Mutex<VecDeque<PublishedExport>>,
 }
 
 #[derive(Debug)]
@@ -90,43 +117,53 @@ struct PublishedExport {
 }
 
 impl PublishedExports {
-    /// Record that the run `run_id` published its output at `path`. The record replaces the
-    /// record of an earlier run.
+    /// Record that the run `run_id` published its output at `path`.
+    ///
+    /// The method removes the record of an earlier run with the same path, because the file at
+    /// that path is now the output of this run. It removes records by path before it adds the
+    /// new one. Then, when the list is longer than [`PUBLISHED_EXPORT_LIMIT`], it removes the
+    /// oldest record.
     pub fn record(&self, run_id: &str, path: PathBuf) {
-        let replaced = self.lock().replace(PublishedExport {
-            run_id: run_id.to_owned(),
-            path,
-        });
-        // Free the earlier record after the lock is released.
-        drop(replaced);
+        let removed: Vec<PublishedExport> = {
+            let mut records = self.lock();
+            let mut removed = Vec::new();
+            let mut index = 0;
+            while index < records.len() {
+                if records[index].path == path || records[index].run_id == run_id {
+                    removed.extend(records.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            records.push_back(PublishedExport {
+                run_id: run_id.to_owned(),
+                path,
+            });
+            while records.len() > PUBLISHED_EXPORT_LIMIT {
+                removed.extend(records.pop_front());
+            }
+            removed
+        };
+        // Free the removed records after the lock is released.
+        drop(removed);
     }
 
-    /// Forget the recorded run. `start_export` calls this when a new run takes the export
-    /// slot, so no request can act on the output of an earlier run while a later run writes,
-    /// possibly to the same path.
-    pub fn clear(&self) {
-        let cleared = self.lock().take();
-        // Free the record after the lock is released.
-        drop(cleared);
-    }
-
-    /// The published path of the run `run_id`, or `None` when that run is not the recorded
-    /// run.
+    /// The published path of the run `run_id`, or `None` when no record names that run.
     #[must_use]
     pub fn path_for(&self, run_id: &str) -> Option<PathBuf> {
         self.lock()
-            .as_ref()
-            .filter(|published| published.run_id == run_id)
+            .iter()
+            .find(|published| published.run_id == run_id)
             .map(|published| published.path.clone())
     }
 
-    /// Lock the record, and recover a poisoned lock instead of propagating it.
+    /// Lock the list of records, and recover a poisoned lock instead of propagating it.
     ///
-    /// The data is one `Option` that each method replaces or reads as a whole, so a panic
-    /// cannot leave it half updated. `ExportRegistry::lock` recovers its poison for the same
-    /// reason.
-    fn lock(&self) -> MutexGuard<'_, Option<PublishedExport>> {
-        self.last.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Each method changes the records only through `VecDeque` calls that complete or do
+    /// nothing, so a panic cannot leave a record half written. `ExportRegistry::lock` recovers
+    /// its poison for the same reason.
+    fn lock(&self) -> MutexGuard<'_, VecDeque<PublishedExport>> {
+        self.records.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -258,26 +295,100 @@ mod tests {
     }
 
     #[test]
-    fn a_clear_forgets_the_recorded_run() {
-        let published = PublishedExports::default();
-        published.record("1-0", PathBuf::from("/movies/first.mp4"));
-
-        published.clear();
-
-        assert_eq!(published.path_for("1-0"), None);
-    }
-
-    #[test]
-    fn a_later_record_replaces_the_earlier_run() {
+    fn a_later_record_keeps_the_earlier_run() {
         let published = PublishedExports::default();
         published.record("1-0", PathBuf::from("/movies/first.mp4"));
         published.record("2-1", PathBuf::from("/movies/second.mp4"));
 
-        assert_eq!(published.path_for("1-0"), None);
+        assert_eq!(
+            published.path_for("1-0"),
+            Some(PathBuf::from("/movies/first.mp4"))
+        );
         assert_eq!(
             published.path_for("2-1"),
             Some(PathBuf::from("/movies/second.mp4"))
         );
+    }
+
+    #[test]
+    fn a_record_for_the_same_path_replaces_the_earlier_run() {
+        let published = PublishedExports::default();
+        published.record("1-0", PathBuf::from("/movies/out.mp4"));
+        published.record("2-1", PathBuf::from("/movies/other.mp4"));
+        published.record("3-2", PathBuf::from("/movies/out.mp4"));
+
+        assert_eq!(published.path_for("1-0"), None);
+        assert_eq!(
+            published.path_for("2-1"),
+            Some(PathBuf::from("/movies/other.mp4"))
+        );
+        assert_eq!(
+            published.path_for("3-2"),
+            Some(PathBuf::from("/movies/out.mp4"))
+        );
+    }
+
+    #[test]
+    fn a_full_record_forgets_the_oldest_run_first() {
+        let published = PublishedExports::default();
+        for index in 0..=PUBLISHED_EXPORT_LIMIT {
+            published.record(
+                &format!("{index}-0"),
+                PathBuf::from(format!("/movies/{index}.mp4")),
+            );
+        }
+
+        assert_eq!(published.path_for("0-0"), None);
+        assert_eq!(
+            published.path_for("1-0"),
+            Some(PathBuf::from("/movies/1.mp4"))
+        );
+        let newest = PUBLISHED_EXPORT_LIMIT;
+        assert_eq!(
+            published.path_for(&format!("{newest}-0")),
+            Some(PathBuf::from(format!("/movies/{newest}.mp4")))
+        );
+        assert_eq!(published.lock().len(), PUBLISHED_EXPORT_LIMIT);
+    }
+
+    #[test]
+    fn a_same_path_record_in_a_full_list_keeps_the_oldest_other_run() {
+        let published = PublishedExports::default();
+        for index in 0..PUBLISHED_EXPORT_LIMIT {
+            published.record(
+                &format!("{index}-0"),
+                PathBuf::from(format!("/movies/{index}.mp4")),
+            );
+        }
+
+        // The path of a run in the middle of the full list.
+        published.record("new-0", PathBuf::from("/movies/10.mp4"));
+
+        assert_eq!(published.path_for("10-0"), None);
+        assert_eq!(
+            published.path_for("0-0"),
+            Some(PathBuf::from("/movies/0.mp4"))
+        );
+        assert_eq!(
+            published.path_for("new-0"),
+            Some(PathBuf::from("/movies/10.mp4"))
+        );
+        assert_eq!(published.lock().len(), PUBLISHED_EXPORT_LIMIT);
+    }
+
+    #[test]
+    fn a_second_record_of_one_run_keeps_one_record() {
+        // A run publishes once. If a caller recorded it twice, the newer path wins and the
+        // run still has one record.
+        let published = PublishedExports::default();
+        published.record("1-0", PathBuf::from("/movies/first.mp4"));
+        published.record("1-0", PathBuf::from("/movies/again.mp4"));
+
+        assert_eq!(
+            published.path_for("1-0"),
+            Some(PathBuf::from("/movies/again.mp4"))
+        );
+        assert_eq!(published.lock().len(), 1);
     }
 
     #[test]

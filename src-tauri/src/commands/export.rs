@@ -323,7 +323,6 @@ struct PreparedExport {
 pub async fn start_export(
     app: tauri::AppHandle,
     registry: tauri::State<'_, Arc<ExportRegistry>>,
-    published: tauri::State<'_, PublishedExports>,
     preview_windows: tauri::State<'_, Arc<PreviewWindows>>,
     request: ExportRequestWire,
 ) -> Result<ExportStart, ExportCommandError> {
@@ -339,9 +338,6 @@ pub async fn start_export(
     let slot = registry
         .begin(&run_id)
         .ok_or_else(|| ExportCommandError::new(ExportErrorCode::ExportAlreadyRunning))?;
-    // The earlier run is over, and the interface stops showing its result when this run
-    // starts. Forget its output, so Show cannot act on a file that this run can replace.
-    published.clear();
 
     // Preparation spawns ffprobe and touches the filesystem, so it does not belong on the
     // async executor. It runs short-lived child processes one after the other, and for an FLV
