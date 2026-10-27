@@ -1263,6 +1263,23 @@ pub fn validate_settings(settings: &Settings) -> Result<(), SettingsValidationEr
     Ok(())
 }
 
+/// Validate one preset by the rules that [`validate_settings`] applies to each preset of a
+/// document.
+///
+/// The check runs on a document that holds this preset alone, so the rules between presets
+/// (unique ids, the active id) have nothing else to compare. An error names the preset at index
+/// 0. The preset test of ADR 041 and the export (which carries its preset in the request, ADR
+/// 049) check a preset that may not be saved, with this function.
+pub fn validate_preset(preset: &Preset) -> Result<(), SettingsValidationError> {
+    validate_settings(&Settings {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        revision: 0,
+        ffmpeg_path: None,
+        presets: vec![preset.clone()],
+        active_preset_id: None,
+    })
+}
+
 /// Check an encoder name against the ADR 013 character rule: 1 to
 /// [`MAX_ENCODER_NAME_CHARS`] characters from `[0-9A-Za-z_.-]`, starting with an
 /// alphanumeric character.

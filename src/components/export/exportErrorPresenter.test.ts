@@ -315,7 +315,7 @@ const BACK: ExportErrorRecovery = { kind: "backToSetup" };
  */
 const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   appDataUnavailable: null,
-  settingsUnreadable: OPEN_PRESETS,
+  invalidPreset: OPEN_PRESETS,
   presetNotFound: OPEN_PRESETS,
   ffmpegPairMissing: OPEN_FFMPEG,
   ffprobeSpawnFailed: OPEN_FFMPEG,
@@ -392,8 +392,8 @@ describe("presentExportErrorRecovery", () => {
     }
   });
 
-  it("opens the Presets section for the preset and settings file codes", () => {
-    for (const code of ["presetNotFound", "settingsUnreadable"] as const) {
+  it("opens the Presets section for the preset codes", () => {
+    for (const code of ["presetNotFound", "invalidPreset"] as const) {
       expect(presentExportErrorRecovery(new ExportError({ code }))).toStrictEqual(
         OPEN_PRESETS,
       );

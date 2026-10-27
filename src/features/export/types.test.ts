@@ -189,8 +189,7 @@ describe("Export Types & Wire Constants", () => {
     it("matches the expected backend error code literals in order", () => {
       expect(BACKEND_EXPORT_ERROR_CODES).toEqual([
         "appDataUnavailable",
-        "settingsUnreadable",
-        "presetNotFound",
+        "invalidPreset",
         "ffmpegPairMissing",
         "ffprobeSpawnFailed",
         "ffprobeProcessFailed",
@@ -228,6 +227,7 @@ describe("Export Types & Wire Constants", () => {
       expect(FRONTEND_EXPORT_ERROR_CODES).toEqual([
         "dialogFailed",
         "sourceRevisionChanged",
+        "presetNotFound",
       ]);
     });
 

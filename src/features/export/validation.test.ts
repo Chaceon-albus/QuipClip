@@ -33,7 +33,9 @@ function createValidStart(overrides: Partial<ExportStart> = {}): ExportStart {
 describe("Export Validation & Normalization", () => {
   describe("Type Guards", () => {
     it("validates representative backend error codes and rejects non-backend values", () => {
-      expect(isBackendExportErrorCode("presetNotFound")).toBe(true);
+      expect(isBackendExportErrorCode("invalidPreset")).toBe(true);
+      // The START step of the flow raises it, so it is a frontend code (ADR 049).
+      expect(isBackendExportErrorCode("presetNotFound")).toBe(false);
       expect(isBackendExportErrorCode("ffmpegProcessFailed")).toBe(true);
       expect(isBackendExportErrorCode("frameCountMismatch")).toBe(true);
       expect(isBackendExportErrorCode("canceled")).toBe(true);

@@ -346,8 +346,11 @@ export class ExportFlowController {
    * 3. When the save dialog throws, reports `dialogFailed`, keeps the modal open, and returns false.
    * 4. When the user cancels (the dialog returns null), returns false and changes nothing (the dialog
    *    stays on the setup step).
-   * 5. Re-reads media, segments, and the active source id, and builds the request with `presetId`,
-   *    `streams` and `audioMode`. A null request reports `noSegments` or `sourceNotFound`.
+   * 5. Re-reads media, segments, and the active source id, and builds the request with the
+   *    preset of step 1, whole, and with `streams` and `audioMode`. The preset is the one that
+   *    the setup step showed when the user confirmed, and the export renders with it even when
+   *    the settings change later (ADR 049). A null request reports `noSegments` or
+   *    `sourceNotFound`.
    * 6. Calls `setModalOpen(true)` and `startExport(request)` without awaiting it.
    * 7. Re-reads settings. When non-null and still containing `presetId` where
    *    `presetId !== settings.activePresetId`, persists the choice via `saveSettings`.
@@ -411,7 +414,7 @@ export class ExportFlowController {
       outputPath,
       segments: currentSegments,
       activeSourceId: currentSourceId,
-      presetId,
+      preset,
       streams,
       audioMode,
     });

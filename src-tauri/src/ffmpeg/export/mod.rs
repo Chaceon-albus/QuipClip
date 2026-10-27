@@ -667,13 +667,11 @@ export_error_codes! {
     /// already holds the single slot, and the command layer turns that `None` into this code
     /// rather than queueing the request.
     ExportAlreadyRunning => "exportAlreadyRunning",
-    /// Produced by `commands::export::prepare_export_with`: the settings file could not be
-    /// read to resolve the requested preset or the configured ffmpeg path.
-    SettingsUnreadable => "settingsUnreadable",
-    /// Produced by `commands::export::resolve_preset`: the requested preset id is not
-    /// present in the settings document, or the request named none and the document has no
-    /// active preset either.
-    PresetNotFound => "presetNotFound",
+    /// Produced by `commands::export::start_export`: the preset of the request fails the
+    /// rules of the settings document (`settings::validate_preset`). The detail carries the
+    /// reason. The request carries the whole preset (ADR 049), so the export reads no settings
+    /// file.
+    InvalidPreset => "invalidPreset",
     /// Produced by `commands::export::prepare_export_with`: `ffmpeg` and `ffprobe` could not
     /// both be located, mirroring `CapabilityProbeErrorCode::FfmpegPairMissing`.
     FfmpegPairMissing => "ffmpegPairMissing",
@@ -862,6 +860,7 @@ mod tests {
                 "ffprobeSpawnFailed",
                 "ffprobeTimedOut",
                 "frameCountMismatch",
+                "invalidPreset",
                 "invalidSegment",
                 "noSegments",
                 "outputDirectoryMissing",
@@ -871,8 +870,6 @@ mod tests {
                 "outputReadOnly",
                 "outputRenameFailed",
                 "outputStreamsMismatch",
-                "presetNotFound",
-                "settingsUnreadable",
                 "sourceAudioRateUnknown",
                 "sourceFrameRateUnknown",
                 "sourceHasNoAudio",

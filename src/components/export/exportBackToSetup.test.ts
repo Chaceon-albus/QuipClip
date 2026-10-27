@@ -26,6 +26,7 @@ import {
   type OpenStepEffects,
 } from "./exportBackToSetup";
 import { presentExportErrorRecovery } from "./exportErrorPresenter";
+import { createPresetDraft } from "@/features/settings/presetDocument";
 
 describe("canGoBackToSetup", () => {
   it.each(EXPORT_STATUSES)(
@@ -47,7 +48,7 @@ const EXPORT_REQUEST: ExportRequest = {
   sourcePath: "/media/source.mp4",
   outputPath: "/media/output.mp4",
   segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
-  presetId: "mp4-h264",
+  preset: createPresetDraft("mp4-h264", "Test preset"),
   streams: "videoAndAudio",
   audioMode: "encode",
 };

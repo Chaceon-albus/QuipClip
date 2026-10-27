@@ -16,6 +16,7 @@ import {
   shouldRequestExportAttention,
   startExportAttentionSync,
 } from "./exportAttentionSync";
+import { createPresetDraft } from "@/features/settings/presetDocument";
 
 function flushPromises(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -302,7 +303,7 @@ describe("startExportAttentionSync", () => {
       sourcePath: "/media/source.mp4",
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
-      presetId: "mp4-h264",
+      preset: createPresetDraft("mp4-h264", "Test preset"),
       streams: "videoAndAudio",
       audioMode: "encode",
     });
@@ -356,7 +357,7 @@ describe("startExportAttentionSync", () => {
       sourcePath: "/media/source.mp4",
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
-      presetId: "mp4-h264",
+      preset: createPresetDraft("mp4-h264", "Test preset"),
       streams: "videoAndAudio",
       audioMode: "encode",
     });
@@ -410,7 +411,7 @@ describe("startExportAttentionSync", () => {
         sourcePath: "/media/source.mp4",
         outputPath: "/media/output.mp4",
         segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
-        presetId: "mp4-h264",
+        preset: createPresetDraft("mp4-h264", "Test preset"),
         streams: "videoAndAudio",
         audioMode: "encode",
       });

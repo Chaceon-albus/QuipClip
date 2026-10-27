@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { presentExportAction } from "@/components/layout/exportActionPresenter";
 import { buildExportRequest } from "@/features/export";
+import { createPresetDraft } from "@/features/settings/presetDocument";
 import { totalActiveSourceSegments } from "@/features/timeline";
 import { createI18nInstance } from "@/i18n";
 import {
@@ -332,6 +333,7 @@ describe("numberSegmentsInExportOrder", () => {
     ]);
     // The same numbers as the segments that the export joins.
     const request = buildExportRequest({
+      preset: createPresetDraft("p1", "Test preset"),
       sourcePath: "/video-b.mp4",
       outputPath: "/out.mp4",
       activeSourceId: "B",

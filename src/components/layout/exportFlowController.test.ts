@@ -22,6 +22,7 @@ import {
 import type { MediaSourceRevisionDescriptor } from "@/features/media";
 import type { Preset, Settings } from "@/features/settings/types";
 import type { Pts, Segment } from "@/types/project";
+import { createPresetDraft } from "@/features/settings/presetDocument";
 
 /**
  * Builds the media facts the flow reads. `size` and `mtime` are part of the shape because the
@@ -355,7 +356,7 @@ describe("ExportFlowController", () => {
           sourcePath: "/media/video.mp4",
           outputPath: "/media/out.mp4",
           segments: [{ inPts: "0" as Pts, outPts: "100" as Pts }],
-          presetId: "default",
+          preset: createPresetDraft("default", "Test preset"),
           streams: "videoAndAudio",
           audioMode: "encode",
         });
@@ -1061,7 +1062,7 @@ describe("ExportFlowController", () => {
           expect(startExport).toHaveBeenCalledWith(
             expect.objectContaining({
               outputPath: "/out/chosen.name",
-              presetId: "p1",
+              preset,
               streams,
             }),
           );
@@ -1169,7 +1170,7 @@ describe("ExportFlowController", () => {
       expect(setModalOpen).toHaveBeenCalledWith(true);
     });
 
-    it("confirm passes presetId in the request and respects segment array order", async () => {
+    it("confirm passes the whole preset in the request and respects segment array order", async () => {
       const startExport = vi.fn().mockResolvedValue(null);
       const openSaveDialog = vi.fn().mockResolvedValue("/out/destination.mp4");
       const media = createMedia("/media/source.mp4", "source.mp4");
@@ -1211,7 +1212,7 @@ describe("ExportFlowController", () => {
       expect(passedRequest).toStrictEqual({
         sourcePath: "/media/source.mp4",
         outputPath: "/out/destination.mp4",
-        presetId: "custom-p",
+        preset,
         streams: "videoAndAudio",
         audioMode: "encode",
         segments: [
@@ -1369,6 +1370,36 @@ describe("ExportFlowController", () => {
       expect(result).toBe(true);
       expect(getSettings).toHaveBeenCalledTimes(2);
       expect(saveSettings).not.toHaveBeenCalled();
+    });
+
+    it("confirm sends the preset that the setup step showed, not a later edit of it", async () => {
+      // The user edits the preset in Settings while the save dialog is open. The export
+      // renders the settings that the user confirmed (ADR 024).
+      const shown = createPreset({ id: "p1", videoEncoder: "libx264" });
+      const edited = { ...shown, videoEncoder: "libx265" };
+      const getSettings = vi
+        .fn()
+        .mockReturnValueOnce(createSettings([shown], "p1"))
+        .mockReturnValue(createSettings([edited], "p1"));
+      const startExport = vi.fn().mockResolvedValue(null);
+
+      const controller = createExportFlowController({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+        startExport,
+        saveSettings: vi.fn().mockResolvedValue(null),
+        filterName: "Video Files",
+        audioFilterName: "Audio Files",
+        getSettings,
+        getMedia: () => createMedia("/media/v.mp4", "v.mp4"),
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      expect(await controller.confirm("p1", "videoAndAudio", "encode")).toBe(true);
+      expect(startExport).toHaveBeenCalledWith(
+        expect.objectContaining({ preset: shown }),
+      );
     });
 
     it("confirm skips saving active preset when the fresh document no longer contains the preset", async () => {

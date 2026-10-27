@@ -423,8 +423,9 @@ pub fn build_plan(
     // stays as it is: the graph names no layout, and the chain keeps the stream's own; see
     // `PlannedAudio::output_channels`. Only the silence of a stream without packets needs a layout
     // name, and `silence_layout` gives it. The rate range and the bitrate range are not re-checked
-    // here: `settings::validate_settings` bounds both, and `commands::export` plans only from a
-    // preset it read out of the settings document through the validating `settings::load`.
+    // here: `settings::validate_settings` bounds both, and `commands::export` plans only from the
+    // preset of a request that `start_export` checked with `settings::validate_preset`, which
+    // applies the same rules.
     let source_audio = probe
         .audio
         .as_ref()

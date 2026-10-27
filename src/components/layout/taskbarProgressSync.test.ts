@@ -12,6 +12,7 @@ import {
   resolveTaskbarProgress,
   startTaskbarProgressSync,
 } from "./taskbarProgressSync";
+import { createPresetDraft } from "@/features/settings/presetDocument";
 
 function createInput(
   overrides: Partial<TaskbarProgressInput> = {},
@@ -294,7 +295,7 @@ describe("startTaskbarProgressSync", () => {
       sourcePath: "/media/source.mp4",
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
-      presetId: "mp4-h264",
+      preset: createPresetDraft("mp4-h264", "Test preset"),
       streams: "videoAndAudio",
       audioMode: "encode",
     });

@@ -10,6 +10,7 @@ import {
   type ExportRequest,
   type ExportStart,
 } from "./types";
+import { createPresetDraft } from "@/features/settings/presetDocument";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -25,7 +26,7 @@ function createValidRequest(overrides: Partial<ExportRequest> = {}): ExportReque
         outPts: "1000" as Pts,
       },
     ],
-    presetId: "mp4-h264",
+    preset: createPresetDraft("mp4-h264", "Test preset"),
     streams: "videoAndAudio",
     audioMode: "encode",
     ...overrides,

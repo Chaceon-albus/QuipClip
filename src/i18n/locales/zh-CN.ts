@@ -779,7 +779,7 @@ export const zhCN: TranslationCatalog = {
   },
   exportError: {
     appDataUnavailable: "应用程序数据目录不可用。",
-    settingsUnreadable: "无法读取设置文件。",
+    invalidPreset: "所选导出预设中有无效的设置。",
     presetNotFound: "未找到所选的导出预设。",
     ffmpegPairMissing: "无法找到所需的 FFmpeg 或 ffprobe 程序。",
     ffprobeSpawnFailed: "无法启动 ffprobe 进程。",

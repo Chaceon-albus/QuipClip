@@ -12,6 +12,7 @@ import {
   type ExportRequest,
   type ExportStart,
 } from "./types";
+import { createPresetDraft } from "@/features/settings/presetDocument";
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -33,7 +34,7 @@ function createValidRequest(overrides: Partial<ExportRequest> = {}): ExportReque
         outPts: "1000" as Pts,
       },
     ],
-    presetId: "mp4-h264",
+    preset: createPresetDraft("mp4-h264", "Test preset"),
     streams: "videoAndAudio",
     audioMode: "encode",
     ...overrides,
@@ -205,11 +206,19 @@ describe("Media Export Store", () => {
           eventHandler = handler;
           return Promise.resolve(() => {});
         },
-        startExport: (req) => (req.presetId === "req2" ? req2.promise : req1.promise),
+        startExport: (req) => (req.preset.id === "req2" ? req2.promise : req1.promise),
       });
 
-      const p1 = store.getState().startExport(createValidRequest({ presetId: "req1" }));
-      const p2 = store.getState().startExport(createValidRequest({ presetId: "req2" }));
+      const p1 = store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("req1", "Test preset") }),
+        );
+      const p2 = store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("req2", "Test preset") }),
+        );
 
       // Early event emitted for run-1 while both are in flight
       eventHandler({
@@ -250,7 +259,7 @@ describe("Media Export Store", () => {
           return subDeferred.promise;
         },
         startExport: (req) => {
-          if (req.presetId === "B") {
+          if (req.preset.id === "B") {
             return reqB.promise;
           }
           return Promise.resolve(createValidStartResult({ runId: "run-A" }));
@@ -258,10 +267,18 @@ describe("Media Export Store", () => {
       });
 
       // 1. Start run A (subscribe deferred so it stays in flight)
-      const p1 = store.getState().startExport(createValidRequest({ presetId: "A" }));
+      const p1 = store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("A", "Test preset") }),
+        );
 
       // 2. Start run B so it supersedes A
-      const p2 = store.getState().startExport(createValidRequest({ presetId: "B" }));
+      const p2 = store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("B", "Test preset") }),
+        );
 
       // 3. Let A resume and hit its supersede branch
       subDeferred.resolve(() => {});
@@ -312,13 +329,17 @@ describe("Media Export Store", () => {
         startExport: (req) =>
           Promise.resolve(
             createValidStartResult({
-              runId: req.presetId === "run2" ? "run-2" : "run-1",
+              runId: req.preset.id === "run2" ? "run-2" : "run-1",
             }),
           ),
       });
 
       // Start run 1
-      await store.getState().startExport(createValidRequest({ presetId: "run1" }));
+      await store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("run1", "Test preset") }),
+        );
       expect(store.getState().runId).toBe("run-1");
 
       eventHandler({
@@ -331,7 +352,11 @@ describe("Media Export Store", () => {
       expect(store.getState().status).toBe("running");
 
       // Start run 2 (supersedes run 1)
-      await store.getState().startExport(createValidRequest({ presetId: "run2" }));
+      await store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("run2", "Test preset") }),
+        );
       expect(store.getState().runId).toBe("run-2");
 
       // Late publishing event arrives from superseded run 1
@@ -649,7 +674,7 @@ describe("Media Export Store", () => {
       const store = createExportStore({
         subscribeExportProgress: () => Promise.resolve(() => {}),
         startExport: (req) => {
-          if (req.presetId === "req1") {
+          if (req.preset.id === "req1") {
             req1Started.resolve();
             return req1.promise;
           }
@@ -657,10 +682,18 @@ describe("Media Export Store", () => {
         },
       });
 
-      const p1 = store.getState().startExport(createValidRequest({ presetId: "req1" }));
+      const p1 = store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("req1", "Test preset") }),
+        );
       await req1Started.promise;
 
-      const p2 = store.getState().startExport(createValidRequest({ presetId: "req2" }));
+      const p2 = store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("req2", "Test preset") }),
+        );
 
       req2.resolve(
         createValidStartResult({ runId: "run-2", outputPath: "/new/output.mp4" }),
@@ -783,13 +816,21 @@ describe("Media Export Store", () => {
         startExport: (req) =>
           Promise.resolve(
             createValidStartResult({
-              runId: req.presetId === "second" ? "run-new" : "run-old",
+              runId: req.preset.id === "second" ? "run-new" : "run-old",
             }),
           ),
       });
 
-      await store.getState().startExport(createValidRequest({ presetId: "first" }));
-      await store.getState().startExport(createValidRequest({ presetId: "second" }));
+      await store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("first", "Test preset") }),
+        );
+      await store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("second", "Test preset") }),
+        );
       expect(store.getState().runId).toBe("run-new");
       expect(store.getState().tracking).toBe(true);
 
@@ -947,18 +988,26 @@ describe("Media Export Store", () => {
         startExport: (req) =>
           Promise.resolve(
             createValidStartResult({
-              runId: req.presetId === "run2" ? "run-2" : "run-1",
+              runId: req.preset.id === "run2" ? "run-2" : "run-1",
             }),
           ),
         cancelExport: mockCancel,
       });
 
-      await store.getState().startExport(createValidRequest({ presetId: "run1" }));
+      await store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("run1", "Test preset") }),
+        );
       expect(store.getState().runId).toBe("run-1");
 
       const cancelPromise = store.getState().cancelExport();
 
-      await store.getState().startExport(createValidRequest({ presetId: "run2" }));
+      await store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("run2", "Test preset") }),
+        );
       expect(store.getState().runId).toBe("run-2");
 
       cancelDeferred.reject(new Error("Stale cancel failure"));
@@ -1895,11 +1944,15 @@ describe("Media Export Store", () => {
           subscribeCount++;
           return Promise.resolve(subscribeCount === 1 ? unlisten1 : unlisten2);
         },
-        startExport: (req) => (req.presetId === "two" ? req2.promise : req1.promise),
+        startExport: (req) => (req.preset.id === "two" ? req2.promise : req1.promise),
       });
 
       // Start export 1
-      const p1 = store.getState().startExport(createValidRequest({ presetId: "one" }));
+      const p1 = store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("one", "Test preset") }),
+        );
       await vi.waitFor(() => {
         expect(store.getState().status).toBe("preparing");
       });
@@ -1919,7 +1972,11 @@ describe("Media Export Store", () => {
       expect(store.getState().runId).toBeNull();
 
       // Later startExport recovers and succeeds
-      const p2 = store.getState().startExport(createValidRequest({ presetId: "two" }));
+      const p2 = store
+        .getState()
+        .startExport(
+          createValidRequest({ preset: createPresetDraft("two", "Test preset") }),
+        );
       req2.resolve(createValidStartResult({ runId: "run-2" }));
 
       const res2 = await p2;

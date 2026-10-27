@@ -11,8 +11,8 @@
 //! # What is rejected, and what is reported by event
 //!
 //! The split mirrors `commands::capabilities`. Everything the command can find out cheaply
-//! and before the encode starts -- a second export already running, a missing ffmpeg pair,
-//! unreadable settings, an unresolvable preset, a failed re-probe, every preflight check in
+//! and before the encode starts -- an invalid preset, a second export already running, a
+//! missing ffmpeg pair, a failed re-probe, every preflight check in
 //! [`build_plan`], and the output reservation -- is a plain rejection of the promise, because
 //! the command has not answered yet and the frontend can render the failure without
 //! subscribing to anything. Everything after the command returns its [`ExportStart`] payload
@@ -77,7 +77,7 @@ use crate::ffmpeg::{
     self, AudioFrames, AudioGapRead, AudioProbe, FfmpegPaths, FirstAudioPacket, LocateError,
     MediaProbe, OutputAudioProbe, ProbeError,
 };
-use crate::settings::{self, LoadedSettings, Preset, Settings, SettingsFileError};
+use crate::settings::{self, Preset};
 use crate::time::{pts_seconds, Pts, Rational};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -122,18 +122,18 @@ pub struct ExportSegmentBoundaryWire {
 }
 
 /// The request payload `start_export` accepts, matching `ExportRequest` on the frontend.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportRequestWire {
     pub source_path: String,
     pub output_path: String,
     pub segments: Vec<ExportSegmentBoundaryWire>,
-    /// The preset to render with. Optional here and **required** in [`ExportStart`]: the
-    /// command resolves an absent id against the settings document's `activePresetId` and
-    /// echoes back whichever id it resolved, so the frontend never has to guess which preset
-    /// a run actually used.
-    #[serde(default)]
-    pub preset_id: Option<String>,
+    /// The preset to render with, whole, as the setup step showed it when the user confirmed
+    /// the export (ADR 049). **Required**, with no default. The command checks it with
+    /// [`settings::validate_preset`] before it accepts the run, and the run never reads the
+    /// presets of the settings file. A later edit of the preset in the settings therefore does
+    /// not change an export that the command accepted. [`ExportStart`] echoes its id.
+    pub preset: Preset,
     /// Which streams of the source the export writes. **Required**, with no default: an
     /// absent value would have to stand for one of the three choices, and a frontend that
     /// forgot to send the user's choice would then export a file the user did not ask for and
@@ -291,7 +291,7 @@ pub enum ExportEvent {
 /// Everything the worker thread needs, all of it resolved before the command answers.
 #[derive(Debug)]
 struct PreparedExport {
-    /// The preset id that was actually resolved, echoed back in [`ExportStart`].
+    /// The id of the preset of the request, echoed back in [`ExportStart`].
     preset_id: String,
     /// The stream choice of the request, echoed back in [`ExportStart`].
     streams: ExportStreams,
@@ -326,6 +326,10 @@ pub async fn start_export(
     preview_windows: tauri::State<'_, Arc<PreviewWindows>>,
     request: ExportRequestWire,
 ) -> Result<ExportStart, ExportCommandError> {
+    // Checked before the slot is claimed, so a request with an invalid preset is refused at
+    // once and holds no slot.
+    validate_request_preset(&request.preset)?;
+
     let app_data_directory = app
         .path()
         .app_data_dir()
@@ -363,7 +367,6 @@ pub async fn start_export(
                 preview_windows: &preview_windows,
             },
             discover_for_export,
-            settings::load,
             ffmpeg::probe_media,
             ffmpeg::probe_first_audio_packet,
             ffmpeg::probe_audio_sample_rate_at,
@@ -455,17 +458,15 @@ fn join_failure(error: &impl std::fmt::Display) -> ExportCommandError {
 /// Resolve the ffmpeg executable pair for an export: the configured path from settings, if
 /// any, ahead of `PATH` and the application data directory, per ADR 005's resolution order.
 ///
-/// This mirrors `commands::capabilities::discover_for_probe`, and it reads the settings
-/// document once for the configured path even though [`prepare_export_with`] loads the
-/// document again a moment later for the preset. The two reads are kept apart on purpose:
-/// discovery must be able to fail as `ffmpegPairMissing` before an unreadable settings file
-/// has any say, which is the order ADR 016's compose list gives.
+/// This mirrors `commands::capabilities::discover_for_probe`. It is the one read of the
+/// settings file in an export: the request carries its preset (ADR 049), and the configured
+/// path of ffmpeg is part of the machine, so the run reads it when it starts.
 fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateError> {
     let configured = settings::configured_ffmpeg_path(app_data_directory);
     ffmpeg::discover(configured.as_deref(), app_data_directory)
 }
 
-/// The plain data [`prepare_export_with`] needs, grouped apart from the six functions it also
+/// The plain data [`prepare_export_with`] needs, grouped apart from the five functions it also
 /// takes.
 ///
 /// `clippy`'s `too-many-arguments` lint (see `clippy.toml`) counts each injected function as one
@@ -485,9 +486,9 @@ struct PrepareRequest<'a> {
 
 /// Do every fallible step an export needs before ffmpeg starts, in ADR 016's order.
 ///
-/// The six injected functions are the ones that reach outside the process: executable
-/// discovery, the settings read, the ffprobe re-probe, the two reads of [`correct_audio_probe`],
-/// and the read of [`read_audio_gaps`]. ADR 014's "Other rules" requires that re-probe -- the
+/// The five injected functions are the ones that reach outside the process: executable
+/// discovery, the ffprobe re-probe, the two reads of [`correct_audio_probe`], and the read of
+/// [`read_audio_gaps`]. ADR 014's "Other rules" requires that re-probe -- the
 /// renderer reads the container start time and the selected stream indices from a fresh probe,
 /// never from stale project metadata.
 ///
@@ -502,10 +503,9 @@ struct PrepareRequest<'a> {
 /// the run from working through every remaining step after the answer is no longer wanted, and
 /// it means a cancel during preparation ends with the slot released and no reserved file left
 /// on disk.
-fn prepare_export_with<Discover, Load, Probe, FirstPacket, RateAt, Gaps>(
+fn prepare_export_with<Discover, Probe, FirstPacket, RateAt, Gaps>(
     prepare: PrepareRequest<'_>,
     discover: Discover,
-    load: Load,
     probe: Probe,
     first_audio_packet: FirstPacket,
     audio_sample_rate_at: RateAt,
@@ -513,7 +513,6 @@ fn prepare_export_with<Discover, Load, Probe, FirstPacket, RateAt, Gaps>(
 ) -> Result<PreparedExport, ExportCommandError>
 where
     Discover: FnOnce(&Path) -> Result<FfmpegPaths, LocateError>,
-    Load: FnOnce(&Path) -> Result<LoadedSettings, SettingsFileError>,
     Probe: FnOnce(&Path, &Path) -> Result<MediaProbe, ProbeError>,
     FirstPacket:
         FnOnce(&Path, &Path, u32, &AtomicBool) -> Result<Option<FirstAudioPacket>, ProbeError>,
@@ -542,20 +541,9 @@ where
     let executables = discover(app_data_directory)
         .map_err(|_| ExportCommandError::new(ExportErrorCode::FfmpegPairMissing))?;
 
-    // The settings failure carries its diagnostic. ADR 011 decides that by the condition, not by
-    // the origin of the string: what the interface renders is always the localized code, and a
-    // detail is supplementary text a user copies into a bug report. `SettingsFileError` has seven
-    // variants -- an I/O failure, a serde parse error that names a line and a column, a validation
-    // refusal, a schema version from the future, an unreadable existing file, a revision conflict,
-    // and a failed backup -- and every one of them arrives here as `settingsUnreadable`, because
-    // the export has no separate recovery for any of them. Without the text, a permission denial
-    // and a parse error at line 12 are indistinguishable in a report. `commands/settings.rs` has
-    // its own codes for these on its own surface; this surface has one, and the detail is the only
-    // thing that tells the seven apart.
-    let loaded = load(app_data_directory).map_err(|error| {
-        ExportCommandError::with_detail(ExportErrorCode::SettingsUnreadable, error.to_string())
-    })?;
-    let preset = resolve_preset(&loaded.settings, request.preset_id.as_deref())?;
+    // The preset of the request, which `start_export` checked. The settings file is not read
+    // here, so an edit of the preset after the command accepted the run changes nothing.
+    let preset = &request.preset;
 
     let source = PathBuf::from(&request.source_path);
     let destination = PathBuf::from(&request.output_path);
@@ -1121,24 +1109,16 @@ fn audio_matches(frames: &[ffmpeg::DecodedAudioFrame], audio: &ffmpeg::AudioProb
 /// How often the watcher of [`flv_input_for`] reads the cancel flag of the run.
 const FLV_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
-/// Resolve the preset an export renders with: the requested id, or the settings document's
-/// active id when the request named none.
+/// Check the preset of a request by the rules of the settings document
+/// ([`settings::validate_preset`]), and report `invalidPreset` with the reason when it fails.
 ///
-/// `presetNotFound` covers both ways this can fail -- an id that names nothing, and no id to
-/// resolve at all -- because from the frontend's side they are the same condition: the run
-/// has no preset.
-fn resolve_preset<'a>(
-    settings: &'a Settings,
-    requested: Option<&str>,
-) -> Result<&'a Preset, ExportCommandError> {
-    let id = requested
-        .or(settings.active_preset_id.as_deref())
-        .ok_or_else(|| ExportCommandError::new(ExportErrorCode::PresetNotFound))?;
-    settings
-        .presets
-        .iter()
-        .find(|preset| preset.id == id)
-        .ok_or_else(|| ExportCommandError::new(ExportErrorCode::PresetNotFound))
+/// The frontend sends a preset of the settings that this backend loaded or saved, and both
+/// validate, so this fails only for a fault in the frontend. The reason is a diagnostic for a
+/// bug report, so it goes in the detail (ADR 011).
+fn validate_request_preset(preset: &Preset) -> Result<(), ExportCommandError> {
+    settings::validate_preset(preset).map_err(|error| {
+        ExportCommandError::with_detail(ExportErrorCode::InvalidPreset, error.to_string())
+    })
 }
 
 /// Build the payload the command resolves with, and that the `started` event repeats.
@@ -1762,16 +1742,6 @@ mod tests {
         }
     }
 
-    fn sample_settings(active: Option<&str>, presets: Vec<Preset>) -> Settings {
-        Settings {
-            schema_version: crate::settings::CURRENT_SCHEMA_VERSION,
-            revision: 0,
-            ffmpeg_path: None,
-            presets,
-            active_preset_id: active.map(str::to_owned),
-        }
-    }
-
     fn sample_probe() -> MediaProbe {
         MediaProbe {
             format_names: vec!["mov".to_owned(), "mp4".to_owned()],
@@ -2124,7 +2094,7 @@ mod tests {
                     out_pts: at(1_500),
                 },
             ],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -2409,12 +2379,13 @@ mod tests {
             "sourcePath": "/media/source.mp4",
             "outputPath": "/movies/out.mp4",
             "segments": [{ "inPts": "9007199254740993", "outPts": "9007199254740994" }],
+            "preset": sample_preset("active"),
             "streams": "videoAndAudio",
             "audioMode": "encode",
         }))
         .unwrap();
 
-        assert_eq!(request.preset_id, None);
+        assert_eq!(request.preset, sample_preset("active"));
         assert_eq!(request.streams, ExportStreams::VideoAndAudio);
         // The value below is above `Number.MAX_SAFE_INTEGER`, which is exactly why ADR 002
         // puts a `Pts` on the wire as a string: as a JSON number it would already have been
@@ -2430,7 +2401,7 @@ mod tests {
             "sourcePath": "/media/source.mp4",
             "outputPath": "/movies/out.mp4",
             "segments": [{ "inPts": "0", "outPts": "90000" }],
-            "presetId": "active",
+            "preset": sample_preset("active"),
             "audioMode": "encode",
         });
         if let Some(streams) = streams {
@@ -2497,6 +2468,57 @@ mod tests {
             let request: ExportRequestWire =
                 serde_json::from_value(request_json(Some(serde_json::json!(wire)))).unwrap();
             assert_eq!(request.streams, streams, "{wire}");
+        }
+    }
+
+    #[test]
+    fn a_request_carries_its_whole_preset() {
+        let mut preset = sample_preset("custom");
+        preset.video_encoder = "libx265".to_owned();
+        let mut value = request_json(Some(serde_json::json!("videoAndAudio")));
+        value["preset"] = serde_json::to_value(&preset).unwrap();
+
+        let request: ExportRequestWire = serde_json::from_value(value).unwrap();
+
+        assert_eq!(request.preset, preset);
+    }
+
+    #[test]
+    fn a_request_without_a_preset_or_with_a_preset_id_is_refused() {
+        // The run renders with the preset of the request and with nothing else (ADR 049). A
+        // frontend that sent no preset, or only the id of the earlier contract, is refused at
+        // the boundary rather than given some other preset.
+        let mut without = request_json(Some(serde_json::json!("videoAndAudio")));
+        without.as_object_mut().unwrap().remove("preset");
+        let error = serde_json::from_value::<ExportRequestWire>(without).unwrap_err();
+        assert!(error.to_string().contains("preset"), "{error}");
+
+        let mut by_id = request_json(Some(serde_json::json!("videoAndAudio")));
+        by_id["presetId"] = serde_json::json!("active");
+        let error = serde_json::from_value::<ExportRequestWire>(by_id).unwrap_err();
+        assert!(error.to_string().contains("presetId"), "{error}");
+    }
+
+    #[test]
+    fn a_valid_preset_passes_the_check_of_the_request() {
+        assert_eq!(validate_request_preset(&sample_preset("active")), Ok(()));
+    }
+
+    #[test]
+    fn an_invalid_preset_reports_invalid_preset_with_the_reason() {
+        let mut unnamed = sample_preset("active");
+        unnamed.name = "   ".to_owned();
+        // An encoder name that would reach ffmpeg as a flag. The command line is built from
+        // the preset of the request, so this check is what keeps a flag out of it.
+        let mut flag = sample_preset("active");
+        flag.video_encoder = "-f".to_owned();
+
+        for preset in [unnamed, flag] {
+            let error = validate_request_preset(&preset).unwrap_err();
+
+            assert_eq!(error.code, ExportErrorCode::InvalidPreset);
+            let expected = settings::validate_preset(&preset).unwrap_err().to_string();
+            assert_eq!(error.detail.as_deref(), Some(expected.as_str()));
         }
     }
 
@@ -2686,97 +2708,6 @@ mod tests {
     }
 
     #[test]
-    fn a_requested_preset_id_wins_over_the_active_one() {
-        let settings = sample_settings(
-            Some("active"),
-            vec![sample_preset("active"), sample_preset("requested")],
-        );
-
-        let preset = resolve_preset(&settings, Some("requested")).unwrap();
-
-        assert_eq!(preset.id, "requested");
-    }
-
-    #[test]
-    fn an_absent_requested_preset_id_falls_back_to_the_active_one() {
-        let settings = sample_settings(Some("active"), vec![sample_preset("active")]);
-
-        let preset = resolve_preset(&settings, None).unwrap();
-
-        assert_eq!(preset.id, "active");
-    }
-
-    #[test]
-    fn an_unresolvable_preset_reports_preset_not_found() {
-        let with_presets = sample_settings(Some("active"), vec![sample_preset("active")]);
-        let without_active = sample_settings(None, vec![sample_preset("active")]);
-
-        // An id that names nothing, and no id to resolve at all, are one condition from the
-        // frontend's side: this run has no preset.
-        for error in [
-            resolve_preset(&with_presets, Some("missing")).unwrap_err(),
-            resolve_preset(&without_active, None).unwrap_err(),
-        ] {
-            assert_eq!(error.code, ExportErrorCode::PresetNotFound);
-            assert_eq!(error.detail, None);
-        }
-    }
-
-    #[test]
-    fn preparation_stops_at_an_unresolvable_preset_without_probing() {
-        let directory = TestDirectory::new();
-        let probed = RefCell::new(false);
-        let request = ExportRequestWire {
-            source_path: "/media/source.mp4".to_owned(),
-            output_path: directory
-                .path
-                .join("out.mp4")
-                .to_string_lossy()
-                .into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
-                in_pts: Pts::new(0),
-                out_pts: Pts::new(90_000),
-            }],
-            preset_id: Some("missing".to_owned()),
-            streams: ExportStreams::VideoAndAudio,
-            audio_mode: ExportAudioMode::Encode,
-        };
-
-        let error = prepare_export_with(
-            PrepareRequest {
-                request: &request,
-                app_data_directory: &directory.path,
-                cancel: &AtomicBool::new(false),
-                preview_windows: &PreviewWindows::default(),
-            },
-            |_| {
-                Ok(FfmpegPaths {
-                    ffmpeg: directory.path.join("ffmpeg"),
-                    ffprobe: directory.path.join("ffprobe"),
-                    origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
-                    seeded: false,
-                })
-            },
-            |_, _| {
-                *probed.borrow_mut() = true;
-                unreachable!()
-            },
-            first_packet_unread,
-            sample_rate_not_read,
-            no_audio_gaps,
-        )
-        .unwrap_err();
-
-        assert_eq!(error.code, ExportErrorCode::PresetNotFound);
-        assert!(!*probed.borrow());
-    }
-
-    #[test]
     fn preparation_builds_the_command_against_the_reservation_and_not_the_destination() {
         let directory = TestDirectory::new();
         let source = directory.path.join("source.mp4");
@@ -2789,7 +2720,7 @@ mod tests {
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -2806,12 +2737,6 @@ mod tests {
                     ffmpeg: directory.path.join("ffmpeg"),
                     ffprobe: directory.path.join("ffprobe"),
                     origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
-                    seeded: false,
                 })
             },
             |_, path| {
@@ -2856,18 +2781,27 @@ mod tests {
         let destination = directory.path.join("out.mp4");
         let settings_path = directory.path.join(settings::SETTINGS_FILE_NAME);
         fs::write(&settings_path, settings::VERSION_1_FIXTURE).unwrap();
-        let request = ExportRequestWire {
+        // The frontend sends the preset as it loaded it from this file, so each preparation
+        // below takes the preset from the file as it is at that time.
+        let request = || ExportRequestWire {
             source_path: source.to_string_lossy().into_owned(),
             output_path: destination.to_string_lossy().into_owned(),
             segments: vec![ExportSegmentBoundaryWire {
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
-            preset_id: Some("default-h264-mp4".to_owned()),
+            preset: settings::load(&directory.path)
+                .unwrap()
+                .settings
+                .presets
+                .into_iter()
+                .find(|preset| preset.id == "default-h264-mp4")
+                .unwrap(),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
         let prepare = || {
+            let request = request();
             prepare_export_with(
                 PrepareRequest {
                     request: &request,
@@ -2882,7 +2816,6 @@ mod tests {
                         origin: ExecutableOrigin::Path,
                     })
                 },
-                settings::load,
                 |_, _| Ok(sample_probe_with_audio()),
                 first_packet_unread,
                 sample_rate_not_read,
@@ -2947,7 +2880,7 @@ mod tests {
                 "mp4",
             ]
         );
-        // The preparation read the file and wrote nothing to it.
+        // Loading the file to read its preset wrote nothing to it.
         assert_eq!(
             fs::read_to_string(&settings_path).unwrap(),
             settings::VERSION_1_FIXTURE
@@ -2985,7 +2918,7 @@ mod tests {
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -3002,12 +2935,6 @@ mod tests {
                     ffmpeg: directory.path.join("ffmpeg"),
                     ffprobe: directory.path.join("ffprobe"),
                     origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
-                    seeded: false,
                 })
             },
             |_, _| Ok(sample_probe()),
@@ -3037,7 +2964,7 @@ mod tests {
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -3054,12 +2981,6 @@ mod tests {
                     ffmpeg: directory.path.join("ffmpeg"),
                     ffprobe: directory.path.join("ffprobe"),
                     origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
-                    seeded: false,
                 })
             },
             |_, _| Ok(sample_probe()),
@@ -3107,7 +3028,7 @@ mod tests {
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -3124,12 +3045,6 @@ mod tests {
                     ffmpeg: directory.path.join("ffmpeg"),
                     ffprobe: directory.path.join("ffprobe"),
                     origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
-                    seeded: false,
                 })
             },
             |_, _| Ok(sample_probe()),
@@ -3201,7 +3116,7 @@ mod tests {
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -3217,7 +3132,6 @@ mod tests {
                 *discovered.borrow_mut() = true;
                 unreachable!()
             },
-            |_| unreachable!(),
             |_, _| unreachable!(),
             first_packet_unread,
             sample_rate_not_read,
@@ -3236,8 +3150,8 @@ mod tests {
         // that time for an answer nobody wants, which is what holds an application quit past
         // its budget.
         //
-        // The flag is set from inside `load`, after `discover` has already run, so this test
-        // reaches the pre-re-probe check rather than the one at the top of preparation. A flag
+        // The flag is set from inside `discover`, after the check at the top of preparation has
+        // passed, so this test reaches the pre-re-probe check rather than that first one. A flag
         // that started out set would stop the run at that first check and leave this one
         // untested.
         let directory = TestDirectory::new();
@@ -3256,7 +3170,7 @@ mod tests {
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -3269,17 +3183,11 @@ mod tests {
                 preview_windows: &PreviewWindows::default(),
             },
             |_| {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(FfmpegPaths {
                     ffmpeg: directory.path.join("ffmpeg"),
                     ffprobe: directory.path.join("ffprobe"),
                     origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
-                    seeded: false,
                 })
             },
             |_, _| {
@@ -3316,7 +3224,7 @@ mod tests {
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -3333,12 +3241,6 @@ mod tests {
                     ffmpeg: directory.path.join("ffmpeg"),
                     ffprobe: directory.path.join("ffprobe"),
                     origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
-                    seeded: false,
                 })
             },
             |_, _| {
@@ -3361,7 +3263,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_ffmpeg_pair_is_reported_before_the_settings_are_read() {
+    fn a_missing_ffmpeg_pair_is_reported_before_the_source_is_probed() {
         let directory = TestDirectory::new();
         let request = ExportRequestWire {
             source_path: "/media/source.mp4".to_owned(),
@@ -3371,7 +3273,7 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
             segments: vec![],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -3384,7 +3286,6 @@ mod tests {
                 preview_windows: &PreviewWindows::default(),
             },
             |_| Err(LocateError::NotFound { inspected: vec![] }),
-            |_| unreachable!(),
             |_, _| unreachable!(),
             first_packet_unread,
             sample_rate_not_read,
@@ -3394,77 +3295,6 @@ mod tests {
 
         assert_eq!(error.code, ExportErrorCode::FfmpegPairMissing);
         assert_eq!(error.detail, None);
-    }
-
-    #[test]
-    fn an_unreadable_settings_file_reports_one_code_and_carries_which_fault_it_was() {
-        // `SettingsFileError` has seven variants and this surface has one code for all of them,
-        // because the export has no separate recovery for any. The detail is therefore the only
-        // thing that tells them apart in a bug report, which is why the two below must not read
-        // the same. `commands/settings.rs` gives these separate codes on its own surface; that is
-        // not this surface, and the amended ADR 011 decides the question by the condition rather
-        // than by which process authored the string.
-        let directory = TestDirectory::new();
-        let mut details = Vec::new();
-        for failure in [
-            SettingsFileError::Io(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "raw operating system diagnostic",
-            )),
-            SettingsFileError::Unreadable,
-        ] {
-            let expected = failure.to_string();
-            let failure = RefCell::new(Some(failure));
-            let probed = RefCell::new(false);
-            let request = ExportRequestWire {
-                source_path: "/media/source.mp4".to_owned(),
-                output_path: directory
-                    .path
-                    .join("out.mp4")
-                    .to_string_lossy()
-                    .into_owned(),
-                segments: vec![],
-                preset_id: None,
-                streams: ExportStreams::VideoAndAudio,
-                audio_mode: ExportAudioMode::Encode,
-            };
-
-            let error = prepare_export_with(
-                PrepareRequest {
-                    request: &request,
-                    app_data_directory: &directory.path,
-                    cancel: &AtomicBool::new(false),
-                    preview_windows: &PreviewWindows::default(),
-                },
-                |_| {
-                    Ok(FfmpegPaths {
-                        ffmpeg: directory.path.join("ffmpeg"),
-                        ffprobe: directory.path.join("ffprobe"),
-                        origin: ExecutableOrigin::Path,
-                    })
-                },
-                |_| Err(failure.borrow_mut().take().unwrap()),
-                |_, _| {
-                    *probed.borrow_mut() = true;
-                    unreachable!()
-                },
-                first_packet_unread,
-                sample_rate_not_read,
-                no_audio_gaps,
-            )
-            .unwrap_err();
-
-            assert_eq!(error.code, ExportErrorCode::SettingsUnreadable);
-            assert_eq!(error.detail.as_deref(), Some(expected.as_str()));
-            assert!(!*probed.borrow());
-            details.push(error.detail.unwrap());
-        }
-
-        // The two faults really are distinguishable, which is the whole point of carrying the
-        // text. Asserting each detail against its own source message alone would still pass if
-        // every variant rendered one indistinguishable sentence.
-        assert_ne!(details[0], details[1]);
-        assert!(details[0].contains("raw operating system diagnostic"));
     }
 
     // A `JoinError` cannot be constructed outside tokio, so the stand-in below is the closest a
@@ -3770,7 +3600,7 @@ mod tests {
                     out_pts: Pts::new(out_seconds * 90_000),
                 })
                 .collect(),
-            preset_id: None,
+            preset: sample_preset("active"),
             streams,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -3786,12 +3616,6 @@ mod tests {
                     ffmpeg: directory.path.join("ffmpeg"),
                     ffprobe: directory.path.join("ffprobe"),
                     origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
-                    seeded: false,
                 })
             },
             |_, _| Ok(probe),
@@ -4728,7 +4552,7 @@ mod tests {
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
         };
@@ -4744,12 +4568,6 @@ mod tests {
                     ffmpeg: directory.path.join("ffmpeg"),
                     ffprobe: directory.path.join("ffprobe"),
                     origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
-                    seeded: false,
                 })
             },
             |_, _| {
@@ -5381,7 +5199,7 @@ mod tests {
                 in_pts: Pts::new(10 * 90_000),
                 out_pts: Pts::new(15 * 90_000),
             }],
-            preset_id: None,
+            preset: sample_preset("active"),
             streams,
             audio_mode,
         };
@@ -5397,12 +5215,6 @@ mod tests {
                     ffmpeg: directory.path.join("ffmpeg"),
                     ffprobe: directory.path.join("ffprobe"),
                     origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![sample_preset("active")]),
-                    seeded: false,
                 })
             },
             |_, _| Ok(sample_probe_with_a_missed_audio_start()),
@@ -5531,6 +5343,13 @@ mod tests {
         let probe = ffmpeg::probe_media(ffprobe, source).unwrap();
         let tb = probe.video_time_base;
         let at = |millis: i64| Pts::new(millis * tb.den() / (1_000 * tb.num()));
+        // An encode would write AC-3, so AAC in the output can only be the copy.
+        let mut preset = sample_preset("active");
+        preset.audio_encoder = "ac3".to_owned();
+        preset.quality = Quality {
+            kind: QualityKind::Crf,
+            value: 30,
+        };
         let request = ExportRequestWire {
             source_path: source.to_string_lossy().into_owned(),
             output_path: output.to_string_lossy().into_owned(),
@@ -5538,16 +5357,9 @@ mod tests {
                 in_pts: at(1_000),
                 out_pts: at(2_500),
             }],
-            preset_id: None,
+            preset,
             streams,
             audio_mode: ExportAudioMode::Copy,
-        };
-        // An encode would write AC-3, so AAC in the output can only be the copy.
-        let mut preset = sample_preset("active");
-        preset.audio_encoder = "ac3".to_owned();
-        preset.quality = Quality {
-            kind: QualityKind::Crf,
-            value: 30,
         };
         let prepared = prepare_export_with(
             PrepareRequest {
@@ -5561,12 +5373,6 @@ mod tests {
                     ffmpeg: ffmpeg.to_path_buf(),
                     ffprobe: ffprobe.to_path_buf(),
                     origin: ExecutableOrigin::Path,
-                })
-            },
-            |_| {
-                Ok(LoadedSettings {
-                    settings: sample_settings(Some("active"), vec![preset]),
-                    seeded: false,
                 })
             },
             ffmpeg::probe_media,

@@ -18,6 +18,7 @@ import {
   isExportRunActive,
   resolveExportDismissal,
 } from "./exportCancelState";
+import { createPresetDraft } from "@/features/settings/presetDocument";
 
 const RUN_ID = "run-abc-123";
 
@@ -69,7 +70,7 @@ describe("resolveExportDismissal", () => {
       sourcePath: "/media/source.mp4",
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
-      presetId: "mp4-h264",
+      preset: createPresetDraft("mp4-h264", "Test preset"),
       streams: "videoAndAudio",
       audioMode: "encode",
     };
@@ -359,7 +360,7 @@ describe("isCancelEnabled on the state of a real store", () => {
     sourcePath: "/media/source.mp4",
     outputPath: "/media/output.mp4",
     segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
-    presetId: "mp4-h264",
+    preset: createPresetDraft("mp4-h264", "Test preset"),
     streams: "videoAndAudio",
     audioMode: "encode",
   };

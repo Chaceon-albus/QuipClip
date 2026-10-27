@@ -637,7 +637,7 @@ export function ExportDialog({
         // Clear the user's manual selection once the export has started so that a subsequent
         // export setup step defaults to the project's active preset (ADR 024) even if this
         // run completes while the dialog is hidden (ADR 025). The started request already
-        // carries the preset id.
+        // carries the whole preset.
         setRequestedPresetId(null);
       }
     } finally {

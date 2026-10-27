@@ -5,6 +5,7 @@
  * See ADR 002, ADR 004, ADR 011, and ADR 014.
  */
 
+import type { Preset } from "@/features/settings/types";
 import type { Pts, Rational } from "@/types/project";
 
 /**
@@ -51,7 +52,12 @@ export type ExportRequest = {
   sourcePath: string;
   outputPath: string;
   segments: ExportSegmentBoundary[];
-  presetId?: string;
+  /**
+   * Required. The whole preset, as the setup step showed it when the user confirmed the
+   * export. The run renders with this preset and never reads the presets of the settings file,
+   * so an export that waits in the queue keeps the settings that the user saw (ADR 049).
+   */
+  preset: Preset;
   /** Required. The backend refuses a request without it, and has no default for it. */
   streams: ExportStreams;
   /** Required, as `streams` is. `ExportStart` does not echo it. */
@@ -78,8 +84,7 @@ export type ExportStart = {
  */
 export const BACKEND_EXPORT_ERROR_CODES = [
   "appDataUnavailable",
-  "settingsUnreadable",
-  "presetNotFound",
+  "invalidPreset",
   "ffmpegPairMissing",
   "ffprobeSpawnFailed",
   "ffprobeProcessFailed",
@@ -124,10 +129,15 @@ export type BackendExportErrorCode = (typeof BACKEND_EXPORT_ERROR_CODES)[number]
  * `sourceRevisionChanged` is a confirmation and not a terminal failure. The export flow raises
  * it when the file on disk is no longer the revision the segments were marked against, and the
  * export dialog renders it with three actions rather than as an error the user can only close.
+ *
+ * `presetNotFound` comes from the START step of the export flow, when the settings hold no
+ * preset with the chosen id. The request carries the whole preset, so the backend never looks
+ * a preset up (ADR 049).
  */
 export const FRONTEND_EXPORT_ERROR_CODES = [
   "dialogFailed",
   "sourceRevisionChanged",
+  "presetNotFound",
 ] as const;
 
 export type FrontendExportErrorCode = (typeof FRONTEND_EXPORT_ERROR_CODES)[number];

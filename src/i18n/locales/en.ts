@@ -1003,7 +1003,7 @@ export const en = {
   },
   exportError: {
     appDataUnavailable: "The application data directory is unavailable.",
-    settingsUnreadable: "QuipClip could not read the settings file.",
+    invalidPreset: "The selected export preset has a setting that is not valid.",
     presetNotFound: "The selected export preset was not found.",
     ffmpegPairMissing:
       "QuipClip could not find the required FFmpeg or ffprobe program.",

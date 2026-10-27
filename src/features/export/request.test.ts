@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createPresetDraft } from "@/features/settings/presetDocument";
 import type { Pts, Segment } from "@/types/project";
 import { buildExportRequest } from "./request";
 import { EXPORT_AUDIO_MODES, EXPORT_STREAMS } from "./types";
@@ -8,6 +9,7 @@ describe("Export Request Builder", () => {
   const otherSourceId = "source-2";
   const sourcePath = "/media/input.mp4";
   const outputPath = "/media/output.mp4";
+  const preset = createPresetDraft("h264-mp4", "H.264");
 
   function createSegment(
     id: string,
@@ -31,19 +33,19 @@ describe("Export Request Builder", () => {
     ];
 
     const result = buildExportRequest({
+      preset,
       sourcePath,
       outputPath,
       activeSourceId,
       streams: "videoAndAudio",
       audioMode: "encode",
       segments,
-      presetId: "h264-mp4",
     });
 
     expect(result).toEqual({
       sourcePath: "/media/input.mp4",
       outputPath: "/media/output.mp4",
-      presetId: "h264-mp4",
+      preset,
       streams: "videoAndAudio",
       audioMode: "encode",
       segments: [
@@ -62,6 +64,7 @@ describe("Export Request Builder", () => {
     ];
 
     const result = buildExportRequest({
+      preset,
       sourcePath,
       outputPath,
       activeSourceId,
@@ -82,6 +85,7 @@ describe("Export Request Builder", () => {
     const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
 
     const result = buildExportRequest({
+      preset,
       media: { path: "/media/from-media-store.mp4" },
       outputPath,
       activeSourceId,
@@ -91,6 +95,7 @@ describe("Export Request Builder", () => {
     });
 
     expect(result).toEqual({
+      preset,
       sourcePath: "/media/from-media-store.mp4",
       outputPath: "/media/output.mp4",
       segments: [{ inPts: "0", outPts: "1000" }],
@@ -103,6 +108,7 @@ describe("Export Request Builder", () => {
     const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
 
     const result = buildExportRequest({
+      preset,
       sourcePath: "/media/explicit.mp4",
       media: { path: "/media/from-media.mp4" },
       outputPath,
@@ -119,6 +125,7 @@ describe("Export Request Builder", () => {
     const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
 
     const result = buildExportRequest({
+      preset,
       sourcePath: "",
       media: { path: "/media/fallback.mp4" },
       outputPath,
@@ -136,6 +143,7 @@ describe("Export Request Builder", () => {
     const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
 
     const result = buildExportRequest({
+      preset,
       sourcePath,
       outputPath: "  /media/trimmed-output.mp4  ",
       activeSourceId,
@@ -148,10 +156,15 @@ describe("Export Request Builder", () => {
     expect(result?.outputPath).toBe("/media/trimmed-output.mp4");
   });
 
-  it("omits presetId when not provided or empty string", () => {
+  it("forwards the whole preset unchanged", () => {
     const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
+    const custom = {
+      ...createPresetDraft("custom", "Custom"),
+      videoEncoder: "libx265",
+    };
 
-    const resUndefined = buildExportRequest({
+    const result = buildExportRequest({
+      preset: custom,
       sourcePath,
       outputPath,
       activeSourceId,
@@ -159,24 +172,16 @@ describe("Export Request Builder", () => {
       audioMode: "encode",
       segments,
     });
-    expect(resUndefined?.presetId).toBeUndefined();
 
-    const resEmpty = buildExportRequest({
-      sourcePath,
-      outputPath,
-      activeSourceId,
-      streams: "videoAndAudio",
-      audioMode: "encode",
-      segments,
-      presetId: "   ",
-    });
-    expect(resEmpty?.presetId).toBeUndefined();
+    // The preset of the request is the one the caller passed: the backend reads no other.
+    expect(result?.preset).toEqual(custom);
   });
 
   it.each(EXPORT_STREAMS)("forwards the stream choice '%s' unchanged", (streams) => {
     const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
 
     const result = buildExportRequest({
+      preset,
       sourcePath,
       outputPath,
       activeSourceId,
@@ -192,6 +197,7 @@ describe("Export Request Builder", () => {
     const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
 
     const result = buildExportRequest({
+      preset,
       sourcePath,
       outputPath,
       activeSourceId,
@@ -211,6 +217,7 @@ describe("Export Request Builder", () => {
     it("returns null when no media source path is available", () => {
       expect(
         buildExportRequest({
+          preset,
           sourcePath: null,
           media: null,
           outputPath,
@@ -223,6 +230,7 @@ describe("Export Request Builder", () => {
 
       expect(
         buildExportRequest({
+          preset,
           sourcePath: "",
           outputPath,
           activeSourceId,
@@ -236,6 +244,7 @@ describe("Export Request Builder", () => {
     it("returns null when outputPath is missing or empty", () => {
       expect(
         buildExportRequest({
+          preset,
           sourcePath,
           outputPath: null,
           activeSourceId,
@@ -247,6 +256,7 @@ describe("Export Request Builder", () => {
 
       expect(
         buildExportRequest({
+          preset,
           sourcePath,
           outputPath: "   ",
           activeSourceId,
@@ -260,6 +270,7 @@ describe("Export Request Builder", () => {
     it("returns null when activeSourceId is missing or empty", () => {
       expect(
         buildExportRequest({
+          preset,
           sourcePath,
           outputPath,
           activeSourceId: null,
@@ -271,6 +282,7 @@ describe("Export Request Builder", () => {
 
       expect(
         buildExportRequest({
+          preset,
           sourcePath,
           outputPath,
           activeSourceId: "",
@@ -284,6 +296,7 @@ describe("Export Request Builder", () => {
     it("returns null when segments array is empty or missing", () => {
       expect(
         buildExportRequest({
+          preset,
           sourcePath,
           outputPath,
           activeSourceId,
@@ -295,6 +308,7 @@ describe("Export Request Builder", () => {
 
       expect(
         buildExportRequest({
+          preset,
           sourcePath,
           outputPath,
           activeSourceId,
@@ -312,6 +326,7 @@ describe("Export Request Builder", () => {
 
       expect(
         buildExportRequest({
+          preset,
           sourcePath,
           outputPath,
           activeSourceId,

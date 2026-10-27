@@ -44,10 +44,10 @@ const BACK_TO_SETUP = { kind: "backToSetup" } as const;
  * `EXPORT_ERROR_CODES` a compile error here until it has a recovery.
  */
 const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecovery>> = {
-  // The settings file holds the presets, and Rust reads the preset of the export from it.
-  // The Settings window shows the read error and its reset control above every tab, and
-  // the Presets tab holds what the export needs.
-  settingsUnreadable: OPEN_PRESET_SETTINGS,
+  // The request carries the whole preset (ADR 024). Rust refuses a preset that fails the
+  // rules of the settings file, and the flow reports a selected id that the settings no
+  // longer hold. The Presets tab holds what the export needs for both.
+  invalidPreset: OPEN_PRESET_SETTINGS,
   presetNotFound: OPEN_PRESET_SETTINGS,
 
   // The FFmpeg tab sets the executable pair and shows which encoders work.

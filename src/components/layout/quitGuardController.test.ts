@@ -15,6 +15,7 @@ import {
   readQuitGuardInput,
   type QuitGuardDependencies,
 } from "./quitGuardController";
+import { createPresetDraft } from "@/features/settings/presetDocument";
 
 const OPEN_SOURCE = "s-open";
 
@@ -371,7 +372,7 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
       sourcePath: "/videos/open.mp4",
       outputPath: "/videos/out.mp4",
       segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
-      presetId: "default",
+      preset: createPresetDraft("default", "Test preset"),
       streams: "videoAndAudio",
       audioMode: "encode",
     });

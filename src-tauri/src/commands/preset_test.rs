@@ -30,9 +30,7 @@ use crate::ffmpeg::capabilities::{
 };
 use crate::ffmpeg::export::ExportRegistry;
 use crate::ffmpeg::{self, FfmpegPaths, LocateError};
-use crate::settings::{
-    self, LoadedSettings, Preset, Settings, SettingsFileError, CURRENT_SCHEMA_VERSION,
-};
+use crate::settings::{self, LoadedSettings, Preset, SettingsFileError};
 use serde::Serialize;
 use std::fs;
 use std::io;
@@ -332,17 +330,10 @@ where
     Ok(PresetTestResults { results })
 }
 
-/// Check `preset` with [`settings::validate_settings`], in a document that holds it alone, so
-/// a preset the editor could not save is not tested either.
+/// Check `preset` with [`settings::validate_preset`], so a preset the editor could not save is
+/// not tested either.
 fn validate_preset(preset: &Preset) -> Result<(), PresetTestError> {
-    let document = Settings {
-        schema_version: CURRENT_SCHEMA_VERSION,
-        revision: 0,
-        ffmpeg_path: None,
-        presets: vec![preset.clone()],
-        active_preset_id: None,
-    };
-    settings::validate_settings(&document)
+    settings::validate_preset(preset)
         .map_err(|error| PresetTestError::with_detail(PresetTestErrorCode::InvalidPreset, error))
 }
 
@@ -442,6 +433,7 @@ mod tests {
     use crate::ffmpeg::capabilities::preset_test::PresetTestStatus;
     use crate::ffmpeg::ExecutableOrigin;
     use crate::settings::defaults::every_platform_seed;
+    use crate::settings::{Settings, CURRENT_SCHEMA_VERSION};
     use std::cell::Cell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
