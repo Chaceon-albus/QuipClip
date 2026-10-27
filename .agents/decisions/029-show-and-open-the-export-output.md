@@ -50,10 +50,27 @@ file action, because three buttons were too many and the Windows label was too l
 - The status bar result keeps its icon button. Its accessible name is still the full phrase of
   the platform.
 
+(Changed on 2026-10-27.) The record keeps the published runs of the last 64 exports, not only
+the last one. An export queue runs exports one after another and lists the result of each run
+of a batch. Show must work for an earlier run while a later run writes.
+
+- A new run no longer clears the record when it takes the export slot.
+- A new record removes the record of an earlier run with the same path, because the file at
+  that path is now the output of the new run.
+- When the record holds more than 64 runs, the oldest run goes. Show for that run then returns
+  `outputUnknown`.
+- A later run that writes to the same path writes a temporary file first, and it replaces the
+  earlier file only at its rename (ADR 016). Until then, the file is still the output of the
+  earlier run. The worker records the later run right after the rename.
+- The record compares paths as written. Two spellings of one file keep two records. Show for
+  the earlier run then selects the file of the later run. This is harmless, because Show runs
+  nothing.
+
 ## Consequences
 
 - The web view can show or open only the file that the last export wrote. (Changed on
-  2026-10-02: it can only show that file.)
+  2026-10-02: it can only show that file.) (Changed on 2026-10-27: it can only show a path that
+  one of the last 64 published runs wrote to.)
 - A file that the user moved or deleted after the export gives `outputMissing`.
 - The command surface grows by two commands, and the error codes of these commands are a
   second small wire contract next to the export events.
@@ -61,6 +78,8 @@ file action, because three buttons were too many and the Windows label was too l
   `open_export_output`. A compile-time check fails when a container is missing. (Changed on
   2026-10-02: the command and its list are removed, so a new container needs no entry here.)
 - A new run clears the record of the last run when it takes the export slot, so the record is
-  never older than the run that the interface shows.
+  never older than the run that the interface shows. (Changed on 2026-10-27: a new run does not
+  clear the record. A record stays until a later run publishes to the same path, or until 64
+  later runs publish.)
 - This amends the finished result of ADR 025: the status bar chip gains a Show control next to
   its dismiss control.
