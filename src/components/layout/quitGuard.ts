@@ -21,6 +21,7 @@
 import type { ExportStatus } from "@/features/export";
 import { isExportRunLive } from "@/features/export/runState";
 import { getActiveSourceSegmentEntries } from "@/features/timeline";
+import { isSameFilePath } from "@/lib/filePath";
 import type { Pts, Segment } from "@/types/project";
 
 /** The timeline fields that the rules read. */
@@ -107,44 +108,6 @@ export function countOpenSourceSegments(timeline: TimelineWorkInput): number {
  */
 function hasPendingIn(timeline: TimelineWorkInput): boolean {
   return timeline.sourceId !== null && timeline.pendingInPts !== null;
-}
-
-// A Windows path in the verbatim form that `std::fs::canonicalize` returns.
-const VERBATIM_UNC_PREFIX = "\\\\?\\UNC\\";
-const VERBATIM_PREFIX = "\\\\?\\";
-// A drive letter or a UNC share at the start of a Windows path.
-const WINDOWS_PATH_START = /^(?:[A-Za-z]:[\\/]|\\\\)/;
-
-/** Rewrites a Windows verbatim path to its ordinary form, and leaves other paths alone. */
-function withoutVerbatimPrefix(path: string): string {
-  if (path.startsWith(VERBATIM_UNC_PREFIX)) {
-    return `\\\\${path.slice(VERBATIM_UNC_PREFIX.length)}`;
-  }
-  if (path.startsWith(VERBATIM_PREFIX)) {
-    return path.slice(VERBATIM_PREFIX.length);
-  }
-  return path;
-}
-
-/**
- * True when two paths name the same file as far as their text shows.
- *
- * The open video has the canonical path from the import. On Windows that path is in the
- * verbatim form (`\\?\C:\...`), and a file dialog or a drop reports the ordinary form. So the
- * test removes the verbatim prefix. It compares Windows paths without regard to letter case
- * or separator, as the Windows file system does, and every other path exactly.
- *
- * The test reads no file system. A symbolic link or a different spelling of one file answers
- * false, and the caller then asks, which loses nothing.
- */
-export function isSameFilePath(first: string, second: string): boolean {
-  const a = withoutVerbatimPrefix(first);
-  const b = withoutVerbatimPrefix(second);
-  if (WINDOWS_PATH_START.test(a) && WINDOWS_PATH_START.test(b)) {
-    const normalize = (path: string) => path.replaceAll("/", "\\").toLowerCase();
-    return normalize(a) === normalize(b);
-  }
-  return a === b;
 }
 
 /**

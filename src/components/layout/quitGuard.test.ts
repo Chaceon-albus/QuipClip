@@ -6,7 +6,6 @@ import {
   countOpenSourceSegments,
   decideQuit,
   decideReplace,
-  isSameFilePath,
   presentQuitPrompt,
   presentReplacePrompt,
   type QuitGuardInput,
@@ -241,31 +240,6 @@ describe("decideReplace", () => {
         "C:\\Videos\\clip.mp4",
       ).ask,
     ).toBe(false);
-  });
-});
-
-describe("isSameFilePath", () => {
-  it("compares POSIX paths exactly", () => {
-    expect(isSameFilePath(OPEN_PATH, OPEN_PATH)).toBe(true);
-    expect(isSameFilePath(OPEN_PATH, OTHER_PATH)).toBe(false);
-    // macOS and Linux file systems can be case sensitive, so case counts.
-    expect(isSameFilePath("/a/Clip.mp4", "/a/clip.mp4")).toBe(false);
-  });
-
-  it("removes the Windows verbatim prefix that canonicalize adds", () => {
-    expect(isSameFilePath("\\\\?\\C:\\v\\a.mp4", "C:\\v\\a.mp4")).toBe(true);
-    expect(
-      isSameFilePath("\\\\?\\UNC\\server\\share\\a.mp4", "\\\\server\\share\\a.mp4"),
-    ).toBe(true);
-  });
-
-  it("compares Windows paths without regard to case or separator", () => {
-    expect(isSameFilePath("C:\\Videos\\A.mp4", "c:/videos/a.MP4")).toBe(true);
-    expect(isSameFilePath("C:\\Videos\\a.mp4", "D:\\Videos\\a.mp4")).toBe(false);
-  });
-
-  it("does not treat a Windows path and a POSIX path as one file", () => {
-    expect(isSameFilePath("C:\\a.mp4", "/a.mp4")).toBe(false);
   });
 });
 
