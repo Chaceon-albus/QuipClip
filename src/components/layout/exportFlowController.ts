@@ -341,7 +341,8 @@ export class ExportFlowController {
    * 2. Opens the native save dialog with the extension of the output and the default name
    *    `<source name>_export.<extension>`. The extension is the `container` of the preset, or
    *    `m4a` or `mka` for an audio-only export (`exportOutputExtension`). The filter label of
-   *    an audio-only export is `audioFilterName`, and `filterName` otherwise.
+   *    an audio-only export is `audioFilterName`, and `filterName` otherwise. The dialog
+   *    reports a failure through the `reportError` of this controller.
    * 3. When the save dialog throws, reports `dialogFailed`, keeps the modal open, and returns false.
    * 4. When the user cancels (the dialog returns null), returns false and changes nothing (the dialog
    *    stays on the setup step).
@@ -374,10 +375,15 @@ export class ExportFlowController {
 
     let outputPath: string | null;
     try {
+      // The dialog reports its own failure, through the reporter of this controller and not
+      // through the default of the dialog. The check of a null answer below reads
+      // `getExportState`, so a caller that injects one of the two injects the other for the
+      // same state.
       outputPath = await this.openSaveDialogFn({
         extension,
         filterName: streams === "audioOnly" ? this.audioFilterName : this.filterName,
         defaultName,
+        reportError: this.reportErrorFn,
       });
     } catch (err) {
       this.reportErrorFn(
@@ -388,8 +394,8 @@ export class ExportFlowController {
     }
 
     if (!outputPath) {
-      // If openExportSaveDialog failed and reported to the store, ensure modal shows it;
-      // otherwise on cancel leave modal as-is on the setup step.
+      // If the dialog failed and reported through `reportError`, ensure the modal shows it;
+      // otherwise on cancel leave the modal as-is on the setup step.
       if (this.getExportStateFn().status === "failed") {
         this.setModalOpen(true);
       }

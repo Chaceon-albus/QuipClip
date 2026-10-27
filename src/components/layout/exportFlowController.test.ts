@@ -10,11 +10,14 @@ import {
 import {
   cancelActiveExport as clientCancelActiveExport,
   createExportStore,
+  ExportError,
   type ExportAudioMode,
   type ExportProgressEvent,
   type ExportRequest,
   type ExportStart,
+  type ExportStatus,
   type ExportStreams,
+  type OpenExportSaveDialogOptions,
 } from "@/features/export";
 import type { MediaSourceRevisionDescriptor } from "@/features/media";
 import type { Preset, Settings } from "@/features/settings/types";
@@ -959,7 +962,48 @@ describe("ExportFlowController", () => {
         extension: "mov",
         filterName: "Video Files",
         defaultName: "clip_export.mov",
+        reportError: expect.any(Function) as unknown,
       });
+    });
+
+    it("confirm hands its own reporter to the save dialog", async () => {
+      // An injected state, as a caller that does not use the export store has one. The
+      // reporter and the state provider are injected together.
+      let status: ExportStatus = "idle";
+      const reportError = vi.fn(() => {
+        status = "failed";
+      });
+      const setModalOpen = vi.fn();
+      const failure = new ExportError({ code: "dialogFailed" });
+      // The dialog reports its failure itself and then answers null (`openExportSaveDialog`).
+      const openSaveDialog = vi.fn((options: OpenExportSaveDialogOptions) => {
+        options.reportError?.(failure);
+        return Promise.resolve(null);
+      });
+      const startExport = vi.fn();
+      const preset = createPreset({ id: "p1" });
+
+      const controller = createExportFlowController({
+        setModalOpen,
+        reportError,
+        getExportState: () => ({ status, tracking: false }),
+        openSaveDialog,
+        startExport,
+        filterName: "Video Files",
+        audioFilterName: "Audio Files",
+        getSettings: () => createSettings([preset], "p1"),
+        getMedia: () => createMedia("/media/clip.mp4", "clip.mp4"),
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      const result = await controller.confirm("p1", "videoAndAudio", "encode");
+
+      expect(result).toBe(false);
+      expect(reportError).toHaveBeenCalledExactlyOnceWith(failure);
+      // The failure reached the injected state, so the modal opens to show it.
+      expect(setModalOpen).toHaveBeenCalledExactlyOnceWith(true);
+      expect(startExport).not.toHaveBeenCalled();
     });
 
     describe("the stream choice", () => {
@@ -1012,6 +1056,7 @@ describe("ExportFlowController", () => {
             extension,
             filterName,
             defaultName: `clip_export.${extension}`,
+            reportError: expect.any(Function) as unknown,
           });
           expect(startExport).toHaveBeenCalledWith(
             expect.objectContaining({
