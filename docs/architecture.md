@@ -341,6 +341,8 @@ setup step then shows the presets, with the active preset selected, and a summar
 selected preset. "Export…" opens the native save dialog with the extension of that preset's
 container. A cancel there returns to the setup step. An export with a preset that is not
 active saves that preset as the active preset, and a failed save does not stop the export.
+The request carries the whole selected preset, and the run reads no preset from the settings
+file (ADR 024).
 
 One export runs at a time, and a second request is refused. A cancel that arrives during the
 encode kills the child at the next poll. A cancel is also tested twice where it decides

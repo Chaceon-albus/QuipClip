@@ -35,6 +35,20 @@ The export action opens the export dialog first, at a setup step. The flow has f
 Step 1 comes before the setup step, so the user never configures an export that the
 application then refuses. "Export anyway" skips the source check and continues at step 2.
 
+(Changed on 2026-10-27.) Step 4 sends the whole selected preset, as the setup step shows it,
+and not its identifier. The run renders with that preset and does not read the presets of
+the settings file. An export that waits in a queue therefore renders the settings that the
+user saw, also when the user edits or deletes the preset while the export waits.
+
+- `start_export` checks the preset with the rules of the settings file before it accepts the
+  export. It refuses an invalid preset with `invalidPreset`.
+- The backend codes `settingsUnreadable` and `presetNotFound` are removed, because the export
+  reads no preset from the settings file.
+- The flow controller still reports `presetNotFound` when the settings hold no preset with
+  the selected identifier. The code is now a frontend code.
+- The settings file still gives the configured path of ffmpeg. The run reads it when it
+  starts, because the path belongs to the machine and not to the export.
+
 A cancel in the save dialog returns the user to the setup step. The export store stays
 `idle`, so a second attempt needs no new check.
 
@@ -55,6 +69,8 @@ export then selects it first.
 
 That save does not delay the export, and a failed save does not stop the export. Rust reads
 the preset from the settings file by its identifier, and the file already holds that preset.
+(Changed on 2026-10-27: the request carries the whole preset, so Rust reads no preset from
+the file.)
 The settings store keeps the error of a failed save, and the Settings dialog shows it.
 
 The active preset therefore means the preset of the last export, or the preset that the user
