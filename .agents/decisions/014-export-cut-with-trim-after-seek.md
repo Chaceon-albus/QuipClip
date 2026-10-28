@@ -534,6 +534,45 @@ The fit step of ADR 053 replaces `scale=<w>:<h>,setsar=1`, and it comes before `
 single-input shape opens one input for each source. The command-line budget must be measured
 again (ADR 053).
 
+(Changed on 2026-10-28.) The budget was measured again for several sources, against the Windows
+limit of 31,743 bytes, with the widest settings and paths of 259 characters. The fit step adds
+about 73 bytes to each chain, and each source adds about 300 bytes for its input. Each piece of an
+FLV source adds about 60 bytes for its slice. One source with 100 pieces no longer fits: its
+encoder needs 31,882 bytes. The limit of pieces is now 48. A segment that crosses a junction
+counts one piece for each of its clips.
+
+A test builds many plans for each source count S from 1 to 48. It checks that every command fits
+in the shape that production chooses. The plans are these:
+
+- The sources share the pieces in turn.
+- The first source has 1 to 49 − S pieces. The other sources have one piece each, or they share
+  the rest of the 48 pieces.
+- Each plan comes with and without an FLV input on the first source.
+- Each plan comes with every piece reading an audio stream, and with no piece reading one. In the
+  second case, the export is one process, and each chain generates its silence in the layout
+  `7.1(wide-side)`. The second source has the layout `5.1.2(back)`.
+
+The widest cases at 48 pieces:
+
+| Command | Plan | Bytes |
+| --- | --- | --- |
+| Encoder | 6 sources, FLV source with 42 of 47 pieces, audio read | 31,736 |
+| Audio process (ADR 043) | 10 sources, FLV source with 37 of 46 pieces | 31,733 |
+| Encoder, one process | 2 sources, FLV source with 14 of 48 pieces, silence | 31,717 |
+
+Every case uses one input for each piece. A case with more pieces does not fit that shape, and the
+single-input shape is shorter for it. These lengths are therefore not the margin of the limit. The
+margin is the shorter of the two shapes in the worst plan: 31,157 bytes, or 586 bytes to spare,
+for 46 sources whose FLV source has 3 of 48 pieces, with silence. The single-input shape grows by
+about 300 bytes for each source. The share of the pieces changes it by a few bytes only. An
+audio-only export is shorter. The widest one measured needs 30,218 bytes: one source whose 48
+pieces all use the FLV input.
+
+A second test checks that 49 pieces give a plan that fits no shape: 47 sources, an FLV source with
+3 pieces, and silence. That plan needs 31,998 bytes in the single-input shape. So the limit cannot
+go up without a new measurement. A change that makes the command longer fails the first test, and
+then the limit must go down. `choose_shape` never gets a plan that no shape fits.
+
 ### The boundary mechanism
 
 The renderer cuts with `trim` and `atrim`. It gives the boundaries as integer ticks in

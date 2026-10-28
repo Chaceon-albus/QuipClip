@@ -65,11 +65,20 @@ The limit of 100 segments in ADR 014 now counts pieces. In the shape with one in
 segment, each piece is one chain and one input. The interface counts the pieces before the user
 starts, so a message about `tooManySegments` can appear for fewer than 100 segments.
 
+(Changed on 2026-10-28.) The measured limit is 48 pieces (ADR 014). Before the save dialog, the
+OPEN step of the export counts the pieces and reports `tooManySegments` when there are more. With
+one clip, it counts the segments.
+
 Preparation runs once for each source that a piece names: the revision check, the probe, the
 audio correction, the FLV input and the gap read of ADR 014, ADR 046 and ADR 049. The plan then
 times each piece with the probe of its own source: its video time base, its format start time,
 its stream indices and its audio sample rate. The plan never compares a raw PTS of one source
 with a raw PTS of another source (ADR 002).
+
+(Changed on 2026-10-28.) Only one FLV source of an export gets the FLV input of ADR 046: the
+first FLV source in the order of the first pieces. `ffmpeg` runs in the directory of the head
+file and names the head by its file name, so one command can name only one head. A later FLV
+source keeps the input seek. Its output is the same, but `ffmpeg` reads more of the file.
 
 ### The command line
 
@@ -208,6 +217,19 @@ source of a piece that has an audio stream, with or without packets, as today.
   that piece counts in the same unit.
 
 With one source, each rule gives the value of today.
+
+(Changed on 2026-10-28.) Two rules were added for the channel layout of the preset value
+`source`:
+
+- Some pieces can read a stream while other pieces generate silence. When the layout name of a
+  silence is not the layout name of the streams, the final `aformat` of each chain names the
+  output layout. This occurs for a layout without a plain name, such as ffprobe's
+  `6 channels (FL+FR+...)`, because its silence gets the name `6c`. So `concat` never gets two
+  layouts.
+- Not every supported `ffmpeg` has a default layout for a count above 8 channels. FFmpeg 9.0.2
+  reads `<count>c` above 8 only for 10, 12, 14, 16 and 24 channels, and FFmpeg 4.3 to 5.0 reads
+  none of them. The silence of a layout of more than 8 channels without a plain name is
+  therefore stereo. When such a silence meets a stream of that layout, the output is stereo.
 
 The second process of ADR 043 keeps its shape. It runs when at least one piece reads audio from a
 stream. The other pieces get their silence chains in that process, as a stream without packets
