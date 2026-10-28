@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-03
 - Deciders: capric98
-- Amended by: ADR 023, ADR 038, ADR 040
+- Amended by: ADR 023, ADR 038, ADR 040, ADR 054
 
 ## Context
 
@@ -27,7 +27,9 @@ and Rust cannot read the web view store.
 
 Keep both in one file, `<app_data>/settings.json`, at schema version 1. Rust owns the file.
 (Changed on 2026-10-02: schema version 2 adds encoder options, the quality kind `cq` and a
-pixel format to each preset, ADR 040. A version 1 file still loads.)
+pixel format to each preset, ADR 040. A version 1 file still loads.) (Changed on 2026-10-28:
+schema version 3 adds an audio gain to each preset, ADR 054. A version 1 or version 2 file still
+loads.)
 ADR 001 gives Rust every operation that touches the file system.
 
 ```json
@@ -103,7 +105,9 @@ rebuilt the document from the seed table would delete the path the user just set
 one probe. See ADR 006. A lost preset library costs the user work that nothing can rebuild,
 so this file inverts that rule.
 
-- A corrupt file, a failed validation, or a schema version above 1 fails the read.
+- A corrupt file, a failed validation, or a schema version above 1 fails the read. (Changed on
+  2026-10-28: a schema version above the current version, 3, fails the read, ADR 040 and ADR
+  054.)
 - A save first reads the file again. It refuses when that read fails.
 - A reset renames the file to `settings.invalid.json` and then writes fresh seeds.
 

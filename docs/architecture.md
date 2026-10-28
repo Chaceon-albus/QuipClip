@@ -74,6 +74,7 @@ document summarizes them and shows how the parts fit together.
 | [`051-list-the-export-queue-for-a-new-page.md`](../.agents/decisions/051-list-the-export-queue-for-a-new-page.md)                           | A page that loaded again restores the export queue from the backend         |
 | [`052-several-sources-on-one-sequence.md`](../.agents/decisions/052-several-sources-on-one-sequence.md)                                     | Clips place sources on one sequence, and edit points name a clip            |
 | [`053-conform-several-sources-at-export.md`](../.agents/decisions/053-conform-several-sources-at-export.md)                                 | One canvas, the highest frame rate and one audio format for several sources |
+| [`054-give-each-preset-an-audio-gain.md`](../.agents/decisions/054-give-each-preset-an-audio-gain.md)                                       | A preset can change the level of the exported audio by a gain in dB         |
 
 ## Shape
 
@@ -351,6 +352,11 @@ preset (ADR 023). The value `source` selects the rate of the source stream, or o
 layout option. The leading `aformat` still pins the input link at the source rate. When an
 encoder cannot accept the requested format, ffmpeg converts the samples in front of it.
 
+A preset with a gain (ADR 054) adds one `volume` chain behind `concat`, in the process that filters
+the audio: the audio process of ADR 043, or the one process of an export without video. `concat`
+writes `[ac]`, and `[ac]volume=-1.0dB[a]` writes the label that the command maps. The encoder of
+ADR 043 and a plan of silence get no gain, and a copy of the audio applies none.
+
 The export action opens the export dialog at a setup step (ADR 024). The flow controller
 first examines the running export, the media, the segments, and the source revision. The
 setup step then shows the presets, with the active preset selected, and a summary of the
@@ -482,6 +488,10 @@ audio, rendered as `-name:v value` and `-name:a value` after the managed flags a
 against a list of names that would break the export; the quality kind `cq`, rendered as
 `-cq N -b:v 0`; and the pixel format of the output video, which the first chain of the graph
 uses. A version 1 file loads with the defaults.
+
+ADR 054 adds an audio gain at schema version 3: a whole number of tenths of a decibel, from -200
+to 200, where 0 means no change. The editor shows it in decibels. A version 1 or version 2 file
+loads with the gain 0.
 
 A missing file seeds presets in memory and writes them on the first save. The seeded
 identifiers are constants. The restore action replaces a seeded preset by identifier and

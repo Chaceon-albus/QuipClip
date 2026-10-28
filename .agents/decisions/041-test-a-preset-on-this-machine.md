@@ -4,7 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 006, ADR 016, ADR 038
-- Amended by: ADR 049
+- Amended by: ADR 049, ADR 054
 
 ## Context
 
@@ -28,7 +28,10 @@ The user asked for a test of a preset on this machine.
 `test_preset(preset)` takes a whole preset, so the editor can test a draft that is not saved. Rust
 checks it with the validation of a saved preset. The command renders the arguments of the export
 with the same builders: the encoder arguments, the pixel format as the first chain of the graph,
-the options, and the muxer arguments. The input is a black `color` source of 256 by 256 at 25
+the options, and the muxer arguments. (Changed on 2026-10-28: a preset with an audio gain ends the
+audio chain of the test graph in the `volume` filter of the export,
+`[1:a]<aformat>,volume=<g>dB[a]`, ADR 054. A gain of 0 renders the same command as before.) The
+input is a black `color` source of 256 by 256 at 25
 frames each second for 0.2 s, and an `anullsrc` source at the sample rate and channel layout of the
 preset, or 48000 Hz stereo for `source`. The command writes with the real muxer to a temporary
 file in the cache directory of the application, because some faults appear only at the header,

@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-04
 - Deciders: capric98
-- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046, ADR 048, ADR 053
+- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046, ADR 048, ADR 053, ADR 054
 
 ## Context
 
@@ -563,13 +563,16 @@ of the limit is the shorter of the two shapes in the worst plan:
 | Command | Worst plan | Bytes |
 | --- | --- | --- |
 | Encoder | 1 source, 91 pieces, FLV input, silence | 31,618 |
-| Audio process (ADR 043) | 44 sources, 48 pieces in turn, FLV input | 30,468 |
+| Audio process (ADR 043) | 44 sources, 48 pieces in turn, FLV input | 30,491 |
 
 The encoder has 125 bytes to spare. Plans without video are shorter. The command that production
 chooses can be longer than these values, because production keeps one input for each piece while
-that shape fits. The longest such encoder needs 31,736 bytes: 6 sources whose FLV source has 42 of
-47 pieces. The longest such audio process needs 31,733 bytes: 10 sources whose FLV source has 37 of
-46 pieces. Both fit.
+that shape fits. The longest such encoder needs 31,741 bytes: an export without video of 36
+sources whose FLV source has 6 of 56 pieces. The longest such audio process needs 31,736 bytes: 32
+sources whose FLV source has 17 of 48 pieces. Both fit. (Changed on 2026-10-28: the gain of ADR
+054 adds 23 bytes to the audio process and to an export without video, and nothing to a plan of
+silence. Before it, the audio process needed 30,468 bytes, and the longest commands that
+production chose were 31,736 and 31,733 bytes.)
 
 For 1 to 10 sources, the largest count that fits is exactly 92 − S. From 11 sources on, one to
 three more pieces fit, so the rule refuses a few exports that would fit. The rule is simple, and

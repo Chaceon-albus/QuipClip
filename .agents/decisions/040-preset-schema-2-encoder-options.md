@@ -4,6 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 013, ADR 014, ADR 023
+- Amended by: ADR 054
 
 ## Context
 
@@ -86,6 +87,10 @@ The permissive reader of the FFmpeg path reads version 1 and version 2. A releas
 record reads a version 2 file as a later version and does not write over it (ADR 013). A version
 1 preset renders the command line of before, plus `-pix_fmt yuv420p`. The encoded packets were
 identical with and without that flag for libx264, libx265 and ProRes.
+
+(Changed on 2026-10-28: ADR 054 adds an audio gain at schema version 3, for the same reason:
+v0.1.1 refuses an unknown key. `CURRENT_SCHEMA_VERSION` is 3, and a load of a version 1 or
+version 2 file writes nothing. The permissive reader reads all three versions.)
 
 ### The editor
 

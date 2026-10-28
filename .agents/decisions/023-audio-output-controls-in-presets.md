@@ -4,7 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 006, ADR 013, ADR 014
-- Amended by: ADR 036, ADR 040, ADR 048, ADR 053
+- Amended by: ADR 036, ADR 040, ADR 048, ADR 053, ADR 054
 
 ## Context
 
@@ -138,8 +138,9 @@ again.
 
 (Added on 2026-10-23.) An export that copies the audio of the source (ADR 048) applies none of
 the audio settings of the preset: the encoder, the bitrate, the sample rate, the channels and
-the options. The audio keeps the format of the source. When the plan refuses the copy, the
-export encodes the audio with these settings, so the editor and the setup step still check
+the options. (Changed on 2026-10-28: such an export also applies no gain, ADR 054.) The audio
+keeps the format of the source. When the plan refuses the copy, the export encodes the audio
+with these settings, so the editor and the setup step still check
 them.
 
 ## Consequences
