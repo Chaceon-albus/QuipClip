@@ -217,7 +217,8 @@ the pieces of that source.
 - It does not convert between colour matrices or ranges. A mix of BT.601 and BT.709 sources, or
   of full range and limited range, can give wrong colours for one of them.
 - It does not handle a display matrix with a mirror or with an angle that is not a multiple of 90
-  degrees. The probe rounds such an angle to the nearest quarter turn.
+  degrees. The probe reports a rotation of 0 for such an angle, because `ffmpeg` then rotates the
+  picture inside a frame of the same size.
 
 A later record can add a check and a conversion for each of these.
 

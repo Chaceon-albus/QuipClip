@@ -90,7 +90,9 @@ the range is the whole source:
   the PTS and the duration, and it keeps the largest sum. A packet with no duration, or with a
   duration of zero, uses the nominal frame interval instead, rounded up to a whole tick. The
   value is null when the probe cannot read the last packets, or when it needs the nominal
-  interval and the source has no nominal rate.
+  interval and the source has no nominal rate. A presented packet with no PTS also makes the
+  value null, so an MPEG-PS source or an AVI with B-frames gets no end. A read with no keyframe
+  is read once more from the start. (Added on 2026-10-28, after the probe measurements.)
 
 A clip whose source has a null `videoStartPts` has no range. It holds no edit point, and no
 segment can cross it.
