@@ -72,6 +72,7 @@ document summarizes them and shows how the parts fit together.
 | [`049-queue-exports-in-the-backend.md`](../.agents/decisions/049-queue-exports-in-the-backend.md)                                           | Exports wait in a backend queue and start one after another                |
 | [`050-bound-the-preparation-of-an-export.md`](../.agents/decisions/050-bound-the-preparation-of-an-export.md)                               | Preparation of an export ends after a time limit or a Stop                 |
 | [`051-list-the-export-queue-for-a-new-page.md`](../.agents/decisions/051-list-the-export-queue-for-a-new-page.md)                           | A page that loaded again restores the export queue from the backend        |
+| [`052-several-sources-on-one-sequence.md`](../.agents/decisions/052-several-sources-on-one-sequence.md)                                     | Clips place sources on one sequence, and edit points name a clip           |
 
 ## Shape
 
@@ -547,6 +548,15 @@ type Project = {
 
 The timeline axis is the active source's elapsed presentation time. It paints only segments
 that reference that source. The global segment array keeps the future export order.
+
+ADR 052 replaces this one-source model, and the code moves to it in steps. A clip places one
+source on a sequence, and the clips play in array order. A segment names a clip and a source
+PTS for its In and for its Out, so it can cross from one clip into the next. Only
+`clipRange` reads the range of a clip, and only `layoutSequence` computes where a clip starts
+on the sequence. The project stores no sequence time. A source gains `videoEndPts`, the exact
+end of its last frame. An operation on clips never changes the frames of a segment, except
+the removal of a clip. The segment array stays the export order, and the export request
+carries each segment as one or more source intervals.
 
 The ruler uses `videoDurationTicks` first. It then uses a valid approximate probe duration,
 then a finite browser duration. If none exists, the ruler is indeterminate and disables

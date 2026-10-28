@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
+- Amended by: ADR 030, ADR 045, ADR 052
 
 ## Context
 
@@ -14,6 +15,13 @@ browser object URLs, and calibration state depend on one machine and one applica
 They must not enter a project file.
 
 ## Decision
+
+(Changed on 2026-10-28.) ADR 052 replaces the one-source axis. The axis is a sequence of
+clips, and each clip places one source. A segment names a clip for its In and for its Out, and
+`activeSourceId` is gone. The rules below for the current segment, the pending In mark, Split,
+zoom, the edges and the menu still apply, on the sequence. The segment array stays the export
+order. The table "What replaces the active source" in ADR 052 gives the replacement for each
+rule here that names the active source.
 
 Use one timeline whose horizontal axis is the active source's elapsed presentation time.
 The segments for that source appear on the axis. The timeline can zoom and pan.

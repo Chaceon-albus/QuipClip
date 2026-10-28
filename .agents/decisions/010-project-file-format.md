@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
+- Amended by: ADR 052
 
 ## Context
 
@@ -48,6 +49,17 @@ schema version remains 1.
   "activeSourceId": "s1"
 }
 ```
+
+(Changed on 2026-10-28.) ADR 052 changes the shape. The file gains `clips`, a list of
+`{ "id", "sourceId" }` in sequence order. A segment is
+`{ "id", "inClipId", "inPts", "outClipId", "outPts" }`. A source gains `videoEndPts`, a
+canonical signed decimal string or null. `activeSourceId` is gone. Validation also checks that
+each clip names a source, that each segment names two clips, that the In clip does not come
+after the Out clip, and that an Out is not after the `videoEndPts` of its clip's source when
+that value exists. A segment that crosses a junction needs a non-null `videoEndPts` on each
+clip from its In clip up to, but not including, its Out clip. Validation also refuses an In
+at the end of a clip and an Out at the start of a clip, because ADR 052 gives each boundary
+one form.
 
 `videoStartPts`, `inPts`, and `outPts` are canonical signed decimal strings.
 `videoDurationTicks` and `reportedFrameCount` are canonical non-negative decimal strings

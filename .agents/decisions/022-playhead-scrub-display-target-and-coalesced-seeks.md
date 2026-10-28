@@ -4,7 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 019
-- Amended by: ADR 035, ADR 039, ADR 046
+- Amended by: ADR 035, ADR 039, ADR 046, ADR 052
 
 ## Context
 
@@ -30,6 +30,9 @@ once. The picture samples that position as fast as the decoder permits. The user
 sees where the seek goes, even when the picture is late.
 
 ## Decision
+
+(Changed on 2026-10-28.) On a sequence of several clips, the table "What replaces the active
+source" in ADR 052 gives the replacement for each rule here that names the active source.
 
 ### A display target that is not an edit position
 

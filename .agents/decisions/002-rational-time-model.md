@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 028, ADR 046
+- Amended by: ADR 028, ADR 046, ADR 052
 
 ## Context
 
@@ -33,6 +33,10 @@ type Pts = string & { readonly __brand: "Pts" }
 type TickCount = string & { readonly __brand: "TickCount" }
 ```
 
+(Changed on 2026-10-28.) ADR 052 moves the owner of a boundary from the source to a clip. A
+segment names a clip for each boundary, and the boundary belongs to the video stream of that
+clip's source. The rules of this record for the PTS do not change.
+
 The JSON representation is a canonical decimal string. `Pts` accepts the full signed
 `i64` range. `TickCount` accepts the non-negative `i64` range. Parsers reject whitespace,
 leading plus signs, non-decimal text, and values outside these ranges.
@@ -48,6 +52,12 @@ Each persisted source stores this timing metadata:
 `videoDurationTicks` describes the reported source extent. It is not an edit boundary. It
 does not identify the end of the final presented frame.
 
+(Changed on 2026-10-28.) Each source also stores `videoEndPts`, the PTS that follows the last
+presented frame, or null (ADR 052). The probe reads it from the last video packets. It is an
+exact end boundary, so an Out can be the end of a clip. That closes the gap that the
+consequence "Exact inclusion of the final source frame needs discovery of its following
+boundary" names.
+
 `approximateDurationSeconds` must be finite and non-negative when it exists. An invalid
 value is unavailable metadata. It cannot affect canonical project state.
 
@@ -56,6 +66,11 @@ value is unavailable metadata. It cannot affect canonical project state.
 the lead of the video start over the container start from `format.duration`. FLV and Matroska
 have their own rules in ADR 046. ADR 046 also gives a `MediaSource` this duration. That is a
 browser value for seeks, so the rule above still holds.
+
+(Changed on 2026-10-28.) The interval rules below, `inPts < outPts` and the duration formula,
+apply to a segment on one clip (ADR 052). A segment that crosses a junction has an In and an
+Out on two clips. Its duration is the sum of the durations of its pieces, each computed with
+the time base of its own source.
 
 A segment is a half-open source interval `[inPts, outPts)`. `inPts` is inclusive.
 `outPts` is the PTS of the first excluded presented frame. A valid segment has

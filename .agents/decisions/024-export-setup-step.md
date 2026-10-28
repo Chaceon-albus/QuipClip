@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-22
 - Deciders: capric98
-- Amended by: ADR 038, ADR 036, ADR 048, ADR 049
+- Amended by: ADR 038, ADR 036, ADR 048, ADR 049, ADR 052
 
 ## Context
 
@@ -14,6 +14,9 @@ the Settings dialog. The export dialog did not show which preset the export used
 The user reported that an export started before they could choose a preset.
 
 ## Decision
+
+(Changed on 2026-10-28.) On a sequence of several clips, the table "What replaces the active
+source" in ADR 052 gives the replacement for each rule here that names the active source.
 
 The export action opens the export dialog first, at a setup step. The flow has four steps:
 

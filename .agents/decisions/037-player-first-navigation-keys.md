@@ -4,7 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 021, ADR 026, ADR 035
-- Amended by: ADR 044
+- Amended by: ADR 044, ADR 052
 
 ## Context
 
@@ -23,6 +23,9 @@ a key or drag the playhead. The user compared three tables and chose a player-fi
   and Premiere Pro.
 
 ## Decision
+
+(Changed on 2026-10-28.) On a sequence of several clips, the table "What replaces the active
+source" in ADR 052 gives the replacement for each rule here that names the active source.
 
 ### The key table
 

@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 021
-- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046
+- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052
 
 ## Context
 
@@ -25,6 +25,9 @@ second reason no longer applies, because this record uses `Shift` for that step.
 first reason stays true for every combination that this record does not name.
 
 ## Decision
+
+(Changed on 2026-10-28.) On a sequence of several clips, the table "What replaces the active
+source" in ADR 052 gives the replacement for each rule here that names the active source.
 
 The layer of ADR 021 stays the one listener. Its rules about the capture phase, ownership,
 focus, input methods, text fields, dialogs, menus and list boxes stay as they are. This

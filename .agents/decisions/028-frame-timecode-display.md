@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 002
-- Amended by: ADR 046
+- Amended by: ADR 046, ADR 052
 
 ## Context
 
@@ -72,6 +72,17 @@ drop-frame or non-drop-frame timecode.
 The millisecond format is used when the source has no nominal frame rate. It is also used
 when the average frame rate and the real frame rate differ, because the source then has a
 variable frame rate and `FF` would not name a frame.
+
+(Changed on 2026-10-28.) On a sequence of several clips (ADR 052), the frame format needs one
+nominal rate for every clip. The whole sequence uses the millisecond format in each of these
+cases:
+
+- Two clips differ in nominal rate.
+- One clip uses the millisecond format by the rules above.
+- A clip before the last has an extent that is not exact, or that is not a whole number of
+  frames at that rate. A later clip would then not start on a frame of the count.
+
+The frame band still uses the frame grid of each clip.
 
 (Changed on 2026-10-17.) An FLV with millisecond timestamps reports a wrong average rate, such
 as 989/33 for 30 fps. For FLV, the probe reports `r_frame_rate` as the average rate when the two

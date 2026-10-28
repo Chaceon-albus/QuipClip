@@ -4,6 +4,7 @@
 - Date: 2026-10-23
 - Deciders: capric98
 - Amends: ADR 014, ADR 016, ADR 023, ADR 024, ADR 036, ADR 043, ADR 046
+- Amended by: ADR 052
 
 ## Context
 
@@ -104,6 +105,9 @@ two processes. The encoder used `libx264 -preset ultrafast`.
     20 ms.
 
 ## Decision
+
+(Changed on 2026-10-28.) On a sequence of several clips, the table "What replaces the active
+source" in ADR 052 gives the replacement for each rule here that names the active source.
 
 ### The switch
 

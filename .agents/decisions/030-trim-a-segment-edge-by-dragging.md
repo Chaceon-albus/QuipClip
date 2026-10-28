@@ -4,6 +4,7 @@
 - Date: 2026-09-24
 - Deciders: capric98
 - Amends: ADR 007
+- Amended by: ADR 045, ADR 052
 
 ## Context
 
@@ -18,6 +19,25 @@ pixel position or from an approximate clock. A boundary must be the PTS of a fra
 browser presented, or a PTS that the project already stores.
 
 ## Decision
+
+(Changed on 2026-10-28.) ADR 052 puts several clips on one sequence. A trim then follows these
+rules, and the rules below that name the active source or the source apply as follows:
+
+- A trim belongs to its segment. A change of the attached clip during the drag does not end
+  the trim and does not drop it. The reset of the calibration that the attach causes does not
+  drop it either. Only a calibration that becomes unavailable for another reason does.
+- The edge can cross a junction into the next or the previous clip. The new boundary then
+  names that clip. A release on a junction writes the one form of ADR 052: an Out at a
+  junction is the end of the earlier clip.
+- The snap targets are the boundaries of the other segments of the sequence, the playhead at
+  the start of the drag, and each junction. The press clears the pending In, as before.
+- At the release, the rule "`inPts < outPts`" uses the comparison of ADR 052.
+- An edge stops on the last frame before a junction after a clip with no `videoEndPts`.
+- The frame under the edge, and the width of one frame, come from the frame grid and the
+  nominal rate of the clip under the edge.
+- The Out edge of the last clip still stops on its last frame. The Out edge of a clip that
+  another clip follows, and that has a `videoEndPts`, can reach the end of that clip, which is
+  the junction.
 
 A drag on an edge trims that edge. The drag moves the playhead as a scrub does, and the
 release commits the frame that the browser presents at the end of the drag.

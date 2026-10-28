@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 039, ADR 046
+- Amended by: ADR 039, ADR 046, ADR 052
 
 ## Context
 
@@ -19,6 +19,9 @@ QuipClip needs a defined mapping from a browser-presented frame to the source vi
 It must also support playback when ffprobe does not report `start_pts`.
 
 ## Decision
+
+(Changed on 2026-10-28.) On a sequence of several clips, the table "What replaces the active
+source" in ADR 052 gives the replacement for each rule here that names the active source.
 
 Use the native `<video>` element when the web view can decode the source. Use an FFmpeg
 proxy when the web view cannot decode it.

@@ -4,6 +4,7 @@
 - Date: 2026-10-14
 - Deciders: capric98
 - Amends: ADR 007, ADR 026, ADR 030
+- Amended by: ADR 052
 
 ## Context
 
@@ -20,6 +21,9 @@ together:
 Before this record, the user had to click each segment and press Delete for each one.
 
 ## Decision
+
+(Changed on 2026-10-28.) On a sequence of several clips, the table "What replaces the active
+source" in ADR 052 gives the replacement for each rule here that names the active source.
 
 ### The selection
 

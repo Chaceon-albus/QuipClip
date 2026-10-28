@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 017
-- Amended by: ADR 038, ADR 049
+- Amended by: ADR 038, ADR 049, ADR 052
 
 ## Context
 
@@ -72,6 +72,11 @@ and waits, as ADR 017 does. Both handlers share one deadline, so an exit that pa
 through both still waits at most 5 seconds in total.
 
 ### Replacing the open video
+
+(Changed on 2026-10-28.) ADR 052 removes this dialog. An import now adds a clip to the
+sequence and replaces nothing. The new action Clear Timeline removes every clip and every
+segment, and it asks first when segments exist. The rest of this section describes the old
+behaviour.
 
 Opening another video while the open one has segments also asks first: File > Open Media,
 `Cmd+O` or `Ctrl+O`, and a file drop. The segments stay with the old source, and they come
