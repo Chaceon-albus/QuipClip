@@ -131,8 +131,22 @@ fps=<rate>
 
 - The plan computes `<fw>`, `<fh>`, `<x>` and `<y>`, so the chain does not depend on the scale
   options of one `ffmpeg` version.
-- Lanczos is the high-quality scaler of every `ffmpeg` build. It needs no optional library.
+- Lanczos is the high-quality scaler of every `ffmpeg` build. It needs no optional library. The
+  fit step uses it for an upscale and for a downscale. The user refuses bicubic and every other
+  scaler of low quality.
 - The padding is black, the default colour of `pad`.
+
+(Changed on 2026-10-28.) Spline36 is not used. The `scale` filter (libswscale) has no spline36:
+its `spline` is a different two-tap kernel. Only `zscale` (zimg) has spline36. On ffmpeg 9.0.2,
+`zscale` failed with `no path between colorspaces` on a source with no colour tags, which is a
+common source. Not every `ffmpeg` build has zimg either.
+
+Every export graph that carries video starts with `sws_flags=lanczos+accurate_rnd+full_chroma_int;`.
+`ffmpeg` adds its own converters for a change of pixel format, for example from 4:2:2 to 4:2:0 at
+the final `format`, or from 10 bits to 8 bits. Without that prefix those converters use bicubic,
+also in an export of one source (measured: `auto_scale_0 … flags:0x00000004`). With the prefix
+they use Lanczos with accurate rounding and full chroma interpolation. The prefix costs about 45
+bytes of the command-line budget for each graph.
 
 An explicit preset size now uses the same fit step. Before this record it stretched the picture.
 This is a change for a single-source export too.
