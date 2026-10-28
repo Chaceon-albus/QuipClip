@@ -51,7 +51,7 @@ const EXPORT_REQUEST: ExportRequest = {
 };
 
 function startAnswer(runId: string): ExportSubmission {
-  return { runId };
+  return { runId, queued: false };
 }
 
 /**

@@ -38,6 +38,7 @@ function createValidStartResult(
 ): ExportSubmission {
   return {
     runId: "export-run-123",
+    queued: false,
     ...overrides,
   };
 }

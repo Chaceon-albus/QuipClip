@@ -416,7 +416,7 @@ describe("ExportFlowController", () => {
         expect(setModalOpen).toHaveBeenCalledWith(true);
         expect(store.getState()).toMatchObject({ status: "preparing", tracking: true });
 
-        answerStart({ runId: "run-kept" });
+        answerStart({ runId: "run-kept", queued: false });
         await expect(starting).resolves.toMatchObject({ runId: "run-kept" });
         await expect(stopping).resolves.toBe(false);
         expect(store.getState()).toMatchObject({
@@ -434,7 +434,7 @@ describe("ExportFlowController", () => {
       it("resets and reaches the setup step once the kept run ended", async () => {
         const { store, starting, stopping, answerStart, emit } =
           await stopWhileTheStartWaits();
-        answerStart({ runId: "run-kept" });
+        answerStart({ runId: "run-kept", queued: false });
         await starting;
         await stopping;
         emit({ event: "failed", runId: "run-kept", code: "ffmpegProcessFailed" });

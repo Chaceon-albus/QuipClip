@@ -220,7 +220,7 @@ describe("Export Types & Wire Constants", () => {
         "outputRenameFailed",
         "canceled",
         "commandExecutionFailed",
-        "exportAlreadyRunning",
+        "exportQueueClosed",
       ]);
     });
 
@@ -360,12 +360,13 @@ describe("Export Types & Wire Constants", () => {
       expect(publishing.runId).toBe("run-1");
     });
 
-    it("enumerates exactly the 5 valid event tag strings", () => {
+    it("enumerates exactly the 6 valid event tag strings", () => {
       // Vitest does not typecheck, so a runtime assertion over a literal the test wrote
       // proves nothing about the type. A Record typed over the union tags pins the set
       // at compile time: adding a variant fails on a missing key, removing one fails on
       // an excess key.
       const ALL_EVENT_TAGS: Record<ExportProgressEvent["event"], true> = {
+        preparing: true,
         started: true,
         progress: true,
         publishing: true,
@@ -373,13 +374,14 @@ describe("Export Types & Wire Constants", () => {
         failed: true,
       };
       expect(Object.keys(ALL_EVENT_TAGS)).toEqual([
+        "preparing",
         "started",
         "progress",
         "publishing",
         "finished",
         "failed",
       ]);
-      expect(Object.keys(ALL_EVENT_TAGS).length).toBe(5);
+      expect(Object.keys(ALL_EVENT_TAGS).length).toBe(6);
     });
   });
 

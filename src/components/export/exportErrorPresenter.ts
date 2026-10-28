@@ -77,12 +77,13 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   audioGapTooLong: BACK_TO_SETUP,
 
   // A condition that can clear by itself: a share that stopped answering, a command that
-  // did not reach the backend, a slot that a stopped run has not released yet (ADR 016),
-  // or a cause that has no code.
+  // did not reach the backend, or a cause that has no code.
   ffprobeTimedOut: BACK_TO_SETUP,
   commandExecutionFailed: BACK_TO_SETUP,
-  exportAlreadyRunning: BACK_TO_SETUP,
   unknown: BACK_TO_SETUP,
+
+  // The application quits, so nothing can start the export again.
+  exportQueueClosed: null,
 
   // The fix is outside the export dialog and the settings: the application data directory,
   // the source file, or the marked segments. A second attempt fails the same way.

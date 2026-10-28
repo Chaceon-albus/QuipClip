@@ -125,6 +125,11 @@ export function createExportStore(
       }
 
       switch (event.event) {
+        case "preparing": {
+          // The first event of the run. The store shows `preparing` from the start, so the
+          // event changes nothing for the run that the store tracks.
+          break;
+        }
         case "started": {
           // `started` moves the run into `running`, a phase of its own. A Stop request that
           // failed in an earlier phase no longer describes the run, so its error clears.
@@ -343,9 +348,9 @@ export function createExportStore(
       cancelExport: async (): Promise<boolean> => {
         const runId = activeRunId;
         if (!runId) {
-          // A start that waits for its run id can still be stopped. The backend claimed the
-          // export slot for it and answers with the id as soon as it accepted the run, before
-          // the run prepares. The request waits for that answer and then names the run.
+          // A start that waits for its run id can still be stopped. The backend answers with
+          // the id as soon as it accepted the run, before the run prepares. The request waits
+          // for that answer and then names the run.
           // Every other status with no run id has no run to stop.
           if (!waitsForRunId()) {
             return false;

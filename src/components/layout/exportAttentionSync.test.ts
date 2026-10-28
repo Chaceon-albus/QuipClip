@@ -277,12 +277,7 @@ describe("startExportAttentionSync", () => {
       startExport: () =>
         Promise.resolve({
           runId: "run-1",
-          presetId: "mp4-h264",
-          streams: "videoAndAudio",
-          outputPath: "/media/output.mp4",
-          segmentCount: 1,
-          totalDurationUs: 5_000_000,
-          expectedFrames: 150,
+          queued: false,
         }),
       cancelExport: () => Promise.reject(new Error("ipc failed")),
       subscribeExportProgress: (handler) => {
@@ -366,7 +361,7 @@ describe("startExportAttentionSync", () => {
     });
     // The Stop waits for the run id, and its request goes out after the answer.
     const stopping = store.getState().cancelExport();
-    answerStart({ runId: "run-kept" });
+    answerStart({ runId: "run-kept", queued: false });
     await starting;
     await expect(stopping).resolves.toBe(false);
     expect(store.getState()).toMatchObject({

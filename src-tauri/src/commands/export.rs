@@ -11,9 +11,10 @@
 //! # What is rejected, and what is reported by event
 //!
 //! The command decides only what it can decide at once, and rejects the promise for it: an
-//! invalid preset, a missing application data directory, a second export already running, and
-//! an export thread that the operating system refused. Then it answers with the run id
-//! ([`ExportSubmission`]). Preparation runs on the export thread after that answer: the
+//! invalid preset, a missing application data directory, and an exit that began. Then it
+//! answers with the run id ([`ExportSubmission`]): the run starts at once, or waits in the queue
+//! of [`ExportRegistry`] until the runs before it end (ADR 049). A run reports `preparing` when it
+//! takes the slot. Preparation runs on the export thread after that: the
 //! discovery of ffmpeg, the revision check, the re-probe, every preflight check in
 //! [`build_plan`], and the output reservation. A failure there is a `failed` event on the run,
 //! as every later failure is. The frontend therefore holds the run id for the whole run, and it
@@ -70,8 +71,8 @@ use crate::ffmpeg::export::{
     verify_audio_output, verify_copied_audio_output, verify_copy_streams, AudioOutputMismatch,
     CopyOutput, ExportAudioMode, ExportErrorCode, ExportPlan, ExportProcessOutcome,
     ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot, ExportStreams,
-    PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary, AUDIO_FILL_MIN_GAP_MILLISECONDS,
-    MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
+    PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary, Submission, WaitingRun,
+    AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::preview::PreviewWindows;
 use crate::ffmpeg::{
@@ -165,14 +166,18 @@ pub struct ExpectedSourceRevisionWire {
     pub mtime: i64,
 }
 
-/// The answer of `start_export`: the id of the run that the command accepted.
+/// The answer of `start_export`: the id of the run that the command accepted, and whether it
+/// waits for the runs before it.
 ///
 /// The command answers before the run prepares. Every later report of the run, a failure of
-/// preparation included, is an event on [`EVENT_NAME`] that carries this id.
+/// preparation included, is an event on [`EVENT_NAME`] that carries this id. A run that waits
+/// reports `preparing` when it takes the slot, and `failed` with `canceled` when a cancel
+/// withdraws it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSubmission {
     pub run_id: String,
+    pub queued: bool,
 }
 
 /// The facts of a prepared run.
@@ -255,7 +260,7 @@ impl ExportCommandError {
 /// to the run it started.
 ///
 /// Both serde attributes below are required together, exactly as in
-/// `commands::capabilities`. `rename_all` renames the five variants into the `event` tag
+/// `commands::capabilities`. `rename_all` renames the six variants into the `event` tag
 /// value. `rename_all_fields` renames each variant's *fields*, and dropping it would ship
 /// `run_id` verbatim: the frontend's strict `validateExportProgressEvent` would then reject
 /// every event, and the interface would sit on "exporting" forever with no completion and no
@@ -267,6 +272,12 @@ impl ExportCommandError {
     rename_all_fields = "camelCase"
 )]
 pub enum ExportEvent {
+    /// The run took the export slot, and its export thread prepares it. A run that started at
+    /// once and a run that waited both send it first. A run that a cancel withdrew from the
+    /// queue, or whose thread the system refused, sends only `failed`.
+    Preparing {
+        run_id: String,
+    },
     Started {
         run_id: String,
         output_path: String,
@@ -338,16 +349,17 @@ struct PreparedExport {
     pending: PendingOutput,
 }
 
-/// Start one export and report it through [`EVENT_NAME`].
+/// Start one export, or put it in the queue, and report it through [`EVENT_NAME`].
 ///
-/// The single export slot is claimed here, in the command, and not on the export thread: a
-/// second export has to be refused while there is still a rejection path to answer it with.
-/// The claim then moves to the export thread, because a run outlives the command that started
-/// it and Tauri lends managed state only for the length of the command.
+/// The command hands the run to the registry ([`ExportRegistry::submit`]). The registry starts
+/// it at once when the slot is free, and otherwise when the runs before it have released the
+/// slot. Either way the run gets its slot through [`QueuedExport`], which moves it to the export
+/// thread, because a run outlives the command that started it and Tauri lends managed state
+/// only for the length of the command.
 ///
-/// The command answers with the run id as soon as the thread runs, and the run prepares on that
-/// thread ([`run_export_job`]). The frontend therefore can name the run in a cancel from the
-/// start of preparation, which can last tens of seconds.
+/// The command answers with the run id at once, and the run prepares on its thread
+/// ([`run_export_job`]). The frontend can therefore name the run in a cancel from the moment it
+/// waits, through preparation, which can last tens of seconds, to its end.
 #[tauri::command]
 pub async fn start_export(
     app: tauri::AppHandle,
@@ -365,29 +377,35 @@ pub async fn start_export(
         .map_err(|_| ExportCommandError::new(ExportErrorCode::AppDataUnavailable))?;
 
     let run_id = next_run_id();
-    // Claimed before the run prepares, so a second export is refused rather than allowed to
-    // spawn a second ffprobe and reserve a second temporary file.
-    let slot = registry
-        .begin(&run_id)
-        .ok_or_else(|| ExportCommandError::new(ExportErrorCode::ExportAlreadyRunning))?;
-
-    spawn_export_job(
+    let waiting = Box::new(QueuedExport {
         app,
-        slot,
-        ExportJob {
+        run_id: run_id.clone(),
+        job: ExportJob {
             request,
             app_data_directory,
             preview_windows: preview_windows.inner().clone(),
         },
-    )?;
-
-    Ok(ExportSubmission { run_id })
+    });
+    // One run holds the slot at a time (ADR 016). A run that comes while another holds it
+    // waits, and the registry starts it when the runs before it have released the slot.
+    match registry.submit(&run_id, waiting) {
+        Submission::Started => Ok(ExportSubmission {
+            run_id,
+            queued: false,
+        }),
+        Submission::Queued => Ok(ExportSubmission {
+            run_id,
+            queued: true,
+        }),
+        Submission::Closed => Err(ExportCommandError::new(ExportErrorCode::ExportQueueClosed)),
+    }
 }
 
-/// Ask the run named by `runId` to stop, and report whether the request reached the run that
-/// currently holds the export slot.
+/// Ask the run named by `runId` to stop, and report whether the request reached it: the run
+/// that holds the export slot, or a run that waits in the queue. A run that waits leaves the
+/// queue and reports `failed` with `canceled`.
 ///
-/// `false` means the named run is not the one running. It does not mean no export is running,
+/// `false` means the named run neither runs nor waits. It does not mean no export is running,
 /// and the frontend must not render it that way.
 ///
 /// This sets a flag and returns. The worker notices on its next poll, kills its child, and
@@ -1152,30 +1170,78 @@ struct ExportJob {
     preview_windows: Arc<PreviewWindows>,
 }
 
+/// An export that waits for the slot, as the registry holds it (ADR 049).
+struct QueuedExport {
+    app: tauri::AppHandle,
+    run_id: String,
+    job: ExportJob,
+}
+
+impl WaitingRun for QueuedExport {
+    /// Move the run and its slot to an export thread of its own.
+    ///
+    /// A thread that the operating system refuses is reported as a `failed` event, before the
+    /// slot is released. The release then hands the slot to the next waiting run, and the
+    /// order of the events stays the order of the runs.
+    fn start(self: Box<Self>, slot: ExportSlot) {
+        let QueuedExport { app, run_id, job } = *self;
+        if let Err(refused) = spawn_export_job(app.clone(), slot, job) {
+            let (slot, error) = *refused;
+            emit_failed(&app, &run_id, error);
+            drop(slot);
+        }
+    }
+
+    /// Report the run that left the queue without starting as `canceled`.
+    fn withdraw(self: Box<Self>) {
+        emit_failed(
+            &self.app,
+            &self.run_id,
+            ExportCommandError::new(ExportErrorCode::Canceled),
+        );
+    }
+}
+
 /// Start the dedicated thread that prepares and runs one export to completion.
 ///
 /// This is an OS thread of its own, not the tokio blocking pool: an export runs for minutes,
 /// and that pool is sized and scheduled for short work. Preparation runs short child
 /// processes one after the other and waits on the file system, which the thread can afford.
 ///
-/// A thread that the operating system refuses is reported as a rejection, because the command
-/// has not answered yet. The refused closure owned the slot, so the drop that lost the closure
-/// released the slot too.
+/// The slot reaches the thread through a channel after the thread runs. A thread that the
+/// operating system refuses therefore gives the slot back with the error, and the caller
+/// reports the failure before it releases the slot.
 fn spawn_export_job(
     app: tauri::AppHandle,
     slot: ExportSlot,
     job: ExportJob,
-) -> Result<(), ExportCommandError> {
-    std::thread::Builder::new()
+) -> Result<(), Box<(ExportSlot, ExportCommandError)>> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<(ExportSlot, ExportJob)>(1);
+    let spawned = std::thread::Builder::new()
         .name("export".to_owned())
-        .spawn(move || run_export_job(&app, slot, job))
-        .map(|_| ())
-        .map_err(|error| {
+        .spawn(move || {
+            // The sender gives the run at once. A closed channel means the caller kept it.
+            if let Ok((slot, job)) = receiver.recv() {
+                run_export_job(&app, slot, job);
+            }
+        });
+    match spawned {
+        Ok(_) => sender
+            .send((slot, job))
+            .map_err(|std::sync::mpsc::SendError((slot, _))| {
+                Box::new((
+                    slot,
+                    ExportCommandError::new(ExportErrorCode::CommandExecutionFailed),
+                ))
+            }),
+        Err(error) => Err(Box::new((
+            slot,
             ExportCommandError::with_detail(
                 ExportErrorCode::CommandExecutionFailed,
                 error.to_string(),
-            )
-        })
+            ),
+        ))),
+    }
 }
 
 /// Prepare one export on the export thread, then run it.
@@ -1183,6 +1249,14 @@ fn spawn_export_job(
 /// The thin shell of [`run_export_job_with`], which holds the order and is what the tests call.
 fn run_export_job(app: &tauri::AppHandle, slot: ExportSlot, job: ExportJob) {
     let run_id = slot.run_id().to_owned();
+    // The first event of every run whose thread runs, so the interface learns that a run that
+    // waited now holds the slot.
+    emit_event(
+        app,
+        ExportEvent::Preparing {
+            run_id: run_id.clone(),
+        },
+    );
     run_export_job_with(
         slot,
         |cancel| {
@@ -1714,9 +1788,9 @@ fn progress_event(
 /// times out: an exit failure or a parse failure there is a wrong output, not a fault of the
 /// source, and a cancel ends the run as canceled.
 ///
-/// The timeout matters more here than it does on the import path. The single export slot is
-/// claimed before the re-probe runs, so an unbounded probe would hold it for the rest of the
-/// process's life and refuse every later export with `exportAlreadyRunning`.
+/// The timeout matters more here than it does on the import path. The run holds the single
+/// export slot while the re-probe runs, so an unbounded probe would hold it for the rest of the
+/// process's life, and every later export would wait behind it in the queue.
 fn map_reprobe_error(error: ProbeError) -> ExportCommandError {
     let mapped = map_probe_error(error);
     let code = match mapped.code {
@@ -2299,12 +2373,12 @@ mod tests {
 
     #[test]
     fn export_command_error_omits_absent_optional_fields_entirely_not_as_null() {
-        let error = ExportCommandError::new(ExportErrorCode::ExportAlreadyRunning);
+        let error = ExportCommandError::new(ExportErrorCode::ExportQueueClosed);
 
         let value = serde_json::to_value(&error).unwrap();
         let object = value.as_object().unwrap();
 
-        assert_eq!(value["code"], "exportAlreadyRunning");
+        assert_eq!(value["code"], "exportQueueClosed");
         assert!(!object.contains_key("detail"));
         assert!(!object.contains_key("exitCode"));
         assert!(!object.contains_key("encoder"));
@@ -4928,10 +5002,27 @@ mod tests {
     fn the_answer_of_start_export_is_the_run_id_in_camel_case() {
         let value = serde_json::to_value(ExportSubmission {
             run_id: "42-7".to_owned(),
+            queued: true,
         })
         .unwrap();
 
-        assert_eq!(value, serde_json::json!({ "runId": "42-7" }));
+        assert_eq!(
+            value,
+            serde_json::json!({ "runId": "42-7", "queued": true })
+        );
+    }
+
+    #[test]
+    fn the_preparing_event_names_its_run_in_camel_case() {
+        let value = serde_json::to_value(ExportEvent::Preparing {
+            run_id: "42-7".to_owned(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({ "event": "preparing", "runId": "42-7" })
+        );
     }
 
     #[test]

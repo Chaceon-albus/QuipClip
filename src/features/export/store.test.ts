@@ -43,6 +43,7 @@ function createValidStartResult(
 ): ExportSubmission {
   return {
     runId: "run-export-1",
+    queued: false,
     ...overrides,
   };
 }
@@ -1020,6 +1021,41 @@ describe("Media Export Store", () => {
     });
   });
 
+  describe("a start that the backend queued", () => {
+    it("tracks the run by its id and follows it from its preparing event", async () => {
+      let emit: (event: ExportProgressEvent) => void = () => {};
+      const store = createExportStore({
+        subscribeExportProgress: (handler) => {
+          emit = handler;
+          return Promise.resolve(() => {});
+        },
+        // The slot of the run before was still held for a moment (ADR 049).
+        startExport: () =>
+          Promise.resolve(createValidStartResult({ runId: "run-2", queued: true })),
+      });
+
+      await store.getState().startExport(createValidRequest());
+      expect(store.getState()).toMatchObject({
+        status: "preparing",
+        runId: "run-2",
+        tracking: true,
+      });
+
+      emit({ event: "preparing", runId: "run-2" });
+      expect(store.getState().status).toBe("preparing");
+
+      emit({
+        event: "started",
+        runId: "run-2",
+        outputPath: "/media/output.mp4",
+        segmentCount: 1,
+        totalDurationUs: 1_000_000,
+        expectedFrames: 30,
+      });
+      expect(store.getState()).toMatchObject({ status: "running", expectedFrames: 30 });
+    });
+  });
+
   describe("a Stop that waits for the run id", () => {
     /**
      * A store whose start waits until the test answers it. `cancelFn` is the injected
@@ -1138,7 +1174,7 @@ describe("Media Export Store", () => {
       const stopping = store.getState().cancelExport();
       expect(store.getState().cancelRequested).toBe(true);
 
-      startDeferred.reject(new ExportError({ code: "exportAlreadyRunning" }));
+      startDeferred.reject(new ExportError({ code: "exportQueueClosed" }));
       await expect(starting).resolves.toBeNull();
 
       await expect(stopping).resolves.toBe(false);
@@ -1150,7 +1186,7 @@ describe("Media Export Store", () => {
         tracking: false,
         cancelRequested: false,
       });
-      expect(store.getState().error?.code).toBe("exportAlreadyRunning");
+      expect(store.getState().error?.code).toBe("exportQueueClosed");
     });
 
     it("settles the Stop with false on a reset, and sends no request", async () => {

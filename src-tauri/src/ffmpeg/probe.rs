@@ -20,9 +20,9 @@ use std::time::{Duration, Instant};
 ///
 /// ADR 006 bounds the smoke test because "a broken hardware encoder can hang instead of
 /// fail". An `ffprobe` that reads a file on a share which stops answering has the same
-/// failure mode, and the cost is higher: `commands::export::start_export` claims the single
-/// export slot *before* the re-probe runs, so a stalled probe holds that slot until the
-/// application restarts and every later export is refused with `exportAlreadyRunning`.
+/// failure mode, and the cost is higher: an export holds the single export slot while its
+/// re-probe runs, so a stalled probe would hold that slot until the application restarts, and
+/// every later export would wait behind it in the queue (ADR 049).
 ///
 /// 30 seconds is far above the real cost of a probe, even of a large file on a slow disk,
 /// and it is short enough that a person waiting on an import is told something rather than

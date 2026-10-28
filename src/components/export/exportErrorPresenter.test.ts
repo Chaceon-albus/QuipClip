@@ -349,7 +349,7 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   outputRenameFailed: BACK,
   canceled: null,
   commandExecutionFailed: BACK,
-  exportAlreadyRunning: BACK,
+  exportQueueClosed: null,
   dialogFailed: BACK,
   sourceRevisionChanged: null,
   unknown: BACK,

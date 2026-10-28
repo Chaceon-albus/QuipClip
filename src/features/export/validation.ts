@@ -65,7 +65,9 @@ export function isExportSubmission(value: unknown): value is ExportSubmission {
     return false;
   }
   const s = value as Record<string, unknown>;
-  return typeof s.runId === "string" && s.runId.length > 0;
+  return (
+    typeof s.runId === "string" && s.runId.length > 0 && typeof s.queued === "boolean"
+  );
 }
 
 /**
@@ -94,6 +96,8 @@ export function isExportProgressEvent(value: unknown): value is ExportProgressEv
   }
 
   switch (e.event) {
+    case "preparing":
+      return true;
     case "started":
       return (
         typeof e.outputPath === "string" &&

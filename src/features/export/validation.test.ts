@@ -23,6 +23,7 @@ function createValidSubmission(
 ): ExportSubmission {
   return {
     runId: "run-export-1",
+    queued: false,
     ...overrides,
   };
 }
@@ -65,8 +66,12 @@ describe("Export Validation & Normalization", () => {
       const valid = createValidSubmission();
       expect(isExportSubmission(valid)).toBe(true);
 
-      // The answer carries the run id only. A field that an older backend still sends does
-      // not make it invalid.
+      // The answer says whether the run waits in the queue (ADR 049).
+      expect(isExportSubmission({ ...valid, queued: true })).toBe(true);
+      expect(isExportSubmission({ runId: "run-export-1" })).toBe(false);
+      expect(isExportSubmission({ runId: "run-export-1", queued: "yes" })).toBe(false);
+
+      // An extra field does not make the answer invalid.
       expect(
         isExportSubmission({ ...valid, outputPath: "/media/out.mp4", segmentCount: 2 }),
       ).toBe(true);
@@ -133,6 +138,14 @@ describe("Export Validation & Normalization", () => {
           speed: { n: 0, d: 1 },
         }),
       ).toBe(true);
+    });
+  });
+
+  describe("the preparing event", () => {
+    it("accepts a preparing event that names its run", () => {
+      expect(isExportProgressEvent({ event: "preparing", runId: "run-2" })).toBe(true);
+      expect(isExportProgressEvent({ event: "preparing" })).toBe(false);
+      expect(isExportProgressEvent({ event: "preparing", runId: 2 })).toBe(false);
     });
   });
 

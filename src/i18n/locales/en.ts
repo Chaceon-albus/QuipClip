@@ -1050,7 +1050,7 @@ export const en = {
       "QuipClip could not save the finished video to the destination path.",
     canceled: "The export was stopped.",
     commandExecutionFailed: "QuipClip could not run the export command.",
-    exportAlreadyRunning: "An export is already running.",
+    exportQueueClosed: "QuipClip is quitting, so it did not start the export.",
     dialogFailed: "QuipClip could not open the export save dialog.",
     sourceRevisionChanged:
       "The video file on disk changed after it was opened. The marked segments may no longer name the same frames.",

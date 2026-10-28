@@ -1,16 +1,20 @@
-//! The single-flight guard and the cancellation handle for the export renderer.
+//! The single-flight guard, the queue, and the cancellation handle for the export renderer.
 //!
-//! This module answers two questions for the whole application, and nothing else: is an
-//! export already running, and has the user asked the running one to stop.
+//! This module answers three questions for the whole application, and nothing else: is an
+//! export already running, which exports wait for it, and has the user asked a run to stop.
 //!
 //! **One export at a time.** Two exports that run at the same time compete for the same
 //! encoder. That is the same false-negative problem ADR 006 already records for capability
 //! probing, where two hardware smoke tests running at once report a working encoder as
-//! broken; `capabilities::smoke::SMOKE_LOCK` exists for exactly that reason. An export runs
-//! for minutes rather than seconds, so it cannot simply wait its turn behind a mutex the way
-//! a smoke test does: the command layer must be able to reject the second request outright
-//! and tell the user why. [`ExportRegistry::begin`] therefore returns `Option`, and the
-//! command layer turns `None` into a rejection rather than into a queue.
+//! broken; `capabilities::smoke::SMOKE_LOCK` exists for exactly that reason.
+//!
+//! **A second export waits in a queue (ADR 049).** [`ExportRegistry::submit`] starts a run
+//! when the slot is free, and otherwise puts it at the end of the queue. When a run releases
+//! the slot, the registry hands the slot to the first waiting run and starts it, in the same
+//! critical section that frees it. The next run therefore starts in the backend, whatever the
+//! web view does: a web view that the system suspends while the window is minimized does not
+//! stop the queue. A waiting run is a [`WaitingRun`], which the command layer implements, so
+//! this module still holds no path, no plan and no process.
 //!
 //! **The claim is an owned guard, not a promise to call a function.** A slot that is claimed
 //! and never released refuses every later export until the application restarts, so the
@@ -39,8 +43,64 @@
 //! is string equality, so the whole guarantee rests on run ids never repeating within one
 //! process; see [`ExportRegistry::begin`] for that requirement and for how to satisfy it.
 
+use std::collections::VecDeque;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+/// A run that waits in the queue for the export slot.
+///
+/// The registry calls at most one of the two methods, once, with no lock of the registry held.
+/// At the application exit it calls neither, and drops the run quietly
+/// ([`ExportRegistry::close_for_exit`]). The command layer implements it for an export, and a
+/// test implements it with plain data.
+pub trait WaitingRun: Send {
+    /// The run takes the slot. The run owns `slot` from here, as a run that took a free slot
+    /// owns the slot of [`ExportRegistry::begin`], and dropping it releases the slot to the
+    /// next waiting run.
+    fn start(self: Box<Self>, slot: ExportSlot);
+    /// The run leaves the queue without starting, because a cancel named it.
+    fn withdraw(self: Box<Self>);
+}
+
+/// A run in the queue, with the identifier that a cancel names it by.
+struct QueuedRun {
+    run_id: String,
+    run: Box<dyn WaitingRun>,
+}
+
+impl fmt::Debug for QueuedRun {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QueuedRun")
+            .field("run_id", &self.run_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What the lock of [`ExportRegistry`] protects.
+#[derive(Debug, Default)]
+struct RegistryState {
+    /// `None` when the slot is free, `Some` when an export holds it.
+    active: Option<ActiveExport>,
+    /// The runs that wait for the slot, first in first out. It is empty whenever `active` is
+    /// `None`: a release hands the slot to the first waiting run in the same critical section.
+    queue: VecDeque<QueuedRun>,
+    /// True once the application exit began ([`ExportRegistry::close_for_exit`]). No run
+    /// starts or waits after that.
+    closed: bool,
+}
+
+/// The answer of [`ExportRegistry::submit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Submission {
+    /// The slot was free, and the run started.
+    Started,
+    /// Another run holds the slot, and this run waits at the end of the queue.
+    Queued,
+    /// The application exit began. The run neither started nor waits.
+    Closed,
+}
 
 /// The export that currently owns the single slot, and the flag that asks it to stop.
 #[derive(Debug)]
@@ -59,8 +119,8 @@ struct ActiveExport {
     cancel: Arc<AtomicBool>,
 }
 
-/// The one export slot for the whole application, plus the cancellation flag of whichever
-/// export holds it.
+/// The one export slot for the whole application, the queue of the runs that wait for it, and
+/// the cancellation flag of whichever export holds it.
 ///
 /// This type is the shared state behind the export commands: `lib.rs` stores one
 /// `Arc<ExportRegistry>` as Tauri managed state, so a single value is reachable from every
@@ -70,15 +130,16 @@ struct ActiveExport {
 /// which export is allowed to run.
 ///
 /// [`Default`] gives the empty registry, which is the correct starting state: no export is
-/// running before one begins.
+/// running before one begins, and none waits.
 #[derive(Debug, Default)]
 pub struct ExportRegistry {
-    /// `None` when the slot is free, `Some` when an export holds it.
+    /// The slot, the queue, and whether the exit began.
     ///
     /// A poisoned lock here is always recovered, never propagated; see
     /// [`ExportRegistry::lock`].
-    active: Mutex<Option<ActiveExport>>,
-    /// How many runs [`ExportRegistry::begin`] has admitted since the registry was made.
+    state: Mutex<RegistryState>,
+    /// How many runs have taken the slot since the registry was made: through
+    /// [`ExportRegistry::begin`], [`ExportRegistry::submit`], or a hand-over from the queue.
     ///
     /// See [`ExportRegistry::begun_count`].
     begun: AtomicU64,
@@ -156,26 +217,24 @@ impl ExportRegistry {
     ///
     /// An export runs for minutes, so a caller that blocked here would leave the user with an
     /// interface that appears to have accepted a second export and then does nothing for a
-    /// long time. The command layer turns `None` into an immediate, explicit rejection.
+    /// long time. A caller that wants a second export to wait uses
+    /// [`ExportRegistry::submit`] instead.
     ///
     /// The flag and the identifier are allocated before the lock is taken, so the critical
     /// section holds nothing but a check and a move.
+    ///
+    /// `None` also comes after [`ExportRegistry::close_for_exit`]. The command layer starts an
+    /// export through [`ExportRegistry::submit`], which queues where this refuses.
     pub fn begin(self: &Arc<Self>, run_id: &str) -> Option<ExportSlot> {
         let cancel = Arc::new(AtomicBool::new(false));
         let run_id = run_id.to_owned();
 
         {
-            let mut active = self.lock();
-            if active.is_some() {
+            let mut state = self.lock();
+            if state.closed || state.active.is_some() {
                 return None;
             }
-            *active = Some(ActiveExport {
-                run_id: run_id.clone(),
-                cancel: Arc::clone(&cancel),
-            });
-            // Inside the critical section, so a reader that finds the slot free and then reads
-            // the same count again knows that no run began in between.
-            self.begun.fetch_add(1, Ordering::SeqCst);
+            self.claim(&mut state, &run_id, &cancel);
         }
 
         Some(ExportSlot {
@@ -185,8 +244,94 @@ impl ExportRegistry {
         })
     }
 
+    /// Start `run` at once when the slot is free, or put it at the end of the queue.
+    ///
+    /// `run_id` must be unique within the process, for the reason [`ExportRegistry::begin`]
+    /// gives. A run that starts here receives its slot through [`WaitingRun::start`] before
+    /// this returns. A run that waits receives it when every run before it has released the
+    /// slot. After [`ExportRegistry::close_for_exit`], the run is dropped, and neither method
+    /// is called.
+    pub fn submit(self: &Arc<Self>, run_id: &str, run: Box<dyn WaitingRun>) -> Submission {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let run_id = run_id.to_owned();
+
+        let to_start = {
+            let mut state = self.lock();
+            if state.closed {
+                None
+            } else if state.active.is_none() {
+                self.claim(&mut state, &run_id, &cancel);
+                Some(run)
+            } else {
+                state.queue.push_back(QueuedRun {
+                    run_id: run_id.clone(),
+                    run,
+                });
+                return Submission::Queued;
+            }
+        };
+
+        // The run is started, or dropped, with no lock held: its code is not this module's.
+        match to_start {
+            Some(run) => {
+                run.start(ExportSlot {
+                    registry: Arc::clone(self),
+                    run_id,
+                    cancel,
+                });
+                Submission::Started
+            }
+            None => Submission::Closed,
+        }
+    }
+
+    /// Refuse every later run, and drop the runs that wait.
+    ///
+    /// The application-exit handler calls this before it cancels the run that holds the slot
+    /// (ADR 017). Without it, the release of that run would hand the slot to the next waiting
+    /// run, and the exit would wait for a run that had just started. A run that holds the slot
+    /// keeps it, and releases it as before. A second call does nothing more.
+    ///
+    /// The runs that wait are dropped without [`WaitingRun::withdraw`]. The window is closing,
+    /// so no page reads a report of them, and the exit sends no event that nobody reads.
+    pub fn close_for_exit(&self) {
+        let dropped: Vec<QueuedRun> = {
+            let mut state = self.lock();
+            state.closed = true;
+            state.queue.drain(..).collect()
+        };
+        // Dropped after the lock is released: their code is not this module's.
+        drop(dropped);
+    }
+
+    /// The identifiers of the runs that wait, first to last.
+    #[must_use]
+    pub fn queued_run_ids(&self) -> Vec<String> {
+        self.lock()
+            .queue
+            .iter()
+            .map(|queued| queued.run_id.clone())
+            .collect()
+    }
+
+    /// Make `run_id` the run that holds the slot. The caller holds the lock, and found the
+    /// slot free.
+    fn claim(&self, state: &mut RegistryState, run_id: &str, cancel: &Arc<AtomicBool>) {
+        state.active = Some(ActiveExport {
+            run_id: run_id.to_owned(),
+            cancel: Arc::clone(cancel),
+        });
+        // Inside the critical section, so a reader that finds the slot free and then reads the
+        // same count again knows that no run began in between.
+        self.begun.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// Ask the run named by `run_id` to stop, and report whether the request reached the run
-    /// that currently holds the slot.
+    /// that currently holds the slot or a run that waits.
+    ///
+    /// A run that waits leaves the queue at once, and the registry calls its
+    /// [`WaitingRun::withdraw`] after it releases the lock. The rest of this section is about
+    /// the run that holds the slot.
     ///
     /// This sets the flag [`ExportRegistry::begin`] handed out and returns immediately. It
     /// does not kill a process, does not wait for the run to notice, and does not release the
@@ -210,19 +355,38 @@ impl ExportRegistry {
     ///
     /// # What `false` means, and what it does not
     ///
-    /// `false` means the request named a run that is not holding the slot -- one that already
-    /// ended, or one that never existed -- and in that case nothing is set at all. This is the
-    /// ADR 006 staleness rule applied to a request rather than to an event. Do not render
+    /// `false` means the request named a run that neither holds the slot nor waits -- one that
+    /// already ended, or one that never existed -- and in that case nothing is set at all. This
+    /// is the ADR 006 staleness rule applied to a request rather than to an event. Do not render
     /// `false` to the user as "there is nothing to cancel": a different export may well be
     /// running, and this result says only that it is not the one the caller named.
     pub fn cancel(&self, run_id: &str) -> bool {
-        let active = self.lock();
-        let Some(export) = active.as_ref() else {
-            return false;
+        let withdrawn = {
+            let mut state = self.lock();
+            match state.active.as_ref() {
+                Some(export) if export.run_id == run_id => {
+                    Self::flag(export);
+                    return true;
+                }
+                _ => {}
+            }
+            let Some(index) = state
+                .queue
+                .iter()
+                .position(|queued| queued.run_id == run_id)
+            else {
+                return false;
+            };
+            state.queue.remove(index)
         };
-        if export.run_id != run_id {
-            return false;
+        if let Some(queued) = withdrawn {
+            queued.run.withdraw();
         }
+        true
+    }
+
+    /// Set the cancel flag of the run that holds the slot.
+    fn flag(export: &ActiveExport) {
         // `Relaxed` would be sound here: the flag carries no payload, so there is nothing for
         // a `Release` store to publish and nothing for an `Acquire` load to acquire, and
         // atomicity alone guarantees the poller observes the value. `SeqCst` is used because
@@ -230,7 +394,6 @@ impl ExportRegistry {
         // process-supervision poll rates, so no later reader has to reconstruct an ordering
         // argument to convince themselves the flag is delivered.
         export.cancel.store(true, Ordering::SeqCst);
-        true
     }
 
     /// The identifier of the export that currently holds the slot, or `None` when the slot
@@ -249,10 +412,14 @@ impl ExportRegistry {
     /// The id is cloned rather than borrowed because the lock cannot outlive this call.
     #[must_use]
     pub fn active_run_id(&self) -> Option<String> {
-        self.lock().as_ref().map(|export| export.run_id.clone())
+        self.lock()
+            .active
+            .as_ref()
+            .map(|export| export.run_id.clone())
     }
 
-    /// How many runs [`ExportRegistry::begin`] has admitted since the registry was made.
+    /// How many runs have taken the slot since the registry was made, a run that started from
+    /// the queue included.
     ///
     /// The test of a preset (`commands::preset_test`) reads it before and after its encode. A
     /// different value means that an export began while the test ran, even one that also
@@ -263,7 +430,7 @@ impl ExportRegistry {
         self.begun.load(Ordering::SeqCst)
     }
 
-    /// Release the slot held by `run_id`, so the next export can begin.
+    /// Release the slot held by `run_id`, and hand it to the first run that waits.
     ///
     /// Callers do not normally need this: dropping the [`ExportSlot`] calls it. It stays
     /// public, and stays total, so the guard and an explicit release coexist harmlessly.
@@ -275,19 +442,43 @@ impl ExportRegistry {
     /// run already released the slot explicitly -- would hand the slot away while its
     /// successor is still running, and the application would then permit two concurrent
     /// exports, the exact failure this whole module exists to prevent.
-    pub fn finish(&self, run_id: &str) {
+    ///
+    /// The hand-over happens in the critical section that frees the slot, so no submission can
+    /// take the slot between the two: a run that comes in that moment waits behind the queue.
+    /// Nothing is handed over after [`ExportRegistry::close_for_exit`]. The next run is started
+    /// after the lock is released. A run whose start drops its slot at once, as an export
+    /// thread that the system refuses does, releases the slot to the run after it from inside
+    /// this call. The depth of that is at most the length of the queue.
+    pub fn finish(self: &Arc<Self>, run_id: &str) {
         // The block is load-bearing, not decoration. It ends the guard's scope before
-        // `finished` is dropped, so freeing the `String` and the last `Arc` reference happens
-        // outside the critical section. Writing this as one statement would work only by way
-        // of the temporary-lifetime rule (the `self.lock()` temporary would be dropped at the
-        // end of the statement, before the binding), which is exactly the kind of implicit
-        // detail an innocuous-looking refactor -- hoisting the guard into its own binding --
-        // silently reverses, moving deallocation back under the lock with no test to catch it.
-        let finished = {
-            let mut active = self.lock();
-            active.take_if(|export| export.run_id == run_id)
+        // `finished` is dropped and before the next run starts, so freeing the `String` and the
+        // last `Arc` reference, and the code of the next run, happen outside the critical
+        // section. Writing this as one statement would work only by way of the
+        // temporary-lifetime rule, which is exactly the kind of implicit detail an
+        // innocuous-looking refactor silently reverses, with no test to catch it.
+        let (finished, next) = {
+            let mut state = self.lock();
+            let finished = state.active.take_if(|export| export.run_id == run_id);
+            let next = if finished.is_some() && !state.closed {
+                state.queue.pop_front().map(|queued| {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    self.claim(&mut state, &queued.run_id, &cancel);
+                    (queued, cancel)
+                })
+            } else {
+                None
+            };
+            (finished, next)
         };
         drop(finished);
+        if let Some((queued, cancel)) = next {
+            let QueuedRun { run_id, run } = queued;
+            run.start(ExportSlot {
+                registry: Arc::clone(self),
+                run_id,
+                cancel,
+            });
+        }
     }
 
     /// Lock the slot, recovering a poisoned lock instead of propagating it.
@@ -304,8 +495,8 @@ impl ExportRegistry {
     ///
     /// This recovery is not what protects the slot from a panicking worker. Nothing is poisoned
     /// in that case; [`ExportSlot`]'s drop guard is what releases the slot.
-    fn lock(&self) -> MutexGuard<'_, Option<ActiveExport>> {
-        self.active.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, RegistryState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -461,7 +652,7 @@ mod tests {
 
         assert!(outcome.is_err(), "the worker thread should have panicked");
         assert!(
-            !registry.active.is_poisoned(),
+            !registry.state.is_poisoned(),
             "a worker panic must not poison the registry lock; if it does, this test is no \
              longer exercising the drop guard"
         );
@@ -603,7 +794,7 @@ mod tests {
 
         let poisoner = Arc::clone(&registry);
         let poison_result = thread::spawn(move || {
-            let _guard = poisoner.active.lock().unwrap();
+            let _guard = poisoner.state.lock().unwrap();
             panic!("poison the export registry lock on purpose for the recovery test");
         })
         .join();
@@ -611,7 +802,7 @@ mod tests {
             poison_result.is_err(),
             "the spawned thread should have panicked"
         );
-        assert!(registry.active.is_poisoned());
+        assert!(registry.state.is_poisoned());
 
         // Reaching these assertions at all is half the point: a propagated poison would have
         // panicked inside `lock` on the way here.
@@ -691,5 +882,309 @@ mod tests {
         assert!(registry.active_run_id().is_none());
         let _second = registry.begin("run-3").expect("the slot is free again");
         assert_eq!(registry.begun_count(), 2);
+    }
+
+    /// A waiting run that records what the registry did with it, and keeps its slot until the
+    /// test releases it.
+    struct RecordingRun {
+        run_id: String,
+        harness: Arc<Recorded>,
+    }
+
+    #[derive(Default)]
+    struct Recorded {
+        log: Mutex<Vec<String>>,
+        slots: Mutex<Vec<ExportSlot>>,
+    }
+
+    impl WaitingRun for RecordingRun {
+        fn start(self: Box<Self>, slot: ExportSlot) {
+            let mut slots = self.harness.slots.lock().unwrap();
+            assert!(
+                slots.is_empty(),
+                "two runs must never hold the slot at once"
+            );
+            slots.push(slot);
+            drop(slots);
+            self.harness
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("start {}", self.run_id));
+        }
+
+        fn withdraw(self: Box<Self>) {
+            self.harness
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("withdraw {}", self.run_id));
+        }
+    }
+
+    /// A registry with a log of the starts and withdrawals of its runs.
+    struct Harness {
+        registry: Arc<ExportRegistry>,
+        recorded: Arc<Recorded>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            Self {
+                registry: registry(),
+                recorded: Arc::default(),
+            }
+        }
+
+        fn submit(&self, run_id: &str) -> Submission {
+            self.registry.submit(
+                run_id,
+                Box::new(RecordingRun {
+                    run_id: run_id.to_owned(),
+                    harness: Arc::clone(&self.recorded),
+                }),
+            )
+        }
+
+        /// Release the slot of the run that holds it, as the end of an export does. The slot
+        /// is dropped after the lock of the record is released, because the drop starts the
+        /// next run, which records itself.
+        fn release(&self) {
+            let slot = self.recorded.slots.lock().unwrap().pop();
+            drop(slot);
+        }
+
+        fn take_log(&self) -> Vec<String> {
+            std::mem::take(&mut *self.recorded.log.lock().unwrap())
+        }
+    }
+
+    #[test]
+    fn a_run_submitted_to_a_free_slot_starts_at_once() {
+        let harness = Harness::new();
+
+        assert_eq!(harness.submit("run-1"), Submission::Started);
+
+        assert_eq!(harness.take_log(), ["start run-1"]);
+        assert_eq!(harness.registry.active_run_id().as_deref(), Some("run-1"));
+        assert!(harness.registry.queued_run_ids().is_empty());
+    }
+
+    #[test]
+    fn waiting_runs_start_in_order_as_each_run_releases_the_slot() {
+        let harness = Harness::new();
+        harness.submit("run-1");
+
+        assert_eq!(harness.submit("run-2"), Submission::Queued);
+        assert_eq!(harness.submit("run-3"), Submission::Queued);
+        assert_eq!(harness.registry.queued_run_ids(), ["run-2", "run-3"]);
+        assert_eq!(harness.take_log(), ["start run-1"]);
+
+        harness.release();
+        assert_eq!(harness.take_log(), ["start run-2"]);
+        assert_eq!(harness.registry.active_run_id().as_deref(), Some("run-2"));
+        assert_eq!(harness.registry.queued_run_ids(), ["run-3"]);
+
+        harness.release();
+        assert_eq!(harness.take_log(), ["start run-3"]);
+
+        harness.release();
+        assert!(harness.take_log().is_empty());
+        assert_eq!(harness.registry.active_run_id(), None);
+    }
+
+    #[test]
+    fn a_run_that_panics_hands_the_slot_to_the_next_run() {
+        let harness = Harness::new();
+        let slot = harness.registry.begin("run-1").unwrap();
+        harness.submit("run-2");
+
+        let worker = thread::spawn(move || {
+            let _slot = slot;
+            panic!("the worker panicked");
+        });
+        assert!(worker.join().is_err());
+
+        assert_eq!(harness.take_log(), ["start run-2"]);
+        assert_eq!(harness.registry.active_run_id().as_deref(), Some("run-2"));
+    }
+
+    #[test]
+    fn a_cancel_withdraws_a_waiting_run_and_keeps_the_order_of_the_others() {
+        let harness = Harness::new();
+        harness.submit("run-1");
+        harness.submit("run-2");
+        harness.submit("run-3");
+        harness.take_log();
+
+        assert!(harness.registry.cancel("run-2"));
+        assert_eq!(harness.take_log(), ["withdraw run-2"]);
+        assert_eq!(harness.registry.queued_run_ids(), ["run-3"]);
+        // A second cancel names a run that is gone.
+        assert!(!harness.registry.cancel("run-2"));
+
+        harness.release();
+        assert_eq!(harness.take_log(), ["start run-3"]);
+    }
+
+    #[test]
+    fn a_cancel_of_the_running_run_sets_its_flag_and_hands_over_only_at_the_release() {
+        let harness = Harness::new();
+        harness.submit("run-1");
+        harness.submit("run-2");
+        harness.take_log();
+
+        assert!(harness.registry.cancel("run-1"));
+        assert!(harness.recorded.slots.lock().unwrap()[0].is_canceled());
+        // The run still holds the slot until its guards have finished.
+        assert!(harness.take_log().is_empty());
+        assert_eq!(harness.registry.active_run_id().as_deref(), Some("run-1"));
+
+        harness.release();
+        assert_eq!(harness.take_log(), ["start run-2"]);
+        assert!(
+            !harness.recorded.slots.lock().unwrap()[0].is_canceled(),
+            "the next run has a flag of its own"
+        );
+    }
+
+    #[test]
+    fn close_for_exit_drops_the_waiting_runs_quietly_and_refuses_new_ones() {
+        let harness = Harness::new();
+        harness.submit("run-1");
+        harness.submit("run-2");
+        harness.submit("run-3");
+        harness.take_log();
+
+        harness.registry.close_for_exit();
+        // Neither started nor withdrawn: the exit reports nothing about them.
+        assert!(harness.take_log().is_empty());
+        assert!(harness.registry.queued_run_ids().is_empty());
+
+        assert_eq!(harness.submit("run-4"), Submission::Closed);
+        assert!(harness.registry.begin("run-5").is_none());
+        assert!(harness.take_log().is_empty());
+
+        // The running run keeps its slot, and its release starts nothing.
+        assert_eq!(harness.registry.active_run_id().as_deref(), Some("run-1"));
+        harness.release();
+        assert!(harness.take_log().is_empty());
+        assert_eq!(harness.registry.active_run_id(), None);
+
+        // A second call does nothing more.
+        harness.registry.close_for_exit();
+        assert!(harness.take_log().is_empty());
+    }
+
+    /// A waiting run whose start drops its slot at once, as an export whose thread the
+    /// system refuses does.
+    struct RefusedRun {
+        run_id: String,
+        harness: Arc<Recorded>,
+    }
+
+    impl WaitingRun for RefusedRun {
+        fn start(self: Box<Self>, slot: ExportSlot) {
+            self.harness
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("refuse {}", self.run_id));
+            drop(slot);
+        }
+
+        fn withdraw(self: Box<Self>) {
+            unreachable!("a refused run is started, not withdrawn");
+        }
+    }
+
+    #[test]
+    fn a_run_that_drops_its_slot_at_once_hands_the_slot_to_the_next_run() {
+        let harness = Harness::new();
+        harness.submit("run-1");
+        for run_id in ["run-2", "run-3"] {
+            harness.registry.submit(
+                run_id,
+                Box::new(RefusedRun {
+                    run_id: run_id.to_owned(),
+                    harness: Arc::clone(&harness.recorded),
+                }),
+            );
+        }
+        harness.submit("run-4");
+        harness.take_log();
+
+        harness.release();
+
+        assert_eq!(
+            harness.take_log(),
+            ["refuse run-2", "refuse run-3", "start run-4"]
+        );
+        assert_eq!(harness.registry.active_run_id().as_deref(), Some("run-4"));
+    }
+
+    #[test]
+    fn a_hand_over_counts_as_a_run_that_began() {
+        // The preset test of ADR 041 compares this count, so a run that started from the queue
+        // must count as one that began.
+        let harness = Harness::new();
+        harness.submit("run-1");
+        harness.submit("run-2");
+        assert_eq!(harness.registry.begun_count(), 1);
+
+        harness.release();
+
+        assert_eq!(harness.registry.begun_count(), 2);
+    }
+
+    #[test]
+    fn a_late_release_of_an_ended_run_hands_nothing_over() {
+        let harness = Harness::new();
+        harness.submit("run-1");
+        harness.submit("run-2");
+        harness.take_log();
+
+        harness.registry.finish("run-0");
+
+        assert!(harness.take_log().is_empty());
+        assert_eq!(harness.registry.active_run_id().as_deref(), Some("run-1"));
+        assert_eq!(harness.registry.queued_run_ids(), ["run-2"]);
+    }
+
+    #[test]
+    fn concurrent_submissions_each_start_exactly_once_and_one_at_a_time() {
+        const RUNS: usize = 16;
+        let harness = Arc::new(Harness::new());
+        let barrier = Arc::new(Barrier::new(RUNS));
+        let submitters: Vec<_> = (0..RUNS)
+            .map(|index| {
+                let harness = Arc::clone(&harness);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    harness.submit(&format!("run-{index}"))
+                })
+            })
+            .collect();
+        let started = submitters
+            .into_iter()
+            .map(|submitter| submitter.join().unwrap())
+            .filter(|submission| *submission == Submission::Started)
+            .count();
+        assert_eq!(started, 1, "exactly one submission finds the slot free");
+
+        // Each release starts the next run. `RecordingRun::start` asserts that no other run
+        // holds the slot.
+        for _ in 0..RUNS {
+            harness.release();
+        }
+
+        let mut log = harness.take_log();
+        assert_eq!(log.len(), RUNS);
+        log.sort_unstable();
+        log.dedup();
+        assert_eq!(log.len(), RUNS, "no run starts twice");
+        assert_eq!(harness.registry.active_run_id(), None);
+        assert_eq!(harness.registry.begun_count(), RUNS as u64);
     }
 }

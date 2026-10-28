@@ -308,7 +308,12 @@ fn stop_export_within_deadline(
     !cancel_active_export(registry, deadline) && wait.take_report()
 }
 
-/// Ask a running export to stop, and wait, bounded, for it to release the export slot.
+/// Close the export queue, ask a running export to stop, and wait, bounded, for it to release
+/// the export slot.
+///
+/// The close comes first: it refuses every later export and drops the exports that wait
+/// (ADR 049). Without it, the release that this waits for would hand the slot to the next
+/// waiting export, and the exit would wait for an export that had just started.
 ///
 /// The slot going free is the signal that the worker has run its guards to completion: the
 /// `ffmpeg` child has been killed and reaped and the reserved temporary file has been
@@ -322,6 +327,7 @@ fn stop_export_within_deadline(
 /// takes an application handle is reachable from a test.
 #[must_use]
 fn cancel_active_export(registry: &ffmpeg::export::ExportRegistry, deadline: Instant) -> bool {
+    registry.close_for_exit();
     let Some(run_id) = registry.active_run_id() else {
         return true;
     };
@@ -329,8 +335,8 @@ fn cancel_active_export(registry: &ffmpeg::export::ExportRegistry, deadline: Ins
 
     loop {
         // The slot, not this run id: a worker that is already unwinding releases the slot,
-        // and no export can claim it after this point, because the window in which the
-        // frontend could start one is closing with the application.
+        // and no export can claim it after this point, because `close_for_exit` refused every
+        // later export.
         if registry.active_run_id().is_none() {
             return true;
         }
@@ -345,6 +351,53 @@ fn cancel_active_export(registry: &ffmpeg::export::ExportRegistry, deadline: Ins
 mod tests {
     use super::*;
     use crate::ffmpeg::export::ExportRegistry;
+
+    /// A waiting export that records whether it started or left the queue.
+    struct RecordingRun {
+        log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl ffmpeg::export::WaitingRun for RecordingRun {
+        fn start(self: Box<Self>, _slot: ffmpeg::export::ExportSlot) {
+            self.log.lock().unwrap().push("start");
+        }
+
+        fn withdraw(self: Box<Self>) {
+            self.log.lock().unwrap().push("withdraw");
+        }
+    }
+
+    #[test]
+    fn an_exit_drops_the_waiting_exports_and_starts_none_of_them() {
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("run-1").expect("the slot starts free");
+        let log = Arc::default();
+        registry.submit(
+            "run-2",
+            Box::new(RecordingRun {
+                log: Arc::clone(&log),
+            }),
+        );
+        let flag = slot.cancel_flag();
+
+        // Stands for the export worker, which releases its slot after the cancel.
+        let worker = std::thread::spawn(move || {
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(slot);
+        });
+
+        assert!(cancel_active_export(
+            &registry,
+            Instant::now() + Duration::from_secs(5)
+        ));
+        worker.join().expect("the worker thread must not panic");
+
+        assert!(log.lock().unwrap().is_empty());
+        assert!(registry.active_run_id().is_none());
+        assert!(registry.queued_run_ids().is_empty());
+    }
 
     #[test]
     fn an_exit_with_no_export_running_waits_for_nothing() {

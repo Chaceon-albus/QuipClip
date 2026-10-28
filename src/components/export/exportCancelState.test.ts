@@ -73,7 +73,7 @@ describe("resolveExportDismissal", () => {
       streams: "videoAndAudio",
       audioMode: "encode",
     };
-    const START: ExportSubmission = { runId: "run-live" };
+    const START: ExportSubmission = { runId: "run-live", queued: false };
 
     /** A store whose Stop requests reach an IPC layer that rejects each call. */
     function createStore(startExport: () => Promise<ExportSubmission>) {
@@ -363,7 +363,7 @@ describe("isCancelEnabled on the state of a real store", () => {
     streams: "videoAndAudio",
     audioMode: "encode",
   };
-  const START: ExportSubmission = { runId: "run-live" };
+  const START: ExportSubmission = { runId: "run-live", queued: false };
 
   function createEncodingStore(invoke: InvokeFn) {
     let emit!: (event: ExportProgressEvent) => void;

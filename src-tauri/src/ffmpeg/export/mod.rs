@@ -89,7 +89,7 @@ pub use process::{
     run_export_process, ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus,
 };
 pub use progress::{ProgressReader, ProgressSnapshot};
-pub use registry::{ExportRegistry, ExportSlot};
+pub use registry::{ExportRegistry, ExportSlot, Submission, WaitingRun};
 pub use verify::{
     verify_audio_output, verify_copied_audio_output, verify_copy_streams, AudioOutputMismatch,
 };
@@ -662,11 +662,10 @@ export_error_codes! {
     /// mirroring `ImportMediaErrorCode::AppDataUnavailable` and
     /// `CapabilityProbeErrorCode::AppDataUnavailable`.
     AppDataUnavailable => "appDataUnavailable",
-    /// Produced by `commands::export::start_export`: an export was requested while another
-    /// one is already running. [`registry::ExportRegistry::begin`] answers `None` when a run
-    /// already holds the single slot, and the command layer turns that `None` into this code
-    /// rather than queueing the request.
-    ExportAlreadyRunning => "exportAlreadyRunning",
+    /// Produced by `commands::export::start_export`: the application exit began, so the
+    /// registry starts and queues no export any more
+    /// ([`registry::ExportRegistry::close_for_exit`]).
+    ExportQueueClosed => "exportQueueClosed",
     /// Produced by `commands::export::start_export`: the preset of the request fails the
     /// rules of the settings document (`settings::validate_preset`). The detail carries the
     /// reason. The request carries the whole preset (ADR 049), so the export reads no settings
@@ -855,7 +854,7 @@ mod tests {
                 "canceled",
                 "commandExecutionFailed",
                 "encoderUnavailable",
-                "exportAlreadyRunning",
+                "exportQueueClosed",
                 "ffmpegPairMissing",
                 "ffmpegProcessFailed",
                 "ffmpegSpawnFailed",

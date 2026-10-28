@@ -85,6 +85,12 @@ export type ExportSourceRevision = {
  */
 export type ExportSubmission = {
   runId: string;
+  /**
+   * True when the run waits in the queue of the backend for the runs before it. The run then
+   * reports `preparing` when it takes the slot, or `failed` with `canceled` when a cancel
+   * withdraws it (ADR 049).
+   */
+  queued: boolean;
 };
 
 /**
@@ -124,7 +130,7 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "outputRenameFailed",
   "canceled",
   "commandExecutionFailed",
-  "exportAlreadyRunning",
+  "exportQueueClosed",
 ] as const;
 
 export type BackendExportErrorCode = (typeof BACKEND_EXPORT_ERROR_CODES)[number];
@@ -220,6 +226,16 @@ export class ExportError extends Error {
 }
 
 /**
+ * Event emitted when a run takes the export slot and its export thread prepares it. A run that
+ * started at once and a run that waited in the queue both send it first. A run that a cancel
+ * withdrew from the queue, or whose thread the system refused, sends only `failed`.
+ */
+export type ExportPreparingEvent = {
+  event: "preparing";
+  runId: string;
+};
+
+/**
  * Event emitted when media export execution starts.
  */
 export type ExportStartedEvent = {
@@ -302,6 +318,7 @@ export type ExportFailedEvent = {
  * Tagged union of all possible backend events emitted on `export:progress`.
  */
 export type ExportProgressEvent =
+  | ExportPreparingEvent
   | ExportStartedEvent
   | ExportProgressUpdateEvent
   | ExportPublishingEvent

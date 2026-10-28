@@ -313,7 +313,7 @@ describe("startTaskbarProgressSync", () => {
       totalDurationUs: 4_000_000,
       expectedFrames: 100,
     });
-    answerStart({ runId: "run-kept" });
+    answerStart({ runId: "run-kept", queued: false });
     await starting;
     await expect(stopping).resolves.toBe(false);
     expect(store.getState()).toMatchObject({ status: "failed", tracking: true });

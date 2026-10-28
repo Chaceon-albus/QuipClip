@@ -396,7 +396,7 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
   /** Answers the start, and lets the Stop request for the named run fail. */
   async function failTheStopAfterTheAnswer() {
     const fixture = await stopWhileTheStartWaits();
-    fixture.answerStart({ runId: "run-kept" });
+    fixture.answerStart({ runId: "run-kept", queued: false });
     await fixture.starting;
     await expect(fixture.stopping).resolves.toBe(false);
     expect(fixture.store.getState()).toMatchObject({

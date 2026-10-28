@@ -814,7 +814,7 @@ export const zhCN: TranslationCatalog = {
     outputRenameFailed: "无法将完成的视频保存到目标路径。",
     canceled: "导出已停止。",
     commandExecutionFailed: "无法运行导出命令。",
-    exportAlreadyRunning: "已有导出任务正在运行。",
+    exportQueueClosed: "QuipClip 正在退出，因此未开始导出。",
     dialogFailed: "无法打开导出保存对话框。",
     sourceRevisionChanged:
       "打开之后，磁盘上的视频文件已更改。已标记的片段可能不再指向相同的帧。",
