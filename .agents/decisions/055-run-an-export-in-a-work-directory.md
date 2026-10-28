@@ -251,6 +251,12 @@ command can name only one head ends. Each FLV source gets the FLV input of ADR 0
 - A crash can leave a work directory in the cache. A later export removes it after 24 hours. It
   holds small files only: the graphs and the heads.
 - Old `head.flv` files stay in `flv-cache` until its eviction removes their directory.
+- (Added on 2026-10-28.) Each FLV source now runs the locate and the slice check of ADR 046. Its
+  bounded reads can then take up to 150 s, and the option probe adds up to 20 s once for each
+  export, against the limit of 180 s for each source (ADR 050). The locate has no time bound of
+  its own. Before this record, a later FLV source skipped both steps. So one large FLV source on a
+  slow share can now fail with `preparationTimedOut`, where it exported through the input seek
+  before.
 - An export of many FLV sources opens each of them in the source cache of the preview. So the
   preview can lose its keyframe tables sooner (`KEPT_SOURCES` and `KEEP_SOURCES` of ADR 046).
 - `MAX_AUDIO_PREFIXES` of ADR 014 was set by the command-line budget. That reason is gone. This
