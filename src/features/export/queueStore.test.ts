@@ -499,6 +499,59 @@ describe("export queue store", () => {
       expect(exportStore.getState().runId).toBe("run-2");
     });
 
+    it("marks the run as removing before the answer, and sends one request for two calls", async () => {
+      const { queue, cancel, exportStore } = createFixture();
+      await queue.getState().submit(createRequest("/out/a.mp4"));
+      await queue.getState().submit(createRequest("/out/b.mp4"));
+      const answer = createDeferred<boolean>();
+      cancel.mockImplementationOnce(() => answer.promise);
+
+      const first = queue.getState().remove("run-2");
+      expect(queue.getState().removing).toEqual(["run-2"]);
+      expect(
+        selectExportQueueRows(queue.getState(), exportStore.getState()).find(
+          (row) => row.runId === "run-2",
+        ),
+      ).toMatchObject({ phase: "waiting", removing: true });
+
+      await expect(queue.getState().remove("run-2")).resolves.toBe(false);
+      answer.resolve(true);
+
+      await expect(first).resolves.toBe(true);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(queue.getState().removing).toEqual(["run-2"]);
+    });
+
+    it("takes the run out of removing when the backend does not withdraw it", async () => {
+      const { queue, cancel, exportStore } = createFixture();
+      await queue.getState().submit(createRequest("/out/a.mp4"));
+      await queue.getState().submit(createRequest("/out/b.mp4"));
+      cancel.mockResolvedValueOnce(false);
+
+      await expect(queue.getState().remove("run-2")).resolves.toBe(false);
+
+      expect(queue.getState()).toMatchObject({ waiting: ["run-2"], removing: [] });
+      expect(
+        selectExportQueueRows(queue.getState(), exportStore.getState()).find(
+          (row) => row.runId === "run-2",
+        ),
+      ).toMatchObject({ phase: "waiting", removing: false });
+      // The user can remove the run again.
+      await expect(queue.getState().remove("run-2")).resolves.toBe(true);
+      expect(cancel).toHaveBeenCalledTimes(2);
+    });
+
+    it("takes the run out of removing when the request rejects", async () => {
+      const { queue, cancel } = createFixture();
+      await queue.getState().submit(createRequest("/out/a.mp4"));
+      await queue.getState().submit(createRequest("/out/b.mp4"));
+      cancel.mockRejectedValueOnce(new Error("ipc"));
+
+      await expect(queue.getState().remove("run-2")).resolves.toBe(false);
+
+      expect(queue.getState()).toMatchObject({ waiting: ["run-2"], removing: [] });
+    });
+
     it("refuses a run that does not wait", async () => {
       const { queue, cancel } = createFixture();
       await queue.getState().submit(createRequest("/out/a.mp4"));

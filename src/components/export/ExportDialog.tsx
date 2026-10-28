@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { CircleCheck, CircleSlash, Loader2, XIcon } from "lucide-react";
 import { DESTRUCTIVE_CONFIRM_CLASS } from "@/components/common/confirmDialogModel";
@@ -29,9 +29,12 @@ import {
   isExportRunLive,
   resolveExportAudioMode,
   resolveExportStreams,
+  exportQueueStore,
   selectExportOutputAction,
+  selectExportQueueRows,
   sourceHasAudio,
   useExportOutputActionStore,
+  useExportQueueStore,
   useExportStore,
   useExportRunTiming,
   useExportStreamChoice,
@@ -45,6 +48,7 @@ import { useSettingsStore, type SettingsSection } from "@/features/settings";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { isMacOS } from "@/lib/platform";
 import { ExportErrorDetails } from "./ExportErrorDetails";
+import { ExportQueueList } from "./ExportQueueList";
 import { ExportRunPanel } from "./ExportRunPanel";
 import { ExportSetup } from "./ExportSetup";
 import {
@@ -72,6 +76,7 @@ import {
   presentFinishedExport,
   revealLabelKey,
 } from "./exportFinishedPresenter";
+import { presentExportQueue, type ExportQueueView } from "./exportQueuePresenter";
 import {
   exportElapsedMs,
   selectExportProgressFields,
@@ -134,6 +139,12 @@ interface ExportDialogFrame extends Pick<
 > {
   /** The state of Show for the run of the frame (`selectExportOutputAction`). */
   outputAction: ExportOutputActionRunState;
+  /**
+   * The queue list of the batch, or null when it does not show (`presentExportQueue`). The
+   * frame holds the view, with the Show state of each row, so the list does not change while
+   * the dialog fades out.
+   */
+  queue: ExportQueueView | null;
   requestedPresetId: string | null;
   choosingDestination: boolean;
   backCheckPending: boolean;
@@ -251,6 +262,47 @@ export function ExportDialog({
     selectExportOutputAction(state, runId),
   );
   const revealOutput = useExportOutputActionStore((state) => state.reveal);
+  // The Show state of every run, for the rows of the queue list.
+  const outputActionRuns = useExportOutputActionStore((state) => state.runs);
+
+  // The slices of the queue store that the rows of the queue list read. Each slice keeps its
+  // identity until the store changes it, so the memo below builds new rows only on a change.
+  // `selectExportQueueRows` returns a new array on each call, so it is never a selector here.
+  const queueJobs = useExportQueueStore((state) => state.jobs);
+  const queueOrder = useExportQueueStore((state) => state.order);
+  const queueWaiting = useExportQueueStore((state) => state.waiting);
+  const queueEnded = useExportQueueStore((state) => state.ended);
+  const queueRemoving = useExportQueueStore((state) => state.removing);
+  const queueView = useMemo(
+    () =>
+      presentExportQueue({
+        rows: selectExportQueueRows(
+          {
+            jobs: queueJobs,
+            order: queueOrder,
+            waiting: queueWaiting,
+            ended: queueEnded,
+            removing: queueRemoving,
+          },
+          { runId },
+        ),
+        batchSize: queueOrder.length,
+        exportState: { status, tracking, error },
+        outputActions: { runs: outputActionRuns },
+      }),
+    [
+      queueJobs,
+      queueOrder,
+      queueWaiting,
+      queueEnded,
+      queueRemoving,
+      runId,
+      status,
+      tracking,
+      error,
+      outputActionRuns,
+    ],
+  );
 
   // An armed state belongs to one run. When the run is no longer live (`isExportRunLive`),
   // clear it, so a later run can never start with the confirmation label from this one. A
@@ -329,6 +381,7 @@ export function ExportDialog({
     tracking,
     error,
     outputAction,
+    queue: queueView,
     requestedPresetId,
     choosingDestination,
     backCheckPending,
@@ -499,6 +552,19 @@ export function ExportDialog({
       return;
     }
     void revealOutput(runId);
+  };
+
+  // Show File of a row of the queue list. The store ignores a second request for a run while
+  // one is in flight.
+  const handleRevealRun = (shownRunId: string) => {
+    void revealOutput(shownRunId);
+  };
+
+  // Remove of a waiting row. The store marks the run as `removing` before it sends the
+  // request, so the button is disabled at once and a second click sends nothing. The run stays
+  // in the list until its event decides. A refused or failed request makes it removable again.
+  const handleRemoveRun = (removedRunId: string) => {
+    void exportQueueStore.getState().remove(removedRunId);
   };
 
   // A closed dialog has nothing to dismiss. During the exit animation, Escape can still reach
@@ -837,6 +903,18 @@ export function ExportDialog({
           held={frame.progress}
           result={step === "result" ? renderResult() : undefined}
         />
+        {/* The runs of the batch, below the run panel. It shows only for a batch of more
+            than one run, so a single export looks as before (ADR 049). */}
+        {frame.queue !== null && (
+          <div className="pt-2">
+            <ExportQueueList
+              view={frame.queue}
+              macOS={isMacOS()}
+              onShow={handleRevealRun}
+              onRemove={handleRemoveRun}
+            />
+          </div>
+        )}
       </StepFade>
     );
   };

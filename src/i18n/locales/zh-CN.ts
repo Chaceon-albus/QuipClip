@@ -770,6 +770,18 @@ export const zhCN: TranslationCatalog = {
       show: "显示详细信息",
       hide: "隐藏详细信息",
     },
+    queue: {
+      heading: "队列",
+      status: {
+        waiting: "等待中",
+        current: "正在导出",
+        finished: "已完成",
+        failed: "已失败",
+        canceled: "已停止",
+      },
+      remove: "移除",
+      removeNamed: "从队列中移除 {{name}}",
+    },
   },
   exportOutputError: {
     outputUnknown: "QuipClip 没有此次导出的文件记录。",

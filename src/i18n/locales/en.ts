@@ -993,6 +993,22 @@ export const en = {
       show: "Show Details",
       hide: "Hide Details",
     },
+    // The list of the runs of a batch in the run view of the dialog (ADR 049). It shows only
+    // when the batch has more than one run. Each row shows one of the `status` labels. A
+    // waiting row has a Remove button, and `removeNamed` is its accessible name. {{name}} is
+    // the file name of the run, such as "clip.mp4".
+    queue: {
+      heading: "Queue",
+      status: {
+        waiting: "Waiting",
+        current: "Exporting",
+        finished: "Finished",
+        failed: "Failed",
+        canceled: "Stopped",
+      },
+      remove: "Remove",
+      removeNamed: "Remove {{name}} from the queue",
+    },
   },
   exportOutputError: {
     outputUnknown: "QuipClip has no record of the file from this export.",

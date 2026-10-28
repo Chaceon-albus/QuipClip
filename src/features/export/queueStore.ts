@@ -66,8 +66,9 @@ export type ExportQueueState = {
    */
   ended: ExportQueueEndedJob[];
   /**
-   * The waiting runs that the backend agreed to cancel, and whose deciding event has not come
-   * yet. A run stays in `waiting` until that event: `failed` with `canceled` when the backend
+   * The waiting runs that the user asked to remove: the cancel request is in flight, or the
+   * backend agreed to cancel the run and its deciding event has not come yet. A refused or
+   * failed request takes the run out again. A run stays in `waiting` until that event: `failed` with `canceled` when the backend
    * withdrew it from the queue, or `preparing` when it took the slot first. In that case the
    * backend stops it as the run that holds the slot, and it ends `canceled` in the export
    * store. The cancel answer and the event can come in either order.
@@ -119,8 +120,10 @@ export type ExportQueueActions = {
   /**
    * Withdraws a waiting run from the queue of the backend.
    *
-   * On a true answer the run goes to `removing`. Its next event decides what happens to it:
-   * see `ExportQueueState.removing`.
+   * The run goes to `removing` before the request, so a second call while the request is in
+   * flight does nothing and returns false. On a true answer the run stays in `removing`, and its
+   * next event decides what happens to it: see `ExportQueueState.removing`. On a false answer
+   * or a rejection, the run leaves `removing`, and the user can remove it again.
    *
    * @returns True when the backend accepted the cancel, false otherwise.
    */
@@ -498,26 +501,34 @@ export function createExportQueueStore(
       },
 
       remove: async (runId: string): Promise<boolean> => {
-        if (!get().waiting.includes(runId)) {
+        const before = get();
+        if (!before.waiting.includes(runId) || before.removing.includes(runId)) {
           return false;
         }
+        // The run goes to `removing` before the request. So the Remove button of the run is
+        // disabled at once, and a second click cannot send a second cancel request.
+        set((state) => ({ removing: [...state.removing, runId] }));
+        // Takes the run out of `removing` after a refused or failed request. The deciding
+        // event, or a new batch, can have taken it out already.
+        const restore = () => {
+          if (get().removing.includes(runId)) {
+            set((state) => ({ removing: removeFrom(state.removing, runId) }));
+          }
+        };
         let withdrawn: boolean;
         try {
           withdrawn = await cancelExportFn(runId);
         } catch {
+          restore();
           return false;
         }
         // A true answer does not tell whether the backend withdrew the run from the queue or
         // stopped it after it took the slot, and the deciding event can come before or after
-        // the answer. So the run goes to `removing`, and its event decides: `failed` with
+        // the answer. So the run stays in `removing`, and its event decides: `failed` with
         // `canceled` forgets it, and `preparing` adopts it, after which it ends canceled in
-        // the export store. When the event came first, the run no longer waits here.
-        if (withdrawn && get().waiting.includes(runId)) {
-          set((state) =>
-            state.removing.includes(runId)
-              ? {}
-              : { removing: [...state.removing, runId] },
-          );
+        // the export store. Both events take the run out of `removing`.
+        if (!withdrawn) {
+          restore();
         }
         return withdrawn;
       },
