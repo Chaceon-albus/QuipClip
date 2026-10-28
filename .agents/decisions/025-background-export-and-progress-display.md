@@ -58,6 +58,18 @@ cannot arm and stop in one gesture. 500 ms is the default double-click time on m
 Windows. A run shorter than 30 seconds stops on one click, because it costs little to start
 again. `src/components/export/exportStopPresenter.ts` holds the rule and its constants.
 
+(Changed on 2026-10-27.) Exports can wait in a queue (ADR 049), so the run under the Stop
+button can change while the pointer is on it. Two more rules protect the next run:
+
+- A click that comes less than 500 ms after the current run started does nothing. Without
+  this rule, a click aimed at a run that just ended stops the next run. The rule also ignores
+  the second click of a double-click on Export that lands on Stop.
+- A Confirm Stop that the user armed for a run that ended does not carry over. A click inside
+  the confirmation window that comes after the next run started does nothing.
+
+An ignored click gives no feedback, as the ignored second half of a double-click gives none.
+A deliberate click so soon after a start is unlikely.
+
 **This replaces the last section of ADR 016, "Dismissing the dialog during preparation now
 cancels".** That section cancelled by slot on a dismissal because the dismissal reset the
 store. A reset store could not learn the run identifier, so the run became an orphan that
