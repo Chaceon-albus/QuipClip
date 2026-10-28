@@ -161,6 +161,8 @@ export const zhCN: TranslationCatalog = {
       segments_other: "已标记的 {{count}} 个片段将丢失。",
       pendingIn: "待定的入点将丢失。",
       export: "导出将停止。",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      queued_other: "队列中的 {{count}} 个导出将不会开始。",
       preset: "对“{{name}}”的未保存更改将丢失。",
       presetUnnamed: "预设的未保存更改将丢失。",
     },

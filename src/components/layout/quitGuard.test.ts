@@ -4,6 +4,7 @@ import { createI18nInstance } from "@/i18n";
 import type { Pts, Segment } from "@/types/project";
 import {
   countOpenSourceSegments,
+  countQueuedExports,
   decideQuit,
   decideReplace,
   presentQuitPrompt,
@@ -32,6 +33,7 @@ function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
     exportTracking: false,
     unsavedPresetName: null,
     openMediaPath: OPEN_PATH,
+    queuedExports: 0,
     ...overrides,
   };
 }
@@ -40,6 +42,7 @@ const NOTHING_LOST = {
   segments: 0,
   pendingIn: false,
   exportActive: false,
+  queuedExports: 0,
   unsavedPreset: null,
 };
 
@@ -111,6 +114,14 @@ describe("decideQuit", () => {
     }
   });
 
+  it("asks for queued exports alone", () => {
+    expect(decideQuit(createInput({ queuedExports: 1 }))).toEqual({
+      ask: true,
+      loss: { ...NOTHING_LOST, queuedExports: 1 },
+    });
+    expect(decideQuit(createInput({ queuedExports: 0 })).ask).toBe(false);
+  });
+
   it("asks for a failure while the store still tracks the run", () => {
     // A Stop request failed, and the backend still encodes. A quit stops that run (ADR 017).
     expect(
@@ -153,6 +164,7 @@ describe("decideQuit", () => {
       exportTracking: true,
       unsavedPresetName: "Archive",
       openMediaPath: OPEN_PATH,
+      queuedExports: 2,
     });
     expect(decision).toEqual({
       ask: true,
@@ -160,6 +172,7 @@ describe("decideQuit", () => {
         segments: 2,
         pendingIn: true,
         exportActive: true,
+        queuedExports: 2,
         unsavedPreset: "Archive",
       },
     });
@@ -243,12 +256,32 @@ describe("decideReplace", () => {
   });
 });
 
+describe("countQueuedExports", () => {
+  it("counts the waiting runs and the submissions for the queue that have no answer", () => {
+    expect(countQueuedExports({ waiting: [], removing: [], enqueuing: 0 })).toBe(0);
+    expect(
+      countQueuedExports({ waiting: ["b", "c"], removing: [], enqueuing: 0 }),
+    ).toBe(2);
+    expect(countQueuedExports({ waiting: ["b"], removing: [], enqueuing: 2 })).toBe(3);
+  });
+
+  it("does not count a run that the user removes", () => {
+    expect(
+      countQueuedExports({ waiting: ["b", "c"], removing: ["c"], enqueuing: 0 }),
+    ).toBe(1);
+    expect(countQueuedExports({ waiting: ["b"], removing: ["b"], enqueuing: 0 })).toBe(
+      0,
+    );
+  });
+});
+
 describe("presentQuitPrompt", () => {
   it("lists every line that applies, in a fixed order", () => {
     const view = presentQuitPrompt({
       segments: 3,
       pendingIn: true,
       exportActive: true,
+      queuedExports: 2,
       unsavedPreset: "Archive",
     });
     expect(view).toEqual({
@@ -257,6 +290,7 @@ describe("presentQuitPrompt", () => {
         { key: "quitGuard.loss.segments", values: { count: 3 } },
         { key: "quitGuard.loss.pendingIn" },
         { key: "quitGuard.loss.export" },
+        { key: "quitGuard.loss.queued", values: { count: 2 } },
         { key: "quitGuard.loss.preset", values: { name: "Archive" } },
       ],
       confirm: { key: "quitGuard.quit.confirm" },
@@ -268,6 +302,50 @@ describe("presentQuitPrompt", () => {
     expect(presentQuitPrompt({ ...NOTHING_LOST, exportActive: true }).lines).toEqual([
       { key: "quitGuard.loss.export" },
     ]);
+  });
+
+  it("lists the queued exports alone, after the line of the live export", () => {
+    expect(presentQuitPrompt({ ...NOTHING_LOST, queuedExports: 1 }).lines).toEqual([
+      { key: "quitGuard.loss.queued", values: { count: 1 } },
+    ]);
+    expect(
+      presentQuitPrompt({ ...NOTHING_LOST, exportActive: true, queuedExports: 3 })
+        .lines,
+    ).toEqual([
+      { key: "quitGuard.loss.export" },
+      { key: "quitGuard.loss.queued", values: { count: 3 } },
+    ]);
+  });
+
+  it("formats the line of the queued exports with its plural form", async () => {
+    for (const [language, one, other] of [
+      [
+        "en",
+        "1 export in the queue will not start.",
+        "2 exports in the queue will not start.",
+      ],
+      ["zh-CN", "队列中的 1 个导出将不会开始。", "队列中的 2 个导出将不会开始。"],
+    ] as const) {
+      const instance = await createI18nInstance({
+        initialPreference: language,
+        storage: null,
+        systemLanguages: [],
+      });
+      const format = (count: number) => {
+        const [line] = presentQuitPrompt({
+          ...NOTHING_LOST,
+          queuedExports: count,
+        }).lines;
+        // The dialog formats a line through the same view of `t`.
+        const translate = instance.t as (
+          key: string,
+          values?: Readonly<Record<string, string | number>>,
+        ) => string;
+        return line === undefined ? "" : translate(line.key, line.values);
+      };
+      expect(format(1)).toBe(one);
+      expect(format(2)).toBe(other);
+    }
   });
 
   it("names no preset when the draft has no name yet", () => {

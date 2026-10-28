@@ -86,10 +86,17 @@ export type ExportQueueState = {
    * run or add one to the queue. A new batch does not clear it.
    */
   submitting: number;
+  /**
+   * The part of `submitting` that goes to the queue of the backend (`enqueue`). It leaves out
+   * a submission that starts a new batch: the export store shows that run as `preparing` at
+   * once, so it is the live run and not a queued one. The quit guard counts this number. A new
+   * batch does not clear it.
+   */
+  enqueuing: number;
 };
 
 /** The part of the queue state that belongs to one batch. A new batch clears it. */
-type ExportQueueBatch = Omit<ExportQueueState, "submitting">;
+type ExportQueueBatch = Omit<ExportQueueState, "submitting" | "enqueuing">;
 
 /**
  * The result of `submit`.
@@ -500,6 +507,7 @@ export function createExportQueueStore(
     return {
       ...emptyBatch(),
       submitting: 0,
+      enqueuing: 0,
 
       submit: async (request: ExportRequest): Promise<ExportQueueSubmitResult> => {
         if (isOutputTaken(request.outputPath)) {
@@ -521,12 +529,19 @@ export function createExportQueueStore(
           pendingOutputPaths.length === 0;
 
         pendingOutputPaths.push(request.outputPath);
-        set((state) => ({ submitting: state.submitting + 1 }));
+        const enqueues = !startsBatch;
+        set((state) => ({
+          submitting: state.submitting + 1,
+          enqueuing: state.enqueuing + (enqueues ? 1 : 0),
+        }));
         try {
-          return startsBatch ? await startDirectly(request) : await enqueue(request);
+          return enqueues ? await enqueue(request) : await startDirectly(request);
         } finally {
           pendingOutputPaths.splice(pendingOutputPaths.indexOf(request.outputPath), 1);
-          set((state) => ({ submitting: state.submitting - 1 }));
+          set((state) => ({
+            submitting: state.submitting - 1,
+            enqueuing: state.enqueuing - (enqueues ? 1 : 0),
+          }));
         }
       },
 

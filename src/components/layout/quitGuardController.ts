@@ -14,16 +14,25 @@
  * which reports its name to this window (`settingsWindowDraft.ts`). A quit can start while
  * the Settings window has the focus, for example from `Cmd+Q`, so the quit prompt brings the
  * main window forward first.
+ *
+ * Every way to close reaches the same decision: the close button of the window, `Cmd+W`, and
+ * an exit request all call `requestQuit`, which reads the input once per request. The input
+ * holds the queued exports, so each of them asks while exports wait (ADR 049).
  */
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createStore, type StoreApi } from "zustand/vanilla";
-import { exportStore } from "@/features/export";
+import {
+  exportQueueStore,
+  exportStore,
+  type ExportQueueState,
+} from "@/features/export";
 import { mediaStore, type ImportMediaResult } from "@/features/media";
 import { settingsWindowDraftStore } from "@/features/settings/settingsWindowDraft";
 import { timelineStore } from "@/features/timeline";
 import { BACKEND_COMMANDS, invokeCommand } from "@/lib/ipc";
 import {
+  countQueuedExports,
   decideQuit,
   decideReplace,
   type QuitGuardInput,
@@ -43,10 +52,21 @@ export interface QuitGuardState {
   readonly prompt: QuitGuardPrompt | null;
 }
 
+/** The fields of the export queue store that the quit guard reads. */
+export type QuitGuardQueueState = Pick<
+  ExportQueueState,
+  "waiting" | "removing" | "enqueuing"
+>;
+
 /** Dependencies that a test can inject. Each one defaults to the production value. */
 export interface QuitGuardDependencies {
-  /** Reads the timeline, the export status, the preset draft, and the open video now. */
+  /**
+   * Reads the timeline, the export status, the queued exports, the preset draft, and the open
+   * video now. Defaults to `readQuitGuardInput` over `queueStore`.
+   */
   readInput?: () => QuitGuardInput;
+  /** The export queue store that the default `readInput` reads. Defaults to `exportQueueStore`. */
+  queueStore?: StoreApi<QuitGuardQueueState>;
   /**
    * Asks Rust to end the application. The promise can resolve before the application ends,
    * because Rust only queues the exit, and it can also never settle.
@@ -84,8 +104,10 @@ export interface QuitGuard {
   cancel: () => void;
 }
 
-/** Reads the production stores. */
-export function readQuitGuardInput(): QuitGuardInput {
+/** Reads the production stores. A test can pass another export queue store. */
+export function readQuitGuardInput(
+  queueStore: StoreApi<QuitGuardQueueState> = exportQueueStore,
+): QuitGuardInput {
   const timeline = timelineStore.getState();
   const exportState = exportStore.getState();
   return {
@@ -98,6 +120,7 @@ export function readQuitGuardInput(): QuitGuardInput {
     exportTracking: exportState.tracking,
     unsavedPresetName: settingsWindowDraftStore.getState().unsavedPresetName,
     openMediaPath: mediaStore.getState().media?.path ?? null,
+    queuedExports: countQueuedExports(queueStore.getState()),
   };
 }
 
@@ -120,7 +143,8 @@ function focusCurrentWindow(): void {
 }
 
 export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitGuard {
-  const readInput = dependencies.readInput ?? readQuitGuardInput;
+  const queueStore = dependencies.queueStore ?? exportQueueStore;
+  const readInput = dependencies.readInput ?? (() => readQuitGuardInput(queueStore));
   const confirmQuit = dependencies.confirmQuit ?? invokeConfirmQuit;
   const importPath =
     dependencies.importPath ??

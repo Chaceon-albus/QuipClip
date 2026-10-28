@@ -232,6 +232,9 @@ export const en = {
       segments_other: "{{count}} marked segments will be lost.",
       pendingIn: "The pending In point will be lost.",
       export: "The export will stop.",
+      // The exports that wait in the queue. The exit drops them before they start (ADR 049).
+      queued_one: "{{count}} export in the queue will not start.",
+      queued_other: "{{count}} exports in the queue will not start.",
       preset: "The unsaved changes to “{{name}}” will be lost.",
       presetUnnamed: "The unsaved changes to the preset will be lost.",
     },

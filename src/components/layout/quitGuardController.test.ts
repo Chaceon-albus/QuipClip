@@ -1,19 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
+import { createStore } from "zustand/vanilla";
 import {
   cancelExport as clientCancelExport,
+  createExportQueueStore,
   createExportStore,
+  exportQueueStore,
   exportStore,
+  type ExportRequest,
   type ExportProgressEvent,
   type ExportSubmission,
 } from "@/features/export";
 import type { ImportMediaResult } from "@/features/media";
 import { settingsWindowDraftStore } from "@/features/settings/settingsWindowDraft";
 import type { Pts, Segment } from "@/types/project";
-import { decideQuit, type QuitGuardInput } from "./quitGuard";
+import {
+  countQueuedExports,
+  decideQuit,
+  presentQuitPrompt,
+  type QuitGuardInput,
+} from "./quitGuard";
 import {
   createQuitGuard,
   readQuitGuardInput,
   type QuitGuardDependencies,
+  type QuitGuardQueueState,
 } from "./quitGuardController";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 
@@ -30,6 +40,7 @@ function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
     exportTracking: false,
     unsavedPresetName: null,
     openMediaPath: "/videos/open.mp4",
+    queuedExports: 0,
     ...overrides,
   };
 }
@@ -96,6 +107,7 @@ describe("requestQuit", () => {
         segments: 0,
         pendingIn: false,
         exportActive: true,
+        queuedExports: 0,
         unsavedPreset: "Archive",
       },
     });
@@ -436,7 +448,13 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
     expect(confirmQuit).not.toHaveBeenCalled();
     expect(guard.store.getState().prompt).toEqual({
       kind: "quit",
-      loss: { segments: 0, pendingIn: false, exportActive: true, unsavedPreset: null },
+      loss: {
+        segments: 0,
+        pendingIn: false,
+        exportActive: true,
+        queuedExports: 0,
+        unsavedPreset: null,
+      },
     });
 
     // Rust then cancels the run that holds the export slot (ADR 017).
@@ -490,5 +508,174 @@ describe("readQuitGuardInput", () => {
       settingsWindowDraftStore.setState({ unsavedPresetName: null });
     }
     expect(readQuitGuardInput().unsavedPresetName).toBeNull();
+  });
+});
+
+describe("the queued exports in the quit guard", () => {
+  function createQueue(state: Partial<QuitGuardQueueState> = {}) {
+    return createStore<QuitGuardQueueState>()(() => ({
+      waiting: [],
+      removing: [],
+      enqueuing: 0,
+      ...state,
+    }));
+  }
+
+  it("reads the waiting runs and the submissions for the queue of the injected store", () => {
+    const queue = createQueue({ waiting: ["run-2", "run-3"], enqueuing: 1 });
+    expect(readQuitGuardInput(queue).queuedExports).toBe(3);
+  });
+
+  it("does not count a waiting run that the user removes", () => {
+    const queue = createQueue({ waiting: ["run-2", "run-3"], removing: ["run-3"] });
+    expect(readQuitGuardInput(queue).queuedExports).toBe(1);
+  });
+
+  it("reads the production queue store by default", () => {
+    // The production store has no injected client, so the test writes its public state.
+    exportQueueStore.setState({ waiting: ["run-2"], enqueuing: 1 });
+    try {
+      expect(readQuitGuardInput().queuedExports).toBe(2);
+    } finally {
+      exportQueueStore.setState({ waiting: [], enqueuing: 0 });
+    }
+    expect(readQuitGuardInput().queuedExports).toBe(0);
+  });
+
+  it("asks before a quit while exports wait, and quits at once when none wait", () => {
+    const queue = createQueue({ waiting: ["run-2"] });
+    const confirmQuit = vi.fn(() => Promise.resolve());
+    const guard = createQuitGuard({
+      queueStore: queue,
+      confirmQuit,
+      focusWindow: () => {},
+    });
+
+    // The close button of the window and an exit request both call `requestQuit`.
+    guard.requestQuit();
+    expect(confirmQuit).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt).toMatchObject({
+      kind: "quit",
+      loss: { queuedExports: 1 },
+    });
+    guard.cancel();
+
+    // A submission for the queue that has no answer counts too.
+    queue.setState({ waiting: [], enqueuing: 1 });
+    guard.requestQuit();
+    expect(guard.store.getState().prompt).toMatchObject({
+      kind: "quit",
+      loss: { queuedExports: 1 },
+    });
+    guard.cancel();
+
+    queue.setState({ enqueuing: 0 });
+    guard.requestQuit();
+    expect(guard.store.getState().prompt).toBeNull();
+    expect(confirmQuit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the quit prompt with the real export stores", () => {
+  function request(outputPath: string): ExportRequest {
+    return {
+      sourcePath: "/media/source.mp4",
+      outputPath,
+      segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+      preset: createPresetDraft("mp4-h264", "Test preset"),
+      streams: "videoAndAudio",
+      audioMode: "encode",
+    };
+  }
+
+  /** A real export store and queue store whose `start_export` answers when the test says. */
+  function setupStores() {
+    const answers: Array<(submission: ExportSubmission) => void> = [];
+    const start = vi.fn(
+      () =>
+        new Promise<ExportSubmission>((resolve) => {
+          answers.push(resolve);
+        }),
+    );
+    const subscribe = () => Promise.resolve(() => {});
+    const cancel = () => Promise.resolve(true);
+    const store = createExportStore({
+      subscribeExportProgress: subscribe,
+      startExport: start,
+      cancelExport: cancel,
+    });
+    const queue = createExportQueueStore({
+      exportStore: store,
+      startExport: start,
+      cancelExport: cancel,
+      subscribeExportProgress: subscribe,
+    });
+    const guard = createQuitGuard({
+      readInput: () => {
+        const { status, tracking } = store.getState();
+        return createInput({
+          exportStatus: status,
+          exportTracking: tracking,
+          queuedExports: countQueuedExports(queue.getState()),
+        });
+      },
+      confirmQuit: () => Promise.resolve(),
+      focusWindow: () => {},
+    });
+    return { start, answers, queue, guard };
+  }
+
+  function promptLines(guard: ReturnType<typeof createQuitGuard>): string[] {
+    const prompt = guard.store.getState().prompt;
+    return prompt?.kind === "quit"
+      ? presentQuitPrompt(prompt.loss).lines.map((line) => line.key)
+      : [];
+  }
+
+  it("names only the live export while a direct start waits for its answer", async () => {
+    const { start, answers, queue, guard } = setupStores();
+    const starting = queue.getState().submit(request("/out/a.mp4"));
+    await vi.waitFor(() => {
+      expect(start).toHaveBeenCalledTimes(1);
+    });
+    expect(queue.getState()).toMatchObject({ submitting: 1, enqueuing: 0 });
+
+    guard.requestQuit();
+    expect(promptLines(guard)).toEqual(["quitGuard.loss.export"]);
+    guard.cancel();
+
+    answers[0]?.({ runId: "run-1", queued: false });
+    await starting;
+  });
+
+  it("names the queued export while a submission for the queue waits for its answer", async () => {
+    const { start, answers, queue, guard } = setupStores();
+    const starting = queue.getState().submit(request("/out/a.mp4"));
+    await vi.waitFor(() => {
+      expect(start).toHaveBeenCalledTimes(1);
+    });
+    answers[0]?.({ runId: "run-1", queued: false });
+    await starting;
+
+    const queuing = queue.getState().submit(request("/out/b.mp4"));
+    await vi.waitFor(() => {
+      expect(start).toHaveBeenCalledTimes(2);
+    });
+    expect(queue.getState()).toMatchObject({ submitting: 1, enqueuing: 1 });
+
+    guard.requestQuit();
+    expect(promptLines(guard)).toEqual([
+      "quitGuard.loss.export",
+      "quitGuard.loss.queued",
+    ]);
+    guard.cancel();
+
+    answers[1]?.({ runId: "run-2", queued: true });
+    await queuing;
+    expect(queue.getState()).toMatchObject({
+      submitting: 0,
+      enqueuing: 0,
+      waiting: ["run-2"],
+    });
   });
 });

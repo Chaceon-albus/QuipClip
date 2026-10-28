@@ -3,8 +3,8 @@
  * (ADR 027).
  *
  * Version 1 writes no project file, so the segments live only for the session. A quit loses
- * the segments and the pending In point of the open source, a live export, and an unsaved
- * preset draft.
+ * the segments and the pending In point of the open source, a live export, the exports that
+ * wait in the queue, and an unsaved preset draft.
  *
  * Opening another video keeps the segments, but it hides them: they belong to the source of
  * the open video, and the timeline shows only the segments of the active source. They come
@@ -18,7 +18,7 @@
  * (ADR 011).
  */
 
-import type { ExportStatus } from "@/features/export";
+import type { ExportQueueState, ExportStatus } from "@/features/export";
 import { isExportRunLive } from "@/features/export/runState";
 import { getActiveSourceSegmentEntries } from "@/features/timeline";
 import { isSameFilePath } from "@/lib/filePath";
@@ -47,6 +47,8 @@ export interface QuitGuardInput {
   readonly unsavedPresetName: string | null;
   /** The canonical path of the open video, as the import reported it, or null. */
   readonly openMediaPath: string | null;
+  /** The exports that a quit drops before they start (`countQueuedExports`). */
+  readonly queuedExports: number;
 }
 
 /** What a quit would lose now. */
@@ -61,6 +63,13 @@ export interface QuitLoss {
    * `failed`, and the backend still encodes. A quit stops the run (ADR 017).
    */
   readonly exportActive: boolean;
+  /**
+   * The number of exports that wait in the queue or have no answer to their submission for
+   * the queue. The exit closes the queue, and the backend drops them with no message
+   * (ADR 049). A submission for the queue can also start at once when the slot is free. The
+   * exit then cancels that run, which is still lost work.
+   */
+  readonly queuedExports: number;
   /** The name of the preset draft with unsaved edits, or null. */
   readonly unsavedPreset: string | null;
 }
@@ -97,6 +106,20 @@ export interface QuitGuardPromptView {
   readonly destructive: boolean;
 }
 
+/**
+ * The number of exports that a quit drops before they start: the runs that wait in the queue,
+ * less the runs that the user removes, and the submissions for the queue that have no answer
+ * yet (`enqueuing`). A run in `removing` is on its way out of the queue, because the user
+ * asked for that. A submission that starts a new batch is not counted: the export store
+ * shows it as the live run, and `exportActive` names it.
+ */
+export function countQueuedExports(
+  queue: Pick<ExportQueueState, "waiting" | "removing" | "enqueuing">,
+): number {
+  const waiting = queue.waiting.filter((runId) => !queue.removing.includes(runId));
+  return waiting.length + queue.enqueuing;
+}
+
 /** The number of segments that belong to the open source. */
 export function countOpenSourceSegments(timeline: TimelineWorkInput): number {
   return getActiveSourceSegmentEntries(timeline.segments, timeline.sourceId).length;
@@ -114,7 +137,8 @@ function hasPendingIn(timeline: TimelineWorkInput): boolean {
  * Decides whether a quit asks first, and what it would lose.
  *
  * The quit asks when it would lose one or more segments or the pending In point of the open
- * source, a live export, or an unsaved preset draft. Otherwise it continues at once.
+ * source, a live export, one or more queued exports, or an unsaved preset draft. Otherwise it
+ * continues at once.
  */
 export function decideQuit(input: QuitGuardInput): QuitDecision {
   const loss: QuitLoss = {
@@ -124,12 +148,14 @@ export function decideQuit(input: QuitGuardInput): QuitDecision {
       status: input.exportStatus,
       tracking: input.exportTracking,
     }),
+    queuedExports: input.queuedExports,
     unsavedPreset: input.unsavedPresetName,
   };
   const ask =
     loss.segments > 0 ||
     loss.pendingIn ||
     loss.exportActive ||
+    loss.queuedExports > 0 ||
     loss.unsavedPreset !== null;
   return { ask, loss };
 }
@@ -168,6 +194,9 @@ export function presentQuitPrompt(loss: QuitLoss): QuitGuardPromptView {
   }
   if (loss.exportActive) {
     lines.push({ key: "quitGuard.loss.export" });
+  }
+  if (loss.queuedExports > 0) {
+    lines.push({ key: "quitGuard.loss.queued", values: { count: loss.queuedExports } });
   }
   if (loss.unsavedPreset !== null) {
     // A new preset can have no name yet. Empty quotation marks would read as a fault.
