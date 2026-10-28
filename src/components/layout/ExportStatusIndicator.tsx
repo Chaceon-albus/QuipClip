@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
+  selectExportOutputAction,
   useExportOutputActionStore,
   useExportPanelStore,
   useExportStore,
@@ -371,13 +372,13 @@ function ExportResultItem({
   onDismiss: () => void;
 }) {
   const { t } = useTranslation();
-  const outputActionPending = useExportOutputActionStore((state) => state.pending);
+  const revealBusy = useExportOutputActionStore(
+    (state) => selectExportOutputAction(state, runId).pending,
+  );
   const revealOutput = useExportOutputActionStore((state) => state.reveal);
 
   const revealLabel = t(revealLabelKey(isMacOS()));
   const canReveal = kind === "finished" && runId !== null;
-  const revealBusy =
-    outputActionPending !== null && outputActionPending.runId === runId;
 
   // The status bar has no room for an error message. A failed request opens the dialog,
   // which shows the message inline for this run.

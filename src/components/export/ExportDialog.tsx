@@ -29,12 +29,13 @@ import {
   isExportRunLive,
   resolveExportAudioMode,
   resolveExportStreams,
+  selectExportOutputAction,
   sourceHasAudio,
   useExportOutputActionStore,
   useExportStore,
   useExportRunTiming,
   useExportStreamChoice,
-  type ExportOutputActionState,
+  type ExportOutputActionRunState,
   type ExportRunTiming,
   type ExportState,
 } from "@/features/export";
@@ -127,13 +128,12 @@ function focusFirstAvailable(
  * at once, and a hidden run can end during the animation. Without the held frame, the content
  * would collapse or change to another step while it fades out.
  */
-interface ExportDialogFrame
-  extends
-    Pick<
-      ExportState,
-      "status" | "runId" | "outputPath" | "cancelRequested" | "tracking" | "error"
-    >,
-    Pick<ExportOutputActionState, "pending" | "failure"> {
+interface ExportDialogFrame extends Pick<
+  ExportState,
+  "status" | "runId" | "outputPath" | "cancelRequested" | "tracking" | "error"
+> {
+  /** The state of Show for the run of the frame (`selectExportOutputAction`). */
+  outputAction: ExportOutputActionRunState;
   requestedPresetId: string | null;
   choosingDestination: boolean;
   backCheckPending: boolean;
@@ -243,8 +243,9 @@ export function ExportDialog({
   const cancelExport = useExportStore((state) => state.cancelExport);
   const reset = useExportStore((state) => state.reset);
 
-  const outputActionPending = useExportOutputActionStore((state) => state.pending);
-  const outputActionFailure = useExportOutputActionStore((state) => state.failure);
+  const outputAction = useExportOutputActionStore((state) =>
+    selectExportOutputAction(state, runId),
+  );
   const revealOutput = useExportOutputActionStore((state) => state.reveal);
 
   // An armed state belongs to one run. When the run is no longer live (`isExportRunLive`),
@@ -323,8 +324,7 @@ export function ExportDialog({
     cancelRequested,
     tracking,
     error,
-    pending: outputActionPending,
-    failure: outputActionFailure,
+    outputAction,
     requestedPresetId,
     choosingDestination,
     backCheckPending,
@@ -478,17 +478,14 @@ export function ExportDialog({
     setChoosingDestination(false);
     setBackCheckPending(false);
     setStopArmedAt(null);
-    // The reset changes the run id, and that change clears the Show state
-    // (`bindOutputActionsToExportRun`).
+    // The reset changes the run id, and that change drops the Show state of the runs that
+    // the interface no longer lists (`bindOutputActionsToExportRun`).
     reset();
   };
 
-  // The state of Show shows only for the run that it names.
-  const outputFailure =
-    frame.failure !== null && frame.failure.runId === frame.runId
-      ? frame.failure
-      : null;
-  const revealBusy = frame.pending !== null && frame.pending.runId === frame.runId;
+  // The frame holds the state of Show for its own run only.
+  const outputFailure = frame.outputAction.error;
+  const revealBusy = frame.outputAction.pending;
   const canActOnOutput = frame.runId !== null && frame.outputPath !== null;
 
   // The store ignores a second request for the run while one is in flight. The busy button
@@ -729,10 +726,10 @@ export function ExportDialog({
                 role="alert"
                 className="text-xs text-destructive-text"
               >
-                <p>{t(outputActionErrorKey(outputFailure.error.code))}</p>
-                {outputFailure.error.detail && (
+                <p>{t(outputActionErrorKey(outputFailure.code))}</p>
+                {outputFailure.detail && (
                   <p className="mt-1 font-mono break-all select-text">
-                    {outputFailure.error.detail}
+                    {outputFailure.detail}
                   </p>
                 )}
               </div>
