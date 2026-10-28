@@ -33,7 +33,7 @@ src/            React frontend
   assets/brand/     the icon master
 src-tauri/      Rust backend
   src/ffmpeg/       locate, probe, capabilities, export, preview windows
-  src/flv/          the FLV tag reader, the keyframe locator, head.flv and its cache
+  src/flv/          the FLV tag reader, the keyframe locator, the FLV head, the keyframe cache
   src/settings/     the settings file
   src/menu.rs       the macOS application menu
   src/traffic_lights.rs  the macOS window buttons and the main window

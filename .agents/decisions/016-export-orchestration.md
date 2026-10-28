@@ -36,8 +36,9 @@ One more constraint comes from the interface. `src/features/export/types.ts` is 
 tests pin 26 error codes in a fixed order, and they pin the event union. The command must produce
 exactly those codes and those payloads.
 
-(Changed on 2026-10-28.) ADR 055 adds four codes at the end of that order: `tooManySources`,
-`piecesOutOfOrder`, `workDirectoryUnavailable` and `graphFileUnsupported`. Preparation also
+(Changed on 2026-10-28.) ADR 055 adds four codes: `tooManySources`, `piecesOutOfOrder`,
+`workDirectoryUnavailable` and `graphFileUnsupported`. Each one goes to the end of that order when
+the unit that uses it lands. Preparation also
 runs the option probe of ADR 055. It is the only `ffmpeg` process before the export that reads
 no source.
 

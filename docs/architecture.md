@@ -96,7 +96,7 @@ document summarizes them and shows how the parts fit together.
 |                                                             |
 |  commands/   the IPC surface                                |
 |  ffmpeg/     locate, probe, capabilities, export, preview   |
-|  flv/        FLV tags, keyframe locator, head.flv cache     |
+|  flv/        FLV tags, keyframe locator, keyframe cache     |
 |  settings/   the settings file                              |
 |  fsutil.rs   atomic file replacement                        |
 |  procutil.rs child processes without a console window       |
@@ -190,7 +190,7 @@ the source at a time into fMP4 with `-c copy`. Rust sends the bytes to the page 
 channel. For FLV, Rust finds the keyframe itself and writes the window to the stdin of FFmpeg.
 FFmpeg cannot seek in an FLV without a keyframe index: it reads the file from its start. For
 MPEG-TS and MKV, FFmpeg seeks with `-ss`. The preview reads only the windows that it plays. It
-writes only a small `head.flv` and a keyframe sidecar to the application data directory. AVI,
+writes only a keyframe sidecar to the application data directory. AVI,
 ASF (WMV) and a video codec that the web view cannot decode keep the decode failure panel.
 
 The windows keep the absolute source timestamps, and the page sets `timestampOffset` so that
@@ -400,8 +400,9 @@ for every display. The dialog smooths the frame count between two `-progress` bl
 clock changes its remaining time and its elapsed time together. One `ProgressBar` component in
 `src/components/common/` draws every bar.
 
-An FLV input does not use `-ss` (ADR 046). It opens a `concat` of `head.flv` and a `subfile`
-slice that starts at the keyframe at or before the seek. The export then reads only the parts of
+An FLV input does not use `-ss` (ADR 046). It opens a `concat` of the head of the source and a
+`subfile` slice that starts at the keyframe at or before the seek. The head is the file
+`h<k>.flv` in the work directory of the export (ADR 055). The export then reads only the parts of
 the file around its segments.
 
 The seek supplies the speed. The trim supplies the exactness. An input seek alone is not
