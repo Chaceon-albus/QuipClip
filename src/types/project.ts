@@ -179,6 +179,47 @@ export type Segment = {
 };
 
 /**
+ * One placement of a source on the sequence (ADR 052).
+ * The array order of the clips is the sequence order. A clip stores no sequence time.
+ */
+export type Clip = {
+  /** Unique stable identifier of the clip in the project. Never used again for another clip. */
+  id: string;
+  /** Identifier of the source that the clip places. */
+  sourceId: string;
+};
+
+/**
+ * An edit point on the sequence: a clip and a PTS of the video stream of that clip's source (ADR 052).
+ */
+export type EditPoint = {
+  /** Identifier of the clip that owns the boundary. */
+  clipId: string;
+  /** PTS in the video time base of the clip's source (ADR 002). */
+  pts: Pts;
+};
+
+/**
+ * A segment on a sequence of clips: a half-open interval from its In point to its Out point (ADR 052).
+ * The In and the Out can name two clips, so the segment can cross a junction.
+ */
+export type SequenceSegment = {
+  /** Unique identifier for the segment. */
+  id: string;
+  /** Clip that holds the first included frame. */
+  inClipId: string;
+  /** Inclusive start PTS in the video time base of the source of `inClipId`. */
+  inPts: Pts;
+  /** Clip that holds the last included frame. */
+  outClipId: string;
+  /**
+   * Exclusive end PTS in the video time base of the source of `outClipId`. It can equal the end of
+   * that clip's range.
+   */
+  outPts: Pts;
+};
+
+/**
  * QuipClip project document format (.qcproj).
  * Holds render settings, imported sources, ordered timeline segments, and active source selection (ADR 007, ADR 010).
  */
