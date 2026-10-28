@@ -10,13 +10,14 @@
 //!
 //! # What is rejected, and what is reported by event
 //!
-//! The split mirrors `commands::capabilities`. Everything the command can find out cheaply
-//! and before the encode starts -- an invalid preset, a second export already running, a
-//! missing ffmpeg pair, a failed re-probe, every preflight check in
-//! [`build_plan`], and the output reservation -- is a plain rejection of the promise, because
-//! the command has not answered yet and the frontend can render the failure without
-//! subscribing to anything. Everything after the command returns its [`ExportStart`] payload
-//! is an event on that run, because by then there is no rejection path left.
+//! The command decides only what it can decide at once, and rejects the promise for it: an
+//! invalid preset, a missing application data directory, a second export already running, and
+//! an export thread that the operating system refused. Then it answers with the run id
+//! ([`ExportSubmission`]). Preparation runs on the export thread after that answer: the
+//! discovery of ffmpeg, the revision check, the re-probe, every preflight check in
+//! [`build_plan`], and the output reservation. A failure there is a `failed` event on the run,
+//! as every later failure is. The frontend therefore holds the run id for the whole run, and it
+//! names the run in every cancel.
 //!
 //! # The five obligations no type enforces
 //!
@@ -132,7 +133,7 @@ pub struct ExportRequestWire {
     /// the export (ADR 049). **Required**, with no default. The command checks it with
     /// [`settings::validate_preset`] before it accepts the run, and the run never reads the
     /// presets of the settings file. A later edit of the preset in the settings therefore does
-    /// not change an export that the command accepted. [`ExportStart`] echoes its id.
+    /// not change an export that the command accepted.
     pub preset: Preset,
     /// Which streams of the source the export writes. **Required**, with no default: an
     /// absent value would have to stand for one of the three choices, and a frontend that
@@ -143,7 +144,7 @@ pub struct ExportRequestWire {
     /// with no default, for the reason of [`Self::streams`]. The plan copies only where
     /// [`crate::ffmpeg::export::copy::decide`] agrees, and otherwise writes the audio as for an
     /// encode, or writes none for a choice of the video only. The value is therefore a request,
-    /// and [`ExportStart`] does not echo it.
+    /// and no report of the run repeats it.
     pub audio_mode: ExportAudioMode,
     /// The revision of the source that the segments were marked against, or `None` when the
     /// user chose to export a changed file anyway (ADR 024). Preparation compares it with the
@@ -164,24 +165,31 @@ pub struct ExpectedSourceRevisionWire {
     pub mtime: i64,
 }
 
-/// The immediate payload `start_export` resolves with when it accepts a run.
+/// The answer of `start_export`: the id of the run that the command accepted.
 ///
-/// This is not an event: it is the command's own return value, resolved before the worker
-/// thread starts. The frontend correlates every later `export:progress` event to this run by
-/// `runId`.
+/// The command answers before the run prepares. Every later report of the run, a failure of
+/// preparation included, is an event on [`EVENT_NAME`] that carries this id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExportSubmission {
+    pub run_id: String,
+}
+
+/// The facts of a prepared run.
+///
+/// The run builds it after preparation and keeps it for its later events. The `started` event
+/// reports each fact but the preset id and the stream choice. It is not on the wire as a whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportStart {
     pub run_id: String,
     pub preset_id: String,
-    /// The stream choice of the request, echoed as the run uses it.
+    /// The stream choice of the request, as the run uses it.
     pub streams: ExportStreams,
     pub output_path: String,
     pub segment_count: u32,
     pub total_duration_us: u64,
     /// Absent for an export without video, which writes no frames: its progress has no total,
     /// and the interface shows it as indeterminate (ADR 025).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_frames: Option<u64>,
 }
 
@@ -305,12 +313,12 @@ pub enum ExportEvent {
     },
 }
 
-/// Everything the worker thread needs, all of it resolved before the command answers.
+/// Everything the export needs after preparation, which resolves all of it.
 #[derive(Debug)]
 struct PreparedExport {
-    /// The id of the preset of the request, echoed back in [`ExportStart`].
+    /// The id of the preset of the request, kept in [`ExportStart`].
     preset_id: String,
-    /// The stream choice of the request, echoed back in [`ExportStart`].
+    /// The stream choice of the request, kept in [`ExportStart`].
     streams: ExportStreams,
     plan: ExportPlan,
     /// The located `ffmpeg`.
@@ -332,17 +340,21 @@ struct PreparedExport {
 
 /// Start one export and report it through [`EVENT_NAME`].
 ///
-/// The single export slot is claimed here, in the command, and not on the worker thread: a
+/// The single export slot is claimed here, in the command, and not on the export thread: a
 /// second export has to be refused while there is still a rejection path to answer it with.
-/// The claim then moves to the worker, because a run outlives the command that started it and
-/// Tauri lends managed state only for the length of the command.
+/// The claim then moves to the export thread, because a run outlives the command that started
+/// it and Tauri lends managed state only for the length of the command.
+///
+/// The command answers with the run id as soon as the thread runs, and the run prepares on that
+/// thread ([`run_export_job`]). The frontend therefore can name the run in a cancel from the
+/// start of preparation, which can last tens of seconds.
 #[tauri::command]
 pub async fn start_export(
     app: tauri::AppHandle,
     registry: tauri::State<'_, Arc<ExportRegistry>>,
     preview_windows: tauri::State<'_, Arc<PreviewWindows>>,
     request: ExportRequestWire,
-) -> Result<ExportStart, ExportCommandError> {
+) -> Result<ExportSubmission, ExportCommandError> {
     // Checked before the slot is claimed, so a request with an invalid preset is refused at
     // once and holds no slot.
     validate_request_preset(&request.preset)?;
@@ -353,59 +365,23 @@ pub async fn start_export(
         .map_err(|_| ExportCommandError::new(ExportErrorCode::AppDataUnavailable))?;
 
     let run_id = next_run_id();
-    // Claimed before any of the preparation below, so a second export is refused rather than
-    // allowed to spawn a second ffprobe and reserve a second temporary file. Every `?` from
-    // here on drops the slot, which releases it.
+    // Claimed before the run prepares, so a second export is refused rather than allowed to
+    // spawn a second ffprobe and reserve a second temporary file.
     let slot = registry
         .begin(&run_id)
         .ok_or_else(|| ExportCommandError::new(ExportErrorCode::ExportAlreadyRunning))?;
 
-    // Preparation spawns ffprobe and touches the filesystem, so it does not belong on the
-    // async executor. It runs short-lived child processes one after the other, and for an FLV
-    // source it also locates a keyframe for each segment in the file and checks each slice with
-    // ffprobe (ADR 046). That is what the blocking pool is for; the export itself runs for
-    // minutes and gets its own thread.
-    //
-    // The flag goes with it: preparation is the one stretch of a run that can last tens of
-    // seconds -- `ffmpeg::probe::PROBE_TIMEOUT` alone is 30, and the check of the FLV slices and
-    // the read of the audio gaps have one each -- and a cancel that arrives inside it must not
-    // have to wait for every remaining step to finish. The reads of the audio stream after the
-    // re-probe also stop on the flag, because the first of them reads as far into the file as
-    // the audio starts. The FLV locate has no time bound. It stops at the next block read after
-    // a cancel, so on a share that holds a read, the cancel waits until that read returns.
-    let cancel = slot.cancel_flag();
-    let preview_windows = preview_windows.inner().clone();
-    let prepared = tauri::async_runtime::spawn_blocking(move || {
-        prepare_export_with(
-            PrepareRequest {
-                request: &request,
-                app_data_directory: &app_data_directory,
-                cancel: cancel.as_ref(),
-                preview_windows: &preview_windows,
-            },
-            discover_for_export,
-            ffmpeg::probe_media,
-            ffmpeg::probe_first_audio_packet,
-            ffmpeg::probe_audio_sample_rate_at,
-            ffmpeg::probe_audio_gaps,
-        )
-    })
-    .await
-    .map_err(|error| join_failure(&error))??;
+    spawn_export_job(
+        app,
+        slot,
+        ExportJob {
+            request,
+            app_data_directory,
+            preview_windows: preview_windows.inner().clone(),
+        },
+    )?;
 
-    // The last read before the worker takes over, for a cancel that landed after preparation
-    // passed its own checks. Returning here drops `prepared`, which deletes the reserved
-    // temporary file, and then drops `slot`, which releases the export slot -- the release
-    // `lib::cancel_active_export` waits for on an application quit.
-    if slot.is_canceled() {
-        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
-    }
-
-    let start = start_payload(&run_id, &prepared);
-
-    spawn_export_worker(app, slot, prepared, start.clone());
-
-    Ok(start)
+    Ok(ExportSubmission { run_id })
 }
 
 /// Ask the run named by `runId` to stop, and report whether the request reached the run that
@@ -423,53 +399,6 @@ pub async fn cancel_export(
     run_id: String,
 ) -> Result<bool, ExportCommandError> {
     Ok(registry.cancel(&run_id))
-}
-
-/// Ask whichever run holds the export slot to stop, and report whether there was one.
-///
-/// This serves the one window [`cancel_export`] cannot. [`start_export`] claims the slot,
-/// prepares, and answers with the run id only afterward, and preparation includes a re-probe
-/// bounded at [`crate::ffmpeg::probe::PROBE_TIMEOUT`], which is 30 seconds, and for an export
-/// that writes audio up to two more reads with the same bound. For that whole window, up to 90
-/// seconds, the frontend holds no id, so it has nothing to name to [`cancel_export`] and the user
-/// cannot stop a run that is already holding the single export slot.
-///
-/// # Why cancelling without naming a run is correct here
-///
-/// The registry holds one run at a time (ADR 016), so the slot identifies a run as
-/// unambiguously as the id does. The frontend reaches this path only while its own
-/// `startExport` is in flight and has produced no id, so by construction the run holding the
-/// slot in that window is the one it just started: no other export could have claimed the slot,
-/// because this one has not released it.
-///
-/// A request that lands after preparation finished is harmless rather than wrong. It names the
-/// same run -- the worker holds the slot for the rest of the run -- and the worker reads the
-/// flag again before `ffmpeg` spawns and once more before the rename, which is ADR 016's
-/// cancel-tested-twice rule. So the late request stops the run the user meant, at the next
-/// point the run tests the flag.
-///
-/// `false` means the slot was free and nothing was set. As with [`cancel_export`], the
-/// frontend must not render that as "there was nothing to cancel": it means only that no
-/// export holds the slot at this instant.
-#[tauri::command]
-pub async fn cancel_active_export(
-    registry: tauri::State<'_, Arc<ExportRegistry>>,
-) -> Result<bool, ExportCommandError> {
-    Ok(registry.cancel_active())
-}
-
-/// Report a blocking-task join failure as `commandExecutionFailed`, carrying what went wrong.
-///
-/// A join failure is not an enumerable condition, so ADR 011 keeps its diagnostic. The value the
-/// one caller passes is a `JoinError`, and its `Display` says whether the task **panicked** or was
-/// **cancelled** -- two different faults with two different investigations, and the bare code
-/// tells them apart not at all.
-///
-/// The parameter is `&impl Display` rather than the concrete error type because a `JoinError`
-/// cannot be constructed outside tokio, so a test can only reach this mapping with a stand-in. The
-/// test that does so proves the text is carried, not that tokio produced it.
-fn join_failure(error: &impl std::fmt::Display) -> ExportCommandError {
-    ExportCommandError::with_detail(ExportErrorCode::CommandExecutionFailed, error.to_string())
 }
 
 /// Resolve the ffmpeg executable pair for an export: the configured path from settings, if
@@ -549,7 +478,7 @@ where
     // Before the first step, which already reaches outside the process: `discover` walks `PATH`
     // and inspects each candidate, and an entry on a share that has stopped answering holds
     // that inspection for as long as the operating system lets it. A cancel that arrives before
-    // the command even reached the blocking pool then ends the run at the first step rather
+    // the export thread even started then ends the run at the first step rather
     // than the third.
     if canceled() {
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
@@ -1173,7 +1102,7 @@ fn validate_request_preset(preset: &Preset) -> Result<(), ExportCommandError> {
     })
 }
 
-/// Build the payload the command resolves with, and that the `started` event repeats.
+/// Build the facts of a prepared run, which the `started` event reports.
 fn start_payload(run_id: &str, prepared: &PreparedExport) -> ExportStart {
     ExportStart {
         run_id: run_id.to_owned(),
@@ -1213,38 +1142,131 @@ fn duration_microseconds(seconds: Rational) -> u64 {
     u64::try_from(microseconds.clamp(0, JAVASCRIPT_MAX_SAFE_INTEGER)).unwrap_or(0)
 }
 
-/// Start the dedicated thread that runs one export to completion.
+/// What the export thread needs to prepare and run one export.
+struct ExportJob {
+    /// The export the interface asked for.
+    request: ExportRequestWire,
+    /// The directory of the settings file and of the discovery of the executables.
+    app_data_directory: PathBuf,
+    /// The open FLV sources, which the FLV input shares with the preview (ADR 046).
+    preview_windows: Arc<PreviewWindows>,
+}
+
+/// Start the dedicated thread that prepares and runs one export to completion.
 ///
 /// This is an OS thread of its own, not the tokio blocking pool: an export runs for minutes,
-/// and that pool is sized and scheduled for short work.
-fn spawn_export_worker(
+/// and that pool is sized and scheduled for short work. Preparation runs short child
+/// processes one after the other and waits on the file system, which the thread can afford.
+///
+/// A thread that the operating system refuses is reported as a rejection, because the command
+/// has not answered yet. The refused closure owned the slot, so the drop that lost the closure
+/// released the slot too.
+fn spawn_export_job(
     app: tauri::AppHandle,
     slot: ExportSlot,
-    prepared: PreparedExport,
-    start: ExportStart,
-) {
-    // Cloned before the `move` closure below takes the originals: a spawn failure drops that
-    // closure and every value it captured, so these clones are the only copies left with
-    // which to report the failure.
-    let failure_app = app.clone();
-    let failure_run_id = start.run_id.clone();
-    let spawn_result = std::thread::Builder::new()
+    job: ExportJob,
+) -> Result<(), ExportCommandError> {
+    std::thread::Builder::new()
         .name("export".to_owned())
-        .spawn(move || {
-            run_export_worker(&app, slot, prepared, &start);
-        });
-    // The command has already returned its success payload by the time this runs, so a
-    // failure to start the thread has no rejection path left. It is reachable only under
-    // extreme resource exhaustion, and without this event the interface would sit on
-    // "exporting" forever. The slot was captured by the dropped closure, so it is released
-    // by the same drop that lost it.
-    if spawn_result.is_err() {
-        emit_failed(
-            &failure_app,
-            &failure_run_id,
-            ExportCommandError::new(ExportErrorCode::CommandExecutionFailed),
-        );
+        .spawn(move || run_export_job(&app, slot, job))
+        .map(|_| ())
+        .map_err(|error| {
+            ExportCommandError::with_detail(
+                ExportErrorCode::CommandExecutionFailed,
+                error.to_string(),
+            )
+        })
+}
+
+/// Prepare one export on the export thread, then run it.
+///
+/// The thin shell of [`run_export_job_with`], which holds the order and is what the tests call.
+fn run_export_job(app: &tauri::AppHandle, slot: ExportSlot, job: ExportJob) {
+    let run_id = slot.run_id().to_owned();
+    run_export_job_with(
+        slot,
+        |cancel| {
+            // The flag is read between the steps. Preparation is the one stretch of a run that
+            // can last tens of seconds -- `ffmpeg::probe::PROBE_TIMEOUT` alone is 30, and the
+            // check of the FLV slices and the read of the audio gaps have one each -- and a
+            // cancel that arrives inside it must not have to wait for every remaining step to
+            // finish. The FLV locate has no time bound. It stops at the next block read after a
+            // cancel, so on a share that holds a read, the cancel waits until that read returns.
+            prepare_export_with(
+                PrepareRequest {
+                    request: &job.request,
+                    app_data_directory: &job.app_data_directory,
+                    cancel,
+                    preview_windows: &job.preview_windows,
+                },
+                discover_for_export,
+                ffmpeg::probe_media,
+                ffmpeg::probe_first_audio_packet,
+                ffmpeg::probe_audio_sample_rate_at,
+                ffmpeg::probe_audio_gaps,
+            )
+        },
+        |slot, prepared| {
+            // `start_payload` only copies and converts, and cannot panic. `run_export_worker`
+            // turns a panic of the run itself into a report, so the run still sends exactly
+            // one terminal event.
+            let start = start_payload(&run_id, &prepared);
+            run_export_worker(app, slot, prepared, &start);
+        },
+        |error| emit_failed(app, &run_id, error),
+    );
+}
+
+/// Prepare one export with `prepare`, and hand the result to `run`, or report the failure
+/// through `fail`.
+///
+/// - A failure of preparation is reported, and the run ends. A panic in preparation is reported
+///   as `commandExecutionFailed`, because the command answered already and no other report
+///   would come.
+/// - The cancel flag is read once more after preparation passed its own checks. A cancel there
+///   drops the prepared export, whose reservation guard deletes the temporary file, and then
+///   reports `canceled`.
+/// - Every report comes before the slot is released, because the slot is dropped when this
+///   function returns. A free slot therefore means that the guards of the run have finished,
+///   which the wait at an application quit relies on (ADR 017).
+fn run_export_job_with<Prepare, Run, Fail>(slot: ExportSlot, prepare: Prepare, run: Run, fail: Fail)
+where
+    Prepare: FnOnce(&AtomicBool) -> Result<PreparedExport, ExportCommandError>,
+    Run: FnOnce(ExportSlot, PreparedExport),
+    Fail: FnOnce(ExportCommandError),
+{
+    let cancel = slot.cancel_flag();
+    let prepared =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare(cancel.as_ref())));
+    let prepared = match prepared {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) => {
+            fail(error);
+            return;
+        }
+        Err(payload) => {
+            // A panic is not an enumerable condition, so ADR 011 keeps its message as the
+            // detail, when the payload is text.
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned());
+            fail(match message {
+                Some(message) => ExportCommandError::with_detail(
+                    ExportErrorCode::CommandExecutionFailed,
+                    message,
+                ),
+                None => ExportCommandError::new(ExportErrorCode::CommandExecutionFailed),
+            });
+            return;
+        }
+    };
+    if slot.is_canceled() {
+        drop(prepared);
+        fail(ExportCommandError::new(ExportErrorCode::Canceled));
+        return;
     }
+    run(slot, prepared);
 }
 
 /// Report one export from its first event to its last.
@@ -1273,10 +1295,10 @@ fn run_export_worker(
     // The published path, as a path. `output_path` is its lossy string form for the event, and
     // the show command must name the file that the rename wrote.
     let destination = prepared.plan.destination.clone();
-    // A panic inside the run has to be turned back into a report. [`spawn_export_worker`]
-    // gives the reason a lost report cannot be tolerated -- the interface sits on "exporting"
-    // forever, with no timeout, and `cancel_export` answers `false` because the slot is
-    // already free -- and the body needs the same protection as the spawn. It is reachable by
+    // A panic inside the run has to be turned back into a report. A lost report cannot be
+    // tolerated -- the interface sits on "exporting" forever, with no timeout, and
+    // `cancel_export` answers `false` because the slot is already free -- so the run needs the
+    // protection that [`run_export_job_with`] gives preparation. It is reachable by
     // the mechanism this module already names: `run_export_process` calls
     // `std::thread::spawn` twice, and that panics rather than returning an error when the
     // operating system refuses a thread.
@@ -2276,30 +2298,6 @@ mod tests {
     }
 
     #[test]
-    fn export_start_serializes_camel_case_and_omits_an_absent_frame_count() {
-        let start = ExportStart {
-            run_id: "42-7".to_owned(),
-            preset_id: "default-h264-mp4".to_owned(),
-            streams: ExportStreams::AudioOnly,
-            output_path: "/movies/out.mp4".to_owned(),
-            segment_count: 3,
-            total_duration_us: 12_500_000,
-            expected_frames: None,
-        };
-
-        let value = serde_json::to_value(&start).unwrap();
-        let object = value.as_object().unwrap();
-
-        assert_eq!(value["runId"], "42-7");
-        assert_eq!(value["presetId"], "default-h264-mp4");
-        assert_eq!(value["outputPath"], "/movies/out.mp4");
-        assert_eq!(value["segmentCount"], 3);
-        assert_eq!(value["totalDurationUs"], 12_500_000);
-        assert!(value.get("run_id").is_none());
-        assert!(!object.contains_key("expectedFrames"));
-    }
-
-    #[test]
     fn export_command_error_omits_absent_optional_fields_entirely_not_as_null() {
         let error = ExportCommandError::new(ExportErrorCode::ExportAlreadyRunning);
 
@@ -2785,22 +2783,6 @@ mod tests {
                 "{refused}"
             );
         }
-    }
-
-    #[test]
-    fn export_start_echoes_the_stream_choice() {
-        let start = ExportStart {
-            run_id: "42-7".to_owned(),
-            preset_id: "default-h264-mp4".to_owned(),
-            streams: ExportStreams::VideoOnly,
-            output_path: "/movies/out.mp4".to_owned(),
-            segment_count: 1,
-            total_duration_us: 1_000_000,
-            expected_frames: Some(30),
-        };
-        let value = serde_json::to_value(&start).unwrap();
-        assert_eq!(value["streams"], "videoOnly");
-        assert_eq!(value["expectedFrames"], 30);
     }
 
     #[test]
@@ -3342,7 +3324,7 @@ mod tests {
     #[test]
     fn a_cancel_before_preparation_starts_ends_it_without_discovering_ffmpeg() {
         // The twin of the pre-re-probe test below, at the other end. `start_export` claims the
-        // slot before it hands preparation to the blocking pool, so a cancel can already be set
+        // slot before it hands preparation to the export thread, so a cancel can already be set
         // when the first step runs. That step is `discover`, which walks `PATH` and inspects
         // each candidate; an entry on a share that stopped answering holds it. Reading the flag
         // only later would spend that time for an answer nobody wants.
@@ -3542,19 +3524,6 @@ mod tests {
 
         assert_eq!(error.code, ExportErrorCode::FfmpegPairMissing);
         assert_eq!(error.detail, None);
-    }
-
-    // A `JoinError` cannot be constructed outside tokio, so the stand-in below is the closest a
-    // test can get to the real value. It holds the mapping: a panic and a cancellation are two
-    // faults, and `commandExecutionFailed` alone cannot tell a reader which one happened.
-    #[test]
-    fn a_join_failure_carries_the_reason_the_task_did_not_finish() {
-        let error = join_failure(&"task 12 was cancelled");
-
-        assert_eq!(error.code, ExportErrorCode::CommandExecutionFailed);
-        assert_eq!(error.detail.as_deref(), Some("task 12 was cancelled"));
-        assert_eq!(error.exit_code, None);
-        assert_eq!(error.encoder, None);
     }
 
     #[test]
@@ -3921,15 +3890,12 @@ mod tests {
             .unwrap();
         assert_eq!(prepared.arguments[muxer + 1], "mp4");
 
-        // The start payload echoes the choice and carries no frame goal, so the interface shows
-        // the progress as indeterminate (ADR 025).
+        // The facts of the run keep the choice and carry no frame goal, so the `started` event
+        // has none either and the interface shows the progress as indeterminate (ADR 025).
         let start = start_payload("42-7", &prepared);
         assert_eq!(start.streams, ExportStreams::AudioOnly);
         assert_eq!(start.expected_frames, None);
         assert_eq!(start.total_duration_us, 1_000_000);
-        let value = serde_json::to_value(&start).unwrap();
-        assert_eq!(value["streams"], "audioOnly");
-        assert!(!value.as_object().unwrap().contains_key("expectedFrames"));
     }
 
     #[test]
@@ -4932,6 +4898,113 @@ mod tests {
         plan.segments[0].audio_in_tick = Some(0);
         plan.segments[0].audio_out_tick = Some(48_000);
         plan
+    }
+
+    #[test]
+    fn a_failure_of_preparation_is_reported_before_the_slot_is_released() {
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let reported = RefCell::new(None);
+        let ran = Cell::new(false);
+
+        run_export_job_with(
+            slot,
+            |_| Err(ExportCommandError::new(ExportErrorCode::SourceNotFound)),
+            |_, _| ran.set(true),
+            |error| {
+                // The wait at an application quit takes a free slot to mean that the run has
+                // reported and cleaned up (ADR 017).
+                assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
+                *reported.borrow_mut() = Some(error.code);
+            },
+        );
+
+        assert_eq!(*reported.borrow(), Some(ExportErrorCode::SourceNotFound));
+        assert!(!ran.get());
+        assert_eq!(registry.active_run_id(), None);
+    }
+
+    #[test]
+    fn the_answer_of_start_export_is_the_run_id_in_camel_case() {
+        let value = serde_json::to_value(ExportSubmission {
+            run_id: "42-7".to_owned(),
+        })
+        .unwrap();
+
+        assert_eq!(value, serde_json::json!({ "runId": "42-7" }));
+    }
+
+    #[test]
+    fn a_panic_in_preparation_is_reported_as_command_execution_failed() {
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let reported = RefCell::new(None);
+
+        run_export_job_with(
+            slot,
+            |_| panic!("preparation panicked"),
+            |_, _| unreachable!(),
+            |error| {
+                assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
+                *reported.borrow_mut() = Some(error);
+            },
+        );
+
+        let error = reported.into_inner().unwrap();
+        assert_eq!(error.code, ExportErrorCode::CommandExecutionFailed);
+        assert_eq!(error.detail.as_deref(), Some("preparation panicked"));
+        assert_eq!(registry.active_run_id(), None);
+    }
+
+    #[test]
+    fn a_cancel_after_preparation_deletes_the_reservation_and_reports_canceled() {
+        let directory = TestDirectory::new();
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let reported = RefCell::new(None);
+        let reserved = RefCell::new(None);
+
+        run_export_job_with(
+            slot,
+            |cancel| {
+                let (prepared, path) = prepared_audio_run(&directory.path.join("out.m4a"));
+                *reserved.borrow_mut() = Some(path);
+                // The cancel lands after preparation passed its own checks.
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(prepared)
+            },
+            |_, _| unreachable!(),
+            |error| {
+                let path = reserved.borrow().clone().unwrap();
+                assert!(!path.exists(), "the reservation goes before the report");
+                assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
+                *reported.borrow_mut() = Some(error.code);
+            },
+        );
+
+        assert_eq!(*reported.borrow(), Some(ExportErrorCode::Canceled));
+        assert_eq!(registry.active_run_id(), None);
+    }
+
+    #[test]
+    fn a_prepared_export_runs_with_its_slot() {
+        let directory = TestDirectory::new();
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let ran = Cell::new(false);
+
+        run_export_job_with(
+            slot,
+            |_| Ok(prepared_audio_run(&directory.path.join("out.m4a")).0),
+            |slot, prepared| {
+                assert_eq!(slot.run_id(), "1-0");
+                assert_eq!(prepared.streams, ExportStreams::AudioOnly);
+                ran.set(true);
+            },
+            |_| unreachable!(),
+        );
+
+        assert!(ran.get());
     }
 
     /// An audio-only run, ready for [`run_export_with`], and the reserved path it writes.

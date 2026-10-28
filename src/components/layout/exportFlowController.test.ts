@@ -8,13 +8,13 @@ import {
   type MediaFlowDescriptor,
 } from "./exportFlowController";
 import {
-  cancelActiveExport as clientCancelActiveExport,
+  cancelExport as clientCancelExport,
   createExportStore,
   ExportError,
   type ExportAudioMode,
   type ExportProgressEvent,
   type ExportRequest,
-  type ExportStart,
+  type ExportSubmission,
   type ExportStatus,
   type ExportStreams,
   type OpenExportSaveDialogOptions,
@@ -327,17 +327,18 @@ describe("ExportFlowController", () => {
       expect(openSaveDialog).not.toHaveBeenCalled();
     });
 
-    describe("run on a real store after a slot cancel that the IPC layer rejected", () => {
+    describe("run on a real store with a Stop that waited for the run id", () => {
       /**
-       * Drives a real export store to `failed` with a tracked start: the Stop request fails
-       * while the start waits for its run id. The flow reads and resets that store.
+       * Drives a real export store into a tracked start with a Stop that waits for its run
+       * id. The `cancel_export` request that follows the answer fails at the IPC layer. The
+       * flow reads and resets that store.
        */
-      async function failTheStopWhileTheStartWaits() {
+      async function stopWhileTheStartWaits() {
         let emit!: (event: ExportProgressEvent) => void;
-        let answerStart: (start: ExportStart) => void = () => {};
+        let answerStart: (start: ExportSubmission) => void = () => {};
         const startFn = vi.fn(
           () =>
-            new Promise<ExportStart>((resolve) => {
+            new Promise<ExportSubmission>((resolve) => {
               answerStart = resolve;
             }),
         );
@@ -347,8 +348,8 @@ describe("ExportFlowController", () => {
             return Promise.resolve(() => {});
           },
           startExport: startFn,
-          cancelActiveExport: () =>
-            clientCancelActiveExport({
+          cancelExport: (runId) =>
+            clientCancelExport(runId, {
               invoke: vi.fn().mockRejectedValue("IPC closed"),
             }),
         });
@@ -363,15 +364,20 @@ describe("ExportFlowController", () => {
         await vi.waitFor(() => {
           expect(startFn).toHaveBeenCalled();
         });
-        await store.getState().cancelExport();
-        expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
+        const stopping = store.getState().cancelExport();
+        expect(store.getState()).toMatchObject({
+          status: "preparing",
+          tracking: true,
+          cancelRequested: true,
+        });
         return {
           store,
           starting,
+          stopping,
           emit: (event: ExportProgressEvent) => {
             emit(event);
           },
-          answerStart: (start: ExportStart) => {
+          answerStart: (start: ExportSubmission) => {
             answerStart(start);
           },
         };
@@ -400,39 +406,37 @@ describe("ExportFlowController", () => {
         return { result, setModalOpen };
       }
 
-      it("shows the kept start, and the store still takes its answer", async () => {
-        const { store, starting, answerStart } = await failTheStopWhileTheStartWaits();
+      it("shows the waiting start, and the store still takes its answer", async () => {
+        const { store, starting, stopping, answerStart } =
+          await stopWhileTheStartWaits();
 
         const { result, setModalOpen } = runOn(store);
 
         await expect(result).resolves.toBe(false);
         expect(setModalOpen).toHaveBeenCalledWith(true);
-        expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
+        expect(store.getState()).toMatchObject({ status: "preparing", tracking: true });
 
-        answerStart({
-          runId: "run-kept",
-          presetId: "default",
-          streams: "videoAndAudio",
-          outputPath: "/media/out.mp4",
-          segmentCount: 1,
-          totalDurationUs: 1_000_000,
-        });
+        answerStart({ runId: "run-kept" });
         await expect(starting).resolves.toMatchObject({ runId: "run-kept" });
+        await expect(stopping).resolves.toBe(false);
+        expect(store.getState()).toMatchObject({
+          status: "failed",
+          runId: "run-kept",
+          tracking: true,
+        });
+
+        // The failed Stop keeps the run, so the flow still only shows it.
+        const again = runOn(store);
+        await expect(again.result).resolves.toBe(false);
         expect(store.getState()).toMatchObject({ runId: "run-kept", tracking: true });
       });
 
       it("resets and reaches the setup step once the kept run ended", async () => {
-        const { store, starting, answerStart, emit } =
-          await failTheStopWhileTheStartWaits();
-        answerStart({
-          runId: "run-kept",
-          presetId: "default",
-          streams: "videoAndAudio",
-          outputPath: "/media/out.mp4",
-          segmentCount: 1,
-          totalDurationUs: 1_000_000,
-        });
+        const { store, starting, stopping, answerStart, emit } =
+          await stopWhileTheStartWaits();
+        answerStart({ runId: "run-kept" });
         await starting;
+        await stopping;
         emit({ event: "failed", runId: "run-kept", code: "ffmpegProcessFailed" });
 
         const { result, setModalOpen } = runOn(store);

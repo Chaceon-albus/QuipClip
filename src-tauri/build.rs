@@ -18,7 +18,6 @@ const APP_COMMANDS: &[&str] = &[
     "preset_test_results",
     "start_export",
     "cancel_export",
-    "cancel_active_export",
     "reveal_export_output",
     "import_media",
     "read_source_revision",

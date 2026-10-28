@@ -60,7 +60,7 @@ export type ExportRequest = {
   preset: Preset;
   /** Required. The backend refuses a request without it, and has no default for it. */
   streams: ExportStreams;
-  /** Required, as `streams` is. `ExportStart` does not echo it. */
+  /** Required, as `streams` is. No report of the run repeats it. */
   audioMode: ExportAudioMode;
   /**
    * The revision of the source that the segments were marked against. When the export
@@ -78,17 +78,13 @@ export type ExportSourceRevision = {
 };
 
 /**
- * Immediate payload returned when `start_export` starts.
+ * The answer of `start_export`: the id of the run that the backend accepted.
+ *
+ * The backend answers before the run prepares. Every later report of the run, a failure of
+ * preparation included, is an `export:progress` event that carries this id.
  */
-export type ExportStart = {
+export type ExportSubmission = {
   runId: string;
-  presetId: string;
-  /** The stream choice of the request, echoed as the run uses it. */
-  streams: ExportStreams;
-  outputPath: string;
-  segmentCount: number;
-  totalDurationUs: number;
-  expectedFrames?: number;
 };
 
 /**
@@ -380,15 +376,14 @@ export type ExportState = {
    * `reportError` never ends the tracking. It does nothing while the store tracks a live run.
    *
    * The run id comes with the answer of `start_export`, so `tracking` is true while `runId`
-   * is still null in `preparing`. A new `startExport` drops the run that the store tracked
-   * before, and tracks the new start.
+   * is still null in `preparing`. The backend answers before the run prepares, so that
+   * window is short. A new `startExport` drops the run that the store tracked before, and
+   * tracks the new start.
    *
    * A `failed` status does not end the tracking by itself. The store also reports `failed`
-   * when a Stop request rejects while the run continues: `cancel_export`, or
-   * `cancel_active_export` while the start waits for its run id, at the IPC layer. It keeps
-   * the start or the run: the backend did not confirm the stop, and the `start_export`
-   * answer and the events still arrive. A reset in that state drops the only record of a
-   * live run (`isExportRunLive`).
+   * when a `cancel_export` request rejects while the run continues, at the IPC layer. It keeps
+   * the run: the backend did not confirm the stop, and the events still arrive. A reset in
+   * that state drops the only record of a live run (`isExportRunLive`).
    */
   tracking: boolean;
   /** Last error encountered during export, or null if idle or succeeded. */
@@ -403,9 +398,9 @@ export type ExportActions = {
    * Subscribes to backend export progress events and starts the export.
    *
    * @param request The export parameters and segment boundaries.
-   * @returns The initial export start payload, or null on failure.
+   * @returns The answer of the backend with the run id, or null on failure.
    */
-  startExport: (request: ExportRequest) => Promise<ExportStart | null>;
+  startExport: (request: ExportRequest) => Promise<ExportSubmission | null>;
   /**
    * Signals the backend to cancel the active export run.
    *

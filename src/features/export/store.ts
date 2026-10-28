@@ -11,14 +11,14 @@
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import type { UnlistenFn } from "@/lib/ipc";
-import { cancelActiveExport, cancelExport, startExport } from "./client";
+import { cancelExport, startExport } from "./client";
 import { subscribeExportProgress } from "./events";
 import { isExportRunLive } from "./runState";
 import {
   ExportError,
   type ExportProgressEvent,
   type ExportRequest,
-  type ExportStart,
+  type ExportSubmission,
   type ExportState,
   type ExportStoreState,
 } from "./types";
@@ -31,16 +31,11 @@ export interface ExportStoreDependencies {
   /**
    * Function to start export via backend command. Defaults to `startExport`.
    */
-  startExport?: (request: ExportRequest) => Promise<ExportStart>;
+  startExport?: (request: ExportRequest) => Promise<ExportSubmission>;
   /**
    * Function to cancel export via backend command. Defaults to `cancelExport`.
    */
   cancelExport?: (runId: string) => Promise<boolean>;
-  /**
-   * Function to cancel whichever run holds the backend export slot, for the window in which
-   * this store holds no run id. Defaults to `cancelActiveExport`.
-   */
-  cancelActiveExport?: () => Promise<boolean>;
   /**
    * Function to subscribe to backend export progress events. Defaults to `subscribeExportProgress`.
    */
@@ -66,7 +61,6 @@ export function createExportStore(
 ): StoreApi<ExportStoreState> {
   const startExportFn = dependencies.startExport ?? startExport;
   const cancelExportFn = dependencies.cancelExport ?? cancelExport;
-  const cancelActiveExportFn = dependencies.cancelActiveExport ?? cancelActiveExport;
   const subscribeExportProgressFn =
     dependencies.subscribeExportProgress ?? subscribeExportProgress;
 
@@ -76,6 +70,30 @@ export function createExportStore(
   let activeUnlisten: UnlistenFn | null = null;
   let pendingEvents: ExportProgressEvent[] = [];
   let awaitingRunId = false;
+  /**
+   * A Stop request that came while the start waited for its run id. The backend answers
+   * `start_export` as soon as it accepted the run, so the wait is short. The store sends the
+   * request by id when the answer arrives, and settles each caller in `settlers` with its
+   * result. `requestId` names the start that it belongs to.
+   */
+  let deferredCancel: {
+    requestId: number;
+    settlers: Array<(accepted: boolean) => void>;
+  } | null = null;
+
+  /** Settles a deferred Stop request with `accepted`, and forgets it. */
+  function settleDeferredCancel(accepted: boolean): void {
+    const pending = deferredCancel;
+    deferredCancel = null;
+    for (const settle of pending?.settlers ?? []) {
+      settle(accepted);
+    }
+  }
+
+  /** Settles a deferred Stop request with false, because no run of its start is live. */
+  function dropDeferredCancel(): void {
+    settleDeferredCancel(false);
+  }
 
   return createStore<ExportStoreState>()((set, get) => {
     /**
@@ -204,6 +222,8 @@ export function createExportStore(
       latestRequestId++;
       awaitingRunId = false;
       pendingEvents = [];
+      // The store no longer hears the run, so a Stop that waits for its id never gets one.
+      dropDeferredCancel();
       publish({});
     }
 
@@ -229,19 +249,17 @@ export function createExportStore(
     }
 
     /**
-     * Records a Stop request that failed while the run continues: `cancel_export` or
-     * `cancel_active_export` rejected, at the IPC layer or in the client check of the answer.
-     * The caller calls it only while the store still tracks the start or the run that the
-     * request was for.
+     * Records a Stop request that failed while the run continues: `cancel_export` rejected, at
+     * the IPC layer or in the client check of the answer. The caller calls it only while the
+     * store still tracks the run that the request was for.
      *
      * The status is `failed`, and the error is the failure of the request. The start or the
      * run stays tracked: the backend did not confirm a stop, so it can still prepare and
      * encode. `reportError` ignores a report while the store tracks a live run, so this is the
-     * one path that writes `failed` over a tracked run. A start that waits for its run id
-     * keeps its request id, so the store takes the `start_export` answer and then tracks the
-     * run to its `finished` or `failed` event. A `failed` status with `tracking` true is
-     * live (`isExportRunLive`), so no control resets the store in that state, and the user
-     * can ask for the stop again: by run id, or by slot while the start still waits.
+     * one path that writes `failed` over a tracked run. The store tracks the run to its
+     * `finished` or `failed` event. A `failed` status with `tracking` true is live
+     * (`isExportRunLive`), so no control resets the store in that state, and the user can ask
+     * for the stop again.
      *
      * A failure in `publishing` changes nothing. The backend ran its last cancel test before
      * it sent that event (ADR 016), so no stop can prevent the rename any more, and a live
@@ -274,12 +292,12 @@ export function createExportStore(
     }
 
     /**
-     * True in the window in which the store cancels by slot: it holds no run id, and its own
-     * start waits for one. That start is in `preparing`, or in the `failed` of a Stop request
-     * that failed while it waited (`reportStopFailure`).
+     * True while the store holds no run id and its own start waits for one. A Stop request
+     * then waits for the answer of `start_export` (`deferredCancel`). A `preparing` status
+     * with no start in flight, as after `unsubscribe`, has no answer to wait for.
      */
     function waitsForRunId(): boolean {
-      return activeRunId === null && (awaitingRunId || get().status === "preparing");
+      return activeRunId === null && awaitingRunId;
     }
 
     return {
@@ -306,6 +324,7 @@ export function createExportStore(
         latestRequestId++;
         awaitingRunId = false;
         pendingEvents = [];
+        dropDeferredCancel();
         setTrackedRun(null, {
           status: "idle",
           runId: null,
@@ -324,57 +343,24 @@ export function createExportStore(
       cancelExport: async (): Promise<boolean> => {
         const runId = activeRunId;
         if (!runId) {
-          // "preparing" with no run id is the one phase where a cancel is still meaningful
-          // without one. `start_export` claims the single export slot, prepares -- a re-probe
-          // alone is bounded at 30 seconds -- and answers with the run id only afterward, so
-          // there is nothing to name yet and the run is already holding the slot. The backend
-          // cancels by slot instead; `cancel_active_export` carries the argument for why the
-          // run holding the slot in this window is the one this store just started. Every
-          // other status with no run id has no run to stop.
-          //
-          // The same window stays open after a Stop request that failed in it. The status
-          // is then `failed`, and the start still waits for its run id (`awaitingRunId`), so
-          // the run that holds the slot is still the one this store started, and the user
-          // can ask again.
+          // A start that waits for its run id can still be stopped. The backend claimed the
+          // export slot for it and answers with the id as soon as it accepted the run, before
+          // the run prepares. The request waits for that answer and then names the run.
+          // Every other status with no run id has no run to stop.
           if (!waitsForRunId()) {
             return false;
           }
-          // The identity of a start that has no run id yet is its request id. Snapshot it
-          // here, the way the by-id path below snapshots the run id, so the rejection is
-          // matched against the start it was made for. "preparing" alone is not an identity:
-          // every start passes through it, so a store that was reset AND started again would
-          // take a stale rejection into a run this call knows nothing about.
           const requestId = latestRequestId;
-          // True while the store still tracks the same start, or the run that its answer
-          // named, and that run is live (`isExportRunLive`): an active status, or the
-          // `failed` of a Stop request that failed. An answer that arrives later belongs to
-          // that run, so the store writes it.
-          const isSameActiveStart = (): boolean =>
-            requestId === latestRequestId && isExportRunLive(get());
-          set({ cancelRequested: true });
-          try {
-            const accepted = await cancelActiveExportFn();
-            if (isSameActiveStart()) {
-              set({ cancelRequested: accepted });
-            }
-            return accepted;
-          } catch (err) {
-            // Report while the store still tracks the same start, or the run that its answer
-            // named in the meantime, and that run is live. A store that was reset or started
-            // again has moved on, a run that ended has its own result, and a start that
-            // failed on its own already shows the better error. `reportStopFailure` keeps a
-            // `publishing` status.
-            //
-            // The report keeps the start. The backend did not confirm the stop, so it can
-            // still prepare and encode, and only the `start_export` answer names that run.
-            // `reportError` ignores a report while the store tracks a live run, so the failure
-            // of a Stop request takes this path.
-            if (isSameActiveStart()) {
-              set({ cancelRequested: false });
-              reportStopFailure(err);
-            }
-            return false;
+          if (deferredCancel?.requestId !== requestId) {
+            dropDeferredCancel();
+            deferredCancel = { requestId, settlers: [] };
           }
+          // A second click while the first waits asks for the same stop.
+          const pending = deferredCancel;
+          set({ cancelRequested: true });
+          return new Promise<boolean>((resolve) => {
+            pending.settlers.push(resolve);
+          });
         }
         set({ cancelRequested: true });
         try {
@@ -394,7 +380,9 @@ export function createExportStore(
         }
       },
 
-      startExport: async (request: ExportRequest): Promise<ExportStart | null> => {
+      startExport: async (request: ExportRequest): Promise<ExportSubmission | null> => {
+        // A Stop request of the start that this one replaces has no run to stop any more.
+        dropDeferredCancel();
         const requestId = ++latestRequestId;
         awaitingRunId = true;
         pendingEvents = [];
@@ -426,7 +414,7 @@ export function createExportStore(
             return null;
           }
 
-          const start = await startExportFn(request);
+          const submission = await startExportFn(request);
 
           if (requestId !== latestRequestId) {
             // A superseded run MUST NOT touch the buffering state: the successor
@@ -436,23 +424,43 @@ export function createExportStore(
 
           awaitingRunId = false;
 
-          // The status is not written here. It is `preparing`, or `failed` after a Stop
-          // request that failed while the start waited (`reportStopFailure`). Either way the
-          // `started` event of the run changes it to `running` and clears the error.
-          setTrackedRun(start.runId, {
-            runId: start.runId,
-            outputPath: start.outputPath,
-            segmentCount: start.segmentCount,
-            expectedFrames: start.expectedFrames ?? null,
-          });
+          // The status is not written here. It stays `preparing` until the `started` event of
+          // the run, or a `failed` event, which also reports a failure of preparation. The
+          // output path and the segment count came from the request, and the `started` event
+          // reports the facts of the plan.
+          setTrackedRun(submission.runId, { runId: submission.runId });
 
+          // Events that came before the answer, in their order. A run that failed quickly has
+          // ended after this.
           const buffered = pendingEvents;
           pendingEvents = [];
           for (const e of buffered) {
             handleEvent(e);
           }
 
-          return start;
+          // A Stop request that waited for the run id.
+          if (deferredCancel?.requestId === requestId) {
+            if (activeRunId === submission.runId) {
+              const pending = deferredCancel;
+              deferredCancel = null;
+              void get()
+                .cancelExport()
+                .then(
+                  (accepted) => {
+                    for (const settle of pending.settlers) settle(accepted);
+                  },
+                  () => {
+                    for (const settle of pending.settlers) settle(false);
+                  },
+                );
+            } else {
+              // The run ended before the request could reach it.
+              set({ cancelRequested: false });
+              dropDeferredCancel();
+            }
+          }
+
+          return submission;
         } catch (err) {
           const normalized = normalizeExportError(err);
 
@@ -464,10 +472,13 @@ export function createExportStore(
 
           awaitingRunId = false;
           pendingEvents = [];
+          // The backend refused the start, so no run exists to stop.
+          dropDeferredCancel();
 
           setTrackedRun(null, {
             status: normalized.code === "canceled" ? "canceled" : "failed",
             runId: null,
+            cancelRequested: false,
             error: normalized,
           });
 

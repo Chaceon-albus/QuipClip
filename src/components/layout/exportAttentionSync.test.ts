@@ -5,7 +5,7 @@ import {
   EXPORT_STATUSES,
   ExportError,
   type ExportProgressEvent,
-  type ExportStart,
+  type ExportSubmission,
   type ExportState,
   type ExportStatus,
 } from "@/features/export";
@@ -327,18 +327,18 @@ describe("startExportAttentionSync", () => {
     stop();
   });
 
-  it("follows a failed slot Stop, the kept start, and its finish through the store actions", async () => {
+  it("follows a Stop that waited for the run id and failed, the kept run, and its finish through the store actions", async () => {
     let emit: (event: ExportProgressEvent) => void = () => {};
-    let answerStart: (start: ExportStart) => void = () => {};
+    let answerStart: (start: ExportSubmission) => void = () => {};
     const startFn = vi.fn(
       () =>
-        new Promise<ExportStart>((resolve) => {
+        new Promise<ExportSubmission>((resolve) => {
           answerStart = resolve;
         }),
     );
     const store = createExportStore({
       startExport: startFn,
-      cancelActiveExport: () => Promise.reject(new Error("ipc failed")),
+      cancelExport: () => Promise.reject(new Error("ipc failed")),
       subscribeExportProgress: (handler) => {
         emit = handler;
         return Promise.resolve(() => {});
@@ -364,22 +364,20 @@ describe("startExportAttentionSync", () => {
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();
     });
-    await store.getState().cancelExport();
-    expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
+    // The Stop waits for the run id, and its request goes out after the answer.
+    const stopping = store.getState().cancelExport();
+    answerStart({ runId: "run-kept" });
+    await starting;
+    await expect(stopping).resolves.toBe(false);
+    expect(store.getState()).toMatchObject({
+      status: "failed",
+      runId: "run-kept",
+      tracking: true,
+    });
     await flushPromises();
-    // The failed Stop is not an end: the start is kept.
+    // The failed Stop is not an end: the run is kept.
     expect(isFocused).not.toHaveBeenCalled();
 
-    answerStart({
-      runId: "run-kept",
-      presetId: "mp4-h264",
-      streams: "videoAndAudio",
-      outputPath: "/media/output.mp4",
-      segmentCount: 1,
-      totalDurationUs: 5_000_000,
-      expectedFrames: 150,
-    });
-    await starting;
     emit({ event: "publishing", runId: "run-kept" });
     emit({
       event: "finished",

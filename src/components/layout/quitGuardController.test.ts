@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  cancelActiveExport as clientCancelActiveExport,
+  cancelExport as clientCancelExport,
   createExportStore,
   exportStore,
   type ExportProgressEvent,
-  type ExportStart,
+  type ExportSubmission,
 } from "@/features/export";
 import type { ImportMediaResult } from "@/features/media";
 import { settingsWindowDraftStore } from "@/features/settings/settingsWindowDraft";
@@ -347,15 +347,15 @@ describe("requestOpen", () => {
 
 describe("the quit prompt for a live export after a failed Stop request", () => {
   /**
-   * A real export store in `failed` with a tracked start: a slot cancel went through the
-   * real client to an IPC layer that rejects, while the start waited for its run id.
+   * A real export store with a Stop that waits for the run id of its start. After the answer
+   * the store sends `cancel_export` through the real client to an IPC layer that rejects.
    */
-  async function failTheStopWhileTheStartWaits() {
+  async function stopWhileTheStartWaits() {
     let emit!: (event: ExportProgressEvent) => void;
-    let answerStart: (start: ExportStart) => void = () => {};
+    let answerStart: (start: ExportSubmission) => void = () => {};
     const startFn = vi.fn(
       () =>
-        new Promise<ExportStart>((resolve) => {
+        new Promise<ExportSubmission>((resolve) => {
           answerStart = resolve;
         }),
     );
@@ -365,8 +365,8 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
         return Promise.resolve(() => {});
       },
       startExport: startFn,
-      cancelActiveExport: () =>
-        clientCancelActiveExport({ invoke: vi.fn().mockRejectedValue("IPC closed") }),
+      cancelExport: (runId) =>
+        clientCancelExport(runId, { invoke: vi.fn().mockRejectedValue("IPC closed") }),
     });
     const starting = store.getState().startExport({
       sourcePath: "/videos/open.mp4",
@@ -379,18 +379,32 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();
     });
-    await store.getState().cancelExport();
-    expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
+    const stopping = store.getState().cancelExport();
     return {
       store,
       starting,
+      stopping,
       emit: (event: ExportProgressEvent) => {
         emit(event);
       },
-      answerStart: (start: ExportStart) => {
+      answerStart: (start: ExportSubmission) => {
         answerStart(start);
       },
     };
+  }
+
+  /** Answers the start, and lets the Stop request for the named run fail. */
+  async function failTheStopAfterTheAnswer() {
+    const fixture = await stopWhileTheStartWaits();
+    fixture.answerStart({ runId: "run-kept" });
+    await fixture.starting;
+    await expect(fixture.stopping).resolves.toBe(false);
+    expect(fixture.store.getState()).toMatchObject({
+      status: "failed",
+      runId: "run-kept",
+      tracking: true,
+    });
+    return fixture;
   }
 
   function inputOf(store: ReturnType<typeof createExportStore>): QuitGuardInput {
@@ -398,8 +412,21 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
     return createInput({ exportStatus: status, exportTracking: tracking });
   }
 
+  it("asks first while the Stop still waits for the run id", async () => {
+    const { store } = await stopWhileTheStartWaits();
+    expect(store.getState()).toMatchObject({ status: "preparing", tracking: true });
+    const { guard, confirmQuit } = setup(createInput(), {
+      readInput: () => inputOf(store),
+    });
+
+    guard.requestQuit();
+
+    expect(confirmQuit).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt?.kind).toBe("quit");
+  });
+
   it("asks first, names the export, and quits on confirm", async () => {
-    const { store } = await failTheStopWhileTheStartWaits();
+    const { store } = await failTheStopAfterTheAnswer();
     const { guard, confirmQuit } = setup(createInput(), {
       readInput: () => inputOf(store),
     });
@@ -418,17 +445,7 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
   });
 
   it("quits at once when the kept run has ended and nothing else would be lost", async () => {
-    const { store, starting, answerStart, emit } =
-      await failTheStopWhileTheStartWaits();
-    answerStart({
-      runId: "run-kept",
-      presetId: "default",
-      streams: "videoAndAudio",
-      outputPath: "/videos/out.mp4",
-      segmentCount: 1,
-      totalDurationUs: 1_000_000,
-    });
-    await starting;
+    const { store, emit } = await failTheStopAfterTheAnswer();
     const { guard, confirmQuit } = setup(createInput(), {
       readInput: () => inputOf(store),
     });

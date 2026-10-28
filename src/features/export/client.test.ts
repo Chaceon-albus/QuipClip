@@ -2,13 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { BACKEND_COMMANDS } from "@/lib/ipc";
 import type { Pts } from "@/types/project";
-import { cancelActiveExport, cancelExport, startExport } from "./client";
+import { cancelExport, startExport } from "./client";
 import {
   BACKEND_EXPORT_ERROR_CODES,
   ExportError,
   type BackendExportErrorCode,
   type ExportRequest,
-  type ExportStart,
+  type ExportSubmission,
 } from "./types";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 
@@ -33,15 +33,11 @@ function createValidRequest(overrides: Partial<ExportRequest> = {}): ExportReque
   };
 }
 
-function createValidStartResult(overrides: Partial<ExportStart> = {}): ExportStart {
+function createValidStartResult(
+  overrides: Partial<ExportSubmission> = {},
+): ExportSubmission {
   return {
     runId: "export-run-123",
-    presetId: "mp4-h264",
-    streams: "videoAndAudio",
-    outputPath: "/media/output.mp4",
-    segmentCount: 1,
-    totalDurationUs: 5_000_000,
-    expectedFrames: 150,
     ...overrides,
   };
 }
@@ -108,8 +104,8 @@ describe("Media Export Client", () => {
 
     it("normalizes malformed success responses to an error with code 'unknown'", async () => {
       const mockInvoke = vi.fn().mockResolvedValue({
-        runId: "export-run-123",
-        // missing presetId, outputPath, segmentCount, totalDurationUs
+        // An empty run id names no run.
+        runId: "",
       });
 
       try {
@@ -228,78 +224,6 @@ describe("Media Export Client", () => {
           } catch (error) {
             expect(error).toBeInstanceOf(ExportError);
           }
-        });
-      },
-    );
-  });
-
-  describe("cancelActiveExport", () => {
-    it("invokes the backend command with no arguments and returns true", async () => {
-      const mockInvoke = vi.fn().mockResolvedValue(true);
-
-      const result = await cancelActiveExport({ invoke: mockInvoke });
-
-      expect(mockInvoke).toHaveBeenCalledTimes(1);
-      // The command takes no run id: it cancels whichever run holds the single export slot,
-      // which is the only run there can be while `start_export` has not answered yet.
-      expect(mockInvoke).toHaveBeenCalledWith(BACKEND_COMMANDS.CANCEL_ACTIVE_EXPORT);
-      expect(BACKEND_COMMANDS.CANCEL_ACTIVE_EXPORT).toBe("cancel_active_export");
-      expect(result).toBe(true);
-    });
-
-    it("returns false when the export slot was already free", async () => {
-      const mockInvoke = vi.fn().mockResolvedValue(false);
-
-      expect(await cancelActiveExport({ invoke: mockInvoke })).toBe(false);
-    });
-
-    it("delegates to default Tauri invoke when no custom invoke is provided", async () => {
-      const mockedTauriInvoke = vi.mocked(tauriInvoke);
-      mockedTauriInvoke.mockResolvedValueOnce(true);
-
-      const result = await cancelActiveExport();
-
-      expect(mockedTauriInvoke).toHaveBeenCalledWith("cancel_active_export", undefined);
-      expect(result).toBe(true);
-    });
-
-    it("throws normalized ExportError when backend returns non-boolean", async () => {
-      const mockInvoke = vi.fn().mockResolvedValue("invalid-string-return");
-
-      const promise = cancelActiveExport({ invoke: mockInvoke });
-      await expect(promise).rejects.toBeInstanceOf(ExportError);
-      await expect(promise).rejects.toMatchObject({ code: "unknown" });
-    });
-
-    it("normalizes Error object rejections with detail undefined to prevent leaking local messages", async () => {
-      const mockInvoke = vi.fn().mockRejectedValue(new Error("Local IPC disconnect"));
-
-      try {
-        await cancelActiveExport({ invoke: mockInvoke });
-        expect.fail("Expected cancelActiveExport to reject");
-      } catch (error) {
-        expect(error).toBeInstanceOf(ExportError);
-        const expErr = error as ExportError;
-        expect(expErr.code).toBe("unknown");
-        expect(expErr.detail).toBeUndefined();
-      }
-    });
-
-    describe.each(BACKEND_EXPORT_ERROR_CODES)(
-      "accepts backend error code: %s",
-      (code: BackendExportErrorCode) => {
-        it(`normalizes rejected error with code ${code}`, async () => {
-          const mockInvoke = vi.fn().mockRejectedValue({
-            code,
-            detail: `Diagnostic for ${code}`,
-          });
-
-          await expect(
-            cancelActiveExport({ invoke: mockInvoke }),
-          ).rejects.toMatchObject({
-            code,
-            detail: `Diagnostic for ${code}`,
-          });
         });
       },
     );

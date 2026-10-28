@@ -21,7 +21,7 @@ import {
   type ExportAudioMode,
   type ExportErrorCode,
   type ExportRequest,
-  type ExportStart,
+  type ExportSubmission,
   type ExportStreams,
   type ExportRunLiveState,
   type OpenExportSaveDialogOptions,
@@ -176,7 +176,7 @@ export interface ExportFlowControllerOptions {
   /**
    * Starts media export with the assembled request. Defaults to `exportStore.getState().startExport`.
    */
-  startExport?: (request: ExportRequest) => Promise<ExportStart | null>;
+  startExport?: (request: ExportRequest) => Promise<ExportSubmission | null>;
 
   /**
    * Reports an export error to the store. Defaults to `exportStore.getState().reportError`.
@@ -223,7 +223,7 @@ export class ExportFlowController {
   private readonly getExportStateFn: () => ExportRunLiveState;
   private readonly startExportFn: (
     request: ExportRequest,
-  ) => Promise<ExportStart | null>;
+  ) => Promise<ExportSubmission | null>;
   private readonly reportErrorFn: (error: unknown) => void;
   private readonly buildRequestFn: typeof buildExportRequest;
   private readonly resetFn: () => void;

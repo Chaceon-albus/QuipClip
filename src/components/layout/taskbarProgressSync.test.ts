@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createExportStore,
   type ExportProgressEvent,
-  type ExportStart,
+  type ExportSubmission,
   type ExportState,
 } from "@/features/export";
 import type { Pts } from "@/types/project";
@@ -269,10 +269,10 @@ describe("startTaskbarProgressSync", () => {
 
   it("never shows the error state while a failed Stop leaves the run live", async () => {
     let emit!: (event: ExportProgressEvent) => void;
-    let answerStart: (start: ExportStart) => void = () => {};
+    let answerStart: (start: ExportSubmission) => void = () => {};
     const startFn = vi.fn(
       () =>
-        new Promise<ExportStart>((resolve) => {
+        new Promise<ExportSubmission>((resolve) => {
           answerStart = resolve;
         }),
     );
@@ -282,7 +282,7 @@ describe("startTaskbarProgressSync", () => {
         return Promise.resolve(() => {});
       },
       startExport: startFn,
-      cancelActiveExport: () => Promise.reject(new Error("IPC closed")),
+      cancelExport: () => Promise.reject(new Error("IPC closed")),
     });
     const setProgressBar = createSpy();
     const stop = startTaskbarProgressSync({
@@ -302,20 +302,23 @@ describe("startTaskbarProgressSync", () => {
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();
     });
-    await store.getState().cancelExport();
-    expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
-    await flushPromises();
-
-    answerStart({
+    // The Stop waits for the run id. The `started` event that comes before the answer waits
+    // too, and the store applies it before it sends the request.
+    const stopping = store.getState().cancelExport();
+    emit({
+      event: "started",
       runId: "run-kept",
-      presetId: "mp4-h264",
-      streams: "videoAndAudio",
       outputPath: "/media/output.mp4",
       segmentCount: 1,
       totalDurationUs: 4_000_000,
       expectedFrames: 100,
     });
+    answerStart({ runId: "run-kept" });
     await starting;
+    await expect(stopping).resolves.toBe(false);
+    expect(store.getState()).toMatchObject({ status: "failed", tracking: true });
+    await flushPromises();
+
     emit({ event: "progress", runId: "run-kept", frame: 40 });
     await flushPromises();
     emit({
@@ -329,6 +332,8 @@ describe("startTaskbarProgressSync", () => {
     expect(callsOf(setProgressBar)).toEqual([
       { status: ProgressBarStatus.None },
       { status: ProgressBarStatus.Indeterminate },
+      // The `started` event, then the progress through the failed Stop. No error state.
+      { status: ProgressBarStatus.Normal, progress: 0 },
       { status: ProgressBarStatus.Normal, progress: 40 },
       { status: ProgressBarStatus.None },
     ]);

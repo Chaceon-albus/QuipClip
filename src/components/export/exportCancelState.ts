@@ -67,11 +67,11 @@ export function isCancelOutstanding({
 /**
  * Answers whether the cancel button accepts a click.
  *
- * "preparing" accepts a click with or without a run id. The store reaches the backend
- * without one through `cancel_active_export`, which stops whichever run holds the single
- * export slot; that is the run the store just started. This is the phase that most needs
- * the button, because preparation includes a re-probe bounded at 30 seconds and the run
- * holds the export slot for all of it (ADR 016, ADR 025).
+ * "preparing" accepts a click with or without a run id. Without one, the store waits for the
+ * answer of `start_export`, which comes as soon as the backend accepted the run, and then
+ * names the run. This is the phase that most needs the button, because preparation includes
+ * a re-probe bounded at 30 seconds and the run holds the export slot for all of it (ADR 016,
+ * ADR 025).
  *
  * "running" requires a run id, because the store only reaches that status from a `started`
  * or `progress` event, and an event can only arrive for a run the store already knows by id.
@@ -82,8 +82,8 @@ export function isCancelOutstanding({
  * writes the file.
  *
  * "failed" while the store still tracks the run accepts a click. A Stop request failed, and
- * the backend did not confirm the stop, so the user can ask again. The store asks by run id
- * when it has one, and by slot while the start still waits for its run id. That `failed` is
+ * the backend did not confirm the stop, so the user can ask again. The store asks by run id.
+ * That `failed` is
  * never the publication. The `publishing` event changes the status to `publishing`, and a
  * Stop request that fails after that event keeps `publishing` (`reportStopFailure` in the
  * store), so the button stays disabled for the whole rename.

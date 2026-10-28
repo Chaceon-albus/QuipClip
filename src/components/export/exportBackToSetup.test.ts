@@ -1,17 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { runExportFlow } from "@/components/layout/exportFlowController";
-import {
-  cancelActiveExport as clientCancelActiveExport,
-  cancelExport as clientCancelExport,
-} from "@/features/export/client";
+import { cancelExport as clientCancelExport } from "@/features/export/client";
 import { createExportStore } from "@/features/export/store";
 import {
   EXPORT_STATUSES,
   ExportError,
   type ExportProgressEvent,
   type ExportRequest,
-  type ExportStart,
+  type ExportSubmission,
   type ExportStatus,
 } from "@/features/export/types";
 import type { InvokeFn } from "@/lib/ipc";
@@ -53,16 +50,8 @@ const EXPORT_REQUEST: ExportRequest = {
   audioMode: "encode",
 };
 
-function startAnswer(runId: string): ExportStart {
-  return {
-    runId,
-    presetId: "mp4-h264",
-    streams: "videoAndAudio",
-    outputPath: "/media/output.mp4",
-    segmentCount: 1,
-    totalDurationUs: 5_000_000,
-    expectedFrames: 150,
-  };
+function startAnswer(runId: string): ExportSubmission {
+  return { runId };
 }
 
 /**
@@ -138,45 +127,47 @@ describe("Back after a stop request that the IPC layer rejected", () => {
   });
 });
 
-describe("Back after a slot cancel that rejects during preparing", () => {
+describe("Back after a Stop that waits for the run id", () => {
   /**
-   * A store whose start waits until the test answers it, and whose `cancel_active_export`
-   * goes through the real client with an invoke that rejects. The Stop fails while the start
-   * still waits for its run id.
+   * A store whose start waits until the test answers it, and whose `cancel_export` goes
+   * through the real client with an invoke that rejects. The user asks for the Stop while the
+   * start still waits for its run id, so the request goes out only after the answer.
    */
-  async function failTheStopWhileTheStartWaits() {
+  async function stopWhileTheStartWaits() {
     let emit!: (event: ExportProgressEvent) => void;
-    let answerStart: (start: ExportStart) => void = () => {};
+    let answerStart: (start: ExportSubmission) => void = () => {};
     let refuseStart: (error: ExportError) => void = () => {};
     const startFn = vi.fn(
       () =>
-        new Promise<ExportStart>((resolve, reject) => {
+        new Promise<ExportSubmission>((resolve, reject) => {
           answerStart = resolve;
           refuseStart = reject;
         }),
     );
+    const cancelInvoke = vi.fn().mockRejectedValue("IPC closed");
     const store = createExportStore({
       subscribeExportProgress: (handler) => {
         emit = handler;
         return Promise.resolve(() => {});
       },
       startExport: startFn,
-      cancelActiveExport: () =>
-        clientCancelActiveExport({ invoke: vi.fn().mockRejectedValue("IPC closed") }),
+      cancelExport: (runId) => clientCancelExport(runId, { invoke: cancelInvoke }),
     });
 
     const starting = store.getState().startExport(EXPORT_REQUEST);
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();
     });
-    await expect(store.getState().cancelExport()).resolves.toBe(false);
+    const stopping = store.getState().cancelExport();
     return {
       store,
       starting,
+      stopping,
+      cancelInvoke,
       emit: (event: ExportProgressEvent) => {
         emit(event);
       },
-      answerStart: (start: ExportStart) => {
+      answerStart: (start: ExportSubmission) => {
         answerStart(start);
       },
       refuseStart: (error: ExportError) => {
@@ -185,28 +176,35 @@ describe("Back after a slot cancel that rejects during preparing", () => {
     };
   }
 
-  it("is not offered while the backend can still encode the start that the store keeps", async () => {
-    const { store, starting, answerStart } = await failTheStopWhileTheStartWaits();
+  it("is not offered while the Stop waits, nor after its request fails for the named run", async () => {
+    const { store, starting, stopping, cancelInvoke, answerStart } =
+      await stopWhileTheStartWaits();
 
-    // The store keeps the start: failed, still tracked, and Back is not offered.
-    expect(store.getState().status).toBe("failed");
-    expect(store.getState().tracking).toBe(true);
+    // The Stop waits for the run id. The start is still tracked.
+    expect(cancelInvoke).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({ status: "preparing", tracking: true });
     expect(canGoBackToSetup(store.getState())).toBe(false);
 
-    // The backend answers with the run that it encodes. The store takes the answer.
+    // The backend answers with the run that it prepares. The request goes out and fails.
     answerStart(startAnswer("run-kept"));
     await expect(starting).resolves.toMatchObject({ runId: "run-kept" });
+    await expect(stopping).resolves.toBe(false);
 
-    expect(store.getState().runId).toBe("run-kept");
-    expect(store.getState().tracking).toBe(true);
+    expect(cancelInvoke).toHaveBeenCalledTimes(1);
+    expect(store.getState()).toMatchObject({
+      status: "failed",
+      runId: "run-kept",
+      tracking: true,
+    });
     expect(canGoBackToSetup(store.getState())).toBe(false);
   });
 
   it("is offered once the kept run ends on a failure", async () => {
-    const { store, starting, answerStart, emit } =
-      await failTheStopWhileTheStartWaits();
+    const { store, starting, stopping, answerStart, emit } =
+      await stopWhileTheStartWaits();
     answerStart(startAnswer("run-kept"));
     await starting;
+    await stopping;
 
     emit({ event: "failed", runId: "run-kept", code: "ffmpegProcessFailed" });
 
@@ -214,12 +212,15 @@ describe("Back after a slot cancel that rejects during preparing", () => {
     expect(canGoBackToSetup(store.getState())).toBe(true);
   });
 
-  it("is offered once the backend refuses the kept start", async () => {
-    const { store, starting, refuseStart } = await failTheStopWhileTheStartWaits();
+  it("is offered once the backend refuses the start", async () => {
+    const { store, starting, stopping, cancelInvoke, refuseStart } =
+      await stopWhileTheStartWaits();
 
     refuseStart(new ExportError({ code: "outputReadOnly" }));
     await expect(starting).resolves.toBeNull();
+    await expect(stopping).resolves.toBe(false);
 
+    expect(cancelInvoke).not.toHaveBeenCalled();
     expect(store.getState().error?.code).toBe("outputReadOnly");
     expect(store.getState().tracking).toBe(false);
     expect(canGoBackToSetup(store.getState())).toBe(true);

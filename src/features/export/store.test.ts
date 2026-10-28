@@ -1,16 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Pts } from "@/types/project";
-import {
-  cancelActiveExport as clientCancelActiveExport,
-  cancelExport as clientCancelExport,
-} from "./client";
+import { cancelExport as clientCancelExport } from "./client";
 import { isExportRunLive } from "./runState";
 import { createExportStore, exportStore, useExportStore } from "./store";
 import {
   ExportError,
   type ExportProgressEvent,
   type ExportRequest,
-  type ExportStart,
+  type ExportSubmission,
 } from "./types";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 
@@ -41,15 +38,11 @@ function createValidRequest(overrides: Partial<ExportRequest> = {}): ExportReque
   };
 }
 
-function createValidStartResult(overrides: Partial<ExportStart> = {}): ExportStart {
+function createValidStartResult(
+  overrides: Partial<ExportSubmission> = {},
+): ExportSubmission {
   return {
     runId: "run-export-1",
-    presetId: "mp4-h264",
-    streams: "videoAndAudio",
-    outputPath: "/media/output.mp4",
-    segmentCount: 1,
-    totalDurationUs: 5_000_000,
-    expectedFrames: 150,
     ...overrides,
   };
 }
@@ -198,8 +191,8 @@ describe("Media Export Store", () => {
 
     it("discards buffered early events from superseded requests", async () => {
       let eventHandler!: (event: ExportProgressEvent) => void;
-      const req1 = createDeferred<ExportStart>();
-      const req2 = createDeferred<ExportStart>();
+      const req1 = createDeferred<ExportSubmission>();
+      const req2 = createDeferred<ExportSubmission>();
 
       const store = createExportStore({
         subscribeExportProgress: (handler) => {
@@ -209,16 +202,18 @@ describe("Media Export Store", () => {
         startExport: (req) => (req.preset.id === "req2" ? req2.promise : req1.promise),
       });
 
-      const p1 = store
-        .getState()
-        .startExport(
-          createValidRequest({ preset: createPresetDraft("req1", "Test preset") }),
-        );
-      const p2 = store
-        .getState()
-        .startExport(
-          createValidRequest({ preset: createPresetDraft("req2", "Test preset") }),
-        );
+      const p1 = store.getState().startExport(
+        createValidRequest({
+          preset: createPresetDraft("req1", "Test preset"),
+          outputPath: "/old/output.mp4",
+        }),
+      );
+      const p2 = store.getState().startExport(
+        createValidRequest({
+          preset: createPresetDraft("req2", "Test preset"),
+          outputPath: "/new/output.mp4",
+        }),
+      );
 
       // Early event emitted for run-1 while both are in flight
       eventHandler({
@@ -230,17 +225,13 @@ describe("Media Export Store", () => {
       });
 
       // Req2 resolves first
-      req2.resolve(
-        createValidStartResult({ runId: "run-2", outputPath: "/new/output.mp4" }),
-      );
+      req2.resolve(createValidStartResult({ runId: "run-2" }));
 
       await p2;
       expect(store.getState().runId).toBe("run-2");
 
       // Req1 resolves later
-      req1.resolve(
-        createValidStartResult({ runId: "run-1", outputPath: "/old/output.mp4" }),
-      );
+      req1.resolve(createValidStartResult({ runId: "run-1" }));
 
       const res1 = await p1;
       expect(res1).toBeNull();
@@ -251,7 +242,7 @@ describe("Media Export Store", () => {
     it("preserves winning run buffering state when a superseded run cleans up", async () => {
       let eventHandler!: (event: ExportProgressEvent) => void;
       const subDeferred = createDeferred<() => void>();
-      const reqB = createDeferred<ExportStart>();
+      const reqB = createDeferred<ExportSubmission>();
 
       const store = createExportStore({
         subscribeExportProgress: (handler) => {
@@ -296,15 +287,7 @@ describe("Media Export Store", () => {
       });
 
       // 5. Resolve B's invoke
-      reqB.resolve(
-        createValidStartResult({
-          runId: "run-B",
-          outputPath: "/media/out-b.mp4",
-          segmentCount: 2,
-          totalDurationUs: 8_000_000,
-          expectedFrames: 240,
-        }),
-      );
+      reqB.resolve(createValidStartResult({ runId: "run-B" }));
 
       const resB = await p2;
       expect(resB?.runId).toBe("run-B");
@@ -429,15 +412,7 @@ describe("Media Export Store", () => {
           return Promise.resolve(() => {});
         },
         startExport: () =>
-          Promise.resolve(
-            createValidStartResult({
-              runId: "run-full",
-              outputPath: "/media/rendered.mp4",
-              segmentCount: 3,
-              totalDurationUs: 10_000_000,
-              expectedFrames: 300,
-            }),
-          ),
+          Promise.resolve(createValidStartResult({ runId: "run-full" })),
       });
 
       // 1. Start export -> preparing
@@ -537,13 +512,7 @@ describe("Media Export Store", () => {
           return Promise.resolve(() => {});
         },
         startExport: () =>
-          Promise.resolve(
-            createValidStartResult({
-              runId: "run-audio",
-              streams: "audioOnly",
-              expectedFrames: undefined,
-            }),
-          ),
+          Promise.resolve(createValidStartResult({ runId: "run-audio" })),
       });
 
       await store.getState().startExport(createValidRequest({ streams: "audioOnly" }));
@@ -667,8 +636,8 @@ describe("Media Export Store", () => {
     });
 
     it("ignores rejection from a superseded startExport call so it does not overwrite the successor state", async () => {
-      const req1 = createDeferred<ExportStart>();
-      const req2 = createDeferred<ExportStart>();
+      const req1 = createDeferred<ExportSubmission>();
+      const req2 = createDeferred<ExportSubmission>();
       const req1Started = createDeferred<void>();
 
       const store = createExportStore({
@@ -695,9 +664,7 @@ describe("Media Export Store", () => {
           createValidRequest({ preset: createPresetDraft("req2", "Test preset") }),
         );
 
-      req2.resolve(
-        createValidStartResult({ runId: "run-2", outputPath: "/new/output.mp4" }),
-      );
+      req2.resolve(createValidStartResult({ runId: "run-2" }));
       const res2 = await p2;
       expect(res2?.runId).toBe("run-2");
       expect(store.getState().runId).toBe("run-2");
@@ -854,7 +821,7 @@ describe("Media Export Store", () => {
     });
 
     it("drops the old run at once when a new start begins, and tracks the new start", async () => {
-      let answerSecond: (start: ExportStart) => void = () => {};
+      let answerSecond: (start: ExportSubmission) => void = () => {};
       let calls = 0;
       const store = createExportStore({
         subscribeExportProgress: () => Promise.resolve(() => {}),
@@ -863,7 +830,7 @@ describe("Media Export Store", () => {
           if (calls === 1) {
             return Promise.resolve(createValidStartResult({ runId: "run-first" }));
           }
-          return new Promise<ExportStart>((resolve) => {
+          return new Promise<ExportSubmission>((resolve) => {
             answerSecond = resolve;
           });
         },
@@ -887,7 +854,7 @@ describe("Media Export Store", () => {
     });
 
     it("tracks a start that waits for its run id", async () => {
-      const startDeferred = createDeferred<ExportStart>();
+      const startDeferred = createDeferred<ExportSubmission>();
       const store = createExportStore({
         subscribeExportProgress: () => Promise.resolve(() => {}),
         startExport: () => startDeferred.promise,
@@ -1019,195 +986,317 @@ describe("Media Export Store", () => {
       expect(store.getState().error).toBeNull();
     });
 
-    it("cancels by export slot while preparing has produced no run id", async () => {
-      // The fault this closes: `start_export` claims the single export slot, prepares -- a
-      // re-probe alone is bounded at 30 seconds -- and answers with the run id only
-      // afterward. For that window the store holds no id, so `cancelExport` has nothing to
-      // name and the user could not stop a run that was already holding the slot.
-      const startDeferred = createDeferred<ExportStart>();
-      const mockCancel = vi.fn();
-      const mockCancelActive = vi.fn().mockResolvedValue(true);
-
-      const store = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: () => startDeferred.promise,
-        cancelExport: mockCancel,
-        cancelActiveExport: mockCancelActive,
-      });
-
-      const startPromise = store.getState().startExport(createValidRequest());
-      await Promise.resolve();
-      expect(store.getState().status).toBe("preparing");
-      expect(store.getState().runId).toBeNull();
-
-      const result = await store.getState().cancelExport();
-
-      expect(result).toBe(true);
-      expect(mockCancelActive).toHaveBeenCalledTimes(1);
-      expect(mockCancelActive).toHaveBeenCalledWith();
-      expect(mockCancel).not.toHaveBeenCalled();
-
-      startDeferred.resolve(createValidStartResult());
-      await startPromise;
-    });
-
-    it("cancels by run id as soon as preparing has one, never by slot", async () => {
+    it("cancels by run id as soon as the start answer names the run", async () => {
       const mockCancel = vi.fn().mockResolvedValue(true);
-      const mockCancelActive = vi.fn();
 
       const store = createExportStore({
         subscribeExportProgress: () => Promise.resolve(() => {}),
         startExport: () =>
           Promise.resolve(createValidStartResult({ runId: "run-named" })),
         cancelExport: mockCancel,
-        cancelActiveExport: mockCancelActive,
       });
 
       await store.getState().startExport(createValidRequest());
       expect(store.getState().runId).toBe("run-named");
+      expect(store.getState().status).toBe("preparing");
 
       const result = await store.getState().cancelExport();
 
       expect(result).toBe(true);
+      expect(mockCancel).toHaveBeenCalledTimes(1);
       expect(mockCancel).toHaveBeenCalledWith("run-named");
-      expect(mockCancelActive).not.toHaveBeenCalled();
     });
 
-    it("does not cancel by slot in a status with no run to stop", async () => {
-      const mockCancelActive = vi.fn();
+    it("does not wait for a run id in a status with no run to stop", async () => {
+      const mockCancel = vi.fn();
       const store = createExportStore(
-        {
-          cancelExport: vi.fn(),
-          cancelActiveExport: mockCancelActive,
-        },
+        { cancelExport: mockCancel },
         { status: "failed" },
       );
 
       expect(await store.getState().cancelExport()).toBe(false);
-      expect(mockCancelActive).not.toHaveBeenCalled();
-    });
-
-    it("reports a slot cancel that rejects while the start is still in flight", async () => {
-      const startDeferred = createDeferred<ExportStart>();
-      const mockCancelActive = vi.fn().mockRejectedValue(new Error("IPC failed"));
-
-      const store = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: () => startDeferred.promise,
-        cancelExport: vi.fn(),
-        cancelActiveExport: mockCancelActive,
-      });
-
-      void store.getState().startExport(createValidRequest());
-      await Promise.resolve();
-
-      expect(await store.getState().cancelExport()).toBe(false);
-      expect(store.getState().status).toBe("failed");
-      expect(store.getState().error?.code).toBe("unknown");
-      // The report keeps the start: the backend did not confirm the stop.
-      expect(store.getState().runId).toBeNull();
-      expect(store.getState().tracking).toBe(true);
       expect(store.getState().cancelRequested).toBe(false);
-    });
-
-    it("does not report a slot cancel that rejects after the store was reset", async () => {
-      // The start fails on its own while a by-slot cancel is pending, and the user closes the
-      // result, which resets the store. A failure that landed afterward would put an error
-      // back on a dialog the user closed.
-      const cancelDeferred = createDeferred<boolean>();
-      const startDeferred = createDeferred<ExportStart>();
-
-      const store = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: () => startDeferred.promise,
-        cancelExport: vi.fn(),
-        cancelActiveExport: () => cancelDeferred.promise,
-      });
-
-      void store.getState().startExport(createValidRequest());
-      await Promise.resolve();
-
-      const cancelPromise = store.getState().cancelExport();
-      store.getState().reset();
-      cancelDeferred.reject(new Error("IPC failed"));
-
-      expect(await cancelPromise).toBe(false);
-      expect(store.getState().status).toBe("idle");
-      expect(store.getState().error).toBeNull();
-    });
-
-    it("does not report a slot cancel that rejects after a reset and a new start", async () => {
-      // "preparing" with no run id is not an identity: every start passes through it. A
-      // rejection matched on the status alone would land in the run that started after the
-      // reset, and `reportError` would invalidate that start's request id -- leaving a live
-      // run the store holds no id for and the by-slot path itself would then refuse.
-      const cancelDeferred = createDeferred<boolean>();
-      const secondStart = createDeferred<ExportStart>();
-      const secondRequest = createValidRequest({ outputPath: "/media/output-2.mp4" });
-      // Key the deferred by request, not by call order. The first start is superseded while it
-      // still awaits the subscription, so it returns before it ever reaches the command: a
-      // queue shifted once per call would hand the first run's deferred to the second run and
-      // leave this test awaiting a promise nothing resolves.
-      const mockStart = vi.fn((request: ExportRequest) => {
-        if (request.outputPath !== secondRequest.outputPath) {
-          return Promise.reject(new Error("the superseded start reached the command"));
-        }
-        return secondStart.promise;
-      });
-      const mockCancelActive = vi
-        .fn()
-        .mockImplementationOnce(() => cancelDeferred.promise)
-        .mockImplementationOnce(() => Promise.resolve(true));
-
-      const store = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: mockStart,
-        cancelExport: vi.fn(),
-        cancelActiveExport: mockCancelActive,
-      });
-
-      void store.getState().startExport(createValidRequest());
-      await Promise.resolve();
-
-      const cancelPromise = store.getState().cancelExport();
-      store.getState().reset();
-
-      const secondStartPromise = store.getState().startExport(secondRequest);
-      await Promise.resolve();
-      expect(store.getState().status).toBe("preparing");
-      expect(store.getState().runId).toBeNull();
-
-      cancelDeferred.reject(new Error("IPC failed"));
-      expect(await cancelPromise).toBe(false);
-
-      // The stale rejection belongs to the run the reset discarded, not to this one.
-      expect(store.getState().status).toBe("preparing");
-      expect(store.getState().error).toBeNull();
-
-      // The new run stays cancellable by slot ...
-      expect(await store.getState().cancelExport()).toBe(true);
-      expect(mockCancelActive).toHaveBeenCalledTimes(2);
-
-      // ... and still learns its run id, so it is cancellable by id afterward.
-      secondStart.resolve(createValidStartResult({ runId: "run-2" }));
-      await secondStartPromise;
-      expect(store.getState().runId).toBe("run-2");
-
-      // Only the surviving run reached the command.
-      expect(mockStart).toHaveBeenCalledTimes(1);
-      expect(mockStart).toHaveBeenCalledWith(secondRequest);
+      expect(mockCancel).not.toHaveBeenCalled();
     });
   });
 
-  describe("a slot cancel that the IPC layer rejects while the start waits for its run id", () => {
+  describe("a Stop that waits for the run id", () => {
     /**
-     * A store whose start waits until the test answers it, and whose `cancel_active_export`
-     * goes through the real client with an invoke that rejects, as a closed IPC channel does.
-     * `emit` sends an `export:progress` event to the store.
+     * A store whose start waits until the test answers it. `cancelFn` is the injected
+     * `cancel_export`, and `emit` sends an `export:progress` event to the store.
      */
-    function createStoreWithFailingSlotCancel() {
+    function createWaitingStore(cancel: (runId: string) => Promise<boolean>) {
       let emit!: (event: ExportProgressEvent) => void;
-      const startDeferred = createDeferred<ExportStart>();
+      const startDeferred = createDeferred<ExportSubmission>();
+      const startFn = vi.fn(() => startDeferred.promise);
+      const cancelFn = vi.fn(cancel);
+      const store = createExportStore({
+        subscribeExportProgress: (handler) => {
+          emit = handler;
+          return Promise.resolve(() => {});
+        },
+        startExport: startFn,
+        cancelExport: cancelFn,
+      });
+      return {
+        store,
+        startDeferred,
+        startFn,
+        cancelFn,
+        emit: (event: ExportProgressEvent) => {
+          emit(event);
+        },
+      };
+    }
+
+    /** Starts the export, and waits until the start waits for its run id. */
+    async function startAndWaitForRunId(cancel: (runId: string) => Promise<boolean>) {
+      const fixture = createWaitingStore(cancel);
+      const starting = fixture.store.getState().startExport(createValidRequest());
+      await vi.waitFor(() => {
+        expect(fixture.startFn).toHaveBeenCalled();
+      });
+      expect(fixture.store.getState()).toMatchObject({
+        status: "preparing",
+        runId: null,
+        tracking: true,
+      });
+      return { ...fixture, starting };
+    }
+
+    it("sends no request before the answer, then one cancel_export whose answer settles the Stop", async () => {
+      const cancelDeferred = createDeferred<boolean>();
+      const { store, startDeferred, starting, cancelFn } = await startAndWaitForRunId(
+        () => cancelDeferred.promise,
+      );
+
+      const stopping = store.getState().cancelExport();
+
+      // No run id exists yet, so nothing goes to the backend.
+      expect(cancelFn).not.toHaveBeenCalled();
+      expect(store.getState().cancelRequested).toBe(true);
+      expect(store.getState().status).toBe("preparing");
+
+      startDeferred.resolve(createValidStartResult({ runId: "run-1" }));
+      await starting;
+
+      // The answer names the run, and the store asks for the stop by that id.
+      expect(cancelFn).toHaveBeenCalledTimes(1);
+      expect(cancelFn).toHaveBeenCalledWith("run-1");
+      expect(store.getState()).toMatchObject({ runId: "run-1", cancelRequested: true });
+
+      cancelDeferred.resolve(true);
+      await expect(stopping).resolves.toBe(true);
+      expect(store.getState().cancelRequested).toBe(true);
+      expect(cancelFn).toHaveBeenCalledTimes(1);
+    });
+
+    it("settles the Stop with false, and clears cancelRequested, when cancel_export answers false", async () => {
+      const { store, startDeferred, starting, cancelFn } = await startAndWaitForRunId(
+        () => Promise.resolve(false),
+      );
+
+      const stopping = store.getState().cancelExport();
+      startDeferred.resolve(createValidStartResult({ runId: "run-1" }));
+      await starting;
+
+      await expect(stopping).resolves.toBe(false);
+      expect(cancelFn).toHaveBeenCalledTimes(1);
+      expect(store.getState()).toMatchObject({
+        runId: "run-1",
+        tracking: true,
+        cancelRequested: false,
+      });
+    });
+
+    it("joins a second click to the waiting request, so one cancel_export settles both", async () => {
+      const cancelDeferred = createDeferred<boolean>();
+      const { store, startDeferred, starting, cancelFn } = await startAndWaitForRunId(
+        () => cancelDeferred.promise,
+      );
+
+      const first = store.getState().cancelExport();
+      const second = store.getState().cancelExport();
+      expect(cancelFn).not.toHaveBeenCalled();
+
+      startDeferred.resolve(createValidStartResult({ runId: "run-1" }));
+      await starting;
+      expect(cancelFn).toHaveBeenCalledTimes(1);
+      expect(cancelFn).toHaveBeenCalledWith("run-1");
+
+      cancelDeferred.resolve(true);
+      await expect(first).resolves.toBe(true);
+      await expect(second).resolves.toBe(true);
+      expect(cancelFn).toHaveBeenCalledTimes(1);
+    });
+
+    it("settles the Stop with false when the backend refuses the start", async () => {
+      const { store, startDeferred, starting, cancelFn } = await startAndWaitForRunId(
+        () => Promise.resolve(true),
+      );
+
+      const stopping = store.getState().cancelExport();
+      expect(store.getState().cancelRequested).toBe(true);
+
+      startDeferred.reject(new ExportError({ code: "exportAlreadyRunning" }));
+      await expect(starting).resolves.toBeNull();
+
+      await expect(stopping).resolves.toBe(false);
+      expect(cancelFn).not.toHaveBeenCalled();
+      // The refusal is the error that shows, and it ends the start.
+      expect(store.getState()).toMatchObject({
+        status: "failed",
+        runId: null,
+        tracking: false,
+        cancelRequested: false,
+      });
+      expect(store.getState().error?.code).toBe("exportAlreadyRunning");
+    });
+
+    it("settles the Stop with false on a reset, and sends no request", async () => {
+      const { store, startDeferred, starting, cancelFn } = await startAndWaitForRunId(
+        () => Promise.resolve(true),
+      );
+
+      const stopping = store.getState().cancelExport();
+      store.getState().reset();
+
+      await expect(stopping).resolves.toBe(false);
+      expect(store.getState()).toMatchObject({
+        status: "idle",
+        tracking: false,
+        cancelRequested: false,
+      });
+
+      // The answer that arrives after the reset belongs to nobody.
+      startDeferred.resolve(createValidStartResult({ runId: "run-dropped" }));
+      await expect(starting).resolves.toBeNull();
+      expect(store.getState().runId).toBeNull();
+      expect(cancelFn).not.toHaveBeenCalled();
+    });
+
+    it("settles the Stop with false on unsubscribe, and sends no request", async () => {
+      const { store, startDeferred, starting, cancelFn } = await startAndWaitForRunId(
+        () => Promise.resolve(true),
+      );
+
+      const stopping = store.getState().cancelExport();
+      store.getState().unsubscribe();
+
+      // The store no longer hears the run, so no answer settles the Stop.
+      await expect(stopping).resolves.toBe(false);
+
+      startDeferred.resolve(createValidStartResult({ runId: "run-dropped" }));
+      await expect(starting).resolves.toBeNull();
+      expect(cancelFn).not.toHaveBeenCalled();
+
+      // With no start in flight, a later Stop has nothing to wait for.
+      await expect(store.getState().cancelExport()).resolves.toBe(false);
+    });
+
+    it("settles the Stop with false, and sends no request, when the run failed before the answer", async () => {
+      const { store, startDeferred, starting, cancelFn, emit } =
+        await startAndWaitForRunId(() => Promise.resolve(true));
+
+      const stopping = store.getState().cancelExport();
+
+      // A failure of preparation can arrive before the answer. It waits for the run id.
+      emit({ event: "failed", runId: "run-1", code: "ffmpegProcessFailed" });
+      expect(store.getState().status).toBe("preparing");
+
+      startDeferred.resolve(createValidStartResult({ runId: "run-1" }));
+      await starting;
+
+      await expect(stopping).resolves.toBe(false);
+      expect(cancelFn).not.toHaveBeenCalled();
+      expect(store.getState()).toMatchObject({
+        status: "failed",
+        runId: "run-1",
+        tracking: false,
+        cancelRequested: false,
+      });
+      expect(store.getState().error?.code).toBe("ffmpegProcessFailed");
+    });
+
+    it("settles the Stop with false when a newer start replaces the start it waited for", async () => {
+      const firstStart = createDeferred<ExportSubmission>();
+      const secondStart = createDeferred<ExportSubmission>();
+      const secondRequest = createValidRequest({ outputPath: "/media/output-2.mp4" });
+      const startFn = vi.fn((request: ExportRequest) =>
+        request.outputPath === secondRequest.outputPath
+          ? secondStart.promise
+          : firstStart.promise,
+      );
+      const cancelFn = vi.fn().mockResolvedValue(true);
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: startFn,
+        cancelExport: cancelFn,
+      });
+
+      const firstStarting = store.getState().startExport(createValidRequest());
+      await vi.waitFor(() => {
+        expect(startFn).toHaveBeenCalledTimes(1);
+      });
+      const stopping = store.getState().cancelExport();
+
+      const secondStarting = store.getState().startExport(secondRequest);
+      await expect(stopping).resolves.toBe(false);
+      expect(store.getState().cancelRequested).toBe(false);
+
+      // The old answer is stale, and the new run gets no stop that nobody asked for.
+      firstStart.resolve(createValidStartResult({ runId: "run-1" }));
+      await expect(firstStarting).resolves.toBeNull();
+      secondStart.resolve(createValidStartResult({ runId: "run-2" }));
+      await secondStarting;
+      expect(store.getState()).toMatchObject({
+        runId: "run-2",
+        tracking: true,
+        cancelRequested: false,
+      });
+      expect(cancelFn).not.toHaveBeenCalled();
+    });
+
+    it("sends the stop after the buffered events of the run, and writes its answer", async () => {
+      const cancelDeferred = createDeferred<boolean>();
+      const { store, startDeferred, starting, cancelFn, emit } =
+        await startAndWaitForRunId(() => cancelDeferred.promise);
+
+      const stopping = store.getState().cancelExport();
+      emit({
+        event: "started",
+        runId: "run-1",
+        outputPath: "/media/output.mp4",
+        segmentCount: 1,
+        totalDurationUs: 5_000_000,
+        expectedFrames: 150,
+      });
+
+      startDeferred.resolve(createValidStartResult({ runId: "run-1" }));
+      await starting;
+      expect(store.getState()).toMatchObject({
+        status: "running",
+        runId: "run-1",
+        expectedFrames: 150,
+        cancelRequested: true,
+      });
+      expect(cancelFn).toHaveBeenCalledWith("run-1");
+
+      cancelDeferred.resolve(true);
+      await expect(stopping).resolves.toBe(true);
+      emit({ event: "failed", runId: "run-1", code: "canceled" });
+      expect(store.getState()).toMatchObject({ status: "canceled", tracking: false });
+    });
+  });
+
+  describe("a Stop that waited for the run id, and whose cancel_export the IPC layer rejects", () => {
+    /**
+     * A store whose start waits until the test answers it, and whose `cancel_export` goes
+     * through the real client with an invoke that rejects, as a closed IPC channel does.
+     */
+    function createStoreWithFailingStop() {
+      let emit!: (event: ExportProgressEvent) => void;
+      const startDeferred = createDeferred<ExportSubmission>();
       const startFn = vi.fn(() => startDeferred.promise);
       const cancelInvoke = vi.fn().mockRejectedValue("IPC closed");
       const store = createExportStore({
@@ -1216,8 +1305,7 @@ describe("Media Export Store", () => {
           return Promise.resolve(() => {});
         },
         startExport: startFn,
-        cancelExport: vi.fn(),
-        cancelActiveExport: () => clientCancelActiveExport({ invoke: cancelInvoke }),
+        cancelExport: (runId) => clientCancelExport(runId, { invoke: cancelInvoke }),
       });
       return {
         store,
@@ -1230,172 +1318,53 @@ describe("Media Export Store", () => {
       };
     }
 
-    /** Starts the export, and fails the Stop while the start waits for its run id. */
-    async function startAndFailTheStop() {
-      const fixture = createStoreWithFailingSlotCancel();
+    /** Starts the export, and asks for a Stop while the start waits for its run id. */
+    async function startAndStopWhileWaiting() {
+      const fixture = createStoreWithFailingStop();
       const starting = fixture.store.getState().startExport(createValidRequest());
       await vi.waitFor(() => {
         expect(fixture.startFn).toHaveBeenCalled();
       });
-      await expect(fixture.store.getState().cancelExport()).resolves.toBe(false);
-      expect(fixture.cancelInvoke).toHaveBeenCalledTimes(1);
-      return { ...fixture, starting };
+      const stopping = fixture.store.getState().cancelExport();
+      expect(fixture.cancelInvoke).not.toHaveBeenCalled();
+      return { ...fixture, starting, stopping };
     }
 
-    it("reports a failure that keeps the start, so the run stays live", async () => {
-      const { store } = await startAndFailTheStop();
+    it("reports a failure that keeps the run, before the encode", async () => {
+      const { store, startDeferred, starting, stopping, cancelInvoke } =
+        await startAndStopWhileWaiting();
 
+      startDeferred.resolve(createValidStartResult({ runId: "run-kept" }));
+      await starting;
+      await expect(stopping).resolves.toBe(false);
+
+      expect(cancelInvoke).toHaveBeenCalledTimes(1);
+      expect(cancelInvoke).toHaveBeenCalledWith("cancel_export", { runId: "run-kept" });
       const state = store.getState();
-      expect(state.status).toBe("failed");
+      expect(state).toMatchObject({
+        status: "failed",
+        runId: "run-kept",
+        tracking: true,
+        cancelRequested: false,
+        encodeStarted: false,
+      });
       expect(state.error).toMatchObject({ code: "unknown", detail: "IPC closed" });
-      expect(state.runId).toBeNull();
-      expect(state.tracking).toBe(true);
-      expect(state.cancelRequested).toBe(false);
       expect(isExportRunLive(state)).toBe(true);
     });
 
-    it("takes the start answer, and tracks the run to its finished event", async () => {
-      const { store, startDeferred, starting, emit } = await startAndFailTheStop();
+    it("reports a failure that keeps the run after its started event", async () => {
+      const { store, startDeferred, starting, stopping, emit } =
+        await startAndStopWhileWaiting();
 
-      // An event that arrives before the answer waits for the run id.
       emit({
         event: "started",
         runId: "run-kept",
         outputPath: "/media/output.mp4",
         segmentCount: 1,
-        totalDurationUs: 5_000_000,
-        expectedFrames: 150,
+        totalDurationUs: 1000,
       });
-      expect(store.getState().status).toBe("failed");
-
-      const start = createValidStartResult({ runId: "run-kept" });
-      startDeferred.resolve(start);
-      await expect(starting).resolves.toStrictEqual(start);
-
-      // The store knows the run, and its `started` event brought it back to `running`. The
-      // failure of the Stop request no longer shows, because Stop is available again.
-      expect(store.getState()).toMatchObject({
-        status: "running",
-        runId: "run-kept",
-        tracking: true,
-        error: null,
-      });
-
-      emit({ event: "progress", runId: "run-kept", frame: 75 });
-      expect(store.getState().frame).toBe(75);
-
-      emit({
-        event: "finished",
-        runId: "run-kept",
-        outputPath: "/media/output.mp4",
-        frames: 150,
-      });
-      expect(store.getState()).toMatchObject({
-        status: "finished",
-        runId: "run-kept",
-        tracking: false,
-        error: null,
-        frame: 150,
-      });
-    });
-
-    it("tracks the run to its failed event", async () => {
-      const { store, startDeferred, starting, emit } = await startAndFailTheStop();
-
       startDeferred.resolve(createValidStartResult({ runId: "run-kept" }));
       await starting;
-      // The answer alone does not change the status. The run is still live.
-      expect(store.getState()).toMatchObject({
-        status: "failed",
-        runId: "run-kept",
-        tracking: true,
-      });
-      expect(isExportRunLive(store.getState())).toBe(true);
-
-      emit({ event: "failed", runId: "run-kept", code: "ffmpegProcessFailed" });
-
-      expect(store.getState().status).toBe("failed");
-      expect(store.getState().error?.code).toBe("ffmpegProcessFailed");
-      expect(store.getState().tracking).toBe(false);
-      expect(isExportRunLive(store.getState())).toBe(false);
-    });
-
-    it("ends the tracking when the backend then refuses the start", async () => {
-      const { store, startDeferred, starting } = await startAndFailTheStop();
-
-      startDeferred.reject(new ExportError({ code: "outputReadOnly" }));
-      await expect(starting).resolves.toBeNull();
-
-      // The refusal is the better error, and it ends the start.
-      expect(store.getState()).toMatchObject({
-        status: "failed",
-        runId: null,
-        tracking: false,
-      });
-      expect(store.getState().error?.code).toBe("outputReadOnly");
-      expect(isExportRunLive(store.getState())).toBe(false);
-    });
-
-    it("ends as canceled when the stop reached the backend after all", async () => {
-      // The IPC layer can reject after the backend received the request. The start then
-      // answers `canceled`.
-      const { store, startDeferred, starting } = await startAndFailTheStop();
-
-      startDeferred.reject(new ExportError({ code: "canceled" }));
-      await expect(starting).resolves.toBeNull();
-
-      expect(store.getState()).toMatchObject({ status: "canceled", tracking: false });
-    });
-
-    it("accepts a retried slot cancel while the start still waits, and ends canceled", async () => {
-      const startDeferred = createDeferred<ExportStart>();
-      const startFn = vi.fn(() => startDeferred.promise);
-      const cancelInvoke = vi
-        .fn()
-        .mockRejectedValueOnce("IPC closed")
-        .mockResolvedValueOnce(true);
-      const store = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: startFn,
-        cancelExport: vi.fn(),
-        cancelActiveExport: () => clientCancelActiveExport({ invoke: cancelInvoke }),
-      });
-      const starting = store.getState().startExport(createValidRequest());
-      await vi.waitFor(() => {
-        expect(startFn).toHaveBeenCalled();
-      });
-      await expect(store.getState().cancelExport()).resolves.toBe(false);
-      expect(store.getState()).toMatchObject({
-        status: "failed",
-        runId: null,
-        tracking: true,
-      });
-
-      // The start still waits for its run id, so the retry asks by slot again.
-      const retry = store.getState().cancelExport();
-      expect(store.getState().cancelRequested).toBe(true);
-      await expect(retry).resolves.toBe(true);
-      expect(cancelInvoke).toHaveBeenCalledTimes(2);
-      expect(store.getState().cancelRequested).toBe(true);
-
-      // The preparation reads the flag, and `start_export` answers `canceled`.
-      startDeferred.reject(new ExportError({ code: "canceled" }));
-      await expect(starting).resolves.toBeNull();
-      expect(store.getState()).toMatchObject({ status: "canceled", tracking: false });
-      expect(isExportRunLive(store.getState())).toBe(false);
-    });
-
-    it("reports a retried slot cancel that rejects after the start answer, and keeps the run", async () => {
-      const { store, startDeferred, starting, cancelInvoke } =
-        await startAndFailTheStop();
-      const firstFailure = store.getState().error;
-      const retry = createDeferred<boolean>();
-      cancelInvoke.mockReturnValueOnce(retry.promise);
-
-      const stopping = store.getState().cancelExport();
-      startDeferred.resolve(createValidStartResult({ runId: "run-kept" }));
-      await starting;
-      retry.reject("IPC closed again");
       await expect(stopping).resolves.toBe(false);
 
       expect(store.getState()).toMatchObject({
@@ -1403,78 +1372,64 @@ describe("Media Export Store", () => {
         runId: "run-kept",
         tracking: true,
         cancelRequested: false,
+        encodeStarted: true,
       });
-      // A new failure, with its own error instance.
-      expect(store.getState().error).toMatchObject({ detail: "IPC closed again" });
-      expect(store.getState().error).not.toBe(firstFailure);
+      expect(isExportRunLive(store.getState())).toBe(true);
     });
 
-    it("writes a retried slot cancel that answers true after the start answer", async () => {
-      const { store, startDeferred, starting, cancelInvoke, emit } =
-        await startAndFailTheStop();
-      const retry = createDeferred<boolean>();
-      cancelInvoke.mockReturnValueOnce(retry.promise);
+    it("tracks the run to its end, and accepts a retried stop by run id", async () => {
+      const { store, startDeferred, starting, stopping, cancelInvoke, emit } =
+        await startAndStopWhileWaiting();
+
+      startDeferred.resolve(createValidStartResult({ runId: "run-kept" }));
+      await starting;
+      await expect(stopping).resolves.toBe(false);
+      const firstFailure = store.getState().error;
+
+      cancelInvoke.mockResolvedValueOnce(true);
+      await expect(store.getState().cancelExport()).resolves.toBe(true);
+      expect(cancelInvoke).toHaveBeenCalledTimes(2);
+      expect(cancelInvoke).toHaveBeenLastCalledWith("cancel_export", {
+        runId: "run-kept",
+      });
+      expect(store.getState().cancelRequested).toBe(true);
+      expect(store.getState().error).toBe(firstFailure);
+
+      emit({ event: "failed", runId: "run-kept", code: "canceled" });
+      expect(store.getState()).toMatchObject({ status: "canceled", tracking: false });
+      expect(isExportRunLive(store.getState())).toBe(false);
+    });
+
+    it("keeps publishing when the stop rejects after the publishing event", async () => {
+      const cancelDeferred = createDeferred<boolean>();
+      let emit!: (event: ExportProgressEvent) => void;
+      const startDeferred = createDeferred<ExportSubmission>();
+      const startFn = vi.fn(() => startDeferred.promise);
+      const store = createExportStore({
+        subscribeExportProgress: (handler) => {
+          emit = handler;
+          return Promise.resolve(() => {});
+        },
+        startExport: startFn,
+        cancelExport: () => cancelDeferred.promise,
+      });
+      const starting = store.getState().startExport(createValidRequest());
+      await vi.waitFor(() => {
+        expect(startFn).toHaveBeenCalled();
+      });
 
       const stopping = store.getState().cancelExport();
-      startDeferred.resolve(createValidStartResult({ runId: "run-kept" }));
+      startDeferred.resolve(createValidStartResult({ runId: "run-fast" }));
       await starting;
-      retry.resolve(true);
-      await expect(stopping).resolves.toBe(true);
-
-      // The answer belongs to the run that the start answer named.
-      expect(store.getState()).toMatchObject({
-        status: "failed",
-        runId: "run-kept",
-        cancelRequested: true,
-      });
-      emit({ event: "failed", runId: "run-kept", code: "canceled" });
-      expect(store.getState()).toMatchObject({ status: "canceled", tracking: false });
-    });
-
-    it("keeps Stop available when a retried slot cancel answers false while the start waits", async () => {
-      // `false` means that no run held the slot yet. The user can ask again.
-      const { store, cancelInvoke } = await startAndFailTheStop();
-      cancelInvoke.mockResolvedValueOnce(false);
-
-      await expect(store.getState().cancelExport()).resolves.toBe(false);
+      emit({ event: "publishing", runId: "run-fast" });
+      cancelDeferred.reject(new Error("IPC failed"));
+      await expect(stopping).resolves.toBe(false);
 
       expect(store.getState()).toMatchObject({
-        status: "failed",
-        runId: null,
-        tracking: true,
+        status: "publishing",
+        error: null,
         cancelRequested: false,
       });
-      cancelInvoke.mockResolvedValueOnce(true);
-      await expect(store.getState().cancelExport()).resolves.toBe(true);
-      expect(cancelInvoke).toHaveBeenCalledTimes(3);
-    });
-
-    it("accepts a retried slot cancel, and the run ends canceled after its answer", async () => {
-      // The flag can also reach the run after the preparation. The run then ends with a
-      // `failed` event that carries `canceled`.
-      const { store, startDeferred, starting, cancelInvoke, emit } =
-        await startAndFailTheStop();
-      cancelInvoke.mockResolvedValueOnce(true);
-
-      await expect(store.getState().cancelExport()).resolves.toBe(true);
-      startDeferred.resolve(createValidStartResult({ runId: "run-kept" }));
-      await starting;
-      emit({ event: "failed", runId: "run-kept", code: "canceled" });
-
-      expect(store.getState()).toMatchObject({ status: "canceled", tracking: false });
-    });
-
-    it("still drops the start on an explicit reset", async () => {
-      // No control resets a live run (`isExportRunLive`). The reset itself keeps its meaning.
-      const { store, startDeferred, starting } = await startAndFailTheStop();
-
-      store.getState().reset();
-      expect(store.getState()).toMatchObject({ status: "idle", tracking: false });
-
-      startDeferred.resolve(createValidStartResult({ runId: "run-dropped" }));
-      await expect(starting).resolves.toBeNull();
-      expect(store.getState().runId).toBeNull();
-      expect(store.getState().tracking).toBe(false);
     });
   });
 
@@ -1775,7 +1730,7 @@ describe("Media Export Store", () => {
     it("ignores an error while a start waits for its run id, and takes the start answer", async () => {
       // The backend claims the export slot before it answers. A `failed` here would let a
       // reset drop the start, and an invalidated start would discard the answer.
-      const startDeferred = createDeferred<ExportStart>();
+      const startDeferred = createDeferred<ExportSubmission>();
       const store = createExportStore({
         subscribeExportProgress: () => Promise.resolve(() => {}),
         startExport: () => startDeferred.promise,
@@ -1884,7 +1839,7 @@ describe("Media Export Store", () => {
     });
 
     it("invalidates in-flight startExport commands on reset", async () => {
-      const deferred = createDeferred<ExportStart>();
+      const deferred = createDeferred<ExportSubmission>();
 
       const store = createExportStore({
         subscribeExportProgress: () => Promise.resolve(() => {}),
@@ -1897,12 +1852,7 @@ describe("Media Export Store", () => {
       store.getState().reset();
       expect(store.getState().status).toBe("idle");
 
-      deferred.resolve(
-        createValidStartResult({
-          runId: "late-run",
-          outputPath: "/media/late.mp4",
-        }),
-      );
+      deferred.resolve(createValidStartResult({ runId: "late-run" }));
 
       const result = await startPromise;
       expect(result).toBeNull();
@@ -1931,8 +1881,8 @@ describe("Media Export Store", () => {
     });
 
     it("invalidates in-flight export when unsubscribing so a later export can recover", async () => {
-      const req1 = createDeferred<ExportStart>();
-      const req2 = createDeferred<ExportStart>();
+      const req1 = createDeferred<ExportSubmission>();
+      const req2 = createDeferred<ExportSubmission>();
       let subscribeCount = 0;
       let activeHandler!: (event: ExportProgressEvent) => void;
       const unlisten1 = vi.fn();
@@ -2253,276 +2203,6 @@ describe("Media Export Store", () => {
       cancelDef.resolve(true);
       expect(await cancelPromise).toBe(true);
       expect(store.getState().cancelRequested).toBe(false);
-    });
-  });
-
-  describe("by-slot cancel cancelRequested tracking", () => {
-    it("is true while pending, true after true, and false after false", async () => {
-      // True case
-      const cancelDefTrue = createDeferred<boolean>();
-      const startDefTrue = createDeferred<ExportStart>();
-      const storeTrue = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: () => startDefTrue.promise,
-        cancelActiveExport: () => cancelDefTrue.promise,
-      });
-
-      void storeTrue.getState().startExport(createValidRequest());
-      await Promise.resolve();
-      expect(storeTrue.getState().status).toBe("preparing");
-      expect(storeTrue.getState().cancelRequested).toBe(false);
-
-      const pTrue = storeTrue.getState().cancelExport();
-      expect(storeTrue.getState().cancelRequested).toBe(true);
-
-      cancelDefTrue.resolve(true);
-      expect(await pTrue).toBe(true);
-      expect(storeTrue.getState().cancelRequested).toBe(true);
-
-      // False case
-      const cancelDefFalse = createDeferred<boolean>();
-      const startDefFalse = createDeferred<ExportStart>();
-      const storeFalse = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: () => startDefFalse.promise,
-        cancelActiveExport: () => cancelDefFalse.promise,
-      });
-
-      void storeFalse.getState().startExport(createValidRequest());
-      await Promise.resolve();
-      expect(storeFalse.getState().cancelRequested).toBe(false);
-
-      const pFalse = storeFalse.getState().cancelExport();
-      expect(storeFalse.getState().cancelRequested).toBe(true);
-
-      cancelDefFalse.resolve(false);
-      expect(await pFalse).toBe(false);
-      expect(storeFalse.getState().cancelRequested).toBe(false);
-    });
-
-    it("does not write cancelRequested when by-slot cancel resolves after reset", async () => {
-      const cancelDef = createDeferred<boolean>();
-      const startDef = createDeferred<ExportStart>();
-      const store = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: () => startDef.promise,
-        cancelActiveExport: () => cancelDef.promise,
-      });
-
-      void store.getState().startExport(createValidRequest());
-      await Promise.resolve();
-
-      const cancelPromise = store.getState().cancelExport();
-      expect(store.getState().cancelRequested).toBe(true);
-
-      store.getState().reset();
-      expect(store.getState().cancelRequested).toBe(false);
-
-      cancelDef.resolve(true);
-      expect(await cancelPromise).toBe(true);
-      expect(store.getState().cancelRequested).toBe(false);
-    });
-
-    it("does not write cancelRequested when by-slot cancel resolves after a new startExport", async () => {
-      const cancelDef = createDeferred<boolean>();
-      const secondStart = createDeferred<ExportStart>();
-      const secondReq = createValidRequest({ outputPath: "/out2.mp4" });
-      const store = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: (req) => {
-          if (req.outputPath === "/out2.mp4") {
-            return secondStart.promise;
-          }
-          return new Promise(() => {});
-        },
-        cancelActiveExport: () => cancelDef.promise,
-      });
-
-      void store
-        .getState()
-        .startExport(createValidRequest({ outputPath: "/out1.mp4" }));
-      await Promise.resolve();
-
-      const cancelPromise = store.getState().cancelExport();
-      expect(store.getState().cancelRequested).toBe(true);
-
-      void store.getState().startExport(secondReq);
-      await Promise.resolve();
-      expect(store.getState().cancelRequested).toBe(false);
-
-      cancelDef.resolve(true);
-      expect(await cancelPromise).toBe(true);
-      expect(store.getState().cancelRequested).toBe(false);
-    });
-
-    it("resolves after the store learned the run id and still writes the answer", async () => {
-      const cancelDef = createDeferred<boolean>();
-      const startDef = createDeferred<ExportStart>();
-      const store = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: () => startDef.promise,
-        cancelActiveExport: () => cancelDef.promise,
-      });
-
-      const startPromise = store.getState().startExport(createValidRequest());
-      await Promise.resolve();
-      expect(store.getState().status).toBe("preparing");
-      expect(store.getState().runId).toBeNull();
-
-      const cancelPromise = store.getState().cancelExport();
-      expect(store.getState().cancelRequested).toBe(true);
-
-      startDef.resolve(createValidStartResult({ runId: "run-learned" }));
-      await startPromise;
-      expect(store.getState().runId).toBe("run-learned");
-      expect(store.getState().cancelRequested).toBe(true);
-
-      cancelDef.resolve(true);
-      const accepted = await cancelPromise;
-
-      expect(accepted).toBe(true);
-      expect(store.getState().cancelRequested).toBe(true);
-    });
-
-    it("resolves false after the store learned the run id and clears cancelRequested", async () => {
-      const cancelDef = createDeferred<boolean>();
-      const startDef = createDeferred<ExportStart>();
-      const store = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: () => startDef.promise,
-        cancelActiveExport: () => cancelDef.promise,
-      });
-
-      const startPromise = store.getState().startExport(createValidRequest());
-      await Promise.resolve();
-      expect(store.getState().status).toBe("preparing");
-      expect(store.getState().runId).toBeNull();
-
-      const cancelPromise = store.getState().cancelExport();
-      expect(store.getState().cancelRequested).toBe(true);
-
-      startDef.resolve(createValidStartResult({ runId: "run-learned" }));
-      await startPromise;
-      expect(store.getState().runId).toBe("run-learned");
-      expect(store.getState().cancelRequested).toBe(true);
-
-      cancelDef.resolve(false);
-      const accepted = await cancelPromise;
-
-      expect(accepted).toBe(false);
-      expect(store.getState().cancelRequested).toBe(false);
-    });
-
-    it("reports a slot cancel that rejects after the start answer and before the encode", async () => {
-      const cancelDef = createDeferred<boolean>();
-      const startDef = createDeferred<ExportStart>();
-      const store = createExportStore({
-        subscribeExportProgress: () => Promise.resolve(() => {}),
-        startExport: () => startDef.promise,
-        cancelActiveExport: () => cancelDef.promise,
-      });
-      const startPromise = store.getState().startExport(createValidRequest());
-      await Promise.resolve();
-
-      const cancelPromise = store.getState().cancelExport();
-      startDef.resolve(createValidStartResult({ runId: "run-answered" }));
-      await startPromise;
-      expect(store.getState()).toMatchObject({
-        status: "preparing",
-        runId: "run-answered",
-      });
-
-      cancelDef.reject(new Error("IPC failed"));
-      await expect(cancelPromise).resolves.toBe(false);
-
-      expect(store.getState()).toMatchObject({
-        status: "failed",
-        runId: "run-answered",
-        tracking: true,
-        cancelRequested: false,
-        encodeStarted: false,
-      });
-      expect(isExportRunLive(store.getState())).toBe(true);
-    });
-
-    it("keeps publishing when a slot cancel rejects after the publishing event", async () => {
-      let progressCallback!: (event: ExportProgressEvent) => void;
-      const cancelDef = createDeferred<boolean>();
-      const startDef = createDeferred<ExportStart>();
-      const store = createExportStore({
-        subscribeExportProgress: (cb) => {
-          progressCallback = cb;
-          return Promise.resolve(() => {});
-        },
-        startExport: () => startDef.promise,
-        cancelActiveExport: () => cancelDef.promise,
-      });
-      const startPromise = store.getState().startExport(createValidRequest());
-      await Promise.resolve();
-
-      const cancelPromise = store.getState().cancelExport();
-      startDef.resolve(createValidStartResult({ runId: "run-fast" }));
-      await startPromise;
-      progressCallback({ event: "publishing", runId: "run-fast" });
-      cancelDef.reject(new Error("IPC failed"));
-      await expect(cancelPromise).resolves.toBe(false);
-
-      expect(store.getState()).toMatchObject({
-        status: "publishing",
-        error: null,
-        cancelRequested: false,
-      });
-    });
-
-    it("reports a slot cancel that rejects after the run id is learned, and keeps the run", async () => {
-      let progressCallback!: (event: ExportProgressEvent) => void;
-      const cancelDef = createDeferred<boolean>();
-      const startDef = createDeferred<ExportStart>();
-      const store = createExportStore({
-        subscribeExportProgress: (cb) => {
-          progressCallback = cb;
-          return Promise.resolve(() => {});
-        },
-        startExport: () => startDef.promise,
-        cancelActiveExport: () => cancelDef.promise,
-      });
-
-      const startPromise = store.getState().startExport(createValidRequest());
-      await Promise.resolve();
-      expect(store.getState().status).toBe("preparing");
-      expect(store.getState().runId).toBeNull();
-
-      const cancelPromise = store.getState().cancelExport();
-      expect(store.getState().cancelRequested).toBe(true);
-
-      startDef.resolve(createValidStartResult({ runId: "run-learned" }));
-      await startPromise;
-      progressCallback({
-        event: "started",
-        runId: "run-learned",
-        outputPath: "/media/output.mp4",
-        segmentCount: 1,
-        totalDurationUs: 1000,
-      });
-      expect(store.getState().runId).toBe("run-learned");
-      expect(store.getState().status).toBe("running");
-      expect(store.getState().cancelRequested).toBe(true);
-
-      cancelDef.reject(new Error("IPC failed"));
-      const accepted = await cancelPromise;
-
-      // The request was for this run, and the run continues. The failure shows, the run
-      // stays tracked, and Stop is available again.
-      expect(accepted).toBe(false);
-      expect(store.getState()).toMatchObject({
-        status: "failed",
-        runId: "run-learned",
-        tracking: true,
-        cancelRequested: false,
-        encodeStarted: true,
-      });
-      expect(store.getState().error?.code).toBe("unknown");
-      expect(isExportRunLive(store.getState())).toBe(true);
     });
   });
 });

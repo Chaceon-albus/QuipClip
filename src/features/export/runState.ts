@@ -12,9 +12,8 @@ export type ExportRunLiveState = Pick<ExportState, "status" | "tracking">;
  * `publishing`, or `failed` while the store still tracks the run.
  *
  * The store reports `failed` with `tracking` still true when a Stop request rejects while
- * the run continues, by run id or by slot while the start waits for its run id. The backend
- * still prepares or encodes that run, and its own `finished` or `failed` event, or the
- * refusal of its start, comes later.
+ * the run continues. The backend still prepares or encodes that run, and its own `finished`
+ * or `failed` event comes later.
  *
  * The dismissal of the export dialog and the open step of the export flow read this rule,
  * so that no reset drops a live run: they show the run instead (ADR 025). The quit guard

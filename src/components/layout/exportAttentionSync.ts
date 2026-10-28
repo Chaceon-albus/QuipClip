@@ -38,13 +38,12 @@ export interface ExportAttentionInput {
  * True when the change ends a run in a result that the user did not ask for: the store goes
  * from a live run (`isExportRunLive`) to `finished` or `failed`, and no longer tracks a run.
  *
- * - A `failed` with `tracking` still true is not an end. A Stop request failed, by run id or
- *   by slot while the start waited for its run id. The run continues, and its real end comes
- *   later, as `failed` to `failed`, through `publishing` to `finished`, or as the refusal of
- *   the start.
- * - A refused start counts as an end: `preparing` to `failed` with no tracked run. The
- *   prepare step of `start_export` can take up to 30 seconds (ADR 016), which is long enough
- *   for the user to go to another window.
+ * - A `failed` with `tracking` still true is not an end. A Stop request failed. The run
+ *   continues, and its real end comes later, as `failed` to `failed`, or through
+ *   `publishing` to `finished`.
+ * - A failure of preparation counts as an end: `preparing` to `failed` with no tracked run.
+ *   Preparation can take up to 90 seconds (ADR 016), which is long enough for the user to go
+ *   to another window. A start that the backend refuses ends the same way.
  * - A run that ends `canceled` does not count, because the user asked for that result.
  * - A change from `idle` does not count either: the open step reports `noSegments` and
  *   similar codes as `failed` before any run starts, while the user is at the window.

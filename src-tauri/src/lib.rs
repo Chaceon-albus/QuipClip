@@ -174,7 +174,6 @@ pub fn run() {
             commands::preset_test::preset_test_results,
             commands::export::start_export,
             commands::export::cancel_export,
-            commands::export::cancel_active_export,
             commands::export_output::reveal_export_output,
             commands::media::import_media,
             commands::media::read_source_revision,
@@ -265,8 +264,8 @@ fn stop_preview_windows(handle: &tauri::AppHandle) {
 /// This runs on the event loop thread and blocks it. The export never needs that thread to
 /// stop: the worker is a thread of its own, it kills and reaps `ffmpeg` and deletes the
 /// reserved file with plain system calls, and its progress events only queue a message for
-/// the event loop, which does not wait for an answer. A start that is still preparing runs on
-/// the async runtime and drops its slot there.
+/// the event loop, which does not wait for an answer. A run that is still preparing runs on
+/// the export thread too, and drops its slot there.
 ///
 /// Every call shares the deadline of [`EXIT_WAIT`], which the first call sets to
 /// `EXIT_CANCEL_BUDGET` from then. A second call therefore returns at once when the slot is
@@ -617,7 +616,6 @@ mod tests {
         "preset_test_results",
         "start_export",
         "cancel_export",
-        "cancel_active_export",
         "reveal_export_output",
         "import_media",
         "read_source_revision",

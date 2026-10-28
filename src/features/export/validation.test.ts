@@ -5,27 +5,24 @@ import {
   EXPORT_STREAMS,
   ExportError,
   type ExportProgressEvent,
-  type ExportStart,
+  type ExportSubmission,
 } from "./types";
 import {
   isBackendExportErrorCode,
   isExportErrorCode,
   isExportProgressEvent,
-  isExportStart,
+  isExportSubmission,
   isExportStreams,
   normalizeExportError,
   validateExportProgressEvent,
-  validateExportStart,
+  validateExportSubmission,
 } from "./validation";
 
-function createValidStart(overrides: Partial<ExportStart> = {}): ExportStart {
+function createValidSubmission(
+  overrides: Partial<ExportSubmission> = {},
+): ExportSubmission {
   return {
     runId: "run-export-1",
-    presetId: "preset-default-mp4",
-    streams: "videoAndAudio",
-    outputPath: "/Users/capric98/Movies/out.mp4",
-    segmentCount: 3,
-    totalDurationUs: 15_000_000,
     ...overrides,
   };
 }
@@ -64,46 +61,31 @@ describe("Export Validation & Normalization", () => {
       expect(isExportErrorCode(null)).toBe(false);
     });
 
-    it("validates isExportStart type guard", () => {
-      const valid = createValidStart();
-      expect(isExportStart(valid)).toBe(true);
+    it("validates isExportSubmission type guard", () => {
+      const valid = createValidSubmission();
+      expect(isExportSubmission(valid)).toBe(true);
 
-      const withExpectedFrames = createValidStart({ expectedFrames: 900 });
-      expect(isExportStart(withExpectedFrames)).toBe(true);
-
-      expect(isExportStart(null)).toBe(false);
-      expect(isExportStart({})).toBe(false);
-      expect(isExportStart({ ...valid, runId: 123 })).toBe(false);
-      expect(isExportStart({ ...valid, presetId: null })).toBe(false);
-      expect(isExportStart({ ...valid, outputPath: true })).toBe(false);
-      expect(isExportStart({ ...valid, segmentCount: 0 })).toBe(false);
-      expect(isExportStart({ ...valid, segmentCount: -1 })).toBe(false);
-      expect(isExportStart({ ...valid, segmentCount: 1.5 })).toBe(false);
-      expect(isExportStart({ ...valid, totalDurationUs: -1 })).toBe(false);
-      expect(isExportStart({ ...valid, totalDurationUs: 100.5 })).toBe(false);
-      expect(isExportStart({ ...valid, expectedFrames: -1 })).toBe(false);
-      expect(isExportStart({ ...valid, expectedFrames: 10.5 })).toBe(false);
-    });
-
-    it("validates the stream choice of a start payload", () => {
-      for (const streams of EXPORT_STREAMS) {
-        expect(isExportStreams(streams)).toBe(true);
-        expect(isExportStart(createValidStart({ streams }))).toBe(true);
-      }
-
-      // An audio-only run writes no frames, so its start payload carries no frame goal.
+      // The answer carries the run id only. A field that an older backend still sends does
+      // not make it invalid.
       expect(
-        isExportStart(
-          createValidStart({ streams: "audioOnly", expectedFrames: undefined }),
-        ),
+        isExportSubmission({ ...valid, outputPath: "/media/out.mp4", segmentCount: 2 }),
       ).toBe(true);
 
-      // The backend always echoes the choice, so a payload without it is not a start payload.
-      const { streams: _omitted, ...withoutStreams } = createValidStart();
-      expect(isExportStart(withoutStreams)).toBe(false);
+      expect(isExportSubmission(null)).toBe(false);
+      expect(isExportSubmission(undefined)).toBe(false);
+      expect(isExportSubmission("run-export-1")).toBe(false);
+      expect(isExportSubmission({})).toBe(false);
+      expect(isExportSubmission({ runId: 123 })).toBe(false);
+      expect(isExportSubmission({ runId: null })).toBe(false);
+      expect(isExportSubmission({ runId: "" })).toBe(false);
+    });
+
+    it("validates the stream choice", () => {
+      for (const streams of EXPORT_STREAMS) {
+        expect(isExportStreams(streams)).toBe(true);
+      }
       for (const invalid of ["audio", "VideoOnly", "video_only", "", null, 1, {}]) {
         expect(isExportStreams(invalid)).toBe(false);
-        expect(isExportStart({ ...createValidStart(), streams: invalid })).toBe(false);
       }
     });
 
@@ -154,27 +136,17 @@ describe("Export Validation & Normalization", () => {
     });
   });
 
-  describe("validateExportStart", () => {
-    it("accepts a valid ExportStart payload", () => {
-      const start = createValidStart({ expectedFrames: 450 });
-      expect(validateExportStart(start)).toEqual(start);
+  describe("validateExportSubmission", () => {
+    it("accepts a valid ExportSubmission payload", () => {
+      const submission = createValidSubmission({ runId: "run-1" });
+      expect(validateExportSubmission(submission)).toEqual(submission);
     });
 
-    it("throws TypeError for invalid start payloads", () => {
-      expect(() => validateExportStart(null)).toThrow(TypeError);
-      expect(() => validateExportStart({})).toThrow(TypeError);
-      expect(() =>
-        validateExportStart({
-          runId: "run-1",
-          presetId: "mp4",
-          // missing outputPath
-          segmentCount: 1,
-          totalDurationUs: 1000,
-        }),
-      ).toThrow(TypeError);
-      expect(() => validateExportStart(createValidStart({ segmentCount: 0 }))).toThrow(
-        TypeError,
-      );
+    it("throws TypeError for invalid submission payloads", () => {
+      expect(() => validateExportSubmission(null)).toThrow(TypeError);
+      expect(() => validateExportSubmission({})).toThrow(TypeError);
+      expect(() => validateExportSubmission({ runId: "" })).toThrow(TypeError);
+      expect(() => validateExportSubmission({ runId: 1 })).toThrow(TypeError);
     });
   });
 

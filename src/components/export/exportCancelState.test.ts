@@ -1,13 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  cancelActiveExport as clientCancelActiveExport,
   cancelExport as clientCancelExport,
   createExportStore,
   EXPORT_STATUSES,
   isExportRunLive,
   type ExportProgressEvent,
   type ExportRequest,
-  type ExportStart,
+  type ExportSubmission,
   type ExportStatus,
 } from "@/features/export";
 import type { InvokeFn } from "@/lib/ipc";
@@ -74,18 +73,10 @@ describe("resolveExportDismissal", () => {
       streams: "videoAndAudio",
       audioMode: "encode",
     };
-    const START: ExportStart = {
-      runId: "run-live",
-      presetId: "mp4-h264",
-      streams: "videoAndAudio",
-      outputPath: "/media/output.mp4",
-      segmentCount: 1,
-      totalDurationUs: 5_000_000,
-      expectedFrames: 150,
-    };
+    const START: ExportSubmission = { runId: "run-live" };
 
     /** A store whose Stop requests reach an IPC layer that rejects each call. */
-    function createStore(startExport: () => Promise<ExportStart>) {
+    function createStore(startExport: () => Promise<ExportSubmission>) {
       let emit!: (event: ExportProgressEvent) => void;
       const rejectingInvoke = vi.fn().mockRejectedValue("IPC closed");
       const store = createExportStore({
@@ -95,7 +86,6 @@ describe("resolveExportDismissal", () => {
         },
         startExport,
         cancelExport: (runId) => clientCancelExport(runId, { invoke: rejectingInvoke }),
-        cancelActiveExport: () => clientCancelActiveExport({ invoke: rejectingInvoke }),
       });
       return {
         store,
@@ -117,11 +107,11 @@ describe("resolveExportDismissal", () => {
       expect(resolveExportDismissal(store.getState())).toBe("close");
     });
 
-    it("hides while a start that waits for its run id continues", async () => {
-      let answer: (start: ExportStart) => void = () => {};
+    it("hides while a Stop waits for the run id, and after its request failed", async () => {
+      let answer: (start: ExportSubmission) => void = () => {};
       const startFn = vi.fn(
         () =>
-          new Promise<ExportStart>((resolve) => {
+          new Promise<ExportSubmission>((resolve) => {
             answer = resolve;
           }),
       );
@@ -130,17 +120,25 @@ describe("resolveExportDismissal", () => {
       await vi.waitFor(() => {
         expect(startFn).toHaveBeenCalled();
       });
-      await store.getState().cancelExport();
+      const stopping = store.getState().cancelExport();
       expect(store.getState()).toMatchObject({
-        status: "failed",
+        status: "preparing",
         runId: null,
         tracking: true,
+        cancelRequested: true,
       });
 
       expect(resolveExportDismissal(store.getState())).toBe("hide");
 
+      // The answer names the run, and the Stop request for it fails.
       answer(START);
       await starting;
+      await expect(stopping).resolves.toBe(false);
+      expect(store.getState()).toMatchObject({
+        status: "failed",
+        runId: "run-live",
+        tracking: true,
+      });
       expect(resolveExportDismissal(store.getState())).toBe("hide");
 
       emit({
@@ -319,7 +317,8 @@ describe("isCancelEnabled", () => {
   });
 
   it("enables cancel again after a failed Stop while the store still tracks the run", () => {
-    // By run id, and by slot while the start still waits for its run id.
+    // A Stop request fails only after the store knows the run id, but the rule does not
+    // read the run id in this state.
     for (const runId of [RUN_ID, null]) {
       expect(
         isCancelEnabled({
@@ -364,15 +363,7 @@ describe("isCancelEnabled on the state of a real store", () => {
     streams: "videoAndAudio",
     audioMode: "encode",
   };
-  const START: ExportStart = {
-    runId: "run-live",
-    presetId: "mp4-h264",
-    streams: "videoAndAudio",
-    outputPath: "/media/output.mp4",
-    segmentCount: 1,
-    totalDurationUs: 5_000_000,
-    expectedFrames: 150,
-  };
+  const START: ExportSubmission = { runId: "run-live" };
 
   function createEncodingStore(invoke: InvokeFn) {
     let emit!: (event: ExportProgressEvent) => void;
@@ -444,22 +435,37 @@ describe("isCancelEnabled on the state of a real store", () => {
     expect(isCancelEnabled(store.getState())).toBe(false);
   });
 
-  it("enables the retry by slot while the start still waits for its run id", async () => {
-    const startFn = vi.fn(() => new Promise<ExportStart>(() => {}));
+  it("shows a Stop that waits for the run id as outstanding, and enables the retry after its request failed", async () => {
+    let answer: (start: ExportSubmission) => void = () => {};
+    const startFn = vi.fn(
+      () =>
+        new Promise<ExportSubmission>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const invoke = vi.fn().mockRejectedValue("IPC closed");
     const store = createExportStore({
       subscribeExportProgress: () => Promise.resolve(() => {}),
       startExport: startFn,
-      cancelActiveExport: () =>
-        clientCancelActiveExport({ invoke: vi.fn().mockRejectedValue("IPC closed") }),
+      cancelExport: (runId) => clientCancelExport(runId, { invoke }),
     });
-    void store.getState().startExport(REQUEST);
+    const starting = store.getState().startExport(REQUEST);
     await vi.waitFor(() => {
       expect(startFn).toHaveBeenCalled();
     });
 
-    await store.getState().cancelExport();
+    const stopping = store.getState().cancelExport();
+    expect(store.getState()).toMatchObject({ status: "preparing", runId: null });
+    expect(isCancelOutstanding(store.getState())).toBe(true);
+    expect(isCancelEnabled(store.getState())).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
 
-    expect(store.getState()).toMatchObject({ status: "failed", runId: null });
+    answer(START);
+    await starting;
+    await expect(stopping).resolves.toBe(false);
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(store.getState()).toMatchObject({ status: "failed", runId: "run-live" });
     expect(isCancelEnabled(store.getState())).toBe(true);
   });
 });

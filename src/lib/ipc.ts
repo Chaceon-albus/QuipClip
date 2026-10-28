@@ -24,7 +24,6 @@ export const BACKEND_COMMANDS = {
   RESET_SETTINGS: "reset_settings",
   START_EXPORT: "start_export",
   CANCEL_EXPORT: "cancel_export",
-  CANCEL_ACTIVE_EXPORT: "cancel_active_export",
   REVEAL_EXPORT_OUTPUT: "reveal_export_output",
   CONFIRM_QUIT: "confirm_quit",
   SET_WINDOW_BORDER_THEME: "set_window_border_theme",

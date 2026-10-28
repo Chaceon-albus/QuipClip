@@ -14,7 +14,7 @@ import {
   type BackendExportErrorCode,
   type ExportErrorCode,
   type ExportProgressEvent,
-  type ExportStart,
+  type ExportSubmission,
   type ExportStreams,
 } from "./types";
 
@@ -58,39 +58,24 @@ export function isExportErrorCode(value: unknown): value is ExportErrorCode {
 }
 
 /**
- * Validates whether an unknown value is a valid ExportStart structure.
+ * Validates whether an unknown value is a valid ExportSubmission structure.
  */
-export function isExportStart(value: unknown): value is ExportStart {
+export function isExportSubmission(value: unknown): value is ExportSubmission {
   if (typeof value !== "object" || value === null) {
     return false;
   }
   const s = value as Record<string, unknown>;
-  if (
-    typeof s.runId !== "string" ||
-    typeof s.presetId !== "string" ||
-    !isExportStreams(s.streams) ||
-    typeof s.outputPath !== "string" ||
-    !isPositiveU32(s.segmentCount) ||
-    typeof s.totalDurationUs !== "number" ||
-    !Number.isSafeInteger(s.totalDurationUs) ||
-    s.totalDurationUs < 0
-  ) {
-    return false;
-  }
-  if (s.expectedFrames !== undefined && !isNonNegativeU32(s.expectedFrames)) {
-    return false;
-  }
-  return true;
+  return typeof s.runId === "string" && s.runId.length > 0;
 }
 
 /**
- * Validates an unknown payload against the ExportStart schema.
+ * Validates an unknown payload against the ExportSubmission schema.
  * Throws a TypeError if the payload does not conform to the expected shape.
  */
-export function validateExportStart(value: unknown): ExportStart {
-  if (!isExportStart(value)) {
+export function validateExportSubmission(value: unknown): ExportSubmission {
+  if (!isExportSubmission(value)) {
     throw new TypeError(
-      "Invalid export start result: payload must match ExportStart schema",
+      "Invalid export start result: payload must match ExportSubmission schema",
     );
   }
   return value;
