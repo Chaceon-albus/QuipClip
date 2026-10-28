@@ -368,7 +368,9 @@ A dismissal of the export dialog during an active run hides the dialog. It does 
 the run (ADR 025). Only the Stop Export button cancels, and a run of 30 seconds or more
 needs a second click to confirm. While the dialog is hidden, the status bar
 shows the progress of the run, and then its result until the user dismisses it. The Dock on
-macOS and the task bar on Windows also show the progress. The percent and the time estimate
+macOS and the task bar on Windows also show the progress. The main window sets
+`backgroundThrottling` to `throttle`, so on macOS 14 and later the web view keeps the Dock
+progress running while the window is minimized (ADR 049). The percent and the time estimate
 come from the frame count and the `fps` value of `-progress`, and one presenter computes them
 for every display. The dialog smooths the frame count between two `-progress` blocks, and one
 clock changes its remaining time and its elapsed time together. One `ProgressBar` component in
