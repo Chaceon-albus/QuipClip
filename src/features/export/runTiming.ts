@@ -40,14 +40,20 @@ export const NO_EXPORT_RUN_TIMING: ExportRunTiming = { startedAt: null, endedAt:
  * 3. Any other status ends the open run at `now`. A status with no open run, such as a
  *    failure of the open step, keeps the timing.
  *
+ * `newRun` is true when the store now holds another run than before, such as a queued run
+ * that the store adopted (ADR 049). The timing of the run before then does not apply, and
+ * the rules above start from no timing. So the new run gets its own start.
+ *
  * The result is `previous` itself when nothing changes, so a store update with it does not
  * notify.
  */
 export function trackExportRunTiming(
-  previous: ExportRunTiming,
+  previousTiming: ExportRunTiming,
   state: ExportRunLiveState,
   now: number,
+  newRun = false,
 ): ExportRunTiming {
+  const previous = newRun ? NO_EXPORT_RUN_TIMING : previousTiming;
   const open = previous.startedAt !== null && previous.endedAt === null;
   if (isExportRunLive(state)) {
     return open ? previous : { startedAt: now, endedAt: null };
@@ -81,13 +87,29 @@ export function bindRunTimingToExportRun(
   timing: ExportRunTimingStore,
   now: () => number = () => performance.now(),
 ): () => void {
-  const apply = (state: ExportRunLiveState) => {
-    timing.setState(trackExportRunTiming(timing.getState(), state, now()), true);
+  const apply = (state: ExportRunLiveState, newRun = false) => {
+    timing.setState(
+      trackExportRunTiming(timing.getState(), state, now(), newRun),
+      true,
+    );
   };
   apply(source.getState());
   return source.subscribe((state, previous) => {
-    if (state.status !== previous.status || state.tracking !== previous.tracking) {
-      apply(state);
+    // The run id changes from one id to another only when the store holds a new run: an
+    // adoption of a queued run moves the store from the end of one run to the next without
+    // `idle`. The change from null to an id is the answer to a start, for the same run.
+    //
+    // One exception: an adoption that supersedes a direct start that still waits for its
+    // run id is also a change from null to an id. The adopted run then keeps the start of
+    // the direct start. The precondition of `adoptRun` in the export store says that this
+    // does not occur.
+    const newRun = previous.runId !== null && state.runId !== previous.runId;
+    if (
+      newRun ||
+      state.status !== previous.status ||
+      state.tracking !== previous.tracking
+    ) {
+      apply(state, newRun);
     }
   });
 }

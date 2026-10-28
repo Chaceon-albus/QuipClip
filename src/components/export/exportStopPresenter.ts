@@ -30,6 +30,16 @@ export const STOP_CONFIRM_WINDOW_MS = 3_000;
 export const STOP_CONFIRM_MIN_DELAY_MS = 500;
 
 /**
+ * A click this soon after the start of the current run is ignored.
+ *
+ * With a queue, a short run can end and the next run can start under the pointer (ADR 049).
+ * One click aimed at the run that ended must not stop the run that started. The delay is the
+ * double-click interval, as for `STOP_CONFIRM_MIN_DELAY_MS`, so a double-click on Export
+ * cannot stop the run that it started either.
+ */
+export const STOP_AFTER_START_MIN_DELAY_MS = 500;
+
+/**
  * Answers whether the button is armed at `now`: the first click came less than
  * `STOP_CONFIRM_WINDOW_MS` before `now`.
  */
@@ -64,6 +74,11 @@ export interface StopClickInput {
   startedAt: number | null;
   /** The time of the click that armed the button, or null when it is not armed. */
   armedAt: number | null;
+  /**
+   * The time of the last click that armed the button, also when the caller cleared the armed
+   * state since, such as at the end of the run. Null or absent when no click armed it.
+   */
+  lastArmedAt?: number | null;
 }
 
 /**
@@ -71,7 +86,8 @@ export interface StopClickInput {
  *
  * - `stop`: send the cancel request now.
  * - `arm`: do not stop. Show the confirmation label until `armedAt + STOP_CONFIRM_WINDOW_MS`.
- * - `ignore`: do nothing. The button stays armed, and its window does not restart.
+ * - `ignore`: do nothing. The button keeps its state: an armed button stays armed, and its
+ *   window does not restart. A button that is not armed does not arm.
  */
 export type StopClickDecision =
   { kind: "stop" } | { kind: "arm"; armedAt: number } | { kind: "ignore" };
@@ -79,11 +95,21 @@ export type StopClickDecision =
 /**
  * Decides what a click on the enabled Stop Export button does.
  *
- * 1. A click on the armed button less than `STOP_CONFIRM_MIN_DELAY_MS` after the arming
+ * 1. A click less than `STOP_AFTER_START_MIN_DELAY_MS` after the start of the current run is
+ *    ignored. It can be a click aimed at the run before, or the second click of a
+ *    double-click on Export. It does not arm the button.
+ * 2. A click less than `STOP_CONFIRM_WINDOW_MS` after an arming click that came before the
+ *    start of the current run is ignored. That arming asked to confirm the stop of the run
+ *    before. The run ended and the next run started in the window, so the click that
+ *    confirms it must not stop the next run. It does not arm the button.
+ * 3. A click on the armed button less than `STOP_CONFIRM_MIN_DELAY_MS` after the arming
  *    click is ignored. It is the second half of a double-click, not a confirmation.
- * 2. Any other click on the armed button stops.
- * 3. A click less than `STOP_CONFIRM_AFTER_MS` after the start stops.
- * 4. Any other click arms the button.
+ * 4. Any other click on the armed button stops.
+ * 5. A click less than `STOP_CONFIRM_AFTER_MS` after the start stops.
+ * 6. Any other click arms the button.
+ *
+ * An arming click that came before the start of the current run armed the button for
+ * another run, so the rules treat the button as not armed.
  *
  * An unknown start stops on the first click. The dialog records the start before the button
  * can be clicked, so this case does not occur. The rule does not let an unknown value block
@@ -92,8 +118,28 @@ export type StopClickDecision =
 export function decideStopClick({
   now,
   startedAt,
-  armedAt,
+  armedAt: armedAtInput,
+  lastArmedAt = null,
 }: StopClickInput): StopClickDecision {
+  if (
+    startedAt !== null &&
+    now >= startedAt &&
+    now - startedAt < STOP_AFTER_START_MIN_DELAY_MS
+  ) {
+    return { kind: "ignore" };
+  }
+  if (
+    startedAt !== null &&
+    lastArmedAt !== null &&
+    lastArmedAt < startedAt &&
+    isStopArmed(lastArmedAt, now)
+  ) {
+    return { kind: "ignore" };
+  }
+  const armedAt =
+    armedAtInput !== null && startedAt !== null && armedAtInput < startedAt
+      ? null
+      : armedAtInput;
   if (armedAt !== null && isStopArmed(armedAt, now)) {
     return now - armedAt < STOP_CONFIRM_MIN_DELAY_MS
       ? { kind: "ignore" }

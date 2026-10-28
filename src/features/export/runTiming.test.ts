@@ -101,6 +101,17 @@ describe("trackExportRunTiming", () => {
     ).toEqual({ startedAt: 50_000, endedAt: null });
   });
 
+  it("starts a new run from no timing when the store holds another run", () => {
+    const open: ExportRunTiming = { startedAt: 500, endedAt: null };
+    expect(
+      trackExportRunTiming(open, { status: "preparing", tracking: true }, 50_000, true),
+    ).toEqual({ startedAt: 50_000, endedAt: null });
+    // A new run that already ended has no start that the store saw.
+    expect(
+      trackExportRunTiming(open, { status: "finished", tracking: false }, 50_000, true),
+    ).toBe(NO_EXPORT_RUN_TIMING);
+  });
+
   it("covers every status in EXPORT_STATUSES", () => {
     for (const status of EXPORT_STATUSES) {
       const timing = trackExportRunTiming(
@@ -181,6 +192,39 @@ describe("bindRunTimingToExportRun", () => {
     source.setState({ status: "finished" });
     expect(timing.getState()).toEqual({ startedAt: 1_000, endedAt: 9_000 });
     expect(seen).toEqual([{ startedAt: 1_000, endedAt: 9_000 }]);
+  });
+
+  it("restarts the timing when the store adopts the next run after an end", () => {
+    const { source, timing, setClock } = setup({ status: "running", runId: "run-1" });
+    setClock(20_000);
+    source.setState({ status: "finished" });
+    setClock(20_050);
+    source
+      .getState()
+      .adoptRun("run-2", { outputPath: "/media/next.mp4", segmentCount: 1 });
+    expect(timing.getState()).toEqual({ startedAt: 20_050, endedAt: null });
+  });
+
+  it("restarts the timing when the store adopts the next run of a live run", () => {
+    // The terminal event of the run before was lost, so the store still shows it as live.
+    const { source, timing, setClock } = setup({ status: "preparing", runId: "run-1" });
+    setClock(30_000);
+    source
+      .getState()
+      .adoptRun("run-2", { outputPath: "/media/next.mp4", segmentCount: 1 });
+    expect(timing.getState()).toEqual({ startedAt: 30_000, endedAt: null });
+
+    setClock(31_000);
+    source.setState({ status: "finished" });
+    expect(timing.getState()).toEqual({ startedAt: 30_000, endedAt: 31_000 });
+  });
+
+  it("keeps the start when a direct start receives its run id", () => {
+    const { source, timing, setClock } = setup();
+    source.setState({ status: "preparing", tracking: false });
+    setClock(1_500);
+    source.setState({ runId: "run-1", tracking: true });
+    expect(timing.getState()).toEqual({ startedAt: 1_000, endedAt: null });
   });
 
   it("stops when it is unbound", () => {

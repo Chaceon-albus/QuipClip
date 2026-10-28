@@ -208,6 +208,10 @@ export function ExportDialog({
   // from `performance.now()`, which is monotonic, so a change of the system clock cannot
   // shorten or lengthen the window.
   const [stopArmedAt, setStopArmedAt] = useState<number | null>(null);
+  // The time of the last click that armed Stop Export. Unlike `stopArmedAt`, the end of the
+  // run does not clear it, so `decideStopClick` can tell that a click confirms an arming of
+  // the run before (`lastArmedAt`).
+  const lastStopArmedAtRef = useRef<number | null>(null);
   // The start and the end of the run, on the same clock. The Stop Export rule, the elapsed
   // time of the readout, and the time on the finished panel read it. Its store changes
   // inside the same update as the status, so the render of a status change already has the
@@ -664,14 +668,18 @@ export function ExportDialog({
       now: performance.now(),
       startedAt: timing.endedAt === null ? timing.startedAt : null,
       armedAt: stopArmedAt,
+      lastArmedAt: lastStopArmedAtRef.current,
     });
     if (decision.kind === "ignore") {
       return;
     }
     if (decision.kind === "arm") {
+      lastStopArmedAtRef.current = decision.armedAt;
       setStopArmedAt(decision.armedAt);
       return;
     }
+    // The arming led to this stop. It must not ignore a Stop of the next run.
+    lastStopArmedAtRef.current = null;
     setStopArmedAt(null);
     void cancelExport();
   };

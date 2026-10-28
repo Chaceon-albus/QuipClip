@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { EXPORT_STATUSES } from "@/features/export";
+import {
+  EXPORT_STATUSES,
+  bindRunTimingToExportRun,
+  createExportRunTimingStore,
+  createExportStore,
+} from "@/features/export";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n";
 import {
+  STOP_AFTER_START_MIN_DELAY_MS,
   STOP_CONFIRM_AFTER_MS,
   STOP_CONFIRM_MIN_DELAY_MS,
   STOP_CONFIRM_WINDOW_MS,
@@ -46,6 +52,11 @@ describe("stop confirmation constants", () => {
   it("ignores a second click within the 500 ms double-click interval", () => {
     expect(STOP_CONFIRM_MIN_DELAY_MS).toBe(500);
     expect(STOP_CONFIRM_MIN_DELAY_MS).toBeLessThan(STOP_CONFIRM_WINDOW_MS);
+  });
+
+  it("ignores a click within the 500 ms double-click interval after a run starts", () => {
+    expect(STOP_AFTER_START_MIN_DELAY_MS).toBe(500);
+    expect(STOP_AFTER_START_MIN_DELAY_MS).toBeLessThan(STOP_CONFIRM_AFTER_MS);
   });
 });
 
@@ -99,10 +110,48 @@ describe("stopArmRemainingMs", () => {
 });
 
 describe("decideStopClick", () => {
-  it("stops at once when the export has run for less than 30 seconds", () => {
+  it("ignores a click right after the run starts, and does not arm", () => {
     expect(decideStopClick({ now: START, startedAt: START, armedAt: null })).toEqual({
-      kind: "stop",
+      kind: "ignore",
     });
+    expect(
+      decideStopClick({
+        now: START + STOP_AFTER_START_MIN_DELAY_MS - 1,
+        startedAt: START,
+        armedAt: null,
+      }),
+    ).toEqual({ kind: "ignore" });
+  });
+
+  it("ignores a click right after the run starts while an older arming holds", () => {
+    // The button armed for the run before, and the next run started inside the window.
+    const armedAt = START - 1_000;
+    expect(decideStopClick({ now: START + 100, startedAt: START, armedAt })).toEqual({
+      kind: "ignore",
+    });
+  });
+
+  it("does not let an arming click before the start confirm a stop of the current run", () => {
+    // After the start delay, a short run stops on one click as before. The old arming does
+    // not change that, and it does not make the click an ignored double-click.
+    const armedAt = START - 100;
+    expect(
+      decideStopClick({
+        now: START + STOP_AFTER_START_MIN_DELAY_MS,
+        startedAt: START,
+        armedAt,
+      }),
+    ).toEqual({ kind: "stop" });
+  });
+
+  it("stops at once when the export has run for less than 30 seconds", () => {
+    expect(
+      decideStopClick({
+        now: START + STOP_AFTER_START_MIN_DELAY_MS,
+        startedAt: START,
+        armedAt: null,
+      }),
+    ).toEqual({ kind: "stop" });
     expect(
       decideStopClick({
         now: START + STOP_CONFIRM_AFTER_MS - 1,
@@ -202,6 +251,92 @@ describe("decideStopClick", () => {
 
     const third = second + 800;
     expect(decideStopClick({ now: third, startedAt: START, armedAt: second })).toEqual({
+      kind: "stop",
+    });
+  });
+
+  it("ignores the confirmation of an arming of the run before, after the start delay", () => {
+    // The user armed Stop on a long run. That run ended, the dialog cleared the armed state,
+    // and the next run started. The confirming click lands after the start delay.
+    const lastArmedAt = START - 1_000;
+    const now = START + STOP_AFTER_START_MIN_DELAY_MS + 100;
+    expect(now - lastArmedAt).toBeLessThan(STOP_CONFIRM_WINDOW_MS);
+    expect(
+      decideStopClick({ now, startedAt: START, armedAt: null, lastArmedAt }),
+    ).toEqual({ kind: "ignore" });
+    // The armed state can also still hold when the run before was live at the adoption.
+    expect(
+      decideStopClick({ now, startedAt: START, armedAt: lastArmedAt, lastArmedAt }),
+    ).toEqual({ kind: "ignore" });
+  });
+
+  it("decides as before once the window of an arming of the run before is over", () => {
+    const lastArmedAt = START - 1_000;
+    expect(
+      decideStopClick({
+        now: lastArmedAt + STOP_CONFIRM_WINDOW_MS,
+        startedAt: START,
+        armedAt: null,
+        lastArmedAt,
+      }),
+    ).toEqual({ kind: "stop" });
+  });
+
+  it("confirms an arming of the current run as before", () => {
+    const lastArmedAt = START + STOP_CONFIRM_AFTER_MS;
+    expect(
+      decideStopClick({
+        now: lastArmedAt + 1_000,
+        startedAt: START,
+        armedAt: lastArmedAt,
+        lastArmedAt,
+      }),
+    ).toEqual({ kind: "stop" });
+  });
+
+  it("ignores the second click of a double-click on Export that lands on Stop", () => {
+    // The first click starts the export, and the store and its timing show the run at once.
+    const source = createExportStore({}, { status: "idle" });
+    const timing = createExportRunTimingStore();
+    let clock = START;
+    bindRunTimingToExportRun(source, timing, () => clock);
+    source.setState({ status: "preparing" });
+
+    clock = START + 150;
+    const { startedAt, endedAt } = timing.getState();
+    expect(
+      decideStopClick({
+        now: clock,
+        startedAt: endedAt === null ? startedAt : null,
+        armedAt: null,
+        lastArmedAt: null,
+      }),
+    ).toEqual({ kind: "ignore" });
+  });
+
+  it("ignores a click right after the export store adopts the next run", () => {
+    const source = createExportStore({}, { status: "running", runId: "run-1" });
+    const timing = createExportRunTimingStore();
+    let clock = START;
+    bindRunTimingToExportRun(source, timing, () => clock);
+    clock = START + 5_000;
+    source.setState({ status: "finished" });
+    clock = START + 5_100;
+    source
+      .getState()
+      .adoptRun("run-2", { outputPath: "/media/next.mp4", segmentCount: 1 });
+
+    const click = (now: number) => {
+      const { startedAt, endedAt } = timing.getState();
+      return decideStopClick({
+        now,
+        startedAt: endedAt === null ? startedAt : null,
+        armedAt: null,
+      });
+    };
+    // The click aimed at the run that ended comes just after the next run started.
+    expect(click(START + 5_200)).toEqual({ kind: "ignore" });
+    expect(click(START + 5_100 + STOP_AFTER_START_MIN_DELAY_MS)).toEqual({
       kind: "stop",
     });
   });
