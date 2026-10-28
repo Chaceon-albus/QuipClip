@@ -65,9 +65,12 @@ The limit of 100 segments in ADR 014 now counts pieces. In the shape with one in
 segment, each piece is one chain and one input. The interface counts the pieces before the user
 starts, so a message about `tooManySegments` can appear for fewer than 100 segments.
 
-(Changed on 2026-10-28.) The measured limit is 48 pieces (ADR 014). Before the save dialog, the
-OPEN step of the export counts the pieces and reports `tooManySegments` when there are more. With
-one clip, it counts the segments.
+(Changed on 2026-10-28.) The measured limit depends on the number of sources. An export of S sources
+joins at most 92 − S pieces, so one source can have 91 pieces (ADR 014). Before the save dialog, the
+OPEN step of the export counts the pieces and their sources. It reports `tooManySegments` when there
+are more pieces than the limit of that number of sources. The message names that limit. With one
+clip, it counts the segments against the limit of one source. From 11 sources on, one to three more
+pieces fit than the rule allows. ADR 014 gives the reason to keep the simple rule.
 
 Preparation runs once for each source that a piece names: the revision check, the probe, the
 audio correction, the FLV input and the gap read of ADR 014, ADR 046 and ADR 049. The plan then

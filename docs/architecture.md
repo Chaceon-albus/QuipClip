@@ -293,7 +293,8 @@ sources and the pieces, and preparation runs once for each source. With the pres
 `source`, the plan picks one canvas, the display size with the largest area, and fits each
 other piece into it with Lanczos and black bars. It also picks the highest frame rate, the
 highest sample rate and the layout with the most channels. A piece without audio gets silence.
-One export joins at most 48 pieces, the most that the command-line budget allows (ADR 014).
+An export of S sources joins at most 92 − S pieces, so one source can have 91. In the
+command-line budget, each source takes the place of one piece (ADR 014).
 
 One export writes one output. One `-copyts`, placed once before the first input,
 keeps the raw source PTS visible to the filter graph on every input. The renderer seeks each
