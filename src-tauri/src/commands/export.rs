@@ -461,9 +461,10 @@ struct PrepareRequest<'a> {
 /// `cancel` is this run's flag, read between the steps. Preparation runs while the run already
 /// holds the export slot, and its steps reach outside the process, so it is the longest stretch
 /// of a run that nothing could stop: a re-probe of a source on a share that stopped answering
-/// takes [`crate::ffmpeg::probe::PROBE_TIMEOUT`], which is 30 seconds, six times the budget
-/// `lib::EXIT_CANCEL_BUDGET` gives an application quit. Reading the flag between the steps does
-/// not shorten a step that has already started -- the timeout bounds that one -- but it stops
+/// takes up to [`crate::ffmpeg::probe::PROBE_TIMEOUT`], which is 30 seconds, six times the
+/// budget `lib::EXIT_CANCEL_BUDGET` gives an application quit. The re-probe and the reads of
+/// the audio stop on the flag. Reading the flag between the steps does not shorten an in-process
+/// step that has already started, but it stops
 /// the run from working through every remaining step after the answer is no longer wanted, and
 /// it means a cancel during preparation ends with the slot released and no reserved file left
 /// on disk.
@@ -477,7 +478,7 @@ fn prepare_export_with<Discover, Probe, FirstPacket, RateAt, Gaps>(
 ) -> Result<PreparedExport, ExportCommandError>
 where
     Discover: FnOnce(&Path) -> Result<FfmpegPaths, LocateError>,
-    Probe: FnOnce(&Path, &Path) -> Result<MediaProbe, ProbeError>,
+    Probe: FnOnce(&Path, &Path, &AtomicBool) -> Result<MediaProbe, ProbeError>,
     FirstPacket:
         FnOnce(&Path, &Path, u32, &AtomicBool) -> Result<Option<FirstAudioPacket>, ProbeError>,
     RateAt: FnOnce(&Path, &Path, u64, u32, &AtomicBool) -> Result<Option<u32>, ProbeError>,
@@ -524,7 +525,12 @@ where
             error
         }
     })?;
-    let mut probe = probe(&executables.ffprobe, &source).map_err(map_reprobe_error)?;
+    // The re-probe stops on the flag, so a cancel does not wait for `PROBE_TIMEOUT` on a share
+    // that stopped answering.
+    let mut probe = probe(&executables.ffprobe, &source, cancel).map_err(|error| match error {
+        ProbeError::Canceled => ExportCommandError::new(ExportErrorCode::Canceled),
+        other => map_reprobe_error(other),
+    })?;
     let rate_readable = rate_readable_from_packets(&probe.format_names);
     if let Some(audio) = probe.audio.as_mut().filter(|audio| {
         request.streams.writes_audio() && (audio.sample_rate.is_some() || rate_readable)
@@ -693,8 +699,8 @@ fn rate_readable_from_packets(format_names: &[String]) -> bool {
 /// unsuccessfully, writes an answer that does not parse, or times out leaves the values of the
 /// re-probe, as they were before these reads existed. So does a read that finds no packet but
 /// reports an error, which [`crate::ffmpeg::probe_first_audio_packet`] returns as a failure. A
-/// cancel that stops a read ends the run as canceled. The flag is also read before each one: the
-/// re-probe takes no cancel flag, and each read can spend up to
+/// cancel that stops a read ends the run as canceled. The flag is also read before each one, so
+/// a cancel that came during the re-probe starts no read, and each read can spend up to
 /// [`crate::ffmpeg::probe::PROBE_TIMEOUT`]. The caller reads it once more after the last one.
 fn correct_audio_probe<FirstPacket, RateAt>(
     ffprobe: &Path,
@@ -1274,7 +1280,7 @@ fn run_export_job(app: &tauri::AppHandle, slot: ExportSlot, job: ExportJob) {
                     preview_windows: &job.preview_windows,
                 },
                 discover_for_export,
-                ffmpeg::probe_media,
+                ffmpeg::probe_media_until_canceled,
                 ffmpeg::probe_first_audio_packet,
                 ffmpeg::probe_audio_sample_rate_at,
                 ffmpeg::probe_audio_gaps,
@@ -1800,9 +1806,9 @@ fn map_reprobe_error(error: ProbeError) -> ExportCommandError {
         ImportMediaErrorCode::FfprobeTimedOut => ExportErrorCode::FfprobeTimedOut,
         // `map_probe_error` produces exactly the four codes above for the four ways a probe
         // fails. Its fifth variant, `Canceled`, comes only from a probe that holds a cancel
-        // flag, and the output probe handles it before this mapping. This arm is therefore
-        // unreachable. It reports rather than panics: a new probe failure mode must not take an
-        // export worker down with it.
+        // flag, and the re-probe and the output probe handle it before this mapping. This arm
+        // is therefore unreachable. It reports rather than panics: a new probe failure mode
+        // must not take an export worker down with it.
         _ => {
             debug_assert!(false, "map_probe_error produced an unexpected code");
             ExportErrorCode::FfprobeProcessFailed
@@ -2774,7 +2780,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _| {
+            |_, _, _| {
                 *probed.borrow_mut() = true;
                 Ok(sample_probe())
             },
@@ -2811,7 +2817,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _| {
+            |_, _, _| {
                 *probed.borrow_mut() = true;
                 unreachable!()
             },
@@ -3034,7 +3040,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, path| {
+            |_, path, _| {
                 assert_eq!(path, source);
                 Ok(sample_probe())
             },
@@ -3112,7 +3118,7 @@ mod tests {
                         origin: ExecutableOrigin::Path,
                     })
                 },
-                |_, _| Ok(sample_probe_with_audio()),
+                |_, _, _| Ok(sample_probe_with_audio()),
                 first_packet_unread,
                 sample_rate_not_read,
                 no_audio_gaps,
@@ -3234,7 +3240,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _| Ok(sample_probe()),
+            |_, _, _| Ok(sample_probe()),
             first_packet_unread,
             sample_rate_not_read,
             no_audio_gaps,
@@ -3281,7 +3287,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _| Ok(sample_probe()),
+            |_, _, _| Ok(sample_probe()),
             first_packet_unread,
             sample_rate_not_read,
             no_audio_gaps,
@@ -3346,7 +3352,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _| Ok(sample_probe()),
+            |_, _, _| Ok(sample_probe()),
             first_packet_unread,
             sample_rate_not_read,
             no_audio_gaps,
@@ -3432,7 +3438,7 @@ mod tests {
                 *discovered.borrow_mut() = true;
                 unreachable!()
             },
-            |_, _| unreachable!(),
+            |_, _, _| unreachable!(),
             first_packet_unread,
             sample_rate_not_read,
             no_audio_gaps,
@@ -3491,7 +3497,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _| {
+            |_, _, _| {
                 *probed.borrow_mut() = true;
                 unreachable!()
             },
@@ -3545,7 +3551,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _| {
+            |_, _, _| {
                 cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(sample_probe())
             },
@@ -3562,6 +3568,46 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn a_re_probe_that_a_cancel_stopped_ends_preparation_as_canceled() {
+        // The re-probe runs under the flag of the run, and stops when the flag is set. Its
+        // `Canceled` is the cancel of the user, not a failure of ffprobe.
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let cancel = AtomicBool::new(false);
+        let request = request_expecting(&source, None);
+
+        let error = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &cancel,
+                preview_windows: &PreviewWindows::default(),
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_, _, flag| {
+                // The probe gets the flag of the run itself.
+                assert!(std::ptr::eq(flag, &cancel));
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err(ProbeError::Canceled)
+            },
+            first_packet_unread,
+            sample_rate_not_read,
+            no_audio_gaps,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::Canceled);
+        assert_eq!(error.detail, None);
     }
 
     #[test]
@@ -3589,7 +3635,7 @@ mod tests {
                 preview_windows: &PreviewWindows::default(),
             },
             |_| Err(LocateError::NotFound { inspected: vec![] }),
-            |_, _| unreachable!(),
+            |_, _, _| unreachable!(),
             first_packet_unread,
             sample_rate_not_read,
             no_audio_gaps,
@@ -3909,7 +3955,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _| Ok(probe),
+            |_, _, _| Ok(probe),
             first_audio_packet,
             audio_sample_rate_at,
             audio_gaps,
@@ -4859,7 +4905,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _| {
+            |_, _, _| {
                 cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(sample_probe_with_a_missed_audio_start())
             },
@@ -5631,7 +5677,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _| Ok(sample_probe_with_a_missed_audio_start()),
+            |_, _, _| Ok(sample_probe_with_a_missed_audio_start()),
             first_packet_unread,
             sample_rate_not_read,
             move |_, _, _, _| Ok(frames),
@@ -5790,7 +5836,7 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            ffmpeg::probe_media,
+            ffmpeg::probe_media_until_canceled,
             ffmpeg::probe_first_audio_packet,
             ffmpeg::probe_audio_sample_rate_at,
             ffmpeg::probe_audio_gaps,

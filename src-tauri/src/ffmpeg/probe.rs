@@ -409,6 +409,20 @@ pub fn probe_media(ffprobe_path: &Path, media_path: &Path) -> Result<MediaProbe,
     probe_media_within(ffprobe_path, media_path, PROBE_TIMEOUT)
 }
 
+/// [`probe_media`] under a cancel flag: a set flag kills ffprobe at its next poll and returns
+/// [`ProbeError::Canceled`].
+///
+/// The re-probe of an export uses this form. The export holds the single export slot while it
+/// prepares, and a cancel must not wait for the whole deadline on a share that stopped
+/// answering.
+pub fn probe_media_until_canceled(
+    ffprobe_path: &Path,
+    media_path: &Path,
+    cancel: &AtomicBool,
+) -> Result<MediaProbe, ProbeError> {
+    probe_media_with(ffprobe_path, media_path, PROBE_TIMEOUT, Some(cancel))
+}
+
 /// [`probe_media`] with an explicit deadline.
 ///
 /// The bound is a constant rather than a parameter of every caller because it is one policy
@@ -418,6 +432,16 @@ pub fn probe_media_within(
     ffprobe_path: &Path,
     media_path: &Path,
     timeout: Duration,
+) -> Result<MediaProbe, ProbeError> {
+    probe_media_with(ffprobe_path, media_path, timeout, None)
+}
+
+/// The body of [`probe_media_within`] and [`probe_media_until_canceled`].
+fn probe_media_with(
+    ffprobe_path: &Path,
+    media_path: &Path,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
 ) -> Result<MediaProbe, ProbeError> {
     let arguments = [
         OsStr::new("-v"),
@@ -429,8 +453,14 @@ pub fn probe_media_within(
         OsStr::new("-i"),
         media_path.as_os_str(),
     ];
-    let run = run_probe_process(ffprobe_path, &arguments, timeout, PROBE_POLL_INTERVAL, None)
-        .map_err(|source| ProbeError::Spawn { source })?;
+    let run = run_probe_process(
+        ffprobe_path,
+        &arguments,
+        timeout,
+        PROBE_POLL_INTERVAL,
+        cancel,
+    )
+    .map_err(|source| ProbeError::Spawn { source })?;
     let mut probe = finish_probe_run(run, timeout)?;
     // The tags give the length of an FLV better than ffprobe does.
     correct_flv_file(&mut probe, media_path);
@@ -2885,6 +2915,45 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "expected the cancel to end ping at once, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_media_probe_stops_on_the_cancel_flag_and_reports_the_cancel() {
+        // The re-probe of an export runs under the flag of the run. The program here ignores
+        // the arguments of ffprobe and waits, as an ffprobe that a share holds does: `exec`
+        // keeps it one process, so the kill reaches it. A Windows twin is not written, because
+        // no Windows program that is always present ignores these arguments. The
+        // `run_probe_process` twins cover the kill there.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "quipclip-probe-cancel-{}-{}",
+            std::process::id(),
+            crate::commands::next_run_id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let program = directory.join("stalled-ffprobe");
+        std::fs::write(&program, "#!/bin/sh\nexec /bin/sleep 10\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cancel = AtomicBool::new(false);
+        let started = Instant::now();
+
+        let result = thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(150));
+                cancel.store(true, Ordering::SeqCst);
+            });
+            probe_media_until_canceled(&program, Path::new("/media/source.mp4"), &cancel)
+        });
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(matches!(result, Err(ProbeError::Canceled)), "{result:?}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "expected the cancel to end the stalled probe at once, took {elapsed:?}"
         );
     }
 
