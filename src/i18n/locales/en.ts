@@ -1066,7 +1066,10 @@ export const en = {
     preparationTimedOut:
       "QuipClip could not prepare the export in time. A drive or a network share might not be answering.",
     noSegments: "No segments are marked for export.",
-    tooManySegments: "Too many segments are marked for export (maximum is 100).",
+    tooManySegments:
+      "Too many segments are marked for export. An export joins at most 48 parts, and a segment across clips is one part for each clip.",
+    invalidSources: "The export request does not match its source files.",
+    invalidSegmentCount: "The export request gives a wrong number of segments.",
     invalidSegment: "One or more export segments have invalid In or Out points.",
     sourcePathInvalid: "The source file path is invalid.",
     sourceNotFound: "The source video file was not found.",

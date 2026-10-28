@@ -200,6 +200,8 @@ describe("Export Types & Wire Constants", () => {
         "preparationTimedOut",
         "noSegments",
         "tooManySegments",
+        "invalidSources",
+        "invalidSegmentCount",
         "invalidSegment",
         "sourcePathInvalid",
         "sourceNotFound",

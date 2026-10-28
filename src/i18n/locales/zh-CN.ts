@@ -823,7 +823,10 @@ export const zhCN: TranslationCatalog = {
     preparationTimedOut:
       "无法在限定时间内完成导出准备。某个驱动器或共享位置可能没有响应。",
     noSegments: "没有标记用于导出的片段。",
-    tooManySegments: "标记用于导出的片段过多（最多 100 个）。",
+    tooManySegments:
+      "标记用于导出的片段过多。一次导出最多拼接 48 个部分，跨越多个剪辑的片段在每个剪辑中各算一个部分。",
+    invalidSources: "导出请求与其源文件不一致。",
+    invalidSegmentCount: "导出请求给出的片段数量有误。",
     invalidSegment: "一个或多个导出片段的入点或出点无效。",
     sourcePathInvalid: "源文件路径无效。",
     sourceNotFound: "未找到源视频文件。",

@@ -66,9 +66,10 @@ describe("resolveExportDismissal", () => {
     // The dialog passes the store state itself, at the click, to this rule for its close
     // control, its Close button, Escape, and an outside click (`closeAndReset`).
     const REQUEST: ExportRequest = {
-      sourcePath: "/media/source.mp4",
+      sources: [{ id: "source", path: "/media/source.mp4" }],
       outputPath: "/media/output.mp4",
-      segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+      pieces: [{ sourceId: "source", inPts: "0" as Pts, outPts: "1000" as Pts }],
+      segmentCount: 1,
       preset: createPresetDraft("mp4-h264", "Test preset"),
       streams: "videoAndAudio",
       audioMode: "encode",
@@ -356,9 +357,10 @@ describe("isCancelEnabled", () => {
 describe("isCancelEnabled on the state of a real store", () => {
   // The dialog passes the store fields to `presentStopButton`, which applies this rule.
   const REQUEST: ExportRequest = {
-    sourcePath: "/media/source.mp4",
+    sources: [{ id: "source", path: "/media/source.mp4" }],
     outputPath: "/media/output.mp4",
-    segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+    pieces: [{ sourceId: "source", inPts: "0" as Pts, outPts: "1000" as Pts }],
+    segmentCount: 1,
     preset: createPresetDraft("mp4-h264", "Test preset"),
     streams: "videoAndAudio",
     audioMode: "encode",

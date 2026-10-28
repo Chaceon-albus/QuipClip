@@ -45,7 +45,9 @@
 //! `render_seek` has the rounding rule and its one-sided guarantee.
 
 use super::flv_input::{FlvInput, HEAD_NAME};
-use super::graph::{build_audio_graph, build_filter_graph, build_video_graph};
+use super::graph::{
+    build_audio_graph, build_filter_graph, build_video_graph, input_layout, GraphInput,
+};
 use super::{CopiedAudio, ExportPlan, GraphShape, PlannedAudio, PlannedVideo};
 use crate::settings::{Container, OptionStream, PresetOption, Quality, QualityKind};
 use crate::time::Rational;
@@ -357,7 +359,7 @@ pub fn build_arguments(
         "the copy of an export without video has no graph; build_copy_arguments writes it"
     );
 
-    let inputs = push_inputs(&mut arguments, plan, shape);
+    let inputs = push_inputs(&mut arguments, plan, shape, plan.video.is_some());
     // The audio of an export whose audio has its own process arrives as a WAV stream on stdin
     // (ADR 043), and copied packets arrive as a NUT stream (ADR 048). The pipe follows the inputs
     // of the source, so the graph's input numbers do not move. `-f` is necessary: a pipe has no
@@ -430,7 +432,7 @@ pub fn build_audio_arguments(plan: &ExportPlan, shape: GraphShape, graph: &str) 
         .map(|flag| (*flag).to_owned())
         .collect();
     arguments.push("-copyts".to_owned());
-    push_inputs(&mut arguments, plan, shape);
+    push_inputs(&mut arguments, plan, shape, false);
     push_pair(&mut arguments, "-filter_complex", graph);
     push_pair(&mut arguments, "-map", "[a]");
     push_pair(&mut arguments, "-c:a", AUDIO_PIPE_CODEC);
@@ -532,7 +534,7 @@ pub fn build_copy_arguments(plan: &ExportPlan, output: CopyOutput<'_>) -> Option
     };
     let mut arguments: Vec<String> = flags.iter().map(|flag| (*flag).to_owned()).collect();
     arguments.push("-copyts".to_owned());
-    push_inputs(&mut arguments, plan, GraphShape::InputPerSegment);
+    push_inputs(&mut arguments, plan, GraphShape::InputPerSegment, true);
     push_pair(
         &mut arguments,
         "-map",
@@ -570,45 +572,62 @@ fn push_copy_codec(arguments: &mut Vec<String>, copied: &CopiedAudio) {
     }
 }
 
-/// Append the inputs of the source for `shape`, and return how many there are.
+/// Append the inputs of the sources for `shape`, and return how many there are.
 ///
-/// The encoder and the audio process open the same inputs. A process that reads the audio of
-/// the source and one that reads its video each read from the keyframe in front of the seek,
-/// so the same seeks serve both.
-fn push_inputs(arguments: &mut Vec<String>, plan: &ExportPlan, shape: GraphShape) -> usize {
-    match shape {
-        GraphShape::InputPerSegment => {
-            for (index, segment) in plan.segments.iter().enumerate() {
-                match flv_offset(plan, Some(index)) {
-                    Some((flv, offset)) => push_flv_input(arguments, flv, offset, &plan.source),
-                    None => push_input(arguments, segment.seek_seconds, &plan.source),
-                }
-            }
-            plan.segments.len()
-        }
-        // One input, seeked once before the earliest frame any segment needs. This must be
-        // `single_input_seek_seconds`, not `segments[0].seek_seconds`: concat order need not
-        // match source order, so the first array element is not necessarily the earliest one,
-        // and seeking to it would skip material a later array element still needs.
-        GraphShape::SingleInput => {
-            match flv_offset(plan, None) {
-                Some((flv, offset)) => push_flv_input(arguments, flv, offset, &plan.source),
-                None => push_input(arguments, plan.single_input_seek_seconds(), &plan.source),
-            }
-            1
+/// The inputs are those of [`input_layout`], which the graph of the same command reads: with
+/// `every_piece`, one for each piece or each source; without it, only those of the pieces whose
+/// chains read an audio stream (ADR 053). Each input opens its source with the seek of its
+/// earliest piece, or its FLV slice.
+///
+/// The encoder and the audio process open the same kind of inputs. A process that reads the
+/// audio of a source and one that reads its video each read from the keyframe in front of the
+/// seek, so the same seeks serve both.
+fn push_inputs(
+    arguments: &mut Vec<String>,
+    plan: &ExportPlan,
+    shape: GraphShape,
+    every_piece: bool,
+) -> usize {
+    let layout = input_layout(plan, shape, every_piece);
+    for input in &layout.inputs {
+        let path = &plan.sources[input.source].path;
+        match flv_offset(plan, input) {
+            Some((flv, offset)) => push_flv_input(arguments, flv, offset, path),
+            // One input of one piece, or of every piece of its source that the process reads,
+            // seeked once before the earliest frame any of them needs. This must be
+            // `single_input_seek_seconds`, not the seek of the first piece: concat order need not
+            // match source order, so the first piece is not necessarily the earliest one, and
+            // seeking to it would skip material a later piece still needs.
+            None => push_input(
+                arguments,
+                plan.single_input_seek_seconds(&input.pieces),
+                path,
+            ),
         }
     }
+    layout.inputs.len()
 }
 
-/// The FLV input of `plan` and the offset of the slice of the segment `index`, or of the single
-/// input when `index` is `None`. `None` when the plan has no FLV input, or no offset for the
-/// segment, which `commands::export` never makes.
-fn flv_offset(plan: &ExportPlan, index: Option<usize>) -> Option<(&FlvInput, u64)> {
-    let flv = plan.flv_input.as_ref()?;
-    let offset = match index {
-        Some(index) => flv.segment_offsets.get(index).copied()?,
-        None => flv.single_offset()?,
-    };
+/// The FLV input of the source of `input` and the offset of its slice: the earliest slice of its
+/// pieces. `None` when the source has no FLV input, or no offset for a piece, which
+/// `commands::export` never makes.
+///
+/// [`FlvInput::segment_offsets`] holds one offset for each piece of its source, in concat order,
+/// so the offset of a piece is at the number of pieces of the same source in front of it.
+fn flv_offset<'a>(plan: &'a ExportPlan, input: &GraphInput) -> Option<(&'a FlvInput, u64)> {
+    let flv = plan.sources[input.source].flv_input.as_ref()?;
+    let offsets: Option<Vec<u64>> = input
+        .pieces
+        .iter()
+        .map(|piece| {
+            let ordinal = plan.segments[..*piece]
+                .iter()
+                .filter(|segment| segment.source == input.source)
+                .count();
+            flv.segment_offsets.get(ordinal).copied()
+        })
+        .collect();
+    let offset = offsets?.into_iter().min()?;
     Some((flv, offset))
 }
 
@@ -846,8 +865,8 @@ fn render_time(seconds: Rational) -> String {
 mod tests {
     use super::*;
     use crate::ffmpeg::export::{
-        OutputTiming, PlannedAudio, PlannedSegment, PlannedVideo, MAX_AUDIO_PREFIXES,
-        MAX_EXPORT_SEGMENTS,
+        OutputTiming, PlannedAudio, PlannedSegment, PlannedSource, PlannedVideo, SourceAudio,
+        VideoFit, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
     };
     use crate::project::Resolution;
     use crate::settings::{
@@ -907,6 +926,7 @@ mod tests {
         seek_seconds: Option<Rational>,
     ) -> PlannedSegment {
         PlannedSegment {
+            source: 0,
             in_pts: Pts::new(in_pts),
             out_pts: Pts::new(out_pts),
             seek_seconds,
@@ -918,20 +938,39 @@ mod tests {
         }
     }
 
-    /// An audio stream at `stream_index`, with ticks at `sample_rate`, written out in the
-    /// pre-ADR 023 format of 48000 Hz stereo.
-    fn legacy_audio(stream_index: u32, sample_rate: u32) -> PlannedAudio {
+    /// The audio part written out in the pre-ADR 023 format of 48000 Hz stereo.
+    fn legacy_audio() -> PlannedAudio {
         PlannedAudio {
-            stream_index,
-            sample_rate,
             output_sample_rate: 48_000,
             output_channels: AudioChannels::Stereo,
+            output_layout: Some("stereo".to_owned()),
+            absent_layout: "stereo".to_owned(),
             encoder: "aac".to_owned(),
             bitrate: None,
             options: vec![],
             // The command does not read it; any value renders the same command.
             expected_duration: Rational::new(1, 1).unwrap(),
-            silence_layout: None,
+        }
+    }
+
+    /// One source at `path`: video at `video_index`, and an audio stream at `audio_index`, with
+    /// ticks at `sample_rate`, that the chains read.
+    fn source_at(
+        path: &str,
+        video_index: u32,
+        audio_index: u32,
+        sample_rate: u32,
+    ) -> PlannedSource {
+        PlannedSource {
+            path: PathBuf::from(path),
+            video_stream_index: video_index,
+            fit: None,
+            audio: Some(SourceAudio {
+                stream_index: audio_index,
+                sample_rate,
+                silence_layout: None,
+            }),
+            flv_input: None,
         }
     }
 
@@ -943,12 +982,11 @@ mod tests {
     fn fixture_plan(count: usize) -> ExportPlan {
         let frames = 6 + 12 * (count - 1);
         ExportPlan {
-            source: PathBuf::from(SOURCE),
+            sources: vec![source_at(SOURCE, 1, 2, 44_100)],
             destination: PathBuf::from("/export/out.mp4"),
             video: Some(PlannedVideo {
-                stream_index: 1,
                 timing: OutputTiming::ConstantFrameRate(Rational::new(25, 1).unwrap()),
-                resolution: None,
+                canvas: None,
                 encoder: "libx264".to_owned(),
                 quality: Quality {
                     kind: QualityKind::Crf,
@@ -958,13 +996,12 @@ mod tests {
                 options: vec![],
                 expected_frames: Some(u64::try_from(frames).unwrap()),
             }),
-            audio: Some(legacy_audio(2, 44_100)),
+            audio: Some(legacy_audio()),
             segments: fixture_segments(count),
             container: Container::Mp4,
             total_duration: Rational::new(i64::try_from(frames).unwrap(), 25).unwrap(),
             copied_audio: None,
             audio_copy_refusal: None,
-            flv_input: None,
         }
     }
 
@@ -1113,7 +1150,7 @@ mod tests {
     #[test]
     fn an_export_of_one_process_opens_no_pipe() {
         let mut silence = fixture_plan(2);
-        audio_mut(&mut silence).silence_layout = Some("stereo".to_owned());
+        silence.sources[0].audio.as_mut().unwrap().silence_layout = Some("stereo".to_owned());
         for plan in [
             video_only_plan(2, Container::Mp4),
             audio_only_plan(2, Container::Mp4),
@@ -1299,8 +1336,8 @@ mod tests {
     /// order, of a source of 212700000 bytes. Element 1 starts first, as in the fixture.
     fn flv_plan() -> ExportPlan {
         let mut plan = fixture_plan(3);
-        plan.source = PathBuf::from("/media/live.flv");
-        plan.flv_input = Some(FlvInput {
+        plan.sources[0].path = PathBuf::from("/media/live.flv");
+        plan.sources[0].flv_input = Some(FlvInput {
             working_directory: PathBuf::from("/app/flv-cache/0123456789abcdef"),
             source_size: 212_700_000,
             segment_offsets: vec![9_000_000, 4_000_000, 30_000_000],
@@ -2176,7 +2213,7 @@ mod tests {
         video_mut(&mut plan).timing = OutputTiming::ConstantFrameRate(
             Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
         );
-        plan.audio = Some(legacy_audio(2, 48_000));
+        plan.sources[0].audio.as_mut().unwrap().sample_rate = 48_000;
         plan.segments[0] = segment(160_000, 190_030, 256_000, 304_048, Rational::new(1, 3));
         video_mut(&mut plan).expected_frames = Some(30);
         plan.total_duration = Rational::new(1_001, 1_000).expect("1.001 is a valid duration");
@@ -2209,7 +2246,7 @@ mod tests {
                 "pipe:0",
                 "-filter_complex",
                 concat!(
-                    "[vc]format=yuv420p[v];",
+                    "sws_flags=lanczos+accurate_rnd+full_chroma_int;[vc]format=yuv420p[v];",
                     "[0:1]trim=start_pts=160000:end_pts=190030,setpts=PTS-STARTPTS,",
                     "fps=30000/1001[v0];",
                     "[0:2]aformat=r=48000,atrim=start_pts=256000:end_pts=304048,",
@@ -2732,6 +2769,7 @@ mod tests {
                 let in_pts = 1_000_000_000 + index * 5_000_000;
                 let in_tick = 5_000_000_000 + index * 26_666_666;
                 PlannedSegment {
+                    source: 0,
                     in_pts: Pts::new(in_pts),
                     out_pts: Pts::new(in_pts + 900_900),
                     // 100000/3 = 33333.333333..., so the seek renders at the full width
@@ -2745,17 +2783,23 @@ mod tests {
                 }
             })
             .collect();
+        let mut source = source_at(WINDOWS_SOURCE, 1, 2, 48_000);
+        source.fit = Some(VideoFit {
+            width: 3840,
+            height: 2160,
+            x: 0,
+            y: 0,
+        });
         ExportPlan {
-            source: PathBuf::from(WINDOWS_SOURCE),
+            sources: vec![source],
             destination: PathBuf::from(
                 r"C:\Users\alexandra.whitfield\Videos\Exports\grand-final-highlights.mp4",
             ),
             video: Some(PlannedVideo {
-                stream_index: 1,
                 timing: OutputTiming::ConstantFrameRate(
                     Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
                 ),
-                resolution: Some(Resolution { w: 3840, h: 2160 }),
+                canvas: Some(Resolution { w: 3840, h: 2160 }),
                 encoder: "hevc_videotoolbox".to_owned(),
                 quality: Quality {
                     kind: QualityKind::Crf,
@@ -2765,7 +2809,7 @@ mod tests {
                 options: vec![],
                 expected_frames: Some(30 * u64::try_from(count).expect("the count fits in a u64")),
             }),
-            audio: Some(legacy_audio(2, 48_000)),
+            audio: Some(legacy_audio()),
             segments,
             container: Container::Mp4,
             total_duration: Rational::new(
@@ -2775,7 +2819,6 @@ mod tests {
             .expect("the fixture duration is representable"),
             copied_audio: None,
             audio_copy_refusal: None,
-            flv_input: None,
         }
     }
 
@@ -2793,23 +2836,16 @@ mod tests {
 
     #[test]
     fn a_full_length_plan_on_a_long_windows_path_fits_the_windows_command_line() {
-        // This is the test that keeps `MAX_EXPORT_SEGMENTS` and the platform limit from
-        // drifting apart. `plan.rs` enforces the cap of 100, but its boundary tests are
-        // symbolic -- they would pass at any value -- so nothing else in the crate would notice
-        // a raised cap producing a command line Windows refuses to start. ADR 014 chose 100 for
-        // this reason and this reason only.
+        // A realistic plan at the cap: one source on a 106-character path, ordinary encoder names,
+        // no encoder options, and a 4K fit step in every chain. The cap of
+        // `MAX_EXPORT_SEGMENTS` is set by the widest plan the settings permit, with any number of
+        // sources: see
+        // `the_widest_plan_the_settings_permit_fits_at_the_cap_with_any_number_of_sources`.
+        // At that cap this plan keeps one input for each piece: the encoder needs 19605 of the
+        // 31743 available bytes, and the one input 13663.
         //
         // Note what is asserted: not that the preferred shape fits, but that the shape
-        // `choose_graph_shape` *returns* fits. The last fallback reaches furthest, so its own
-        // length is the real limit of the renderer.
-        //
-        // The command of the encoder of this plan measures 21714 of the 31743 available bytes,
-        // and the command of its audio process 26922 (ADR 043). Do not read that gap as the margin
-        // the cap has: this fixture uses a 106-character path, ordinary encoder names, and no
-        // encoder options, and the widest plan the settings actually permit needs 24735 and 29477
-        // at the same count. `the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap`
-        // measures that one, and it is the test that justifies the cap. This one is about the
-        // realistic case, and about the fallback being reached at all.
+        // `choose_graph_shape` *returns* fits. Its length is the real limit of the renderer.
         let plan = windows_plan(MAX_EXPORT_SEGMENTS);
         let shape = choose_graph_shape_within(
             &plan,
@@ -2822,19 +2858,14 @@ mod tests {
             "{MAX_EXPORT_SEGMENTS} segments as {shape:?} need {length} bytes, over the \
              {WINDOWS_COMMAND_LINE_BUDGET}-byte budget of Windows' {WINDOWS_COMMAND_LINE_LIMIT}"
         );
-        // At this size the first shape cannot fit: it repeats a 106-character path 100 times.
-        // The fallback is therefore load-bearing at the cap, not a theoretical branch.
-        assert_eq!(shape, GraphShape::SingleInput);
-        assert!(
-            measured_length(&plan, GraphShape::InputPerSegment, WINDOWS_OUTPUT)
-                > WINDOWS_COMMAND_LINE_BUDGET
-        );
+        assert_eq!(shape, GraphShape::InputPerSegment);
     }
 
     #[test]
     fn a_full_length_plan_on_a_long_windows_path_fits_the_command_of_its_audio_process() {
-        // The audio process opens the same inputs as the encoder and has a graph of its own, so
-        // its command meets the same budget on its own (ADR 043).
+        // The audio process opens the inputs of the pieces whose chains read audio, and has a
+        // graph of its own, so its command meets the same budget on its own (ADR 043). It needs
+        // 19780 bytes here.
         let plan = windows_plan(MAX_EXPORT_SEGMENTS);
         assert!(plan.separate_audio_process());
         let shape = choose_audio_graph_shape_within(&plan, WINDOWS_COMMAND_LINE_BUDGET);
@@ -2843,7 +2874,7 @@ mod tests {
             length <= WINDOWS_COMMAND_LINE_BUDGET,
             "the audio process at {MAX_EXPORT_SEGMENTS} segments as {shape:?} needs {length} bytes"
         );
-        assert_eq!(shape, GraphShape::SingleInput);
+        assert_eq!(shape, GraphShape::InputPerSegment);
     }
 
     /// The longest path Windows accepts without the extended-length prefix, counting the
@@ -2857,13 +2888,25 @@ mod tests {
         format!("{head}{}{suffix}", "a".repeat(fill))
     }
 
+    /// The longest channel layout name the closing `aformat` can carry: `7.1(wide-side)`, the
+    /// longest name of FFmpeg's table of named layouts.
+    ///
+    /// With the preset value `source` and sources of different layouts, the closing `aformat`
+    /// names the layout of the source with the most channels (ADR 053). The plan takes that name
+    /// from ffprobe only when it is plain (`plan::is_plain_layout_name`), and ffprobe writes a
+    /// plain name only for a layout of that table. Every other layout reads as `6 channels (...)`
+    /// or similar, which holds spaces, and the plan then names the default layout of the count,
+    /// such as `6c`.
+    const WIDEST_CHANNEL_LAYOUT: &str = "7.1(wide-side)";
+
     /// The audio stream and output format that spell the longest audio chains: a two-digit
     /// stream index, and 192000 Hz both in the input pin and in the closing `aformat`, with the
-    /// `stereo` layout.
+    /// layout [`WIDEST_CHANNEL_LAYOUT`].
     ///
     /// 192000 is the top of ADR 023's fixed range, and it is one digit longer than 48000.
-    /// `stereo` is the longest of the three layout choices: `mono` is two bytes shorter, and
-    /// `source` drops the whole `:cl=` option.
+    /// [`WIDEST_CHANNEL_LAYOUT`], which the preset value `source` names for sources of different
+    /// layouts (ADR 053), is the longest layout choice: `stereo` is eight bytes shorter, `mono`
+    /// ten, and `source` for sources of one layout drops the whole `:cl=` option.
     /// `the_widest_audio_format_is_the_one_the_widest_plan_carries_and_it_fits_at_the_cap`
     /// checks the choice.
     ///
@@ -2878,17 +2921,30 @@ mod tests {
     /// faster than 192000 Hz, so the prefixes add nothing past six digits.
     fn widest_audio() -> PlannedAudio {
         PlannedAudio {
-            stream_index: 11,
-            sample_rate: MAX_AUDIO_SAMPLE_RATE,
             output_sample_rate: MAX_AUDIO_SAMPLE_RATE,
-            output_channels: AudioChannels::Stereo,
+            output_channels: AudioChannels::Source,
+            output_layout: Some(WIDEST_CHANNEL_LAYOUT.to_owned()),
+            absent_layout: WIDEST_CHANNEL_LAYOUT.to_owned(),
             encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
             bitrate: Some(MAX_AUDIO_BITRATE_KBPS),
             options: widest_options(),
             // The command does not read it; any value renders the same command.
             expected_duration: Rational::new(1, 1).unwrap(),
-            silence_layout: None,
         }
+    }
+
+    /// The source that spells the widest inputs and chains: a path of `MAX_PATH`, two-digit stream
+    /// indices, an audio stream at [`MAX_AUDIO_SAMPLE_RATE`], and a fit step whose numbers have the
+    /// digits of [`MAX_RESOLUTION_DIMENSION`] on every side and offset.
+    fn widest_source(suffix: &str) -> PlannedSource {
+        let mut source = source_at(&longest_windows_path(suffix), 10, 11, MAX_AUDIO_SAMPLE_RATE);
+        source.fit = Some(VideoFit {
+            width: MAX_RESOLUTION_DIMENSION,
+            height: MAX_RESOLUTION_DIMENSION,
+            x: MAX_RESOLUTION_DIMENSION,
+            y: MAX_RESOLUTION_DIMENSION,
+        });
+        source
     }
 
     /// The option list that, on both streams, spells the longest options the settings permit: [`MAX_PRESET_OPTIONS`] entries of 16 bytes each,
@@ -2936,6 +2992,7 @@ mod tests {
                 let in_pts = 10_000_000_000 + index * 100_000_000;
                 let in_tick = 100_000_000_000 + index * 1_000_000_000;
                 PlannedSegment {
+                    source: 0,
                     in_pts: Pts::new(in_pts),
                     out_pts: Pts::new(in_pts + 900_900),
                     seek_seconds: Rational::new(100_000 + index, 3),
@@ -2954,14 +3011,13 @@ mod tests {
             })
             .collect();
         ExportPlan {
-            source: PathBuf::from(longest_windows_path(".mkv")),
+            sources: vec![widest_source(".mkv")],
             destination: PathBuf::from(longest_windows_path(".mp4")),
             video: Some(PlannedVideo {
-                stream_index: 10,
                 timing: OutputTiming::ConstantFrameRate(
                     Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
                 ),
-                resolution: Some(Resolution {
+                canvas: Some(Resolution {
                     w: MAX_RESOLUTION_DIMENSION,
                     h: MAX_RESOLUTION_DIMENSION,
                 }),
@@ -2984,15 +3040,155 @@ mod tests {
             .expect("the fixture duration is representable"),
             copied_audio: None,
             audio_copy_refusal: None,
-            flv_input: None,
         }
+    }
+
+    /// [`widest_plan`] with its pieces spread over `sources` sources in turn, piece `i` from
+    /// source `i % sources`, each source at a path of `MAX_PATH` ([`widest_source`]). With as many
+    /// sources as pieces, every piece opens an input of its own in both shapes.
+    fn widest_plan_of_sources(count: usize, sources: usize) -> ExportPlan {
+        let sources = sources.clamp(1, count);
+        let mut plan = widest_plan(count);
+        plan.sources = (0..sources)
+            .map(|index| widest_source(&format!("-{index:03}.mkv")))
+            .collect();
+        for (index, segment) in plan.segments.iter_mut().enumerate() {
+            segment.source = index % sources;
+        }
+        plan
+    }
+
+    /// The second layout of [`silenced`]: `5.1.2(back)`, the longest name of FFmpeg's table of
+    /// eight channels after [`WIDEST_CHANNEL_LAYOUT`]. Its count ties with the widest layout, so
+    /// the earlier source keeps the name of the closing `aformat`, and the silence of its own
+    /// source is as long as a second name can be.
+    const SECOND_CHANNEL_LAYOUT: &str = "5.1.2(back)";
+
+    /// `plan` with no piece that reads an audio stream, so the export is one process whose graph
+    /// generates the silence of every piece: the first source has a stream without packets in the
+    /// layout [`WIDEST_CHANNEL_LAYOUT`], the second one in [`SECOND_CHANNEL_LAYOUT`], and every
+    /// other source has no audio stream. The layouts differ, so every closing `aformat` names
+    /// [`WIDEST_CHANNEL_LAYOUT`], and every silence of a source without audio is generated in it at
+    /// the output rate, with a length of twelve digits.
+    fn silenced(mut plan: ExportPlan) -> ExportPlan {
+        for (index, source) in plan.sources.iter_mut().enumerate() {
+            source.audio = match index {
+                0 => Some(SourceAudio {
+                    stream_index: 11,
+                    sample_rate: MAX_AUDIO_SAMPLE_RATE,
+                    silence_layout: Some(WIDEST_CHANNEL_LAYOUT.to_owned()),
+                }),
+                1 => Some(SourceAudio {
+                    stream_index: 11,
+                    sample_rate: MAX_AUDIO_SAMPLE_RATE,
+                    silence_layout: Some(SECOND_CHANNEL_LAYOUT.to_owned()),
+                }),
+                _ => None,
+            };
+        }
+        for segment in &mut plan.segments {
+            segment.audio_prefix = None;
+            if segment.source >= 2 {
+                segment.audio_in_tick = Some(0);
+            }
+        }
+        plan
+    }
+
+    /// [`widest_plan`] of `count` pieces of `sources` sources in which the first source holds the
+    /// first `first_pieces` pieces, the second source the next one, and the other sources the
+    /// rest in turn, or the second source all of them when there are two, and the one source all
+    /// of them when there is one. Every source holds a
+    /// piece, so `count` is at least `first_pieces + sources - 1`. The first source is the one
+    /// that [`with_flv_input`] gives the FLV input, so this skews the pieces toward the FLV source,
+    /// whose inputs are the longest.
+    fn skewed_plan(count: usize, sources: usize, first_pieces: usize) -> ExportPlan {
+        assert!(count >= first_pieces + sources - 1);
+        let mut plan = widest_plan(count);
+        plan.sources = (0..sources)
+            .map(|index| widest_source(&format!("-{index:03}.mkv")))
+            .collect();
+        for (index, segment) in plan.segments.iter_mut().enumerate() {
+            segment.source = if index < first_pieces || sources == 1 {
+                0
+            } else if index == first_pieces || sources == 2 {
+                1
+            } else {
+                2 + (index - first_pieces - 1) % (sources - 2)
+            };
+        }
+        plan
+    }
+
+    /// Every plan the budget sweep measures at `cap` pieces, with a name for a report: for every
+    /// count of sources, the round robin of [`widest_plan_of_sources`] and every skew of
+    /// [`skewed_plan`] toward the first source, with one piece for each other source or all the
+    /// pieces the cap leaves, each with every piece reading audio and
+    /// [`silenced`], each with and without an FLV input on the first source.
+    fn budget_sweep(cap: usize) -> Vec<(String, ExportPlan)> {
+        let mut plans = Vec::new();
+        for sources in 1..=cap {
+            let mut shapes = vec![(
+                format!("{sources} sources in turn"),
+                widest_plan_of_sources(cap, sources),
+            )];
+            for first_pieces in 1..=cap - sources + 1 {
+                // The other sources hold one piece each, or share every piece the cap leaves.
+                for count in [first_pieces + sources - 1, cap] {
+                    shapes.push((
+                        format!("{sources} sources, {first_pieces} of {count} pieces in the first"),
+                        skewed_plan(count, sources, first_pieces),
+                    ));
+                }
+            }
+            for (name, plan) in shapes {
+                for silent in [false, true] {
+                    let plan = if silent {
+                        silenced(plan.clone())
+                    } else {
+                        plan.clone()
+                    };
+                    let silence = if silent { ", silent" } else { "" };
+                    plans.push((format!("{name}{silence}"), plan.clone()));
+                    plans.push((
+                        format!("{name}{silence}, FLV"),
+                        with_flv_input(plan, u64::MAX),
+                    ));
+                }
+            }
+        }
+        plans
+    }
+
+    /// The length of the command of the encoder of `plan` and of its audio process, in the shapes
+    /// production chooses, with those shapes. The audio process is `None` for an export of one
+    /// process.
+    fn chosen_lengths(
+        plan: &ExportPlan,
+        reservation: &str,
+    ) -> ((GraphShape, usize), Option<(GraphShape, usize)>) {
+        let shape =
+            choose_graph_shape_within(plan, Path::new(reservation), WINDOWS_COMMAND_LINE_BUDGET);
+        let encoder = (shape, measured_length(plan, shape, reservation));
+        let audio = plan.separate_audio_process().then(|| {
+            let shape = choose_audio_graph_shape_within(plan, WINDOWS_COMMAND_LINE_BUDGET);
+            (shape, measured_audio_length(plan, shape))
+        });
+        (encoder, audio)
+    }
+
+    /// Whether every command of `plan` fits the Windows budget in the shapes production chooses.
+    fn fits_windows(plan: &ExportPlan, reservation: &str) -> bool {
+        let (encoder, audio) = chosen_lengths(plan, reservation);
+        encoder.1 <= WINDOWS_COMMAND_LINE_BUDGET
+            && audio.is_none_or(|(_, length)| length <= WINDOWS_COMMAND_LINE_BUDGET)
     }
 
     /// `plan` with an FLV input whose numbers have the digits of `size`: a slice for each
     /// segment, each from an offset just below `size`.
     fn with_flv_input(mut plan: ExportPlan, size: u64) -> ExportPlan {
         let count = u64::try_from(plan.segments.len()).expect("the count fits in a u64");
-        plan.flv_input = Some(FlvInput {
+        plan.sources[0].flv_input = Some(FlvInput {
             working_directory: PathBuf::from(longest_windows_path("")),
             source_size: size,
             segment_offsets: (0..count).map(|index| size - 1 - index).collect(),
@@ -3005,7 +3201,7 @@ mod tests {
     /// for the encoder and for the audio process.
     fn largest_count_with_one_input_each(make: impl Fn(usize) -> ExportPlan) -> (usize, usize) {
         let mut largest = (0, 0);
-        for count in 1..=MAX_EXPORT_SEGMENTS {
+        for count in 1..=160 {
             let plan = make(count);
             let shape = GraphShape::InputPerSegment;
             if measured_length(&plan, shape, WINDOWS_OUTPUT) <= WINDOWS_COMMAND_LINE_BUDGET {
@@ -3025,40 +3221,42 @@ mod tests {
         // and its value. So the first shape fits fewer segments. ADR 046 records these counts.
         // Change it with them.
         //
+        //
+        // The counts are measured past the cap of `MAX_EXPORT_SEGMENTS`, up to 160 pieces of one
+        // source, so they show how far the first shape reaches, also where the cap stops a plan.
+        // The fit step of ADR 053 and the scaler flags of the graph made each video chain longer,
+        // and the widest layout name each audio chain of the audio process.
+        //
         // The realistic plan: the 106-character path and a source below 1 TB.
-        assert_eq!(largest_count_with_one_input_each(windows_plan), (92, 77));
+        assert_eq!(largest_count_with_one_input_each(windows_plan), (78, 77));
         assert_eq!(
             largest_count_with_one_input_each(|count| {
                 with_flv_input(windows_plan(count), 999_999_999_999)
             }),
-            (81, 69)
+            (70, 69)
         );
         // The widest plan, with the largest numbers a file can have.
-        assert_eq!(largest_count_with_one_input_each(widest_plan), (59, 50));
+        assert_eq!(largest_count_with_one_input_each(widest_plan), (51, 49));
         assert_eq!(
             largest_count_with_one_input_each(|count| with_flv_input(widest_plan(count), u64::MAX)),
-            (52, 45)
+            (46, 45)
         );
     }
 
     #[test]
     fn the_widest_plan_with_an_flv_input_still_fits_at_the_segment_cap() {
-        // The single input carries one slice, so the fallback still fits at the cap, with the
-        // largest numbers a file can have. A long path of the application data does not count:
-        // the command names the head by its file name.
-        let plan = with_flv_input(widest_plan(MAX_EXPORT_SEGMENTS), u64::MAX);
-        let shape = choose_graph_shape_within(
-            &plan,
-            Path::new(WINDOWS_OUTPUT),
-            WINDOWS_COMMAND_LINE_BUDGET,
-        );
-        assert_eq!(shape, GraphShape::SingleInput);
-        let length = measured_length(&plan, shape, WINDOWS_OUTPUT);
-        assert!(length <= WINDOWS_COMMAND_LINE_BUDGET, "{length}");
-        let shape = choose_audio_graph_shape_within(&plan, WINDOWS_COMMAND_LINE_BUDGET);
-        assert_eq!(shape, GraphShape::SingleInput);
-        let length = measured_audio_length(&plan, shape);
-        assert!(length <= WINDOWS_COMMAND_LINE_BUDGET, "{length}");
+        // One source of an export at most has an FLV input, and the shape that each command of
+        // the plan chooses still fits at the cap, with the largest numbers a file can have. A
+        // long path of the application data does not count: the command names the head by its
+        // file name.
+        let reservation = longest_windows_path(".mp4.tmp-13724-0");
+        for sources in [1, 2, 7, MAX_EXPORT_SEGMENTS] {
+            let plan = with_flv_input(
+                widest_plan_of_sources(MAX_EXPORT_SEGMENTS, sources),
+                u64::MAX,
+            );
+            assert!(fits_windows(&plan, &reservation), "{sources} sources");
+        }
     }
 
     /// The largest audio tick of twelve digits, which [`widest_plan`] assumes as the widest.
@@ -3090,58 +3288,49 @@ mod tests {
     fn the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap() {
         // The cap is a byte budget, so the value that justifies it has to be measured against
         // the widest command the settings can produce -- not against a plausible one. This scans
-        // for the largest segment count that still fits, on the fixture above, choosing the
-        // shape the way production does.
+        // for the largest count of pieces of one source that still fits, choosing the shape the
+        // way production does. Several sources need more bytes, and the next test holds the cap
+        // against them.
         //
         // The plan has two commands since the audio of an export with video has its own process
-        // (ADR 043), and each must fit on its own. Measured at the time of writing, at the cap and
-        // as `SingleInput`: the encoder needs 24735 of the 31743 available bytes, and the audio
-        // process 31413, so 7008 and 330 bytes of slack remain, and the two fit up to 130 and
-        // 101 segments. The encoder replaced each audio chain with a stand-in silence, and it
-        // keeps the encoder options. The audio process carries in every chain the end pad and the
-        // cut to the length of the segment (`graph::audio_exact_end`), with two twelve-digit
-        // lengths, and a stand-in video for each segment, with a nine-digit frame count, and no
-        // encoder option. Its last `MAX_AUDIO_PREFIXES` chains also carry a silence prefix of
-        // twelve digits (`graph::audio_silence_prefix`), about 121 bytes each: 1936 bytes, which
-        // took the audio process from 29477 bytes. The audio process is therefore the command that
-        // limits the cap, and the count of prefixes is what its slack allows.
+        // (ADR 043), and each must fit on its own. Measured at the time of writing, with one
+        // source, at the cap of 48 pieces: the encoder needs 29772 of the 31743 available bytes,
+        // and the audio process 30692, both with one input for each piece. The widest plan of one
+        // source fits up to 98 pieces.
         //
-        // The history below is of the one command that carried both before ADR 043. It needed 31547
-        // of the 31743 available bytes at the cap, so 196 bytes of slack remained, and 100 segments
-        // fit while 101 did not. (A realistic plan on a 106-character path measured 28419 at the
-        // same count.) The end pad of the last audio chain (`graph::audio_end_pad`) took 38 of the
-        // 234 bytes that were free before it: `,apad=whole_len=`, a twelve-digit length, and
-        // `,asetpts=N`, once, because only the last chain of a graph with video carries it. A pad
-        // in every chain would take up to 3800 bytes at the cap, which this budget does not have.
-        // The audio chain that starts at the In point (`graph::audio_chain`) gave back 111 bytes:
-        // the timestamp reset with a 12-digit tick and the gap fill at 192000 Hz add 33 bytes to
-        // each chain, and the short option names of `aformat` take 34 from each chain and 11 from
-        // the one input pin. Before that chain, 123 bytes were free. Schema 2 of the settings spent
-        // 1484 of the 1607 bytes that were there before it: 1408 for the two option lists at their
-        // limits (1024 bytes, and 384 for the separators and quotes of 128 arguments), 71 for a
-        // 32-character pixel format in the graph and in `-pix_fmt`, and 5 for `-cq 63 -b:v 0` over
-        // `-b:v 200000k`. The options are written once, not once for each segment, so they did not
-        // move the growth for each segment. The slack was 130 bytes, and 101 segments did not fit,
-        // while every video chain ended in its own `format`. One `format` behind `concat`
-        // (`graph::video_output_format`) gave back 1477 bytes at the cap. Earlier, ADR 023's audio
-        // settings cost 115 of the 245 bytes that were there before them; see
+        // ADR 053 changed the widest chain. The fit step
+        // (`scale=<w>:<h>:flags=lanczos+accurate_rnd+full_chroma_int,setsar=1,pad=<W>:<H>:<x>:<y>`)
+        // replaced `scale=<w>:<h>,setsar=1` in every video chain, about 73 more bytes with numbers
+        // of five digits, and the graph of the encoder starts with the scaler flags,
+        // `sws_flags=lanczos+accurate_rnd+full_chroma_int`. The layout that the closing `aformat`
+        // of each audio chain names can be `7.1(wide-side)` with sources of different layouts,
+        // eight bytes longer than `stereo`. At 100 pieces of one source, the encoder needed 31882
+        // bytes and no longer fitted. Each further source adds its own input of `MAX_PATH`, about
+        // 300 bytes, and with as many sources as pieces each piece opens an input of its own in
+        // both shapes. With pieces skewed toward an FLV source and every piece generating silence,
+        // 49 pieces no longer fit, so the cap is 48 (the next test).
+        //
+        // The history below is of the command of one source of the cap of 100 segments. The audio
+        // process needed 31413 bytes, with a silence prefix of twelve digits
+        // (`graph::audio_silence_prefix`, about 121 bytes each) on its last `MAX_AUDIO_PREFIXES`
+        // chains. Before ADR 043, the one command that carried both needed 31547 bytes. The end
+        // pad of the last audio chain (`graph::audio_end_pad`) took 38 bytes, and a pad in every
+        // chain would have taken up to 3800. The audio chain that starts at the In point
+        // (`graph::audio_chain`) gave back 111 bytes: the timestamp reset and the gap fill add 33
+        // bytes to each chain, and the short option names of `aformat` take 34 from each chain and
+        // 11 from the one input pin. Schema 2 of the settings spent 1484 bytes: 1408 for the two
+        // option lists at their limits, 71 for a 32-character pixel format in the graph and in
+        // `-pix_fmt`, and 5 for `-cq 63 -b:v 0` over `-b:v 200000k`. The options are written once,
+        // not once for each piece. One `format` behind `concat` (`graph::video_output_format`)
+        // gave back 1477 bytes, and ADR 023's audio settings cost 115; see
         // `the_widest_audio_format_is_the_one_the_widest_plan_carries_and_it_fits_at_the_cap`. A
-        // filter added to every chain spends the slack at a hundred times its own length, so the
-        // slack is smaller than it looks. The assertion is one-sided on purpose: shortening the
-        // command is welcome and must not fail a test, but a filter added to the graph or a
-        // settings maximum raised has to bring the cap down with it, and that is the drift this
-        // catches.
+        // filter added to every chain spends the slack at the cap times its own length. The
+        // assertion is one-sided on purpose: shortening the command is welcome and must not fail a
+        // test, but a filter added to the graph or a settings maximum raised has to bring the cap
+        // down with it, and that is the drift this catches.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
-        let output = Path::new(&reservation);
         let largest = (1..=160)
-            .take_while(|count| {
-                let plan = widest_plan(*count);
-                let shape = choose_graph_shape_within(&plan, output, WINDOWS_COMMAND_LINE_BUDGET);
-                let audio_shape =
-                    choose_audio_graph_shape_within(&plan, WINDOWS_COMMAND_LINE_BUDGET);
-                measured_length(&plan, shape, &reservation) <= WINDOWS_COMMAND_LINE_BUDGET
-                    && measured_audio_length(&plan, audio_shape) <= WINDOWS_COMMAND_LINE_BUDGET
-            })
+            .take_while(|count| fits_windows(&widest_plan(*count), &reservation))
             .count();
         assert!(
             largest >= MAX_EXPORT_SEGMENTS,
@@ -3151,11 +3340,64 @@ mod tests {
     }
 
     #[test]
+    fn the_widest_plan_the_settings_permit_fits_at_the_cap_with_any_number_of_sources() {
+        // `choose_shape` returns the last shape when no shape fits, and nothing reports that
+        // case: the cap must make it impossible (ADR 053). So every plan of `budget_sweep` must
+        // fit every command at the cap, in the shapes that production chooses: every count of
+        // sources from one to one for each piece, the pieces in turn or skewed toward the FLV
+        // source, every piece reading audio or every piece generating silence
+        // ([`silenced`]), with and without an FLV input.
+        //
+        // Measured at the time of writing, at the cap of 48, every command keeps one input for
+        // each piece in its widest case:
+        //
+        // - The widest encoder needs 31736 of the 31743 available bytes: 6 sources whose pieces
+        //   all read audio, the FLV source with 42 of 47 pieces.
+        // - The widest audio process needs 31733: 10 sources, the FLV source with 37 of 46 pieces.
+        // - The widest plan of silence needs 31717, in its one process: 2 sources, the FLV source
+        //   with 14 of 48 pieces. With one source for each piece and no FLV input it needs 30976.
+        //
+        // These lengths are not the margin of the cap: when one input for each piece does not fit,
+        // production takes one input for each source. The margin is the shorter of the two shapes
+        // in the worst plan, 31157 bytes (586 to spare): 46 sources whose FLV source holds 3 of 48
+        // pieces, with silence. One input for each source grows about 300 bytes with each source
+        // and hardly with the share of the pieces.
+        //
+        // At 49 pieces, 47 sources whose FLV source holds 3 pieces, with silence, need 31998 bytes
+        // with one input for each source and more with one input for each piece, over the budget.
+        let reservation = longest_windows_path(".mp4.tmp-13724-0");
+        for (name, plan) in budget_sweep(MAX_EXPORT_SEGMENTS) {
+            assert!(
+                fits_windows(&plan, &reservation),
+                "{name} does not fit: {:?}",
+                chosen_lengths(&plan, &reservation)
+            );
+        }
+        // The sweep holds both kinds of plan.
+        assert!(silenced(widest_plan_of_sources(MAX_EXPORT_SEGMENTS, 3))
+            .audio
+            .is_some());
+        assert!(!silenced(widest_plan_of_sources(MAX_EXPORT_SEGMENTS, 3)).separate_audio_process());
+        assert!(widest_plan_of_sources(MAX_EXPORT_SEGMENTS, 3).separate_audio_process());
+    }
+
+    #[test]
+    fn the_cap_is_the_largest_count_that_the_sweep_fits() {
+        // One more piece than the cap leaves a plan of the sweep that no shape fits, so the cap
+        // cannot rise without a shorter command.
+        let reservation = longest_windows_path(".mp4.tmp-13724-0");
+        assert!(budget_sweep(MAX_EXPORT_SEGMENTS + 1)
+            .iter()
+            .any(|(_, plan)| !fits_windows(plan, &reservation)));
+    }
+
+    #[test]
     fn the_widest_plan_without_video_still_fits_at_the_segment_cap() {
         // A graph without video pads every audio chain (`graph::audio_end_pad`), so its growth for
-        // each segment carries the pad too. It has no video chain, so it is still far below the
-        // budget: 23259 bytes at the cap, as `SingleInput`, with the sixteen silence prefixes of
-        // `widest_plan`. The assertion is one-sided for the reason the test above gives.
+        // each segment carries the pad too. It has no video chain, so it is still below the
+        // budget: 27322 bytes at the cap of 48, with one input for each piece and the sixteen
+        // silence prefixes of `widest_plan`. The assertion is one-sided for the reason the test
+        // above gives.
         let reservation = longest_windows_path(".m4a.tmp-13724-0");
         let output = Path::new(&reservation);
         let plan = widest_audio_only_plan(MAX_EXPORT_SEGMENTS);
@@ -3186,10 +3428,12 @@ mod tests {
             |shape: GraphShape| -> usize { measured_length(&widest, shape, &reservation) };
 
         for output_sample_rate in [MIN_AUDIO_SAMPLE_RATE, 44_100, 48_000, MAX_AUDIO_SAMPLE_RATE] {
-            for output_channels in [
-                AudioChannels::Source,
-                AudioChannels::Stereo,
-                AudioChannels::Mono,
+            for (output_channels, output_layout) in [
+                (AudioChannels::Source, None),
+                (AudioChannels::Source, Some("5.1(side)")),
+                (AudioChannels::Source, Some(WIDEST_CHANNEL_LAYOUT)),
+                (AudioChannels::Stereo, Some("stereo")),
+                (AudioChannels::Mono, Some("mono")),
             ] {
                 for audio_bitrate in [
                     None,
@@ -3201,6 +3445,7 @@ mod tests {
                     plan.audio = Some(PlannedAudio {
                         output_sample_rate,
                         output_channels,
+                        output_layout: output_layout.map(str::to_owned),
                         bitrate: audio_bitrate,
                         ..widest_audio()
                     });
@@ -3232,6 +3477,7 @@ mod tests {
         legacy.audio = Some(PlannedAudio {
             output_sample_rate: 48_000,
             output_channels: AudioChannels::Stereo,
+            output_layout: Some("stereo".to_owned()),
             bitrate: None,
             ..widest_audio()
         });
@@ -3591,8 +3837,8 @@ mod tests {
     #[test]
     fn the_copy_process_opens_the_flv_slice_of_the_encoder() {
         let mut plan = copy_plan(Container::Mp4);
-        plan.source = PathBuf::from("/media/live.flv");
-        plan.flv_input = Some(FlvInput {
+        plan.sources[0].path = PathBuf::from("/media/live.flv");
+        plan.sources[0].flv_input = Some(FlvInput {
             working_directory: PathBuf::from("/app/flv-cache/0123456789abcdef"),
             source_size: 212_700_000,
             segment_offsets: vec![9_000_000],
@@ -3691,5 +3937,108 @@ mod tests {
             render_time(Rational::new(1001, 30_000).unwrap()),
             "0.033366"
         );
+    }
+
+    // -- several sources (ADR 053) ----------------------------------------------------------
+
+    /// The fixture plan of three pieces with piece 1 from a second source, which has no audio
+    /// stream and an FLV input when `flv` holds. Pieces 0 and 2 stay pieces of the first source.
+    fn two_source_plan(flv: bool) -> ExportPlan {
+        let mut plan = fixture_plan(3);
+        let mut second = source_at("/media/second.flv", 0, 1, 44_100);
+        second.audio = None;
+        if flv {
+            second.flv_input = Some(FlvInput {
+                working_directory: PathBuf::from("/app/flv-cache/0123456789abcdef"),
+                source_size: 212_700_000,
+                segment_offsets: vec![4_000_000],
+                first_frame_offset: 13,
+            });
+        }
+        plan.sources.push(second);
+        plan.segments[1].source = 1;
+        plan.segments[1].audio_in_tick = Some(0);
+        plan.segments[1].audio_out_tick = Some(14_400);
+        plan
+    }
+
+    #[test]
+    fn each_piece_opens_its_own_source_and_the_audio_process_only_the_pieces_it_reads() {
+        let plan = two_source_plan(false);
+        assert!(plan.separate_audio_process());
+        // The encoder reads the video of every piece: one input for each, from its own source.
+        assert_eq!(
+            input_arguments(&plan, GraphShape::InputPerSegment),
+            [
+                "-ss",
+                "6.6",
+                "-i",
+                SOURCE,
+                "-ss",
+                "5",
+                "-i",
+                "/media/second.flv",
+                "-ss",
+                "15",
+                "-i",
+                SOURCE,
+                "-f",
+                "wav",
+                "-i",
+                "pipe:0",
+            ]
+        );
+        // One input for each source, in the order of its first piece, seeked for the earliest
+        // of its pieces: 6.6 s for pieces 0 and 2 of the first source.
+        assert_eq!(
+            input_arguments(&plan, GraphShape::SingleInput),
+            [
+                "-ss",
+                "6.6",
+                "-i",
+                SOURCE,
+                "-ss",
+                "5",
+                "-i",
+                "/media/second.flv",
+                "-f",
+                "wav",
+                "-i",
+                "pipe:0",
+            ]
+        );
+        // The audio process reads no input for the piece of the source without audio.
+        let audio = |shape: GraphShape| {
+            let all = build_audio_arguments(&plan, shape, GRAPH);
+            let start = all.iter().position(|a| a == "-copyts").unwrap() + 1;
+            let end = all.iter().position(|a| a == "-filter_complex").unwrap();
+            all[start..end].to_vec()
+        };
+        assert_eq!(
+            audio(GraphShape::InputPerSegment),
+            ["-ss", "6.6", "-i", SOURCE, "-ss", "15", "-i", SOURCE]
+        );
+        assert_eq!(audio(GraphShape::SingleInput), ["-ss", "6.6", "-i", SOURCE]);
+    }
+
+    #[test]
+    fn the_flv_input_of_one_source_takes_the_offsets_of_its_own_pieces() {
+        // The second source holds one piece, so its one offset belongs to piece 1, and FFmpeg
+        // runs in the directory of its head.
+        let plan = two_source_plan(true);
+        let slice = "concat:head.flv|subfile,,start,4000000,end,212700000,,:/media/second.flv";
+        assert_eq!(
+            input_arguments(&plan, GraphShape::InputPerSegment)[4..6],
+            ["-i", slice]
+        );
+        assert_eq!(
+            input_arguments(&plan, GraphShape::SingleInput)[4..6],
+            ["-i", slice]
+        );
+        assert_eq!(
+            plan.working_directory(),
+            Some(Path::new("/app/flv-cache/0123456789abcdef"))
+        );
+        assert_eq!(fixture_plan(1).working_directory(), None);
     }
 }

@@ -5,10 +5,10 @@
 //! arithmetic or the command shape. ADR 014 settles both, from measurements on a real
 //! ffmpeg, and this module holds the types that every later stage of the renderer shares.
 //!
-//! [`plan`] builds the pure [`ExportPlan`] from a source probe, a preset, and the requested
-//! segment boundaries: it resolves the output frame rate and the audio output format,
-//! computes each segment's exact duration and seek position, and converts video PTS into
-//! audio ticks. [`ExportPlan`] also
+//! [`plan`] builds the pure [`ExportPlan`] from the probes of the sources, a preset, and the
+//! requested pieces (ADR 053): it resolves the output frame rate, frame size and audio output
+//! format, computes each piece's exact duration and seek position with the probe of its own
+//! source, and converts video PTS into audio ticks. [`ExportPlan`] also
 //! exposes [`ExportPlan::single_input_seek_seconds`], the one extra value ADR 014's second
 //! graph shape (one input for the whole source) needs beyond the per-segment plan, and
 //! [`ExportPlan::separate_audio_process`], which writes the audio of an export with video in a
@@ -84,7 +84,7 @@ pub use arguments::{
 pub use fsinspect::inspect_path;
 pub use graph::{build_audio_graph, build_filter_graph, build_video_graph, GraphShape};
 pub use output::PendingOutput;
-pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, SegmentBoundary};
+pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, PlanSource, SegmentBoundary};
 pub use process::{
     run_export_process, ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus,
 };
@@ -158,7 +158,11 @@ pub enum ExportAudioMode {
     Copy,
 }
 
-/// The largest number of segments [`plan::build_plan`] accepts in one export request.
+/// The largest number of pieces [`plan::build_plan`] accepts in one export request.
+///
+/// ADR 053 makes the limit of ADR 014 count pieces: each piece is one chain and, in the shape
+/// with one input for each piece, one input. A segment across clips gives one piece for each
+/// clip, so the limit can stop an export of fewer segments than this.
 ///
 /// This is a command-line budget, not a sanity bound. ADR 014 measurement 13 leaves the
 /// renderer no portable way to move the filter graph off the command line:
@@ -168,13 +172,21 @@ pub enum ExportAudioMode {
 /// one command-line budget Windows allows.
 ///
 /// ADR 014 measurement 15 measures what that costs: the graph grows by about the same
-/// amount for each added segment in *both* [`GraphShape`] variants. The single-input shape
-/// (one seek, then `split`/`asplit`) writes the source path once instead of once for each
-/// segment, so it reaches further on a long path, but it does not remove that growth. ADR
-/// 014's "The graph shape" section keeps the byte figures and the reach they imply; the
-/// conclusion is that neither shape can spell an export much larger than this cap on
-/// Windows. 100 keeps the command line inside the Windows budget even for a long source
-/// path, and it is still far above the number of segments a person marks by hand.
+/// amount for each added piece in *both* [`GraphShape`] variants. The single-input shape
+/// (one seek for each source, then `split`/`asplit`) writes the path of each source once
+/// instead of once for each piece, so it reaches further on a long path, but it does not remove
+/// that growth, and each further source adds an input of its own.
+///
+/// The value is the largest count at which the widest command the settings permit fits the
+/// Windows budget, for the encoder and for the audio process of ADR 043, with any number of
+/// sources at the longest Windows path: up to one source for each piece, where every piece opens
+/// an input of its own in both shapes, with the pieces in turn or skewed toward the source of the
+/// FLV input, and with every piece reading audio or every piece generating silence. ADR 053's fit
+/// step and the scaler flags of the graph made each video chain about 73 bytes longer, and the
+/// cap of 100 of one source no longer fitted. At 49, 47 sources whose FLV source holds 3 pieces,
+/// with silence in the widest layout names, need more than the budget in both shapes.
+/// The tests of `arguments.rs` hold the measurement, and the frontend states the same number in
+/// the message of [`ExportErrorCode::TooManySegments`].
 ///
 /// ffmpeg itself is not the constraint here: measurement 14 found that many inputs of one
 /// file do not cause a failure. A larger export needs the graph off the command line
@@ -182,7 +194,7 @@ pub enum ExportAudioMode {
 /// The capability probe already reads the version, so a later unit can select that form on
 /// a build that offers it and keep the inline form on an older one. ADR 014 does not
 /// require that work, and this crate does not do it.
-pub const MAX_EXPORT_SEGMENTS: usize = 100;
+pub const MAX_EXPORT_SEGMENTS: usize = 48;
 
 /// The longest silence, in whole seconds, that the segments of an export may need FFmpeg to
 /// hold in memory, all together: in front of the first sample of the source audio stream, and in
@@ -276,6 +288,12 @@ pub enum OutputTiming {
 /// argument builder and the graph builder never repeat the arithmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlannedSegment {
+    /// The index of the source of this piece in [`ExportPlan::sources`].
+    ///
+    /// Every other field of this type is in the units of that source: its video time base, its
+    /// container start, and the sample rate of its audio (ADR 053). The plan never compares a
+    /// value of one source with a value of another.
+    pub source: usize,
     /// The inclusive start of the segment, as a raw source video PTS.
     pub in_pts: Pts,
     /// The exclusive end of the segment, as a raw source video PTS.
@@ -298,6 +316,12 @@ pub struct PlannedSegment {
     /// The inclusive start of the segment's audio, in ticks of `1 / sample_rate`, or `None`
     /// when [`ExportPlan::audio`] is `None`.
     ///
+    /// The rate is [`SourceAudio::sample_rate`] of the source of the piece. A piece whose source
+    /// has no audio stream ([`PlannedSource::audio`] is `None` in a plan with audio) has no
+    /// source rate and reads nothing: its ticks are `0` and `round(duration * outputRate)`, in
+    /// ticks of [`PlannedAudio::output_sample_rate`], so that their difference is the length of
+    /// its silence (ADR 053).
+    ///
     /// This is `round(pts * videoTimeBase * sampleRate)` computed from the *video* PTS's
     /// own absolute origin (ADR 014's decision), never relative to `video_start_pts` or
     /// `format_start_time`; `plan`'s audio-tick tests pin exactly this. A negative value is
@@ -318,8 +342,9 @@ pub struct PlannedSegment {
     /// pads the audio of the segment to the length of its video, as it does in the encoder (ADR
     /// 043).
     pub frames: Option<u64>,
-    /// The number of samples of silence, at [`PlannedAudio::sample_rate`], that the audio chain
-    /// of this segment generates in front of the audio it reads, or `None` for no prefix.
+    /// The number of samples of silence, at [`SourceAudio::sample_rate`] of its source, that the
+    /// audio chain of this segment generates in front of the audio it reads, or `None` for no
+    /// prefix.
     ///
     /// [`plan::build_plan`] gives a prefix to a segment that starts at least 1 s plus
     /// [`AUDIO_PREFIX_MARGIN_MILLISECONDS`] before the first sample of the source audio and reaches
@@ -339,16 +364,16 @@ pub struct PlannedSegment {
 /// [`ExportPlan::audio`] holds [`PlannedAudio`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedVideo {
-    /// The absolute index of the video stream the filter graph must address.
-    ///
-    /// ADR 014's "The command" section requires the graph to bind this stream by its
-    /// absolute index, never the short specifier `[i:v]`, for the same reason as
-    /// [`PlannedAudio::stream_index`].
-    pub stream_index: u32,
     /// How the renderer times its output frames. See [`OutputTiming`].
     pub timing: OutputTiming,
-    /// The output resolution, or `None` to keep the source video's own resolution.
-    pub resolution: Option<Resolution>,
+    /// The frame size of the output, or `None` to keep the size of the sources.
+    ///
+    /// `None` only when the preset keeps the source size and every source has the same coded
+    /// size, SAR and rotation, so `concat` gets one size and one SAR without a filter. Otherwise
+    /// it is the preset size, or the largest display size of the sources, with even sides, and
+    /// each source whose display size or SAR does not fit it has a [`PlannedSource::fit`] (ADR
+    /// 053).
+    pub canvas: Option<Resolution>,
     /// The ffmpeg video encoder name, verbatim from the preset.
     pub encoder: String,
     /// The quality control and its value, verbatim from the preset.
@@ -370,45 +395,40 @@ pub struct PlannedVideo {
     pub expected_frames: Option<u64>,
 }
 
-/// The audio part of a plan: the stream it addresses, the sample rate its ticks are measured
-/// in, the format every audio chain ends in, and the encoder settings a preset selected.
+/// The audio part of a plan: the format every audio chain ends in, and the encoder settings a
+/// preset selected.
 ///
-/// The first two facts always travel together; see [`ExportPlan::audio`] for why bundling them
-/// into one type, rather than two independent optional fields, is the point. The output format
-/// and the encoder settings belong here too, because they only mean something when there is
-/// audio to format and to encode.
+/// What each chain reads, and the unit its ticks count in, belongs to its source:
+/// [`PlannedSource::audio`]. A plan with this part writes an audio stream when at least one
+/// source of the pieces has an audio stream, with or without packets (ADR 053).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedAudio {
-    /// The absolute index of the audio stream the filter graph must address.
-    ///
-    /// ADR 014's "The command" section requires the graph to bind this stream by its
-    /// absolute index, never the short specifier `[i:a]`, for the same reason as
-    /// [`PlannedVideo::stream_index`].
-    pub stream_index: u32,
-    /// The sample rate every `audio_in_tick`/`audio_out_tick` in this plan's segments is
-    /// measured in: the tick unit is `1 / sample_rate` seconds.
-    ///
-    /// This is always the source stream's own rate, whatever the preset asks for, because the
-    /// graph pins each input link to it before `atrim` reads the ticks (ADR 014 measurement 17).
-    pub sample_rate: u32,
     /// The sample rate every audio chain resamples to before `concat`, in hertz.
     ///
-    /// [`plan::build_plan`] resolves the preset's [`AudioSampleRateSetting::Source`] to
-    /// [`Self::sample_rate`] here, so the graph renders a number and never reads the preset.
-    /// Every chain reads the same audio stream, or generates silence with no stream
-    /// ([`Self::silence_layout`]), and ends at this one rate, so `concat` still receives inputs
-    /// that agree (ADR 023).
+    /// [`plan::build_plan`] resolves the preset's [`AudioSampleRateSetting::Source`] to the
+    /// highest [`SourceAudio::sample_rate`] among the sources with an audio stream, so the graph
+    /// renders a number and never reads the preset. Every chain ends at this one rate, so `concat`
+    /// receives inputs that agree (ADR 023, ADR 053). With one source this is the rate of its
+    /// stream.
     ///
     /// [`AudioSampleRateSetting::Source`]: crate::settings::AudioSampleRateSetting::Source
     pub output_sample_rate: u32,
-    /// The channel layout every audio chain ends in.
-    ///
-    /// [`AudioChannels::Source`] is the one value the plan does not resolve to a concrete layout:
-    /// the graph names no layout at all, and the chain keeps the source stream's own (ADR 023).
-    /// As with the rate, every chain reads the same stream, so every chain ends with the same
-    /// layout. Chains that generate silence read no stream; they generate it in
-    /// [`Self::silence_layout`], which is then that same layout for every chain.
+    /// The channel layout the preset asks for. [`AudioChannels::Source`] keeps the layout of the
+    /// sources; see [`Self::output_layout`] for the name the chains end in.
     pub output_channels: AudioChannels,
+    /// The channel layout that the closing `aformat` of every chain names, or `None` for a chain
+    /// that names no layout and keeps the layout of its stream.
+    ///
+    /// The preset's `stereo` and `mono` name themselves. [`AudioChannels::Source`] names no
+    /// layout when every source with an audio stream has the same layout, as before ADR 053.
+    /// When the layouts differ, it names the layout of the source with the most channels, an
+    /// earlier source on a tie, so `concat` does not choose one; a layout without a plain name
+    /// gives the default layout of its channel count (`plan::silence_layout`).
+    pub output_layout: Option<String>,
+    /// The channel layout of the silence of a piece whose source has no audio stream: the layout
+    /// of [`Self::output_layout`], or, when that is `None`, the one layout the sources share. Its
+    /// silence is generated at [`Self::output_sample_rate`] in this layout (ADR 053).
+    pub absent_layout: String,
     /// The ffmpeg audio encoder name, verbatim from the preset.
     pub encoder: String,
     /// The audio bitrate in kilobits per second, verbatim from the preset, or `None` to leave
@@ -434,21 +454,84 @@ pub struct PlannedAudio {
     /// The graph does not read it. It is a bound for the success check, and never an edit
     /// boundary (ADR 002).
     pub expected_duration: Rational,
-    /// The channel layout of the silence that every audio chain generates, or `None` when the
-    /// chains read the audio stream.
+}
+
+/// The audio stream of one source, as the chains of its pieces use it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceAudio {
+    /// The absolute index of the audio stream the filter graph must address.
+    ///
+    /// ADR 014's "The command" section requires the graph to bind this stream by its
+    /// absolute index, never the short specifier `[i:a]`: a short specifier selects the first
+    /// audio stream, and the probe selects the stream with the `default` disposition.
+    pub stream_index: u32,
+    /// The sample rate every `audio_in_tick`/`audio_out_tick` of the pieces of this source is
+    /// measured in: the tick unit is `1 / sample_rate` seconds.
+    ///
+    /// This is always the stream's own rate, whatever the preset asks for, because the graph pins
+    /// each input link to it before `atrim` reads the ticks (ADR 014 measurement 17).
+    pub sample_rate: u32,
+    /// The channel layout of the silence that every chain of this source generates, or `None`
+    /// when the chains read the stream.
     ///
     /// [`plan::build_plan`] sets it when the audio stream holds no packets
     /// ([`crate::ffmpeg::AudioProbe::holds_no_packets`]). An input of that stream never gives
     /// an audio frame, so FFmpeg would keep the decoded video until the end of the file before
     /// it configures the graph: 1416 MiB for a segment of 5 s from a source of 120 s at 640x360
-    /// (ADR 014 measurement 26). Each chain then generates the silence of its segment
-    /// (`graph::audio_silence_chain`) at [`Self::sample_rate`] and reads no input, so the export
-    /// is one process ([`ExportPlan::separate_audio_process`]).
+    /// (ADR 014 measurement 26). Each chain then generates the silence of its piece
+    /// (`graph::audio_silence_chain`) at [`Self::sample_rate`] and reads no input.
     ///
-    /// The layout is the one the chain ends in when [`Self::output_channels`] names one, and
-    /// otherwise the layout of the stream, so the output track has the layout it would have if
-    /// the stream held audio.
+    /// The layout is the one the chain ends in when [`PlannedAudio::output_channels`] names one,
+    /// and otherwise the layout of the stream, so the output track has the layout it would have
+    /// if the stream held audio.
     pub silence_layout: Option<String>,
+}
+
+impl SourceAudio {
+    /// True when the chains of this source read its audio stream.
+    #[must_use]
+    pub fn reads_stream(&self) -> bool {
+        self.silence_layout.is_none()
+    }
+}
+
+/// The size and the place of one source's picture on the canvas (ADR 053): the fit step
+/// `scale=<width>:<height>:flags=...,setsar=1,pad=<W>:<H>:<x>:<y>` of each of its pieces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoFit {
+    /// The width of the scaled picture, an even number of pixels.
+    pub width: u32,
+    /// The height of the scaled picture, an even number of pixels.
+    pub height: u32,
+    /// The left offset of the picture on the canvas, an even number of pixels.
+    pub x: u32,
+    /// The top offset of the picture on the canvas, an even number of pixels.
+    pub y: u32,
+}
+
+/// One source of an export, with what the graph and the command read of it (ADR 053).
+///
+/// [`ExportPlan::sources`] holds the sources in the order of their first piece.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedSource {
+    /// The media file the pieces of this source cut from.
+    pub path: PathBuf,
+    /// The absolute index of the video stream the filter graph must address, for the reason of
+    /// [`SourceAudio::stream_index`].
+    pub video_stream_index: u32,
+    /// The fit step of the pieces of this source, or `None` when their frames already have the
+    /// size and the SAR of the output. Always `None` in a plan without video.
+    pub fit: Option<VideoFit>,
+    /// The audio stream of this source, or `None` when the plan writes no encoded audio or the
+    /// source has no audio stream. In a plan with [`ExportPlan::audio`], a piece of a source
+    /// without one gets the silence of its length at the output rate (`graph::audio_silence_chain`).
+    pub audio: Option<SourceAudio>,
+    /// The FLV input of ADR 046, which opens each input of this source as the head of the source
+    /// and a slice of it from a keyframe in place of an input seek, or `None` for the input seek
+    /// of ADR 014. [`plan::build_plan`] leaves it `None`. `commands::export` sets it for an FLV
+    /// source, with one offset for each piece of this source, and for one source at most:
+    /// FFmpeg runs in the directory of the head, and the command names the head by its file name.
+    pub flv_input: Option<flv_input::FlvInput>,
 }
 
 /// The audio part of a plan that copies the packets of the source audio stream into the output
@@ -480,7 +563,7 @@ pub struct CopiedAudio {
     pub adts_to_asc: bool,
 }
 
-/// A fully resolved, ready-to-render export: one source, its segments in concat order, and
+/// A fully resolved, ready-to-render export: its sources, its pieces in concat order, and
 /// the video and audio parts with the encoder settings a preset selected.
 ///
 /// [`plan::build_plan`] is the only place that produces this type. Every field is already
@@ -494,8 +577,9 @@ pub struct CopiedAudio {
 /// ([`Self::copied_audio`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportPlan {
-    /// The source media file every segment cuts from.
-    pub source: PathBuf,
+    /// The sources of the pieces, in the order of their first piece. Each one has at least one
+    /// piece ([`PlannedSegment::source`]).
+    pub sources: Vec<PlannedSource>,
     /// The final output location. The renderer writes a temporary file beside it and
     /// renames on success (ADR 004, ADR 014's "Other rules").
     pub destination: PathBuf,
@@ -505,8 +589,10 @@ pub struct ExportPlan {
     /// for the request. A plan without it is an audio-only export, and the frame count cannot
     /// verify that export; [`verify`] holds the check that does.
     pub video: Option<PlannedVideo>,
-    /// The audio stream this plan addresses, together with the sample rate every audio
-    /// tick in [`PlannedSegment`] is measured in, or `None` when the plan writes no audio.
+    /// The audio this plan encodes: the format every audio chain ends in and the encoder
+    /// settings, or `None` when the plan writes no encoded audio. What each chain reads, and the
+    /// rate its ticks count in, belongs to the source of its piece ([`PlannedSource::audio`],
+    /// [`ExportPlan::audio_tick_rate`]).
     ///
     /// ADR 014 requires an exact `atrim` boundary in ticks of `1 / sample_rate`, and
     /// forbids the imprecise fallback of `atrim`'s `start`/`end` options, which ffmpeg
@@ -516,11 +602,12 @@ pub struct ExportPlan {
     /// export with [`ExportErrorCode::SourceAudioRateUnknown`] rather than reaching this
     /// field: dropping the track here would write a video-only file for a source the
     /// preview played with sound, and report nothing. `None` therefore means one of three
-    /// things, and all are stated, never silent: the source has no audio, the user chose
-    /// [`ExportStreams::VideoOnly`], or the plan copies the audio ([`Self::copied_audio`]). Bundling the stream index and the sample rate into
-    /// one [`PlannedAudio`] makes "an audio stream to address, but no exact way to address
-    /// it" unrepresentable, instead of leaving that combination as an unstated policy
-    /// question for the graph builder.
+    /// things, and all are stated, never silent: no source of the pieces has an audio stream,
+    /// the user chose [`ExportStreams::VideoOnly`], or the plan copies the audio
+    /// ([`Self::copied_audio`]). A [`SourceAudio`] always carries its stream index and its rate
+    /// together, so "an audio stream to address, but no exact way to address it" cannot be
+    /// represented. A source without an audio stream in a plan with audio is not that case: its
+    /// pieces generate silence at the output rate (ADR 053).
     pub audio: Option<PlannedAudio>,
     /// The audio this plan copies from the source, or `None` when the plan encodes its audio or
     /// writes none (ADR 048).
@@ -536,17 +623,13 @@ pub struct ExportPlan {
     /// request asked for no copy or the plan copies (ADR 048). No stage of the renderer reads it:
     /// `commands::export` writes it to the log, and the export runs as an encode.
     pub audio_copy_refusal: Option<copy::CopyRefusal>,
-    /// The segments to render, in the order they must appear in the concatenated output.
+    /// The pieces to render, in the order they must appear in the concatenated output. The
+    /// field keeps the name of ADR 014, whose segments were the pieces of one source.
     pub segments: Vec<PlannedSegment>,
     /// The output container, which selects the muxer (ADR 004).
     pub container: Container,
     /// The exact total output duration: the rational sum of every segment's duration.
     pub total_duration: Rational,
-    /// The FLV input of ADR 046, which opens each input as the head of the source and a slice of
-    /// it from a keyframe in place of an input seek, or `None` for the input seek of ADR 014.
-    /// [`plan::build_plan`] leaves it `None`. `commands::export` sets it for an FLV source, with
-    /// one offset for each segment.
-    pub flv_input: Option<flv_input::FlvInput>,
 }
 
 impl ExportPlan {
@@ -558,15 +641,66 @@ impl ExportPlan {
     /// late, never, or only after a gap therefore makes the encoder keep the video of that time.
     /// With the audio in its own process, the graph of the encoder reads no audio input, and the
     /// graph of the audio process decodes no video. A plan without video has nothing to keep, a
-    /// plan without audio nothing to wait for, and a plan whose chains generate silence
-    /// ([`PlannedAudio::silence_layout`]) reads no audio input, so each of those is one process.
+    /// plan without audio nothing to wait for, and a plan whose chains all generate silence
+    /// ([`SourceAudio::silence_layout`], or a source without an audio stream) reads no audio
+    /// input, so each of those is one process. One piece that reads a stream is enough for a
+    /// second process, and the other pieces get their silence chains there (ADR 053).
     #[must_use]
     pub fn separate_audio_process(&self) -> bool {
-        self.video.is_some()
+        self.video.is_some() && self.audio.is_some() && self.reads_audio_stream()
+    }
+
+    /// True when the chain of at least one piece reads an audio stream of its source: a plan
+    /// with [`Self::audio`] in which a source of the pieces has a stream that holds packets.
+    #[must_use]
+    pub fn reads_audio_stream(&self) -> bool {
+        self.audio.is_some() && (0..self.segments.len()).any(|piece| self.piece_reads_audio(piece))
+    }
+
+    /// True when the audio chain of the piece `piece` reads the audio stream of its source.
+    #[must_use]
+    pub fn piece_reads_audio(&self, piece: usize) -> bool {
+        self.audio.is_some()
             && self
+                .segments
+                .get(piece)
+                .and_then(|segment| self.sources.get(segment.source))
+                .and_then(|source| source.audio.as_ref())
+                .is_some_and(SourceAudio::reads_stream)
+    }
+
+    /// The source of the piece `piece`.
+    ///
+    /// # Panics
+    ///
+    /// When `piece` or its source index is out of range, which [`plan::build_plan`] never makes.
+    #[must_use]
+    pub fn source_of(&self, piece: usize) -> &PlannedSource {
+        &self.sources[self.segments[piece].source]
+    }
+
+    /// The sample rate the audio ticks of the piece `piece` count in: the rate of the audio stream
+    /// of its source, or [`PlannedAudio::output_sample_rate`] for a source without one, whose
+    /// ticks are the length of its silence at that rate. `None` in a plan without audio.
+    #[must_use]
+    pub fn audio_tick_rate(&self, piece: usize) -> Option<u32> {
+        let audio = self.audio.as_ref()?;
+        Some(
+            self.source_of(piece)
                 .audio
                 .as_ref()
-                .is_some_and(|audio| audio.silence_layout.is_none())
+                .map_or(audio.output_sample_rate, |source| source.sample_rate),
+        )
+    }
+
+    /// The directory FFmpeg runs in: the directory of the head of the one source with an FLV
+    /// input, or `None` when no source has one (ADR 046).
+    #[must_use]
+    pub fn working_directory(&self) -> Option<&std::path::Path> {
+        self.sources
+            .iter()
+            .find_map(|source| source.flv_input.as_ref())
+            .map(|flv| flv.working_directory.as_path())
     }
 
     /// True when a second `ffmpeg` copies the audio packets of the source into a pipe, and the
@@ -598,26 +732,35 @@ impl ExportPlan {
         self.video.as_ref().and_then(|video| video.expected_frames)
     }
 
-    /// The single input seek ADR 014's second graph shape needs: one input for the whole
-    /// source, seeked once before the earliest frame any segment requires, with
-    /// `split`/`asplit` dividing the decoded stream among each segment's own `trim` chain.
+    /// The single input seek ADR 014's second graph shape needs for one source: one input for the
+    /// whole source, seeked once before the earliest frame that any of `pieces` requires, with
+    /// `split`/`asplit` dividing the decoded stream among each piece's own `trim` chain. `pieces`
+    /// are the pieces of one source that the input feeds (ADR 053).
     ///
-    /// This is **not** `self.segments[0].seek_seconds`. `segments` is in concat order, and
-    /// concat order need not match source-PTS order: an export can present its segments out
-    /// of source order, so the first array element is not necessarily the segment with the
-    /// smallest `in_pts`. Seeking to the first array element's position in that case can
-    /// skip past material an earlier-in-source, later-in-array segment still needs.
+    /// This is **not** the seek of the first of them. `segments` is in concat order, and
+    /// concat order need not match source-PTS order: an export can present its pieces out
+    /// of source order, so the first one is not necessarily the piece with the smallest
+    /// `in_pts`. Seeking to the first piece's position in that case can skip past material an
+    /// earlier-in-source, later-in-array piece still needs.
     ///
-    /// The fix needs no new arithmetic. Every segment's own `seek_seconds` is a strictly
+    /// The fix needs no new arithmetic. Every piece's own `seek_seconds` is a strictly
     /// increasing function of its `in_pts` alone -- same time base, same
-    /// `format_start_time`, same margin, for every segment of one source and one plan -- so
-    /// the segment with the smallest `in_pts` already carries the correct single-input seek
+    /// `format_start_time`, same margin, for every piece of one source and one plan -- so
+    /// the piece with the smallest `in_pts` already carries the correct single-input seek
     /// in its own `seek_seconds` field, clamped exactly as ADR 014 requires. This method
-    /// only has to find that segment.
+    /// only has to find that piece. It never compares the PTS of two sources: the pieces are
+    /// of one source.
     #[must_use]
-    pub fn single_input_seek_seconds(&self) -> Option<Rational> {
-        self.segments
+    pub fn single_input_seek_seconds(&self, pieces: &[usize]) -> Option<Rational> {
+        debug_assert!(
+            pieces
+                .windows(2)
+                .all(|pair| self.segments[pair[0]].source == self.segments[pair[1]].source),
+            "one input reads one source"
+        );
+        pieces
             .iter()
+            .map(|piece| &self.segments[*piece])
             .min_by_key(|segment| segment.in_pts)
             .and_then(|segment| segment.seek_seconds)
     }
@@ -693,11 +836,21 @@ export_error_codes! {
     /// interrupted, so the export thread stops waiting for it and releases the slot. The detail
     /// names the stage of preparation that was running.
     PreparationTimedOut => "preparationTimedOut",
-    /// Produced by [`plan::build_plan`]: the request carried zero segments.
+    /// Produced by [`plan::build_plan`] and `commands::export::resolve_request`: the request
+    /// carried zero pieces.
     NoSegments => "noSegments",
-    /// Produced by [`plan::build_plan`]: the request carried more than
-    /// [`MAX_EXPORT_SEGMENTS`] segments.
+    /// Produced by [`plan::build_plan`] and `commands::export::resolve_request`: the request
+    /// carried more than [`MAX_EXPORT_SEGMENTS`] pieces (ADR 053: the limit counts pieces).
     TooManySegments => "tooManySegments",
+    /// Produced by `commands::export::resolve_request`: the list of sources of the request does
+    /// not match its pieces. The list is empty, an id is empty or appears twice, a piece names an
+    /// id that the list does not hold, or a source has no piece. The detail names the fault and
+    /// the id, as a diagnostic for a bug report (ADR 011): the frontend builds the request, so
+    /// only a fault there produces this code.
+    InvalidSources => "invalidSources",
+    /// Produced by `commands::export::resolve_request`: the `segmentCount` of the request is 0 or
+    /// larger than the number of its pieces. Each segment gives at least one piece (ADR 052).
+    InvalidSegmentCount => "invalidSegmentCount",
     /// Produced by [`plan::build_plan`]: a segment's `in_pts` was not strictly before its
     /// `out_pts`, or an internal timestamp computation could not be represented exactly.
     InvalidSegment => "invalidSegment",
@@ -709,8 +862,8 @@ export_error_codes! {
     /// Produced by [`plan::build_plan`]: the source path exists but is not a regular file.
     SourceNotFile => "sourceNotFile",
     /// Produced by `commands::export::check_source_revision`: the size or the modification time
-    /// of the source differs from the revision that the request expects, so the segments may
-    /// name other frames (ADR 049).
+    /// of a source differs from the revision that the request expects, so the segments may
+    /// name other frames (ADR 049). The detail is the id of that source in the request (ADR 053).
     SourceRevisionMismatch => "sourceRevisionMismatch",
     /// Produced by [`plan::build_plan`]: the destination path is empty, contains a NUL
     /// byte, has no file name, has no parent, or is not absolute.
@@ -871,6 +1024,8 @@ mod tests {
                 "frameCountMismatch",
                 "invalidPreset",
                 "invalidSegment",
+                "invalidSegmentCount",
+                "invalidSources",
                 "noSegments",
                 "outputDirectoryMissing",
                 "outputEqualsSource",

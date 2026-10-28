@@ -77,8 +77,8 @@ use crate::ffmpeg::export::{
     verify_audio_output, verify_copied_audio_output, verify_copy_streams, AudioOutputMismatch,
     CopyOutput, ExportAudioMode, ExportErrorCode, ExportPlan, ExportProcessOutcome,
     ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot, ExportStreams,
-    PendingOutput, PlanRequest, ProgressSnapshot, SegmentBoundary, Submission, WaitingRun,
-    AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
+    PendingOutput, PlanRequest, PlanSource, ProgressSnapshot, SegmentBoundary, Submission,
+    WaitingRun, AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::preview::PreviewWindows;
 use crate::ffmpeg::{
@@ -89,7 +89,7 @@ use crate::settings::{self, Preset};
 use crate::time::{pts_seconds, Pts, Rational};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
@@ -117,15 +117,35 @@ const JAVASCRIPT_MAX_SAFE_INTEGER: i128 = 9_007_199_254_740_991;
 /// Microseconds in one second, as the exact factor [`duration_microseconds`] multiplies by.
 const MICROSECONDS_PER_SECOND: i128 = 1_000_000;
 
-/// One requested segment boundary, as the frontend spells it.
+/// One source of an export request, as the frontend spells it (ADR 053).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportSourceWire {
+    /// The id the pieces name the source by. Not empty, and unique in the request.
+    pub id: String,
+    /// The path of the media file.
+    pub path: String,
+    /// The revision of the source that the segments were marked against, or `None` when the
+    /// user chose to export a changed file anyway (ADR 024). Preparation compares it with the
+    /// file at `path` when it starts, and refuses a file whose size or whole-second
+    /// modification time differs with `sourceRevisionMismatch`, whose detail names this id.
+    /// [`check_source_revision`] states what the comparison cannot see. `None` checks nothing.
+    #[serde(default)]
+    pub expected_revision: Option<ExpectedSourceRevisionWire>,
+}
+
+/// One piece of an export request: one interval of one source, as the frontend spells it (ADR
+/// 052, ADR 053).
 ///
 /// `ffmpeg::export::SegmentBoundary` carries no serde derives on purpose -- it is a planning
-/// type, not a wire type -- so this is the wire form and [`prepare_export_with`] converts.
-/// Both fields are [`Pts`], which crosses as a canonical decimal **string**: ADR 002 keeps a
+/// type, not a wire type -- so this is the wire form and [`resolve_request`] converts it.
+/// Both PTS fields are [`Pts`], which crosses as a canonical decimal **string**: ADR 002 keeps a
 /// timestamp exact, and a JavaScript number cannot hold every `i64` a container can report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ExportSegmentBoundaryWire {
+pub struct ExportPieceWire {
+    /// The id of the source in [`ExportRequestWire::sources`].
+    pub source_id: String,
     pub in_pts: Pts,
     pub out_pts: Pts,
 }
@@ -134,9 +154,16 @@ pub struct ExportSegmentBoundaryWire {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportRequestWire {
-    pub source_path: String,
+    /// The sources that the pieces name. Each one has at least one piece.
+    pub sources: Vec<ExportSourceWire>,
+    /// The pieces, in export order: each segment in array order, and the pieces of one segment
+    /// in sequence order (ADR 052). The backend does not know about clips or segments.
+    pub pieces: Vec<ExportPieceWire>,
+    /// The number of the user's segments that the pieces come from, from 1 to the number of
+    /// pieces. The run reports it as its segment count ([`ExportStart::segment_count`] and the
+    /// journal); nothing else reads it.
+    pub segment_count: u32,
     pub output_path: String,
-    pub segments: Vec<ExportSegmentBoundaryWire>,
     /// The preset to render with, whole, as the setup step showed it when the user confirmed
     /// the export (ADR 049). **Required**, with no default. The command checks it with
     /// [`settings::validate_preset`] before it accepts the run, and the run never reads the
@@ -154,18 +181,116 @@ pub struct ExportRequestWire {
     /// encode, or writes none for a choice of the video only. The value is therefore a request,
     /// and no report of the run repeats it.
     pub audio_mode: ExportAudioMode,
-    /// The revision of the source that the segments were marked against, or `None` when the
-    /// user chose to export a changed file anyway (ADR 024). Preparation compares it with the
-    /// file at `source_path` when it starts, and refuses a file whose size or whole-second
-    /// modification time differs with `sourceRevisionMismatch`. [`check_source_revision`]
-    /// states what the comparison cannot see. `None` checks nothing.
-    #[serde(default)]
-    pub expected_source_revision: Option<ExpectedSourceRevisionWire>,
     /// Whether the interface starts a new batch with this run. The export journal then removes
     /// the runs of the earlier batch that ended (`commands::export_journal`). Absent means
     /// `false`: the run joins the batch that the interface shows.
     #[serde(default)]
     pub new_batch: bool,
+}
+
+/// A request whose sources and pieces [`resolve_request`] checked.
+#[derive(Debug)]
+struct ResolvedRequest<'a> {
+    /// The sources of the request, in the order of their first piece.
+    sources: Vec<&'a ExportSourceWire>,
+    /// The pieces, in export order, each naming its source by its index in [`Self::sources`].
+    pieces: Vec<SegmentBoundary>,
+}
+
+impl ResolvedRequest<'_> {
+    /// The pieces of the source `source`, in export order.
+    fn pieces_of(&self, source: usize) -> Vec<SegmentBoundary> {
+        self.pieces
+            .iter()
+            .filter(|piece| piece.source == source)
+            .copied()
+            .collect()
+    }
+}
+
+/// Check the sources and the pieces of `request`, and order the sources by their first piece.
+///
+/// The checks run in this order, and the first failure wins:
+///
+/// 1. No piece -- `noSegments`.
+/// 2. More than [`MAX_EXPORT_SEGMENTS`] pieces -- `tooManySegments` (ADR 053: the limit counts
+///    pieces).
+/// 3. No source, an empty id, an id that appears twice, a piece that names an id the list does
+///    not hold, or a source that no piece names -- `invalidSources`, with the fault and the id in
+///    the detail (ADR 011: a diagnostic, not a sentence for the user).
+/// 4. A `segmentCount` of 0, or larger than the number of pieces -- `invalidSegmentCount`.
+/// 5. A piece whose In point is not before its Out point -- `invalidSegment`.
+///
+/// [`build_plan`] checks 1, 2 and 5 again for any other caller. The order of the sources is the
+/// order of their first piece, so preparation runs once for each source in that order, and the
+/// plan breaks a tie of the canvas in favour of the earlier piece (ADR 053).
+fn resolve_request(request: &ExportRequestWire) -> Result<ResolvedRequest<'_>, ExportCommandError> {
+    let invalid = |detail: String| {
+        Err(ExportCommandError::with_detail(
+            ExportErrorCode::InvalidSources,
+            detail,
+        ))
+    };
+    if request.pieces.is_empty() {
+        return Err(ExportCommandError::new(ExportErrorCode::NoSegments));
+    }
+    if request.pieces.len() > MAX_EXPORT_SEGMENTS {
+        return Err(ExportCommandError::new(ExportErrorCode::TooManySegments));
+    }
+    if request.sources.is_empty() {
+        return invalid("no source".to_owned());
+    }
+    for (index, source) in request.sources.iter().enumerate() {
+        if source.id.is_empty() {
+            return invalid("empty source id".to_owned());
+        }
+        if request.sources[..index]
+            .iter()
+            .any(|earlier| earlier.id == source.id)
+        {
+            return invalid(format!("duplicate source id: {}", source.id));
+        }
+    }
+    let mut sources: Vec<&ExportSourceWire> = Vec::with_capacity(request.sources.len());
+    let mut pieces = Vec::with_capacity(request.pieces.len());
+    for piece in &request.pieces {
+        let Some(wire) = request
+            .sources
+            .iter()
+            .find(|source| source.id == piece.source_id)
+        else {
+            return invalid(format!("unknown source id: {}", piece.source_id));
+        };
+        let index = match sources.iter().position(|known| known.id == wire.id) {
+            Some(index) => index,
+            None => {
+                sources.push(wire);
+                sources.len() - 1
+            }
+        };
+        pieces.push(SegmentBoundary {
+            source: index,
+            in_pts: piece.in_pts,
+            out_pts: piece.out_pts,
+        });
+    }
+    if let Some(unused) = request
+        .sources
+        .iter()
+        .find(|source| !sources.iter().any(|used| used.id == source.id))
+    {
+        return invalid(format!("unused source id: {}", unused.id));
+    }
+    let segment_count = usize::try_from(request.segment_count).unwrap_or(usize::MAX);
+    if segment_count == 0 || segment_count > pieces.len() {
+        return Err(ExportCommandError::new(
+            ExportErrorCode::InvalidSegmentCount,
+        ));
+    }
+    if pieces.iter().any(|piece| piece.in_pts >= piece.out_pts) {
+        return Err(ExportCommandError::new(ExportErrorCode::InvalidSegment));
+    }
+    Ok(ResolvedRequest { sources, pieces })
 }
 
 /// The size and the modification time of a source file, in the form of the revision that
@@ -343,6 +468,8 @@ struct PreparedExport {
     preset_id: String,
     /// The stream choice of the request, kept in [`ExportStart`].
     streams: ExportStreams,
+    /// The segment count of the request, kept in [`ExportStart`].
+    segment_count: u32,
     plan: ExportPlan,
     /// The located `ffmpeg`.
     ffmpeg: PathBuf,
@@ -433,7 +560,7 @@ fn run_facts(request: &ExportRequestWire) -> RunFacts {
     RunFacts {
         output_path: request.output_path.clone(),
         preset_name: request.preset.name.clone(),
-        segment_count: u32::try_from(request.segments.len()).unwrap_or(u32::MAX),
+        segment_count: request.segment_count,
         streams: request.streams,
     }
 }
@@ -514,18 +641,18 @@ struct PrepareRequest<'a> {
 fn prepare_export_with<Discover, Probe, FirstPacket, RateAt, Gaps>(
     prepare: PrepareRequest<'_>,
     discover: Discover,
-    probe: Probe,
-    first_audio_packet: FirstPacket,
-    audio_sample_rate_at: RateAt,
-    audio_gaps: Gaps,
+    mut probe: Probe,
+    mut first_audio_packet: FirstPacket,
+    mut audio_sample_rate_at: RateAt,
+    mut audio_gaps: Gaps,
 ) -> Result<PreparedExport, ExportCommandError>
 where
     Discover: FnOnce(&Path) -> Result<FfmpegPaths, LocateError>,
-    Probe: FnOnce(&Path, &Path, &AtomicBool) -> Result<MediaProbe, ProbeError>,
+    Probe: FnMut(&Path, &Path, &AtomicBool) -> Result<MediaProbe, ProbeError>,
     FirstPacket:
-        FnOnce(&Path, &Path, u32, &AtomicBool) -> Result<Option<FirstAudioPacket>, ProbeError>,
-    RateAt: FnOnce(&Path, &Path, u64, u32, &AtomicBool) -> Result<Option<u32>, ProbeError>,
-    Gaps: FnOnce(&Path, &Path, &AudioGapRead<'_>, &AtomicBool) -> Result<AudioFrames, ProbeError>,
+        FnMut(&Path, &Path, u32, &AtomicBool) -> Result<Option<FirstAudioPacket>, ProbeError>,
+    RateAt: FnMut(&Path, &Path, u64, u32, &AtomicBool) -> Result<Option<u32>, ProbeError>,
+    Gaps: FnMut(&Path, &Path, &AudioGapRead<'_>, &AtomicBool) -> Result<AudioFrames, ProbeError>,
 {
     let PrepareRequest {
         request,
@@ -548,6 +675,10 @@ where
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
 
+    // The sources and the pieces, checked before any step reaches outside the process: a request
+    // that does not hold together is a fault of the frontend, and no read can change that.
+    let resolved = resolve_request(request)?;
+
     stage.enter(PreparationStage::Discovery);
     let executables = discover(app_data_directory)
         .map_err(|_| ExportCommandError::new(ExportErrorCode::FfmpegPairMissing))?;
@@ -555,71 +686,99 @@ where
     // The preset of the request, which `start_export` checked. The settings file is not read
     // here, so an edit of the preset after the command accepted the run changes nothing.
     let preset = &request.preset;
-
-    let source = PathBuf::from(&request.source_path);
     let destination = PathBuf::from(&request.output_path);
 
-    // Before the re-probe, the first of the steps here that can spend tens of seconds.
-    if canceled() {
-        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
-    }
-    stage.enter(PreparationStage::RevisionCheck);
-    // A cancel that arrives during the read of the revision wins over a mismatch.
-    check_source_revision(request).map_err(|error| {
+    // The bounded steps run once for each source, in the order of its first piece (ADR 053):
+    // the revision check, the re-probe, the correction of the audio, the FLV input and the read
+    // of the gaps. `run_export_job_with` multiplies the time limit of preparation by the number of
+    // sources (ADR 050).
+    let mut paths: Vec<PathBuf> = Vec::with_capacity(resolved.sources.len());
+    let mut probes: Vec<MediaProbe> = Vec::with_capacity(resolved.sources.len());
+    let mut frames: Vec<AudioFrames> = Vec::with_capacity(resolved.sources.len());
+    let mut flv_inputs: Vec<Option<FlvInput>> = Vec::with_capacity(resolved.sources.len());
+    for (index, wire) in resolved.sources.iter().enumerate() {
+        let source = PathBuf::from(&wire.path);
+        let pieces = resolved.pieces_of(index);
+
+        // Before the re-probe, the first of the steps here that can spend tens of seconds.
         if canceled() {
-            ExportCommandError::new(ExportErrorCode::Canceled)
-        } else {
-            error
+            return Err(ExportCommandError::new(ExportErrorCode::Canceled));
         }
-    })?;
-    // After the read of the revision, which can block on a share. A helper that the watchdog
-    // abandoned during that read must not start ffprobe when the read returns.
-    if canceled() {
-        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
-    }
-    // The re-probe stops on the flag, so a cancel does not wait for `PROBE_TIMEOUT` on a share
-    // that stopped answering.
-    stage.enter(PreparationStage::ReProbe);
-    let mut probe = probe(&executables.ffprobe, &source, cancel).map_err(|error| match error {
-        ProbeError::Canceled => ExportCommandError::new(ExportErrorCode::Canceled),
-        other => map_reprobe_error(other),
-    })?;
-    let rate_readable = rate_readable_from_packets(&probe.format_names);
-    if let Some(audio) = probe.audio.as_mut().filter(|audio| {
-        request.streams.writes_audio() && (audio.sample_rate.is_some() || rate_readable)
-    }) {
+        stage.enter_for(PreparationStage::RevisionCheck, Some(index));
+        // A cancel that arrives during the read of the revision wins over a mismatch.
+        check_source_revision(wire).map_err(|error| {
+            if canceled() {
+                ExportCommandError::new(ExportErrorCode::Canceled)
+            } else {
+                error
+            }
+        })?;
+        // After the read of the revision, which can block on a share. A helper that the watchdog
+        // abandoned during that read must not start ffprobe when the read returns.
+        if canceled() {
+            return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+        }
+        // The re-probe stops on the flag, so a cancel does not wait for `PROBE_TIMEOUT` on a
+        // share that stopped answering.
+        stage.enter(PreparationStage::ReProbe);
+        let mut source_probe =
+            probe(&executables.ffprobe, &source, cancel).map_err(|error| match error {
+                ProbeError::Canceled => ExportCommandError::new(ExportErrorCode::Canceled),
+                other => map_reprobe_error(other),
+            })?;
+        let rate_readable = rate_readable_from_packets(&source_probe.format_names);
+        if let Some(audio) = source_probe.audio.as_mut().filter(|audio| {
+            request.streams.writes_audio() && (audio.sample_rate.is_some() || rate_readable)
+        }) {
+            stage.enter(PreparationStage::AudioReads);
+            correct_audio_probe(
+                &executables.ffprobe,
+                &source,
+                audio,
+                cancel,
+                &mut first_audio_packet,
+                &mut audio_sample_rate_at,
+            )?;
+        }
+        // ADR 046: an FLV source opens each input as its head and a slice from a keyframe, so
+        // the reads of the export, the read of the audio gaps included, do not read it from its
+        // start. FFmpeg runs in the directory of the head and names it by its file name, so one
+        // source of an export at most opens its inputs so; a later FLV source keeps the input
+        // seek, which reads more and is correct.
+        stage.enter(PreparationStage::FlvInput);
+        let flv_input = if flv_inputs.iter().any(Option::is_some) {
+            if source_probe.format_names.iter().any(|name| name == "flv") {
+                eprintln!("export: a second FLV source keeps the input seek");
+            }
+            None
+        } else {
+            flv_input_for(
+                &executables.ffprobe,
+                &source,
+                &source_probe,
+                &pieces,
+                request.streams,
+                app_data_directory,
+                preview_windows,
+                cancel,
+            )?
+        };
         stage.enter(PreparationStage::AudioReads);
-        correct_audio_probe(
+        let audio_frames = read_audio_gaps(
             &executables.ffprobe,
             &source,
-            audio,
+            &source_probe,
+            &pieces,
+            request.streams,
+            flv_input.as_ref(),
             cancel,
-            first_audio_packet,
-            audio_sample_rate_at,
+            &mut audio_gaps,
         )?;
+        paths.push(source);
+        probes.push(source_probe);
+        frames.push(audio_frames);
+        flv_inputs.push(flv_input);
     }
-    // ADR 046: an FLV source opens each input as its head and a slice from a keyframe, so the
-    // reads of the export, the read of the audio gaps included, do not read it from its start.
-    stage.enter(PreparationStage::FlvInput);
-    let flv_input = flv_input_for(
-        &executables.ffprobe,
-        &source,
-        &probe,
-        request,
-        app_data_directory,
-        preview_windows,
-        cancel,
-    )?;
-    stage.enter(PreparationStage::AudioReads);
-    let audio_frames = read_audio_gaps(
-        &executables.ffprobe,
-        &source,
-        &probe,
-        request,
-        flv_input.as_ref(),
-        cancel,
-        audio_gaps,
-    )?;
     // After the reads of the audio, which can each spend tens of seconds. A cancel that arrives as
     // the last one ends must not reach the plan, which can refuse what these reads found with a
     // code of its own, such as `sourceHasNoAudio`.
@@ -627,33 +786,36 @@ where
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
 
-    let segments: Vec<SegmentBoundary> = request
-        .segments
+    let plan_sources: Vec<PlanSource<'_>> = paths
         .iter()
-        .map(|segment| SegmentBoundary {
-            in_pts: segment.in_pts,
-            out_pts: segment.out_pts,
+        .zip(&probes)
+        .zip(&frames)
+        .map(|((path, probe), audio_frames)| PlanSource {
+            path,
+            probe,
+            audio_frames,
         })
         .collect();
 
     // Obligation 1: planning runs before the reservation. A destination that is a directory
     // reserves successfully and fails only at the rename, after the whole encode.
-    stage.enter(PreparationStage::Plan);
+    stage.enter_for(PreparationStage::Plan, None);
     let mut plan = build_plan(
         &PlanRequest {
-            source: &source,
+            sources: &plan_sources,
             destination: &destination,
-            segments: &segments,
-            probe: &probe,
+            segments: &resolved.pieces,
             preset,
             streams: request.streams,
-            audio_frames: &audio_frames,
             audio_mode: request.audio_mode,
         },
         inspect_path,
     )
     .map_err(ExportCommandError::new)?;
-    plan.flv_input = flv_input.filter(|flv| flv.segment_offsets.len() == plan.segments.len());
+    for (index, flv_input) in flv_inputs.into_iter().enumerate() {
+        let pieces = resolved.pieces_of(index).len();
+        plan.sources[index].flv_input = flv_input.filter(|flv| flv.segment_offsets.len() == pieces);
+    }
     // A copy that the plan refused is no error: the export encodes the audio, or writes none
     // (ADR 048).
     if let Some(refusal) = plan.audio_copy_refusal {
@@ -713,6 +875,7 @@ where
     Ok(PreparedExport {
         preset_id: preset.id.clone(),
         streams: request.streams,
+        segment_count: request.segment_count,
         plan,
         ffmpeg: executables.ffmpeg,
         ffprobe: executables.ffprobe,
@@ -818,8 +981,9 @@ where
     Ok(())
 }
 
-/// Read the gaps inside the audio stream of an export inside its segments, for the bound of the
-/// plan on the silence that the fills of the chains hold in memory (ADR 014 measurement 28).
+/// Read the gaps inside the audio stream of one source of an export inside its pieces, for the
+/// bound of the plan on the silence that the fills of the chains hold in memory (ADR 014
+/// measurement 28). `pieces` are the pieces of that source, in the units of its probe.
 ///
 /// The read runs when the export writes audio from a stream that holds packets and has a sample
 /// rate. Otherwise no chain reads the stream, or the plan refuses the audio, and the answer is
@@ -840,7 +1004,8 @@ fn read_audio_gaps<Gaps>(
     ffprobe: &Path,
     source: &Path,
     probe: &MediaProbe,
-    request: &ExportRequestWire,
+    pieces: &[SegmentBoundary],
+    streams: ExportStreams,
     flv: Option<&FlvInput>,
     cancel: &AtomicBool,
     audio_gaps: Gaps,
@@ -851,16 +1016,15 @@ where
     let Some((audio, sample_rate)) = probe
         .audio
         .as_ref()
-        .filter(|audio| request.streams.writes_audio() && !audio.holds_no_packets)
+        .filter(|audio| streams.writes_audio() && !audio.holds_no_packets)
         .and_then(|audio| Some((audio, audio.sample_rate?)))
     else {
         return Ok(AudioFrames::default());
     };
-    if request.segments.is_empty() || request.segments.len() > MAX_EXPORT_SEGMENTS {
+    if pieces.is_empty() || pieces.len() > MAX_EXPORT_SEGMENTS {
         return Ok(AudioFrames::default());
     }
-    let ranges: Option<Vec<(Rational, Rational)>> = request
-        .segments
+    let ranges: Option<Vec<(Rational, Rational)>> = pieces
         .iter()
         .map(|segment| {
             let start = pts_seconds(segment.in_pts, probe.video_time_base)?;
@@ -890,9 +1054,9 @@ where
     }
 }
 
-/// The FLV input of an export of `source` (ADR 046), or `None` when the source keeps the input
-/// seek of ADR 014. The seek position of each segment is its In point less
-/// [`SEEK_MARGIN_SECONDS`], as the input seek would use it.
+/// The FLV input of `source` in an export (ADR 046), or `None` when the source keeps the input
+/// seek of ADR 014. `pieces` are the pieces of that source. The seek position of each is its In
+/// point less [`SEEK_MARGIN_SECONDS`], as the input seek would use it.
 ///
 /// The locate reads the file, which on a share that stopped answering can hold a read, so a
 /// watcher copies the cancel flag of the run into the flag of the reader, which stops between two
@@ -907,23 +1071,23 @@ fn flv_input_for(
     ffprobe: &Path,
     source: &Path,
     probe: &MediaProbe,
-    request: &ExportRequestWire,
+    pieces: &[SegmentBoundary],
+    streams: ExportStreams,
     app_data_directory: &Path,
     preview_windows: &PreviewWindows,
     cancel: &AtomicBool,
 ) -> Result<Option<FlvInput>, ExportCommandError> {
-    // The plan refuses a request with too many segments, so the locates of such a request would
+    // The plan refuses a request with too many pieces, so the locates of such a request would
     // be wasted.
     if !probe.format_names.iter().any(|name| name == "flv")
-        || request.segments.is_empty()
-        || request.segments.len() > MAX_EXPORT_SEGMENTS
+        || pieces.is_empty()
+        || pieces.len() > MAX_EXPORT_SEGMENTS
     {
         return Ok(None);
     }
     let margin = Rational::new(SEEK_MARGIN_SECONDS, 1)
         .expect("SEEK_MARGIN_SECONDS/1 always reduces to a valid Rational");
-    let positions: Option<Vec<Rational>> = request
-        .segments
+    let positions: Option<Vec<Rational>> = pieces
         .iter()
         .map(|segment| pts_seconds(segment.in_pts, probe.video_time_base)?.sub(margin))
         .collect();
@@ -970,7 +1134,7 @@ fn flv_input_for(
     };
     // The same condition as the read of the audio gaps: an export that writes no audio, or an
     // audio stream with no packets, needs no check of the audio.
-    let check_audio = request.streams.writes_audio()
+    let check_audio = streams.writes_audio()
         && probe
             .audio
             .as_ref()
@@ -1152,7 +1316,8 @@ const FLV_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(20
 /// The segments name frames of the revision that the user marked them against. An export that
 /// waited in the queue can find another file at the path, and its cut would then name other
 /// frames. The file is read the way `import_media` read it, so the two revisions compare as
-/// equals when the file did not change.
+/// equals when the file did not change. Preparation checks each source of the pieces, and the
+/// detail of a mismatch is the id of the source (ADR 053).
 ///
 /// The comparison has the limits of the revision of ADR 010. It does not see a replacement of
 /// the same size inside the same second of modification time, a copy that keeps the
@@ -1162,14 +1327,17 @@ const FLV_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(20
 /// A read that fails is not a mismatch. The re-probe and [`build_plan`] report a file that is
 /// gone, or that is no longer a regular file, with codes of their own. The frontend check of
 /// ADR 024 follows the same rule.
-fn check_source_revision(request: &ExportRequestWire) -> Result<(), ExportCommandError> {
-    let Some(expected) = request.expected_source_revision else {
+fn check_source_revision(source: &ExportSourceWire) -> Result<(), ExportCommandError> {
+    let Some(expected) = source.expected_revision else {
         return Ok(());
     };
-    match crate::commands::media::validate_media(&request.source_path) {
-        Ok(actual) if actual.size != expected.size || actual.mtime != expected.mtime => Err(
-            ExportCommandError::new(ExportErrorCode::SourceRevisionMismatch),
-        ),
+    match crate::commands::media::validate_media(&source.path) {
+        Ok(actual) if actual.size != expected.size || actual.mtime != expected.mtime => {
+            Err(ExportCommandError::with_detail(
+                ExportErrorCode::SourceRevisionMismatch,
+                source.id.clone(),
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -1193,9 +1361,9 @@ fn start_payload(run_id: &str, prepared: &PreparedExport) -> ExportStart {
         preset_id: prepared.preset_id.clone(),
         streams: prepared.streams,
         output_path: path_to_string(&prepared.plan.destination),
-        // `build_plan` rejects an empty request and caps the count at `MAX_EXPORT_SEGMENTS`,
-        // so this conversion cannot saturate for any plan that reaches here.
-        segment_count: u32::try_from(prepared.plan.segments.len()).unwrap_or(u32::MAX),
+        // The segments of the user, which `resolve_request` held between 1 and the number of
+        // pieces. The pieces are not what the user counts (ADR 053).
+        segment_count: prepared.segment_count,
         total_duration_us: duration_microseconds(prepared.plan.total_duration),
         expected_frames: prepared.plan.expected_frames(),
     }
@@ -1310,7 +1478,11 @@ fn spawn_export_job(
     }
 }
 
-/// How long preparation can last before the export thread stops waiting for it.
+/// How long preparation can last for each source before the export thread stops waiting for it.
+///
+/// Preparation runs its bounded steps once for each source of the pieces, so the limit of a run
+/// is this value multiplied by the number of its sources ([`PreparationLimits::for_sources`], ADR
+/// 050, ADR 053).
 ///
 /// Preparation runs up to three reads of FFprobe that each have
 /// [`crate::ffmpeg::probe::PROBE_TIMEOUT`] (the re-probe and the two reads of the audio, ADR 016),
@@ -1355,6 +1527,17 @@ impl PreparationLimits {
         grace: PREPARATION_CANCEL_GRACE,
         poll: PREPARATION_POLL,
     };
+
+    /// These limits for a preparation of `sources` sources: the timeout multiplied by their
+    /// number, at least one. Preparation runs its bounded steps once for each source (ADR 050,
+    /// ADR 053), so one limit covers the whole preparation.
+    fn for_sources(self, sources: usize) -> Self {
+        let factor = u32::try_from(sources.max(1)).unwrap_or(u32::MAX);
+        Self {
+            timeout: self.timeout.saturating_mul(factor),
+            ..self
+        }
+    }
 }
 
 /// The steps of [`prepare_export_with`], as the report of a timeout names them.
@@ -1412,24 +1595,71 @@ impl PreparationStage {
     }
 }
 
-/// The stage of preparation that runs now, shared by the helper thread that sets it and the
-/// export thread that reads it.
+/// The stage of preparation that runs now, and the source it runs for, shared by the helper
+/// thread that sets them and the export thread that reads them.
+///
+/// Both live in one atomic word, so a read never pairs the stage of one source with the number
+/// of another: the low 8 bits hold the stage, and the bits above them one more than the index of
+/// the source whose steps run, in the order of the first piece of each source, or 0 outside the
+/// steps of a source.
 #[derive(Debug, Default)]
-struct PreparationStageCell(AtomicU8);
+struct PreparationStageCell(AtomicUsize);
+
+/// The bits of [`PreparationStageCell`] that hold the stage.
+const STAGE_BITS: u32 = 8;
 
 impl PreparationStageCell {
-    /// Record that `stage` starts now.
+    /// Record that `stage` starts now, for the source whose steps run already, if any.
     fn enter(&self, stage: PreparationStage) {
-        self.0.store(stage as u8, Ordering::SeqCst);
+        let stage = stage as usize;
+        // Keep the source bits, and replace the stage bits, in one exchange.
+        let mut word = self.0.load(Ordering::SeqCst);
+        loop {
+            let next = (word >> STAGE_BITS << STAGE_BITS) | stage;
+            match self
+                .0
+                .compare_exchange(word, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return,
+                Err(current) => word = current,
+            }
+        }
+    }
+
+    /// Record, in one store, that `stage` starts now for the source `index`, or, with `None`,
+    /// outside the steps of a source.
+    fn enter_for(&self, stage: PreparationStage, index: Option<usize>) {
+        let source = index.map_or(0, |index| index.saturating_add(1));
+        self.0
+            .store((source << STAGE_BITS) | stage as usize, Ordering::SeqCst);
+    }
+
+    /// The stage that runs now, and the source it runs for, read together.
+    fn read(&self) -> (PreparationStage, Option<usize>) {
+        let word = self.0.load(Ordering::SeqCst);
+        let stage = PreparationStage::ALL
+            .get(word & ((1 << STAGE_BITS) - 1))
+            .copied()
+            .unwrap_or(PreparationStage::Discovery);
+        (stage, (word >> STAGE_BITS).checked_sub(1))
+    }
+
+    /// The detail of `preparationTimedOut`: the stage, and the source when a step of a source runs,
+    /// counted from 1 in the order of the first piece of each source (ADR 053). It is a diagnostic
+    /// for a bug report (ADR 011).
+    fn detail(&self) -> String {
+        let (stage, source) = self.read();
+        let stage = stage.name();
+        match source {
+            Some(index) => format!("preparation stage: {stage}, source {}", index + 1),
+            None => format!("preparation stage: {stage}"),
+        }
     }
 
     /// The stage that runs now. A cell that no step set yet reads as [`PreparationStage::Discovery`].
+    #[cfg(test)]
     fn current(&self) -> PreparationStage {
-        let index = usize::from(self.0.load(Ordering::SeqCst));
-        PreparationStage::ALL
-            .get(index)
-            .copied()
-            .unwrap_or(PreparationStage::Discovery)
+        self.read().0
     }
 }
 
@@ -1460,7 +1690,7 @@ fn run_export_job(app: &tauri::AppHandle, slot: ExportSlot, job: ExportJob) {
     );
     run_export_job_with(
         slot,
-        PreparationLimits::PRODUCTION,
+        PreparationLimits::PRODUCTION.for_sources(job.request.sources.len()),
         move |cancel, stage| {
             // This runs on the helper thread, which owns the job. `cancel` is the stop flag of
             // the helper, which the watchdog sets on a cancel of the run and at the deadline. The
@@ -1626,14 +1856,14 @@ fn watch_preparation(
         }
         if started.elapsed() >= limits.timeout {
             // Read before the stop, which can move the helper to its next step.
-            let running = stage.current();
+            let running = stage.detail();
             stop_preparation(receiver, stop, limits.grace);
             if cancel.load(Ordering::SeqCst) {
                 return Err(ExportCommandError::new(ExportErrorCode::Canceled));
             }
             return Err(ExportCommandError::with_detail(
                 ExportErrorCode::PreparationTimedOut,
-                format!("preparation stage: {}", running.name()),
+                running,
             ));
         }
     }
@@ -1812,10 +2042,7 @@ where
             arguments: &arguments,
             audio_arguments: audio_arguments.as_deref(),
             // The inputs of an FLV source name the head by its file name (ADR 046).
-            working_directory: plan
-                .flv_input
-                .as_ref()
-                .map(|flv| flv.working_directory.as_path()),
+            working_directory: plan.working_directory(),
             cancel: cancel.as_ref(),
             poll: PROGRESS_POLL_INTERVAL,
         },
@@ -2305,12 +2532,17 @@ mod tests {
 
     fn sample_plan(destination: &Path) -> ExportPlan {
         ExportPlan {
-            source: PathBuf::from("/media/source.mp4"),
+            sources: vec![crate::ffmpeg::export::PlannedSource {
+                path: PathBuf::from("/media/source.mp4"),
+                video_stream_index: 0,
+                fit: None,
+                audio: None,
+                flv_input: None,
+            }],
             destination: destination.to_path_buf(),
             video: Some(PlannedVideo {
-                stream_index: 0,
                 timing: OutputTiming::ConstantFrameRate(Rational::new(30, 1).unwrap()),
-                resolution: None,
+                canvas: None,
                 encoder: "libx264".to_owned(),
                 quality: Quality {
                     kind: QualityKind::Crf,
@@ -2322,6 +2554,7 @@ mod tests {
             }),
             audio: None,
             segments: vec![PlannedSegment {
+                source: 0,
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
                 seek_seconds: None,
@@ -2334,7 +2567,6 @@ mod tests {
             total_duration: Rational::new(1, 1).unwrap(),
             copied_audio: None,
             audio_copy_refusal: None,
-            flv_input: None,
         }
     }
 
@@ -2571,33 +2803,47 @@ mod tests {
         // In points at 3.5 s and 1 s, in that concat order, in the time base of the probe.
         let at = |millis: i64| Pts::new(millis * tb.den() / (1_000 * tb.num()));
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![
+                ExportPieceWire {
+                    source_id: "source".to_owned(),
+                    in_pts: at(3_500),
+                    out_pts: at(3_900),
+                },
+                ExportPieceWire {
+                    source_id: "source".to_owned(),
+                    in_pts: at(1_000),
+                    out_pts: at(1_500),
+                },
+            ],
+            segment_count: 1,
             output_path: directory
                 .path
                 .join("out.mp4")
                 .to_string_lossy()
                 .into_owned(),
-            segments: vec![
-                ExportSegmentBoundaryWire {
-                    in_pts: at(3_500),
-                    out_pts: at(3_900),
-                },
-                ExportSegmentBoundaryWire {
-                    in_pts: at(1_000),
-                    out_pts: at(1_500),
-                },
-            ],
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
         let app_data = directory.path.join("app");
         let windows = PreviewWindows::default();
+        let pieces = resolve_request(&request).unwrap().pieces;
         let run = |probe: &MediaProbe, cancel: &AtomicBool| {
             flv_input_for(
-                &ffprobe, &source, probe, &request, &app_data, &windows, cancel,
+                &ffprobe,
+                &source,
+                probe,
+                &pieces,
+                request.streams,
+                &app_data,
+                &windows,
+                cancel,
             )
         };
         // Both seek positions lie before the first keyframe, so both slices start at the first
@@ -2847,9 +3093,12 @@ mod tests {
     #[test]
     fn a_segment_boundary_crosses_as_a_decimal_string_not_a_number() {
         let request: ExportRequestWire = serde_json::from_value(serde_json::json!({
-            "sourcePath": "/media/source.mp4",
+            "sources": [{ "id": "a", "path": "/media/source.mp4" }],
+            "pieces": [
+                { "sourceId": "a", "inPts": "9007199254740993", "outPts": "9007199254740994" },
+            ],
+            "segmentCount": 1,
             "outputPath": "/movies/out.mp4",
-            "segments": [{ "inPts": "9007199254740993", "outPts": "9007199254740994" }],
             "preset": sample_preset("active"),
             "streams": "videoAndAudio",
             "audioMode": "encode",
@@ -2861,17 +3110,20 @@ mod tests {
         // The value below is above `Number.MAX_SAFE_INTEGER`, which is exactly why ADR 002
         // puts a `Pts` on the wire as a string: as a JSON number it would already have been
         // rounded before it reached this parser.
-        assert_eq!(request.segments[0].in_pts, Pts::new(9_007_199_254_740_993));
-        assert_eq!(request.segments[0].out_pts, Pts::new(9_007_199_254_740_994));
+        assert_eq!(request.pieces[0].in_pts, Pts::new(9_007_199_254_740_993));
+        assert_eq!(request.pieces[0].out_pts, Pts::new(9_007_199_254_740_994));
+        assert_eq!(request.pieces[0].source_id, "a");
+        assert_eq!(request.segment_count, 1);
     }
 
     /// A request payload in its wire form, with `streams` set to `streams` or left out, and the
     /// audio encoded.
     fn request_json(streams: Option<serde_json::Value>) -> serde_json::Value {
         let mut value = serde_json::json!({
-            "sourcePath": "/media/source.mp4",
+            "sources": [{ "id": "a", "path": "/media/source.mp4" }],
+            "pieces": [{ "sourceId": "a", "inPts": "0", "outPts": "90000" }],
+            "segmentCount": 1,
             "outputPath": "/movies/out.mp4",
-            "segments": [{ "inPts": "0", "outPts": "90000" }],
             "preset": sample_preset("active"),
             "audioMode": "encode",
         });
@@ -2997,23 +3249,49 @@ mod tests {
     fn a_request_carries_an_optional_expected_source_revision() {
         let without: ExportRequestWire =
             serde_json::from_value(request_json(Some(serde_json::json!("videoAndAudio")))).unwrap();
-        assert_eq!(without.expected_source_revision, None);
+        assert_eq!(without.sources[0].expected_revision, None);
 
         let mut value = request_json(Some(serde_json::json!("videoAndAudio")));
-        value["expectedSourceRevision"] =
+        value["sources"][0]["expectedRevision"] = serde_json::json!(null);
+        let null: ExportRequestWire = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(null.sources[0].expected_revision, None);
+
+        value["sources"][0]["expectedRevision"] =
             serde_json::json!({ "size": 4096, "mtime": 1_700_000_000 });
         let with: ExportRequestWire = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(
-            with.expected_source_revision,
+            with.sources[0].expected_revision,
             Some(ExpectedSourceRevisionWire {
                 size: 4096,
                 mtime: 1_700_000_000
             })
         );
 
-        // The path is the source path of the request, so a revision that names one is refused.
-        value["expectedSourceRevision"]["path"] = serde_json::json!("/media/other.mp4");
+        // The path is the path of the source, so a revision that names one is refused.
+        value["sources"][0]["expectedRevision"]["path"] = serde_json::json!("/media/other.mp4");
         assert!(serde_json::from_value::<ExportRequestWire>(value).is_err());
+    }
+
+    #[test]
+    fn a_request_of_the_old_wire_is_refused() {
+        // The wire of one source is gone (ADR 053). A frontend that still sent it is refused at
+        // the boundary, not read as a request of no pieces.
+        let old = serde_json::json!({
+            "sourcePath": "/media/source.mp4",
+            "outputPath": "/movies/out.mp4",
+            "segments": [{ "inPts": "0", "outPts": "90000" }],
+            "preset": sample_preset("active"),
+            "streams": "videoAndAudio",
+            "audioMode": "encode",
+        });
+        assert!(serde_json::from_value::<ExportRequestWire>(old).is_err());
+        let mut missing_count = request_json(Some(serde_json::json!("videoAndAudio")));
+        missing_count
+            .as_object_mut()
+            .unwrap()
+            .remove("segmentCount");
+        let error = serde_json::from_value::<ExportRequestWire>(missing_count).unwrap_err();
+        assert!(error.to_string().contains("segmentCount"), "{error}");
     }
 
     #[test]
@@ -3037,20 +3315,30 @@ mod tests {
         expected: Option<ExpectedSourceRevisionWire>,
     ) -> ExportRequestWire {
         ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: expected,
+            }],
+            pieces: vec![piece("source", 0, 90_000)],
+            segment_count: 1,
             output_path: source
                 .with_file_name("out.mp4")
                 .to_string_lossy()
                 .into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
-                in_pts: Pts::new(0),
-                out_pts: Pts::new(90_000),
-            }],
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: expected,
             new_batch: false,
+        }
+    }
+
+    /// A piece of the source `source_id` from `in_pts` to `out_pts`.
+    fn piece(source_id: &str, in_pts: i64, out_pts: i64) -> ExportPieceWire {
+        ExportPieceWire {
+            source_id: source_id.to_owned(),
+            in_pts: Pts::new(in_pts),
+            out_pts: Pts::new(out_pts),
         }
     }
 
@@ -3071,19 +3359,21 @@ mod tests {
         let marked = revision_of(&source);
 
         assert_eq!(
-            check_source_revision(&request_expecting(&source, None)),
+            check_source_revision(&request_expecting(&source, None).sources[0]),
             Ok(())
         );
         assert_eq!(
-            check_source_revision(&request_expecting(&source, Some(marked))),
+            check_source_revision(&request_expecting(&source, Some(marked)).sources[0]),
             Ok(())
         );
 
         // Another file of another size at the same path.
         fs::write(&source, b"replaced media").unwrap();
-        let error = check_source_revision(&request_expecting(&source, Some(marked))).unwrap_err();
+        let error = check_source_revision(&request_expecting(&source, Some(marked)).sources[0])
+            .unwrap_err();
         assert_eq!(error.code, ExportErrorCode::SourceRevisionMismatch);
-        assert_eq!(error.detail, None);
+        // The detail names the source of the request (ADR 053).
+        assert_eq!(error.detail.as_deref(), Some("source"));
 
         // The same size, written at another time.
         fs::write(&source, b"MEDIA").unwrap();
@@ -3094,7 +3384,8 @@ mod tests {
             .unwrap()
             .set_modified(earlier)
             .unwrap();
-        let error = check_source_revision(&request_expecting(&source, Some(marked))).unwrap_err();
+        let error = check_source_revision(&request_expecting(&source, Some(marked)).sources[0])
+            .unwrap_err();
         assert_eq!(error.code, ExportErrorCode::SourceRevisionMismatch);
     }
 
@@ -3109,7 +3400,7 @@ mod tests {
         };
 
         assert_eq!(
-            check_source_revision(&request_expecting(&gone, Some(expected))),
+            check_source_revision(&request_expecting(&gone, Some(expected)).sources[0]),
             Ok(())
         );
     }
@@ -3372,16 +3663,21 @@ mod tests {
         fs::write(&source, b"media").unwrap();
         let destination = directory.path.join("out.mp4");
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
-            output_path: destination.to_string_lossy().into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
+            segment_count: 1,
+            output_path: destination.to_string_lossy().into_owned(),
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
 
@@ -3445,12 +3741,18 @@ mod tests {
         // The frontend sends the preset as it loaded it from this file, so each preparation
         // below takes the preset from the file as it is at that time.
         let request = || ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
-            output_path: destination.to_string_lossy().into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
+            segment_count: 1,
+            output_path: destination.to_string_lossy().into_owned(),
             preset: settings::load(&directory.path)
                 .unwrap()
                 .settings
@@ -3460,7 +3762,6 @@ mod tests {
                 .unwrap(),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
         let prepare = || {
@@ -3519,7 +3820,7 @@ mod tests {
                 "pipe:0",
                 "-filter_complex",
                 concat!(
-                    "[vc]format=yuv420p[v];",
+                    "sws_flags=lanczos+accurate_rnd+full_chroma_int;[vc]format=yuv420p[v];",
                     "[0:0]trim=start_pts=0:end_pts=90000,setpts=PTS-STARTPTS,fps=30/1[v0];",
                     "anullsrc=r=48000:cl=mono,atrim=end_sample=48000,aformat=f=fltp:r=48000[pa0];",
                     "[v0][pa0]concat=n=1:v=1:a=1[vc][pa];[pa]anullsink",
@@ -3576,16 +3877,21 @@ mod tests {
         fs::write(&source, b"media").unwrap();
         let destination = directory.path.join("missing").join("out.mp4");
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
-            output_path: destination.to_string_lossy().into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
+            segment_count: 1,
+            output_path: destination.to_string_lossy().into_owned(),
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
 
@@ -3625,16 +3931,21 @@ mod tests {
         let destination = directory.path.join("folder");
         fs::create_dir_all(&destination).unwrap();
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
-            output_path: destination.to_string_lossy().into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
+            segment_count: 1,
+            output_path: destination.to_string_lossy().into_owned(),
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
 
@@ -3692,16 +4003,21 @@ mod tests {
         permissions.set_readonly(true);
         fs::set_permissions(&destination, permissions).unwrap();
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
-            output_path: destination.to_string_lossy().into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
                 in_pts: Pts::new(0),
                 out_pts: Pts::new(90_000),
             }],
+            segment_count: 1,
+            output_path: destination.to_string_lossy().into_owned(),
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
 
@@ -3779,20 +4095,25 @@ mod tests {
         let directory = TestDirectory::new();
         let discovered = RefCell::new(false);
         let request = ExportRequestWire {
-            source_path: "/media/source.mp4".to_owned(),
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: "/media/source.mp4".to_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            segment_count: 1,
             output_path: directory
                 .path
                 .join("out.mp4")
                 .to_string_lossy()
                 .into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
-                in_pts: Pts::new(0),
-                out_pts: Pts::new(90_000),
-            }],
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
 
@@ -3836,20 +4157,25 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let probed = RefCell::new(false);
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            segment_count: 1,
             output_path: directory
                 .path
                 .join("out.mp4")
                 .to_string_lossy()
                 .into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
-                in_pts: Pts::new(0),
-                out_pts: Pts::new(90_000),
-            }],
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
 
@@ -3893,20 +4219,25 @@ mod tests {
         fs::write(&source, b"media").unwrap();
         let cancel = AtomicBool::new(false);
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            segment_count: 1,
             output_path: directory
                 .path
                 .join("out.mp4")
                 .to_string_lossy()
                 .into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
-                in_pts: Pts::new(0),
-                out_pts: Pts::new(90_000),
-            }],
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
 
@@ -3989,17 +4320,21 @@ mod tests {
     fn a_missing_ffmpeg_pair_is_reported_before_the_source_is_probed() {
         let directory = TestDirectory::new();
         let request = ExportRequestWire {
-            source_path: "/media/source.mp4".to_owned(),
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: "/media/source.mp4".to_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![piece("source", 0, 90_000)],
+            segment_count: 1,
             output_path: directory
                 .path
                 .join("out.mp4")
                 .to_string_lossy()
                 .into_owned(),
-            segments: vec![],
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
 
@@ -4064,6 +4399,7 @@ mod tests {
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
             streams: ExportStreams::VideoAndAudio,
+            segment_count: 1,
             plan,
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
@@ -4097,6 +4433,7 @@ mod tests {
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
             streams: ExportStreams::VideoAndAudio,
+            segment_count: 1,
             plan,
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
@@ -4186,7 +4523,7 @@ mod tests {
         probe: MediaProbe,
         segments: &[(i64, i64)],
         cancel: &AtomicBool,
-        first_audio_packet: impl FnOnce(
+        first_audio_packet: impl FnMut(
             &Path,
             &Path,
             u32,
@@ -4211,13 +4548,13 @@ mod tests {
         probe: MediaProbe,
         segments: &[(i64, i64)],
         cancel: &AtomicBool,
-        first_audio_packet: impl FnOnce(
+        first_audio_packet: impl FnMut(
             &Path,
             &Path,
             u32,
             &AtomicBool,
         ) -> Result<Option<FirstAudioPacket>, ProbeError>,
-        audio_sample_rate_at: impl FnOnce(
+        audio_sample_rate_at: impl FnMut(
             &Path,
             &Path,
             u64,
@@ -4245,13 +4582,13 @@ mod tests {
         probe: MediaProbe,
         segments: &[(i64, i64)],
         cancel: &AtomicBool,
-        first_audio_packet: impl FnOnce(
+        first_audio_packet: impl FnMut(
             &Path,
             &Path,
             u32,
             &AtomicBool,
         ) -> Result<Option<FirstAudioPacket>, ProbeError>,
-        audio_gaps: impl FnOnce(
+        audio_gaps: impl FnMut(
             &Path,
             &Path,
             &AudioGapRead<'_>,
@@ -4277,20 +4614,20 @@ mod tests {
         probe: MediaProbe,
         segments: &[(i64, i64)],
         cancel: &AtomicBool,
-        first_audio_packet: impl FnOnce(
+        first_audio_packet: impl FnMut(
             &Path,
             &Path,
             u32,
             &AtomicBool,
         ) -> Result<Option<FirstAudioPacket>, ProbeError>,
-        audio_sample_rate_at: impl FnOnce(
+        audio_sample_rate_at: impl FnMut(
             &Path,
             &Path,
             u64,
             u32,
             &AtomicBool,
         ) -> Result<Option<u32>, ProbeError>,
-        audio_gaps: impl FnOnce(
+        audio_gaps: impl FnMut(
             &Path,
             &Path,
             &AudioGapRead<'_>,
@@ -4300,23 +4637,28 @@ mod tests {
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: segments
+                .iter()
+                .map(|(in_seconds, out_seconds)| ExportPieceWire {
+                    source_id: "source".to_owned(),
+                    in_pts: Pts::new(in_seconds * 90_000),
+                    out_pts: Pts::new(out_seconds * 90_000),
+                })
+                .collect(),
+            segment_count: 1,
             output_path: directory
                 .path
                 .join("out.m4a")
                 .to_string_lossy()
                 .into_owned(),
-            segments: segments
-                .iter()
-                .map(|(in_seconds, out_seconds)| ExportSegmentBoundaryWire {
-                    in_pts: Pts::new(in_seconds * 90_000),
-                    out_pts: Pts::new(out_seconds * 90_000),
-                })
-                .collect(),
             preset: sample_preset("active"),
             streams,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
         prepare_export_with(
@@ -4334,7 +4676,10 @@ mod tests {
                     origin: ExecutableOrigin::Path,
                 })
             },
-            |_, _, _| Ok(probe),
+            {
+                let mut probe = Some(probe);
+                move |_, _, _| Ok(probe.take().expect("one source is probed once"))
+            },
             first_audio_packet,
             audio_sample_rate_at,
             audio_gaps,
@@ -4450,7 +4795,7 @@ mod tests {
     /// A read of the first audio packet that finds it at `seconds`.
     fn first_packet_at(
         seconds: i64,
-    ) -> impl FnOnce(&Path, &Path, u32, &AtomicBool) -> Result<Option<FirstAudioPacket>, ProbeError>
+    ) -> impl FnMut(&Path, &Path, u32, &AtomicBool) -> Result<Option<FirstAudioPacket>, ProbeError>
     {
         move |_, _, _, _| Ok(Some(packet_at(seconds)))
     }
@@ -4709,7 +5054,10 @@ mod tests {
                 &[(5, 110)],
                 cancel,
                 first_packet_unread,
-                move |_, _, _, _| gaps,
+                {
+                    let mut gaps = Some(gaps);
+                    move |_, _, _, _| gaps.take().expect("one source is read once")
+                },
             )
         };
         let failed = ProbeError::ProcessFailed {
@@ -4830,7 +5178,15 @@ mod tests {
         )
         .unwrap();
         let audio = prepared.plan.audio.as_ref().unwrap();
-        assert_eq!(audio.silence_layout.as_deref(), Some("stereo"));
+        assert_eq!(
+            prepared.plan.sources[0]
+                .audio
+                .as_ref()
+                .unwrap()
+                .silence_layout
+                .as_deref(),
+            Some("stereo")
+        );
         assert_eq!(audio.expected_duration, Rational::new(3, 1).unwrap());
         // One process: no chain reads the stream, so nothing waits for it.
         assert!(prepared.audio_arguments.is_none());
@@ -4862,7 +5218,14 @@ mod tests {
             first_packet_unread,
         )
         .unwrap();
-        assert_eq!(prepared.plan.audio.as_ref().unwrap().silence_layout, None);
+        assert_eq!(
+            prepared.plan.sources[0]
+                .audio
+                .as_ref()
+                .unwrap()
+                .silence_layout,
+            None
+        );
         assert!(audio_graph_of(&prepared).contains("[0:1]aformat=r=48000,atrim="));
     }
 
@@ -4884,7 +5247,14 @@ mod tests {
                 no_first_packet,
             )
             .unwrap();
-            assert_eq!(prepared.plan.audio.as_ref().unwrap().silence_layout, None);
+            assert_eq!(
+                prepared.plan.sources[0]
+                    .audio
+                    .as_ref()
+                    .unwrap()
+                    .silence_layout,
+                None
+            );
             assert!(audio_graph_of(&prepared).contains("[0:1]aformat=r=48000,atrim="));
         }
         // A count of zero contradicts nothing.
@@ -4900,7 +5270,12 @@ mod tests {
             no_first_packet,
         )
         .unwrap();
-        assert!(prepared.plan.audio.unwrap().silence_layout.is_some());
+        assert!(prepared.plan.sources[0]
+            .audio
+            .as_ref()
+            .unwrap()
+            .silence_layout
+            .is_some());
     }
 
     #[test]
@@ -5083,7 +5458,7 @@ mod tests {
                 true
             ))
         );
-        let audio = prepared.plan.audio.as_ref().unwrap();
+        let audio = prepared.plan.sources[0].audio.as_ref().unwrap();
         assert_eq!(audio.sample_rate, 44_100);
         // The ticks of the cut count that rate: one second is 44100 of them.
         assert_eq!(prepared.plan.segments[0].audio_out_tick, Some(44_100));
@@ -5124,7 +5499,10 @@ mod tests {
                 &[(20, 30)],
                 &AtomicBool::new(false),
                 first_packet_at(12),
-                move |_, _, _, _, _| failure,
+                {
+                    let mut failure = Some(failure);
+                    move |_, _, _, _, _| failure.take().expect("one source is read once")
+                },
             ) {
                 Err(error) => error,
                 Ok(_) => panic!("{shown}: the rate stays unknown"),
@@ -5255,20 +5633,25 @@ mod tests {
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            segment_count: 1,
             output_path: directory
                 .path
                 .join("out.mp4")
                 .to_string_lossy()
                 .into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
-                in_pts: Pts::new(0),
-                out_pts: Pts::new(90_000),
-            }],
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
-            expected_source_revision: None,
             new_batch: false,
         };
         let error = prepare_export_with(
@@ -5346,7 +5729,10 @@ mod tests {
                 sample_probe_with_a_missed_audio_start(),
                 &[(0, 1)],
                 &AtomicBool::new(false),
-                move |_, _, _, _| Err(failure),
+                {
+                    let mut failure = Some(failure);
+                    move |_, _, _, _| Err(failure.take().expect("one source is read once"))
+                },
             )
             .unwrap_or_else(|error| panic!("{shown}: {:?}", error.code));
             assert_eq!(command(prepared), expected, "{shown}");
@@ -5365,9 +5751,12 @@ mod tests {
                 sample_probe_with_a_missed_audio_start(),
                 &[(0, 1)],
                 &AtomicBool::new(false),
-                move |_, _, _, cancel| {
-                    cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-                    answer
+                {
+                    let mut answer = Some(answer);
+                    move |_, _, _, cancel| {
+                        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                        answer.take().expect("one source is read once")
+                    }
                 },
             ) {
                 Err(error) => error,
@@ -5385,15 +5774,19 @@ mod tests {
         let mut plan = sample_plan(destination);
         plan.video = None;
         plan.audio = Some(crate::ffmpeg::export::PlannedAudio {
-            stream_index: 1,
-            sample_rate: 48_000,
             output_sample_rate: 48_000,
             output_channels: AudioChannels::Stereo,
+            output_layout: Some("stereo".to_owned()),
+            absent_layout: "stereo".to_owned(),
             encoder: "aac".to_owned(),
             bitrate: None,
             options: vec![],
             // The source audio covers the whole segment.
             expected_duration: Rational::new(1, 1).unwrap(),
+        });
+        plan.sources[0].audio = Some(crate::ffmpeg::export::SourceAudio {
+            stream_index: 1,
+            sample_rate: 48_000,
             silence_layout: None,
         });
         plan.segments[0].audio_in_tick = Some(0);
@@ -5647,6 +6040,16 @@ mod tests {
         assert_eq!(error.code, ExportErrorCode::PreparationTimedOut);
         assert_eq!(error.detail.as_deref(), Some("preparation stage: reProbe"));
         assert_eq!(registry.active_run_id(), None);
+        // A step of a source names the source too, counted from 1.
+        let cell = PreparationStageCell::default();
+        cell.enter_for(PreparationStage::RevisionCheck, Some(1));
+        assert_eq!(cell.detail(), "preparation stage: revisionCheck, source 2");
+        // A later stage of the same source keeps its number.
+        cell.enter(PreparationStage::AudioReads);
+        assert_eq!(cell.detail(), "preparation stage: audioReads, source 2");
+        assert_eq!(cell.current(), PreparationStage::AudioReads);
+        cell.enter_for(PreparationStage::Plan, None);
+        assert_eq!(cell.detail(), "preparation stage: plan");
         drop(release);
     }
 
@@ -5852,10 +6255,7 @@ mod tests {
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
         let mut request = request_expecting(&source, None);
-        request.segments = vec![ExportSegmentBoundaryWire {
-            in_pts: Pts::new(10 * 90_000),
-            out_pts: Pts::new(20 * 90_000),
-        }];
+        request.pieces = vec![piece("source", 10 * 90_000, 20 * 90_000)];
         let stage = PreparationStageCell::default();
         let seen = RefCell::new(Vec::new());
 
@@ -5910,7 +6310,13 @@ mod tests {
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
         let mut request = request_expecting(&source, None);
-        request.segments = vec![];
+        // A destination whose directory is missing: a refusal that only the plan makes.
+        request.output_path = directory
+            .path
+            .join("missing")
+            .join("out.mp4")
+            .to_string_lossy()
+            .into_owned();
         let stage = PreparationStageCell::default();
 
         let error = prepare_export_with(
@@ -5935,7 +6341,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.code, ExportErrorCode::NoSegments);
+        assert_eq!(error.code, ExportErrorCode::OutputDirectoryMissing);
         assert_eq!(stage.current(), PreparationStage::Plan);
     }
 
@@ -5965,6 +6371,7 @@ mod tests {
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
             streams: ExportStreams::AudioOnly,
+            segment_count: 1,
             plan: sample_audio_plan(destination),
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
@@ -6395,6 +6802,7 @@ mod tests {
             let prepared = PreparedExport {
                 preset_id: "active".to_owned(),
                 streams,
+                segment_count: 1,
                 plan: sample_plan(&destination),
                 ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
                 ffprobe: PathBuf::from("/usr/bin/ffprobe"),
@@ -6462,20 +6870,25 @@ mod tests {
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
+                in_pts: Pts::new(10 * 90_000),
+                out_pts: Pts::new(15 * 90_000),
+            }],
+            segment_count: 1,
             output_path: directory
                 .path
                 .join("out.mp4")
                 .to_string_lossy()
                 .into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
-                in_pts: Pts::new(10 * 90_000),
-                out_pts: Pts::new(15 * 90_000),
-            }],
             preset: sample_preset("active"),
             streams,
             audio_mode,
-            expected_source_revision: None,
             new_batch: false,
         };
         prepare_export_with(
@@ -6496,7 +6909,7 @@ mod tests {
             |_, _, _| Ok(sample_probe_with_a_missed_audio_start()),
             first_packet_unread,
             sample_rate_not_read,
-            move |_, _, _, _| Ok(frames),
+            move |_, _, _, _| Ok(frames.clone()),
         )
     }
 
@@ -6627,16 +7040,21 @@ mod tests {
             value: 30,
         };
         let request = ExportRequestWire {
-            source_path: source.to_string_lossy().into_owned(),
-            output_path: output.to_string_lossy().into_owned(),
-            segments: vec![ExportSegmentBoundaryWire {
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
                 in_pts: at(1_000),
                 out_pts: at(2_500),
             }],
+            segment_count: 1,
+            output_path: output.to_string_lossy().into_owned(),
             preset,
             streams,
             audio_mode: ExportAudioMode::Copy,
-            expected_source_revision: None,
             new_batch: false,
         };
         let prepared = prepare_export_with(
@@ -6764,6 +7182,7 @@ mod tests {
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
             streams: ExportStreams::VideoAndAudio,
+            segment_count: 1,
             plan,
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
@@ -6943,6 +7362,7 @@ mod tests {
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
             streams: ExportStreams::VideoAndAudio,
+            segment_count: 1,
             plan,
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
@@ -6986,5 +7406,774 @@ mod tests {
             !reserved.exists(),
             "a failed commit must still remove the reservation"
         );
+    }
+
+    // -- several sources with real ffmpeg (ADR 053) ------------------------------------------
+
+    /// Write the media file `path` with ffmpeg from `arguments`, which name the inputs, the
+    /// encoders and the muxer.
+    fn write_fixture(ffmpeg: &Path, path: &Path, arguments: &[&str]) {
+        let status = crate::procutil::command_without_console(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args(arguments)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{path:?}");
+    }
+
+    /// The four sources of ADR 053's test, 2 s each, in `directory`:
+    ///
+    /// - `a`: 1920x1080 at 30 fps with 48 kHz stereo audio.
+    /// - `b`: 1280x720 at 60 fps without audio.
+    /// - `c`: 1080x1920, stored as 1920x1080 with a display rotation of 90 degrees.
+    /// - `d`: anamorphic 720x480 at a SAR of 32:27 and 30000/1001 fps, with 44.1 kHz mono audio.
+    fn write_mixed_sources(ffmpeg: &Path, directory: &Path) -> [PathBuf; 4] {
+        let video = [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ];
+        let a = directory.join("a.mp4");
+        let mut arguments = vec![
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1920x1080:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "2",
+            "-ac",
+            "2",
+            "-c:a",
+            "aac",
+        ];
+        arguments.extend(video);
+        write_fixture(ffmpeg, &a, &arguments);
+
+        let b = directory.join("b.mp4");
+        let mut arguments = vec![
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1280x720:rate=60",
+            "-t",
+            "2",
+        ];
+        arguments.extend(video);
+        write_fixture(ffmpeg, &b, &arguments);
+
+        let upright = directory.join("c-upright.mp4");
+        let mut arguments = vec![
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1920x1080:rate=30",
+            "-t",
+            "2",
+        ];
+        arguments.extend(video);
+        write_fixture(ffmpeg, &upright, &arguments);
+        let c = directory.join("c.mp4");
+        write_fixture(
+            ffmpeg,
+            &c,
+            &[
+                "-display_rotation",
+                "90",
+                "-i",
+                &upright.to_string_lossy(),
+                "-c",
+                "copy",
+            ],
+        );
+
+        let d = directory.join("d.mp4");
+        let mut arguments = vec![
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=720x480:rate=30000/1001",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:sample_rate=44100",
+            "-t",
+            "2",
+            "-vf",
+            "setsar=32/27",
+            "-ac",
+            "1",
+            "-c:a",
+            "aac",
+        ];
+        arguments.extend(video);
+        write_fixture(ffmpeg, &d, &arguments);
+        [a, b, c, d]
+    }
+
+    /// Export `pieces`, each a source, an In point and an Out point in milliseconds, of the
+    /// sources `sources`, with real ffmpeg, to `output`, and return the prepared plan's expected
+    /// frames and the frames the run wrote.
+    fn real_export_of_pieces(
+        tools: &(PathBuf, PathBuf),
+        directory: &TestDirectory,
+        sources: &[&Path],
+        pieces: &[(usize, i64, i64)],
+        preset: Preset,
+        streams: ExportStreams,
+        output: &Path,
+    ) -> (Option<u64>, u64) {
+        let (ffmpeg, ffprobe) = tools;
+        let at = |source: usize, millis: i64| {
+            let probe = ffmpeg::probe_media(ffprobe, sources[source]).unwrap();
+            let tb = probe.video_time_base;
+            let ticks = Rational::new(millis, 1000)
+                .and_then(|seconds| seconds.div(tb))
+                .unwrap();
+            assert_eq!(ticks.den(), 1, "{millis} ms is a whole number of ticks");
+            Pts::new(ticks.num())
+        };
+        let request = ExportRequestWire {
+            sources: sources
+                .iter()
+                .enumerate()
+                .map(|(index, path)| ExportSourceWire {
+                    id: format!("source-{index}"),
+                    path: path.to_string_lossy().into_owned(),
+                    expected_revision: None,
+                })
+                .collect(),
+            pieces: pieces
+                .iter()
+                .map(|(source, from, to)| ExportPieceWire {
+                    source_id: format!("source-{source}"),
+                    in_pts: at(*source, *from),
+                    out_pts: at(*source, *to),
+                })
+                .collect(),
+            segment_count: 1,
+            output_path: output.to_string_lossy().into_owned(),
+            preset,
+            streams,
+            audio_mode: ExportAudioMode::Encode,
+            new_batch: false,
+        };
+        let prepared = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path.join("app"),
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: ffmpeg.clone(),
+                    ffprobe: ffprobe.clone(),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            ffmpeg::probe_media_until_canceled,
+            ffmpeg::probe_first_audio_packet,
+            ffmpeg::probe_audio_sample_rate_at,
+            ffmpeg::probe_audio_gaps,
+        )
+        .unwrap();
+        let expected = prepared.plan.expected_frames();
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+        // The run compares the frames that ffmpeg wrote with the expected count, and fails with
+        // `frameCountMismatch` when they differ.
+        let frames = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |_event| {},
+            |request, on_progress| run_export_process(request, on_progress),
+            ffmpeg::probe_output_audio,
+        )
+        .unwrap();
+        (expected, frames)
+    }
+
+    /// What ffprobe reads of the streams of a finished export.
+    #[derive(Debug, Default)]
+    struct OutputStreams {
+        width: u32,
+        height: u32,
+        frame_rate: String,
+        frames: u64,
+        video_seconds: f64,
+        audio_seconds: Option<f64>,
+        sample_rate: Option<u32>,
+        channels: Option<u32>,
+    }
+
+    /// Read the streams of `output` with ffprobe, counting the decoded video frames.
+    fn read_output_streams(ffprobe: &Path, output: &Path) -> OutputStreams {
+        let answer = crate::procutil::command_without_console(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-count_frames",
+                "-show_entries",
+                "stream=codec_type,width,height,r_frame_rate,nb_read_frames,duration,\
+                 sample_rate,channels",
+                "-of",
+                "json",
+            ])
+            .arg(output)
+            .output()
+            .unwrap();
+        assert!(answer.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&answer.stdout).unwrap();
+        let text = |stream: &serde_json::Value, key: &str| {
+            stream[key].as_str().map(str::to_owned).unwrap_or_default()
+        };
+        let mut streams = OutputStreams::default();
+        for stream in value["streams"].as_array().unwrap() {
+            match stream["codec_type"].as_str() {
+                Some("video") => {
+                    streams.width = u32::try_from(stream["width"].as_u64().unwrap()).unwrap();
+                    streams.height = u32::try_from(stream["height"].as_u64().unwrap()).unwrap();
+                    streams.frame_rate = text(stream, "r_frame_rate");
+                    streams.frames = text(stream, "nb_read_frames").parse().unwrap();
+                    streams.video_seconds = text(stream, "duration").parse().unwrap();
+                }
+                Some("audio") => {
+                    streams.audio_seconds = text(stream, "duration").parse().ok();
+                    streams.sample_rate = text(stream, "sample_rate").parse().ok();
+                    streams.channels = stream["channels"]
+                        .as_u64()
+                        .and_then(|count| u32::try_from(count).ok());
+                }
+                _ => {}
+            }
+        }
+        streams
+    }
+
+    #[test]
+    fn a_real_export_of_four_sources_fits_one_canvas_one_rate_and_one_audio_format() {
+        let Some(tools) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let sources = write_mixed_sources(&tools.0, &directory.path);
+        let sources: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
+        let output = directory.path.join("mixed.mp4");
+        let mut preset = sample_preset("active");
+        preset.audio_sample_rate = AudioSampleRateSetting::Source;
+        preset.audio_channels = AudioChannels::Source;
+        // `a` and `c` have the same display area, and `a` comes first: a landscape canvas of
+        // 1920x1080. The highest rate is the 60 fps of `b`. The audio takes the 48 kHz of `a` and
+        // its two channels, the most of the sources; `b` and `c` write silence.
+        let (expected, frames) = real_export_of_pieces(
+            &tools,
+            &directory,
+            &sources,
+            &[
+                (0, 0, 1_000),
+                (2, 500, 1_500),
+                (3, 0, 1_001),
+                (1, 250, 1_250),
+            ],
+            preset,
+            ExportStreams::VideoAndAudio,
+            &output,
+        );
+        // 60 frames for each piece of 1 s, and 1001 ms of `d` at 60 fps is 60.06, which rounds to 60.
+        assert_eq!(expected, Some(240));
+        assert_eq!(frames, 240);
+        let streams = read_output_streams(&tools.1, &output);
+        assert_eq!((streams.width, streams.height), (1920, 1080), "{streams:?}");
+        assert_eq!(streams.frame_rate, "60/1", "{streams:?}");
+        assert_eq!(streams.frames, 240, "{streams:?}");
+        assert_eq!(streams.sample_rate, Some(48_000), "{streams:?}");
+        assert_eq!(streams.channels, Some(2), "{streams:?}");
+        let audio = streams.audio_seconds.expect("the export writes audio");
+        assert!(
+            (audio - streams.video_seconds).abs() <= 1.0 / 60.0,
+            "{streams:?}"
+        );
+        // The rotated piece, from 1 s to 2 s of the output, is fitted, not stretched: 608 pixels
+        // wide at x = 656, with black bars beside it. The column at x = 100 lies in the bar, so
+        // its luma is black on every row; a stretched picture would put the test pattern there.
+        let column = crate::procutil::command_without_console(&tools.0)
+            .args(["-v", "error", "-ss", "1.5", "-i"])
+            .arg(&output)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                "crop=1:1080:100:0,format=gray",
+                "-f",
+                "rawvideo",
+                "-",
+            ])
+            .output()
+            .unwrap();
+        assert!(column.status.success());
+        assert_eq!(column.stdout.len(), 1080);
+        assert!(
+            column.stdout.iter().all(|luma| *luma <= 32),
+            "the pillarbox is not black: {:?}",
+            column.stdout.iter().max()
+        );
+    }
+
+    #[test]
+    fn a_real_export_rounds_a_half_frame_of_a_slower_source_as_the_plan_counts_it() {
+        // Three frames of 24 fps last 1/8 s, which is 7.5 frames at 60 fps. The plan rounds each
+        // piece on its own, half away from zero, to 8, and the end of `fps` must agree, or the
+        // run fails with `frameCountMismatch`. Two such pieces expect 16, and a single source of
+        // 24 fps in a preset of 60 fps does the same.
+        let Some(tools) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let film = directory.path.join("film.mp4");
+        write_fixture(
+            &tools.0,
+            &film,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=24",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "2",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+            ],
+        );
+        let fast = directory.path.join("fast.mp4");
+        write_fixture(
+            &tools.0,
+            &fast,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=60",
+                "-t",
+                "2",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+        );
+        let output = directory.path.join("rounded.mp4");
+        let (expected, frames) = real_export_of_pieces(
+            &tools,
+            &directory,
+            &[&film, &fast],
+            &[(0, 125, 250), (1, 0, 500), (0, 1_000, 1_125)],
+            sample_preset("active"),
+            ExportStreams::VideoAndAudio,
+            &output,
+        );
+        assert_eq!(expected, Some(46));
+        assert_eq!(frames, 46);
+        let streams = read_output_streams(&tools.1, &output);
+        assert_eq!(streams.frame_rate, "60/1", "{streams:?}");
+        assert_eq!(streams.frames, 46, "{streams:?}");
+        let audio = streams.audio_seconds.expect("the export writes audio");
+        assert!(
+            (audio - streams.video_seconds).abs() <= 1.0 / 60.0,
+            "{streams:?}"
+        );
+
+        let mut preset = sample_preset("active");
+        preset.frame_rate = FrameRateSetting::Rate(Rational::new(60, 1).unwrap());
+        let single = directory.path.join("single.mp4");
+        let (expected, frames) = real_export_of_pieces(
+            &tools,
+            &directory,
+            &[&film],
+            &[(0, 125, 250), (0, 1_000, 1_125)],
+            preset,
+            ExportStreams::VideoOnly,
+            &single,
+        );
+        assert_eq!((expected, frames), (Some(16), 16));
+    }
+
+    #[test]
+    fn a_real_export_converts_a_4_2_2_source_with_the_lanczos_scaler() {
+        // The `format` of the graph converts 4:2:2 to 4:2:0 with a scaler that ffmpeg inserts by
+        // itself. Without the scaler flags of the graph, that scaler is bicubic: ffmpeg 9.0.2 logs
+        // `auto_scale_0` with `flags:0x00000004`. The command of the export runs here at the debug
+        // log level, and every scaler that ffmpeg inserts must use the flags of the graph.
+        let Some((ffmpeg_path, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let source = directory.path.join("422.mp4");
+        write_fixture(
+            &ffmpeg_path,
+            &source,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x240:rate=25",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv422p",
+            ],
+        );
+        let probe = ffmpeg::probe_media(&ffprobe, &source).unwrap();
+        let end = Rational::new(1, 2)
+            .and_then(|seconds| seconds.div(probe.video_time_base))
+            .unwrap();
+        let request = ExportRequestWire {
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![piece("source", 0, end.num())],
+            segment_count: 1,
+            output_path: directory
+                .path
+                .join("420.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            preset: sample_preset("active"),
+            streams: ExportStreams::VideoOnly,
+            audio_mode: ExportAudioMode::Encode,
+            new_batch: false,
+        };
+        let prepared = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path.join("app"),
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: ffmpeg_path.clone(),
+                    ffprobe: ffprobe.clone(),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            ffmpeg::probe_media_until_canceled,
+            ffmpeg::probe_first_audio_packet,
+            ffmpeg::probe_audio_sample_rate_at,
+            ffmpeg::probe_audio_gaps,
+        )
+        .unwrap();
+        let mut arguments = prepared.arguments.clone();
+        let level = arguments.iter().position(|a| a == "-loglevel").unwrap() + 1;
+        arguments[level] = "debug".to_owned();
+        let answer = crate::procutil::command_without_console(&ffmpeg_path)
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert!(answer.status.success());
+        let log = String::from_utf8_lossy(&answer.stderr);
+        let scalers: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("auto_scale") && line.contains("flags:"))
+            .collect();
+        assert!(!scalers.is_empty(), "the conversion inserts a scaler");
+        // ffmpeg 9.0.2 writes the flags as a number here: 0x00042200 is `lanczos` (0x200),
+        // `full_chroma_int` (0x2000) and `accurate_rnd` (0x40000). Another build can write their
+        // names.
+        for line in scalers {
+            assert!(!line.contains("flags:0x00000004"), "{line}");
+            assert!(
+                line.contains("flags:0x00042200") || line.contains("lanczos"),
+                "{line}"
+            );
+        }
+    }
+
+    // -- several sources: the request and the preparation (ADR 053) --------------------------
+
+    /// A request of the sources `sources`, each an id and a path, and the pieces `pieces`, each
+    /// a source id and an interval in ticks of 1/90000.
+    fn request_of(sources: &[(&str, &Path)], pieces: &[(&str, i64, i64)]) -> ExportRequestWire {
+        let output = sources
+            .first()
+            .map(|(_, path)| path.with_file_name("out.mp4"))
+            .unwrap_or_else(|| PathBuf::from("/movies/out.mp4"));
+        ExportRequestWire {
+            sources: sources
+                .iter()
+                .map(|(id, path)| ExportSourceWire {
+                    id: (*id).to_owned(),
+                    path: path.to_string_lossy().into_owned(),
+                    expected_revision: None,
+                })
+                .collect(),
+            pieces: pieces
+                .iter()
+                .map(|(id, from, to)| piece(id, *from, *to))
+                .collect(),
+            segment_count: 1,
+            output_path: output.to_string_lossy().into_owned(),
+            preset: sample_preset("active"),
+            streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
+            new_batch: false,
+        }
+    }
+
+    #[test]
+    fn the_request_orders_its_sources_by_their_first_piece() {
+        let a = Path::new("/media/a.mp4");
+        let b = Path::new("/media/b.mp4");
+        let request = request_of(
+            &[("a", a), ("b", b)],
+            &[("b", 0, 90_000), ("a", 0, 90_000), ("b", 90_000, 180_000)],
+        );
+        let resolved = resolve_request(&request).unwrap();
+        let ids: Vec<&str> = resolved
+            .sources
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["b", "a"]);
+        let sources: Vec<usize> = resolved.pieces.iter().map(|piece| piece.source).collect();
+        assert_eq!(sources, vec![0, 1, 0]);
+        assert_eq!(resolved.pieces_of(0).len(), 2);
+        assert_eq!(resolved.pieces[2].in_pts, Pts::new(90_000));
+    }
+
+    #[test]
+    fn a_request_whose_sources_do_not_match_its_pieces_is_refused_with_a_code() {
+        let a = Path::new("/media/a.mp4");
+        let b = Path::new("/media/b.mp4");
+        let refused = |request: ExportRequestWire| resolve_request(&request).unwrap_err();
+        let invalid = |detail: &str| {
+            ExportCommandError::with_detail(ExportErrorCode::InvalidSources, detail.to_owned())
+        };
+
+        assert_eq!(
+            refused(request_of(&[("a", a)], &[])).code,
+            ExportErrorCode::NoSegments
+        );
+        let many: Vec<(&str, i64, i64)> = (0..=MAX_EXPORT_SEGMENTS)
+            .map(|_| ("a", 0, 90_000))
+            .collect();
+        assert_eq!(
+            refused(request_of(&[("a", a)], &many)).code,
+            ExportErrorCode::TooManySegments
+        );
+        assert_eq!(
+            refused(request_of(&[], &[("a", 0, 1)])),
+            invalid("no source")
+        );
+        assert_eq!(
+            refused(request_of(&[("", a)], &[("", 0, 1)])),
+            invalid("empty source id")
+        );
+        assert_eq!(
+            refused(request_of(&[("a", a), ("a", b)], &[("a", 0, 1)])),
+            invalid("duplicate source id: a")
+        );
+        assert_eq!(
+            refused(request_of(&[("a", a)], &[("a", 0, 1), ("c", 0, 1)])),
+            invalid("unknown source id: c")
+        );
+        assert_eq!(
+            refused(request_of(&[("a", a), ("b", b)], &[("a", 0, 1)])),
+            invalid("unused source id: b")
+        );
+
+        // The segment count lies between 1 and the number of pieces.
+        let mut request = request_of(&[("a", a)], &[("a", 0, 1), ("a", 1, 2)]);
+        for count in [0, 3] {
+            request.segment_count = count;
+            assert_eq!(
+                refused(request.clone()).code,
+                ExportErrorCode::InvalidSegmentCount
+            );
+        }
+        request.segment_count = 2;
+        assert!(resolve_request(&request).is_ok());
+
+        assert_eq!(
+            refused(request_of(&[("a", a)], &[("a", 5, 5)])).code,
+            ExportErrorCode::InvalidSegment
+        );
+    }
+
+    #[test]
+    fn the_run_reports_the_segment_count_of_the_request_and_not_its_pieces() {
+        let a = Path::new("/media/a.mp4");
+        let mut request = request_of(&[("a", a)], &[("a", 0, 1), ("a", 1, 2), ("a", 2, 3)]);
+        request.segment_count = 2;
+        assert_eq!(run_facts(&request).segment_count, 2);
+    }
+
+    #[test]
+    fn preparation_runs_once_for_each_source_in_the_order_of_its_first_piece() {
+        let directory = TestDirectory::new();
+        let first = directory.path.join("first.mp4");
+        let second = directory.path.join("second.mov");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second media").unwrap();
+        let mut request = request_of(
+            &[("first", &first), ("second", &second)],
+            &[
+                ("second", 0, 90_000),
+                ("first", 0, 90_000),
+                ("second", 90_000, 180_000),
+            ],
+        );
+        request.segment_count = 2;
+        let probed: RefCell<Vec<PathBuf>> = RefCell::new(Vec::new());
+        let reads: RefCell<Vec<(PathBuf, usize)>> = RefCell::new(Vec::new());
+        let mut with_audio = sample_probe();
+        with_audio.audio = Some(AudioProbe {
+            index: 1,
+            codec: Some("aac".to_owned()),
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            start_time: None,
+            duration: None,
+            tagged_end: None,
+            channel_layout: Some("stereo".to_owned()),
+            reported_packets: None,
+            holds_no_packets: false,
+        });
+
+        let prepared = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_, source, _| {
+                probed.borrow_mut().push(source.to_path_buf());
+                Ok(with_audio.clone())
+            },
+            first_packet_unread,
+            sample_rate_not_read,
+            |_, source, read, _| {
+                reads
+                    .borrow_mut()
+                    .push((source.to_path_buf(), read.ranges.len()));
+                Ok(AudioFrames::default())
+            },
+        )
+        .unwrap();
+
+        // Each source is probed once, and its gaps are read inside its own pieces only.
+        assert_eq!(*probed.borrow(), vec![second.clone(), first.clone()]);
+        assert_eq!(
+            *reads.borrow(),
+            vec![(second.clone(), 2), (first.clone(), 1)]
+        );
+        let paths: Vec<&Path> = prepared
+            .plan
+            .sources
+            .iter()
+            .map(|source| source.path.as_path())
+            .collect();
+        assert_eq!(paths, vec![second.as_path(), first.as_path()]);
+        assert_eq!(prepared.segment_count, 2);
+        assert_eq!(start_payload("1-0", &prepared).segment_count, 2);
+        assert_eq!(prepared.plan.segments.len(), 3);
+    }
+
+    #[test]
+    fn a_revision_mismatch_of_a_later_source_names_that_source() {
+        let directory = TestDirectory::new();
+        let first = directory.path.join("first.mp4");
+        let second = directory.path.join("second.mov");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second media").unwrap();
+        let mut request = request_of(
+            &[("first", &first), ("second", &second)],
+            &[("first", 0, 90_000), ("second", 0, 90_000)],
+        );
+        request.sources[0].expected_revision = Some(revision_of(&first));
+        request.sources[1].expected_revision = Some(ExpectedSourceRevisionWire {
+            size: 1,
+            mtime: 1_700_000_000,
+        });
+        let probed = Cell::new(0);
+
+        let error = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_, _, _| {
+                probed.set(probed.get() + 1);
+                Ok(sample_probe())
+            },
+            first_packet_unread,
+            sample_rate_not_read,
+            no_audio_gaps,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::SourceRevisionMismatch);
+        assert_eq!(error.detail.as_deref(), Some("second"));
+        // The first source passed its check and was probed; the second was not.
+        assert_eq!(probed.get(), 1);
+    }
+
+    #[test]
+    fn the_time_limit_of_preparation_grows_with_the_number_of_sources() {
+        let limits = |sources: usize| PreparationLimits::PRODUCTION.for_sources(sources).timeout;
+        assert_eq!(limits(1), PREPARATION_TIMEOUT);
+        assert_eq!(limits(0), PREPARATION_TIMEOUT);
+        assert_eq!(limits(3), PREPARATION_TIMEOUT * 3);
+        assert_eq!(PREPARATION_TIMEOUT, Duration::from_secs(180));
+        let limits = PreparationLimits::PRODUCTION.for_sources(4);
+        assert_eq!(limits.grace, PREPARATION_CANCEL_GRACE);
+        assert_eq!(limits.poll, PREPARATION_POLL);
     }
 }

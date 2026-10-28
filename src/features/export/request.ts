@@ -3,7 +3,7 @@
  *
  * Implements:
  * - Filtering timeline segments to the active source preserving array order (ADR 007).
- * - Dropping segment id and sourceId to construct ExportSegmentBoundary intervals.
+ * - One source and one piece for each active segment, in the wire of several sources (ADR 053).
  * - Boundary validation returning null when media or active segments are absent.
  */
 
@@ -12,8 +12,8 @@ import { getActiveSourceSegmentEntries } from "@/features/timeline/math";
 import type { Segment } from "@/types/project";
 import type {
   ExportAudioMode,
+  ExportPiece,
   ExportRequest,
-  ExportSegmentBoundary,
   ExportSourceRevision,
   ExportStreams,
 } from "./types";
@@ -72,9 +72,11 @@ export interface BuildExportRequestOptions {
  * - Pure function, independently testable without component mount or store side-effects.
  * - Multi-source aware: filters segments to `activeSourceId` while strictly PRESERVING ARRAY ORDER (ADR 007).
  * - Never sorts segments; array order is export order.
- * - Maps each Segment to `{ inPts, outPts }`, dropping `id` and `sourceId`.
- * - Forwards `preset`, `streams` and `audioMode` unchanged, and `expectedSourceRevision` when
- *   the caller gives one.
+ * - Names one source, the active source: its id is `activeSourceId`, its path the media path,
+ *   and its `expectedRevision` the `expectedSourceRevision` of the caller, when it gives one.
+ * - Maps each Segment to the piece `{ sourceId, inPts, outPts }` of that source, dropping its
+ *   `id`, and counts one segment for each piece.
+ * - Forwards `preset`, `streams` and `audioMode` unchanged.
  * - Returns `null` when there is no media, no output path, or no segments for the active source.
  *
  * @param options Export assembly parameters.
@@ -109,27 +111,33 @@ export function buildExportRequest(
     return null;
   }
 
-  // Preserve array order strictly; map to { inPts, outPts }
-  const segments: ExportSegmentBoundary[] = activeEntries.map((entry) => ({
+  const sourceId = options.activeSourceId;
+
+  // Preserve array order strictly: one piece of the one source for each segment.
+  const pieces: ExportPiece[] = activeEntries.map((entry) => ({
+    sourceId,
     inPts: entry.segment.inPts,
     outPts: entry.segment.outPts,
   }));
 
-  const request: ExportRequest = {
-    sourcePath: resolvedSourcePath,
-    outputPath: options.outputPath.trim(),
-    segments,
-    preset: options.preset,
-    streams: options.streams,
-    audioMode: options.audioMode,
+  const source: ExportRequest["sources"][number] = {
+    id: sourceId,
+    path: resolvedSourcePath,
   };
-
   if (options.expectedSourceRevision) {
-    request.expectedSourceRevision = {
+    source.expectedRevision = {
       size: options.expectedSourceRevision.size,
       mtime: options.expectedSourceRevision.mtime,
     };
   }
 
-  return request;
+  return {
+    sources: [source],
+    pieces,
+    segmentCount: pieces.length,
+    outputPath: options.outputPath.trim(),
+    preset: options.preset,
+    streams: options.streams,
+    audioMode: options.audioMode,
+  };
 }

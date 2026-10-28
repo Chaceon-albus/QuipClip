@@ -361,9 +361,10 @@ describe("ExportFlowController", () => {
             }),
         });
         const starting = store.getState().startExport({
-          sourcePath: "/media/video.mp4",
+          sources: [{ id: "source", path: "/media/video.mp4" }],
           outputPath: "/media/out.mp4",
-          segments: [{ inPts: "0" as Pts, outPts: "100" as Pts }],
+          pieces: [{ sourceId: "source", inPts: "0" as Pts, outPts: "100" as Pts }],
+          segmentCount: 1,
           preset: createPresetDraft("default", "Test preset"),
           streams: "videoAndAudio",
           audioMode: "encode",
@@ -1221,18 +1222,24 @@ describe("ExportFlowController", () => {
       const passedRequest = submit.mock.calls[0][0] as ExportRequest;
       // The request carries the stream choice and the audio mode that the setup step passed.
       expect(passedRequest).toStrictEqual({
-        sourcePath: "/media/source.mp4",
+        sources: [
+          {
+            id: sourceId,
+            path: "/media/source.mp4",
+            // The revision of the media, which the segments were marked against.
+            expectedRevision: { size: 4096, mtime: 1_700_000_000 },
+          },
+        ],
         outputPath: "/out/destination.mp4",
         preset,
         streams: "videoAndAudio",
         audioMode: "encode",
-        segments: [
-          { inPts: "1000", outPts: "2000" },
-          { inPts: "5000", outPts: "6000" },
-          { inPts: "3000", outPts: "4000" },
+        pieces: [
+          { sourceId, inPts: "1000", outPts: "2000" },
+          { sourceId, inPts: "5000", outPts: "6000" },
+          { sourceId, inPts: "3000", outPts: "4000" },
         ],
-        // The revision of the media, which the segments were marked against.
-        expectedSourceRevision: { size: 4096, mtime: 1_700_000_000 },
+        segmentCount: 3,
       });
     });
 
@@ -1258,7 +1265,7 @@ describe("ExportFlowController", () => {
 
       expect(await controller.confirm("p1", "videoAndAudio", "encode")).toBe(true);
       const request = submit.mock.calls[0][0] as ExportRequest;
-      expect(request).not.toHaveProperty("expectedSourceRevision");
+      expect(request.sources[0]).not.toHaveProperty("expectedRevision");
     });
 
     it("confirm saves activePresetId when it differs, and does not save when it is equal", async () => {

@@ -18,14 +18,16 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 function createValidRequest(overrides: Partial<ExportRequest> = {}): ExportRequest {
   return {
-    sourcePath: "/media/source.mp4",
+    sources: [{ id: "source", path: "/media/source.mp4" }],
     outputPath: "/media/output.mp4",
-    segments: [
+    pieces: [
       {
+        sourceId: "source",
         inPts: "0" as Pts,
         outPts: "1000" as Pts,
       },
     ],
+    segmentCount: 1,
     preset: createPresetDraft("mp4-h264", "Test preset"),
     streams: "videoAndAudio",
     audioMode: "encode",

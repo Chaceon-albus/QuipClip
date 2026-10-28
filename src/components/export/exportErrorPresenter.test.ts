@@ -184,6 +184,20 @@ describe("presentExportOutcome", () => {
     expect(emptyDetail.detail).toBeNull();
   });
 
+  it("hides the source id that a source revision mismatch carries as its detail", () => {
+    // The id names the source in the request (ADR 053). It is for the log, not for the user.
+    const outcome = presentExportOutcome({
+      status: "failed",
+      error: new ExportError({ code: "sourceRevisionMismatch", detail: "source-2" }),
+      tracking: false,
+    });
+
+    expect(outcome.detail).toBeNull();
+    expect(outcome.message).toStrictEqual({
+      key: "exportError.sourceRevisionMismatch",
+    });
+  });
+
   it("falls back to exportError.unknown for a failed status with no error", () => {
     expect(
       presentExportOutcome({ status: "failed", error: null, tracking: false }),
@@ -326,6 +340,8 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   preparationTimedOut: BACK,
   noSegments: null,
   tooManySegments: null,
+  invalidSources: null,
+  invalidSegmentCount: null,
   invalidSegment: null,
   sourcePathInvalid: null,
   sourceNotFound: null,

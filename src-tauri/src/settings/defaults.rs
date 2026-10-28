@@ -312,7 +312,7 @@ mod tests {
     use super::*;
     use crate::ffmpeg::export::{
         build_arguments, build_audio_arguments, build_audio_graph, build_plan, encoder_graph,
-        ExportPlan, ExportStreams, GraphShape, PathFacts, PathIdentity, PlanRequest,
+        ExportPlan, ExportStreams, GraphShape, PathFacts, PathIdentity, PlanRequest, PlanSource,
         SegmentBoundary,
     };
     use crate::ffmpeg::{AudioProbe, MediaProbe};
@@ -583,6 +583,7 @@ mod tests {
     /// The plan of [`command_of`].
     fn plan_of(preset: &Preset) -> ExportPlan {
         let segments = [SegmentBoundary {
+            source: 0,
             in_pts: Pts::new(900_000),
             out_pts: Pts::new(1_080_000),
         }];
@@ -591,13 +592,15 @@ mod tests {
         let parent = PathBuf::from(DESTINATION_PARENT);
         build_plan(
             &PlanRequest {
-                source: &source,
+                sources: &[PlanSource {
+                    path: &source,
+                    probe: &probe(),
+                    audio_frames: &crate::ffmpeg::AudioFrames::default(),
+                }],
                 destination: &destination,
                 segments: &segments,
-                probe: &probe(),
                 preset,
                 streams: ExportStreams::VideoAndAudio,
-                audio_frames: &crate::ffmpeg::AudioFrames::default(),
                 audio_mode: crate::ffmpeg::ExportAudioMode::Encode,
             },
             |path: &Path| {
@@ -640,7 +643,7 @@ mod tests {
             "pipe:0",
             "-filter_complex",
             &format!(
-                "[vc]format={pixel_format}[v];\
+                "sws_flags=lanczos+accurate_rnd+full_chroma_int;[vc]format={pixel_format}[v];\
                  [0:0]trim=start_pts=900000:end_pts=1080000,setpts=PTS-STARTPTS,fps=30/1[v0];\
                  anullsrc=r=48000:cl=mono,atrim=end_sample=96000,aformat=f=fltp:r=48000[pa0];\
                  [v0][pa0]concat=n=1:v=1:a=1[vc][pa];[pa]anullsink"

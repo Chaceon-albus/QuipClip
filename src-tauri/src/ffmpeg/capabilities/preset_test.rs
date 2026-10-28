@@ -199,11 +199,10 @@ fn audio_input_format(preset: &Preset) -> (u32, &'static str) {
 /// them. The other fields describe the 0.2 s input, and the argument builders do not read them.
 fn planned_video(preset: &Preset) -> PlannedVideo {
     PlannedVideo {
-        stream_index: 0,
         timing: OutputTiming::ConstantFrameRate(
             Rational::new(25, 1).expect("25/1 always reduces to a valid Rational"),
         ),
-        resolution: None,
+        canvas: None,
         encoder: preset.video_encoder.clone(),
         quality: preset.quality,
         pixel_format: preset.pixel_format.clone(),
@@ -218,16 +217,21 @@ fn planned_video(preset: &Preset) -> PlannedVideo {
 /// rate, and the channel setting is the preset's, so [`audio_output_format`] renders the same
 /// filter it renders for an export from a source of this rate.
 fn planned_audio(preset: &Preset, sample_rate: u32) -> PlannedAudio {
+    // One source, as `build_plan` resolves it: a preset that keeps the source layout names none.
+    let output_layout = match preset.audio_channels {
+        AudioChannels::Source => None,
+        AudioChannels::Stereo => Some("stereo".to_owned()),
+        AudioChannels::Mono => Some("mono".to_owned()),
+    };
     PlannedAudio {
-        stream_index: 0,
-        sample_rate,
         output_sample_rate: sample_rate,
         output_channels: preset.audio_channels,
+        absent_layout: output_layout.clone().unwrap_or_else(|| "stereo".to_owned()),
+        output_layout,
         encoder: preset.audio_encoder.clone(),
         bitrate: preset.audio_bitrate,
         options: preset.audio_options.clone(),
         expected_duration: Rational::new(1, 5).expect("1/5 always reduces to a valid Rational"),
-        silence_layout: None,
     }
 }
 
@@ -850,7 +854,7 @@ mod tests {
     fn export_command_of(preset: &Preset) -> Vec<String> {
         use crate::ffmpeg::export::{
             build_arguments, build_filter_graph, build_plan, ExportStreams, GraphShape, PathFacts,
-            PathIdentity, PlanRequest, SegmentBoundary,
+            PathIdentity, PlanRequest, PlanSource, SegmentBoundary,
         };
         use crate::ffmpeg::{AudioProbe, MediaProbe};
         use crate::time::Pts;
@@ -890,6 +894,7 @@ mod tests {
             }),
         };
         let segments = [SegmentBoundary {
+            source: 0,
             in_pts: Pts::new(900_000),
             out_pts: Pts::new(1_080_000),
         }];
@@ -898,13 +903,15 @@ mod tests {
         let parent = destination.parent().unwrap().to_path_buf();
         let plan = build_plan(
             &PlanRequest {
-                source: &source,
+                sources: &[PlanSource {
+                    path: &source,
+                    probe: &probe,
+                    audio_frames: &crate::ffmpeg::AudioFrames::default(),
+                }],
                 destination: &destination,
                 segments: &segments,
-                probe: &probe,
                 preset,
                 streams: ExportStreams::VideoAndAudio,
-                audio_frames: &crate::ffmpeg::AudioFrames::default(),
                 audio_mode: crate::ffmpeg::ExportAudioMode::Encode,
             },
             |path: &Path| {

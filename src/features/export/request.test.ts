@@ -25,7 +25,7 @@ describe("Export Request Builder", () => {
     };
   }
 
-  it("filters segments to the active source and drops id and sourceId", () => {
+  it("filters segments to the active source and sends one piece of that source for each", () => {
     const segments: Segment[] = [
       createSegment("seg-1", activeSourceId, "100", "200"),
       createSegment("seg-2", otherSourceId, "300", "400"),
@@ -43,15 +43,16 @@ describe("Export Request Builder", () => {
     });
 
     expect(result).toEqual({
-      sourcePath: "/media/input.mp4",
+      sources: [{ id: activeSourceId, path: "/media/input.mp4" }],
+      pieces: [
+        { sourceId: activeSourceId, inPts: "100", outPts: "200" },
+        { sourceId: activeSourceId, inPts: "500", outPts: "600" },
+      ],
+      segmentCount: 2,
       outputPath: "/media/output.mp4",
       preset,
       streams: "videoAndAudio",
       audioMode: "encode",
-      segments: [
-        { inPts: "100", outPts: "200" },
-        { inPts: "500", outPts: "600" },
-      ],
     });
   });
 
@@ -74,11 +75,12 @@ describe("Export Request Builder", () => {
     });
 
     expect(result).not.toBeNull();
-    expect(result?.segments).toEqual([
-      { inPts: "8000", outPts: "9000" },
-      { inPts: "1000", outPts: "2000" },
-      { inPts: "4000", outPts: "5000" },
+    expect(result?.pieces).toEqual([
+      { sourceId: activeSourceId, inPts: "8000", outPts: "9000" },
+      { sourceId: activeSourceId, inPts: "1000", outPts: "2000" },
+      { sourceId: activeSourceId, inPts: "4000", outPts: "5000" },
     ]);
+    expect(result?.segmentCount).toBe(3);
   });
 
   it("resolves sourcePath from media object when sourcePath is omitted", () => {
@@ -96,9 +98,10 @@ describe("Export Request Builder", () => {
 
     expect(result).toEqual({
       preset,
-      sourcePath: "/media/from-media-store.mp4",
+      sources: [{ id: activeSourceId, path: "/media/from-media-store.mp4" }],
+      pieces: [{ sourceId: activeSourceId, inPts: "0", outPts: "1000" }],
+      segmentCount: 1,
       outputPath: "/media/output.mp4",
-      segments: [{ inPts: "0", outPts: "1000" }],
       streams: "videoAndAudio",
       audioMode: "encode",
     });
@@ -118,7 +121,9 @@ describe("Export Request Builder", () => {
       segments,
     });
 
-    expect(result?.sourcePath).toBe("/media/explicit.mp4");
+    expect(result?.sources).toEqual([
+      { id: activeSourceId, path: "/media/explicit.mp4" },
+    ]);
   });
 
   it("falls back to media.path when sourcePath is an empty string", () => {
@@ -136,7 +141,7 @@ describe("Export Request Builder", () => {
     });
 
     expect(result).not.toBeNull();
-    expect(result?.sourcePath).toBe("/media/fallback.mp4");
+    expect(result?.sources[0]?.path).toBe("/media/fallback.mp4");
   });
 
   it("forwards trimmed outputPath when outputPath contains surrounding whitespace", () => {
@@ -191,14 +196,14 @@ describe("Export Request Builder", () => {
 
     const revision = { size: 4096, mtime: 1_700_000_000 };
     expect(
-      buildExportRequest({ ...base, expectedSourceRevision: revision })
-        ?.expectedSourceRevision,
+      buildExportRequest({ ...base, expectedSourceRevision: revision })?.sources[0]
+        ?.expectedRevision,
     ).toStrictEqual(revision);
     // No revision, or null for a changed source that the user accepted, sends none.
-    expect(buildExportRequest(base)).not.toHaveProperty("expectedSourceRevision");
+    expect(buildExportRequest(base)?.sources[0]).not.toHaveProperty("expectedRevision");
     expect(
-      buildExportRequest({ ...base, expectedSourceRevision: null }),
-    ).not.toHaveProperty("expectedSourceRevision");
+      buildExportRequest({ ...base, expectedSourceRevision: null })?.sources[0],
+    ).not.toHaveProperty("expectedRevision");
   });
 
   it.each(EXPORT_STREAMS)("forwards the stream choice '%s' unchanged", (streams) => {

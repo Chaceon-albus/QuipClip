@@ -44,7 +44,8 @@ pub struct FlvInput {
     pub working_directory: PathBuf,
     /// The size of the source, where every slice ends.
     pub source_size: u64,
-    /// For each segment, in concat order, the byte offset of the tag that its slice starts at.
+    /// For each piece of this source, in concat order, the byte offset of the tag that its slice
+    /// starts at. The pieces of other sources have no offset here (ADR 053).
     pub segment_offsets: Vec<u64>,
     /// The offset of the first frame of the file. A slice from there is the start of the file,
     /// whose decoder configurations the head holds.
@@ -102,8 +103,8 @@ pub enum FlvInputFallback {
 pub struct FlvInputRequest<'a> {
     pub source: &'a Path,
     pub probe: &'a MediaProbe,
-    /// The seek position of each segment, in concat order: the In point less the seek margin,
-    /// in seconds on the timeline of the source.
+    /// The seek position of each piece of this source, in concat order: the In point less the
+    /// seek margin, in seconds on the timeline of the source.
     pub seek_positions: &'a [Rational],
     pub app_data: &'a Path,
     /// The open FLV sources, which the export shares with the preview: each knows what the

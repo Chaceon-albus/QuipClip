@@ -443,7 +443,7 @@ export function createExportQueueStore(
         runId,
         outputPath: request.outputPath,
         presetName: request.preset.name,
-        segmentCount: request.segments.length,
+        segmentCount: request.segmentCount,
         streams: request.streams,
       };
       set((state) => ({

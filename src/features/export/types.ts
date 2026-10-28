@@ -15,6 +15,28 @@ import type { Pts, Rational } from "@/types/project";
 export type ExportSegmentBoundary = { inPts: Pts; outPts: Pts };
 
 /**
+ * One source of an export request (ADR 053).
+ *
+ * `id` names the source in the pieces. It is not empty, and it is unique in the request.
+ * `expectedRevision` is the revision of the file that the segments were marked against. When the
+ * export prepares, the backend refuses a file whose size or whole-second modification time
+ * differs from it with `sourceRevisionMismatch`, and the detail of the error is this `id`. Null or
+ * absent when the user chose to export a changed file anyway, and the backend then checks
+ * nothing (ADR 024).
+ */
+export type ExportSource = {
+  id: string;
+  path: string;
+  expectedRevision?: ExportSourceRevision | null;
+};
+
+/**
+ * One piece of an export request: the half-open interval [inPts, outPts) of one source, in the
+ * time base of that source (ADR 052, ADR 053).
+ */
+export type ExportPiece = ExportSegmentBoundary & { sourceId: string };
+
+/**
  * The streams of the source that an export writes, as the user chooses them.
  *
  * The wire strings of the Rust `ExportStreams` enum, in its order. `types.test.ts` reads the
@@ -49,9 +71,20 @@ export type ExportAudioMode = (typeof EXPORT_AUDIO_MODES)[number];
  * Request payload sent to the backend `start_export` command.
  */
 export type ExportRequest = {
-  sourcePath: string;
+  /** The sources that the pieces name. Each source has at least one piece. */
+  sources: ExportSource[];
+  /**
+   * The pieces in export order: each segment in array order, and the pieces of one segment in
+   * sequence order (ADR 052). The backend refuses more than its limit of pieces with
+   * `tooManySegments`.
+   */
+  pieces: ExportPiece[];
+  /**
+   * The number of segments that the pieces come from, from 1 to the number of pieces. The run
+   * reports it as its segment count.
+   */
+  segmentCount: number;
   outputPath: string;
-  segments: ExportSegmentBoundary[];
   /**
    * Required. The whole preset, as the setup step showed it when the user confirmed the
    * export. The run renders with this preset and never reads the presets of the settings file,
@@ -62,13 +95,6 @@ export type ExportRequest = {
   streams: ExportStreams;
   /** Required, as `streams` is. No report of the run repeats it. */
   audioMode: ExportAudioMode;
-  /**
-   * The revision of the source that the segments were marked against. When the export
-   * prepares, the backend refuses a source file whose size or whole-second modification time
-   * differs from it with `sourceRevisionMismatch`. Absent when the user chose to export a
-   * changed file anyway, and the backend then checks nothing (ADR 024).
-   */
-  expectedSourceRevision?: ExportSourceRevision;
   /**
    * True when the queue store starts a new batch with this run. The backend journal then drops
    * the runs of the earlier batch that ended, so that the list of the queue for a page that
@@ -114,6 +140,8 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "preparationTimedOut",
   "noSegments",
   "tooManySegments",
+  "invalidSources",
+  "invalidSegmentCount",
   "invalidSegment",
   "sourcePathInvalid",
   "sourceNotFound",

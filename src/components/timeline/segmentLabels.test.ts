@@ -341,7 +341,7 @@ describe("numberSegmentsInExportOrder", () => {
       streams: "videoAndAudio",
       audioMode: "encode",
     });
-    expect(request?.segments).toHaveLength(numbering.total);
+    expect(request?.pieces).toHaveLength(numbering.total);
   });
 
   it("numbers the segments of the active source in project order, across other sources", () => {

@@ -95,6 +95,8 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   ffprobeParseFailed: null,
   noSegments: null,
   tooManySegments: null,
+  invalidSources: null,
+  invalidSegmentCount: null,
   invalidSegment: null,
   sourcePathInvalid: null,
   sourceNotFound: null,
@@ -203,6 +205,9 @@ export interface ExportOutcomeInput {
   tracking: boolean;
 }
 
+/** The codes whose detail the outcome does not show. */
+const DETAIL_HIDDEN_CODES: ReadonlySet<string> = new Set(["sourceRevisionMismatch"]);
+
 /**
  * Presents the notice for an export that ended in `failed` or `canceled`, or for a `failed`
  * status that the store still tracks.
@@ -222,8 +227,11 @@ export function presentExportOutcome({
   error,
   tracking,
 }: ExportOutcomeInput): ExportOutcomeView {
-  // An empty diagnostic carries nothing to show.
-  const detail = error?.detail ? error.detail : null;
+  // An empty diagnostic carries nothing to show. The detail of `sourceRevisionMismatch` is the
+  // id of the source in the request (ADR 053), which names nothing that the user knows: it is for
+  // the log, and the message says what changed.
+  const detail =
+    error?.detail && !DETAIL_HIDDEN_CODES.has(error.code) ? error.detail : null;
 
   if (isExportRunLive({ status, tracking })) {
     return {

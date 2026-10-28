@@ -12,61 +12,72 @@
 use super::copy::{self, CopyQuestion};
 use super::{
     ExportAudioMode, ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PlannedAudio,
-    PlannedSegment, PlannedVideo, AUDIO_PREFIX_MARGIN_MILLISECONDS, MAX_AUDIO_PREFIXES,
-    MAX_EXPORT_SEGMENTS, MAX_HELD_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
+    PlannedSegment, PlannedSource, PlannedVideo, SourceAudio, VideoFit,
+    AUDIO_PREFIX_MARGIN_MILLISECONDS, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
+    MAX_HELD_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::probe::{AudioFrames, AudioGap, AudioProbe, MediaProbe};
+use crate::project::Resolution;
 use crate::settings::{
     AudioChannels, AudioSampleRateSetting, FrameRateSetting, Preset, ResolutionSetting,
 };
 use crate::time::{pts_seconds, Pts, Rational};
 use std::path::Path;
 
-/// One requested segment boundary, before [`build_plan`] derives a seek position or audio
-/// ticks from it.
+/// One requested piece, before [`build_plan`] derives a seek position or audio ticks from it.
 ///
-/// This is deliberately narrower than `project::Segment`: a plan request only needs the two
-/// PTS values that name a source interval, not the segment's id or its source id. ADR 002's
-/// half-open convention applies here exactly as it does to `project::Segment`: `in_pts` is
-/// inclusive, `out_pts` is the PTS of the first excluded presented frame, and a valid
-/// boundary has `in_pts < out_pts`.
+/// A piece is one interval of one source (ADR 052, ADR 053). This is deliberately narrower than
+/// `project::Segment`: a plan request only needs the source and the two PTS values that name the
+/// interval, not a segment's id. ADR 002's half-open convention applies here exactly as it does to
+/// `project::Segment`: `in_pts` is inclusive, `out_pts` is the PTS of the first excluded
+/// presented frame, and a valid boundary has `in_pts < out_pts`. Both PTS values are in the time
+/// base of the source that `source` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentBoundary {
+    /// The index of the source of the piece in [`PlanRequest::sources`].
+    pub source: usize,
     pub in_pts: Pts,
     pub out_pts: Pts,
+}
+
+/// One source of a plan request, with what the export read of it in preparation.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanSource<'a> {
+    /// The media file. Must be an absolute path.
+    pub path: &'a Path,
+    /// The source's probe, from a re-probe taken when the export starts (ADR 014's
+    /// "Other rules": the renderer re-probes rather than trusting stale project metadata).
+    pub probe: &'a MediaProbe,
+    /// What the export read about the frames of the audio stream of [`MediaProbe::audio`] inside
+    /// the pieces of this source, from `ffmpeg::probe::probe_audio_gaps`. Empty when the export
+    /// read none, or the read failed.
+    ///
+    /// The fill of a chain holds the silence of each gap of [`AudioFrames::gaps`] in memory, so the
+    /// plan bounds the longest gap of each piece with the silence in front of the first sample
+    /// (check 15). The decision on a copy of the audio reads the rest (step 13a).
+    pub audio_frames: &'a AudioFrames,
 }
 
 /// The plain data [`build_plan`] needs to plan one export.
 ///
 /// `segments` carries request order, and [`ExportPlan::segments`] preserves that order
-/// exactly: ADR 014's "The command" section concatenates the rendered segments in project
+/// exactly: ADR 014's "The command" section concatenates the rendered pieces in project
 /// array order, so this function must never reorder or deduplicate them. Concat order need
 /// not match source-PTS order; see [`ExportPlan::single_input_seek_seconds`] for a case
 /// where that distinction matters.
 pub struct PlanRequest<'a> {
-    /// The source media file every segment cuts from. Must be an absolute path.
-    pub source: &'a Path,
+    /// The sources of the pieces, in the order of their first piece. Every source has a piece.
+    pub sources: &'a [PlanSource<'a>],
     /// The final output location. Must also be an absolute path.
     pub destination: &'a Path,
-    /// The requested segment boundaries, in concat order.
+    /// The requested pieces, in concat order.
     pub segments: &'a [SegmentBoundary],
-    /// The source's probe, from a re-probe taken when the export starts (ADR 014's
-    /// "Other rules": the renderer re-probes rather than trusting stale project metadata).
-    pub probe: &'a MediaProbe,
     /// The export preset selecting the container, the encoders, the quality, and the two
     /// output settings.
     pub preset: &'a Preset,
-    /// Which streams of the source the export writes, as the user chose them. This decides
+    /// Which streams of the sources the export writes, as the user chose them. This decides
     /// which parts of [`ExportPlan`] exist; see [`ExportStreams`].
     pub streams: ExportStreams,
-    /// What the export read about the frames of the audio stream of [`MediaProbe::audio`] inside
-    /// the segments, from `ffmpeg::probe::probe_audio_gaps`. Empty when the export read none, or
-    /// the read failed.
-    ///
-    /// The fill of a chain holds the silence of each gap of [`AudioFrames::gaps`] in memory, so the
-    /// plan bounds the longest gap of each segment with the silence in front of the first sample
-    /// (check 15). The decision on a copy of the audio reads the rest (step 13a).
-    pub audio_frames: &'a AudioFrames,
     /// Whether the request asks to copy the audio rather than encode it (ADR 048, step 13a).
     pub audio_mode: ExportAudioMode,
 }
@@ -164,55 +175,60 @@ pub enum PathFacts {
 /// 1. `segments` is empty -- [`ExportErrorCode::NoSegments`].
 /// 2. `segments` holds more than [`MAX_EXPORT_SEGMENTS`] --
 ///    [`ExportErrorCode::TooManySegments`].
-/// 3. Any segment has `in_pts >= out_pts` -- [`ExportErrorCode::InvalidSegment`].
-/// 4. `source` is empty, contains a NUL byte, or is not absolute --
-///    [`ExportErrorCode::SourcePathInvalid`].
-/// 5. `source` does not exist -- [`ExportErrorCode::SourceNotFound`].
-/// 6. `source` is not a regular file -- [`ExportErrorCode::SourceNotFile`].
+/// 3. Any segment has `in_pts >= out_pts` -- [`ExportErrorCode::InvalidSegment`]. Then
+///    `sources` is empty, a piece names a source index out of range, or a source has no piece --
+///    [`ExportErrorCode::InvalidSources`]. `commands::export` refuses such a request before the
+///    plan; this check holds the precondition for any other caller.
+/// 4. A source path is empty, contains a NUL byte, or is not absolute --
+///    [`ExportErrorCode::SourcePathInvalid`]. Checks 4 to 6 run for each source in turn.
+/// 5. A source does not exist -- [`ExportErrorCode::SourceNotFound`].
+/// 6. A source is not a regular file -- [`ExportErrorCode::SourceNotFile`].
 /// 7. `destination` is empty, contains a NUL byte, has no file name, has no parent, or is
 ///    not absolute -- [`ExportErrorCode::OutputPathInvalid`].
 /// 8. `destination`'s parent is missing or is not a directory --
 ///    [`ExportErrorCode::OutputDirectoryMissing`].
 /// 9. `destination` exists but is a directory, or is neither a regular file nor a directory
 ///    -- [`ExportErrorCode::OutputPathInvalid`].
-/// 10. `destination` and `source` name the same file --
+/// 10. `destination` and a source name the same file --
 ///     [`ExportErrorCode::OutputEqualsSource`].
 /// 11. `destination` exists as a regular file the user protected against writing --
 ///     [`ExportErrorCode::OutputReadOnly`].
 /// 12. The export writes video ([`ExportStreams::writes_video`]), and the preset's frame rate
-///     is [`FrameRateSetting::Source`] but the probe has neither a valid `avg_frame_rate` nor
+///     is [`FrameRateSetting::Source`] but no source has a valid `avg_frame_rate` or
 ///     `r_frame_rate`, or the resolved rate is not strictly positive --
-///     [`ExportErrorCode::SourceFrameRateUnknown`]. An audio-only export times no frames, so
-///     it skips this check.
-/// 13. The export is [`ExportStreams::AudioOnly`], and the probe reports no audio stream, or
-///     one that holds no packets ([`AudioProbe::holds_no_packets`]) --
-///     [`ExportErrorCode::SourceHasNoAudio`]. This check opens the audio step, because it is
-///     the one question about the audio that comes before its sample rate: a stream that is
-///     absent has no rate to ask about. An export of only the audio of an empty stream would
-///     write a file of silence and nothing else.
+///     [`ExportErrorCode::SourceFrameRateUnknown`]. `source` is the highest nominal rate among
+///     the sources (ADR 053), and a source with no rate does not take part. An audio-only export
+///     times no frames, so it skips this check.
+/// 13. The export is [`ExportStreams::AudioOnly`], and no source has an audio stream that holds
+///     packets ([`AudioProbe::holds_no_packets`]) -- [`ExportErrorCode::SourceHasNoAudio`]. This
+///     check opens the audio step, because it is the one question about the audio that comes
+///     before its sample rate: a stream that is absent has no rate to ask about. An export of
+///     only the audio of empty streams would write a file of silence and nothing else.
 ///
 ///     Step 13a is no check: a request with [`ExportAudioMode::Copy`] asks [`copy::decide`]
-///     whether the plan copies the audio (ADR 048). When it does, the plan carries
-///     [`ExportPlan::copied_audio`] and no [`ExportPlan::audio`], so checks 14 and 15, which are
-///     about the decode of the stream, do not run. When it does not, the plan carries the reason
-///     in [`ExportPlan::audio_copy_refusal`], and every later step runs as for an encode.
-/// 14. The export writes audio ([`ExportStreams::writes_audio`]), and the probe reports an
+///     whether the plan copies the audio (ADR 048), with the probe of the source of the first
+///     piece; it refuses any request of more than one piece (ADR 053). When it copies, the plan
+///     carries [`ExportPlan::copied_audio`] and no [`ExportPlan::audio`], so checks 14 and 15,
+///     which are about the decode of the stream, do not run. When it does not, the plan carries
+///     the reason in [`ExportPlan::audio_copy_refusal`], and every later step runs as for an
+///     encode.
+/// 14. The export writes audio ([`ExportStreams::writes_audio`]), and a source reports an
 ///     audio stream whose sample rate is absent, not positive, or larger than `u32` --
 ///     [`ExportErrorCode::SourceAudioRateUnknown`]. A video-only export never reads the
 ///     audio stream, so it skips this check.
 /// 15. The export writes audio, and the silence that the fills hold in memory adds up to more
 ///     than [`MAX_HELD_AUDIO_SILENCE_SECONDS`] -- [`ExportErrorCode::AudioGapTooLong`]. That
-///     silence has two parts. The first is the part of each segment that reaches the first sample
-///     of the source audio stream, before that sample, less its silence prefix
-///     ([`PlannedSegment::audio_prefix`]). A segment that ends at or before the sample counts
+///     silence has two parts. The first is the part of each piece that reaches the first sample
+///     of the audio stream of its source, before that sample, less its silence prefix
+///     ([`PlannedSegment::audio_prefix`]). A piece that ends at or before the sample counts
 ///     nothing, because the end pad of its chain writes its silence frame by frame, without
 ///     holding it (`graph::audio_end_pad`). The second is the longest gap of
-///     [`PlanRequest::audio_frames`] that the segment holds audio behind (`longest_held_gap`). Each
-///     segment counts the longer of the two, because one chain holds one of them at a time. The
-///     sum is checked once every segment is planned, because the prefixes go to the longest
-///     silences of all segments. A probe that reports no start of the stream bounds no silence in
-///     front of the first sample, and a stream that holds no packets bounds nothing: its chains
-///     generate their silence frame by frame.
+///     [`PlanSource::audio_frames`] that the piece holds audio behind (`longest_held_gap`). Each
+///     piece counts the longer of the two, because one chain holds one of them at a time. The
+///     sum is checked once every piece is planned, because the prefixes go to the longest
+///     silences of all pieces. A probe that reports no start of the stream bounds no silence in
+///     front of the first sample, and a stream that holds no packets, or a source without a
+///     stream, bounds nothing: its chains generate their silence frame by frame.
 ///
 /// `destination` must be absolute for the same reason `source` must: a CWD-relative path
 /// would carry an ambiguous location into a pipeline that spawns a child process and later
@@ -237,13 +253,21 @@ pub enum PathFacts {
 /// segment at its whole length, whatever part of it the source audio stream reaches
 /// (`graph::audio_end_pad`).
 ///
-/// The plan carries [`ExportPlan::video`] exactly when the export writes video. It carries
-/// [`ExportPlan::audio`] exactly when the export writes audio, the probe reports an audio
-/// stream, and the plan does not copy it (step 13a). Check 13 makes the rules leave no plan that
-/// writes nothing: the one choice without video is refused when there is no audio to write, and
-/// otherwise its plan encodes or copies the audio. When that stream holds no packets, the audio
-/// part carries [`PlannedAudio::silence_layout`], and its chains generate silence instead of
-/// reading the stream.
+/// Each piece is timed with the probe of its own source: its video time base, its container
+/// start, its stream indices and its audio sample rate. No step compares a PTS of one source with
+/// a PTS of another (ADR 002, ADR 053).
+///
+/// The plan carries [`ExportPlan::video`] exactly when the export writes video, with the canvas
+/// and the fit steps of ADR 053 (`video_geometry`). It carries [`ExportPlan::audio`] exactly when
+/// the export writes audio, a source reports an audio stream, and the plan does not copy it (step
+/// 13a). Check 13 makes the rules leave no plan that writes nothing: the one choice without video
+/// is refused when there is no audio to write, and otherwise its plan encodes or copies the audio.
+/// A source whose stream holds no packets carries [`SourceAudio::silence_layout`], and the chains
+/// of its pieces generate silence instead of reading the stream. A piece of a source without an
+/// audio stream generates silence at the output rate and layout.
+///
+/// With one source, every rule of ADR 053 gives the value of the plan before it, except for an
+/// explicit preset size, which now fits the picture with black bars instead of stretching it.
 ///
 /// [`ExportStreams::VideoAndAudio`] with [`ExportAudioMode::Encode`] plans exactly what every
 /// export planned before the two choices existed, so such a request renders the same command as
@@ -268,16 +292,26 @@ pub fn build_plan(
     {
         return Err(ExportErrorCode::InvalidSegment);
     }
-
-    let source = request.source;
-    if !source_path_is_valid(source) {
-        return Err(ExportErrorCode::SourcePathInvalid);
+    let sources = request.sources;
+    if sources.is_empty()
+        || segments
+            .iter()
+            .any(|segment| segment.source >= sources.len())
+        || (0..sources.len()).any(|index| !segments.iter().any(|segment| segment.source == index))
+    {
+        return Err(ExportErrorCode::InvalidSources);
     }
-    let source_facts = inspect(source);
-    match source_facts {
-        PathFacts::Absent => return Err(ExportErrorCode::SourceNotFound),
-        PathFacts::Directory | PathFacts::Other => return Err(ExportErrorCode::SourceNotFile),
-        PathFacts::File { .. } => {}
+
+    let mut source_identities = Vec::with_capacity(sources.len());
+    for source in sources {
+        if !source_path_is_valid(source.path) {
+            return Err(ExportErrorCode::SourcePathInvalid);
+        }
+        match inspect(source.path) {
+            PathFacts::Absent => return Err(ExportErrorCode::SourceNotFound),
+            PathFacts::Directory | PathFacts::Other => return Err(ExportErrorCode::SourceNotFile),
+            PathFacts::File { identity, .. } => source_identities.push(identity),
+        }
     }
 
     let destination = request.destination;
@@ -310,11 +344,13 @@ pub fn build_plan(
         PathFacts::Absent | PathFacts::File { .. } => {}
     }
 
+    // Any source, not only the first: the rename would replace whichever source the destination
+    // names.
     let same_identity = matches!(
-        (source_facts, destination_facts),
-        (PathFacts::File { identity: a, .. }, PathFacts::File { identity: b, .. }) if a == b
+        destination_facts,
+        PathFacts::File { identity, .. } if source_identities.contains(&identity)
     );
-    if source == destination || same_identity {
+    if sources.iter().any(|source| source.path == destination) || same_identity {
         return Err(ExportErrorCode::OutputEqualsSource);
     }
 
@@ -329,7 +365,7 @@ pub fn build_plan(
     // destination's own final component, so the preflight and the publication cannot disagree
     // about which files are refused; `PathFacts::File` carries what that means, including why
     // an unreadable attribute reads as `false` here. This runs after the same-file check on
-    // purpose: a destination that *is* the source is the more dangerous condition and the more
+    // purpose: a destination that *is* a source is the more dangerous condition and the more
     // specific report, whether or not the source happens to be protected.
     //
     // The late guard in `commit` stays. This check closes the common path, where the user
@@ -345,7 +381,6 @@ pub fn build_plan(
         return Err(ExportErrorCode::OutputReadOnly);
     }
 
-    let probe = request.probe;
     let preset = request.preset;
     let streams = request.streams;
     // Only an export that writes video times frames. An audio-only export reads neither rate,
@@ -353,10 +388,9 @@ pub fn build_plan(
     let output_frame_rate = if streams.writes_video() {
         let rate = match preset.frame_rate {
             FrameRateSetting::Rate(rate) => rate,
-            FrameRateSetting::Source => probe
-                .avg_frame_rate
-                .or(probe.r_frame_rate)
-                .ok_or(ExportErrorCode::SourceFrameRateUnknown)?,
+            FrameRateSetting::Source => {
+                highest_nominal_rate(sources).ok_or(ExportErrorCode::SourceFrameRateUnknown)?
+            }
         };
         // A non-positive frame rate cannot time anything (the graph builder would have to emit
         // `fps=0` or worse). `settings::validate_settings` already rejects a non-positive rate
@@ -374,33 +408,36 @@ pub fn build_plan(
         None
     };
 
-    let video_time_base = probe.video_time_base;
     let zero = zero_rational();
-    let format_start_time = probe.format_start_time.unwrap_or(zero);
     let margin = seek_margin_rational();
-    // An audio-only export of a source with no audio would write nothing at all, so it is
+    // An audio-only export of sources with no audio would write nothing at all, so it is
     // refused here, before the rate question below can be asked of a stream that is absent. A
     // stream that holds no packets is no audio either: the export would be silence alone.
     if streams == ExportStreams::AudioOnly
-        && probe
-            .audio
-            .as_ref()
-            .is_none_or(|audio| audio.holds_no_packets)
+        && sources.iter().all(|source| {
+            source
+                .probe
+                .audio
+                .as_ref()
+                .is_none_or(|audio| audio.holds_no_packets)
+        })
     {
         return Err(ExportErrorCode::SourceHasNoAudio);
     }
     // Step 13a: a request that asks to copy the audio gets a copy when `copy::decide` agrees, and
     // an encode otherwise, with the reason for the log. A copy plans no `PlannedAudio`, so the
     // checks below that read the audio stream, the rate and the silence of the fills, are those of
-    // an encode only (ADR 048).
+    // an encode only (ADR 048). `copy::decide` refuses more than one piece, so the source of the
+    // first piece is the source of the one piece it can copy (ADR 053).
+    let first_source = &sources[segments[0].source];
     let copy = match request.audio_mode {
         ExportAudioMode::Encode => None,
         ExportAudioMode::Copy => Some(copy::decide(&CopyQuestion {
-            probe,
+            probe: first_source.probe,
             streams,
             container: preset.container,
             segments,
-            frames: request.audio_frames,
+            frames: first_source.audio_frames,
         })),
     };
     let audio_copy_refusal = copy
@@ -419,53 +456,25 @@ pub fn build_plan(
     // needed.
     //
     // The output format is resolved here too, so the graph renders numbers and never reads the
-    // preset. `source` for the rate becomes the source stream's own rate. `source` for the channels
-    // stays as it is: the graph names no layout, and the chain keeps the stream's own; see
-    // `PlannedAudio::output_channels`. Only the silence of a stream without packets needs a layout
-    // name, and `silence_layout` gives it. The rate range and the bitrate range are not re-checked
-    // here: `settings::validate_settings` bounds both, and `commands::export` plans only from the
+    // preset (`plan_audio`). The rate range and the bitrate range are not re-checked here:
+    // `settings::validate_settings` bounds both, and `commands::export` plans only from the
     // preset of a request that `start_export` checked with `settings::validate_preset`, which
     // applies the same rules.
-    let source_audio = probe
-        .audio
-        .as_ref()
-        .filter(|_| streams.writes_audio() && copied_audio.is_none());
-    let audio = match source_audio {
-        None => None,
-        Some(audio) => {
-            let sample_rate = audio
-                .sample_rate
-                .ok_or(ExportErrorCode::SourceAudioRateUnknown)?;
-            let output_sample_rate = match preset.audio_sample_rate {
-                AudioSampleRateSetting::Source => sample_rate,
-                AudioSampleRateSetting::Fixed(rate) => rate,
-            };
-            Some(PlannedAudio {
-                stream_index: audio.index,
-                sample_rate,
-                output_sample_rate,
-                output_channels: preset.audio_channels,
-                encoder: preset.audio_encoder.clone(),
-                bitrate: preset.audio_bitrate,
-                options: preset.audio_options.clone(),
-                // The total duration, once the segments below have summed it.
-                expected_duration: zero,
-                silence_layout: audio
-                    .holds_no_packets
-                    .then(|| silence_layout(preset.audio_channels, audio)),
-            })
-        }
+    let writes_audio = streams.writes_audio()
+        && copied_audio.is_none()
+        && sources.iter().any(|source| source.probe.audio.is_some());
+    let (audio, source_audio) = if writes_audio {
+        let (audio, source_audio) = plan_audio(sources, preset)?;
+        (Some(audio), source_audio)
+    } else {
+        (None, vec![None; sources.len()])
     };
-    // From here on, the source audio is the stream the chains read. A stream that holds no
-    // packets is read by no chain, so nothing below waits for it or fills in front of it.
-    let source_audio = source_audio.filter(|audio| !audio.holds_no_packets);
-    // The first sample of the source audio, for the bound on the silence in front of it
-    // (`MAX_HELD_AUDIO_SILENCE_SECONDS`). Only a plan that reads audio has one.
-    let audio_start = source_audio.and_then(|audio| audio.start_time);
-    // The silence in front of the first sample, for each segment that reaches that sample, in
-    // segment order. The prefixes and the bound read it once every segment is planned.
+    // The silence in front of the first sample, for each piece that reaches that sample, in
+    // piece order. The prefixes and the bound read it once every piece is planned.
     let mut leading_silences: Vec<Option<Rational>> = Vec::with_capacity(segments.len());
-    // The longest gap inside the stream that the fill of each segment holds, in segment order.
+    // The pieces that can carry a silence prefix, with the rate of their source.
+    let mut prefix_rates: Vec<Option<u32>> = Vec::with_capacity(segments.len());
+    // The longest gap inside the stream that the fill of each piece holds, in piece order.
     // The bound reads it with the silence in front of the first sample.
     let mut longest_gaps: Vec<Rational> = Vec::with_capacity(segments.len());
 
@@ -474,6 +483,22 @@ pub fn build_plan(
     let mut total_frames: u64 = 0;
 
     for segment in segments {
+        let source = &sources[segment.source];
+        let probe = source.probe;
+        // Every value of a piece comes from the probe of its own source (ADR 053).
+        let video_time_base = probe.video_time_base;
+        let format_start_time = probe.format_start_time.unwrap_or(zero);
+        // From here on, the source audio is the stream the chain of this piece reads. A stream
+        // that holds no packets is read by no chain, so nothing below waits for it or fills in
+        // front of it, and neither does a source without a stream.
+        let read_audio = source_audio[segment.source]
+            .as_ref()
+            .filter(|audio| audio.reads_stream())
+            .and(probe.audio.as_ref());
+        // The first sample of the source audio, for the bound on the silence in front of it
+        // (`MAX_HELD_AUDIO_SILENCE_SECONDS`). Only a piece that reads audio has one.
+        let audio_start = read_audio.and_then(|audio| audio.start_time);
+
         // Every `Option`-returning step below can fail for more reasons than one segment's
         // own PTS values overflowing. `probe.video_time_base` is not re-validated here: a
         // `MediaProbe` built outside `probe::normalize` (a test, or a future caller) could
@@ -509,9 +534,14 @@ pub fn build_plan(
                 None => None,
             };
         leading_silences.push(leading_silence);
-        longest_gaps.push(match source_audio {
+        prefix_rates.push(
+            read_audio
+                .filter(|audio| takes_audio_prefixes(audio))
+                .and_then(|audio| audio.sample_rate),
+        );
+        longest_gaps.push(match read_audio {
             Some(_) => longest_held_gap(
-                &request.audio_frames.gaps,
+                &source.audio_frames.gaps,
                 in_seconds,
                 out_seconds,
                 audio_start,
@@ -531,18 +561,31 @@ pub fn build_plan(
         // exact zero clamps to `None` exactly like a negative value does.
         let seek_seconds = (raw_seek.num() > 0).then_some(raw_seek);
 
-        let (audio_in_tick, audio_out_tick) = match &audio {
-            Some(audio) => {
-                let in_tick = audio_tick(segment.in_pts, video_time_base, audio.sample_rate)
+        let (audio_in_tick, audio_out_tick) = match (&audio, &source_audio[segment.source]) {
+            (Some(_), Some(stream)) => {
+                let in_tick = audio_tick(segment.in_pts, video_time_base, stream.sample_rate)
                     .ok_or(ExportErrorCode::InvalidSegment)?;
-                let out_tick = audio_tick(segment.out_pts, video_time_base, audio.sample_rate)
+                let out_tick = audio_tick(segment.out_pts, video_time_base, stream.sample_rate)
                     .ok_or(ExportErrorCode::InvalidSegment)?;
                 (Some(in_tick), Some(out_tick))
             }
-            // `ExportPlan::audio` is `None`: the source reports no audio stream, or the
-            // export is video only. Both ticks stay `None` too, distinct from an overflow
-            // above, which is reported as an error rather than silently `None`.
-            None => (None, None),
+            // A source without an audio stream reads nothing, and its silence is generated at the
+            // output rate. Its length is the duration of the piece at that rate, rounded half away
+            // from zero (ADR 002), and the ticks run from 0 to it (ADR 053).
+            (Some(planned), None) => {
+                let rate = Rational::new(i64::from(planned.output_sample_rate), 1)
+                    .ok_or(ExportErrorCode::InvalidSegment)?;
+                let length = duration
+                    .mul(rate)
+                    .and_then(round_rational_to_i128)
+                    .and_then(|value| i64::try_from(value).ok())
+                    .ok_or(ExportErrorCode::InvalidSegment)?;
+                (Some(0), Some(length))
+            }
+            // `ExportPlan::audio` is `None`: no source has an audio stream, the export is video
+            // only, or the plan copies the audio. Both ticks stay `None` too, distinct from an
+            // overflow above, which is reported as an error rather than silently `None`.
+            (None, _) => (None, None),
         };
 
         let frames = match output_frame_rate {
@@ -565,6 +608,7 @@ pub fn build_plan(
             .ok_or(ExportErrorCode::InvalidSegment)?;
 
         planned_segments.push(PlannedSegment {
+            source: segment.source,
             in_pts: segment.in_pts,
             out_pts: segment.out_pts,
             seek_seconds,
@@ -575,14 +619,12 @@ pub fn build_plan(
         });
     }
 
-    if let Some(audio) = &audio {
-        if source_audio.is_some_and(takes_audio_prefixes) {
-            assign_audio_prefixes(&mut planned_segments, &leading_silences, audio.sample_rate)?;
-        }
+    if audio.is_some() {
+        assign_audio_prefixes(&mut planned_segments, &leading_silences, &prefix_rates)?;
         // What the fill of each chain holds in memory: the silence in front of the first sample,
         // less the prefix, which streams, or the longest gap inside the stream, whichever is
         // longer. One chain holds one of them at a time (`longest_held_gap`). The chains of all
-        // segments can build their fills at the same time, so the bound is on the sum.
+        // pieces can build their fills at the same time, so the bound is on the sum.
         let max_held_silence = max_held_audio_silence_rational();
         let mut held = zero;
         for ((segment, silence), longest_gap) in planned_segments
@@ -594,7 +636,11 @@ pub fn build_plan(
                 (None, _) => zero,
                 (Some(silence), None) => *silence,
                 (Some(silence), Some(prefix)) => {
-                    Rational::new(prefix, i64::from(audio.sample_rate))
+                    let rate = source_audio[segment.source]
+                        .as_ref()
+                        .map(|audio| audio.sample_rate)
+                        .ok_or(ExportErrorCode::InvalidSegment)?;
+                    Rational::new(prefix, i64::from(rate))
                         .and_then(|streamed| silence.sub(streamed))
                         .ok_or(ExportErrorCode::InvalidSegment)?
                 }
@@ -608,9 +654,11 @@ pub fn build_plan(
         }
     }
 
-    let resolution = match preset.resolution {
-        ResolutionSetting::Source => None,
-        ResolutionSetting::Custom(resolution) => Some(resolution),
+    // The canvas and the fit step of each source, only for a plan that writes video.
+    let (canvas, fits) = if output_frame_rate.is_some() {
+        video_geometry(sources, preset.resolution).ok_or(ExportErrorCode::InvalidSegment)?
+    } else {
+        (None, vec![None; sources.len()])
     };
     // Every audio chain that reads the stream ends at the length of its segment
     // (`graph::audio_end_pad`), and `concat` pads it further to the length of its video where
@@ -621,14 +669,25 @@ pub fn build_plan(
         expected_duration: total_duration,
         ..audio
     });
+    let planned_sources = sources
+        .iter()
+        .zip(source_audio)
+        .zip(fits)
+        .map(|((source, audio), fit)| PlannedSource {
+            path: source.path.to_path_buf(),
+            video_stream_index: source.probe.video_stream_index,
+            fit,
+            audio,
+            flv_input: None,
+        })
+        .collect();
 
     Ok(ExportPlan {
-        source: source.to_path_buf(),
+        sources: planned_sources,
         destination: destination.to_path_buf(),
         video: output_frame_rate.map(|rate| PlannedVideo {
-            stream_index: probe.video_stream_index,
             timing: OutputTiming::ConstantFrameRate(rate),
-            resolution,
+            canvas,
             encoder: preset.video_encoder.clone(),
             quality: preset.quality,
             pixel_format: preset.pixel_format.clone(),
@@ -641,8 +700,304 @@ pub fn build_plan(
         segments: planned_segments,
         container: preset.container,
         total_duration,
-        flv_input: None,
     })
+}
+
+/// The preset value `source` for the frame rate: the highest nominal rate among `sources`, where
+/// the nominal rate of a source is its `avg_frame_rate`, else its `r_frame_rate` (ADR 014), and
+/// the rates compare as exact rationals (ADR 053). A source with no rate does not take part, and
+/// `None` means that no source has one.
+///
+/// With the highest rate, `fps` only repeats frames of a slower constant-frame-rate source, and
+/// every chain gives `concat` the one rate, so `concat` never falls back to 25 frames per second.
+fn highest_nominal_rate(sources: &[PlanSource<'_>]) -> Option<Rational> {
+    sources
+        .iter()
+        .filter_map(|source| source.probe.avg_frame_rate.or(source.probe.r_frame_rate))
+        .max()
+}
+
+/// The audio part of a plan that writes audio, and the [`SourceAudio`] of each source, in the
+/// order of `sources` (ADR 053, ADR 023).
+///
+/// - The output rate of the preset value `source` is the highest rate among the sources with an
+///   audio stream, with or without packets. Each of their streams needs a rate, or the plan is
+///   refused with [`ExportErrorCode::SourceAudioRateUnknown`] (check 14).
+/// - The layout of the preset value `source` is the layout of the source with the most channels,
+///   the earlier source on a tie. The closing `aformat` names it ([`PlannedAudio::output_layout`])
+///   when the layouts of those sources differ. A layout counts as the pair of the name and the
+///   channel count the probe reports.
+/// - A piece of a source without an audio stream generates its silence in
+///   [`PlannedAudio::absent_layout`], at the output rate, and a piece of a stream without packets
+///   in its [`SourceAudio::silence_layout`]. When some pieces read a stream and some generate
+///   silence, and the name of a silence is not the name of the layout of the streams, the closing
+///   `aformat` names the layout too. That is so for a layout without a plain name, such as
+///   ffprobe's `6 channels (FL+FR+...)`, whose silence takes `6c`. So `concat` never chooses
+///   between two layouts (ADR 053). Otherwise no chain names a layout, as before.
+///
+/// The silence of a layout of more than 8 channels without a plain name is stereo
+/// (`silence_layout`). FFmpeg 9.0.2 parses `<count>c` above 8 only for 10, 12, 14, 16 and 24
+/// channels, and FFmpeg 4.3 to 5.0 for none of them.
+///
+/// With one source, the rate is its rate and no chain names a layout, as before ADR 053: its
+/// pieces either all read the stream or all generate silence.
+fn plan_audio(
+    sources: &[PlanSource<'_>],
+    preset: &Preset,
+) -> Result<(PlannedAudio, Vec<Option<SourceAudio>>), ExportErrorCode> {
+    let mut source_audio = Vec::with_capacity(sources.len());
+    let mut highest_rate: Option<u32> = None;
+    let mut widest: Option<&AudioProbe> = None;
+    let mut layouts_differ = false;
+    for source in sources {
+        let Some(audio) = source.probe.audio.as_ref() else {
+            source_audio.push(None);
+            continue;
+        };
+        let sample_rate = audio
+            .sample_rate
+            .ok_or(ExportErrorCode::SourceAudioRateUnknown)?;
+        highest_rate = Some(highest_rate.map_or(sample_rate, |rate| rate.max(sample_rate)));
+        match widest {
+            None => widest = Some(audio),
+            Some(chosen) => {
+                if (&chosen.channel_layout, chosen.channels)
+                    != (&audio.channel_layout, audio.channels)
+                {
+                    layouts_differ = true;
+                }
+                // Strictly more, so an earlier source wins a tie.
+                if audio.channels.unwrap_or(0) > chosen.channels.unwrap_or(0) {
+                    widest = Some(audio);
+                }
+            }
+        }
+        source_audio.push(Some(SourceAudio {
+            stream_index: audio.index,
+            sample_rate,
+            silence_layout: audio
+                .holds_no_packets
+                .then(|| silence_layout(preset.audio_channels, audio)),
+        }));
+    }
+    let (Some(highest_rate), Some(widest)) = (highest_rate, widest) else {
+        // The caller plans audio only when a source has an audio stream.
+        return Err(ExportErrorCode::SourceHasNoAudio);
+    };
+    let output_sample_rate = match preset.audio_sample_rate {
+        AudioSampleRateSetting::Source => highest_rate,
+        AudioSampleRateSetting::Fixed(rate) => rate,
+    };
+    let absent_layout = silence_layout(preset.audio_channels, widest);
+    // The layout the streams that are read share, when they share one, and whether a silence of
+    // another name meets them in `concat`.
+    let read_layout = sources
+        .iter()
+        .filter_map(|source| source.probe.audio.as_ref())
+        .find(|audio| !audio.holds_no_packets)
+        .map(|audio| audio.channel_layout.as_deref());
+    let silence_differs = read_layout.is_some_and(|read| {
+        sources
+            .iter()
+            .zip(&source_audio)
+            .filter_map(|(source, planned)| match (&source.probe.audio, planned) {
+                (None, _) => Some(absent_layout.as_str()),
+                (Some(_), Some(planned)) => planned.silence_layout.as_deref(),
+                (Some(_), None) => None,
+            })
+            .any(|silence| read != Some(silence))
+    });
+    let output_layout = match preset.audio_channels {
+        AudioChannels::Source => (layouts_differ || silence_differs).then(|| absent_layout.clone()),
+        AudioChannels::Stereo | AudioChannels::Mono => Some(absent_layout.clone()),
+    };
+    Ok((
+        PlannedAudio {
+            output_sample_rate,
+            output_channels: preset.audio_channels,
+            output_layout,
+            absent_layout,
+            encoder: preset.audio_encoder.clone(),
+            bitrate: preset.audio_bitrate,
+            options: preset.audio_options.clone(),
+            // The total duration, once the pieces are summed.
+            expected_duration: zero_rational(),
+        },
+        source_audio,
+    ))
+}
+
+/// The frame of one source as a player shows it (ADR 053): the coded size with the SAR and the
+/// rotation applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisplayGeometry {
+    /// The display width: the coded width times the SAR, rounded half up, swapped with the height
+    /// for a rotation of 90 or 270 degrees.
+    width: u32,
+    /// The display height.
+    height: u32,
+    /// The exact display aspect ratio: the coded width times the SAR over the coded height, or
+    /// its inverse for a rotation of 90 or 270 degrees. It is not the ratio of the rounded size.
+    aspect: Rational,
+    /// Whether the pixels are square: no SAR, or a SAR of 1.
+    square: bool,
+}
+
+/// The [`DisplayGeometry`] of `probe`, or `None` for a frame without a size. An unknown SAR
+/// counts as 1.
+fn display_geometry(probe: &MediaProbe) -> Option<DisplayGeometry> {
+    let one = Rational::new(1, 1)?;
+    let sar = probe.sample_aspect_ratio.unwrap_or(one);
+    let coded_width = Rational::new(i64::from(probe.width), 1)?;
+    let scaled_width = coded_width.mul(sar)?;
+    let width = u32::try_from(round_half_up(scaled_width)?).ok()?;
+    let aspect = scaled_width.div(Rational::new(i64::from(probe.height), 1)?)?;
+    let quarter_turn = matches!(probe.rotation, 90 | 270);
+    let (width, height, aspect) = if quarter_turn {
+        (probe.height, width, one.div(aspect)?)
+    } else {
+        (width, probe.height, aspect)
+    };
+    (width > 0 && height > 0).then_some(DisplayGeometry {
+        width,
+        height,
+        aspect,
+        square: sar == one,
+    })
+}
+
+/// Round a non-negative rational to the nearest integer, a half up.
+fn round_half_up(value: Rational) -> Option<i64> {
+    let numerator = i128::from(value.num());
+    let denominator = i128::from(value.den());
+    i64::try_from((2 * numerator + denominator).div_euclid(2 * denominator)).ok()
+}
+
+/// A side of a canvas made even, as the 4:2:0 pixel formats need it and `pad` rounds an odd side
+/// down: an odd side loses one pixel, and a side of 1 becomes 2 (ADR 053).
+fn even_side(side: u32) -> u32 {
+    if side <= 1 {
+        2
+    } else {
+        side - side % 2
+    }
+}
+
+/// The canvas of a plan with video, and the [`VideoFit`] of each source, in the order of
+/// `sources` (ADR 053), or `None` when a source has a frame without a size or the arithmetic
+/// overflows.
+///
+/// - An explicit preset size is the canvas, with even sides.
+/// - With `source`, sources that all share the coded size, the SAR and the rotation get no canvas
+///   and no fit, as a single source always does. Two SARs compare after an unknown SAR is read
+///   as 1, as the probe reads it.
+/// - Otherwise the canvas is the display size with the largest area, the earlier source on a
+///   tie, with even sides.
+///
+/// A source whose display size is not the canvas, or whose SAR is not 1, gets a fit step
+/// ([`fit_on_canvas`]).
+#[allow(clippy::type_complexity)]
+fn video_geometry(
+    sources: &[PlanSource<'_>],
+    resolution: ResolutionSetting,
+) -> Option<(Option<Resolution>, Vec<Option<VideoFit>>)> {
+    let geometries: Vec<DisplayGeometry> = sources
+        .iter()
+        .map(|source| display_geometry(source.probe))
+        .collect::<Option<_>>()?;
+    let canvas = match resolution {
+        ResolutionSetting::Custom(Resolution { w, h }) => Some(Resolution {
+            w: even_side(w),
+            h: even_side(h),
+        }),
+        ResolutionSetting::Source => {
+            let key = |probe: &MediaProbe| {
+                (
+                    probe.width,
+                    probe.height,
+                    probe
+                        .sample_aspect_ratio
+                        .filter(|sar| *sar != Rational::new(1, 1).expect("1/1 is valid")),
+                    probe.rotation,
+                )
+            };
+            let first = key(sources[0].probe);
+            if sources.iter().all(|source| key(source.probe) == first) {
+                None
+            } else {
+                let mut largest = geometries[0];
+                for geometry in &geometries[1..] {
+                    // Strictly larger, so an earlier source wins a tie.
+                    if u64::from(geometry.width) * u64::from(geometry.height)
+                        > u64::from(largest.width) * u64::from(largest.height)
+                    {
+                        largest = *geometry;
+                    }
+                }
+                Some(Resolution {
+                    w: even_side(largest.width),
+                    h: even_side(largest.height),
+                })
+            }
+        }
+    };
+    let Some(canvas) = canvas else {
+        return Some((None, vec![None; sources.len()]));
+    };
+    let fits = geometries
+        .iter()
+        .map(|geometry| {
+            if geometry.square && geometry.width == canvas.w && geometry.height == canvas.h {
+                Some(None)
+            } else {
+                fit_on_canvas(canvas, geometry.aspect).map(Some)
+            }
+        })
+        .collect::<Option<_>>()?;
+    Some((Some(canvas), fits))
+}
+
+/// The fit of a picture of the exact display aspect ratio `aspect` on `canvas`, whose sides are
+/// even (ADR 053).
+///
+/// 1. The side that limits the fit takes the size of the canvas on that side: the width when the
+///    picture is wider than the canvas, the height when it is narrower, both when the two aspect
+///    ratios are equal.
+/// 2. The other side is the exact value for `aspect`, rounded to the nearest even number, a tie
+///    up, and at least 2.
+/// 3. Each offset is half of the difference to the canvas, rounded down to an even number.
+///
+/// So a 1080x1920 picture on a 1920x1080 canvas is 1080 high and 1080 x 9/16 = 607.5 wide, which
+/// rounds to 608, at x = 656.
+fn fit_on_canvas(canvas: Resolution, aspect: Rational) -> Option<VideoFit> {
+    let canvas_width = Rational::new(i64::from(canvas.w), 1)?;
+    let canvas_height = Rational::new(i64::from(canvas.h), 1)?;
+    let canvas_aspect = canvas_width.div(canvas_height)?;
+    let (width, height) = match aspect.cmp(&canvas_aspect) {
+        std::cmp::Ordering::Equal => (canvas.w, canvas.h),
+        std::cmp::Ordering::Greater => (canvas.w, round_even(canvas_width.div(aspect)?)?),
+        std::cmp::Ordering::Less => (round_even(canvas_height.mul(aspect)?)?, canvas.h),
+    };
+    let width = width.min(canvas.w);
+    let height = height.min(canvas.h);
+    let offset = |canvas_side: u32, side: u32| {
+        let half = (canvas_side - side) / 2;
+        half - half % 2
+    };
+    Some(VideoFit {
+        width,
+        height,
+        x: offset(canvas.w, width),
+        y: offset(canvas.h, height),
+    })
+}
+
+/// Round a positive rational to the nearest even number, a tie up, and at least 2: twice the half
+/// of the value rounded half up.
+fn round_even(value: Rational) -> Option<u32> {
+    let half = value.div(Rational::new(2, 1)?)?;
+    let even = round_half_up(half)?.checked_mul(2)?;
+    u32::try_from(even.max(2)).ok()
 }
 
 /// `source` must be a non-empty, NUL-free, absolute path.
@@ -685,7 +1040,7 @@ fn seek_margin_rational() -> Rational {
 const MAX_SILENCE_LAYOUT_NAME_BYTES: usize = 32;
 
 /// The channel layout of the silence of an audio stream that holds no packets
-/// ([`PlannedAudio::silence_layout`]).
+/// ([`SourceAudio::silence_layout`]).
 ///
 /// A preset that names a layout gets that layout, the one every chain ends in anyway. A preset
 /// that keeps the source layout gets the layout that ffprobe reports for the stream, when it is a
@@ -746,27 +1101,32 @@ fn is_plain_layout_name(layout: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b".()+-_".contains(&byte))
 }
 
-/// Give a silence prefix ([`PlannedSegment::audio_prefix`]) to the segments with the longest
+/// Give a silence prefix ([`PlannedSegment::audio_prefix`]) to the pieces with the longest
 /// silence in front of the first audio sample, at most [`MAX_AUDIO_PREFIXES`] of them.
 ///
-/// `leading_silences` holds that silence in seconds for each segment that reaches the sample, in
-/// segment order. A prefix is the silence less [`AUDIO_PREFIX_MARGIN_MILLISECONDS`], in whole
-/// samples at `sample_rate`, rounded down, so it ends before the first packet whatever the
-/// rounding. A segment gets one only when the prefix is at least one second: a shorter fill
-/// costs less memory than the prefix costs bytes of the command line. Two equal prefixes go to
-/// the earlier segment first.
+/// `leading_silences` holds that silence in seconds for each piece that reaches the sample, in
+/// piece order, and `rates` the sample rate of the source of each piece whose stream can carry a
+/// prefix (`takes_audio_prefixes`), or `None`. A prefix is the silence less
+/// [`AUDIO_PREFIX_MARGIN_MILLISECONDS`], in whole samples at the rate of the source of the piece,
+/// rounded down, so it ends before the first packet whatever the rounding. A piece gets one only
+/// when the prefix is at least one second: a shorter fill costs less memory than the prefix costs
+/// bytes of the command line. The longest prefixes, compared in seconds, go first, because pieces
+/// of several sources count their samples at different rates (ADR 053). Two equal prefixes go to
+/// the earlier piece first. With one source, seconds order the prefixes as their samples did.
 fn assign_audio_prefixes(
     segments: &mut [PlannedSegment],
     leading_silences: &[Option<Rational>],
-    sample_rate: u32,
+    rates: &[Option<u32>],
 ) -> Result<(), ExportErrorCode> {
     let margin = Rational::new(AUDIO_PREFIX_MARGIN_MILLISECONDS, 1000)
         .expect("AUDIO_PREFIX_MARGIN_MILLISECONDS/1000 always reduces to a valid Rational");
-    let one_second = i64::from(sample_rate);
-    let rate = Rational::new(one_second, 1).ok_or(ExportErrorCode::InvalidSegment)?;
-    let mut candidates: Vec<(usize, i64)> = Vec::new();
-    for (index, silence) in leading_silences.iter().enumerate() {
-        let Some(silence) = silence else { continue };
+    let mut candidates: Vec<(usize, i64, Rational)> = Vec::new();
+    for (index, (silence, rate)) in leading_silences.iter().zip(rates).enumerate() {
+        let (Some(silence), Some(rate)) = (silence, rate) else {
+            continue;
+        };
+        let one_second = i64::from(*rate);
+        let rate = Rational::new(one_second, 1).ok_or(ExportErrorCode::InvalidSegment)?;
         let samples = silence
             .sub(margin)
             .and_then(|prefix| prefix.mul(rate))
@@ -774,11 +1134,13 @@ fn assign_audio_prefixes(
         let prefix = i64::try_from(i128::from(samples.num()).div_euclid(i128::from(samples.den())))
             .map_err(|_| ExportErrorCode::InvalidSegment)?;
         if prefix >= one_second {
-            candidates.push((index, prefix));
+            let seconds =
+                Rational::new(prefix, one_second).ok_or(ExportErrorCode::InvalidSegment)?;
+            candidates.push((index, prefix, seconds));
         }
     }
-    candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    for (index, prefix) in candidates.into_iter().take(MAX_AUDIO_PREFIXES) {
+    candidates.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+    for (index, prefix, _) in candidates.into_iter().take(MAX_AUDIO_PREFIXES) {
         segments[index].audio_prefix = Some(prefix);
     }
     Ok(())
@@ -991,6 +1353,7 @@ mod tests {
 
     fn boundary(in_pts: i64, out_pts: i64) -> SegmentBoundary {
         SegmentBoundary {
+            source: 0,
             in_pts: Pts::new(in_pts),
             out_pts: Pts::new(out_pts),
         }
@@ -1153,13 +1516,15 @@ mod tests {
         audio_mode: ExportAudioMode,
     ) -> Result<ExportPlan, ExportErrorCode> {
         let request = PlanRequest {
-            source: Path::new(SOURCE),
+            sources: &[PlanSource {
+                path: Path::new(SOURCE),
+                probe,
+                audio_frames: frames,
+            }],
             destination: Path::new(DESTINATION),
             segments,
-            probe,
             preset,
             streams,
-            audio_frames: frames,
             audio_mode,
         };
         build_plan(&request, inspect_from(facts))
@@ -1244,13 +1609,15 @@ mod tests {
     fn a_malformed_source_path_is_rejected_with_source_path_invalid() {
         for source in ["", "relative/source.mp4", "/media/bad\0source.mp4"] {
             let request = PlanRequest {
-                source: Path::new(source),
+                sources: &[PlanSource {
+                    path: Path::new(source),
+                    probe: &sample_probe(),
+                    audio_frames: &AudioFrames::default(),
+                }],
                 destination: Path::new(DESTINATION),
                 segments: &[boundary(0, 1)],
-                probe: &sample_probe(),
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
-                audio_frames: &AudioFrames::default(),
                 audio_mode: ExportAudioMode::Encode,
             };
             let error = build_plan(&request, inspect_from(valid_path_facts())).unwrap_err();
@@ -1301,13 +1668,15 @@ mod tests {
             "/export/..",
         ] {
             let request = PlanRequest {
-                source: Path::new(SOURCE),
+                sources: &[PlanSource {
+                    path: Path::new(SOURCE),
+                    probe: &sample_probe(),
+                    audio_frames: &AudioFrames::default(),
+                }],
                 destination: Path::new(destination),
                 segments: &[boundary(0, 1)],
-                probe: &sample_probe(),
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
-                audio_frames: &AudioFrames::default(),
                 audio_mode: ExportAudioMode::Encode,
             };
             let error = build_plan(&request, inspect_from(valid_path_facts())).unwrap_err();
@@ -1379,13 +1748,15 @@ mod tests {
     #[test]
     fn a_destination_identical_to_the_source_path_is_rejected_with_output_equals_source() {
         let request = PlanRequest {
-            source: Path::new(SOURCE),
+            sources: &[PlanSource {
+                path: Path::new(SOURCE),
+                probe: &sample_probe(),
+                audio_frames: &AudioFrames::default(),
+            }],
             destination: Path::new(SOURCE),
             segments: &[boundary(0, 1)],
-            probe: &sample_probe(),
             preset: &sample_preset(),
             streams: ExportStreams::VideoAndAudio,
-            audio_frames: &AudioFrames::default(),
             audio_mode: ExportAudioMode::Encode,
         };
         let mut facts = valid_path_facts();
@@ -1471,7 +1842,7 @@ mod tests {
         let mut facts = valid_path_facts();
         facts.insert(PathBuf::from(SOURCE), present_read_only_file(1));
         let plan = plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts).unwrap();
-        assert_eq!(plan.source, PathBuf::from(SOURCE));
+        assert_eq!(plan.sources[0].path, PathBuf::from(SOURCE));
     }
 
     #[test]
@@ -1733,7 +2104,7 @@ mod tests {
             Some(Rational::new(5, 1).unwrap())
         );
         assert_eq!(plan.segments[1].seek_seconds, None);
-        assert_eq!(plan.single_input_seek_seconds(), None);
+        assert_eq!(plan.single_input_seek_seconds(&[0, 1]), None);
     }
 
     // -- computation: audio ticks ----------------------------------------------------------
@@ -1766,15 +2137,22 @@ mod tests {
         assert_eq!(
             plan.audio,
             Some(PlannedAudio {
-                stream_index: 1,
-                sample_rate: 44_100,
                 output_sample_rate: 48_000,
                 output_channels: AudioChannels::Stereo,
+                output_layout: Some("stereo".to_owned()),
+                absent_layout: "stereo".to_owned(),
                 encoder: "aac".to_owned(),
                 bitrate: None,
                 options: vec![],
                 // Every segment is expected for its whole length.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
+            })
+        );
+        assert_eq!(
+            plan.sources[0].audio,
+            Some(SourceAudio {
+                stream_index: 1,
+                sample_rate: 44_100,
                 silence_layout: None,
             })
         );
@@ -1810,15 +2188,22 @@ mod tests {
         assert_eq!(
             plan.audio,
             Some(PlannedAudio {
-                stream_index: 2,
-                sample_rate: 48_000,
                 output_sample_rate: 48_000,
                 output_channels: AudioChannels::Stereo,
+                output_layout: Some("stereo".to_owned()),
+                absent_layout: "stereo".to_owned(),
                 encoder: "aac".to_owned(),
                 bitrate: None,
                 options: vec![],
                 // Every segment is expected for its whole length.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
+            })
+        );
+        assert_eq!(
+            plan.sources[0].audio,
+            Some(SourceAudio {
+                stream_index: 2,
+                sample_rate: 48_000,
                 silence_layout: None,
             })
         );
@@ -1947,15 +2332,24 @@ mod tests {
         assert_eq!(
             plan.audio,
             Some(PlannedAudio {
-                stream_index: 1,
-                sample_rate: 44_100,
                 output_sample_rate: 44_100,
                 output_channels: AudioChannels::Source,
+                output_layout: None,
+                // The silence of a source without audio would take the layout of the stream,
+                // six channels without a plain name here.
+                absent_layout: "6c".to_owned(),
                 encoder: "aac".to_owned(),
                 bitrate: None,
                 options: vec![],
                 // Every segment is expected for its whole length.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
+            })
+        );
+        assert_eq!(
+            plan.sources[0].audio,
+            Some(SourceAudio {
+                stream_index: 1,
+                sample_rate: 44_100,
                 silence_layout: None,
             })
         );
@@ -1980,7 +2374,7 @@ mod tests {
             )
             .unwrap();
             let audio = plan.audio.expect("the probe reports audio");
-            assert_eq!(audio.sample_rate, 44_100);
+            assert_eq!(plan.sources[0].audio.as_ref().unwrap().sample_rate, 44_100);
             assert_eq!(audio.output_sample_rate, sample_rate);
             assert_eq!(audio.output_channels, channels);
             // Still 1471 at the source's 44100 Hz, not 1602 at 48000 or any other output rate.
@@ -2081,7 +2475,7 @@ mod tests {
             valid_path_facts(),
         )
         .unwrap();
-        assert_eq!(video(&plan).resolution, None);
+        assert_eq!(video(&plan).canvas, None);
     }
 
     #[test]
@@ -2095,10 +2489,7 @@ mod tests {
             valid_path_facts(),
         )
         .unwrap();
-        assert_eq!(
-            video(&plan).resolution,
-            Some(Resolution { w: 1280, h: 720 })
-        );
+        assert_eq!(video(&plan).canvas, Some(Resolution { w: 1280, h: 720 }));
     }
 
     // -- computation: the video part -------------------------------------------------------
@@ -2117,9 +2508,8 @@ mod tests {
             value: 8_000,
         };
         let expected = PlannedVideo {
-            stream_index: 3,
             timing: OutputTiming::ConstantFrameRate(Rational::new(30, 1).unwrap()),
-            resolution: None,
+            canvas: None,
             encoder: "hevc_videotoolbox".to_owned(),
             quality: Quality {
                 kind: QualityKind::Bitrate,
@@ -2135,6 +2525,7 @@ mod tests {
             plan_with(&[boundary(0, 90_000)], &probe, &preset, valid_path_facts()).unwrap();
         assert_eq!(silent.audio, None);
         assert_eq!(silent.video.as_ref(), Some(&expected));
+        assert_eq!(silent.sources[0].video_stream_index, 3);
         assert_eq!(silent.expected_frames(), Some(30));
 
         probe.audio = Some(AudioProbe {
@@ -2207,7 +2598,14 @@ mod tests {
         )
         .unwrap();
         assert!(plan.video.is_some());
-        assert_eq!(plan.audio.as_ref().map(|audio| audio.stream_index), Some(1));
+        assert!(plan.audio.is_some());
+        assert_eq!(
+            plan.sources[0]
+                .audio
+                .as_ref()
+                .map(|audio| audio.stream_index),
+            Some(1)
+        );
         assert_eq!(plan.expected_frames(), Some(30));
         assert_eq!(plan.segments[0].audio_out_tick, Some(48_000));
     }
@@ -2735,32 +3133,33 @@ mod tests {
 
     #[test]
     fn the_silence_that_the_fills_hold_is_bounded_together() {
-        // Each of these segments needs 1 s in front of the first sample: too short for a prefix,
-        // so every second of it is filled in memory. Sixty fit the bound of 60 s, and one more
-        // goes over it.
+        // The first sample is at 60.5 s. The 16 pieces with the longest silence, 10.5 s each, get
+        // a prefix, and the fill of each holds only the margin of 0.25 s: 4 s together. The other
+        // pieces get no prefix, because at most 16 pieces of an export have one, and their fills
+        // hold all of their silence: 31 pieces of 1.6 s and one of 6.4 s fill the 56 s left. So
+        // the most pieces an export holds fill exactly the bound of 60 s, and one more hundredth
+        // of a second goes over it.
         for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
-            let sixty: Vec<SegmentBoundary> =
-                (0..60).map(|_| seconds_boundary("59.5", "61")).collect();
-            plan_late_audio(streams, &sixty).unwrap();
-            let mut sixty_one = sixty.clone();
-            sixty_one.push(seconds_boundary("59.5", "61"));
+            let mut full: Vec<SegmentBoundary> =
+                (0..16).map(|_| seconds_boundary("50", "61")).collect();
+            full.extend((0..31).map(|_| seconds_boundary("58.9", "61")));
+            full.push(seconds_boundary("54.1", "61"));
+            assert_eq!(full.len(), MAX_EXPORT_SEGMENTS);
+            let plan = plan_late_audio(streams, &full).unwrap();
+            let prefixes = plan
+                .segments
+                .iter()
+                .filter(|piece| piece.audio_prefix.is_some())
+                .count();
+            assert_eq!(prefixes, MAX_AUDIO_PREFIXES, "{streams:?}");
+            let mut over = full.clone();
+            over[MAX_EXPORT_SEGMENTS - 1] = seconds_boundary("54.09", "61");
             assert_eq!(
-                plan_late_audio(streams, &sixty_one).unwrap_err(),
+                plan_late_audio(streams, &over).unwrap_err(),
                 ExportErrorCode::AudioGapTooLong,
                 "{streams:?}"
             );
         }
-        // The margin that a prefix leaves counts too: 16 prefixes leave 4 s, and 57 segments of
-        // 1 s more go over the bound.
-        let mut segments: Vec<SegmentBoundary> =
-            (0..16).map(|_| seconds_boundary("50", "61")).collect();
-        segments.extend((0..56).map(|_| seconds_boundary("59.5", "61")));
-        plan_late_audio(ExportStreams::VideoAndAudio, &segments).unwrap();
-        segments.push(seconds_boundary("59.5", "61"));
-        assert_eq!(
-            plan_late_audio(ExportStreams::VideoAndAudio, &segments).unwrap_err(),
-            ExportErrorCode::AudioGapTooLong
-        );
     }
 
     #[test]
@@ -3107,7 +3506,15 @@ mod tests {
         )
         .unwrap();
         let audio = plan.audio.as_ref().unwrap();
-        assert_eq!(audio.silence_layout.as_deref(), Some("stereo"));
+        assert_eq!(
+            plan.sources[0]
+                .audio
+                .as_ref()
+                .unwrap()
+                .silence_layout
+                .as_deref(),
+            Some("stereo")
+        );
         // The ticks still give each chain its length, and the audio still runs for every segment.
         assert_eq!(plan.segments[1].audio_in_tick, Some(126 * 48_000));
         assert_eq!(plan.segments[1].audio_out_tick, Some(127 * 48_000));
@@ -3173,7 +3580,8 @@ mod tests {
             valid_path_facts(),
         )
         .unwrap();
-        assert_eq!(plan.audio.unwrap().silence_layout, None);
+        assert!(plan.audio.is_some());
+        assert_eq!(plan.sources[0].audio.as_ref().unwrap().silence_layout, None);
     }
 
     #[test]
@@ -3194,10 +3602,12 @@ mod tests {
                 valid_path_facts(),
             )
             .unwrap()
-            .audio
-            .unwrap()
-            .silence_layout
-            .unwrap()
+            .sources[0]
+                .audio
+                .clone()
+                .unwrap()
+                .silence_layout
+                .unwrap()
         };
         // A preset that names a layout gets it, whatever the stream reports.
         assert_eq!(
@@ -3831,5 +4241,815 @@ mod tests {
             ),
             Err(ExportErrorCode::SourceHasNoAudio)
         );
+    }
+
+    // -- several sources (ADR 053) ----------------------------------------------------------
+
+    #[cfg(windows)]
+    const SOURCES: [&str; 3] = [
+        r"C:\media\source.mp4",
+        r"C:\media\second.mov",
+        r"C:\media\third.mkv",
+    ];
+    #[cfg(not(windows))]
+    const SOURCES: [&str; 3] = ["/media/source.mp4", "/media/second.mov", "/media/third.mkv"];
+
+    /// The path facts of [`valid_path_facts`], with every path of [`SOURCES`] a file of its own.
+    fn several_path_facts() -> HashMap<PathBuf, PathFacts> {
+        let mut facts = valid_path_facts();
+        for (identity, source) in (1..).zip(SOURCES) {
+            facts.insert(PathBuf::from(source), present_file(identity));
+        }
+        facts
+    }
+
+    /// A piece of the source `source` from `in_pts` to `out_pts`.
+    fn piece(source: usize, in_pts: i64, out_pts: i64) -> SegmentBoundary {
+        SegmentBoundary {
+            source,
+            in_pts: Pts::new(in_pts),
+            out_pts: Pts::new(out_pts),
+        }
+    }
+
+    /// A probe of a `width`x`height` video with the SAR `sar`, the rotation `rotation` and the
+    /// nominal rate `rate`, at the time base of 1/90000 and without audio.
+    fn video_probe(
+        width: u32,
+        height: u32,
+        sar: Option<(i64, i64)>,
+        rotation: u16,
+        rate: Option<(i64, i64)>,
+    ) -> MediaProbe {
+        let rate = rate.map(|(num, den)| Rational::new(num, den).unwrap());
+        MediaProbe {
+            width,
+            height,
+            sample_aspect_ratio: sar.map(|(num, den)| Rational::new(num, den).unwrap()),
+            rotation,
+            avg_frame_rate: rate,
+            r_frame_rate: rate,
+            ..sample_probe()
+        }
+    }
+
+    /// An audio stream at `index` of `rate` Hz with `channels` channels in `layout`.
+    fn audio_stream(index: u32, rate: u32, channels: u32, layout: Option<&str>) -> AudioProbe {
+        AudioProbe {
+            index,
+            codec: Some("aac".to_owned()),
+            sample_rate: Some(rate),
+            channels: Some(channels),
+            start_time: None,
+            duration: None,
+            tagged_end: None,
+            channel_layout: layout.map(str::to_owned),
+            reported_packets: None,
+            holds_no_packets: false,
+        }
+    }
+
+    /// Plan `pieces` of the sources `probes`, at the paths of [`SOURCES`] in that order.
+    fn plan_sources(
+        streams: ExportStreams,
+        probes: &[MediaProbe],
+        pieces: &[SegmentBoundary],
+        preset: &Preset,
+    ) -> Result<ExportPlan, ExportErrorCode> {
+        let frames = AudioFrames::default();
+        let sources: Vec<PlanSource<'_>> = probes
+            .iter()
+            .zip(SOURCES)
+            .map(|(probe, path)| PlanSource {
+                path: Path::new(path),
+                probe,
+                audio_frames: &frames,
+            })
+            .collect();
+        build_plan(
+            &PlanRequest {
+                sources: &sources,
+                destination: Path::new(DESTINATION),
+                segments: pieces,
+                preset,
+                streams,
+                audio_mode: ExportAudioMode::Encode,
+            },
+            inspect_from(several_path_facts()),
+        )
+    }
+
+    /// The canvas and the fit of each source of a plan of one piece of each of `probes`.
+    fn geometry_of(
+        probes: &[MediaProbe],
+        resolution: ResolutionSetting,
+    ) -> (Option<Resolution>, Vec<Option<VideoFit>>) {
+        let pieces: Vec<SegmentBoundary> = (0..probes.len())
+            .map(|source| piece(source, 0, 90_000))
+            .collect();
+        let preset = Preset {
+            resolution,
+            ..sample_preset()
+        };
+        let plan = plan_sources(ExportStreams::VideoOnly, probes, &pieces, &preset).unwrap();
+        let fits = plan.sources.iter().map(|source| source.fit).collect();
+        (video(&plan).canvas, fits)
+    }
+
+    fn fit(width: u32, height: u32, x: u32, y: u32) -> Option<VideoFit> {
+        Some(VideoFit {
+            width,
+            height,
+            x,
+            y,
+        })
+    }
+
+    #[test]
+    fn an_anamorphic_source_beside_a_full_hd_source_fits_the_full_hd_canvas() {
+        // 720x480 at 32:27 shows 853x480 at 16:9 exactly, so it fills 1920x1080. Its SAR is not
+        // 1, so it gets the fit step even though its aspect ratio is the canvas's.
+        let anamorphic = video_probe(720, 480, Some((32, 27)), 0, Some((30_000, 1001)));
+        let full_hd = video_probe(1920, 1080, None, 0, Some((30, 1)));
+        assert_eq!(
+            geometry_of(&[anamorphic, full_hd], ResolutionSetting::Source),
+            (
+                Some(Resolution { w: 1920, h: 1080 }),
+                vec![fit(1920, 1080, 0, 0), None]
+            )
+        );
+    }
+
+    #[test]
+    fn a_portrait_source_after_a_landscape_source_is_pillarboxed_on_the_landscape_canvas() {
+        // The two display sizes have the same area, so the source of the earlier piece wins. The
+        // portrait picture is 1080 high and 1080 x 9/16 = 607.5 wide, which rounds to 608, at
+        // x = (1920 - 608) / 2 = 656. A coded portrait and a rotated landscape show the same.
+        let landscape = video_probe(1920, 1080, None, 0, Some((30, 1)));
+        for portrait in [
+            video_probe(1080, 1920, None, 0, Some((30, 1))),
+            video_probe(1920, 1080, None, 90, Some((30, 1))),
+            video_probe(1920, 1080, None, 270, Some((30, 1))),
+        ] {
+            assert_eq!(
+                geometry_of(&[landscape.clone(), portrait], ResolutionSetting::Source),
+                (
+                    Some(Resolution { w: 1920, h: 1080 }),
+                    vec![None, fit(608, 1080, 656, 0)]
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_portrait_source_first_gives_a_portrait_canvas() {
+        let portrait = video_probe(1080, 1920, None, 0, Some((30, 1)));
+        let landscape = video_probe(1920, 1080, None, 0, Some((30, 1)));
+        assert_eq!(
+            geometry_of(&[portrait, landscape], ResolutionSetting::Source),
+            (
+                Some(Resolution { w: 1080, h: 1920 }),
+                vec![None, fit(1080, 608, 0, 656)]
+            )
+        );
+    }
+
+    #[test]
+    fn sources_of_one_size_sar_and_rotation_get_no_canvas_and_no_fit() {
+        // As a single source always does: an anamorphic source keeps its own SAR, and no chain
+        // scales (ADR 014 measurement 16).
+        let anamorphic = || video_probe(720, 480, Some((32, 27)), 0, Some((30, 1)));
+        assert_eq!(
+            geometry_of(&[anamorphic(), anamorphic()], ResolutionSetting::Source),
+            (None, vec![None, None])
+        );
+        assert_eq!(
+            geometry_of(&[anamorphic()], ResolutionSetting::Source),
+            (None, vec![None])
+        );
+        // An unknown SAR reads as square pixels, as the probe reads it.
+        let square = video_probe(1920, 1080, Some((1, 1)), 0, Some((30, 1)));
+        let unknown = video_probe(1920, 1080, None, 0, Some((30, 1)));
+        assert_eq!(
+            geometry_of(&[square, unknown], ResolutionSetting::Source),
+            (None, vec![None, None])
+        );
+        // Another rotation of the same coded size is another picture.
+        let rotated = video_probe(1920, 1080, None, 90, Some((30, 1)));
+        let upright = video_probe(1920, 1080, None, 0, Some((30, 1)));
+        assert_eq!(
+            geometry_of(&[upright, rotated], ResolutionSetting::Source).0,
+            Some(Resolution { w: 1920, h: 1080 })
+        );
+    }
+
+    #[test]
+    fn a_preset_size_is_the_canvas_with_even_sides_and_fits_every_source() {
+        // An odd side loses one pixel, and a side of 1 becomes 2. A source of the canvas's size
+        // and square pixels needs no fit; one of another aspect ratio is pillarboxed.
+        let full_hd = video_probe(1920, 1080, None, 0, Some((30, 1)));
+        assert_eq!(
+            geometry_of(
+                std::slice::from_ref(&full_hd),
+                ResolutionSetting::Custom(Resolution { w: 1281, h: 721 })
+            ),
+            (
+                Some(Resolution { w: 1280, h: 720 }),
+                vec![fit(1280, 720, 0, 0)]
+            )
+        );
+        assert_eq!(
+            geometry_of(
+                std::slice::from_ref(&full_hd),
+                ResolutionSetting::Custom(Resolution { w: 1920, h: 1080 })
+            ),
+            (Some(Resolution { w: 1920, h: 1080 }), vec![None])
+        );
+        let four_three = video_probe(640, 480, None, 0, Some((30, 1)));
+        assert_eq!(
+            geometry_of(
+                &[four_three],
+                ResolutionSetting::Custom(Resolution { w: 1920, h: 1080 })
+            ),
+            (
+                Some(Resolution { w: 1920, h: 1080 }),
+                vec![fit(1440, 1080, 240, 0)]
+            )
+        );
+        assert_eq!(
+            geometry_of(
+                &[full_hd],
+                ResolutionSetting::Custom(Resolution { w: 1, h: 3 })
+            )
+            .0,
+            Some(Resolution { w: 2, h: 2 })
+        );
+    }
+
+    #[test]
+    fn the_fit_rounds_to_an_even_side_a_tie_up_and_each_offset_down_to_an_even_number() {
+        let canvas = Resolution { w: 1920, h: 1080 };
+        let aspect = |num: i64, den: i64| Rational::new(num, den).unwrap();
+        // 1080 x 607/1080 = 607, an odd number: the tie between 606 and 608 goes up.
+        assert_eq!(
+            fit_on_canvas(canvas, aspect(607, 1080)),
+            fit(608, 1080, 656, 0)
+        );
+        // 1080 x 605.9/1080 rounds to 606, and the half of 1314 is 657, rounded down to 656.
+        assert_eq!(
+            fit_on_canvas(canvas, aspect(6059, 10_800)),
+            fit(606, 1080, 656, 0)
+        );
+        // A wide picture takes the width, and its height rounds: 1920 / (21/9) = 822.86 -> 822,
+        // at y = 129 rounded down to 128.
+        assert_eq!(fit_on_canvas(canvas, aspect(21, 9)), fit(1920, 822, 0, 128));
+        // The canvas's own aspect ratio fills it.
+        assert_eq!(fit_on_canvas(canvas, aspect(16, 9)), fit(1920, 1080, 0, 0));
+        // A side never rounds to nothing.
+        assert_eq!(
+            fit_on_canvas(canvas, aspect(1, 100_000)),
+            fit(2, 1080, 958, 0)
+        );
+    }
+
+    #[test]
+    fn the_display_size_rounds_the_width_half_up_and_swaps_for_a_quarter_turn() {
+        // 720 x 32/27 = 853.33 -> 853; 704 x 10/11 = 640 exactly; 3 x 1/2 = 1.5 -> 2.
+        let size_of = |width: u32, sar: (i64, i64), rotation: u16| {
+            let geometry =
+                display_geometry(&video_probe(width, 480, Some(sar), rotation, None)).unwrap();
+            (geometry.width, geometry.height)
+        };
+        assert_eq!(size_of(720, (32, 27), 0), (853, 480));
+        assert_eq!(size_of(704, (10, 11), 0), (640, 480));
+        assert_eq!(size_of(3, (1, 2), 0), (2, 480));
+        assert_eq!(size_of(720, (32, 27), 90), (480, 853));
+        assert_eq!(size_of(720, (32, 27), 180), (853, 480));
+    }
+
+    #[test]
+    fn the_source_frame_rate_is_the_highest_nominal_rate_of_the_sources() {
+        let at = |rate: Option<(i64, i64)>| video_probe(1920, 1080, None, 0, rate);
+        let pieces = [
+            piece(0, 0, 90_000),
+            piece(1, 0, 90_000),
+            piece(2, 0, 90_000),
+        ];
+        let rate_of = |probes: &[MediaProbe]| {
+            plan_sources(
+                ExportStreams::VideoOnly,
+                probes,
+                &pieces[..probes.len()],
+                &sample_preset(),
+            )
+            .map(|plan| video(&plan).timing)
+        };
+        let rate =
+            |num: i64, den: i64| OutputTiming::ConstantFrameRate(Rational::new(num, den).unwrap());
+        // Compared as exact rationals: 30000/1001 is below 30, and 60 is above both.
+        assert_eq!(
+            rate_of(&[
+                at(Some((30_000, 1001))),
+                at(Some((60, 1))),
+                at(Some((24, 1)))
+            ]),
+            Ok(rate(60, 1))
+        );
+        assert_eq!(
+            rate_of(&[at(Some((30_000, 1001))), at(Some((30, 1)))]),
+            Ok(rate(30, 1))
+        );
+        // A source without a rate does not take part, and none at all is refused.
+        assert_eq!(rate_of(&[at(None), at(Some((25, 1)))]), Ok(rate(25, 1)));
+        assert_eq!(
+            rate_of(&[at(None), at(None)]),
+            Err(ExportErrorCode::SourceFrameRateUnknown)
+        );
+        // `avg_frame_rate` comes before `r_frame_rate`, as for one source.
+        let mut averaged = at(Some((50, 1)));
+        averaged.avg_frame_rate = Some(Rational::new(24, 1).unwrap());
+        assert_eq!(rate_of(&[averaged, at(Some((30, 1)))]), Ok(rate(30, 1)));
+        // An explicit rate wins, and then no source needs one.
+        let preset = Preset {
+            frame_rate: FrameRateSetting::Rate(Rational::new(25, 1).unwrap()),
+            ..sample_preset()
+        };
+        let plan = plan_sources(
+            ExportStreams::VideoOnly,
+            &[at(None), at(None)],
+            &pieces[..2],
+            &preset,
+        )
+        .unwrap();
+        assert_eq!(video(&plan).timing, rate(25, 1));
+    }
+
+    #[test]
+    fn the_expected_frames_round_each_piece_on_its_own_with_a_half_away_from_zero() {
+        // Three frames of a 24 fps source last 1/8 s, which is 7.5 frames at 60 fps. Each piece
+        // rounds to 8, so two of them expect 16, not the 15 of the rounded sum.
+        let film = video_probe(1920, 1080, None, 0, Some((24, 1)));
+        let fast = video_probe(1280, 720, None, 0, Some((60, 1)));
+        let pieces = [
+            piece(0, 0, 11_250),
+            piece(1, 0, 90_000),
+            piece(0, 90_000, 101_250),
+        ];
+        let plan = plan_sources(
+            ExportStreams::VideoOnly,
+            &[film, fast],
+            &pieces,
+            &sample_preset(),
+        )
+        .unwrap();
+        let frames: Vec<Option<u64>> = plan.segments.iter().map(|piece| piece.frames).collect();
+        assert_eq!(frames, vec![Some(8), Some(60), Some(8)]);
+        assert_eq!(plan.expected_frames(), Some(76));
+    }
+
+    #[test]
+    fn each_piece_is_timed_with_its_own_source() {
+        // The second source has another time base and a container start of 10 s. Its In point of
+        // 20 s seeks to 20 - 10 - 5 = 5 s, and its ticks count its own audio rate.
+        let mut first = video_probe(1920, 1080, None, 0, Some((30, 1)));
+        first.audio = Some(audio_stream(1, 48_000, 2, Some("stereo")));
+        let mut second = video_probe(1920, 1080, None, 0, Some((30, 1)));
+        second.video_time_base = Rational::new(1, 1000).unwrap();
+        second.format_start_time = Some(Rational::new(10, 1).unwrap());
+        second.video_stream_index = 1;
+        second.audio = Some(audio_stream(0, 44_100, 2, Some("stereo")));
+        let pieces = [piece(0, 900_000, 990_000), piece(1, 20_000, 21_000)];
+        let plan = plan_sources(
+            ExportStreams::VideoAndAudio,
+            &[first, second],
+            &pieces,
+            &sample_preset(),
+        )
+        .unwrap();
+        assert_eq!(plan.segments[0].seek_seconds, Rational::new(5, 1));
+        assert_eq!(plan.segments[1].seek_seconds, Rational::new(5, 1));
+        assert_eq!(
+            (
+                plan.segments[0].audio_in_tick,
+                plan.segments[0].audio_out_tick
+            ),
+            (Some(480_000), Some(528_000))
+        );
+        assert_eq!(
+            (
+                plan.segments[1].audio_in_tick,
+                plan.segments[1].audio_out_tick
+            ),
+            (Some(882_000), Some(926_100))
+        );
+        assert_eq!(plan.total_duration, Rational::new(2, 1).unwrap());
+        assert_eq!(plan.sources[1].video_stream_index, 1);
+        assert_eq!(plan.sources[1].audio.as_ref().unwrap().stream_index, 0);
+        assert_eq!(plan.sources[1].path, PathBuf::from(SOURCES[1]));
+        // The single input of a source seeks for the pieces of that source only.
+        assert_eq!(plan.single_input_seek_seconds(&[1]), Rational::new(5, 1));
+    }
+
+    #[test]
+    fn the_source_audio_format_is_the_highest_rate_and_the_widest_layout() {
+        let preset = Preset {
+            audio_sample_rate: AudioSampleRateSetting::Source,
+            audio_channels: AudioChannels::Source,
+            ..sample_preset()
+        };
+        let with_audio = |audio: Option<AudioProbe>| MediaProbe {
+            audio,
+            ..sample_probe()
+        };
+        let pieces = [
+            piece(0, 0, 90_000),
+            piece(1, 0, 90_000),
+            piece(2, 0, 90_000),
+        ];
+        let audio_of = |probes: &[MediaProbe]| {
+            plan_sources(
+                ExportStreams::VideoAndAudio,
+                probes,
+                &pieces[..probes.len()],
+                &preset,
+            )
+            .unwrap()
+            .audio
+            .unwrap()
+        };
+
+        // Different layouts: the closing `aformat` names the layout of the most channels, at
+        // the highest rate, and a source without audio takes part in neither.
+        let audio = audio_of(&[
+            with_audio(Some(audio_stream(1, 44_100, 2, Some("stereo")))),
+            with_audio(None),
+            with_audio(Some(audio_stream(1, 48_000, 6, Some("5.1(side)")))),
+        ]);
+        assert_eq!(audio.output_sample_rate, 48_000);
+        assert_eq!(audio.output_layout.as_deref(), Some("5.1(side)"));
+        assert_eq!(audio.absent_layout, "5.1(side)");
+
+        // One layout: no chain names it, as for one source, and the silence of a source
+        // without audio takes it.
+        let audio = audio_of(&[
+            with_audio(Some(audio_stream(1, 32_000, 2, Some("stereo")))),
+            with_audio(Some(audio_stream(1, 44_100, 2, Some("stereo")))),
+            with_audio(None),
+        ]);
+        assert_eq!(audio.output_sample_rate, 44_100);
+        assert_eq!(audio.output_layout, None);
+        assert_eq!(audio.absent_layout, "stereo");
+
+        // Equal counts: the source of the earlier piece wins, and a layout without a plain name
+        // gives the default layout of its count.
+        let audio = audio_of(&[
+            with_audio(Some(audio_stream(
+                1,
+                48_000,
+                6,
+                Some("6 channels (FL+FR+FC+LFE+SL+SR)"),
+            ))),
+            with_audio(Some(audio_stream(1, 48_000, 6, Some("5.1")))),
+        ]);
+        assert_eq!(audio.output_layout.as_deref(), Some("6c"));
+
+        // A stream without packets takes part, as a stream with packets does.
+        let mut empty = audio_stream(1, 96_000, 8, Some("7.1"));
+        empty.holds_no_packets = true;
+        let plan = plan_sources(
+            ExportStreams::VideoAndAudio,
+            &[
+                with_audio(Some(audio_stream(1, 48_000, 2, Some("stereo")))),
+                with_audio(Some(empty)),
+            ],
+            &pieces[..2],
+            &preset,
+        )
+        .unwrap();
+        let audio = plan.audio.as_ref().unwrap();
+        assert_eq!(audio.output_sample_rate, 96_000);
+        assert_eq!(audio.output_layout.as_deref(), Some("7.1"));
+        assert_eq!(
+            plan.sources[1]
+                .audio
+                .as_ref()
+                .unwrap()
+                .silence_layout
+                .as_deref(),
+            Some("7.1")
+        );
+
+        // The preset's own values win.
+        let fixed = plan_sources(
+            ExportStreams::VideoAndAudio,
+            &[
+                with_audio(Some(audio_stream(1, 44_100, 2, Some("stereo")))),
+                with_audio(Some(audio_stream(1, 48_000, 6, Some("5.1")))),
+            ],
+            &pieces[..2],
+            &sample_preset(),
+        )
+        .unwrap();
+        let audio = fixed.audio.as_ref().unwrap();
+        assert_eq!(audio.output_sample_rate, 48_000);
+        assert_eq!(audio.output_layout.as_deref(), Some("stereo"));
+        // Each source keeps its own rate as the unit of its ticks.
+        assert_eq!(fixed.sources[0].audio.as_ref().unwrap().sample_rate, 44_100);
+        assert_eq!(fixed.segments[0].audio_out_tick, Some(44_100));
+    }
+
+    #[test]
+    fn a_source_without_audio_gets_silence_of_its_length_at_the_output_rate() {
+        // 50 ticks of 1/90000 s at 44100 Hz are 24.5 samples, which round away from zero to 25.
+        // A piece of 1 s is 44100 of them. Its ticks run from 0, so their difference is the
+        // length.
+        let preset = Preset {
+            audio_sample_rate: AudioSampleRateSetting::Fixed(44_100),
+            ..sample_preset()
+        };
+        let mut with_audio = sample_probe();
+        with_audio.audio = Some(audio_stream(1, 48_000, 2, Some("stereo")));
+        let pieces = [
+            piece(1, 1_000, 1_050),
+            piece(0, 0, 90_000),
+            piece(1, 90_000, 180_000),
+        ];
+        let plan = plan_sources(
+            ExportStreams::VideoAndAudio,
+            &[with_audio, sample_probe()],
+            &pieces,
+            &preset,
+        );
+        // The pieces name source 1 first, but a request names its sources in the order of their
+        // first piece; this one does not, which `build_plan` accepts.
+        let plan = plan.unwrap();
+        let ticks: Vec<(Option<i64>, Option<i64>)> = plan
+            .segments
+            .iter()
+            .map(|piece| (piece.audio_in_tick, piece.audio_out_tick))
+            .collect();
+        assert_eq!(
+            ticks,
+            vec![
+                (Some(0), Some(25)),
+                (Some(0), Some(48_000)),
+                (Some(0), Some(44_100)),
+            ]
+        );
+        assert_eq!(plan.audio_tick_rate(0), Some(44_100));
+        assert_eq!(plan.audio_tick_rate(1), Some(48_000));
+        assert_eq!(plan.sources[1].audio, None);
+        // One piece reads a stream, so the audio has its own process (ADR 043).
+        assert!(plan.reads_audio_stream());
+        assert!(plan.separate_audio_process());
+        assert!(!plan.piece_reads_audio(0));
+        assert!(plan.piece_reads_audio(1));
+    }
+
+    #[test]
+    fn the_audio_of_sources_without_packets_or_without_audio_is_written_or_refused() {
+        let mut empty = sample_probe();
+        empty.audio = Some(AudioProbe {
+            holds_no_packets: true,
+            ..audio_stream(1, 48_000, 2, Some("stereo"))
+        });
+        let mut with_audio = sample_probe();
+        with_audio.audio = Some(audio_stream(1, 48_000, 2, Some("stereo")));
+        let pieces = [piece(0, 0, 90_000), piece(1, 0, 90_000)];
+
+        // No source has an audio stream: no audio is written, and an audio-only export of
+        // streams without packets is refused.
+        let plan = plan_sources(
+            ExportStreams::VideoAndAudio,
+            &[sample_probe(), sample_probe()],
+            &pieces,
+            &sample_preset(),
+        )
+        .unwrap();
+        assert_eq!(plan.audio, None);
+        assert_eq!(
+            plan_sources(
+                ExportStreams::AudioOnly,
+                &[sample_probe(), empty.clone()],
+                &pieces,
+                &sample_preset(),
+            )
+            .unwrap_err(),
+            ExportErrorCode::SourceHasNoAudio
+        );
+        // A stream without packets beside a source without audio writes silence in one process.
+        let plan = plan_sources(
+            ExportStreams::VideoAndAudio,
+            &[sample_probe(), empty],
+            &pieces,
+            &sample_preset(),
+        )
+        .unwrap();
+        assert!(plan.audio.is_some());
+        assert!(!plan.separate_audio_process());
+        // An audio-only export of a source with audio and one without writes both.
+        let plan = plan_sources(
+            ExportStreams::AudioOnly,
+            &[sample_probe(), with_audio],
+            &pieces,
+            &sample_preset(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.audio.unwrap().expected_duration,
+            Rational::new(2, 1).unwrap()
+        );
+        // A source with an audio stream of no rate is refused, whichever source it is.
+        let mut unknown = sample_probe();
+        unknown.audio = Some(AudioProbe {
+            sample_rate: None,
+            ..audio_stream(1, 48_000, 2, None)
+        });
+        assert_eq!(
+            plan_sources(
+                ExportStreams::VideoAndAudio,
+                &[sample_probe(), unknown],
+                &pieces,
+                &sample_preset(),
+            )
+            .unwrap_err(),
+            ExportErrorCode::SourceAudioRateUnknown
+        );
+    }
+
+    #[test]
+    fn a_copy_of_the_audio_needs_one_piece() {
+        // A segment across a junction has two pieces, so its audio is encoded (ADR 048, ADR 053).
+        let probe = probe_with_audio();
+        let frames = AudioFrames::default();
+        let sources = [
+            PlanSource {
+                path: Path::new(SOURCES[0]),
+                probe: &probe,
+                audio_frames: &frames,
+            },
+            PlanSource {
+                path: Path::new(SOURCES[1]),
+                probe: &probe,
+                audio_frames: &frames,
+            },
+        ];
+        let plan = build_plan(
+            &PlanRequest {
+                sources: &sources,
+                destination: Path::new(DESTINATION),
+                segments: &[piece(0, 0, 450_000), piece(1, 0, 450_000)],
+                preset: &sample_preset(),
+                streams: ExportStreams::VideoAndAudio,
+                audio_mode: ExportAudioMode::Copy,
+            },
+            inspect_from(several_path_facts()),
+        )
+        .unwrap();
+        assert_eq!(plan.copied_audio, None);
+        assert_eq!(
+            plan.audio_copy_refusal,
+            Some(copy::CopyRefusal::NotOneSegment)
+        );
+        assert!(plan.audio.is_some());
+    }
+
+    #[test]
+    fn the_sources_must_match_the_pieces_and_the_destination_must_be_none_of_them() {
+        let probes = [sample_probe(), sample_probe()];
+        let plan = |pieces: &[SegmentBoundary]| {
+            plan_sources(ExportStreams::VideoOnly, &probes, pieces, &sample_preset())
+        };
+        // A piece names a source that is not there, or a source has no piece.
+        assert_eq!(
+            plan(&[piece(0, 0, 1), piece(2, 0, 1)]).unwrap_err(),
+            ExportErrorCode::InvalidSources
+        );
+        assert_eq!(
+            plan(&[piece(0, 0, 1), piece(0, 1, 2)]).unwrap_err(),
+            ExportErrorCode::InvalidSources
+        );
+        assert!(plan(&[piece(1, 0, 1), piece(0, 0, 1)]).is_ok());
+        // Every source is checked in turn.
+        let frames = AudioFrames::default();
+        let sources: Vec<PlanSource<'_>> = probes
+            .iter()
+            .zip(SOURCES)
+            .map(|(probe, path)| PlanSource {
+                path: Path::new(path),
+                probe,
+                audio_frames: &frames,
+            })
+            .collect();
+        let preset = sample_preset();
+        let pieces = [piece(0, 0, 1), piece(1, 0, 1)];
+        let request = |destination: &'static str| PlanRequest {
+            sources: &sources,
+            destination: Path::new(destination),
+            segments: &pieces,
+            preset: &preset,
+            streams: ExportStreams::VideoOnly,
+            audio_mode: ExportAudioMode::Encode,
+        };
+        let mut facts = several_path_facts();
+        facts.insert(PathBuf::from(SOURCES[1]), absent());
+        assert_eq!(
+            build_plan(&request(DESTINATION), inspect_from(facts)).unwrap_err(),
+            ExportErrorCode::SourceNotFound
+        );
+        // A destination that is the second source is refused, by its identity and by its path.
+        let mut facts = several_path_facts();
+        facts.insert(PathBuf::from(DESTINATION), present_file(2));
+        assert_eq!(
+            build_plan(&request(DESTINATION), inspect_from(facts)).unwrap_err(),
+            ExportErrorCode::OutputEqualsSource
+        );
+        let mut facts = several_path_facts();
+        facts.insert(PathBuf::from(SOURCE_PARENT), present_directory());
+        assert_eq!(
+            build_plan(&request(SOURCES[1]), inspect_from(facts)).unwrap_err(),
+            ExportErrorCode::OutputEqualsSource
+        );
+    }
+
+    #[test]
+    fn the_limit_counts_pieces() {
+        let probes = [sample_probe(), sample_probe()];
+        let pieces: Vec<SegmentBoundary> = (0..=MAX_EXPORT_SEGMENTS)
+            .map(|index| piece(index % 2, 0, 90_000))
+            .collect();
+        assert_eq!(
+            plan_sources(ExportStreams::VideoOnly, &probes, &pieces, &sample_preset()).unwrap_err(),
+            ExportErrorCode::TooManySegments
+        );
+        assert!(plan_sources(
+            ExportStreams::VideoOnly,
+            &probes,
+            &pieces[..MAX_EXPORT_SEGMENTS],
+            &sample_preset()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_silence_of_another_name_than_the_shared_layout_is_named_in_the_closing_format() {
+        // Streams that share a layout without a plain name, beside a source without audio or a
+        // stream without packets: the silence takes `6c`, so every chain names `6c`, and
+        // `concat` does not choose between two layouts.
+        let preset = Preset {
+            audio_sample_rate: AudioSampleRateSetting::Source,
+            audio_channels: AudioChannels::Source,
+            ..sample_preset()
+        };
+        let custom = Some("6 channels (FL+FR+FC+LFE+SL+SR)");
+        let with_audio = |audio: Option<AudioProbe>| MediaProbe {
+            audio,
+            ..sample_probe()
+        };
+        let pieces = [piece(0, 0, 90_000), piece(1, 0, 90_000)];
+        let layout_of = |second: Option<AudioProbe>| {
+            plan_sources(
+                ExportStreams::VideoAndAudio,
+                &[
+                    with_audio(Some(audio_stream(1, 48_000, 6, custom))),
+                    with_audio(second),
+                ],
+                &pieces,
+                &preset,
+            )
+            .unwrap()
+            .audio
+            .unwrap()
+            .output_layout
+        };
+        assert_eq!(layout_of(None).as_deref(), Some("6c"));
+        let mut empty = audio_stream(1, 48_000, 6, custom);
+        empty.holds_no_packets = true;
+        assert_eq!(layout_of(Some(empty)).as_deref(), Some("6c"));
+        // Two streams of that layout, read both, need no name: no silence meets them.
+        assert_eq!(layout_of(Some(audio_stream(1, 48_000, 6, custom))), None);
+        // A plain shared name is the name of the silence too.
+        let plan = plan_sources(
+            ExportStreams::VideoAndAudio,
+            &[
+                with_audio(Some(audio_stream(1, 48_000, 6, Some("5.1")))),
+                with_audio(None),
+            ],
+            &pieces,
+            &preset,
+        )
+        .unwrap();
+        assert_eq!(plan.audio.unwrap().output_layout, None);
+        // One source of that layout whose stream holds no packets names none, as before.
+        let mut alone = audio_stream(1, 48_000, 6, custom);
+        alone.holds_no_packets = true;
+        let plan = plan_sources(
+            ExportStreams::VideoAndAudio,
+            &[with_audio(Some(alone))],
+            &pieces[..1],
+            &preset,
+        )
+        .unwrap();
+        assert_eq!(plan.audio.unwrap().output_layout, None);
     }
 }

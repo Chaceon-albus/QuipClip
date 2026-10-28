@@ -341,9 +341,10 @@ describe("the quit prompt for a live export after a failed Stop request", () => 
         clientCancelExport(runId, { invoke: vi.fn().mockRejectedValue("IPC closed") }),
     });
     const starting = store.getState().startExport({
-      sourcePath: "/videos/open.mp4",
+      sources: [{ id: "source", path: "/videos/open.mp4" }],
       outputPath: "/videos/out.mp4",
-      segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+      pieces: [{ sourceId: "source", inPts: "0" as Pts, outPts: "1000" as Pts }],
+      segmentCount: 1,
       preset: createPresetDraft("default", "Test preset"),
       streams: "videoAndAudio",
       audioMode: "encode",
@@ -539,9 +540,10 @@ describe("the queued exports in the quit guard", () => {
 describe("the quit prompt with the real export stores", () => {
   function request(outputPath: string): ExportRequest {
     return {
-      sourcePath: "/media/source.mp4",
+      sources: [{ id: "source", path: "/media/source.mp4" }],
       outputPath,
-      segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+      pieces: [{ sourceId: "source", inPts: "0" as Pts, outPts: "1000" as Pts }],
+      segmentCount: 1,
       preset: createPresetDraft("mp4-h264", "Test preset"),
       streams: "videoAndAudio",
       audioMode: "encode",

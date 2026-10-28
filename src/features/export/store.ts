@@ -482,7 +482,7 @@ export function createExportStore(
           status: "preparing",
           runId: null,
           outputPath: request.outputPath,
-          segmentCount: request.segments.length,
+          segmentCount: request.segmentCount,
           frame: null,
           expectedFrames: null,
           fps: null,

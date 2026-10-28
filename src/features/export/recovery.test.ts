@@ -42,9 +42,10 @@ async function flush(): Promise<void> {
 
 function createRequest(outputPath: string): ExportRequest {
   return {
-    sourcePath: "/media/source.mp4",
+    sources: [{ id: "source", path: "/media/source.mp4" }],
     outputPath,
-    segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+    pieces: [{ sourceId: "source", inPts: "0" as Pts, outPts: "1000" as Pts }],
+    segmentCount: 1,
     preset: createPresetDraft("mp4-h264", "New preset"),
     streams: "videoAndAudio",
     audioMode: "encode",

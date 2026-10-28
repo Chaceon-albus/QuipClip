@@ -30,12 +30,13 @@ function createDeferred<T>() {
 
 function createRequest(outputPath: string, presetName = "Test preset"): ExportRequest {
   return {
-    sourcePath: "/media/source.mp4",
+    sources: [{ id: "source", path: "/media/source.mp4" }],
     outputPath,
-    segments: [
-      { inPts: "0" as Pts, outPts: "1000" as Pts },
-      { inPts: "2000" as Pts, outPts: "3000" as Pts },
+    pieces: [
+      { sourceId: "source", inPts: "0" as Pts, outPts: "1000" as Pts },
+      { sourceId: "source", inPts: "2000" as Pts, outPts: "3000" as Pts },
     ],
+    segmentCount: 2,
     preset: createPresetDraft("mp4-h264", presetName),
     streams: "videoAndAudio",
     audioMode: "encode",
