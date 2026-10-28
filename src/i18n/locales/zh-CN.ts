@@ -719,6 +719,8 @@ export const zhCN: TranslationCatalog = {
       qualityBitrate: "{{value}} kbps",
       qualityScale: "质量系数 {{value}}",
       audioBitrateLossless: "无损",
+      audioGainNone: "不调整",
+      audioGainValue: "{{value}} dB",
       resolutionValue: "{{width}} × {{height}}",
       frameRateValue: "{{value}} fps",
       sourceResolution: "与源相同（{{width}} × {{height}}）",

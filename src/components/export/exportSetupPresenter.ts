@@ -439,6 +439,31 @@ function presentAudioBitrateRow(
   };
 }
 
+/**
+ * The gain row of the audio group (ADR 054): "No Change" for 0, or the gain in decibels with its
+ * sign and one decimal place, such as "-1.0 dB".
+ */
+function presentAudioGainRow(
+  preset: Preset,
+  formatter: Intl.NumberFormat,
+): PresetSummaryRowView {
+  const labelKey = "settings.preset.audioGainLabel";
+  if (preset.audioGainTenthsDb === 0) {
+    return { id: "audioGain", labelKey, valueKey: "export.setup.audioGainNone" };
+  }
+  const decibels = new Intl.NumberFormat(formatter.resolvedOptions().locale, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+    signDisplay: "exceptZero",
+  });
+  return {
+    id: "audioGain",
+    labelKey,
+    valueKey: "export.setup.audioGainValue",
+    valueValues: { value: decibels.format(preset.audioGainTenthsDb / 10) },
+  };
+}
+
 function presentSampleRateRow(
   preset: Preset,
   source: PresetSummarySource | null,
@@ -613,6 +638,7 @@ export function presentPresetSummary(
               presentAudioBitrateRow(preset, formatter),
               presentSampleRateRow(preset, source, formatter),
               presentChannelsRow(preset, source),
+              presentAudioGainRow(preset, formatter),
               ...(audioOptions === null ? [] : [audioOptions]),
             ],
           };

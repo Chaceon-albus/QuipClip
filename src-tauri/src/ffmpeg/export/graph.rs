@@ -61,10 +61,11 @@
 //! [`SCALER_FLAGS`]), so the scalers that ffmpeg inserts for a change of pixel format use Lanczos
 //! and not bicubic.
 //!
-//! One filter stands outside every chain: the `format` that sets the output pixel format reads
-//! the output of `concat` once, where ADR 014's chain template first ended each chain with it.
-//! The reason is the command-line budget. Its chain comes **first** in the graph text, and that
-//! position is what keeps the output the same; see [`video_output_format`].
+//! Two filters stand outside every chain, and each reads an output of `concat` once. The `format`
+//! that sets the output pixel format reads the video, where ADR 014's chain template first ended
+//! each chain with it. Its chain comes **first** in the graph text, and that position is what
+//! keeps the output the same; see [`video_output_format`]. The `volume` of a preset gain reads the
+//! audio (ADR 054); see [`audio_gain_chain`]. The reason for both is the command-line budget.
 //!
 //! No step here uses floating point. A frame rate renders as `num/den` (ADR 002), so an NTSC
 //! rate reaches ffmpeg as the exact `30000/1001`, never a rounded decimal.
@@ -161,6 +162,64 @@ pub(crate) fn audio_output_format(audio: &PlannedAudio) -> String {
         .map(|layout| format!(":cl={layout}"))
         .unwrap_or_default();
     format!("aformat=f=fltp:r={}{layout}", audio.output_sample_rate)
+}
+
+/// Render a gain in tenths of a decibel as the decibel text of `volume`: a sign for a negative
+/// value, the whole decibels, a point, and the tenth. -10 is `-1.0`, 5 is `0.5`, and -200 is
+/// `-20.0`.
+///
+/// The text comes from the integer alone, so it is exact (ADR 002) and the same on every
+/// machine. The settings bound the gain to `-200..=200`, so the text is at most five bytes.
+pub(crate) fn decibel_text(tenths_db: i32) -> String {
+    let sign = if tenths_db < 0 { "-" } else { "" };
+    let magnitude = tenths_db.unsigned_abs();
+    format!("{sign}{}.{}", magnitude / 10, magnitude % 10)
+}
+
+/// Render the `volume` filter of a gain in tenths of a decibel: `volume=-1.0dB` for -10.
+///
+/// `volume` reads its value as an expression, and the expression parser reads the suffix `dB` as
+/// a gain. On ffmpeg 9.0.2, `volume=-1.0dB` lowered a 1 kHz tone by exactly 1.000 dB in peak and
+/// RMS, `-20.0dB` by 20.000 dB and `0.5dB` raised it by 0.500 dB, and a constant 0.5 became
+/// 0.445625, so the minus sign does not invert the samples (ADR 054).
+pub(crate) fn volume_filter(tenths_db: i32) -> String {
+    format!("volume={}dB", decibel_text(tenths_db))
+}
+
+/// The audio label of `concat` when the plan has a gain chain behind it.
+const JOINED_AUDIO_LABEL: &str = "[ac]";
+
+/// The audio label that `concat` writes: [`JOINED_AUDIO_LABEL`] when `gain`, the chain of
+/// [`audio_gain_chain`], reads it, and otherwise the graph's `[a]` output label.
+fn concat_audio_label(gain: Option<&String>) -> &'static str {
+    if gain.is_some() {
+        JOINED_AUDIO_LABEL
+    } else {
+        "[a]"
+    }
+}
+
+/// Render the chain that applies the gain of the plan to the joined audio: `[ac]volume=<g>dB[a]`,
+/// or `None` when the plan has no gain to apply (ADR 054).
+///
+/// There is no chain when the gain is 0, so the graph of a preset without a gain stays the same
+/// byte for byte. There is none either when no piece reads an audio stream: silence has no level
+/// to change, and those plans have the longest commands of the encoder (ADR 014), which this keeps
+/// as they were.
+///
+/// The gain is one chain behind `concat` and not a filter in each audio chain, for the reason
+/// [`video_output_format`] gives: a filter in each chain costs its bytes once for each piece. As
+/// one chain it costs at most 23 bytes: `;[ac]volume=-20.0dB[a]`, and the `c` of the `[ac]` that
+/// `concat` writes. Every chain ends in the one format of [`audio_output_format`], so `volume`
+/// receives one rate and one layout, and the planar float format of that `aformat` keeps a gain
+/// from clipping inside the graph.
+fn audio_gain_chain(plan: &ExportPlan, audio: &PlannedAudio) -> Option<String> {
+    (audio.gain_tenths_db != 0 && plan.reads_audio_stream()).then(|| {
+        format!(
+            "{JOINED_AUDIO_LABEL}{}[a]",
+            volume_filter(audio.gain_tenths_db)
+        )
+    })
 }
 
 /// The flags of every scaler in the graph: Lanczos, the high-quality scaler of every `ffmpeg`
@@ -353,15 +412,21 @@ pub fn build_filter_graph(plan: &ExportPlan, shape: GraphShape) -> String {
         }
     }
 
-    chains.push(concat_chain(count, video.is_some(), audio.is_some()));
+    let gain = audio
+        .as_ref()
+        .and_then(|(planned, _)| audio_gain_chain(plan, planned));
+    let audio_output = audio.as_ref().map(|_| concat_audio_label(gain.as_ref()));
+    chains.push(concat_chain(count, video.is_some(), audio_output));
+    chains.extend(gain);
     chains.join(";")
 }
 
 /// Render the graph of the encoder of an export whose audio has its own process
 /// ([`ExportPlan::separate_audio_process`]), for the requested shape.
 ///
-/// It is the graph of one process with each audio chain replaced by a stand-in: the silence of
-/// the planned length of the segment, which reads no input (`stand_in_audio_chain`). `concat`
+/// It is the graph of one process with each audio chain replaced by a stand-in, and without the
+/// gain chain of [`audio_gain_chain`]: the silence of the planned length of the segment, which
+/// reads no input (`stand_in_audio_chain`). `concat`
 /// therefore places the video of each segment where it places it when it reads the real audio,
 /// at the end of the longer of the two, and its audio output goes to `anullsink`. The audio that
 /// the encoder writes comes from the pipe of the audio process, which the argument builder maps
@@ -472,7 +537,10 @@ pub fn build_audio_graph(plan: &ExportPlan, shape: GraphShape) -> String {
     let inputs: String = (0..count)
         .map(|index| format!("[pv{index}][a{index}]"))
         .collect();
-    chains.push(format!("{inputs}concat=n={count}:v=1:a=1[pv][a]"));
+    let gain = audio_gain_chain(plan, audio);
+    let output = concat_audio_label(gain.as_ref());
+    chains.push(format!("{inputs}concat=n={count}:v=1:a=1[pv]{output}"));
+    chains.extend(gain);
     chains.join(";")
 }
 
@@ -1118,13 +1186,16 @@ fn piece_audio_chain(
     }
 }
 
-/// Render the `concat` filter, with the joined video at `[vc]` and the joined audio at the
-/// graph's `[a]` output label, for whichever of the two parts the plan carries.
+/// Render the `concat` filter, with the joined video at `[vc]` and the joined audio at
+/// `audio_output`, for whichever of the two parts the plan carries. `audio_output` is `None` for a
+/// plan without audio.
 ///
 /// The video does not leave the graph here. [`video_output_format`], the first chain of the
 /// graph, reads `[vc]` and writes `[v]`, so the label the argument builder maps is the same in
-/// every graph.
-fn concat_chain(count: usize, has_video: bool, has_audio: bool) -> String {
+/// every graph. The audio leaves at the graph's `[a]` output label, or at `[ac]` when the gain
+/// chain of [`audio_gain_chain`] reads it and writes `[a]`.
+fn concat_chain(count: usize, has_video: bool, audio_output: Option<&str>) -> String {
+    let has_audio = audio_output.is_some();
     let inputs: String = (0..count)
         .map(|index| {
             let video = if has_video {
@@ -1143,7 +1214,7 @@ fn concat_chain(count: usize, has_video: bool, has_audio: bool) -> String {
     let video_streams = u8::from(has_video);
     let audio_streams = u8::from(has_audio);
     let video_output = if has_video { "[vc]" } else { "" };
-    let audio_output = if has_audio { "[a]" } else { "" };
+    let audio_output = audio_output.unwrap_or_default();
     format!(
         "{inputs}concat=n={count}:v={video_streams}:a={audio_streams}{video_output}{audio_output}"
     )
@@ -1269,6 +1340,7 @@ mod tests {
             encoder: "aac".to_owned(),
             bitrate: None,
             options: vec![],
+            gain_tenths_db: 0,
             // The graph does not read it; any value renders the same graph.
             expected_duration: Rational::new(1, 1).unwrap(),
         }
@@ -2979,5 +3051,130 @@ mod tests {
         let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
         assert!(!graph.contains(",aformat=f=fltp:r=48000:cl="), "{graph}");
         assert!(graph.contains("anullsrc=r=48000:cl=stereo,"), "{graph}");
+    }
+
+    // -- The gain of ADR 054: one `volume` behind `concat`. --
+
+    /// `plan` with the gain `tenths_db` on its audio part.
+    fn with_gain(mut plan: ExportPlan, tenths_db: i32) -> ExportPlan {
+        plan.audio
+            .as_mut()
+            .expect("the plan has audio")
+            .gain_tenths_db = tenths_db;
+        plan
+    }
+
+    #[test]
+    fn the_decibel_text_of_a_gain_is_exact_with_one_decimal_place() {
+        for (tenths_db, text) in [
+            (-200, "-20.0"),
+            (-15, "-1.5"),
+            (-10, "-1.0"),
+            (-1, "-0.1"),
+            (0, "0.0"),
+            (5, "0.5"),
+            (200, "20.0"),
+        ] {
+            assert_eq!(decibel_text(tenths_db), text, "{tenths_db}");
+        }
+        assert_eq!(volume_filter(-10), "volume=-1.0dB");
+        assert_eq!(volume_filter(5), "volume=0.5dB");
+    }
+
+    #[test]
+    fn the_audio_process_applies_the_gain_once_behind_concat_in_both_shapes() {
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            let plain = build_audio_graph(&fixture_plan(2), shape);
+            let gained = build_audio_graph(&with_gain(fixture_plan(2), -10), shape);
+            let tail = "concat=n=2:v=1:a=1[pv][a]";
+            assert!(plain.ends_with(tail), "{plain}");
+            assert_eq!(
+                gained,
+                format!(
+                    "{}concat=n=2:v=1:a=1[pv][ac];[ac]volume=-1.0dB[a]",
+                    plain.strip_suffix(tail).unwrap()
+                ),
+                "{shape:?}"
+            );
+            assert_eq!(gained.matches("volume=").count(), 1);
+        }
+    }
+
+    #[test]
+    fn an_export_without_video_applies_the_gain_once_behind_concat_in_both_shapes() {
+        let plan = planned(ExportStreams::AudioOnly, true).unwrap();
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            let plain = build_filter_graph(&plan, shape);
+            let gained = build_filter_graph(&with_gain(plan.clone(), 5), shape);
+            let tail = "concat=n=2:v=0:a=1[a]";
+            assert!(plain.ends_with(tail), "{plain}");
+            assert_eq!(
+                gained,
+                format!(
+                    "{}concat=n=2:v=0:a=1[ac];[ac]volume=0.5dB[a]",
+                    plain.strip_suffix(tail).unwrap()
+                ),
+                "{shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_whose_other_pieces_generate_silence_applies_the_gain_once() {
+        // A piece of the source without audio generates its silence, and the other pieces read
+        // the stream of the first source. The plan reads a stream, so it gets one gain, behind the
+        // `concat` that joins the silence and the stream.
+        let plan = with_gain(two_source_plan(), -10);
+        assert!(plan.reads_audio_stream());
+        assert!(!plan.piece_reads_audio(1));
+        let mut without_video = plan.clone();
+        without_video.video = None;
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            for graph in [
+                build_audio_graph(&plan, shape),
+                build_filter_graph(&without_video, shape),
+            ] {
+                assert_eq!(graph.matches("volume=").count(), 1, "{graph}");
+                assert!(graph.ends_with("[ac];[ac]volume=-1.0dB[a]"), "{graph}");
+                assert!(graph.contains("anullsrc="), "{graph}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_gain_of_zero_leaves_every_graph_as_it_was() {
+        // The fixtures carry no gain, so every pinned graph above is also the graph of a gain of
+        // 0. This states the rule for each builder.
+        let plan = fixture_plan(2);
+        assert_eq!(plan.audio.as_ref().unwrap().gain_tenths_db, 0);
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            for graph in [
+                build_audio_graph(&plan, shape),
+                build_video_graph(&plan, shape),
+                build_filter_graph(&plan_with_silence(2, "stereo"), shape),
+            ] {
+                assert!(!graph.contains("volume"), "{graph}");
+                assert!(!graph.contains("[ac]"), "{graph}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_encoder_of_a_separate_audio_process_and_a_silent_plan_apply_no_gain() {
+        // The encoder discards the audio of its graph and maps the pipe of the audio process, so
+        // its graph does not change. Silence has no level to change, and a plan of silence only
+        // keeps the longest command of the encoder as it was (ADR 014).
+        for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
+            assert_eq!(
+                build_video_graph(&with_gain(fixture_plan(2), -200), shape),
+                build_video_graph(&fixture_plan(2), shape)
+            );
+            let silent = plan_with_silence(2, "stereo");
+            assert!(!silent.reads_audio_stream());
+            assert_eq!(
+                build_filter_graph(&with_gain(silent.clone(), -200), shape),
+                build_filter_graph(&silent, shape)
+            );
+        }
     }
 }

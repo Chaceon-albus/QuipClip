@@ -451,6 +451,12 @@ pub struct PlannedAudio {
     /// The encoder options of the audio stream, verbatim from the preset, in the order the
     /// argument builder writes them: each one as `-<name>:a <value>`, after `-b:a`.
     pub options: Vec<PresetOption>,
+    /// The gain of the joined audio in tenths of a decibel, verbatim from the preset (ADR 054).
+    ///
+    /// The graph writes it as one `volume` filter behind `concat` (`graph::audio_gain_chain`),
+    /// and only when it is not 0 and a piece reads an audio stream. An export that copies the
+    /// audio (ADR 048) applies no gain, as it applies no other audio setting of the preset.
+    pub gain_tenths_db: i32,
     /// The length of audio an export of the segments writes, in seconds, exact.
     ///
     /// This is [`ExportPlan::total_duration`], whatever part of the segments the source audio

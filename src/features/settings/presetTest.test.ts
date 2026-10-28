@@ -262,6 +262,7 @@ describe("presetTestFingerprint", () => {
       "audioBitrate",
       "audioSampleRate",
       "audioChannels",
+      "audioGainTenthsDb",
       "quality",
       "pixelFormat",
       "videoOptions",

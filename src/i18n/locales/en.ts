@@ -919,6 +919,11 @@ export const en = {
       qualityBitrate: "{{value}} kbps",
       qualityScale: "Quality scale {{value}}",
       audioBitrateLossless: "Lossless",
+      // The value of the Volume row when the preset has no gain.
+      audioGainNone: "No Change",
+      // The value of the Volume row. {{value}} is the gain with its sign and one decimal place,
+      // such as "-1.0" or "+0.5".
+      audioGainValue: "{{value}} dB",
       resolutionValue: "{{width}} × {{height}}",
       frameRateValue: "{{value}} fps",
       // A "Same as Source" value with the value of the open file. {{value}} of the frame rate is

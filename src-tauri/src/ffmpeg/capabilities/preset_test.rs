@@ -29,7 +29,7 @@
 use super::smoke::SMOKE_LOCK;
 use super::{run_with_timeout, CommandOutcome, CommandStatus, StdoutCapture};
 use crate::ffmpeg::export::arguments::{push_encoder_arguments, push_muxer_arguments};
-use crate::ffmpeg::export::graph::audio_output_format;
+use crate::ffmpeg::export::graph::{audio_output_format, volume_filter};
 use crate::ffmpeg::export::{OutputTiming, PlannedAudio, PlannedVideo};
 use crate::settings::{AudioChannels, AudioSampleRateSetting, Preset};
 use crate::time::Rational;
@@ -129,8 +129,11 @@ pub struct PresetTestResult {
 ///
 /// The graph is `[0:v]format=<pixelFormat>[v];[1:a]<aformat>[a]`: the export puts the pixel
 /// format chain first in its graph (ADR 014 measurement 19), and it ends every audio chain in the
-/// same `aformat`. The cut, the timing and the scaling of the export chains have nothing to cut
-/// here, so the test leaves them out.
+/// same `aformat`. A preset with a gain adds the `volume` filter of the export behind the
+/// `aformat`, `[1:a]<aformat>,volume=<g>dB[a]`, so the test also runs the filter that the export
+/// writes behind `concat` (ADR 054). A preset without a gain renders the command it rendered before
+/// the gain existed, so its stored result still matches. The cut, the timing and the scaling of
+/// the export chains have nothing to cut here, so the test leaves them out.
 ///
 /// The cache key of a result is this command with [`OUTPUT_PLACEHOLDER`] for `output`.
 #[must_use]
@@ -160,8 +163,12 @@ pub fn build_test_arguments(preset: &Preset, output: &str) -> Vec<String> {
     .collect();
     arguments.push(format!("anullsrc=r={sample_rate}:cl={layout}"));
     arguments.push("-filter_complex".to_owned());
+    let gain = match audio.gain_tenths_db {
+        0 => String::new(),
+        tenths_db => format!(",{}", volume_filter(tenths_db)),
+    };
     arguments.push(format!(
-        "[0:v]format={}[v];[1:a]{}[a]",
+        "[0:v]format={}[v];[1:a]{}{gain}[a]",
         video.pixel_format,
         audio_output_format(&audio)
     ));
@@ -231,6 +238,7 @@ fn planned_audio(preset: &Preset, sample_rate: u32) -> PlannedAudio {
         encoder: preset.audio_encoder.clone(),
         bitrate: preset.audio_bitrate,
         options: preset.audio_options.clone(),
+        gain_tenths_db: preset.audio_gain_tenths_db,
         expected_duration: Rational::new(1, 5).expect("1/5 always reduces to a valid Rational"),
     }
 }
@@ -821,6 +829,41 @@ mod tests {
         .map(|argument| (*argument).to_owned())
         .collect();
         assert_eq!(arguments, expected);
+    }
+
+    #[test]
+    fn a_gain_adds_the_volume_filter_of_the_export_behind_the_aformat() {
+        // The export writes the gain as one `volume` behind `concat` (ADR 054). The test has no
+        // `concat`, so the filter follows the `aformat` that ends each chain of the export. A gain
+        // of 0 renders the command of a preset from before the gain.
+        let plain = seed("default-h264-mp4");
+        let gained = Preset {
+            audio_gain_tenths_db: -15,
+            ..plain.clone()
+        };
+        let graph_of = |preset: &Preset| {
+            let arguments = build_test_arguments(preset, OUTPUT_PLACEHOLDER);
+            let at = arguments
+                .iter()
+                .position(|argument| argument == "-filter_complex")
+                .expect("the test has a graph");
+            arguments[at + 1].clone()
+        };
+        assert!(!graph_of(&plain).contains("volume"));
+        assert_eq!(
+            graph_of(&gained),
+            graph_of(&plain).replace("[a]", ",volume=-1.5dB[a]")
+        );
+        // Everything but the graph stays the same.
+        let mut without_graph = build_test_arguments(&gained, OUTPUT_PLACEHOLDER);
+        let mut plain_without_graph = build_test_arguments(&plain, OUTPUT_PLACEHOLDER);
+        let at = without_graph
+            .iter()
+            .position(|argument| argument == "-filter_complex")
+            .unwrap();
+        without_graph.remove(at + 1);
+        plain_without_graph.remove(at + 1);
+        assert_eq!(without_graph, plain_without_graph);
     }
 
     #[test]

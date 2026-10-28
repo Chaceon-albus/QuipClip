@@ -873,7 +873,7 @@ mod tests {
         AudioChannels, MAX_AUDIO_BITRATE_KBPS, MAX_AUDIO_SAMPLE_RATE, MAX_CONSTANT_QUALITY,
         MAX_ENCODER_NAME_CHARS, MAX_PIXEL_FORMAT_CHARS, MAX_PRESET_OPTIONS,
         MAX_PRESET_OPTION_BYTES, MAX_RESOLUTION_DIMENSION, MIN_AUDIO_BITRATE_KBPS,
-        MIN_AUDIO_SAMPLE_RATE,
+        MIN_AUDIO_GAIN_TENTHS_DB, MIN_AUDIO_SAMPLE_RATE,
     };
     use crate::time::Pts;
     use std::path::PathBuf;
@@ -948,6 +948,7 @@ mod tests {
             encoder: "aac".to_owned(),
             bitrate: None,
             options: vec![],
+            gain_tenths_db: 0,
             // The command does not read it; any value renders the same command.
             expected_duration: Rational::new(1, 1).unwrap(),
         }
@@ -2902,7 +2903,8 @@ mod tests {
 
     /// The audio stream and output format that spell the longest audio chains: a two-digit
     /// stream index, and 192000 Hz both in the input pin and in the closing `aformat`, with the
-    /// layout [`WIDEST_CHANNEL_LAYOUT`].
+    /// layout [`WIDEST_CHANNEL_LAYOUT`]. The gain is [`MIN_AUDIO_GAIN_TENTHS_DB`], whose text
+    /// `-20.0` is the longest a gain spells (ADR 054).
     ///
     /// 192000 is the top of ADR 023's fixed range, and it is one digit longer than 48000.
     /// [`WIDEST_CHANNEL_LAYOUT`], which the preset value `source` names for sources of different
@@ -2929,6 +2931,7 @@ mod tests {
             encoder: "a".repeat(MAX_ENCODER_NAME_CHARS),
             bitrate: Some(MAX_AUDIO_BITRATE_KBPS),
             options: widest_options(),
+            gain_tenths_db: MIN_AUDIO_GAIN_TENTHS_DB,
             // The command does not read it; any value renders the same command.
             expected_duration: Rational::new(1, 1).unwrap(),
         }
@@ -3317,8 +3320,8 @@ mod tests {
         // The plan has two commands since the audio of an export with video has its own process
         // (ADR 043), and each must fit on its own. Measured at the time of writing, at the limit
         // of 91 pieces of one source: the encoder needs 29234 of the 31743 available bytes, and
-        // the audio process 29529, both with one input for the source. This plan fits up to 98
-        // pieces.
+        // the audio process 29552 (23 of them for the gain of ADR 054), both with one input for
+        // the source. This plan fits up to 98 pieces.
         //
         // ADR 053 changed the widest chain. The fit step
         // (`scale=<w>:<h>:flags=lanczos+accurate_rnd+full_chroma_int,setsar=1,pad=<W>:<H>:<x>:<y>`)
@@ -3377,12 +3380,14 @@ mod tests {
         //
         // - The encoder needs at most 31618 of the 31743 available bytes (125 to spare): one
         //   source of 91 pieces that generate silence, with an FLV input.
-        // - The audio process needs at most 30468: 44 sources of 48 pieces in turn, with an FLV
-        //   input.
+        // - The audio process needs at most 30491: 44 sources of 48 pieces in turn, with an FLV
+        //   input. The gain of ADR 054 takes 23 of those bytes; it adds nothing to the plans whose
+        //   pieces all generate silence, so the encoder above does not grow.
         //
         // The longest command that production chooses is longer, because it takes one input for
-        // each piece while that fits: 31736 bytes for 6 sources whose FLV source holds 42 of 47
-        // pieces, and 31733 for the audio process of 10 sources whose FLV source holds 37 of 46.
+        // each piece while that fits: 31741 bytes for an export without video of 36 sources whose
+        // FLV source holds 6 of 56 pieces, and 31736 for the audio process of 32 sources whose FLV
+        // source holds 17 of 48.
         //
         // One input for each source grows about 300 bytes with each source, and about as much
         // with each piece, so the sum of the pieces and the sources sets the limit. For 1 to 10
@@ -3420,7 +3425,7 @@ mod tests {
     fn the_widest_plan_without_video_still_fits_at_the_segment_cap() {
         // A graph without video pads every audio chain (`graph::audio_end_pad`), so its growth for
         // each segment carries the pad too. It has no video chain, so it is still below the
-        // budget: 22203 bytes at the limit of 91 pieces of one source, with one input for the
+        // budget: 22226 bytes at the limit of 91 pieces of one source, with one input for the
         // source and the sixteen silence prefixes of `widest_plan`. The sweep above holds the
         // plans without video of several sources. The assertion is one-sided for the reason the
         // tests above give.

@@ -3727,6 +3727,103 @@ mod tests {
     }
 
     #[test]
+    fn a_preset_gain_reaches_the_audio_process_and_leaves_the_encoder_as_it_was() {
+        // ADR 054 through the preparation. A preset of v0.1.1 has no gain key and prepares no
+        // `volume` anywhere. The same preset with -1.0 dB changes only the graph of the audio
+        // process (ADR 043): one `volume` behind its `concat`.
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let destination = directory.path.join("out.mp4");
+        fs::write(
+            directory.path.join(settings::SETTINGS_FILE_NAME),
+            settings::VERSION_2_FIXTURE,
+        )
+        .unwrap();
+        let loaded = settings::load(&directory.path)
+            .unwrap()
+            .settings
+            .presets
+            .into_iter()
+            .find(|preset| preset.id == "default-h264-mp4")
+            .unwrap();
+        assert_eq!(loaded.audio_gain_tenths_db, 0);
+        let prepare = |preset: settings::Preset| {
+            let request = ExportRequestWire {
+                sources: vec![ExportSourceWire {
+                    id: "source".to_owned(),
+                    path: source.to_string_lossy().into_owned(),
+                    expected_revision: None,
+                }],
+                pieces: vec![ExportPieceWire {
+                    source_id: "source".to_owned(),
+                    in_pts: Pts::new(0),
+                    out_pts: Pts::new(90_000),
+                }],
+                segment_count: 1,
+                output_path: destination.to_string_lossy().into_owned(),
+                preset,
+                streams: ExportStreams::VideoAndAudio,
+                audio_mode: ExportAudioMode::Encode,
+                new_batch: false,
+            };
+            let prepared = prepare_export_with(
+                PrepareRequest {
+                    request: &request,
+                    app_data_directory: &directory.path,
+                    cancel: &AtomicBool::new(false),
+                    preview_windows: &PreviewWindows::default(),
+                    stage: &PreparationStageCell::default(),
+                },
+                |_| {
+                    Ok(FfmpegPaths {
+                        ffmpeg: directory.path.join("ffmpeg"),
+                        ffprobe: directory.path.join("ffprobe"),
+                        origin: ExecutableOrigin::Path,
+                    })
+                },
+                |_, _, _| Ok(sample_probe_with_audio()),
+                first_packet_unread,
+                sample_rate_not_read,
+                no_audio_gaps,
+            )
+            .unwrap();
+            // The encoder command without the reservation, whose name counts up, and the graph of
+            // the audio process.
+            let mut arguments = prepared.arguments.clone();
+            arguments.pop();
+            let audio = prepared.audio_arguments.clone().expect("a second process");
+            let at = audio
+                .iter()
+                .position(|argument| argument == "-filter_complex")
+                .unwrap();
+            (arguments, audio[at + 1].clone())
+        };
+
+        let (plain_encoder, plain_audio) = prepare(loaded.clone());
+        assert!(!plain_encoder
+            .iter()
+            .any(|argument| argument.contains("volume")));
+        assert!(
+            plain_audio.ends_with("concat=n=1:v=1:a=1[pv][a]"),
+            "{plain_audio}"
+        );
+
+        let (gained_encoder, gained_audio) = prepare(settings::Preset {
+            audio_gain_tenths_db: -10,
+            ..loaded
+        });
+        assert_eq!(gained_encoder, plain_encoder);
+        assert_eq!(
+            gained_audio,
+            plain_audio.replace(
+                "concat=n=1:v=1:a=1[pv][a]",
+                "concat=n=1:v=1:a=1[pv][ac];[ac]volume=-1.0dB[a]"
+            )
+        );
+    }
+
+    #[test]
     fn a_version_1_settings_file_prepares_the_command_of_version_1_and_saving_it_keeps_the_command()
     {
         // A user upgrades from the first release, and the settings file is still at schema
@@ -5783,6 +5880,7 @@ mod tests {
             encoder: "aac".to_owned(),
             bitrate: None,
             options: vec![],
+            gain_tenths_db: 0,
             // The source audio covers the whole segment.
             expected_duration: Rational::new(1, 1).unwrap(),
         });
@@ -7164,6 +7262,152 @@ mod tests {
                     "{source:?} {streams:?}: {packets} packets"
                 );
             }
+        }
+    }
+
+    /// Export `source` from 1.0 s to 2.5 s to `output` with the gain `tenths_db`, encoding FLAC
+    /// in Matroska so that the levels compare without a lossy step, and return the RMS level and
+    /// the peak level in dB and the number of samples of the output, as `astats` measures them.
+    fn real_gained_export(
+        ffmpeg: &Path,
+        ffprobe: &Path,
+        directory: &TestDirectory,
+        source: &Path,
+        streams: ExportStreams,
+        output: &Path,
+        tenths_db: i32,
+    ) -> (f64, f64, u64) {
+        let probe = ffmpeg::probe_media(ffprobe, source).unwrap();
+        let tb = probe.video_time_base;
+        let at = |millis: i64| Pts::new(millis * tb.den() / (1_000 * tb.num()));
+        let mut preset = sample_preset("active");
+        preset.container = Container::Mkv;
+        preset.audio_encoder = "flac".to_owned();
+        preset.audio_bitrate = None;
+        preset.audio_gain_tenths_db = tenths_db;
+        preset.quality = Quality {
+            kind: QualityKind::Crf,
+            value: 30,
+        };
+        let request = ExportRequestWire {
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
+                in_pts: at(1_000),
+                out_pts: at(2_500),
+            }],
+            segment_count: 1,
+            output_path: output.to_string_lossy().into_owned(),
+            preset,
+            streams,
+            audio_mode: ExportAudioMode::Encode,
+            new_batch: false,
+        };
+        let prepared = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path.join("app"),
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: ffmpeg.to_path_buf(),
+                    ffprobe: ffprobe.to_path_buf(),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            ffmpeg::probe_media_until_canceled,
+            ffmpeg::probe_first_audio_packet,
+            ffmpeg::probe_audio_sample_rate_at,
+            ffmpeg::probe_audio_gaps,
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.audio_arguments.is_some(),
+            streams == ExportStreams::VideoAndAudio,
+            "an export with video writes its audio in a second process (ADR 043)"
+        );
+
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+        run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |_event| {},
+            |request, on_progress| run_export_process(request, on_progress),
+            ffmpeg::probe_output_audio,
+        )
+        .unwrap();
+
+        let answer = crate::procutil::command_without_console(ffmpeg)
+            .args(["-hide_banner", "-nostdin", "-i"])
+            .arg(output)
+            .args([
+                "-map",
+                "0:a",
+                "-af",
+                "astats=measure_perchannel=none:measure_overall=RMS_level+Peak_level+Number_of_samples",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .unwrap();
+        assert!(answer.status.success());
+        let log = String::from_utf8_lossy(&answer.stderr).into_owned();
+        let value = |name: &str| -> String {
+            log.lines()
+                .find_map(|line| line.split_once(&format!("{name}: ")).map(|(_, v)| v.trim()))
+                .unwrap_or_else(|| panic!("astats wrote no {name}: {log}"))
+                .to_owned()
+        };
+        (
+            value("RMS level dB").parse().unwrap(),
+            value("Peak level dB").parse().unwrap(),
+            value("Number of samples").parse().unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_real_export_lowers_the_audio_by_the_gain_of_the_preset() {
+        // ADR 054: one `volume` behind `concat`, in the audio process of an export with video and
+        // in the one process of an export without video. FLAC keeps the samples, so the levels
+        // fall by the gain within rounding, and the length does not change.
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.flv");
+        write_real_flv(&ffmpeg, &source, "160x90", 48_000);
+
+        for (streams, name) in [
+            (ExportStreams::VideoAndAudio, "mkv"),
+            (ExportStreams::AudioOnly, "mka"),
+        ] {
+            let measure = |tenths_db: i32| {
+                let output = directory.path.join(format!("out{tenths_db}.{name}"));
+                real_gained_export(
+                    &ffmpeg, &ffprobe, &directory, &source, streams, &output, tenths_db,
+                )
+            };
+            let (rms, peak, samples) = measure(0);
+            let (gained_rms, gained_peak, gained_samples) = measure(-10);
+            assert_eq!(gained_samples, samples, "{streams:?}");
+            assert!(
+                (rms - gained_rms - 1.0).abs() < 0.05,
+                "{streams:?}: RMS {rms} dB, then {gained_rms} dB"
+            );
+            assert!(
+                (peak - gained_peak - 1.0).abs() < 0.05,
+                "{streams:?}: peak {peak} dB, then {gained_peak} dB"
+            );
         }
     }
 

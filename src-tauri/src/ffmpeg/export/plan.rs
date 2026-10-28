@@ -820,6 +820,7 @@ fn plan_audio(
             encoder: preset.audio_encoder.clone(),
             bitrate: preset.audio_bitrate,
             options: preset.audio_options.clone(),
+            gain_tenths_db: preset.audio_gain_tenths_db,
             // The total duration, once the pieces are summed.
             expected_duration: zero_rational(),
         },
@@ -2145,6 +2146,7 @@ mod tests {
                 encoder: "aac".to_owned(),
                 bitrate: None,
                 options: vec![],
+                gain_tenths_db: 0,
                 // Every segment is expected for its whole length.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
             })
@@ -2196,6 +2198,7 @@ mod tests {
                 encoder: "aac".to_owned(),
                 bitrate: None,
                 options: vec![],
+                gain_tenths_db: 0,
                 // Every segment is expected for its whole length.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
             })
@@ -2342,6 +2345,7 @@ mod tests {
                 encoder: "aac".to_owned(),
                 bitrate: None,
                 options: vec![],
+                gain_tenths_db: 0,
                 // Every segment is expected for its whole length.
                 expected_duration: Rational::new(1001, 30_000).unwrap(),
             })
@@ -3583,6 +3587,24 @@ mod tests {
         .unwrap();
         assert!(plan.audio.is_some());
         assert_eq!(plan.sources[0].audio.as_ref().unwrap().silence_layout, None);
+    }
+
+    #[test]
+    fn the_audio_part_carries_the_gain_of_the_preset() {
+        for gain in [0, -15, 200] {
+            let preset = Preset {
+                audio_gain_tenths_db: gain,
+                ..sample_preset()
+            };
+            let plan = plan_with(
+                &[seconds_boundary("0", "1")],
+                &probe_with_audio(),
+                &preset,
+                valid_path_facts(),
+            )
+            .unwrap();
+            assert_eq!(plan.audio.unwrap().gain_tenths_db, gain);
+        }
     }
 
     #[test]

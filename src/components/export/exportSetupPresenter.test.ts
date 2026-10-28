@@ -450,9 +450,60 @@ describe("exportSetupPresenter", () => {
               labelKey: "settings.preset.audioChannelsLabel",
               valueKey: "settings.preset.audioChannelsStereo",
             },
+            {
+              id: "audioGain",
+              labelKey: "settings.preset.audioGainLabel",
+              valueKey: "export.setup.audioGainNone",
+            },
           ],
         },
       ]);
+    });
+
+    it("shows the gain with its sign and one decimal place", () => {
+      for (const [gain, value] of [
+        [-10, "-1.0"],
+        [-15, "-1.5"],
+        [5, "+0.5"],
+        [-200, "-20.0"],
+      ] as const) {
+        const summary = presentPresetSummary(
+          createPreset({ audioGainTenthsDb: gain }),
+          formatter,
+          null,
+        );
+        expect(rowOf(summary, "audioGain"), String(gain)).toEqual({
+          id: "audioGain",
+          labelKey: "settings.preset.audioGainLabel",
+          valueKey: "export.setup.audioGainValue",
+          valueValues: { value },
+        });
+      }
+    });
+
+    it("shows no gain row for a copy of the audio, which applies no gain", () => {
+      const summary = presentPresetSummary(
+        createPreset({ audioGainTenthsDb: -10 }),
+        formatter,
+        createSource(),
+        "copy",
+      );
+      expect(rowOf(summary, "audioGain")).toBeUndefined();
+    });
+
+    it.each([
+      ["en", "No Change", "-1.0 dB"],
+      ["zh-CN", "不调整", "-1.0 dB"],
+    ] as const)("words the gain row in %s", (language, none, value) => {
+      const catalog = language === "en" ? en : zhCN;
+      expect(lookup(catalog, "export.setup.audioGainNone")).toBe(none);
+      expect(lookup(catalog, "export.setup.audioGainValue")).toBe("{{value}} dB");
+      expect(
+        (lookup(catalog, "export.setup.audioGainValue") as string).replace(
+          "{{value}}",
+          "-1.0",
+        ),
+      ).toBe(value);
     });
 
     it("shows a stated value the same way with or without an open source", () => {
@@ -684,6 +735,7 @@ describe("exportSetupPresenter", () => {
         "audioBitrate",
         "audioSampleRate",
         "audioChannels",
+        "audioGain",
         "audioOptions",
       ]);
       expect(rowOf(summary, "audioOptions")?.valueValues).toEqual({
