@@ -6,6 +6,8 @@ export * from "./types";
 export * from "./validation";
 export * from "./client";
 export * from "./events";
+export * from "./eventFloor";
+export * from "./recoveryGate";
 export * from "./store";
 export * from "./queueStore";
 export * from "./panelStore";

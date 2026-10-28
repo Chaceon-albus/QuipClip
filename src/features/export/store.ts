@@ -12,12 +12,14 @@ import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import type { UnlistenFn } from "@/lib/ipc";
 import { cancelExport, startExport } from "./client";
+import { exportEventFloor, type ExportEventFloor } from "./eventFloor";
 import { subscribeExportProgress } from "./events";
 import { isExportRunLive } from "./runState";
 import {
   ExportError,
   type ExportProgressEvent,
   type ExportRequest,
+  type ExportRestoredRun,
   type ExportRunFacts,
   type ExportSubmission,
   type ExportState,
@@ -43,6 +45,11 @@ export interface ExportStoreDependencies {
   subscribeExportProgress?: (
     handler: (event: ExportProgressEvent) => void,
   ) => Promise<UnlistenFn>;
+  /**
+   * The sequence floor that a restore sets (`eventFloor.ts`). The store ignores each event at
+   * or below it. Defaults to `exportEventFloor`.
+   */
+  eventFloor?: ExportEventFloor;
 }
 
 /**
@@ -64,6 +71,7 @@ export function createExportStore(
   const cancelExportFn = dependencies.cancelExport ?? cancelExport;
   const subscribeExportProgressFn =
     dependencies.subscribeExportProgress ?? subscribeExportProgress;
+  const eventFloor = dependencies.eventFloor ?? exportEventFloor;
 
   let latestRequestId = 0;
   let activeRunId: string | null = initialState?.runId ?? null;
@@ -115,6 +123,10 @@ export function createExportStore(
     }
 
     function handleEvent(event: ExportProgressEvent): void {
+      // A restored state already holds each event at or below the floor.
+      if (!eventFloor.admits(event)) {
+        return;
+      }
       if (awaitingRunId && !activeRunId) {
         pendingEvents.push(event);
         return;
@@ -387,6 +399,33 @@ export function createExportStore(
             handleEvent(event);
           }
         }
+      },
+
+      restoreRun: (run: ExportRestoredRun): void => {
+        // The same reset of the start state as `adoptRun`. After a reload no start of this
+        // store is in flight, because the queue store holds each submission until the
+        // recovery ends. The reset is a defense.
+        latestRequestId++;
+        awaitingRunId = false;
+        pendingEvents = [];
+        dropDeferredCancel();
+        setTrackedRun(run.runId, {
+          status: run.status,
+          runId: run.runId,
+          outputPath: run.outputPath,
+          segmentCount: run.segmentCount,
+          frame: run.frame,
+          expectedFrames: run.expectedFrames,
+          fps: null,
+          speed: null,
+          cancelRequested: false,
+          encodeStarted: run.status !== "preparing",
+          error: null,
+        });
+      },
+
+      replayEvent: (event: ExportProgressEvent): void => {
+        handleEvent(event);
       },
 
       cancelExport: async (): Promise<boolean> => {

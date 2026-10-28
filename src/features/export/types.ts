@@ -499,6 +499,19 @@ export type ExportRunFacts = {
 };
 
 /**
+ * A run that a page restores from the answer of `export_queue_snapshot`: the run that left
+ * `waiting` and did not end. `frame` and `expectedFrames` are null when the snapshot has none.
+ */
+export type ExportRestoredRun = {
+  runId: string;
+  status: "preparing" | "running" | "publishing";
+  outputPath: string;
+  segmentCount: number;
+  frame: number | null;
+  expectedFrames: number | null;
+};
+
+/**
  * Actions provided by the export store.
  */
 export type ExportActions = {
@@ -528,6 +541,20 @@ export type ExportActions = {
     facts: ExportRunFacts,
     events?: readonly ExportProgressEvent[],
   ) => void;
+  /**
+   * Makes the store track a run that a page restores after a reload (`recovery.ts`). The
+   * backend runs the run, and the page lost its copy of it.
+   *
+   * It drops the start in flight, if any, as `adoptRun` does. The store then shows the status
+   * of the run, its facts, and its last frame. The encode started when the status is
+   * `running` or `publishing`. The store tracks the run, with no error and no Stop request.
+   */
+  restoreRun: (run: ExportRestoredRun) => void;
+  /**
+   * Applies an event that the recovery held back while it read the snapshot. The store
+   * applies it as it applies a live event, with the same test of the sequence floor.
+   */
+  replayEvent: (event: ExportProgressEvent) => void;
   /**
    * Signals the backend to cancel the active export run.
    *

@@ -114,6 +114,23 @@ export function bindRunTimingToExportRun(
   });
 }
 
+/**
+ * Sets the start of a run that a page restores after a reload (`recovery.ts`). The binding
+ * above starts the timing when the restore makes the export store live, but the run started
+ * earlier, before the reload. The recovery calls this after the restore, in the same
+ * synchronous task, with the start that the backend reported: `now - elapsedMs`. So the Stop
+ * rule still sees how long the run has run.
+ *
+ * The binding keeps this start while the run stays live, because a status change inside the
+ * run keeps the start of an open run.
+ */
+export function seedExportRunStart(
+  timing: ExportRunTimingStore,
+  startedAt: number,
+): void {
+  timing.setState({ startedAt, endedAt: null }, true);
+}
+
 export const exportRunTimingStore: ExportRunTimingStore = createExportRunTimingStore();
 
 // The binding lasts for the life of the web view, the same as both stores. A hot reload of

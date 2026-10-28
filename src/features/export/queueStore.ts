@@ -17,7 +17,9 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import type { UnlistenFn } from "@/lib/ipc";
 import { isSameFilePath } from "@/lib/filePath";
 import { cancelExport, startExport } from "./client";
+import { exportEventFloor, type ExportEventFloor } from "./eventFloor";
 import { subscribeExportProgress } from "./events";
+import { exportRecoveryGate, type ExportRecoveryGate } from "./recoveryGate";
 import { isExportRunLive } from "./runState";
 import { exportStore, type ExportStore } from "./store";
 import {
@@ -50,11 +52,31 @@ export type ExportQueueEndedJob = {
   error: ExportError | null;
 };
 
+/**
+ * The batch that a page restores after a reload, from the answer of `export_queue_snapshot`
+ * (`recovery.ts`).
+ */
+export type ExportQueueRestore = {
+  /**
+   * The facts of each run of the batch, in the order of the snapshot: the ended runs by their
+   * end order, then the active run, then the waiting runs. It becomes `order`.
+   */
+  jobs: readonly ExportQueueJob[];
+  /** The runs that wait, in the order of the queue of the backend. */
+  waiting: readonly string[];
+  /** The runs that ended, in the order that they ended. */
+  ended: readonly ExportQueueEndedJob[];
+};
+
 /** Public state of the export queue store. */
 export type ExportQueueState = {
   /** The facts of each run of the batch, by run id. */
   jobs: Record<string, ExportQueueJob>;
-  /** The run ids of the batch, in the order of submission. */
+  /**
+   * The run ids of the batch, in the order of submission. After a restore (`restore`) it is
+   * the order of the snapshot: the ended runs by their end order, then the active run, then
+   * the waiting runs.
+   */
   order: string[];
   /** The run ids that wait in the queue of the backend, in their order. */
   waiting: string[];
@@ -149,6 +171,28 @@ export type ExportQueueActions = {
    * idle or while the batch goes on (`exportBatchContinues`).
    */
   dismissEndedBatch: () => void;
+  /**
+   * Subscribes the store to the export progress events, once. The store also subscribes at
+   * its first submission. The recovery after a reload calls it before it reads the snapshot,
+   * so the store hears every event after the snapshot.
+   */
+  ensureSubscribed: () => Promise<void>;
+  /**
+   * Replaces the batch with the batch that a page restores after a reload. `removing` keeps
+   * only the runs that still wait in `batch`, so a second read during a removal keeps the
+   * Remove button disabled. `seenEndedCount` becomes zero. `submitting` and `enqueuing` do not change: the
+   * submissions wait at the recovery gate, so none is in flight.
+   *
+   * The recovery calls `restoreRun` of the export store first, so the batch that this sets
+   * never looks over while the export store is still idle.
+   */
+  restore: (batch: ExportQueueRestore) => void;
+  /**
+   * Applies an event that the recovery held back while it read the snapshot. The recovery
+   * gives each event to the export store first, because an adoption reads the end of the run
+   * that the export store shows.
+   */
+  replayEvent: (event: ExportProgressEvent) => void;
 };
 
 /** Combined type of the export queue state and actions. */
@@ -166,6 +210,16 @@ export interface ExportQueueStoreDependencies {
   subscribeExportProgress?: (
     handler: (event: ExportProgressEvent) => void,
   ) => Promise<UnlistenFn>;
+  /**
+   * The sequence floor that a restore sets (`eventFloor.ts`). The store ignores each event at
+   * or below it. Defaults to `exportEventFloor`.
+   */
+  eventFloor?: ExportEventFloor;
+  /**
+   * The gate that holds submissions while the queue recovers after a reload. Defaults to
+   * `exportRecoveryGate`.
+   */
+  recoveryGate?: ExportRecoveryGate;
 }
 
 const TERMINAL_STATUSES: ReadonlySet<ExportState["status"]> = new Set([
@@ -201,6 +255,8 @@ export function createExportQueueStore(
   const cancelExportFn = dependencies.cancelExport ?? cancelExport;
   const subscribeExportProgressFn =
     dependencies.subscribeExportProgress ?? subscribeExportProgress;
+  const eventFloor = dependencies.eventFloor ?? exportEventFloor;
+  const recoveryGate = dependencies.recoveryGate ?? exportRecoveryGate;
 
   let subscriptionPromise: Promise<UnlistenFn> | null = null;
   /**
@@ -351,6 +407,10 @@ export function createExportQueueStore(
     }
 
     function handleEvent(event: ExportProgressEvent): void {
+      // A restored state already holds each event at or below the floor.
+      if (!eventFloor.admits(event)) {
+        return;
+      }
       const state = get();
       if (state.waiting.includes(event.runId)) {
         handleWaitingRunEvent(event);
@@ -516,6 +576,13 @@ export function createExportQueueStore(
       enqueuing: 0,
 
       submit: async (request: ExportRequest): Promise<ExportQueueSubmitResult> => {
+        // A recovery after a reload replaces the batch. A submission waits until it ended,
+        // so the restore cannot overwrite the batch that the submission starts. The gate is
+        // open in normal use, and the submission then starts at once.
+        const recovering = recoveryGate.pending();
+        if (recovering !== null) {
+          await recovering;
+        }
         if (isOutputTaken(request.outputPath)) {
           return {
             kind: "refused",
@@ -551,6 +618,28 @@ export function createExportQueueStore(
         }
       },
 
+      ensureSubscribed,
+
+      restore: (batch: ExportQueueRestore): void => {
+        pendingEvents = [];
+        const jobs: Record<string, ExportQueueJob> = {};
+        for (const job of batch.jobs) {
+          jobs[job.runId] = job;
+        }
+        set((state) => ({
+          jobs,
+          order: batch.jobs.map((job) => job.runId),
+          waiting: [...batch.waiting],
+          ended: [...batch.ended],
+          removing: state.removing.filter((runId) => batch.waiting.includes(runId)),
+          seenEndedCount: 0,
+        }));
+      },
+
+      replayEvent: (event: ExportProgressEvent): void => {
+        handleEvent(event);
+      },
+
       dismissEndedBatch: (): void => {
         const current = exportStoreApi.getState();
         if (current.status !== "idle" || exportBatchContinues(get(), current)) {
@@ -569,7 +658,7 @@ export function createExportQueueStore(
         set((state) => ({ removing: [...state.removing, runId] }));
         // Takes the run out of `removing` after a refused or failed request. The deciding
         // event, or a new batch, can have taken it out already.
-        const restore = () => {
+        const clearRemoving = () => {
           if (get().removing.includes(runId)) {
             set((state) => ({ removing: removeFrom(state.removing, runId) }));
           }
@@ -578,7 +667,7 @@ export function createExportQueueStore(
         try {
           withdrawn = await cancelExportFn(runId);
         } catch {
-          restore();
+          clearRemoving();
           return false;
         }
         // A true answer does not tell whether the backend withdrew the run from the queue or
@@ -587,7 +676,7 @@ export function createExportQueueStore(
         // `canceled` forgets it, and `preparing` adopts it, after which it ends canceled in
         // the export store. Both events take the run out of `removing`.
         if (!withdrawn) {
-          restore();
+          clearRemoving();
         }
         return withdrawn;
       },

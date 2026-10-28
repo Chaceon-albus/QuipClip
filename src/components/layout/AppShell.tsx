@@ -15,6 +15,7 @@ import { PreviewPane } from "@/components/preview/PreviewPane";
 import { TimelinePanel } from "@/components/timeline/TimelinePanel";
 import { TransportBar } from "@/components/transport/TransportBar";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { startExportQueueRecovery } from "@/features/export/recovery";
 import { usePlaybackStore } from "@/features/playback";
 import { usePreferenceSync } from "@/features/settings/preferenceSync";
 import { useSettingsChangedSync } from "@/features/settings/settingsSync";
@@ -37,6 +38,9 @@ export function AppShell() {
   usePreferenceSync();
   useSettingsWindowDraftMirror();
 
+  // Rebuild the export queue that the backend still runs after a page reload (ADR 049). It
+  // runs once per page. The status views and the quit guard read the restored stores.
+  useEffect(() => startExportQueueRecovery(), []);
   // Mirror the export progress on the Dock and the task bar (ADR 025).
   useEffect(() => startTaskbarProgressSync(), []);
   // Bounce the Dock icon or flash the task bar button when an export ends in the background.
