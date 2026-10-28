@@ -179,6 +179,10 @@ export function ExportDialog({
   const [requestedPresetId, setRequestedPresetId] = useState<string | null>(null);
   // Guard against double clicks triggering multiple concurrent native save dialogs.
   const [choosingDestination, setChoosingDestination] = useState(false);
+  // True after "Export anyway": the user accepted a source file that changed on disk. The START
+  // step then sends no expected revision, so the backend does not refuse that file (ADR 024).
+  // A close, Back, or a started export clears it.
+  const [sourceChangeAccepted, setSourceChangeAccepted] = useState(false);
   // True while the open step that Back runs again has not answered. The setup step shows
   // meanwhile, and Export stays disabled, so no export starts before the checks end.
   const [backCheckPending, setBackCheckPending] = useState(false);
@@ -470,6 +474,7 @@ export function ExportDialog({
     backStep.invalidate();
     onOpenChange(false);
     setRequestedPresetId(null);
+    setSourceChangeAccepted(false);
     setChoosingDestination(false);
     setBackCheckPending(false);
     setStopArmedAt(null);
@@ -548,6 +553,7 @@ export function ExportDialog({
     const kept = requestedPresetId;
     closeAndReset();
     setRequestedPresetId(kept);
+    setSourceChangeAccepted(true);
     if (onExportAnyway) {
       onExportAnyway();
       return;
@@ -596,6 +602,7 @@ export function ExportDialog({
       return;
     }
     setBackClicks((count) => count + 1);
+    setSourceChangeAccepted(false);
     setChoosingDestination(false);
     setStopArmedAt(null);
     reset();
@@ -628,6 +635,7 @@ export function ExportDialog({
           setModalOpen: onOpenChange,
           filterName: t("dialog.videoFilter"),
           audioFilterName: t("dialog.audioFilter"),
+          skipSourceRevisionCheck: sourceChangeAccepted,
         },
         effectivePresetId,
         streams,
@@ -639,6 +647,7 @@ export function ExportDialog({
         // run completes while the dialog is hidden (ADR 025). The started request already
         // carries the whole preset.
         setRequestedPresetId(null);
+        setSourceChangeAccepted(false);
       }
     } finally {
       setChoosingDestination(false);

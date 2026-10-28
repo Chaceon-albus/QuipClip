@@ -145,6 +145,23 @@ pub struct ExportRequestWire {
     /// encode, or writes none for a choice of the video only. The value is therefore a request,
     /// and [`ExportStart`] does not echo it.
     pub audio_mode: ExportAudioMode,
+    /// The revision of the source that the segments were marked against, or `None` when the
+    /// user chose to export a changed file anyway (ADR 024). Preparation compares it with the
+    /// file at `source_path` when it starts, and refuses a file whose size or whole-second
+    /// modification time differs with `sourceRevisionMismatch`. [`check_source_revision`]
+    /// states what the comparison cannot see. `None` checks nothing.
+    #[serde(default)]
+    pub expected_source_revision: Option<ExpectedSourceRevisionWire>,
+}
+
+/// The size and the modification time of a source file, in the form of the revision that
+/// `import_media` and `read_source_revision` report (ADR 010).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExpectedSourceRevisionWire {
+    pub size: u64,
+    /// Seconds since the Unix epoch, as `commands::media` rounds them.
+    pub mtime: i64,
 }
 
 /// The immediate payload `start_export` resolves with when it accepts a run.
@@ -552,6 +569,14 @@ where
     if canceled() {
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
+    // A cancel that arrives during the read of the revision wins over a mismatch.
+    check_source_revision(request).map_err(|error| {
+        if canceled() {
+            ExportCommandError::new(ExportErrorCode::Canceled)
+        } else {
+            error
+        }
+    })?;
     let mut probe = probe(&executables.ffprobe, &source).map_err(map_reprobe_error)?;
     let rate_readable = rate_readable_from_packets(&probe.format_names);
     if let Some(audio) = probe.audio.as_mut().filter(|audio| {
@@ -1108,6 +1133,33 @@ fn audio_matches(frames: &[ffmpeg::DecodedAudioFrame], audio: &ffmpeg::AudioProb
 
 /// How often the watcher of [`flv_input_for`] reads the cancel flag of the run.
 const FLV_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Refuse a source file whose revision differs from the one the request expects.
+///
+/// The segments name frames of the revision that the user marked them against. An export that
+/// waited in the queue can find another file at the path, and its cut would then name other
+/// frames. The file is read the way `import_media` read it, so the two revisions compare as
+/// equals when the file did not change.
+///
+/// The comparison has the limits of the revision of ADR 010. It does not see a replacement of
+/// the same size inside the same second of modification time, a copy that keeps the
+/// modification time, or a change after this one read. The read has no time bound, as the
+/// read of discovery has none.
+///
+/// A read that fails is not a mismatch. The re-probe and [`build_plan`] report a file that is
+/// gone, or that is no longer a regular file, with codes of their own. The frontend check of
+/// ADR 024 follows the same rule.
+fn check_source_revision(request: &ExportRequestWire) -> Result<(), ExportCommandError> {
+    let Some(expected) = request.expected_source_revision else {
+        return Ok(());
+    };
+    match crate::commands::media::validate_media(&request.source_path) {
+        Ok(actual) if actual.size != expected.size || actual.mtime != expected.mtime => Err(
+            ExportCommandError::new(ExportErrorCode::SourceRevisionMismatch),
+        ),
+        _ => Ok(()),
+    }
+}
 
 /// Check the preset of a request by the rules of the settings document
 /// ([`settings::validate_preset`]), and report `invalidPreset` with the reason when it fails.
@@ -2097,6 +2149,7 @@ mod tests {
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
         let app_data = directory.path.join("app");
         let windows = PreviewWindows::default();
@@ -2523,6 +2576,191 @@ mod tests {
     }
 
     #[test]
+    fn a_request_carries_an_optional_expected_source_revision() {
+        let without: ExportRequestWire =
+            serde_json::from_value(request_json(Some(serde_json::json!("videoAndAudio")))).unwrap();
+        assert_eq!(without.expected_source_revision, None);
+
+        let mut value = request_json(Some(serde_json::json!("videoAndAudio")));
+        value["expectedSourceRevision"] =
+            serde_json::json!({ "size": 4096, "mtime": 1_700_000_000 });
+        let with: ExportRequestWire = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            with.expected_source_revision,
+            Some(ExpectedSourceRevisionWire {
+                size: 4096,
+                mtime: 1_700_000_000
+            })
+        );
+
+        // The path is the source path of the request, so a revision that names one is refused.
+        value["expectedSourceRevision"]["path"] = serde_json::json!("/media/other.mp4");
+        assert!(serde_json::from_value::<ExportRequestWire>(value).is_err());
+    }
+
+    /// A request for `source` that expects `expected` as the revision of the source.
+    fn request_expecting(
+        source: &Path,
+        expected: Option<ExpectedSourceRevisionWire>,
+    ) -> ExportRequestWire {
+        ExportRequestWire {
+            source_path: source.to_string_lossy().into_owned(),
+            output_path: source
+                .with_file_name("out.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            segments: vec![ExportSegmentBoundaryWire {
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            preset: sample_preset("active"),
+            streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: expected,
+        }
+    }
+
+    /// The revision of `path` as the import reports it.
+    fn revision_of(path: &Path) -> ExpectedSourceRevisionWire {
+        let media = crate::commands::media::validate_media(&path.to_string_lossy()).unwrap();
+        ExpectedSourceRevisionWire {
+            size: media.size,
+            mtime: media.mtime,
+        }
+    }
+
+    #[test]
+    fn the_source_revision_check_accepts_the_same_file_and_refuses_a_changed_one() {
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let marked = revision_of(&source);
+
+        assert_eq!(
+            check_source_revision(&request_expecting(&source, None)),
+            Ok(())
+        );
+        assert_eq!(
+            check_source_revision(&request_expecting(&source, Some(marked))),
+            Ok(())
+        );
+
+        // Another file of another size at the same path.
+        fs::write(&source, b"replaced media").unwrap();
+        let error = check_source_revision(&request_expecting(&source, Some(marked))).unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::SourceRevisionMismatch);
+        assert_eq!(error.detail, None);
+
+        // The same size, written at another time.
+        fs::write(&source, b"MEDIA").unwrap();
+        let earlier = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(earlier)
+            .unwrap();
+        let error = check_source_revision(&request_expecting(&source, Some(marked))).unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::SourceRevisionMismatch);
+    }
+
+    #[test]
+    fn a_source_that_cannot_be_read_is_not_a_revision_mismatch() {
+        // The re-probe and the plan report a file that is gone with codes of their own.
+        let directory = TestDirectory::new();
+        let gone = directory.path.join("gone.mp4");
+        let expected = ExpectedSourceRevisionWire {
+            size: 5,
+            mtime: 1_700_000_000,
+        };
+
+        assert_eq!(
+            check_source_revision(&request_expecting(&gone, Some(expected))),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn preparation_with_a_matching_revision_reaches_the_re_probe() {
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let request = request_expecting(&source, Some(revision_of(&source)));
+        let probed = RefCell::new(false);
+
+        let prepared = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_, _| {
+                *probed.borrow_mut() = true;
+                Ok(sample_probe())
+            },
+            first_packet_unread,
+            sample_rate_not_read,
+            no_audio_gaps,
+        );
+
+        assert!(*probed.borrow());
+        assert!(prepared.is_ok(), "{:?}", prepared.err());
+    }
+
+    #[test]
+    fn preparation_stops_at_a_changed_source_before_the_re_probe() {
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let marked = revision_of(&source);
+        fs::write(&source, b"replaced media").unwrap();
+        let request = request_expecting(&source, Some(marked));
+        let probed = RefCell::new(false);
+
+        let error = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_, _| {
+                *probed.borrow_mut() = true;
+                unreachable!()
+            },
+            first_packet_unread,
+            sample_rate_not_read,
+            no_audio_gaps,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::SourceRevisionMismatch);
+        assert!(!*probed.borrow());
+        // Nothing was reserved in the folder of the output.
+        let leftovers = fs::read_dir(&directory.path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
     fn a_request_without_streams_is_refused_rather_than_defaulted() {
         // No value may stand in for the user's choice. A frontend that forgot to send it is
         // refused at the boundary, before any preparation starts.
@@ -2723,6 +2961,7 @@ mod tests {
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
 
         let prepared = prepare_export_with(
@@ -2799,6 +3038,7 @@ mod tests {
                 .unwrap(),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
         let prepare = || {
             let request = request();
@@ -2921,6 +3161,7 @@ mod tests {
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
 
         let error = prepare_export_with(
@@ -2967,6 +3208,7 @@ mod tests {
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
 
         let error = prepare_export_with(
@@ -3031,6 +3273,7 @@ mod tests {
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
 
         let result = prepare_export_with(
@@ -3119,6 +3362,7 @@ mod tests {
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
 
         let error = prepare_export_with(
@@ -3173,6 +3417,7 @@ mod tests {
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
 
         let error = prepare_export_with(
@@ -3227,6 +3472,7 @@ mod tests {
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
 
         let error = prepare_export_with(
@@ -3276,6 +3522,7 @@ mod tests {
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
 
         let error = prepare_export_with(
@@ -3603,6 +3850,7 @@ mod tests {
             preset: sample_preset("active"),
             streams,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
         prepare_export_with(
             PrepareRequest {
@@ -4555,6 +4803,7 @@ mod tests {
             preset: sample_preset("active"),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            expected_source_revision: None,
         };
         let error = prepare_export_with(
             PrepareRequest {
@@ -5202,6 +5451,7 @@ mod tests {
             preset: sample_preset("active"),
             streams,
             audio_mode,
+            expected_source_revision: None,
         };
         prepare_export_with(
             PrepareRequest {
@@ -5360,6 +5610,7 @@ mod tests {
             preset,
             streams,
             audio_mode: ExportAudioMode::Copy,
+            expected_source_revision: None,
         };
         let prepared = prepare_export_with(
             PrepareRequest {

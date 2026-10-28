@@ -793,6 +793,8 @@ export const zhCN: TranslationCatalog = {
     sourcePathInvalid: "源文件路径无效。",
     sourceNotFound: "未找到源视频文件。",
     sourceNotFile: "所选源路径不是常规文件。",
+    sourceRevisionMismatch:
+      "打开之后，磁盘上的视频文件已更改，因此导出已停止。已标记的片段可能不再指向相同的帧。",
     outputPathInvalid: "导出目标路径无效。",
     outputDirectoryMissing: "导出目标文件夹不存在。",
     outputEqualsSource: "导出目标不能与源文件相同。",

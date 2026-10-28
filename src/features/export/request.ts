@@ -14,6 +14,7 @@ import type {
   ExportAudioMode,
   ExportRequest,
   ExportSegmentBoundary,
+  ExportSourceRevision,
   ExportStreams,
 } from "./types";
 
@@ -57,6 +58,11 @@ export interface BuildExportRequestOptions {
    * the reason of `streams`.
    */
   audioMode: ExportAudioMode;
+  /**
+   * The revision of the source that the segments were marked against, or null to send none:
+   * the user chose to export a changed file anyway (ADR 024).
+   */
+  expectedSourceRevision?: ExportSourceRevision | null;
 }
 
 /**
@@ -67,7 +73,8 @@ export interface BuildExportRequestOptions {
  * - Multi-source aware: filters segments to `activeSourceId` while strictly PRESERVING ARRAY ORDER (ADR 007).
  * - Never sorts segments; array order is export order.
  * - Maps each Segment to `{ inPts, outPts }`, dropping `id` and `sourceId`.
- * - Forwards `preset`, `streams` and `audioMode` unchanged.
+ * - Forwards `preset`, `streams` and `audioMode` unchanged, and `expectedSourceRevision` when
+ *   the caller gives one.
  * - Returns `null` when there is no media, no output path, or no segments for the active source.
  *
  * @param options Export assembly parameters.
@@ -116,6 +123,13 @@ export function buildExportRequest(
     streams: options.streams,
     audioMode: options.audioMode,
   };
+
+  if (options.expectedSourceRevision) {
+    request.expectedSourceRevision = {
+      size: options.expectedSourceRevision.size,
+      mtime: options.expectedSourceRevision.mtime,
+    };
+  }
 
   return request;
 }

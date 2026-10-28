@@ -140,7 +140,8 @@ export interface ExportFlowControllerOptions {
    * Skips the replacement check for this run.
    *
    * Set by the "Export anyway" action of the confirmation the check raises. The user has
-   * already been told the file changed, so asking again would be a loop.
+   * already been told the file changed, so asking again would be a loop. The START step then
+   * sends no expected revision, and the backend does not check the revision of the file.
    */
   skipSourceRevisionCheck?: boolean;
 
@@ -349,8 +350,9 @@ export class ExportFlowController {
    * 5. Re-reads media, segments, and the active source id, and builds the request with the
    *    preset of step 1, whole, and with `streams` and `audioMode`. The preset is the one that
    *    the setup step showed when the user confirmed, and the export renders with it even when
-   *    the settings change later (ADR 049). A null request reports `noSegments` or
-   *    `sourceNotFound`.
+   *    the settings change later (ADR 049). The request also carries the revision of the media,
+   *    which the segments were marked against, unless `skipSourceRevisionCheck` is set. A null
+   *    request reports `noSegments` or `sourceNotFound`.
    * 6. Calls `setModalOpen(true)` and `startExport(request)` without awaiting it.
    * 7. Re-reads settings. When non-null and still containing `presetId` where
    *    `presetId !== settings.activePresetId`, persists the choice via `saveSettings`.
@@ -417,6 +419,10 @@ export class ExportFlowController {
       preset,
       streams,
       audioMode,
+      expectedSourceRevision:
+        this.skipSourceRevisionCheck || !currentMedia
+          ? null
+          : { size: currentMedia.size, mtime: currentMedia.mtime },
     });
 
     if (!request) {

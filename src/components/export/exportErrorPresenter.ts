@@ -95,6 +95,8 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   sourcePathInvalid: null,
   sourceNotFound: null,
   sourceNotFile: null,
+  // The open step checks the file again and offers Re-import and Export anyway.
+  sourceRevisionMismatch: BACK_TO_SETUP,
   sourceFrameRateUnknown: null,
   sourceAudioRateUnknown: null,
 

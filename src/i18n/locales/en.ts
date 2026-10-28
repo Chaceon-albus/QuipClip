@@ -1018,6 +1018,8 @@ export const en = {
     sourcePathInvalid: "The source file path is invalid.",
     sourceNotFound: "The source video file was not found.",
     sourceNotFile: "The selected source path is not a regular file.",
+    sourceRevisionMismatch:
+      "The video file on disk changed after it was opened, so the export stopped. The marked segments may no longer name the same frames.",
     outputPathInvalid: "The export destination path is invalid.",
     outputDirectoryMissing: "The export destination folder does not exist.",
     outputEqualsSource: "The export destination cannot be the same as the source file.",

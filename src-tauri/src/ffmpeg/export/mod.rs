@@ -703,6 +703,10 @@ export_error_codes! {
     SourceNotFound => "sourceNotFound",
     /// Produced by [`plan::build_plan`]: the source path exists but is not a regular file.
     SourceNotFile => "sourceNotFile",
+    /// Produced by `commands::export::check_source_revision`: the size or the modification time
+    /// of the source differs from the revision that the request expects, so the segments may
+    /// name other frames (ADR 049).
+    SourceRevisionMismatch => "sourceRevisionMismatch",
     /// Produced by [`plan::build_plan`]: the destination path is empty, contains a NUL
     /// byte, has no file name, has no parent, or is not absolute.
     OutputPathInvalid => "outputPathInvalid",
@@ -876,6 +880,7 @@ mod tests {
                 "sourceNotFile",
                 "sourceNotFound",
                 "sourcePathInvalid",
+                "sourceRevisionMismatch",
                 "tooManySegments",
             ]
         );

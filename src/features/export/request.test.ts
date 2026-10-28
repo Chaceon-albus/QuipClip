@@ -177,6 +177,30 @@ describe("Export Request Builder", () => {
     expect(result?.preset).toEqual(custom);
   });
 
+  it("forwards the expected source revision when the caller gives one", () => {
+    const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
+    const base = {
+      preset,
+      sourcePath,
+      outputPath,
+      activeSourceId,
+      segments,
+      streams: "videoAndAudio" as const,
+      audioMode: "encode" as const,
+    };
+
+    const revision = { size: 4096, mtime: 1_700_000_000 };
+    expect(
+      buildExportRequest({ ...base, expectedSourceRevision: revision })
+        ?.expectedSourceRevision,
+    ).toStrictEqual(revision);
+    // No revision, or null for a changed source that the user accepted, sends none.
+    expect(buildExportRequest(base)).not.toHaveProperty("expectedSourceRevision");
+    expect(
+      buildExportRequest({ ...base, expectedSourceRevision: null }),
+    ).not.toHaveProperty("expectedSourceRevision");
+  });
+
   it.each(EXPORT_STREAMS)("forwards the stream choice '%s' unchanged", (streams) => {
     const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
 

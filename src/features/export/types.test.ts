@@ -201,6 +201,7 @@ describe("Export Types & Wire Constants", () => {
         "sourcePathInvalid",
         "sourceNotFound",
         "sourceNotFile",
+        "sourceRevisionMismatch",
         "outputPathInvalid",
         "outputDirectoryMissing",
         "outputEqualsSource",

@@ -1220,7 +1220,34 @@ describe("ExportFlowController", () => {
           { inPts: "5000", outPts: "6000" },
           { inPts: "3000", outPts: "4000" },
         ],
+        // The revision of the media, which the segments were marked against.
+        expectedSourceRevision: { size: 4096, mtime: 1_700_000_000 },
       });
+    });
+
+    it("confirm sends no expected revision after the user accepted a changed source", async () => {
+      // "Export anyway" sets the option. The backend must not refuse the file that the user
+      // accepted (ADR 024).
+      const startExport = vi.fn().mockResolvedValue(null);
+      const preset = createPreset({ id: "p1" });
+
+      const controller = createExportFlowController({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+        startExport,
+        saveSettings: vi.fn().mockResolvedValue(null),
+        filterName: "Video Files",
+        audioFilterName: "Audio Files",
+        skipSourceRevisionCheck: true,
+        getSettings: () => createSettings([preset], "p1"),
+        getMedia: () => createMedia("/media/v.mp4", "v.mp4"),
+        getSourceId: () => "s1",
+        getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+      });
+
+      expect(await controller.confirm("p1", "videoAndAudio", "encode")).toBe(true);
+      const request = startExport.mock.calls[0][0] as ExportRequest;
+      expect(request).not.toHaveProperty("expectedSourceRevision");
     });
 
     it("confirm saves activePresetId when it differs, and does not save when it is equal", async () => {

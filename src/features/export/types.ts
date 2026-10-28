@@ -62,6 +62,19 @@ export type ExportRequest = {
   streams: ExportStreams;
   /** Required, as `streams` is. `ExportStart` does not echo it. */
   audioMode: ExportAudioMode;
+  /**
+   * The revision of the source that the segments were marked against. When the export
+   * prepares, the backend refuses a source file whose size or whole-second modification time
+   * differs from it with `sourceRevisionMismatch`. Absent when the user chose to export a
+   * changed file anyway, and the backend then checks nothing (ADR 024).
+   */
+  expectedSourceRevision?: ExportSourceRevision;
+};
+
+/** The size and the modification time of a source file, as the import reports them (ADR 010). */
+export type ExportSourceRevision = {
+  size: number;
+  mtime: number;
 };
 
 /**
@@ -96,6 +109,7 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "sourcePathInvalid",
   "sourceNotFound",
   "sourceNotFile",
+  "sourceRevisionMismatch",
   "outputPathInvalid",
   "outputDirectoryMissing",
   "outputEqualsSource",

@@ -328,6 +328,7 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   sourcePathInvalid: null,
   sourceNotFound: null,
   sourceNotFile: null,
+  sourceRevisionMismatch: BACK,
   outputPathInvalid: BACK,
   outputDirectoryMissing: BACK,
   outputEqualsSource: BACK,
