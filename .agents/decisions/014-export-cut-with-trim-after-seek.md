@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-04
 - Deciders: capric98
-- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046, ADR 048
+- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046, ADR 048, ADR 053
 
 ## Context
 
@@ -527,6 +527,13 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
 
 ## Decision
 
+(Changed on 2026-10-28.) ADR 053 extends this record to pieces of several sources. In the
+input-per-segment shape, each piece is one chain and one input. The limit of 100 segments counts
+pieces. The preset value `source` for the frame rate means the highest rate among the sources.
+The fit step of ADR 053 replaces `scale=<w>:<h>,setsar=1`, and it comes before `fps`. The
+single-input shape opens one input for each source. The command-line budget must be measured
+again (ADR 053).
+
 ### The boundary mechanism
 
 The renderer cuts with `trim` and `atrim`. It gives the boundaries as integer ticks in
@@ -544,6 +551,9 @@ The audio chain applies `aformat` with the source sample rate before `atrim`. Me
 boundary ticks count the source rate. The cut therefore lands early, and the segment loses
 length. The video frame count stays correct, so the frame comparison cannot report
 this. Pinning the input link to the source rate restores the boundary.
+
+(Changed on 2026-10-28.) ADR 053 replaces the rule of this paragraph with its fit step, which
+keeps the display aspect ratio and pads with black.
 
 The chain applies `scale` and `setsar=1` together, and only when the preset gives an
 explicit resolution. A chain that keeps the source resolution applies neither filter.
@@ -825,6 +835,9 @@ means that the seek removed frames that the output needed. The renderer then rep
 error code `frameCountMismatch`. It must not write an incorrect cut without a report.
 
 ### Output timing
+
+(Changed on 2026-10-28.) With several sources, `source` means the highest nominal rate among the
+sources of the pieces (ADR 053).
 
 Version 1 writes constant-frame-rate output. It applies `fps` to each segment, because
 `concat` needs one frame rate and a variable-frame-rate source has none.

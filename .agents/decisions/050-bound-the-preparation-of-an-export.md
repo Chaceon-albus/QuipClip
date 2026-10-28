@@ -4,6 +4,7 @@
 - Date: 2026-10-27
 - Deciders: capric98
 - Amends: ADR 016, ADR 017, ADR 049
+- Amended by: ADR 053
 
 ## Context
 
@@ -34,7 +35,10 @@ every 50 ms.
   2 seconds for its answer. Then it reports `canceled`, whatever the helper answered, and gives
   up the helper if it did not answer.
 - **Preparation takes more than 180 seconds.** That is 6 × `PROBE_TIMEOUT`, more than the
-  bounded steps can take together. The export thread sets the stop flag, waits up to 2 seconds,
+  bounded steps can take together. (Changed on 2026-10-28.) Preparation runs those steps once
+  for each source of the pieces (ADR 053). One limit then covers the whole preparation: 180
+  seconds multiplied by the number of those sources. The export thread sets the stop flag, waits
+  up to 2 seconds,
   and reports `preparationTimedOut`. The detail names the stage of preparation that ran, such as
   `discovery` or `reservation`. A Stop that comes in those 2 seconds reports `canceled`.
 

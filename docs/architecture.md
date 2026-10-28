@@ -19,60 +19,61 @@ source key that makes that possible. Multi-track is out of scope and stays out o
 Each record states context, decision, and consequences. They are the source of truth. This
 document summarizes them and shows how the parts fit together.
 
-| Record                                                                                                                                      | Subject                                                                    |
-| ------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| [`001-tauri-react-typescript-shell.md`](../.agents/decisions/001-tauri-react-typescript-shell.md)                                           | Tauri v2, React 19, TypeScript, Vite, Tailwind 4, shadcn/ui                |
-| [`002-rational-time-model.md`](../.agents/decisions/002-rational-time-model.md)                                                             | Source video PTS, exact time bases, half-open segments                     |
-| [`003-hybrid-preview-decoding.md`](../.agents/decisions/003-hybrid-preview-decoding.md)                                                     | Native preview, proxy fallback, calibrated PTS inference                   |
-| [`004-single-pass-filter-complex-export.md`](../.agents/decisions/004-single-pass-filter-complex-export.md)                                 | Accurate source seek, timestamp resolution, normalization                  |
-| [`005-ffmpeg-acquisition.md`](../.agents/decisions/005-ffmpeg-acquisition.md)                                                               | PATH, then app data, then a download the user agreed to                    |
-| [`006-encoder-capability-probing.md`](../.agents/decisions/006-encoder-capability-probing.md)                                               | List the encoders, then smoke-test them, then cache                        |
-| [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md)                                 | One source-PTS timeline with ordered half-open segments                    |
-| [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)                                   | Superseded by ADR 033                                                      |
-| [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                                                 | One reviewed unit, one commit, no push                                     |
-| [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                                                             | Version 1 JSON with exact source-PTS boundaries                            |
-| [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                                                             | English and Simplified Chinese interface with a saved setting              |
-| [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)                                         | Homebrew path fallback for macOS GUI applications                          |
-| [`013-application-settings-file.md`](../.agents/decisions/013-application-settings-file.md)                                                 | One settings file for the ffmpeg path and the export presets               |
-| [`014-export-cut-with-trim-after-seek.md`](../.agents/decisions/014-export-cut-with-trim-after-seek.md)                                     | Seeked input, trim on raw source PTS, one process, one output              |
-| [`015-windows-atomic-replace-retry.md`](../.agents/decisions/015-windows-atomic-replace-retry.md)                                           | Layered Windows rename with a bounded retry                                |
-| [`016-export-orchestration.md`](../.agents/decisions/016-export-orchestration.md)                                                           | One export at a time, one event, a 30-second publication wait              |
-| [`017-export-lifetime-across-application-exit.md`](../.agents/decisions/017-export-lifetime-across-application-exit.md)                     | A quit cancels a running export and waits a bounded time                   |
-| [`018-windows-child-processes-without-a-console.md`](../.agents/decisions/018-windows-child-processes-without-a-console.md)                 | Every child process starts with no Windows console window                  |
-| [`019-scrub-audio-on-frame-step.md`](../.agents/decisions/019-scrub-audio-on-frame-step.md)                                                 | A frame step plays a short audio burst at the new position                 |
-| [`020-platform-title-bar-and-export-action.md`](../.agents/decisions/020-platform-title-bar-and-export-action.md)                           | One title bar per platform, with the export action inside it               |
-| [`021-window-level-keyboard-shortcuts.md`](../.agents/decisions/021-window-level-keyboard-shortcuts.md)                                     | One window keyboard layer for play and the frame step                      |
-| [`022-playhead-scrub-display-target-and-coalesced-seeks.md`](../.agents/decisions/022-playhead-scrub-display-target-and-coalesced-seeks.md) | The playhead draws the seek target, and one seek runs at a time            |
-| [`023-audio-output-controls-in-presets.md`](../.agents/decisions/023-audio-output-controls-in-presets.md)                                   | Audio bitrate, sample rate, and channels in each preset                    |
-| [`024-export-setup-step.md`](../.agents/decisions/024-export-setup-step.md)                                                                 | The export dialog selects the preset before the save dialog                |
-| [`025-background-export-and-progress-display.md`](../.agents/decisions/025-background-export-and-progress-display.md)                       | A hidden export continues, and three places show its progress              |
-| [`026-editing-keys-in-the-window-keyboard-layer.md`](../.agents/decisions/026-editing-keys-in-the-window-keyboard-layer.md)                 | The window keyboard layer takes the editing keys                           |
-| [`027-confirm-a-quit-that-loses-work.md`](../.agents/decisions/027-confirm-a-quit-that-loses-work.md)                                       | A close or a quit that would lose work asks first                          |
-| [`028-frame-timecode-display.md`](../.agents/decisions/028-frame-timecode-display.md)                                                       | Elapsed time shows as HH:MM:SS:FF by default                               |
-| [`029-show-and-open-the-export-output.md`](../.agents/decisions/029-show-and-open-the-export-output.md)                                     | Show and open the export output through its run                            |
-| [`030-trim-a-segment-edge-by-dragging.md`](../.agents/decisions/030-trim-a-segment-edge-by-dragging.md)                                     | Trim a segment edge by dragging it                                         |
-| [`031-order-dialog-buttons-by-platform.md`](../.agents/decisions/031-order-dialog-buttons-by-platform.md)                                   | Order dialog buttons by platform                                           |
-| [`032-one-frontend-chunk-and-its-size-limit.md`](../.agents/decisions/032-one-frontend-chunk-and-its-size-limit.md)                         | One frontend chunk, with a size warning above 1200 kB                      |
-| [`033-main-agent-writes-the-code.md`](../.agents/decisions/033-main-agent-writes-the-code.md)                                               | The main agent writes, and another tool runs only on request               |
-| [`034-one-application-version-and-its-release-tag.md`](../.agents/decisions/034-one-application-version-and-its-release-tag.md)             | One version in `Cargo.toml`, and one `v` tag for each release              |
-| [`035-keep-playback-across-a-pointer-seek.md`](../.agents/decisions/035-keep-playback-across-a-pointer-seek.md)                             | A click or a drag on the timeline during playback keeps playing            |
-| [`036-choose-the-output-streams-at-export.md`](../.agents/decisions/036-choose-the-output-streams-at-export.md)                             | Export the video and the audio, the video only, or the audio only          |
-| [`037-player-first-navigation-keys.md`](../.agents/decisions/037-player-first-navigation-keys.md)                                           | The arrows jump in time, `,` and `.` step frames, ↑ and ↓ find edit points |
-| [`038-settings-in-its-own-window.md`](../.agents/decisions/038-settings-in-its-own-window.md)                                               | Settings opens in its own window, with a grant for each command            |
-| [`039-recover-the-preview-after-a-decode-error.md`](../.agents/decisions/039-recover-the-preview-after-a-decode-error.md)                   | A decode error mid-file stalls the preview, and the next seek reloads it   |
-| [`040-preset-schema-2-encoder-options.md`](../.agents/decisions/040-preset-schema-2-encoder-options.md)                                     | Encoder options, constant quality and a pixel format in each preset        |
-| [`041-test-a-preset-on-this-machine.md`](../.agents/decisions/041-test-a-preset-on-this-machine.md)                                         | A preset can be tested on this machine with its own arguments              |
-| [`042-mark-a-release-as-a-pre-release.md`](../.agents/decisions/042-mark-a-release-as-a-pre-release.md)                                     | The maintainer marks a published release as a pre-release                  |
-| [`043-write-the-audio-in-a-second-process.md`](../.agents/decisions/043-write-the-audio-in-a-second-process.md)                             | The audio of an export with video comes from a second `ffmpeg`, by a pipe  |
-| [`044-arrow-keys-step-a-frame-while-paused.md`](../.agents/decisions/044-arrow-keys-step-a-frame-while-paused.md)                           | Paused arrows step a frame, playing arrows jump 5 s, D and F step frames   |
-| [`045-select-several-segments-and-delete-them.md`](../.agents/decisions/045-select-several-segments-and-delete-them.md)                     | `Cmd`/`Ctrl` with a click or `A` selects segments, Delete removes them all |
-| [`046-preview-through-mediasource-windows.md`](../.agents/decisions/046-preview-through-mediasource-windows.md)                             | A container the web view cannot open plays from fMP4 windows               |
-| [`047-show-the-source-of-each-build.md`](../.agents/decisions/047-show-the-source-of-each-build.md)                                         | The version shows with the commit and the branch of the build              |
-| [`048-copy-the-audio-of-one-segment.md`](../.agents/decisions/048-copy-the-audio-of-one-segment.md)                                         | An export of one segment can copy the packets of the source audio          |
-| [`049-queue-exports-in-the-backend.md`](../.agents/decisions/049-queue-exports-in-the-backend.md)                                           | Exports wait in a backend queue and start one after another                |
-| [`050-bound-the-preparation-of-an-export.md`](../.agents/decisions/050-bound-the-preparation-of-an-export.md)                               | Preparation of an export ends after a time limit or a Stop                 |
-| [`051-list-the-export-queue-for-a-new-page.md`](../.agents/decisions/051-list-the-export-queue-for-a-new-page.md)                           | A page that loaded again restores the export queue from the backend        |
-| [`052-several-sources-on-one-sequence.md`](../.agents/decisions/052-several-sources-on-one-sequence.md)                                     | Clips place sources on one sequence, and edit points name a clip           |
+| Record                                                                                                                                      | Subject                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| [`001-tauri-react-typescript-shell.md`](../.agents/decisions/001-tauri-react-typescript-shell.md)                                           | Tauri v2, React 19, TypeScript, Vite, Tailwind 4, shadcn/ui                 |
+| [`002-rational-time-model.md`](../.agents/decisions/002-rational-time-model.md)                                                             | Source video PTS, exact time bases, half-open segments                      |
+| [`003-hybrid-preview-decoding.md`](../.agents/decisions/003-hybrid-preview-decoding.md)                                                     | Native preview, proxy fallback, calibrated PTS inference                    |
+| [`004-single-pass-filter-complex-export.md`](../.agents/decisions/004-single-pass-filter-complex-export.md)                                 | Accurate source seek, timestamp resolution, normalization                   |
+| [`005-ffmpeg-acquisition.md`](../.agents/decisions/005-ffmpeg-acquisition.md)                                                               | PATH, then app data, then a download the user agreed to                     |
+| [`006-encoder-capability-probing.md`](../.agents/decisions/006-encoder-capability-probing.md)                                               | List the encoders, then smoke-test them, then cache                         |
+| [`007-single-track-source-time-timeline.md`](../.agents/decisions/007-single-track-source-time-timeline.md)                                 | One source-PTS timeline with ordered half-open segments                     |
+| [`008-multi-agent-development-workflow.md`](../.agents/decisions/008-multi-agent-development-workflow.md)                                   | Superseded by ADR 033                                                       |
+| [`009-incremental-commit-policy.md`](../.agents/decisions/009-incremental-commit-policy.md)                                                 | One reviewed unit, one commit, no push                                      |
+| [`010-project-file-format.md`](../.agents/decisions/010-project-file-format.md)                                                             | Version 1 JSON with exact source-PTS boundaries                             |
+| [`011-localized-interface.md`](../.agents/decisions/011-localized-interface.md)                                                             | English and Simplified Chinese interface with a saved setting               |
+| [`012-macos-homebrew-path-discovery.md`](../.agents/decisions/012-macos-homebrew-path-discovery.md)                                         | Homebrew path fallback for macOS GUI applications                           |
+| [`013-application-settings-file.md`](../.agents/decisions/013-application-settings-file.md)                                                 | One settings file for the ffmpeg path and the export presets                |
+| [`014-export-cut-with-trim-after-seek.md`](../.agents/decisions/014-export-cut-with-trim-after-seek.md)                                     | Seeked input, trim on raw source PTS, one process, one output               |
+| [`015-windows-atomic-replace-retry.md`](../.agents/decisions/015-windows-atomic-replace-retry.md)                                           | Layered Windows rename with a bounded retry                                 |
+| [`016-export-orchestration.md`](../.agents/decisions/016-export-orchestration.md)                                                           | One export at a time, one event, a 30-second publication wait               |
+| [`017-export-lifetime-across-application-exit.md`](../.agents/decisions/017-export-lifetime-across-application-exit.md)                     | A quit cancels a running export and waits a bounded time                    |
+| [`018-windows-child-processes-without-a-console.md`](../.agents/decisions/018-windows-child-processes-without-a-console.md)                 | Every child process starts with no Windows console window                   |
+| [`019-scrub-audio-on-frame-step.md`](../.agents/decisions/019-scrub-audio-on-frame-step.md)                                                 | A frame step plays a short audio burst at the new position                  |
+| [`020-platform-title-bar-and-export-action.md`](../.agents/decisions/020-platform-title-bar-and-export-action.md)                           | One title bar per platform, with the export action inside it                |
+| [`021-window-level-keyboard-shortcuts.md`](../.agents/decisions/021-window-level-keyboard-shortcuts.md)                                     | One window keyboard layer for play and the frame step                       |
+| [`022-playhead-scrub-display-target-and-coalesced-seeks.md`](../.agents/decisions/022-playhead-scrub-display-target-and-coalesced-seeks.md) | The playhead draws the seek target, and one seek runs at a time             |
+| [`023-audio-output-controls-in-presets.md`](../.agents/decisions/023-audio-output-controls-in-presets.md)                                   | Audio bitrate, sample rate, and channels in each preset                     |
+| [`024-export-setup-step.md`](../.agents/decisions/024-export-setup-step.md)                                                                 | The export dialog selects the preset before the save dialog                 |
+| [`025-background-export-and-progress-display.md`](../.agents/decisions/025-background-export-and-progress-display.md)                       | A hidden export continues, and three places show its progress               |
+| [`026-editing-keys-in-the-window-keyboard-layer.md`](../.agents/decisions/026-editing-keys-in-the-window-keyboard-layer.md)                 | The window keyboard layer takes the editing keys                            |
+| [`027-confirm-a-quit-that-loses-work.md`](../.agents/decisions/027-confirm-a-quit-that-loses-work.md)                                       | A close or a quit that would lose work asks first                           |
+| [`028-frame-timecode-display.md`](../.agents/decisions/028-frame-timecode-display.md)                                                       | Elapsed time shows as HH:MM:SS:FF by default                                |
+| [`029-show-and-open-the-export-output.md`](../.agents/decisions/029-show-and-open-the-export-output.md)                                     | Show and open the export output through its run                             |
+| [`030-trim-a-segment-edge-by-dragging.md`](../.agents/decisions/030-trim-a-segment-edge-by-dragging.md)                                     | Trim a segment edge by dragging it                                          |
+| [`031-order-dialog-buttons-by-platform.md`](../.agents/decisions/031-order-dialog-buttons-by-platform.md)                                   | Order dialog buttons by platform                                            |
+| [`032-one-frontend-chunk-and-its-size-limit.md`](../.agents/decisions/032-one-frontend-chunk-and-its-size-limit.md)                         | One frontend chunk, with a size warning above 1200 kB                       |
+| [`033-main-agent-writes-the-code.md`](../.agents/decisions/033-main-agent-writes-the-code.md)                                               | The main agent writes, and another tool runs only on request                |
+| [`034-one-application-version-and-its-release-tag.md`](../.agents/decisions/034-one-application-version-and-its-release-tag.md)             | One version in `Cargo.toml`, and one `v` tag for each release               |
+| [`035-keep-playback-across-a-pointer-seek.md`](../.agents/decisions/035-keep-playback-across-a-pointer-seek.md)                             | A click or a drag on the timeline during playback keeps playing             |
+| [`036-choose-the-output-streams-at-export.md`](../.agents/decisions/036-choose-the-output-streams-at-export.md)                             | Export the video and the audio, the video only, or the audio only           |
+| [`037-player-first-navigation-keys.md`](../.agents/decisions/037-player-first-navigation-keys.md)                                           | The arrows jump in time, `,` and `.` step frames, ↑ and ↓ find edit points  |
+| [`038-settings-in-its-own-window.md`](../.agents/decisions/038-settings-in-its-own-window.md)                                               | Settings opens in its own window, with a grant for each command             |
+| [`039-recover-the-preview-after-a-decode-error.md`](../.agents/decisions/039-recover-the-preview-after-a-decode-error.md)                   | A decode error mid-file stalls the preview, and the next seek reloads it    |
+| [`040-preset-schema-2-encoder-options.md`](../.agents/decisions/040-preset-schema-2-encoder-options.md)                                     | Encoder options, constant quality and a pixel format in each preset         |
+| [`041-test-a-preset-on-this-machine.md`](../.agents/decisions/041-test-a-preset-on-this-machine.md)                                         | A preset can be tested on this machine with its own arguments               |
+| [`042-mark-a-release-as-a-pre-release.md`](../.agents/decisions/042-mark-a-release-as-a-pre-release.md)                                     | The maintainer marks a published release as a pre-release                   |
+| [`043-write-the-audio-in-a-second-process.md`](../.agents/decisions/043-write-the-audio-in-a-second-process.md)                             | The audio of an export with video comes from a second `ffmpeg`, by a pipe   |
+| [`044-arrow-keys-step-a-frame-while-paused.md`](../.agents/decisions/044-arrow-keys-step-a-frame-while-paused.md)                           | Paused arrows step a frame, playing arrows jump 5 s, D and F step frames    |
+| [`045-select-several-segments-and-delete-them.md`](../.agents/decisions/045-select-several-segments-and-delete-them.md)                     | `Cmd`/`Ctrl` with a click or `A` selects segments, Delete removes them all  |
+| [`046-preview-through-mediasource-windows.md`](../.agents/decisions/046-preview-through-mediasource-windows.md)                             | A container the web view cannot open plays from fMP4 windows                |
+| [`047-show-the-source-of-each-build.md`](../.agents/decisions/047-show-the-source-of-each-build.md)                                         | The version shows with the commit and the branch of the build               |
+| [`048-copy-the-audio-of-one-segment.md`](../.agents/decisions/048-copy-the-audio-of-one-segment.md)                                         | An export of one segment can copy the packets of the source audio           |
+| [`049-queue-exports-in-the-backend.md`](../.agents/decisions/049-queue-exports-in-the-backend.md)                                           | Exports wait in a backend queue and start one after another                 |
+| [`050-bound-the-preparation-of-an-export.md`](../.agents/decisions/050-bound-the-preparation-of-an-export.md)                               | Preparation of an export ends after a time limit or a Stop                  |
+| [`051-list-the-export-queue-for-a-new-page.md`](../.agents/decisions/051-list-the-export-queue-for-a-new-page.md)                           | A page that loaded again restores the export queue from the backend         |
+| [`052-several-sources-on-one-sequence.md`](../.agents/decisions/052-several-sources-on-one-sequence.md)                                     | Clips place sources on one sequence, and edit points name a clip            |
+| [`053-conform-several-sources-at-export.md`](../.agents/decisions/053-conform-several-sources-at-export.md)                                 | One canvas, the highest frame rate and one audio format for several sources |
 
 ## Shape
 
@@ -286,6 +287,13 @@ helper thread, and the export thread ends it after 180 seconds or about 2 second
 (ADR 050). After a run finishes,
 `reveal_export_output` shows the file that the run wrote in the file manager. It takes the
 run identifier, never a path (ADR 029).
+
+ADR 053 extends the export to pieces of several sources (ADR 052). The request names the
+sources and the pieces, and preparation runs once for each source. With the preset value
+`source`, the plan picks one canvas, the display size with the largest area, and fits each
+other piece into it with Lanczos and black bars. It also picks the highest frame rate, the
+highest sample rate and the layout with the most channels. A piece without audio gets silence.
+The code still exports one source. The multi-source export unit brings it to ADR 053.
 
 One export writes one output. One `-copyts`, placed once before the first input,
 keeps the raw source PTS visible to the filter graph on every input. The renderer seeks each

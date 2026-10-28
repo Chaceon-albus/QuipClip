@@ -4,7 +4,7 @@
 - Date: 2026-10-03
 - Deciders: capric98
 - Amends: ADR 014, ADR 016, ADR 017, ADR 018, ADR 036
-- Amended by: ADR 046, ADR 048
+- Amended by: ADR 046, ADR 048, ADR 053
 
 ## Context
 
@@ -117,6 +117,9 @@ the renderer builds.
    needed 31547 bytes.
 
 ## Decision
+
+(Changed on 2026-10-28.) With several sources (ADR 053), the second process keeps its shape. It
+builds one stand-in for each piece, as it builds one for each segment today.
 
 An export with video and with audio that its chains read from the source stream runs two `ffmpeg`
 processes. `ExportPlan::separate_audio_process` states the rule. These exports stay one process,

@@ -4,7 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 006, ADR 013, ADR 014
-- Amended by: ADR 036, ADR 040, ADR 048
+- Amended by: ADR 036, ADR 040, ADR 048, ADR 053
 
 ## Context
 
@@ -59,6 +59,11 @@ Measurements on ffmpeg 9.0.2, on macOS:
   selects the sample rate of the source audio stream.
 - `audioChannels` is `source`, `stereo`, or `mono`. `source` keeps the channel layout of
   the source audio stream.
+
+(Changed on 2026-10-28.) With several sources, `source` for the sample rate means the highest
+rate among the sources of the pieces that have audio. `source` for the channels means the
+layout of the source with the most channels, and the final `aformat` then names that layout
+(ADR 053). With one source, both values are the values of today.
 
 The final `aformat` of each audio chain takes its rate and its layout from the last two
 fields. The value `source` for channels omits the `channel_layouts` option. The leading

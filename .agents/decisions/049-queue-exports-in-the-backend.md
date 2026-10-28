@@ -4,7 +4,7 @@
 - Date: 2026-10-27
 - Deciders: capric98
 - Amends: ADR 016, ADR 017, ADR 020, ADR 024, ADR 025, ADR 027, ADR 029, ADR 031, ADR 041
-- Amended by: ADR 050, ADR 051
+- Amended by: ADR 050, ADR 051, ADR 053
 
 ## Context
 
@@ -25,6 +25,10 @@ Three facts shape the decision.
   waited.
 
 ## Decision
+
+(Changed on 2026-10-28.) With several sources (ADR 053), a run stores the size and the
+modification time of each source, and preparation compares and re-probes each source that a
+piece names.
 
 ### The backend holds the queue
 

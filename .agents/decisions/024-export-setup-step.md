@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-22
 - Deciders: capric98
-- Amended by: ADR 038, ADR 036, ADR 048, ADR 049, ADR 052
+- Amended by: ADR 038, ADR 036, ADR 048, ADR 049, ADR 052, ADR 053
 
 ## Context
 
@@ -143,6 +143,11 @@ Settings does not become the choice of the step.
 Encoder row of the Audio group, for an export of one segment (ADR 048). While it is on, the
 Audio group names the codec, the sample rate and the channels of the source, and the step shows
 no size estimate.
+
+(Changed on 2026-10-28.) With several sources, the step shows the values that the plan of
+ADR 053 finds: the canvas, the frame rate, the sample rate and the channel layout. The limit of
+`tooManySegments` counts pieces, and the Copy audio switch needs an export of one piece
+(ADR 053).
 
 ## Consequences
 

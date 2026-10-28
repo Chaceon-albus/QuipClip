@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
+- Amended by: ADR 053
 
 ## Context
 
@@ -18,6 +19,11 @@ Different sources can use different time bases and unrelated timestamp origins. 
 PTS values are never directly comparable.
 
 ## Decision
+
+(Changed on 2026-10-28.) ADR 052 puts several sources on one sequence, and ADR 053 gives the
+normalization of step 9 for pieces of several sources: one canvas with a Lanczos fit and black
+bars, the highest frame rate, and one sample rate and channel layout. ADR 053 also defines the
+silence that a piece without audio gets.
 
 The future renderer will process each segment with these semantic steps:
 
