@@ -776,7 +776,8 @@ segments.
 The read of the audio gaps (ADR 014 measurement 28) opens the same slices. It joins the ranges
 that overlap or touch. For each group, it reads the slice of the earliest range from its start
 to the end of the group, with `-read_intervals %<end>`. It names the head by its full path. All
-the runs share one `PROBE_TIMEOUT`.
+the runs share one `PROBE_TIMEOUT`. (Changed on 2026-10-28.) At most eight runs work at the same
+time, and their answers join in the order of the groups (ADR 055).
 
 ## Rejected alternatives
 

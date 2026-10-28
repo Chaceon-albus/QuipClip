@@ -74,7 +74,7 @@ clip, it counts the segments against the limit of one source. From 11 sources on
 pieces fit than the rule allows. ADR 014 gives the reason to keep the simple rule.
 
 (Changed again on 2026-10-28.) ADR 055 replaces the rule 92 − S. An export joins at most 256
-pieces and at most `MAX_EXPORT_INPUTS` sources. The OPEN step also counts the runs of ADR 055.
+pieces and at most `MAX_EXPORT_INPUTS` (85) sources. The OPEN step also counts the runs of ADR 055.
 
 Preparation runs once for each source that a piece names: the revision check, the probe, the
 audio correction, the FLV input and the gap read of ADR 014, ADR 046 and ADR 049. The plan then

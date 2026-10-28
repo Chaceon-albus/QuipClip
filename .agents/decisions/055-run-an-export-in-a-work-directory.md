@@ -67,6 +67,9 @@ H.264 at 30 fps with a GOP of 2 s: 120 s at 1920x1080 and 60 s at 3840x2160. Eac
 5. One source of 1080p, 40 pieces in reverse source order, through one input and `split`: 1528 MiB.
    `concat` holds the frames that `split` gives a piece that waits. ADR 014 measured the same
    cost: one wait of 50 s at 1280x720 took 2078 MiB, against 156 MiB in source order.
+6. (Added on 2026-10-28.) 256 runs of `ffprobe`, each reading 6 s of the audio of a 1280x720 FLV,
+   took 14.3 s one after another and 2.6 s with eight at a time. This is the shape of the read of
+   the audio gaps of an FLV source, which runs `ffprobe` once for each group of pieces.
 
 ## Decision
 
@@ -130,10 +133,10 @@ ffmpeg -nostdin -hide_banner -loglevel error -/filter_complex probe.graph \
   after 10 seconds, gives `ffmpegProcessFailed` with a detail. A Stop gives `canceled`.
 
 The probe uses only parts that the audio process of ADR 043 also uses: the `color` source, the
-`rawvideo` encoder and the `null` muxer. The process keeps a successful answer for each `ffmpeg` binary, by its path,
-size and modification time. It keeps no failure. The probe runs only for an export whose
-commands carry a graph, so a copy of the audio alone (ADR 048) never runs it. The capability
-probe of ADR 006 and its cache do not change.
+`rawvideo` encoder and the `null` muxer. The process keeps a successful answer for each `ffmpeg`
+binary, by its path, size and modification time. It keeps no failure. The probe runs only for an
+export whose commands carry a graph, so a copy of the audio alone (ADR 048) never runs it. The
+capability probe of ADR 006 and its cache do not change.
 
 Each command that carries a graph names its file with the option that the probe found, for
 example `-/filter_complex encoder.graph`. The file holds the text that the command line held
@@ -209,6 +212,27 @@ fail with `piecesOutOfOrder`.
 - An export uses at most `MAX_EXPORT_INPUTS` sources, because each source needs one input.
 - The read of the audio gaps (ADR 014 measurement 28) adds about 27 bytes for each piece to its
   `ffprobe` command. At 256 pieces of one source, that command must fit the budget too.
+
+(Changed on 2026-10-28.) The measurement of the last unit gives these values:
+
+- An export uses at most 85 sources, the value of `MAX_EXPORT_INPUTS`.
+- At 256 pieces and any count of sources from 1 to 85, the widest encoder command needs 31,448
+  bytes, and the widest audio process 29,531 bytes. These are the values at 85 inputs, because
+  the inputs stop at 85. The test samples the skews of the pieces among the sources, because each
+  input has the same width.
+- The read of the audio gaps of 256 pieces of one source, on a path of 259 characters, needs
+  11,647 bytes with the widest bounds that the code writes, and at most 14,719 bytes with bounds
+  of the widest `i64`. A piece costs about 27 bytes in an ordinary source and at most 56. For an
+  FLV source, each group of pieces reads its slice with its own command of at most 742 bytes.
+- An FLV source can give 256 groups for that read. One `ffprobe` after another could then spend
+  the whole `PROBE_TIMEOUT` on the start of the processes (measurement 6). So at most eight runs
+  work at the same time. They read the same bytes within the same deadline, and their answers
+  join in the order of the groups. After a failure, a panic or a Stop, no new run starts. The
+  first failure in the order of the groups is the answer, and a Stop wins over a failure.
+- `build_plan` has no `invalidSegmentCount`, and it checks the rest in the same order.
+- The OPEN step counts the runs with `countInputRuns`. The file
+  `src/features/export/inputRunCases.json` holds the cases that a vitest and a Rust test both run.
+  A PTS that is not a decimal integer gives `invalidSegment` there.
 - The backend checks the request in this order: `noSegments`, `tooManySegments`,
   `invalidSources`, `tooManySources`, `invalidSegmentCount`, `invalidSegment` and
   `piecesOutOfOrder`. The count of runs needs valid source IDs and In points before Out points,

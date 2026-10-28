@@ -588,7 +588,7 @@ the budget must go down. `choose_shape` never gets a plan that no shape fits.
 
 (Changed on 2026-10-28.) ADR 055 ends the rule 92 − S. The graph is in a file, so only the
 fixed arguments and the inputs use the budget. An export joins at most 256 pieces and at most
-`MAX_EXPORT_INPUTS` sources. A dated note of ADR 055 gives the measurement.
+`MAX_EXPORT_INPUTS` (85) sources. A dated note of ADR 055 gives the measurement.
 
 ### The boundary mechanism
 
