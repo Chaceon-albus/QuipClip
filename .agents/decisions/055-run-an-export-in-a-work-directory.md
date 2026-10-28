@@ -111,22 +111,26 @@ fails, and it tries again at the next export.
 
 ### The option probe
 
-Preparation finds the spelling that the installed `ffmpeg` reads. It writes `probe.graph` with
-the graph `nullsrc=s=16x16:d=0.04[v]` and runs this command in the work directory:
+Preparation finds the spelling that the installed `ffmpeg` reads. It runs before the reservation
+of the output, so a slow probe leaves no empty file in the folder of the user. It writes
+`probe.graph` with the graph `color=s=16x16:d=0.04[v]` and runs this command in the work
+directory:
 
 ```
-ffmpeg -nostdin -hide_banner -loglevel error -/filter_complex probe.graph -map [v] -f null -
+ffmpeg -nostdin -hide_banner -loglevel error -/filter_complex probe.graph \
+  -map [v] -c:v rawvideo -f null -
 ```
 
 - Exit 0: the export uses `-/filter_complex`.
-- An exit that is not 0, with the message `Unrecognized option`: the same command runs with
-  `-filter_complex_script`. Exit 0 gives that spelling. The same message again gives
-  `graphFileUnsupported`.
+- An exit that is not 0, with the message `Unrecognized option '/filter_complex'`: the same
+  command runs with `-filter_complex_script`. Exit 0 gives that spelling. The message
+  `Unrecognized option 'filter_complex_script'` then gives `graphFileUnsupported`. A message about
+  another option does not count.
 - A process that does not start gives `ffmpegSpawnFailed`. Another exit that is not 0, or no exit
   after 10 seconds, gives `ffmpegProcessFailed` with a detail. A Stop gives `canceled`.
 
-The probe uses only parts that every video export also uses: `nullsrc`, the `null` muxer and its
-default encoder. The process keeps a successful answer for each `ffmpeg` binary, by its path,
+The probe uses only parts that the audio process of ADR 043 also uses: the `color` source, the
+`rawvideo` encoder and the `null` muxer. The process keeps a successful answer for each `ffmpeg` binary, by its path,
 size and modification time. It keeps no failure. The probe runs only for an export whose
 commands carry a graph, so a copy of the audio alone (ADR 048) never runs it. The capability
 probe of ADR 006 and its cache do not change.
