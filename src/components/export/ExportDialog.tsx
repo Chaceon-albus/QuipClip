@@ -50,7 +50,6 @@ import {
 import { quitGuard } from "@/components/layout/quitGuardController";
 import { openMediaFileDialog } from "@/features/media";
 import { useAttachedMediaStore } from "@/features/sequence/attachedMedia";
-import { selectActiveSourceSegmentCount, useTimelineStore } from "@/features/timeline";
 import { useSettingsStore, type SettingsSection } from "@/features/settings";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { isMacOS } from "@/lib/platform";
@@ -74,6 +73,7 @@ import {
   type ExportComposeExitTrigger,
 } from "./exportDialogCompose";
 import { resolveExportDismissal } from "./exportCancelState";
+import { useExportSourceFacts } from "./useExportSourceFacts";
 import {
   resolveExportDialogFocusOrder,
   resolveExportDialogFooter,
@@ -495,20 +495,24 @@ export function ExportDialog({
   const streamChoice = useExportStreamChoice((state) => state.choice);
   const setStream = useExportStreamChoice((state) => state.setStream);
   const probe = useAttachedMediaStore((state) => state.media?.probe ?? null);
-  const streams = resolveExportStreams(streamChoice, sourceHasAudio(probe));
+  // With several clips, the sources of the pieces decide, not the attached clip (ADR 053).
+  const sourceFacts = useExportSourceFacts(probe);
+  const streams = resolveExportStreams(
+    streamChoice,
+    sourceHasAudio(sourceFacts.output),
+  );
   // The copy of the audio (ADR 048): the request asks for it only while the setup step offers
   // it, which the setup step resolves the same way for its switch and its summary.
   const copyAudio = useExportStreamChoice((state) => state.copyAudio);
   const setCopyAudio = useExportStreamChoice((state) => state.setCopyAudio);
-  const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
   const audioMode = resolveExportAudioMode(
     copyAudio,
     selectedPreset !== null &&
       canCopyAudio({
-        probe,
+        probe: sourceFacts.copyProbe,
         container: selectedPreset.container,
         streams,
-        segmentCount,
+        segmentCount: sourceFacts.copySegmentCount,
       }),
   );
   // The blocker does not read the copy: the backend encodes the audio with the preset when it

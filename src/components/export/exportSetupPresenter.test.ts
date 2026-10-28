@@ -350,6 +350,19 @@ describe("exportSetupPresenter", () => {
       return summary.groups.flatMap((group) => group.rows).find((row) => row.id === id);
     }
 
+    it("shows an odd preset side one pixel smaller, as the plan writes it", () => {
+      const preset = createPreset({ resolution: { w: 1281, h: 721 } });
+
+      expect(
+        rowOf(presentPresetSummary(preset, formatter, null), "resolution"),
+      ).toEqual({
+        id: "resolution",
+        labelKey: "settings.preset.resolutionLabel",
+        valueKey: "export.setup.resolutionValue",
+        valueValues: { width: "1280", height: "720" },
+      });
+    });
+
     it("puts the container first, then the Video group and the Audio group", () => {
       const preset = createPreset({
         container: "mp4",

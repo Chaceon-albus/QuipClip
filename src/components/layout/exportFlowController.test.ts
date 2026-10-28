@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   confirmExportFlow,
   createExportFlowController,
@@ -23,9 +23,12 @@ import {
   type ExportStreams,
   type OpenExportSaveDialogOptions,
 } from "@/features/export";
-import type { MediaSourceRevisionDescriptor } from "@/features/media";
+import { mediaStore, type MediaSourceRevisionDescriptor } from "@/features/media";
+import type { ImportMediaResult } from "@/features/media/types";
+import { timelineStore } from "@/features/timeline";
+import type { SequenceSource } from "@/features/timeline/sequence";
 import type { Preset, Settings } from "@/features/settings/types";
-import type { Pts, Segment } from "@/types/project";
+import type { Pts, Segment, SequenceSegment } from "@/types/project";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 
 /**
@@ -202,6 +205,60 @@ describe("ExportFlowController", () => {
       );
       expect(setModalOpen).toHaveBeenCalledWith(true);
       expect(openSaveDialog).not.toHaveBeenCalled();
+    });
+
+    it("run reports tooManySegments for more segments than an export joins", async () => {
+      const reportError = vi.fn();
+      const media = createMedia("/media/sample.mp4", "sample.mp4");
+      const readSourceRevision = createMatchingReader(media);
+
+      const result = await runExportFlow({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn(),
+        reportError,
+        filterName: "Video Files",
+        audioFilterName: "Audio Files",
+        getExportState: () => ({ status: "idle", tracking: false }),
+        getMedia: () => media,
+        readSourceRevision,
+        getSourceId: () => "source-1",
+        getSegments: () =>
+          Array.from({ length: 49 }, (_, index) =>
+            createSegment(`s${index}`, "source-1", "0", "100"),
+          ),
+        getSettings: () => createSettings([createPreset()]),
+      });
+
+      expect(result).toBe(false);
+      expect(readSourceRevision).not.toHaveBeenCalled();
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "tooManySegments" }),
+      );
+    });
+
+    it("run accepts exactly as many segments as an export joins", async () => {
+      const reportError = vi.fn();
+      const media = createMedia("/media/sample.mp4", "sample.mp4");
+
+      const result = await runExportFlow({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn(),
+        reportError,
+        filterName: "Video Files",
+        audioFilterName: "Audio Files",
+        getExportState: () => ({ status: "idle", tracking: false }),
+        getMedia: () => media,
+        readSourceRevision: createMatchingReader(media),
+        getSourceId: () => "source-1",
+        getSegments: () =>
+          Array.from({ length: 48 }, (_, index) =>
+            createSegment(`s${index}`, "source-1", "0", "100"),
+          ),
+        getSettings: () => createSettings([createPreset()]),
+      });
+
+      expect(result).toBe(true);
+      expect(reportError).not.toHaveBeenCalled();
     });
 
     it("run resets a terminal store status", async () => {
@@ -1868,5 +1925,324 @@ describe("openExportFlow", () => {
       expect(await openExportFlow(flowOptions(), stores)).toBe(true);
       expect(stores.composeStore.getState().composing).toBe(false);
     });
+  });
+});
+
+describe("ExportFlowController with several clips (ADR 052, ADR 053)", () => {
+  // The flow reads the clips and the imported sources from the application stores. Each test
+  // writes them, and this hook puts back the state of the module.
+  const initialTimeline = timelineStore.getState();
+  const initialMedia = mediaStore.getState();
+  afterEach(() => {
+    timelineStore.setState(initialTimeline, true);
+    mediaStore.setState(initialMedia, true);
+  });
+
+  function facts(id: string, end: string): SequenceSource {
+    return {
+      id,
+      videoTimeBase: { n: 1, d: 1000 },
+      videoStartPts: "0" as Pts,
+      videoEndPts: end as Pts,
+      videoDurationTicks: null,
+      approximateDurationSeconds: null,
+    };
+  }
+
+  function imported(path: string, size: number, mtime: number): ImportMediaResult {
+    return { path, fileName: path.slice(1), size, mtime } as ImportMediaResult;
+  }
+
+  /** Clips a1 (A), b1 (B) and a2 (A), with the given segments. */
+  function loadSequence(segments: SequenceSegment[]): void {
+    timelineStore.setState({
+      clips: [
+        { id: "a1", sourceId: "A" },
+        { id: "b1", sourceId: "B" },
+        { id: "a2", sourceId: "A" },
+      ],
+      sequenceSources: { A: facts("A", "10000"), B: facts("B", "5000") },
+      sequenceSegments: segments,
+    });
+    mediaStore.setState({
+      sources: { A: imported("/a.mp4", 10, 1), B: imported("/b.mp4", 20, 2) },
+    });
+  }
+
+  function anchored(
+    id: string,
+    inClipId: string,
+    inPts: string,
+    outClipId: string,
+    outPts: string,
+  ): SequenceSegment {
+    return { id, inClipId, inPts: inPts as Pts, outClipId, outPts: outPts as Pts };
+  }
+
+  const media = createMedia("/a.mp4", "a.mp4", { size: 10, mtime: 1 });
+
+  function readerOf(
+    revisions: Record<string, { size: number; mtime: number }>,
+  ): (path: string) => Promise<MediaSourceRevisionDescriptor> {
+    return vi.fn((path: string) => {
+      const revision = revisions[path];
+      return revision === undefined
+        ? Promise.reject(new Error("missing"))
+        : Promise.resolve({ path, ...revision });
+    });
+  }
+
+  it("run reports noSegments when no segment is on the sequence", async () => {
+    loadSequence([]);
+    const reportError = vi.fn();
+    const setModalOpen = vi.fn();
+
+    const result = await runExportFlow({
+      setModalOpen,
+      reportError,
+      openSaveDialog: vi.fn(),
+      readSourceRevision: readerOf({}),
+      getExportState: () => ({ status: "idle", tracking: false }),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+      getSettings: () => createSettings([createPreset()]),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+    });
+
+    expect(result).toBe(false);
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "noSegments" }),
+    );
+    expect(setModalOpen).toHaveBeenCalledWith(true);
+  });
+
+  it("run reports tooManySegments for more pieces than an export joins", async () => {
+    // Each segment from a1 into b1 gives two pieces: 49 pieces in all.
+    loadSequence(
+      Array.from({ length: 24 }, (_, index) =>
+        anchored(`s${index}`, "a1", "100", "b1", "1000"),
+      ).concat(anchored("last", "a1", "100", "a1", "200")),
+    );
+    const reportError = vi.fn();
+    const readSourceRevision = readerOf({});
+
+    const result = await runExportFlow({
+      setModalOpen: vi.fn(),
+      reportError,
+      openSaveDialog: vi.fn(),
+      readSourceRevision,
+      getExportState: () => ({ status: "idle", tracking: false }),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+      getSettings: () => createSettings([createPreset()]),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+    });
+
+    expect(result).toBe(false);
+    expect(readSourceRevision).not.toHaveBeenCalled();
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "tooManySegments" }),
+    );
+  });
+
+  it("run accepts exactly as many pieces as an export joins", async () => {
+    // 23 segments of two pieces and two of one piece: 48 pieces.
+    loadSequence([
+      ...Array.from({ length: 23 }, (_, index) =>
+        anchored(`s${index}`, "a1", "100", "b1", "1000"),
+      ),
+      anchored("last", "a1", "100", "a1", "200"),
+      anchored("only", "b1", "100", "b1", "200"),
+    ]);
+    const reportError = vi.fn();
+
+    const result = await runExportFlow({
+      setModalOpen: vi.fn(),
+      reportError,
+      openSaveDialog: vi.fn(),
+      readSourceRevision: readerOf({
+        "/a.mp4": { size: 10, mtime: 1 },
+        "/b.mp4": { size: 20, mtime: 2 },
+      }),
+      getExportState: () => ({ status: "idle", tracking: false }),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+      getSettings: () => createSettings([createPreset()]),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+    });
+
+    expect(result).toBe(true);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("run reports sourceNotFound for a source of a piece without imported media", async () => {
+    loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+    mediaStore.setState({ sources: { A: imported("/a.mp4", 10, 1) } });
+    const reportError = vi.fn();
+
+    const result = await runExportFlow({
+      setModalOpen: vi.fn(),
+      reportError,
+      openSaveDialog: vi.fn(),
+      readSourceRevision: readerOf({ "/a.mp4": { size: 10, mtime: 1 } }),
+      getExportState: () => ({ status: "idle", tracking: false }),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+      getSettings: () => createSettings([createPreset()]),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+    });
+
+    expect(result).toBe(false);
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "sourceNotFound" }),
+    );
+  });
+
+  it("run reads no file after the user accepted a changed source", async () => {
+    loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+    const readSourceRevision = readerOf({});
+
+    const result = await runExportFlow({
+      setModalOpen: vi.fn(),
+      reportError: vi.fn(),
+      openSaveDialog: vi.fn(),
+      readSourceRevision,
+      skipSourceRevisionCheck: true,
+      getExportState: () => ({ status: "idle", tracking: false }),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+      getSettings: () => createSettings([createPreset()]),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+    });
+
+    expect(result).toBe(true);
+    expect(readSourceRevision).not.toHaveBeenCalled();
+  });
+
+  it("run checks the revision of each source of a piece", async () => {
+    loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+    const reportError = vi.fn();
+    const readSourceRevision = readerOf({
+      "/a.mp4": { size: 10, mtime: 1 },
+      "/b.mp4": { size: 20, mtime: 99 },
+    });
+
+    const result = await runExportFlow({
+      setModalOpen: vi.fn(),
+      reportError,
+      openSaveDialog: vi.fn(),
+      readSourceRevision,
+      getExportState: () => ({ status: "idle", tracking: false }),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+      getSettings: () => createSettings([createPreset()]),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+    });
+
+    expect(result).toBe(false);
+    expect(readSourceRevision).toHaveBeenCalledWith("/a.mp4");
+    expect(readSourceRevision).toHaveBeenCalledWith("/b.mp4");
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "sourceRevisionChanged" }),
+    );
+  });
+
+  it("run reaches the setup step when every source matches or cannot be read", async () => {
+    loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+    const reportError = vi.fn();
+
+    const result = await runExportFlow({
+      setModalOpen: vi.fn(),
+      reportError,
+      openSaveDialog: vi.fn(),
+      // B cannot be read, which is no mismatch.
+      readSourceRevision: readerOf({ "/a.mp4": { size: 10, mtime: 1 } }),
+      getExportState: () => ({ status: "idle", tracking: false }),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+      getSettings: () => createSettings([createPreset()]),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+    });
+
+    expect(result).toBe(true);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("confirm sends the pieces of each segment in array order, and each source once", async () => {
+    loadSequence([
+      anchored("late", "b1", "1000", "a2", "2000"),
+      anchored("early", "a1", "100", "a1", "200"),
+    ]);
+    const submit = vi.fn().mockResolvedValue(STARTED);
+    const preset = createPreset({ id: "p1" });
+
+    const result = await createExportFlowController({
+      setModalOpen: vi.fn(),
+      openSaveDialog: vi.fn().mockResolvedValue("/out/joined.mp4"),
+      submit,
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+      getSettings: () => createSettings([preset], "p1"),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+    }).confirm("p1", "videoAndAudio", "encode");
+
+    expect(result).toBe(true);
+    expect(submit.mock.calls[0][0]).toStrictEqual({
+      sources: [
+        { id: "B", path: "/b.mp4", expectedRevision: { size: 20, mtime: 2 } },
+        { id: "A", path: "/a.mp4", expectedRevision: { size: 10, mtime: 1 } },
+      ],
+      pieces: [
+        { sourceId: "B", inPts: "1000", outPts: "5000" },
+        { sourceId: "A", inPts: "0", outPts: "2000" },
+        { sourceId: "A", inPts: "100", outPts: "200" },
+      ],
+      segmentCount: 2,
+      outputPath: "/out/joined.mp4",
+      preset,
+      streams: "videoAndAudio",
+      audioMode: "encode",
+    });
+  });
+
+  it("confirm sends no revision after the user accepted a changed source", async () => {
+    loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+    const submit = vi.fn().mockResolvedValue(STARTED);
+    const preset = createPreset({ id: "p1" });
+
+    await createExportFlowController({
+      setModalOpen: vi.fn(),
+      openSaveDialog: vi.fn().mockResolvedValue("/out/joined.mp4"),
+      submit,
+      skipSourceRevisionCheck: true,
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+      getSettings: () => createSettings([preset], "p1"),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+    }).confirm("p1", "videoAndAudio", "encode");
+
+    const request = submit.mock.calls[0][0] as ExportRequest;
+    expect(request.sources).toStrictEqual([
+      { id: "A", path: "/a.mp4" },
+      { id: "B", path: "/b.mp4" },
+    ]);
   });
 });

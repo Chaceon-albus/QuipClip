@@ -82,6 +82,7 @@ import {
   type CopyAudioSwitchView,
   type StreamSwitchView,
 } from "./exportStreamsPresenter";
+import { useExportSourceFacts } from "./useExportSourceFacts";
 import { useSequenceMediaStore } from "@/features/sequence";
 
 // One bigint or null, which compare by value, so the step renders again only when the exact
@@ -627,6 +628,11 @@ export function ExportSetup({
     [timecodePreference, probe],
   );
   const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
+  // What the export writes with the preset value `source`, and the facts of the copy of the
+  // audio (ADR 053): with one clip, its probe; with several, the canvas, the highest frame rate
+  // and the widest audio of the sources of the pieces, by the rules that the plan applies.
+  const sourceFacts = useExportSourceFacts(probe);
+  const outputSource = sourceFacts.output;
   // The total of the Export tooltip, for the sentence only. It is one bigint or null, which
   // compare by value, so the step renders again only when the total changes.
   const selectSegmentTotal = useCallback(
@@ -717,14 +723,19 @@ export function ExportSetup({
 
   // The streams that the export writes, as the dialog resolves them for the blocker and the
   // request.
-  const streams = resolveExportStreams(streamChoice, sourceHasAudio(probe));
-  const streamSwitches = presentStreamSwitches(streamChoice, probe);
+  const streams = resolveExportStreams(streamChoice, sourceHasAudio(outputSource));
+  const streamSwitches = presentStreamSwitches(streamChoice, outputSource);
   // The copy of the audio (ADR 048), as the dialog resolves it for the request. The encoder
   // mark and the blocker do not read it: the backend encodes the audio with the preset when it
   // cannot copy it.
   const copyOffered =
     selectedPreset !== null &&
-    canCopyAudio({ probe, container: selectedPreset.container, streams, segmentCount });
+    canCopyAudio({
+      probe: sourceFacts.copyProbe,
+      container: selectedPreset.container,
+      streams,
+      segmentCount: sourceFacts.copySegmentCount,
+    });
   const copyAudioSwitch = presentCopyAudioSwitch(copyAudio, copyOffered);
   const audioMode = resolveExportAudioMode(copyAudio, copyOffered);
   const options = settings
@@ -737,7 +748,7 @@ export function ExportSetup({
     : null;
   const summary = selectedPreset
     ? presentStreamSummary(
-        presentPresetSummary(selectedPreset, numberFormatter, probe, audioMode),
+        presentPresetSummary(selectedPreset, numberFormatter, outputSource, audioMode),
         selectedPreset.container,
         streams,
       )

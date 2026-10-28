@@ -6,6 +6,7 @@
  * ADR 028 and ADR 036. Pure module with no React dependencies.
  */
 
+import { evenSide } from "@/features/export/outputSummary";
 import {
   formatAudioSampleRateKHz,
   presentContainer,
@@ -360,9 +361,10 @@ function presentResolutionRow(
       id: "resolution",
       labelKey,
       valueKey: "export.setup.resolutionValue",
+      // The plan makes each side even (ADR 053), so an odd side shows one pixel less.
       valueValues: {
-        width: String(preset.resolution.w),
-        height: String(preset.resolution.h),
+        width: String(evenSide(preset.resolution.w)),
+        height: String(evenSide(preset.resolution.h)),
       },
     };
   }

@@ -40,6 +40,7 @@ import {
 } from "@/features/export";
 import {
   isSameSourceRevision,
+  mediaStore,
   readSourceRevision,
   type MediaSourceRevisionDescriptor,
 } from "@/features/media";
@@ -47,6 +48,11 @@ import { settingsStore } from "@/features/settings";
 import { setActivePreset } from "@/features/settings/presetDocument";
 import type { Settings } from "@/features/settings/types";
 import { attachedMediaStore } from "@/features/sequence/attachedMedia";
+import {
+  buildSequenceExportRequest,
+  MAX_EXPORT_PIECES,
+  sequenceExportPieces,
+} from "@/features/export/sequenceRequest";
 import { timelineStore } from "@/features/timeline";
 import type { Segment } from "@/types/project";
 
@@ -295,6 +301,11 @@ export class ExportFlowController {
    *    This check runs ahead of the setup step and save dialog.
    * 6. Stats the source file and compares its revision against the one segments were marked against.
    *    On a mismatch, reports `sourceRevisionChanged` confirmation, opens the modal, and returns false.
+   *    More segments than `MAX_EXPORT_PIECES` report `tooManySegments` before the check. A
+   *    sequence of several clips does steps 5 and 6 on the pieces of its segments instead: no
+   *    piece reports `noSegments`, more than `MAX_EXPORT_PIECES` pieces report
+   *    `tooManySegments`, a source of a piece without imported media reports `sourceNotFound`,
+   *    and each source of a piece gets the revision check (ADR 053).
    * 7. On good path: calls `setModalOpen(true)` with the store at `idle` and returns true.
    *    It must NOT open the save dialog.
    */
@@ -329,13 +340,34 @@ export class ExportFlowController {
     const activeSourceId = this.getSourceIdFn();
     const segments = this.getSegmentsFn();
 
-    // The export of several clips follows ADR 053 in a later step. Until then a sequence of
-    // several clips has no segments that this request can carry, because its virtual PTS do not
-    // name the frames of one file.
+    // A sequence of several clips exports its segments as pieces of several sources (ADR 053).
     if (timelineStore.getState().clips.length > 1) {
-      this.reportErrorFn(new ExportError({ code: "noSegments" }));
+      const { pieces, sourceIds } = sequencePiecesNow();
+      if (pieces.length === 0) {
+        this.reportErrorFn(new ExportError({ code: "noSegments" }));
+        this.setModalOpen(true);
+        return false;
+      }
+      if (pieces.length > MAX_EXPORT_PIECES) {
+        this.reportErrorFn(new ExportError({ code: "tooManySegments" }));
+        this.setModalOpen(true);
+        return false;
+      }
+      // The request names the file of each source, so a source without imported media cannot
+      // export.
+      const imported = mediaStore.getState().sources;
+      if (sourceIds.some((id) => imported[id] === undefined)) {
+        this.reportErrorFn(new ExportError({ code: "sourceNotFound" }));
+        this.setModalOpen(true);
+        return false;
+      }
+      if (!(await this.sourcesStillMatch(sourceIds))) {
+        this.reportErrorFn(new ExportError({ code: "sourceRevisionChanged" }));
+        this.setModalOpen(true);
+        return false;
+      }
       this.setModalOpen(true);
-      return false;
+      return true;
     }
 
     // The same match buildExportRequest and sourceRevisionStillMatches use
@@ -344,6 +376,15 @@ export class ExportFlowController {
       !segments.some((segment) => segment.sourceId === activeSourceId)
     ) {
       this.reportErrorFn(new ExportError({ code: "noSegments" }));
+      this.setModalOpen(true);
+      return false;
+    }
+    // With one clip, each segment is one piece.
+    if (
+      segments.filter((segment) => segment.sourceId === activeSourceId).length >
+      MAX_EXPORT_PIECES
+    ) {
+      this.reportErrorFn(new ExportError({ code: "tooManySegments" }));
       this.setModalOpen(true);
       return false;
     }
@@ -378,7 +419,9 @@ export class ExportFlowController {
    *    the setup step showed when the user confirmed, and the export renders with it even when
    *    the settings change later (ADR 049). The request also carries the revision of the media,
    *    which the segments were marked against, unless `skipSourceRevisionCheck` is set. A null
-   *    request reports `noSegments` or `sourceNotFound`.
+   *    request reports `noSegments` or `sourceNotFound`. A sequence of several clips builds the
+   *    request from the pieces of its segments, with the path and the revision of each source
+   *    (`buildSequenceExportRequest`).
    * 6. Calls `setModalOpen(true)` and awaits `submit(request)`.
    *    - `refused`: no run exists. Reports the error of the result, for example
    *      `outputAlreadyQueued`, keeps the modal open, and returns false.
@@ -447,19 +490,33 @@ export class ExportFlowController {
     const currentSegments = this.getSegmentsFn();
     const currentSourceId = this.getSourceIdFn();
 
-    const request = this.buildRequestFn({
-      media: currentMedia,
-      outputPath,
-      segments: currentSegments,
-      activeSourceId: currentSourceId,
-      preset,
-      streams,
-      audioMode,
-      expectedSourceRevision:
-        this.skipSourceRevisionCheck || !currentMedia
-          ? null
-          : { size: currentMedia.size, mtime: currentMedia.mtime },
-    });
+    const timeline = timelineStore.getState();
+    const request =
+      timeline.clips.length > 1
+        ? buildSequenceExportRequest({
+            clips: timeline.clips,
+            segments: timeline.sequenceSegments,
+            sources: new Map(Object.entries(timeline.sequenceSources)),
+            media: mediaStore.getState().sources,
+            outputPath,
+            preset,
+            streams,
+            audioMode,
+            checkRevisions: !this.skipSourceRevisionCheck,
+          })
+        : this.buildRequestFn({
+            media: currentMedia,
+            outputPath,
+            segments: currentSegments,
+            activeSourceId: currentSourceId,
+            preset,
+            streams,
+            audioMode,
+            expectedSourceRevision:
+              this.skipSourceRevisionCheck || !currentMedia
+                ? null
+                : { size: currentMedia.size, mtime: currentMedia.mtime },
+          });
 
     if (!request) {
       const code: ExportErrorCode = currentMedia ? "noSegments" : "sourceNotFound";
@@ -548,6 +605,48 @@ export class ExportFlowController {
     }
     return isSameSourceRevision(media, actual);
   }
+
+  /**
+   * The revision check of a sequence of several clips: each source that a piece uses must still
+   * have the size and the modification time of its import. A read that fails or does not answer
+   * in time is no mismatch, as for one source. The reads run together, so the OPEN step waits
+   * at most one `sourceRevisionTimeoutMs`, whatever the number of sources.
+   */
+  private async sourcesStillMatch(sourceIds: readonly string[]): Promise<boolean> {
+    if (this.skipSourceRevisionCheck) {
+      return true;
+    }
+    const media = mediaStore.getState().sources;
+    const matches = await Promise.all(
+      sourceIds.map(async (id) => {
+        const source = media[id];
+        if (source === undefined) {
+          return true;
+        }
+        let actual: MediaSourceRevisionDescriptor;
+        try {
+          actual = await withinTime(
+            this.readSourceRevisionFn(source.path),
+            this.sourceRevisionTimeoutMs,
+          );
+        } catch {
+          return true;
+        }
+        return isSameSourceRevision(source, actual);
+      }),
+    );
+    return matches.every(Boolean);
+  }
+}
+
+/** The pieces and the sources of the segments on the sequence now (ADR 052). */
+function sequencePiecesNow() {
+  const timeline = timelineStore.getState();
+  return sequenceExportPieces(
+    timeline.clips,
+    timeline.sequenceSegments,
+    new Map(Object.entries(timeline.sequenceSources)),
+  );
 }
 
 /**
