@@ -144,18 +144,26 @@ export function presentExportErrorRecovery(
  * The error's `code` is re-narrowed against `EXPORT_ERROR_CODES` defensively at this
  * boundary, falling back to the literal `"unknown"` if absent from the catalog.
  *
- * None of the current `exportError.*` catalog messages (see `src/i18n/locales/en.ts`)
- * declare an interpolation placeholder, so `ExportError`'s optional `detail`, `exitCode`,
- * and `encoder` fields have nothing to feed, and i18next discards them. Furthermore,
- * `detail` is already rendered raw elsewhere in the error dialog. Return the key alone,
- * matching `settingsErrorPresenter`.
+ * One message has a value: `tooManySegments` with the `pieceLimit` that the OPEN step computed
+ * for the sources of the export takes `exportError.tooManySegmentsLimit`, which names that
+ * limit. The same code from the backend has no limit and takes the message of its code. The
+ * optional `detail`, `exitCode` and `encoder` fields feed no message, and the error dialog
+ * already shows `detail` raw. Every other code returns the key alone, matching
+ * `settingsErrorPresenter`.
  */
 export function presentExportError(error: ExportError | null): ExportErrorView | null {
   if (error === null) {
     return null;
   }
 
-  return { key: `exportError.${knownCode(error)}` };
+  const code = knownCode(error);
+  if (code === "tooManySegments" && error.pieceLimit !== undefined) {
+    return {
+      key: "exportError.tooManySegmentsLimit",
+      values: { limit: error.pieceLimit },
+    };
+  }
+  return { key: `exportError.${code}` };
 }
 
 /**

@@ -25,12 +25,21 @@ import type {
 import type { Preset } from "@/features/settings/types";
 
 /**
- * The most pieces that one export joins. It is a copy of `MAX_EXPORT_SEGMENTS` in
- * `src-tauri/src/ffmpeg/export/mod.rs`, and the two values must stay equal. The backend refuses
- * more pieces with `tooManySegments`. The OPEN step refuses them first, so the user learns it
- * before naming an output file (ADR 053).
+ * The largest sum of the pieces and the sources of one export. It is a copy of
+ * `EXPORT_PIECE_BUDGET` in `src-tauri/src/ffmpeg/export/mod.rs`, and the two values must stay
+ * equal.
  */
-export const MAX_EXPORT_PIECES = 48;
+export const EXPORT_PIECE_BUDGET = 92;
+
+/**
+ * The most pieces that one export of `sourceCount` sources joins: `EXPORT_PIECE_BUDGET` less the
+ * count of sources, as `max_export_pieces` in `src-tauri/src/ffmpeg/export/mod.rs` computes it.
+ * The backend refuses more pieces with `tooManySegments`. The OPEN step refuses them first, so
+ * the user learns it before naming an output file (ADR 053).
+ */
+export function maxExportPieces(sourceCount: number): number {
+  return Math.max(0, EXPORT_PIECE_BUDGET - Math.max(1, sourceCount));
+}
 
 /** The inputs of `buildSequenceExportRequest`. */
 export interface SequenceExportRequestOptions {

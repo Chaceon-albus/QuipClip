@@ -50,7 +50,7 @@ import type { Settings } from "@/features/settings/types";
 import { attachedMediaStore } from "@/features/sequence/attachedMedia";
 import {
   buildSequenceExportRequest,
-  MAX_EXPORT_PIECES,
+  maxExportPieces,
   sequenceExportPieces,
 } from "@/features/export/sequenceRequest";
 import { timelineStore } from "@/features/timeline";
@@ -301,11 +301,11 @@ export class ExportFlowController {
    *    This check runs ahead of the setup step and save dialog.
    * 6. Stats the source file and compares its revision against the one segments were marked against.
    *    On a mismatch, reports `sourceRevisionChanged` confirmation, opens the modal, and returns false.
-   *    More segments than `MAX_EXPORT_PIECES` report `tooManySegments` before the check. A
+   *    More segments than `maxExportPieces(1)` report `tooManySegments` before the check. A
    *    sequence of several clips does steps 5 and 6 on the pieces of its segments instead: no
-   *    piece reports `noSegments`, more than `MAX_EXPORT_PIECES` pieces report
-   *    `tooManySegments`, a source of a piece without imported media reports `sourceNotFound`,
-   *    and each source of a piece gets the revision check (ADR 053).
+   *    piece reports `noSegments`, more pieces than `maxExportPieces` allows for the count of
+   *    their sources report `tooManySegments`, a source of a piece without imported media
+   *    reports `sourceNotFound`, and each source of a piece gets the revision check (ADR 053).
    * 7. On good path: calls `setModalOpen(true)` with the store at `idle` and returns true.
    *    It must NOT open the save dialog.
    */
@@ -348,8 +348,9 @@ export class ExportFlowController {
         this.setModalOpen(true);
         return false;
       }
-      if (pieces.length > MAX_EXPORT_PIECES) {
-        this.reportErrorFn(new ExportError({ code: "tooManySegments" }));
+      const pieceLimit = maxExportPieces(sourceIds.length);
+      if (pieces.length > pieceLimit) {
+        this.reportErrorFn(new ExportError({ code: "tooManySegments", pieceLimit }));
         this.setModalOpen(true);
         return false;
       }
@@ -379,12 +380,13 @@ export class ExportFlowController {
       this.setModalOpen(true);
       return false;
     }
-    // With one clip, each segment is one piece.
+    // With one clip, each segment is one piece of the one source.
+    const pieceLimit = maxExportPieces(1);
     if (
       segments.filter((segment) => segment.sourceId === activeSourceId).length >
-      MAX_EXPORT_PIECES
+      pieceLimit
     ) {
-      this.reportErrorFn(new ExportError({ code: "tooManySegments" }));
+      this.reportErrorFn(new ExportError({ code: "tooManySegments", pieceLimit }));
       this.setModalOpen(true);
       return false;
     }

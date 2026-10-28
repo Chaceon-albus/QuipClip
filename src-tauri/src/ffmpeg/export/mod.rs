@@ -158,11 +158,12 @@ pub enum ExportAudioMode {
     Copy,
 }
 
-/// The largest number of pieces [`plan::build_plan`] accepts in one export request.
+/// The largest sum of the pieces and the sources of one export request. An export of `n` sources
+/// joins at most `EXPORT_PIECE_BUDGET - n` pieces ([`max_export_pieces`]).
 ///
 /// ADR 053 makes the limit of ADR 014 count pieces: each piece is one chain and, in the shape
 /// with one input for each piece, one input. A segment across clips gives one piece for each
-/// clip, so the limit can stop an export of fewer segments than this.
+/// clip, so the limit can stop an export of fewer segments than pieces.
 ///
 /// This is a command-line budget, not a sanity bound. ADR 014 measurement 13 leaves the
 /// renderer no portable way to move the filter graph off the command line:
@@ -175,18 +176,18 @@ pub enum ExportAudioMode {
 /// amount for each added piece in *both* [`GraphShape`] variants. The single-input shape
 /// (one seek for each source, then `split`/`asplit`) writes the path of each source once
 /// instead of once for each piece, so it reaches further on a long path, but it does not remove
-/// that growth, and each further source adds an input of its own.
+/// that growth, and each further source adds an input of its own. An input at the longest
+/// Windows path costs about as many bytes as a chain, so each source takes the place of one
+/// piece.
 ///
-/// The value is the largest count at which the widest command the settings permit fits the
-/// Windows budget, for the encoder and for the audio process of ADR 043, with any number of
-/// sources at the longest Windows path: up to one source for each piece, where every piece opens
-/// an input of its own in both shapes, with the pieces in turn or skewed toward the source of the
-/// FLV input, and with every piece reading audio or every piece generating silence. ADR 053's fit
-/// step and the scaler flags of the graph made each video chain about 73 bytes longer, and the
-/// cap of 100 of one source no longer fitted. At 49, 47 sources whose FLV source holds 3 pieces,
-/// with silence in the widest layout names, need more than the budget in both shapes.
-/// The tests of `arguments.rs` hold the measurement, and the frontend states the same number in
-/// the message of [`ExportErrorCode::TooManySegments`].
+/// The value is the largest at which the widest command the settings permit fits the Windows
+/// budget, for the encoder and for the audio process of ADR 043, for every count of sources at
+/// the longest Windows path: with the pieces in turn or skewed toward the source of the FLV
+/// input, with every piece reading audio or every piece generating silence, and with and without
+/// video. One source of 92 pieces does not fit. From 11 sources on, the sum that fits is larger
+/// than this value, up to 95, so the rule refuses a few exports that would fit. The tests of
+/// `arguments.rs` hold the measurement, and the frontend states the same rule in the message of
+/// [`ExportErrorCode::TooManySegments`].
 ///
 /// ffmpeg itself is not the constraint here: measurement 14 found that many inputs of one
 /// file do not cause a failure. A larger export needs the graph off the command line
@@ -194,7 +195,18 @@ pub enum ExportAudioMode {
 /// The capability probe already reads the version, so a later unit can select that form on
 /// a build that offers it and keep the inline form on an older one. ADR 014 does not
 /// require that work, and this crate does not do it.
-pub const MAX_EXPORT_SEGMENTS: usize = 48;
+pub const EXPORT_PIECE_BUDGET: usize = 92;
+
+/// The largest number of pieces [`plan::build_plan`] accepts in one export request of `sources`
+/// sources: [`EXPORT_PIECE_BUDGET`] less the count of sources. A request without a source counts
+/// as one source, and the checks of the sources refuse it later.
+pub const fn max_export_pieces(sources: usize) -> usize {
+    let sources = if sources == 0 { 1 } else { sources };
+    EXPORT_PIECE_BUDGET.saturating_sub(sources)
+}
+
+/// The largest number of pieces of any export request: the limit of an export of one source.
+pub const MAX_EXPORT_SEGMENTS: usize = max_export_pieces(1);
 
 /// The longest silence, in whole seconds, that the segments of an export may need FFmpeg to
 /// hold in memory, all together: in front of the first sample of the source audio stream, and in
@@ -840,7 +852,8 @@ export_error_codes! {
     /// carried zero pieces.
     NoSegments => "noSegments",
     /// Produced by [`plan::build_plan`] and `commands::export::resolve_request`: the request
-    /// carried more than [`MAX_EXPORT_SEGMENTS`] pieces (ADR 053: the limit counts pieces).
+    /// carried more than [`max_export_pieces`] pieces for its count of sources (ADR 053: the limit
+    /// counts pieces).
     TooManySegments => "tooManySegments",
     /// Produced by `commands::export::resolve_request`: the list of sources of the request does
     /// not match its pieces. The list is empty, an id is empty or appears twice, a piece names an

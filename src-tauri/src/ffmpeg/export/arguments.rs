@@ -37,8 +37,8 @@
 //! That last rule is why [`choose_graph_shape`] lives here rather than in [`super::graph`]. Only
 //! this module can measure the assembled command, so only this module can decide which of the two
 //! [`GraphShape`] variants each command of an export can afford. See [`WINDOWS_COMMAND_LINE_LIMIT`]
-//! for the budget, and the tests for the one assertion that keeps
-//! [`MAX_EXPORT_SEGMENTS`](super::MAX_EXPORT_SEGMENTS) and that limit from drifting apart.
+//! for the budget, and the tests for the sweep that keeps
+//! [`max_export_pieces`](super::max_export_pieces) and that limit from drifting apart.
 //!
 //! No step here uses floating point. A seek reaches ffmpeg as an exact decimal expansion of the
 //! plan's [`Rational`], truncated at ffmpeg's own microsecond resolution; the private
@@ -171,12 +171,12 @@ pub const COMMAND_LINE_BUDGET: usize = UNIX_COMMAND_LINE_BUDGET;
 ///
 /// The last shape is the one that reaches furthest, [`GraphShape::SingleInput`], so a plan too
 /// large for both shapes is simply rendered in it. Nothing here reports that condition,
-/// and nothing needs to: ADR 014 makes
-/// [`super::MAX_EXPORT_SEGMENTS`] the guarantee, and [`super::plan::build_plan`] enforces that
-/// cap before an [`ExportPlan`] exists at all. The test
-/// `a_full_length_plan_on_a_long_windows_path_fits_the_windows_command_line` is what holds the
-/// cap and the platform limit together; if the cap ever rises past what the limit allows, that
-/// test fails rather than a user's export failing.
+/// and nothing needs to: ADR 014 makes [`super::max_export_pieces`] the guarantee, and
+/// [`super::plan::build_plan`] enforces that limit for the count of sources before an
+/// [`ExportPlan`] exists at all. The test
+/// `the_widest_plan_the_settings_permit_fits_at_the_limit_with_any_number_of_sources` is what
+/// holds the limit and the platform limit together; if the limit ever rises past what the
+/// platform allows, that test fails rather than a user's export failing.
 ///
 /// # Cost
 ///
@@ -865,8 +865,8 @@ fn render_time(seconds: Rational) -> String {
 mod tests {
     use super::*;
     use crate::ffmpeg::export::{
-        OutputTiming, PlannedAudio, PlannedSegment, PlannedSource, PlannedVideo, SourceAudio,
-        VideoFit, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
+        max_export_pieces, OutputTiming, PlannedAudio, PlannedSegment, PlannedSource, PlannedVideo,
+        SourceAudio, VideoFit, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
     };
     use crate::project::Resolution;
     use crate::settings::{
@@ -2836,13 +2836,14 @@ mod tests {
 
     #[test]
     fn a_full_length_plan_on_a_long_windows_path_fits_the_windows_command_line() {
-        // A realistic plan at the cap: one source on a 106-character path, ordinary encoder names,
-        // no encoder options, and a 4K fit step in every chain. The cap of
-        // `MAX_EXPORT_SEGMENTS` is set by the widest plan the settings permit, with any number of
+        // A realistic plan at the limit of one source: a 106-character path, ordinary encoder
+        // names, no encoder options, and a 4K fit step in every chain. The limit of
+        // `max_export_pieces` is set by the widest plan the settings permit, with any number of
         // sources: see
-        // `the_widest_plan_the_settings_permit_fits_at_the_cap_with_any_number_of_sources`.
-        // At that cap this plan keeps one input for each piece: the encoder needs 19605 of the
-        // 31743 available bytes, and the one input 13663.
+        // `the_widest_plan_the_settings_permit_fits_at_the_limit_with_any_number_of_sources`.
+        // At the 91 pieces of one source, this plan takes one input for the source: the encoder
+        // needs 25402 of the 31743 available bytes. One input for each piece fits up to 78
+        // pieces (`an_flv_input_keeps_one_input_for_each_segment_up_to_the_measured_count`).
         //
         // Note what is asserted: not that the preferred shape fits, but that the shape
         // `choose_graph_shape` *returns* fits. Its length is the real limit of the renderer.
@@ -2858,14 +2859,14 @@ mod tests {
             "{MAX_EXPORT_SEGMENTS} segments as {shape:?} need {length} bytes, over the \
              {WINDOWS_COMMAND_LINE_BUDGET}-byte budget of Windows' {WINDOWS_COMMAND_LINE_LIMIT}"
         );
-        assert_eq!(shape, GraphShape::InputPerSegment);
+        assert_eq!(shape, GraphShape::SingleInput);
     }
 
     #[test]
     fn a_full_length_plan_on_a_long_windows_path_fits_the_command_of_its_audio_process() {
         // The audio process opens the inputs of the pieces whose chains read audio, and has a
         // graph of its own, so its command meets the same budget on its own (ADR 043). It needs
-        // 19780 bytes here.
+        // 24526 bytes here, with one input for the source.
         let plan = windows_plan(MAX_EXPORT_SEGMENTS);
         assert!(plan.separate_audio_process());
         let shape = choose_audio_graph_shape_within(&plan, WINDOWS_COMMAND_LINE_BUDGET);
@@ -2874,7 +2875,7 @@ mod tests {
             length <= WINDOWS_COMMAND_LINE_BUDGET,
             "the audio process at {MAX_EXPORT_SEGMENTS} segments as {shape:?} needs {length} bytes"
         );
-        assert_eq!(shape, GraphShape::InputPerSegment);
+        assert_eq!(shape, GraphShape::SingleInput);
     }
 
     /// The longest path Windows accepts without the extended-length prefix, counting the
@@ -3120,44 +3121,60 @@ mod tests {
         plan
     }
 
-    /// Every plan the budget sweep measures at `cap` pieces, with a name for a report: for every
-    /// count of sources, the round robin of [`widest_plan_of_sources`] and every skew of
-    /// [`skewed_plan`] toward the first source, with one piece for each other source or all the
-    /// pieces the cap leaves, each with every piece reading audio and
-    /// [`silenced`], each with and without an FLV input on the first source.
-    fn budget_sweep(cap: usize) -> Vec<(String, ExportPlan)> {
-        let mut plans = Vec::new();
-        for sources in 1..=cap {
-            let mut shapes = vec![(
-                format!("{sources} sources in turn"),
-                widest_plan_of_sources(cap, sources),
-            )];
-            for first_pieces in 1..=cap - sources + 1 {
-                // The other sources hold one piece each, or share every piece the cap leaves.
-                for count in [first_pieces + sources - 1, cap] {
+    /// Every plan the budget sweep measures for `sources` sources at `count` pieces, with a name
+    /// for a report. The shapes are the round robin of [`widest_plan_of_sources`] and, with two
+    /// sources or more, every skew of [`skewed_plan`] toward the first source, with one piece for
+    /// each other source or all `count` pieces. Each shape comes with every piece reading audio
+    /// and [`silenced`], with video and [`without_video`], and with and without an FLV input on
+    /// the first source.
+    fn budget_sweep(count: usize, sources: usize) -> Vec<(String, ExportPlan)> {
+        let mut shapes = vec![(
+            format!("{sources} sources in turn"),
+            widest_plan_of_sources(count, sources),
+        )];
+        if sources > 1 {
+            for first_pieces in 1..=count - sources + 1 {
+                // The other sources hold one piece each, or share every piece that is left.
+                for total in [first_pieces + sources - 1, count] {
                     shapes.push((
-                        format!("{sources} sources, {first_pieces} of {count} pieces in the first"),
-                        skewed_plan(count, sources, first_pieces),
-                    ));
-                }
-            }
-            for (name, plan) in shapes {
-                for silent in [false, true] {
-                    let plan = if silent {
-                        silenced(plan.clone())
-                    } else {
-                        plan.clone()
-                    };
-                    let silence = if silent { ", silent" } else { "" };
-                    plans.push((format!("{name}{silence}"), plan.clone()));
-                    plans.push((
-                        format!("{name}{silence}, FLV"),
-                        with_flv_input(plan, u64::MAX),
+                        format!("{sources} sources, {first_pieces} of {total} pieces in the first"),
+                        skewed_plan(total, sources, first_pieces),
                     ));
                 }
             }
         }
+        let mut plans = Vec::new();
+        for (name, plan) in shapes {
+            for silent in [false, true] {
+                for video in [true, false] {
+                    let mut plan = if silent {
+                        silenced(plan.clone())
+                    } else {
+                        plan.clone()
+                    };
+                    if !video {
+                        plan = without_video(plan);
+                    }
+                    let name = format!(
+                        "{name}{}{}",
+                        if silent { ", silent" } else { "" },
+                        if video { "" } else { ", no video" }
+                    );
+                    plans.push((name.clone(), plan.clone()));
+                    plans.push((format!("{name}, FLV"), with_flv_input(plan, u64::MAX)));
+                }
+            }
+        }
         plans
+    }
+
+    /// The most sources of one export: each source holds a piece, and [`max_export_pieces`] lowers
+    /// the limit by one for each source.
+    fn max_export_sources() -> usize {
+        (1..)
+            .take_while(|sources| max_export_pieces(*sources) >= *sources)
+            .last()
+            .expect("one source holds a piece")
     }
 
     /// The length of the command of the encoder of `plan` and of its audio process, in the shapes
@@ -3222,8 +3239,9 @@ mod tests {
         // Change it with them.
         //
         //
-        // The counts are measured past the cap of `MAX_EXPORT_SEGMENTS`, up to 160 pieces of one
-        // source, so they show how far the first shape reaches, also where the cap stops a plan.
+        // The counts are measured up to 160 pieces of one source, past the limit of
+        // `MAX_EXPORT_SEGMENTS`, so they show how far the first shape reaches. Each is below the
+        // limit, so production takes one input for the source past these counts.
         // The fit step of ADR 053 and the scaler flags of the graph made each video chain longer,
         // and the widest layout name each audio chain of the audio process.
         //
@@ -3246,13 +3264,13 @@ mod tests {
     #[test]
     fn the_widest_plan_with_an_flv_input_still_fits_at_the_segment_cap() {
         // One source of an export at most has an FLV input, and the shape that each command of
-        // the plan chooses still fits at the cap, with the largest numbers a file can have. A
-        // long path of the application data does not count: the command names the head by its
-        // file name.
+        // the plan chooses still fits at the limit of its count of sources, with the largest
+        // numbers a file can have. A long path of the application data does not count: the
+        // command names the head by its file name.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
-        for sources in [1, 2, 7, MAX_EXPORT_SEGMENTS] {
+        for sources in [1, 2, 7, max_export_sources()] {
             let plan = with_flv_input(
-                widest_plan_of_sources(MAX_EXPORT_SEGMENTS, sources),
+                widest_plan_of_sources(max_export_pieces(sources), sources),
                 u64::MAX,
             );
             assert!(fits_windows(&plan, &reservation), "{sources} sources");
@@ -3276,7 +3294,11 @@ mod tests {
     /// so every segment here ends at [`WIDEST_AUDIO_TICK`], and every pad carries a twelve-digit
     /// length.
     fn widest_audio_only_plan(count: usize) -> ExportPlan {
-        let mut plan = widest_plan(count);
+        without_video(widest_plan(count))
+    }
+
+    /// `plan` without its video part, every segment ending at [`WIDEST_AUDIO_TICK`].
+    fn without_video(mut plan: ExportPlan) -> ExportPlan {
         plan.video = None;
         for segment in &mut plan.segments {
             segment.audio_out_tick = Some(WIDEST_AUDIO_TICK);
@@ -3286,17 +3308,17 @@ mod tests {
 
     #[test]
     fn the_widest_plan_the_settings_permit_still_fits_at_the_segment_cap() {
-        // The cap is a byte budget, so the value that justifies it has to be measured against
+        // The limit is a byte budget, so the value that justifies it has to be measured against
         // the widest command the settings can produce -- not against a plausible one. This scans
         // for the largest count of pieces of one source that still fits, choosing the shape the
-        // way production does. Several sources need more bytes, and the next test holds the cap
-        // against them.
+        // way production does. Silence, an FLV input and several sources need more bytes, and the
+        // next test holds the limit against them.
         //
         // The plan has two commands since the audio of an export with video has its own process
-        // (ADR 043), and each must fit on its own. Measured at the time of writing, with one
-        // source, at the cap of 48 pieces: the encoder needs 29772 of the 31743 available bytes,
-        // and the audio process 30692, both with one input for each piece. The widest plan of one
-        // source fits up to 98 pieces.
+        // (ADR 043), and each must fit on its own. Measured at the time of writing, at the limit
+        // of 91 pieces of one source: the encoder needs 29234 of the 31743 available bytes, and
+        // the audio process 29529, both with one input for the source. This plan fits up to 98
+        // pieces.
         //
         // ADR 053 changed the widest chain. The fit step
         // (`scale=<w>:<h>:flags=lanczos+accurate_rnd+full_chroma_int,setsar=1,pad=<W>:<H>:<x>:<y>`)
@@ -3307,8 +3329,8 @@ mod tests {
         // eight bytes longer than `stereo`. At 100 pieces of one source, the encoder needed 31882
         // bytes and no longer fitted. Each further source adds its own input of `MAX_PATH`, about
         // 300 bytes, and with as many sources as pieces each piece opens an input of its own in
-        // both shapes. With pieces skewed toward an FLV source and every piece generating silence,
-        // 49 pieces no longer fit, so the cap is 48 (the next test).
+        // both shapes. So each source takes the place of one piece (`EXPORT_PIECE_BUDGET`). One
+        // source of 92 pieces that generate silence needs 31880 bytes (the next tests).
         //
         // The history below is of the command of one source of the cap of 100 segments. The audio
         // process needed 31413 bytes, with a silence prefix of twelve digits
@@ -3340,53 +3362,56 @@ mod tests {
     }
 
     #[test]
-    fn the_widest_plan_the_settings_permit_fits_at_the_cap_with_any_number_of_sources() {
+    fn the_widest_plan_the_settings_permit_fits_at_the_limit_with_any_number_of_sources() {
         // `choose_shape` returns the last shape when no shape fits, and nothing reports that
-        // case: the cap must make it impossible (ADR 053). So every plan of `budget_sweep` must
-        // fit every command at the cap, in the shapes that production chooses: every count of
-        // sources from one to one for each piece, the pieces in turn or skewed toward the FLV
-        // source, every piece reading audio or every piece generating silence
-        // ([`silenced`]), with and without an FLV input.
+        // case: the limit must make it impossible (ADR 053). So for every count of sources, every
+        // plan of `budget_sweep` at the limit of that count must fit every command, in the shapes
+        // that production chooses: the pieces in turn or skewed toward the FLV source, every
+        // piece reading audio or every piece generating silence ([`silenced`]), with and without
+        // video, and with and without an FLV input. The sweep also holds the plans of fewer
+        // pieces in which each source but the first holds one piece.
         //
-        // Measured at the time of writing, at the cap of 48, every command keeps one input for
-        // each piece in its widest case:
+        // Measured at the time of writing. When one input for each piece does not fit, production
+        // takes one input for each source, so the margin of the limit is the shorter of the two
+        // shapes in the worst plan:
         //
-        // - The widest encoder needs 31736 of the 31743 available bytes: 6 sources whose pieces
-        //   all read audio, the FLV source with 42 of 47 pieces.
-        // - The widest audio process needs 31733: 10 sources, the FLV source with 37 of 46 pieces.
-        // - The widest plan of silence needs 31717, in its one process: 2 sources, the FLV source
-        //   with 14 of 48 pieces. With one source for each piece and no FLV input it needs 30976.
+        // - The encoder needs at most 31618 of the 31743 available bytes (125 to spare): one
+        //   source of 91 pieces that generate silence, with an FLV input.
+        // - The audio process needs at most 30468: 44 sources of 48 pieces in turn, with an FLV
+        //   input.
         //
-        // These lengths are not the margin of the cap: when one input for each piece does not fit,
-        // production takes one input for each source. The margin is the shorter of the two shapes
-        // in the worst plan, 31157 bytes (586 to spare): 46 sources whose FLV source holds 3 of 48
-        // pieces, with silence. One input for each source grows about 300 bytes with each source
-        // and hardly with the share of the pieces.
+        // The longest command that production chooses is longer, because it takes one input for
+        // each piece while that fits: 31736 bytes for 6 sources whose FLV source holds 42 of 47
+        // pieces, and 31733 for the audio process of 10 sources whose FLV source holds 37 of 46.
         //
-        // At 49 pieces, 47 sources whose FLV source holds 3 pieces, with silence, need 31998 bytes
-        // with one input for each source and more with one input for each piece, over the budget.
+        // One input for each source grows about 300 bytes with each source, and about as much
+        // with each piece, so the sum of the pieces and the sources sets the limit. For 1 to 10
+        // sources, the largest count that fits is the limit. From 11 sources on, one to three
+        // pieces more fit.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
-        for (name, plan) in budget_sweep(MAX_EXPORT_SEGMENTS) {
-            assert!(
-                fits_windows(&plan, &reservation),
-                "{name} does not fit: {:?}",
-                chosen_lengths(&plan, &reservation)
-            );
+        for sources in 1..=max_export_sources() {
+            for (name, plan) in budget_sweep(max_export_pieces(sources), sources) {
+                assert!(
+                    fits_windows(&plan, &reservation),
+                    "{name} does not fit: {:?}",
+                    chosen_lengths(&plan, &reservation)
+                );
+            }
         }
         // The sweep holds both kinds of plan.
-        assert!(silenced(widest_plan_of_sources(MAX_EXPORT_SEGMENTS, 3))
-            .audio
-            .is_some());
-        assert!(!silenced(widest_plan_of_sources(MAX_EXPORT_SEGMENTS, 3)).separate_audio_process());
-        assert!(widest_plan_of_sources(MAX_EXPORT_SEGMENTS, 3).separate_audio_process());
+        let plan = widest_plan_of_sources(max_export_pieces(3), 3);
+        assert!(silenced(plan.clone()).audio.is_some());
+        assert!(!silenced(plan.clone()).separate_audio_process());
+        assert!(plan.separate_audio_process());
     }
 
     #[test]
-    fn the_cap_is_the_largest_count_that_the_sweep_fits() {
-        // One more piece than the cap leaves a plan of the sweep that no shape fits, so the cap
-        // cannot rise without a shorter command.
+    fn the_budget_is_the_largest_that_the_sweep_fits() {
+        // One more piece than one source may hold leaves a plan of the sweep that no shape fits:
+        // one source of 92 pieces that generate silence needs 31880 bytes, and 31938 with an FLV
+        // input. So `EXPORT_PIECE_BUDGET` cannot rise without a shorter command.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
-        assert!(budget_sweep(MAX_EXPORT_SEGMENTS + 1)
+        assert!(budget_sweep(max_export_pieces(1) + 1, 1)
             .iter()
             .any(|(_, plan)| !fits_windows(plan, &reservation)));
     }
@@ -3395,9 +3420,10 @@ mod tests {
     fn the_widest_plan_without_video_still_fits_at_the_segment_cap() {
         // A graph without video pads every audio chain (`graph::audio_end_pad`), so its growth for
         // each segment carries the pad too. It has no video chain, so it is still below the
-        // budget: 27322 bytes at the cap of 48, with one input for each piece and the sixteen
-        // silence prefixes of `widest_plan`. The assertion is one-sided for the reason the test
-        // above gives.
+        // budget: 22203 bytes at the limit of 91 pieces of one source, with one input for the
+        // source and the sixteen silence prefixes of `widest_plan`. The sweep above holds the
+        // plans without video of several sources. The assertion is one-sided for the reason the
+        // tests above give.
         let reservation = longest_windows_path(".m4a.tmp-13724-0");
         let output = Path::new(&reservation);
         let plan = widest_audio_only_plan(MAX_EXPORT_SEGMENTS);
@@ -3467,9 +3493,9 @@ mod tests {
         }
 
         // What ADR 023 costs at the cap, byte for byte. Against the 48000 Hz stereo format ADR
-        // 014 fixed, with no bitrate: one more digit in each of the 100 closing `aformat`
-        // filters, and `-b:a 1536k`, which is two arguments of 4 and 5 bytes plus the
-        // per-argument overhead of each. The input pin carries the source rate in both plans,
+        // 014 fixed, with no bitrate: one more digit in each closing `aformat` filter at the
+        // limit, and `-b:a 1536k`, which is two arguments of 4 and 5 bytes plus the per-argument
+        // overhead of each. The input pin carries the source rate in both plans,
         // so it contributes nothing to the difference.
         let output = Path::new(&reservation);
         let shape = choose_graph_shape_within(&widest, output, WINDOWS_COMMAND_LINE_BUDGET);
@@ -3549,7 +3575,8 @@ mod tests {
         //
         // The second assertion holds a separate property: ADR 014 measurement 15 records that
         // the single-input *graph* is the larger of the two for the first seven segments and
-        // the smaller one from eight segments upward, 27916 bytes against 28289 at the cap. No
+        // the smaller one from eight segments upward, 31033 bytes against 31372 at the limit of one
+        // source. No
         // decision reads that, because the fallback is never selected for its graph size, but a
         // reader who expects the graphs to be ordered the other way would mis-predict where the
         // budget goes.

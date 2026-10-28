@@ -77,6 +77,22 @@ describe("presentExportError", () => {
     );
   });
 
+  it("names the limit that the OPEN step computed for tooManySegments", () => {
+    const view = presentExportError(
+      new ExportError({ code: "tooManySegments", pieceLimit: 90 }),
+    );
+
+    expect(view).toStrictEqual({
+      key: "exportError.tooManySegmentsLimit",
+      values: { limit: 90 },
+    });
+    for (const catalog of [en, zhCN]) {
+      expect(resolveCatalogKey(catalog, view!.key)).toEqual(
+        expect.stringContaining("{{limit}}"),
+      );
+    }
+  });
+
   it("falls back to exportError.unknown for a code absent from the catalog", () => {
     const error = new ExportError({
       code: "notARealCode" as unknown as ExportErrorCode,

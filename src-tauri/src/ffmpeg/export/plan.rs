@@ -11,10 +11,10 @@
 
 use super::copy::{self, CopyQuestion};
 use super::{
-    ExportAudioMode, ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PlannedAudio,
-    PlannedSegment, PlannedSource, PlannedVideo, SourceAudio, VideoFit,
-    AUDIO_PREFIX_MARGIN_MILLISECONDS, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
-    MAX_HELD_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
+    max_export_pieces, ExportAudioMode, ExportErrorCode, ExportPlan, ExportStreams, OutputTiming,
+    PlannedAudio, PlannedSegment, PlannedSource, PlannedVideo, SourceAudio, VideoFit,
+    AUDIO_PREFIX_MARGIN_MILLISECONDS, MAX_AUDIO_PREFIXES, MAX_HELD_AUDIO_SILENCE_SECONDS,
+    SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::probe::{AudioFrames, AudioGap, AudioProbe, MediaProbe};
 use crate::project::Resolution;
@@ -173,7 +173,7 @@ pub enum PathFacts {
 /// Checks run in this order; the first failure wins:
 ///
 /// 1. `segments` is empty -- [`ExportErrorCode::NoSegments`].
-/// 2. `segments` holds more than [`MAX_EXPORT_SEGMENTS`] --
+/// 2. `segments` holds more than [`max_export_pieces`] of the count of `sources` --
 ///    [`ExportErrorCode::TooManySegments`].
 /// 3. Any segment has `in_pts >= out_pts` -- [`ExportErrorCode::InvalidSegment`]. Then
 ///    `sources` is empty, a piece names a source index out of range, or a source has no piece --
@@ -283,7 +283,7 @@ pub fn build_plan(
     if segments.is_empty() {
         return Err(ExportErrorCode::NoSegments);
     }
-    if segments.len() > MAX_EXPORT_SEGMENTS {
+    if segments.len() > max_export_pieces(request.sources.len()) {
         return Err(ExportErrorCode::TooManySegments);
     }
     if segments
@@ -1257,7 +1257,7 @@ fn round_rational_to_i128(value: Rational) -> Option<i128> {
 mod tests {
     use super::*;
     use crate::ffmpeg::export::copy::CopyRefusal;
-    use crate::ffmpeg::export::CopiedAudio;
+    use crate::ffmpeg::export::{CopiedAudio, MAX_EXPORT_SEGMENTS};
     use crate::ffmpeg::probe::AudioProbe;
     use crate::project::Resolution;
     use crate::settings::{AudioChannels, Container, Quality, QualityKind};
@@ -3136,14 +3136,14 @@ mod tests {
         // The first sample is at 60.5 s. The 16 pieces with the longest silence, 10.5 s each, get
         // a prefix, and the fill of each holds only the margin of 0.25 s: 4 s together. The other
         // pieces get no prefix, because at most 16 pieces of an export have one, and their fills
-        // hold all of their silence: 31 pieces of 1.6 s and one of 6.4 s fill the 56 s left. So
+        // hold all of their silence: 74 pieces of 0.7 s and one of 4.2 s fill the 56 s left. So
         // the most pieces an export holds fill exactly the bound of 60 s, and one more hundredth
         // of a second goes over it.
         for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
             let mut full: Vec<SegmentBoundary> =
                 (0..16).map(|_| seconds_boundary("50", "61")).collect();
-            full.extend((0..31).map(|_| seconds_boundary("58.9", "61")));
-            full.push(seconds_boundary("54.1", "61"));
+            full.extend((0..74).map(|_| seconds_boundary("59.8", "61")));
+            full.push(seconds_boundary("56.3", "61"));
             assert_eq!(full.len(), MAX_EXPORT_SEGMENTS);
             let plan = plan_late_audio(streams, &full).unwrap();
             let prefixes = plan
@@ -3153,7 +3153,7 @@ mod tests {
                 .count();
             assert_eq!(prefixes, MAX_AUDIO_PREFIXES, "{streams:?}");
             let mut over = full.clone();
-            over[MAX_EXPORT_SEGMENTS - 1] = seconds_boundary("54.09", "61");
+            over[MAX_EXPORT_SEGMENTS - 1] = seconds_boundary("56.29", "61");
             assert_eq!(
                 plan_late_audio(streams, &over).unwrap_err(),
                 ExportErrorCode::AudioGapTooLong,
@@ -4973,11 +4973,13 @@ mod tests {
     }
 
     #[test]
-    fn the_limit_counts_pieces() {
+    fn the_limit_counts_pieces_and_lowers_with_each_source() {
+        // Two sources may hold one piece less than one source.
         let probes = [sample_probe(), sample_probe()];
-        let pieces: Vec<SegmentBoundary> = (0..=MAX_EXPORT_SEGMENTS)
+        let pieces: Vec<SegmentBoundary> = (0..MAX_EXPORT_SEGMENTS)
             .map(|index| piece(index % 2, 0, 90_000))
             .collect();
+        assert_eq!(max_export_pieces(2), MAX_EXPORT_SEGMENTS - 1);
         assert_eq!(
             plan_sources(ExportStreams::VideoOnly, &probes, &pieces, &sample_preset()).unwrap_err(),
             ExportErrorCode::TooManySegments
@@ -4985,7 +4987,7 @@ mod tests {
         assert!(plan_sources(
             ExportStreams::VideoOnly,
             &probes,
-            &pieces[..MAX_EXPORT_SEGMENTS],
+            &pieces[..max_export_pieces(2)],
             &sample_preset()
         )
         .is_ok());

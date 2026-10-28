@@ -207,7 +207,7 @@ describe("ExportFlowController", () => {
       expect(openSaveDialog).not.toHaveBeenCalled();
     });
 
-    it("run reports tooManySegments for more segments than an export joins", async () => {
+    it("run reports tooManySegments for more segments than an export of one source joins", async () => {
       const reportError = vi.fn();
       const media = createMedia("/media/sample.mp4", "sample.mp4");
       const readSourceRevision = createMatchingReader(media);
@@ -223,7 +223,7 @@ describe("ExportFlowController", () => {
         readSourceRevision,
         getSourceId: () => "source-1",
         getSegments: () =>
-          Array.from({ length: 49 }, (_, index) =>
+          Array.from({ length: 92 }, (_, index) =>
             createSegment(`s${index}`, "source-1", "0", "100"),
           ),
         getSettings: () => createSettings([createPreset()]),
@@ -232,11 +232,11 @@ describe("ExportFlowController", () => {
       expect(result).toBe(false);
       expect(readSourceRevision).not.toHaveBeenCalled();
       expect(reportError).toHaveBeenCalledWith(
-        expect.objectContaining({ code: "tooManySegments" }),
+        expect.objectContaining({ code: "tooManySegments", pieceLimit: 91 }),
       );
     });
 
-    it("run accepts exactly as many segments as an export joins", async () => {
+    it("run accepts exactly as many segments as an export of one source joins", async () => {
       const reportError = vi.fn();
       const media = createMedia("/media/sample.mp4", "sample.mp4");
 
@@ -251,7 +251,7 @@ describe("ExportFlowController", () => {
         readSourceRevision: createMatchingReader(media),
         getSourceId: () => "source-1",
         getSegments: () =>
-          Array.from({ length: 48 }, (_, index) =>
+          Array.from({ length: 91 }, (_, index) =>
             createSegment(`s${index}`, "source-1", "0", "100"),
           ),
         getSettings: () => createSettings([createPreset()]),
@@ -2018,10 +2018,11 @@ describe("ExportFlowController with several clips (ADR 052, ADR 053)", () => {
     expect(setModalOpen).toHaveBeenCalledWith(true);
   });
 
-  it("run reports tooManySegments for more pieces than an export joins", async () => {
-    // Each segment from a1 into b1 gives two pieces: 49 pieces in all.
+  it("run reports tooManySegments for more pieces than an export of two sources joins", async () => {
+    // Each segment from a1 into b1 gives two pieces: 91 pieces in all. One source may hold 91
+    // pieces, and two sources one less.
     loadSequence(
-      Array.from({ length: 24 }, (_, index) =>
+      Array.from({ length: 45 }, (_, index) =>
         anchored(`s${index}`, "a1", "100", "b1", "1000"),
       ).concat(anchored("last", "a1", "100", "a1", "200")),
     );
@@ -2045,14 +2046,14 @@ describe("ExportFlowController with several clips (ADR 052, ADR 053)", () => {
     expect(result).toBe(false);
     expect(readSourceRevision).not.toHaveBeenCalled();
     expect(reportError).toHaveBeenCalledWith(
-      expect.objectContaining({ code: "tooManySegments" }),
+      expect.objectContaining({ code: "tooManySegments", pieceLimit: 90 }),
     );
   });
 
-  it("run accepts exactly as many pieces as an export joins", async () => {
-    // 23 segments of two pieces and two of one piece: 48 pieces.
+  it("run accepts exactly as many pieces as an export of two sources joins", async () => {
+    // 44 segments of two pieces and two of one piece: 90 pieces.
     loadSequence([
-      ...Array.from({ length: 23 }, (_, index) =>
+      ...Array.from({ length: 44 }, (_, index) =>
         anchored(`s${index}`, "a1", "100", "b1", "1000"),
       ),
       anchored("last", "a1", "100", "a1", "200"),

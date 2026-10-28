@@ -220,6 +220,7 @@ export type ExportErrorOptions = {
   encoder?: string;
   measuredDurationUs?: number;
   expectedDurationUs?: number;
+  pieceLimit?: number;
 };
 
 /**
@@ -241,6 +242,11 @@ export class ExportError extends Error {
   declare readonly measuredDurationUs?: number;
   /** For `audioDurationMismatch`: the duration that the plan expected, in whole microseconds. */
   declare readonly expectedDurationUs?: number;
+  /**
+   * For `tooManySegments`: the most pieces that an export of the sources of the request joins
+   * (`maxExportPieces`). The OPEN step of the export sets it. The backend sends no limit.
+   */
+  declare readonly pieceLimit?: number;
 
   constructor(options: ExportErrorOptions) {
     super(options.detail ? `${options.code}: ${options.detail}` : options.code);
@@ -260,6 +266,9 @@ export class ExportError extends Error {
     }
     if (options.expectedDurationUs !== undefined) {
       this.expectedDurationUs = options.expectedDurationUs;
+    }
+    if (options.pieceLimit !== undefined) {
+      this.pieceLimit = options.pieceLimit;
     }
     Object.setPrototypeOf(this, new.target.prototype);
   }

@@ -73,12 +73,13 @@ use crate::ffmpeg::export::flv_input::{
 };
 use crate::ffmpeg::export::{
     build_arguments, build_audio_arguments, build_audio_graph, build_copy_arguments, build_plan,
-    choose_audio_graph_shape, choose_graph_shape, encoder_graph, inspect_path, run_export_process,
-    verify_audio_output, verify_copied_audio_output, verify_copy_streams, AudioOutputMismatch,
-    CopyOutput, ExportAudioMode, ExportErrorCode, ExportPlan, ExportProcessOutcome,
-    ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot, ExportStreams,
-    PendingOutput, PlanRequest, PlanSource, ProgressSnapshot, SegmentBoundary, Submission,
-    WaitingRun, AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS, SEEK_MARGIN_SECONDS,
+    choose_audio_graph_shape, choose_graph_shape, encoder_graph, inspect_path, max_export_pieces,
+    run_export_process, verify_audio_output, verify_copied_audio_output, verify_copy_streams,
+    AudioOutputMismatch, CopyOutput, ExportAudioMode, ExportErrorCode, ExportPlan,
+    ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot,
+    ExportStreams, PendingOutput, PlanRequest, PlanSource, ProgressSnapshot, SegmentBoundary,
+    Submission, WaitingRun, AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS,
+    SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::preview::PreviewWindows;
 use crate::ffmpeg::{
@@ -213,8 +214,8 @@ impl ResolvedRequest<'_> {
 /// The checks run in this order, and the first failure wins:
 ///
 /// 1. No piece -- `noSegments`.
-/// 2. More than [`MAX_EXPORT_SEGMENTS`] pieces -- `tooManySegments` (ADR 053: the limit counts
-///    pieces).
+/// 2. More pieces than [`max_export_pieces`] allows for the count of sources -- `tooManySegments`
+///    (ADR 053: the limit counts pieces, and each source lowers it by one).
 /// 3. No source, an empty id, an id that appears twice, a piece that names an id the list does
 ///    not hold, or a source that no piece names -- `invalidSources`, with the fault and the id in
 ///    the detail (ADR 011: a diagnostic, not a sentence for the user).
@@ -234,7 +235,7 @@ fn resolve_request(request: &ExportRequestWire) -> Result<ResolvedRequest<'_>, E
     if request.pieces.is_empty() {
         return Err(ExportCommandError::new(ExportErrorCode::NoSegments));
     }
-    if request.pieces.len() > MAX_EXPORT_SEGMENTS {
+    if request.pieces.len() > max_export_pieces(request.sources.len()) {
         return Err(ExportCommandError::new(ExportErrorCode::TooManySegments));
     }
     if request.sources.is_empty() {
@@ -7989,6 +7990,20 @@ mod tests {
             refused(request_of(&[("a", a)], &many)).code,
             ExportErrorCode::TooManySegments
         );
+        // Each further source lowers the limit by one (ADR 053): the pieces that one source may
+        // hold are too many for two.
+        let two: Vec<(&str, i64, i64)> = (0..max_export_pieces(1))
+            .map(|index| (["a", "b"][index % 2], 0, 90_000))
+            .collect();
+        assert_eq!(
+            refused(request_of(&[("a", a), ("b", b)], &two)).code,
+            ExportErrorCode::TooManySegments
+        );
+        assert!(resolve_request(&request_of(
+            &[("a", a), ("b", b)],
+            &two[..max_export_pieces(2)]
+        ))
+        .is_ok());
         assert_eq!(
             refused(request_of(&[], &[("a", 0, 1)])),
             invalid("no source")

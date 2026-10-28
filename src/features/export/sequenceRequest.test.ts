@@ -3,7 +3,11 @@ import type { ImportMediaResult } from "@/features/media/types";
 import type { SequenceSource } from "@/features/timeline/sequence";
 import type { Preset } from "@/features/settings/types";
 import type { Clip, Pts, SequenceSegment } from "@/types/project";
-import { buildSequenceExportRequest, sequenceExportPieces } from "./sequenceRequest";
+import {
+  buildSequenceExportRequest,
+  maxExportPieces,
+  sequenceExportPieces,
+} from "./sequenceRequest";
 
 const pts = (value: string) => value as Pts;
 
@@ -43,6 +47,14 @@ function segment(
 const preset = {} as Preset;
 
 describe("sequence export request (ADR 052, ADR 053)", () => {
+  it("lowers the limit of pieces by one for each source", () => {
+    expect(maxExportPieces(1)).toBe(91);
+    expect(maxExportPieces(2)).toBe(90);
+    expect(maxExportPieces(46)).toBe(46);
+    // A request without a source counts as one source.
+    expect(maxExportPieces(0)).toBe(91);
+  });
+
   it("expands each segment in array order and names each source once", () => {
     const result = sequenceExportPieces(
       [a1, b1, a2],
