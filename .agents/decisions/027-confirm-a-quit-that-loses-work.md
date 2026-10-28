@@ -31,6 +31,11 @@ A close or a quit asks for a confirmation when it would lose one of these:
   encodes (ADR 025);
 - an unsaved preset draft in the Settings dialog.
 
+(Changed on 2026-10-27.) The list gains exports that wait in the queue, and submissions to the
+queue that have no answer yet (ADR 049). A quit drops them without a start, so the prompt gains one line with
+their number, after the line of the running export. A waiting export that the user already asked
+to remove does not count.
+
 (Changed on 2026-10-02.) Settings is its own window (ADR 038). It sends the name of an unsaved
 preset draft to the main window, and the quit guard reads that mirror. The quit prompt brings the
 main window forward. Closing the Settings window with a draft asks in that window.

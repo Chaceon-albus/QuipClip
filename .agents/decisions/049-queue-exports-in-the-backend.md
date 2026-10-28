@@ -103,7 +103,8 @@ start the next run during the exit. A request after the close fails with `export
 - The status bar shows the number of waiting runs. The Dock and the taskbar ask for attention
   once, when the batch ends. A batch ends when no run waits, no submission has an answer
   pending, and every run of the batch has ended (ADR 025).
-- The quit guard counts the waiting runs as work that a quit loses (ADR 027).
+- The quit guard counts the waiting runs, and the submissions to the queue that have no answer
+  yet, as work that a quit loses (ADR 027).
 - The main window sets `backgroundThrottling` to `throttle`, so the Dock progress and the
   request for attention still work while the window is minimized.
 
