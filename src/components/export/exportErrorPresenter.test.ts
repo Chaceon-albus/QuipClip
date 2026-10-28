@@ -322,6 +322,8 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   ffprobeProcessFailed: null,
   ffprobeParseFailed: null,
   ffprobeTimedOut: BACK,
+  // A share that stopped answering during preparation can answer again.
+  preparationTimedOut: BACK,
   noSegments: null,
   tooManySegments: null,
   invalidSegment: null,

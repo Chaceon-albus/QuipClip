@@ -14,11 +14,17 @@
 //! invalid preset, a missing application data directory, and an exit that began. Then it
 //! answers with the run id ([`ExportSubmission`]): the run starts at once, or waits in the queue
 //! of [`ExportRegistry`] until the runs before it end (ADR 049). A run reports `preparing` when it
-//! takes the slot. Preparation runs on the export thread after that: the
-//! discovery of ffmpeg, the revision check, the re-probe, every preflight check in
-//! [`build_plan`], and the output reservation. A failure there is a `failed` event on the run,
-//! as every later failure is. The frontend therefore holds the run id for the whole run, and it
-//! names the run in every cancel.
+//! takes the slot. Preparation runs after that: the discovery of ffmpeg, the revision check, the
+//! re-probe, every preflight check in [`build_plan`], and the output reservation. A failure there
+//! is a `failed` event on the run, as every later failure is. The frontend therefore holds the
+//! run id for the whole run, and it names the run in every cancel.
+//!
+//! Preparation runs on a helper thread, and the export thread watches it
+//! ([`run_export_job_with`]). Some of its steps wait in the file system, and a call that a share
+//! holds cannot be interrupted. The watch bounds them: a cancel ends the run within
+//! [`PREPARATION_CANCEL_GRACE`], and a preparation that lasts longer than
+//! [`PREPARATION_TIMEOUT`] ends as `preparationTimedOut`. In both cases the run releases the
+//! slot, and the runs in the queue go on.
 //!
 //! # The five obligations no type enforces
 //!
@@ -83,9 +89,9 @@ use crate::settings::{self, Preset};
 use crate::time::{pts_seconds, Pts, Rational};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
 use super::export_output::PublishedExports;
@@ -359,7 +365,9 @@ struct PreparedExport {
 ///
 /// The command answers with the run id at once, and the run prepares on its thread
 /// ([`run_export_job`]). The frontend can therefore name the run in a cancel from the moment it
-/// waits, through preparation, which can last tens of seconds, to its end.
+/// waits, through preparation, which can last tens of seconds, to its end. Preparation is bounded
+/// by [`PREPARATION_TIMEOUT`], and a cancel ends it within [`PREPARATION_CANCEL_GRACE`], also
+/// while a step waits in the file system.
 #[tauri::command]
 pub async fn start_export(
     app: tauri::AppHandle,
@@ -442,10 +450,15 @@ struct PrepareRequest<'a> {
     request: &'a ExportRequestWire,
     /// The directory of the settings file and of the discovery of the executables.
     app_data_directory: &'a Path,
-    /// This run's cancel flag, read between the steps.
+    /// The stop flag of preparation, read between the steps. In a run this is the flag of the
+    /// helper thread of [`run_export_job_with`]. It starts as the cancel flag of the run, and the
+    /// watchdog sets it on a later cancel of the run and at [`PREPARATION_TIMEOUT`].
     cancel: &'a AtomicBool,
     /// The open FLV sources, which the FLV input shares with the preview (ADR 046).
     preview_windows: &'a PreviewWindows,
+    /// The stage that runs now. Preparation sets it at the start of each step, and the watchdog
+    /// names it in the report of a timeout.
+    stage: &'a PreparationStageCell,
 }
 
 /// Do every fallible step an export needs before ffmpeg starts, in ADR 016's order.
@@ -458,16 +471,17 @@ struct PrepareRequest<'a> {
 ///
 /// See this module's documentation for the five ordering obligations the body below carries.
 ///
-/// `cancel` is this run's flag, read between the steps. Preparation runs while the run already
-/// holds the export slot, and its steps reach outside the process, so it is the longest stretch
-/// of a run that nothing could stop: a re-probe of a source on a share that stopped answering
-/// takes up to [`crate::ffmpeg::probe::PROBE_TIMEOUT`], which is 30 seconds, six times the
-/// budget `lib::EXIT_CANCEL_BUDGET` gives an application quit. The re-probe and the reads of
-/// the audio stop on the flag. Reading the flag between the steps does not shorten an in-process
-/// step that has already started, but it stops
-/// the run from working through every remaining step after the answer is no longer wanted, and
-/// it means a cancel during preparation ends with the slot released and no reserved file left
-/// on disk.
+/// `cancel` is the stop flag of preparation, read between the steps. Preparation runs while the
+/// run already holds the export slot, and its steps reach outside the process. The re-probe and
+/// the reads of the audio stop on the flag. Reading the flag between the steps does not shorten
+/// an in-process step that has already started, such as a stat on a share that stopped
+/// answering, but it stops the run from working through every remaining step after the answer
+/// is no longer wanted.
+///
+/// A step in the file system has no time bound here. [`run_export_job_with`] runs this function
+/// on a helper thread and bounds it from the export thread: a cancel of the run, or
+/// [`PREPARATION_TIMEOUT`], ends the run even while a step is blocked. `stage` tells that watchdog
+/// which step runs ([`PreparationStage`]).
 fn prepare_export_with<Discover, Probe, FirstPacket, RateAt, Gaps>(
     prepare: PrepareRequest<'_>,
     discover: Discover,
@@ -489,6 +503,7 @@ where
         app_data_directory,
         cancel,
         preview_windows,
+        stage,
     } = prepare;
     // Read the same way `ExportSlot::is_canceled` reads it, so the ordering pairs with
     // `ExportRegistry::cancel`'s store.
@@ -496,13 +511,15 @@ where
 
     // Before the first step, which already reaches outside the process: `discover` walks `PATH`
     // and inspects each candidate, and an entry on a share that has stopped answering holds
-    // that inspection for as long as the operating system lets it. A cancel that arrives before
-    // the export thread even started then ends the run at the first step rather
-    // than the third.
+    // that inspection for as long as the operating system lets it. `run_export_job_with` does
+    // not start preparation for a run that was canceled already, and copies the cancel flag of
+    // the run into the stop flag. This read covers a direct caller and a stop that came between
+    // the spawn of the helper and its first step.
     if canceled() {
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
 
+    stage.enter(PreparationStage::Discovery);
     let executables = discover(app_data_directory)
         .map_err(|_| ExportCommandError::new(ExportErrorCode::FfmpegPairMissing))?;
 
@@ -517,6 +534,7 @@ where
     if canceled() {
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
+    stage.enter(PreparationStage::RevisionCheck);
     // A cancel that arrives during the read of the revision wins over a mismatch.
     check_source_revision(request).map_err(|error| {
         if canceled() {
@@ -525,8 +543,14 @@ where
             error
         }
     })?;
+    // After the read of the revision, which can block on a share. A helper that the watchdog
+    // abandoned during that read must not start ffprobe when the read returns.
+    if canceled() {
+        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+    }
     // The re-probe stops on the flag, so a cancel does not wait for `PROBE_TIMEOUT` on a share
     // that stopped answering.
+    stage.enter(PreparationStage::ReProbe);
     let mut probe = probe(&executables.ffprobe, &source, cancel).map_err(|error| match error {
         ProbeError::Canceled => ExportCommandError::new(ExportErrorCode::Canceled),
         other => map_reprobe_error(other),
@@ -535,6 +559,7 @@ where
     if let Some(audio) = probe.audio.as_mut().filter(|audio| {
         request.streams.writes_audio() && (audio.sample_rate.is_some() || rate_readable)
     }) {
+        stage.enter(PreparationStage::AudioReads);
         correct_audio_probe(
             &executables.ffprobe,
             &source,
@@ -546,6 +571,7 @@ where
     }
     // ADR 046: an FLV source opens each input as its head and a slice from a keyframe, so the
     // reads of the export, the read of the audio gaps included, do not read it from its start.
+    stage.enter(PreparationStage::FlvInput);
     let flv_input = flv_input_for(
         &executables.ffprobe,
         &source,
@@ -555,6 +581,7 @@ where
         preview_windows,
         cancel,
     )?;
+    stage.enter(PreparationStage::AudioReads);
     let audio_frames = read_audio_gaps(
         &executables.ffprobe,
         &source,
@@ -582,6 +609,7 @@ where
 
     // Obligation 1: planning runs before the reservation. A destination that is a directory
     // reserves successfully and fails only at the rename, after the whole encode.
+    stage.enter(PreparationStage::Plan);
     let mut plan = build_plan(
         &PlanRequest {
             source: &source,
@@ -619,9 +647,12 @@ where
     // alone cannot tell two of those apart in a bug report. `commit`'s guard is the other case in
     // the same record: a refusal QuipClip decides for itself about an enumerable condition, where
     // the code is the whole account and a Rust-authored sentence adds nothing.
+    stage.enter(PreparationStage::Reservation);
     let pending = PendingOutput::reserve(&plan.destination).map_err(|error| {
         ExportCommandError::with_detail(ExportErrorCode::OutputNotWritable, error.to_string())
     })?;
+
+    stage.enter(PreparationStage::Arguments);
 
     // Obligations 2 and 3: ffmpeg writes the reservation, not the destination, and one shape
     // decision serves both the graph and the arguments of each process. An export without video
@@ -1096,8 +1127,8 @@ const FLV_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(20
 ///
 /// The comparison has the limits of the revision of ADR 010. It does not see a replacement of
 /// the same size inside the same second of modification time, a copy that keeps the
-/// modification time, or a change after this one read. The read has no time bound, as the
-/// read of discovery has none.
+/// modification time, or a change after this one read. The read has no time bound of its own,
+/// as the read of discovery has none. The watchdog of [`run_export_job_with`] bounds both.
 ///
 /// A read that fails is not a mismatch. The re-probe and [`build_plan`] report a file that is
 /// gone, or that is no longer a regular file, with codes of their own. The frontend check of
@@ -1250,7 +1281,142 @@ fn spawn_export_job(
     }
 }
 
-/// Prepare one export on the export thread, then run it.
+/// How long preparation can last before the export thread stops waiting for it.
+///
+/// Preparation runs up to three reads of FFprobe that each have
+/// [`crate::ffmpeg::probe::PROBE_TIMEOUT`] (the re-probe and the two reads of the audio, ADR 016),
+/// and the FLV input and the read of the audio gaps add reads of their own. Six times that bound
+/// covers all of them with a margin. The bound is for the steps that have none: a stat, a
+/// canonicalization or a read in the file system that waits on a share that stopped answering.
+/// Such a call cannot be interrupted, so at this deadline the export thread abandons the helper
+/// thread and reports `preparationTimedOut`.
+pub(crate) const PREPARATION_TIMEOUT: Duration =
+    Duration::from_secs(6 * crate::ffmpeg::probe::PROBE_TIMEOUT.as_secs());
+
+/// How long the export thread waits for the answer of the helper thread after it set the stop
+/// flag of preparation.
+///
+/// A step that stops on the flag, such as the re-probe, answers within a poll of its own. A step
+/// that is blocked in the file system does not answer, and the export thread reports without it.
+/// The sum of this grace and [`PREPARATION_POLL`] must stay well below `EXIT_CANCEL_BUDGET` in
+/// `lib.rs`, so that a quit during a blocked preparation still finds the slot free. A test in
+/// `lib.rs` holds that rule.
+pub(crate) const PREPARATION_CANCEL_GRACE: Duration = Duration::from_secs(2);
+
+/// How often the export thread reads the cancel flag of the run and the clock while preparation
+/// runs. An answer of the helper thread ends the wait at once, so this adds no delay to a
+/// preparation that ends.
+pub(crate) const PREPARATION_POLL: Duration = Duration::from_millis(50);
+
+/// The time limits of the watchdog of [`run_export_job_with`]. Production uses
+/// [`PreparationLimits::PRODUCTION`]. The tests use limits of milliseconds.
+#[derive(Debug, Clone, Copy)]
+struct PreparationLimits {
+    /// See [`PREPARATION_TIMEOUT`].
+    timeout: Duration,
+    /// See [`PREPARATION_CANCEL_GRACE`].
+    grace: Duration,
+    /// See [`PREPARATION_POLL`].
+    poll: Duration,
+}
+
+impl PreparationLimits {
+    const PRODUCTION: Self = Self {
+        timeout: PREPARATION_TIMEOUT,
+        grace: PREPARATION_CANCEL_GRACE,
+        poll: PREPARATION_POLL,
+    };
+}
+
+/// The steps of [`prepare_export_with`], as the report of a timeout names them.
+///
+/// The list is short on purpose. It names the step that waits, not each call inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum PreparationStage {
+    /// The discovery of ffmpeg and ffprobe, with the read of the settings file.
+    Discovery = 0,
+    /// The read of the revision of the source ([`check_source_revision`]).
+    RevisionCheck = 1,
+    /// The re-probe of the source, with the correction of an FLV file that follows it.
+    ReProbe = 2,
+    /// The reads of the audio: the first packet and the sample rate before the FLV input
+    /// ([`correct_audio_probe`]), and the audio gaps after it ([`read_audio_gaps`]).
+    AudioReads = 3,
+    /// The FLV input: the locate of the slices, the write of the head, and the check of the
+    /// slices ([`flv_input_for`]).
+    FlvInput = 4,
+    /// The plan and its preflight checks of the paths ([`build_plan`]).
+    Plan = 5,
+    /// The reservation of the temporary output ([`PendingOutput::reserve`]).
+    Reservation = 6,
+    /// The graphs and the argument lists.
+    Arguments = 7,
+}
+
+impl PreparationStage {
+    /// Every stage, in the order of its number.
+    const ALL: [Self; 8] = [
+        Self::Discovery,
+        Self::RevisionCheck,
+        Self::ReProbe,
+        Self::AudioReads,
+        Self::FlvInput,
+        Self::Plan,
+        Self::Reservation,
+        Self::Arguments,
+    ];
+
+    /// The name of the stage in the detail of `preparationTimedOut`. It is a diagnostic for a
+    /// bug report (ADR 011), and the interface does not translate it.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::RevisionCheck => "revisionCheck",
+            Self::ReProbe => "reProbe",
+            Self::AudioReads => "audioReads",
+            Self::FlvInput => "flvInput",
+            Self::Plan => "plan",
+            Self::Reservation => "reservation",
+            Self::Arguments => "arguments",
+        }
+    }
+}
+
+/// The stage of preparation that runs now, shared by the helper thread that sets it and the
+/// export thread that reads it.
+#[derive(Debug, Default)]
+struct PreparationStageCell(AtomicU8);
+
+impl PreparationStageCell {
+    /// Record that `stage` starts now.
+    fn enter(&self, stage: PreparationStage) {
+        self.0.store(stage as u8, Ordering::SeqCst);
+    }
+
+    /// The stage that runs now. A cell that no step set yet reads as [`PreparationStage::Discovery`].
+    fn current(&self) -> PreparationStage {
+        let index = usize::from(self.0.load(Ordering::SeqCst));
+        PreparationStage::ALL
+            .get(index)
+            .copied()
+            .unwrap_or(PreparationStage::Discovery)
+    }
+}
+
+/// The answer of preparation, as the helper thread sends it to the export thread.
+type PreparationAnswer = Result<PreparedExport, ExportCommandError>;
+
+// The helper thread of preparation sends the prepared export to the export thread, so it must be
+// `Send`. A future field that is not thread-safe then fails here, next to the type, and not in
+// the spawn of the helper.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<PreparedExport>();
+};
+
+/// Prepare one export on a helper thread that the export thread watches, then run it on the
+/// export thread.
 ///
 /// The thin shell of [`run_export_job_with`], which holds the order and is what the tests call.
 fn run_export_job(app: &tauri::AppHandle, slot: ExportSlot, job: ExportJob) {
@@ -1265,19 +1431,20 @@ fn run_export_job(app: &tauri::AppHandle, slot: ExportSlot, job: ExportJob) {
     );
     run_export_job_with(
         slot,
-        |cancel| {
-            // The flag is read between the steps. Preparation is the one stretch of a run that
-            // can last tens of seconds -- `ffmpeg::probe::PROBE_TIMEOUT` alone is 30, and the
-            // check of the FLV slices and the read of the audio gaps have one each -- and a
-            // cancel that arrives inside it must not have to wait for every remaining step to
-            // finish. The FLV locate has no time bound. It stops at the next block read after a
-            // cancel, so on a share that holds a read, the cancel waits until that read returns.
+        PreparationLimits::PRODUCTION,
+        move |cancel, stage| {
+            // This runs on the helper thread, which owns the job. `cancel` is the stop flag of
+            // the helper, which the watchdog sets on a cancel of the run and at the deadline. The
+            // flag is read between the steps, and the re-probe, the reads of the audio and the
+            // FLV locate also stop on it while they run. A step that is blocked in the file
+            // system does not see it, and the watchdog ends the run without that step.
             prepare_export_with(
                 PrepareRequest {
                     request: &job.request,
                     app_data_directory: &job.app_data_directory,
                     cancel,
                     preview_windows: &job.preview_windows,
+                    stage,
                 },
                 discover_for_export,
                 ffmpeg::probe_media_until_canceled,
@@ -1297,47 +1464,93 @@ fn run_export_job(app: &tauri::AppHandle, slot: ExportSlot, job: ExportJob) {
     );
 }
 
-/// Prepare one export with `prepare`, and hand the result to `run`, or report the failure
-/// through `fail`.
+/// Prepare one export with `prepare` on a helper thread, and hand the result to `run`, or report
+/// the failure through `fail`.
 ///
-/// - A failure of preparation is reported, and the run ends. A panic in preparation is reported
-///   as `commandExecutionFailed`, because the command answered already and no other report
-///   would come.
+/// A step of preparation can block in the file system, and such a call cannot be interrupted.
+/// So `prepare` runs on a helper thread that owns everything it needs, with a stop flag of its
+/// own, and this thread watches it (`limits`):
+///
+/// - A run that was canceled before this call reports `canceled` at once, and no helper thread
+///   starts. The stop flag of the helper starts as the cancel flag of the run, so a cancel that
+///   came before the spawn also reaches the first step.
+/// - An answer ends the wait at once. A failure is reported, and the run ends. A failure that
+///   comes while the run is canceled is reported as `canceled`, because the stop caused it or
+///   raced it. A panic in
+///   preparation is reported as `commandExecutionFailed` with its message, because the command
+///   answered already and no other report would come.
+/// - A cancel of the run sets the stop flag of the helper and waits up to the grace for its
+///   answer. The run reports `canceled`, whatever the helper answers: a cancel wins over the
+///   error it caused, and a prepared export that comes in the grace is dropped here.
+/// - At the timeout, the run sets the stop flag of the helper, waits the grace in the same way,
+///   and reports `preparationTimedOut` with the name of the stage that was running. A cancel
+///   that came during that grace wins, and the run reports `canceled`.
+/// - A helper that does not answer in the grace is abandoned. When its blocked call returns, it
+///   reads its stop flag at the next step, and its send fails because this thread dropped the
+///   receiver. Its answer then drops on the helper thread, and the reservation guard of a late
+///   prepared export deletes the temporary file there.
+/// - A helper thread that the operating system refuses is reported as `commandExecutionFailed`
+///   with the error of the system.
 /// - The cancel flag is read once more after preparation passed its own checks. A cancel there
 ///   drops the prepared export, whose reservation guard deletes the temporary file, and then
 ///   reports `canceled`.
 /// - Every report comes before the slot is released, because the slot is dropped when this
 ///   function returns. A free slot therefore means that the guards of the run have finished,
-///   which the wait at an application quit relies on (ADR 017).
-fn run_export_job_with<Prepare, Run, Fail>(slot: ExportSlot, prepare: Prepare, run: Run, fail: Fail)
-where
-    Prepare: FnOnce(&AtomicBool) -> Result<PreparedExport, ExportCommandError>,
+///   which the wait at an application quit relies on (ADR 017). An abandoned helper is the
+///   exception: its late answer drops on its own thread, after the release.
+fn run_export_job_with<Prepare, Run, Fail>(
+    slot: ExportSlot,
+    limits: PreparationLimits,
+    prepare: Prepare,
+    run: Run,
+    fail: Fail,
+) where
+    Prepare: FnOnce(&AtomicBool, &PreparationStageCell) -> PreparationAnswer + Send + 'static,
     Run: FnOnce(ExportSlot, PreparedExport),
     Fail: FnOnce(ExportCommandError),
 {
+    // Before the spawn: a run that a Stop reached before it started does not touch the file
+    // system at all.
+    if slot.is_canceled() {
+        fail(ExportCommandError::new(ExportErrorCode::Canceled));
+        return;
+    }
+    let stop = Arc::new(AtomicBool::new(slot.is_canceled()));
+    let stage = Arc::new(PreparationStageCell::default());
+    // A rendezvous channel. A send completes only when this thread receives the answer, so no
+    // answer waits in a buffer after this thread stopped waiting. The send of an abandoned
+    // helper fails, and the answer drops on the helper thread.
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<PreparationAnswer>(0);
+    let spawned = {
+        let stop = Arc::clone(&stop);
+        let stage = Arc::clone(&stage);
+        std::thread::Builder::new()
+            .name("export-prepare".to_owned())
+            .spawn(move || {
+                let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    prepare(&stop, &stage)
+                }))
+                .unwrap_or_else(|payload| Err(panic_error(payload.as_ref())));
+                // A failed send means that the export thread stopped waiting. The answer then
+                // drops here, on this thread.
+                let _ = sender.send(answer);
+            })
+    };
+    if let Err(error) = spawned {
+        fail(ExportCommandError::with_detail(
+            ExportErrorCode::CommandExecutionFailed,
+            error.to_string(),
+        ));
+        return;
+    }
     let cancel = slot.cancel_flag();
-    let prepared =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare(cancel.as_ref())));
-    let prepared = match prepared {
-        Ok(Ok(prepared)) => prepared,
-        Ok(Err(error)) => {
+    let answer = watch_preparation(&receiver, &cancel, &stop, &stage, limits);
+    // Before the report, so the send of an abandoned helper fails from now on.
+    drop(receiver);
+    let prepared = match answer {
+        Ok(prepared) => prepared,
+        Err(error) => {
             fail(error);
-            return;
-        }
-        Err(payload) => {
-            // A panic is not an enumerable condition, so ADR 011 keeps its message as the
-            // detail, when the payload is text.
-            let message = payload
-                .downcast_ref::<&str>()
-                .map(|text| (*text).to_owned())
-                .or_else(|| payload.downcast_ref::<String>().cloned());
-            fail(match message {
-                Some(message) => ExportCommandError::with_detail(
-                    ExportErrorCode::CommandExecutionFailed,
-                    message,
-                ),
-                None => ExportCommandError::new(ExportErrorCode::CommandExecutionFailed),
-            });
             return;
         }
     };
@@ -1347,6 +1560,85 @@ where
         return;
     }
     run(slot, prepared);
+}
+
+/// Wait for the answer of the helper thread of preparation, within `limits`. See
+/// [`run_export_job_with`] for the rules.
+fn watch_preparation(
+    receiver: &std::sync::mpsc::Receiver<PreparationAnswer>,
+    cancel: &AtomicBool,
+    stop: &AtomicBool,
+    stage: &PreparationStageCell,
+    limits: PreparationLimits,
+) -> PreparationAnswer {
+    use std::sync::mpsc::RecvTimeoutError;
+
+    let started = Instant::now();
+    loop {
+        match receiver.recv_timeout(limits.poll) {
+            // A cancel wins over the failure that it caused or raced. A prepared export goes on
+            // to the cancel check of `run_export_job_with`, which drops it.
+            Ok(Err(_)) if cancel.load(Ordering::SeqCst) => {
+                return Err(ExportCommandError::new(ExportErrorCode::Canceled))
+            }
+            Ok(answer) => return answer,
+            // The helper always sends before it ends, so this means that it ended without an
+            // answer. It is reported, as a panic is.
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(ExportCommandError::new(
+                    ExportErrorCode::CommandExecutionFailed,
+                ))
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if cancel.load(Ordering::SeqCst) {
+            stop_preparation(receiver, stop, limits.grace);
+            return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+        }
+        if started.elapsed() >= limits.timeout {
+            // Read before the stop, which can move the helper to its next step.
+            let running = stage.current();
+            stop_preparation(receiver, stop, limits.grace);
+            if cancel.load(Ordering::SeqCst) {
+                return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+            }
+            return Err(ExportCommandError::with_detail(
+                ExportErrorCode::PreparationTimedOut,
+                format!("preparation stage: {}", running.name()),
+            ));
+        }
+    }
+}
+
+/// Set the stop flag of the helper thread, and wait up to `grace` for its answer.
+///
+/// The caller reports the end of the run itself, so the answer only matters for its cleanup. A
+/// prepared export that comes in the grace drops here, and its reservation guard deletes the
+/// temporary file before the report.
+fn stop_preparation(
+    receiver: &std::sync::mpsc::Receiver<PreparationAnswer>,
+    stop: &AtomicBool,
+    grace: Duration,
+) {
+    stop.store(true, Ordering::SeqCst);
+    if let Ok(Ok(prepared)) = receiver.recv_timeout(grace) {
+        drop(prepared);
+    }
+}
+
+/// The report of a panic in preparation. A panic is not an enumerable condition, so ADR 011 keeps
+/// its message as the detail, when the payload is text.
+fn panic_error(payload: &(dyn std::any::Any + Send)) -> ExportCommandError {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned());
+    match message {
+        Some(message) => {
+            ExportCommandError::with_detail(ExportErrorCode::CommandExecutionFailed, message)
+        }
+        None => ExportCommandError::new(ExportErrorCode::CommandExecutionFailed),
+    }
 }
 
 /// Report one export from its first event to its last.
@@ -2772,6 +3064,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -2809,6 +3102,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3032,6 +3326,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3110,6 +3405,7 @@ mod tests {
                     app_data_directory: &directory.path,
                     cancel: &AtomicBool::new(false),
                     preview_windows: &PreviewWindows::default(),
+                    stage: &PreparationStageCell::default(),
                 },
                 |_| {
                     Ok(FfmpegPaths {
@@ -3232,6 +3528,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3279,6 +3576,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3344,6 +3642,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3433,6 +3732,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(true),
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 *discovered.borrow_mut() = true;
@@ -3488,6 +3788,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 cancel.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3543,6 +3844,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3586,6 +3888,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3633,6 +3936,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| Err(LocateError::NotFound { inspected: vec![] }),
             |_, _, _| unreachable!(),
@@ -3947,6 +4251,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel,
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -4897,6 +5202,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -5020,6 +5326,26 @@ mod tests {
         plan
     }
 
+    /// Limits for the tests of [`run_export_job_with`] that do not reach a limit: a deadline far
+    /// away, and a poll long enough that a wait for it would show in the time of a test.
+    const NO_LIMIT_REACHED: PreparationLimits = PreparationLimits {
+        timeout: Duration::from_secs(600),
+        grace: Duration::from_secs(30),
+        poll: Duration::from_secs(10),
+    };
+
+    /// Wait until `path` is gone, for at most five seconds, and tell whether it went.
+    fn eventually_gone(path: &Path) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while path.exists() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
     #[test]
     fn a_failure_of_preparation_is_reported_before_the_slot_is_released() {
         let registry = Arc::new(ExportRegistry::default());
@@ -5029,7 +5355,8 @@ mod tests {
 
         run_export_job_with(
             slot,
-            |_| Err(ExportCommandError::new(ExportErrorCode::SourceNotFound)),
+            NO_LIMIT_REACHED,
+            |_, _| Err(ExportCommandError::new(ExportErrorCode::SourceNotFound)),
             |_, _| ran.set(true),
             |error| {
                 // The wait at an application quit takes a free slot to mean that the run has
@@ -5079,7 +5406,8 @@ mod tests {
 
         run_export_job_with(
             slot,
-            |_| panic!("preparation panicked"),
+            NO_LIMIT_REACHED,
+            |_, _| panic!("preparation panicked"),
             |_, _| unreachable!(),
             |error| {
                 assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
@@ -5099,20 +5427,24 @@ mod tests {
         let registry = Arc::new(ExportRegistry::default());
         let slot = registry.begin("1-0").unwrap();
         let reported = RefCell::new(None);
-        let reserved = RefCell::new(None);
+        let reserved = Arc::new(std::sync::Mutex::new(None));
+        let destination = directory.path.join("out.m4a");
+        let helper_registry = Arc::clone(&registry);
+        let helper_reserved = Arc::clone(&reserved);
 
         run_export_job_with(
             slot,
-            |cancel| {
-                let (prepared, path) = prepared_audio_run(&directory.path.join("out.m4a"));
-                *reserved.borrow_mut() = Some(path);
+            NO_LIMIT_REACHED,
+            move |_, _| {
+                let (prepared, path) = prepared_audio_run(&destination);
+                *helper_reserved.lock().unwrap() = Some(path);
                 // The cancel lands after preparation passed its own checks.
-                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                helper_registry.cancel("1-0");
                 Ok(prepared)
             },
             |_, _| unreachable!(),
             |error| {
-                let path = reserved.borrow().clone().unwrap();
+                let path = reserved.lock().unwrap().clone().unwrap();
                 assert!(!path.exists(), "the reservation goes before the report");
                 assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
                 *reported.borrow_mut() = Some(error.code);
@@ -5124,17 +5456,23 @@ mod tests {
     }
 
     #[test]
-    fn a_prepared_export_runs_with_its_slot() {
+    fn a_prepared_export_runs_with_its_slot_and_without_a_wait_for_the_poll() {
         let directory = TestDirectory::new();
         let registry = Arc::new(ExportRegistry::default());
         let slot = registry.begin("1-0").unwrap();
         let ran = Cell::new(false);
+        let destination = directory.path.join("out.m4a");
+        let started = Instant::now();
 
         run_export_job_with(
             slot,
-            |_| Ok(prepared_audio_run(&directory.path.join("out.m4a")).0),
+            NO_LIMIT_REACHED,
+            move |_, _| Ok(prepared_audio_run(&destination).0),
             |slot, prepared| {
+                // The answer ends the wait at once. A wait for the poll of ten seconds would show.
+                assert!(started.elapsed() < Duration::from_secs(5));
                 assert_eq!(slot.run_id(), "1-0");
+                assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
                 assert_eq!(prepared.streams, ExportStreams::AudioOnly);
                 ran.set(true);
             },
@@ -5142,8 +5480,409 @@ mod tests {
         );
 
         assert!(ran.get());
+        assert_eq!(registry.active_run_id(), None);
     }
 
+    #[test]
+    fn a_cancel_during_a_blocked_preparation_reports_after_the_grace_and_frees_the_slot() {
+        let directory = TestDirectory::new();
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let reported = RefCell::new(None);
+        let ran = Cell::new(false);
+        let destination = directory.path.join("out.m4a");
+        let helper_registry = Arc::clone(&registry);
+        let (reserved_sender, reserved) = std::sync::mpsc::channel::<PathBuf>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let saw_stop = Arc::new(AtomicBool::new(false));
+        let helper_saw_stop = Arc::clone(&saw_stop);
+        let grace = Duration::from_millis(200);
+        let started = Instant::now();
+
+        run_export_job_with(
+            slot,
+            PreparationLimits {
+                timeout: Duration::from_secs(60),
+                grace,
+                poll: Duration::from_millis(5),
+            },
+            move |stop, _| {
+                let (prepared, path) = prepared_audio_run(&destination);
+                reserved_sender.send(path).unwrap();
+                helper_registry.cancel("1-0");
+                // Stands for a call that a share holds: it does not read the stop flag.
+                let _ = released.recv();
+                helper_saw_stop.store(stop.load(Ordering::SeqCst), Ordering::SeqCst);
+                Ok(prepared)
+            },
+            |_, _| ran.set(true),
+            |error| {
+                assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
+                *reported.borrow_mut() = Some(error.code);
+            },
+        );
+
+        assert!(started.elapsed() >= grace);
+        assert_eq!(*reported.borrow(), Some(ExportErrorCode::Canceled));
+        // The slot is free while the helper is still blocked, so the next run can start.
+        assert_eq!(registry.active_run_id(), None);
+        let path = reserved.recv().unwrap();
+        assert!(
+            path.exists(),
+            "the blocked helper still holds its reservation"
+        );
+
+        // The blocked call returns with a prepared export. Its send fails, and the export drops
+        // on the helper thread, which deletes the temporary file.
+        release.send(()).unwrap();
+        assert!(eventually_gone(&path), "the late reservation is deleted");
+        assert!(saw_stop.load(Ordering::SeqCst));
+        assert!(!ran.get());
+    }
+
+    #[test]
+    fn a_blocked_preparation_times_out_and_names_its_stage() {
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let reported = RefCell::new(None);
+        let (release, released) = std::sync::mpsc::channel::<()>();
+
+        run_export_job_with(
+            slot,
+            PreparationLimits {
+                // Long enough that the helper surely set its stage on a loaded machine.
+                timeout: Duration::from_secs(1),
+                grace: Duration::from_millis(50),
+                poll: Duration::from_millis(5),
+            },
+            move |_, stage| {
+                stage.enter(PreparationStage::ReProbe);
+                // Stands for a call that a share holds.
+                let _ = released.recv();
+                Err(ExportCommandError::new(ExportErrorCode::FfprobeTimedOut))
+            },
+            |_, _| unreachable!(),
+            |error| {
+                assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
+                *reported.borrow_mut() = Some(error);
+            },
+        );
+
+        let error = reported.into_inner().unwrap();
+        assert_eq!(error.code, ExportErrorCode::PreparationTimedOut);
+        assert_eq!(error.detail.as_deref(), Some("preparation stage: reProbe"));
+        assert_eq!(registry.active_run_id(), None);
+        drop(release);
+    }
+
+    #[test]
+    fn a_cancel_wins_over_the_error_that_the_stop_of_preparation_caused() {
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let reported = RefCell::new(None);
+        let helper_registry = Arc::clone(&registry);
+        let answered = Arc::new(AtomicBool::new(false));
+        let helper_answered = Arc::clone(&answered);
+        let started = Instant::now();
+
+        run_export_job_with(
+            slot,
+            PreparationLimits {
+                timeout: Duration::from_secs(600),
+                grace: Duration::from_secs(30),
+                poll: Duration::from_millis(5),
+            },
+            move |stop, _| {
+                helper_registry.cancel("1-0");
+                // Stands for a step that stops on the flag, takes a moment, and reports its own
+                // failure.
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                helper_answered.store(true, Ordering::SeqCst);
+                Err(ExportCommandError::new(
+                    ExportErrorCode::FfprobeProcessFailed,
+                ))
+            },
+            |_, _| unreachable!(),
+            |error| {
+                assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
+                *reported.borrow_mut() = Some(error.code);
+            },
+        );
+
+        assert_eq!(*reported.borrow(), Some(ExportErrorCode::Canceled));
+        // The run waited for the answer of the helper, and not for the whole grace.
+        assert!(answered.load(Ordering::SeqCst));
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert_eq!(registry.active_run_id(), None);
+    }
+
+    #[test]
+    fn a_canceled_answer_within_the_grace_reports_canceled() {
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let reported = RefCell::new(None);
+        let helper_registry = Arc::clone(&registry);
+
+        run_export_job_with(
+            slot,
+            PreparationLimits {
+                timeout: Duration::from_secs(600),
+                grace: Duration::from_secs(30),
+                poll: Duration::from_millis(5),
+            },
+            move |stop, _| {
+                helper_registry.cancel("1-0");
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(ExportCommandError::new(ExportErrorCode::Canceled))
+            },
+            |_, _| unreachable!(),
+            |error| *reported.borrow_mut() = Some(error.code),
+        );
+
+        assert_eq!(*reported.borrow(), Some(ExportErrorCode::Canceled));
+        assert_eq!(registry.active_run_id(), None);
+    }
+
+    #[test]
+    fn a_run_canceled_before_it_starts_reports_canceled_at_once_and_prepares_nothing() {
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        registry.cancel("1-0");
+        let reported = RefCell::new(None);
+        let prepared = Arc::new(AtomicBool::new(false));
+        let helper_prepared = Arc::clone(&prepared);
+        let started = Instant::now();
+
+        run_export_job_with(
+            slot,
+            NO_LIMIT_REACHED,
+            move |_, _| {
+                helper_prepared.store(true, Ordering::SeqCst);
+                Err(ExportCommandError::new(ExportErrorCode::FfmpegPairMissing))
+            },
+            |_, _| unreachable!(),
+            |error| {
+                assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
+                *reported.borrow_mut() = Some(error.code);
+            },
+        );
+
+        assert_eq!(*reported.borrow(), Some(ExportErrorCode::Canceled));
+        // At once: no wait for the poll of ten seconds or for the grace.
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!prepared.load(Ordering::SeqCst));
+        assert_eq!(registry.active_run_id(), None);
+    }
+
+    #[test]
+    fn a_failure_that_comes_with_a_cancel_of_the_run_is_reported_as_canceled() {
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let reported = RefCell::new(None);
+        let helper_registry = Arc::clone(&registry);
+
+        run_export_job_with(
+            slot,
+            // The poll is long, so the answer comes before the watchdog reads the cancel flag.
+            NO_LIMIT_REACHED,
+            move |_, _| {
+                helper_registry.cancel("1-0");
+                Err(ExportCommandError::new(
+                    ExportErrorCode::FfprobeProcessFailed,
+                ))
+            },
+            |_, _| unreachable!(),
+            |error| *reported.borrow_mut() = Some(error.code),
+        );
+
+        assert_eq!(*reported.borrow(), Some(ExportErrorCode::Canceled));
+    }
+
+    #[test]
+    fn a_cancel_during_the_grace_of_the_timeout_reports_canceled() {
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let reported = RefCell::new(None);
+        let helper_registry = Arc::clone(&registry);
+
+        run_export_job_with(
+            slot,
+            PreparationLimits {
+                timeout: Duration::from_millis(100),
+                grace: Duration::from_secs(30),
+                poll: Duration::from_millis(5),
+            },
+            move |stop, _| {
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                // The user presses Stop while the watchdog waits the grace of the timeout.
+                helper_registry.cancel("1-0");
+                Err(ExportCommandError::new(ExportErrorCode::Canceled))
+            },
+            |_, _| unreachable!(),
+            |error| *reported.borrow_mut() = Some(error.code),
+        );
+
+        assert_eq!(*reported.borrow(), Some(ExportErrorCode::Canceled));
+    }
+
+    #[test]
+    fn a_prepared_export_that_comes_in_the_cancel_grace_is_dropped_before_the_report() {
+        let directory = TestDirectory::new();
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("1-0").unwrap();
+        let reported = RefCell::new(None);
+        let destination = directory.path.join("out.m4a");
+        let helper_registry = Arc::clone(&registry);
+        let (reserved_sender, reserved) = std::sync::mpsc::channel::<PathBuf>();
+
+        run_export_job_with(
+            slot,
+            PreparationLimits {
+                timeout: Duration::from_secs(600),
+                grace: Duration::from_secs(30),
+                poll: Duration::from_millis(5),
+            },
+            move |stop, _| {
+                let (prepared, path) = prepared_audio_run(&destination);
+                reserved_sender.send(path).unwrap();
+                helper_registry.cancel("1-0");
+                // The answer comes only after the watchdog set the stop flag, in the grace.
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(prepared)
+            },
+            |_, _| unreachable!(),
+            |error| {
+                let path = reserved.recv().unwrap();
+                assert!(!path.exists(), "the reservation goes before the report");
+                assert_eq!(registry.active_run_id().as_deref(), Some("1-0"));
+                *reported.borrow_mut() = Some(error.code);
+            },
+        );
+
+        assert_eq!(*reported.borrow(), Some(ExportErrorCode::Canceled));
+    }
+
+    #[test]
+    fn preparation_records_the_stage_of_each_step_it_runs() {
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let mut request = request_expecting(&source, None);
+        request.segments = vec![ExportSegmentBoundaryWire {
+            in_pts: Pts::new(10 * 90_000),
+            out_pts: Pts::new(20 * 90_000),
+        }];
+        let stage = PreparationStageCell::default();
+        let seen = RefCell::new(Vec::new());
+
+        prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &stage,
+            },
+            |_| {
+                seen.borrow_mut().push(stage.current());
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_, _, _| {
+                seen.borrow_mut().push(stage.current());
+                Ok(sample_probe_with_a_missed_audio_start())
+            },
+            |ffprobe, source, index, cancel| {
+                seen.borrow_mut().push(stage.current());
+                first_packet_unread(ffprobe, source, index, cancel)
+            },
+            sample_rate_not_read,
+            |_, _, _, _| {
+                seen.borrow_mut().push(stage.current());
+                Ok(AudioFrames::default())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            seen.into_inner(),
+            vec![
+                PreparationStage::Discovery,
+                PreparationStage::ReProbe,
+                PreparationStage::AudioReads,
+                PreparationStage::AudioReads,
+            ]
+        );
+        // The last step of a preparation that passed the plan and the reservation.
+        assert_eq!(stage.current(), PreparationStage::Arguments);
+    }
+
+    #[test]
+    fn a_plan_that_refuses_the_request_leaves_the_stage_at_the_plan() {
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let mut request = request_expecting(&source, None);
+        request.segments = vec![];
+        let stage = PreparationStageCell::default();
+
+        let error = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &stage,
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_, _, _| Ok(sample_probe()),
+            first_packet_unread,
+            sample_rate_not_read,
+            no_audio_gaps,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::NoSegments);
+        assert_eq!(stage.current(), PreparationStage::Plan);
+    }
+
+    #[test]
+    fn the_stage_cell_reads_back_every_stage_and_names_each_one_differently() {
+        let cell = PreparationStageCell::default();
+        assert_eq!(cell.current(), PreparationStage::Discovery);
+        let mut names = Vec::new();
+        for stage in PreparationStage::ALL {
+            cell.enter(stage);
+            assert_eq!(cell.current(), stage);
+            names.push(stage.name());
+        }
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), PreparationStage::ALL.len());
+    }
+
+    #[test]
+    fn the_preparation_timeout_is_six_times_the_probe_timeout() {
+        assert_eq!(PREPARATION_TIMEOUT, crate::ffmpeg::probe::PROBE_TIMEOUT * 6);
+    }
     /// An audio-only run, ready for [`run_export_with`], and the reserved path it writes.
     fn prepared_audio_run(destination: &Path) -> (PreparedExport, PathBuf) {
         let pending = PendingOutput::reserve(destination).unwrap();
@@ -5669,6 +6408,7 @@ mod tests {
                 app_data_directory: &directory.path,
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -5828,6 +6568,7 @@ mod tests {
                 app_data_directory: &directory.path.join("app"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
             },
             |_| {
                 Ok(FfmpegPaths {

@@ -184,6 +184,16 @@ pub fn locate_flv_input(request: &FlvInputRequest<'_>) -> Result<FlvInput, FlvIn
     if !stream_order_matches(&source.window_stream_order(earliest), request.probe) {
         return Err(FlvInputFallback::StreamOrder);
     }
+    // The last read of the flag before the write of the head. An export whose preparation was
+    // abandoned while a read above was blocked (`commands::export::run_export_job_with`) sets the
+    // flag, and must not write the head of the cache late, when nothing will use it.
+    if request
+        .cancel
+        .as_ref()
+        .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        return Err(FlvInputFallback::Canceled);
+    }
     let head = cache
         .write_head(&source.head_bytes_at(earliest))
         .map_err(|error| FlvInputFallback::HeadNotWritten(error.to_string()))?;

@@ -105,6 +105,7 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "ffprobeProcessFailed",
   "ffprobeParseFailed",
   "ffprobeTimedOut",
+  "preparationTimedOut",
   "noSegments",
   "tooManySegments",
   "invalidSegment",

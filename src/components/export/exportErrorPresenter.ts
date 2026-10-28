@@ -81,6 +81,7 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   // A condition that can clear by itself: a share that stopped answering, a command that
   // did not reach the backend, or a cause that has no code.
   ffprobeTimedOut: BACK_TO_SETUP,
+  preparationTimedOut: BACK_TO_SETUP,
   commandExecutionFailed: BACK_TO_SETUP,
   unknown: BACK_TO_SETUP,
 

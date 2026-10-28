@@ -687,6 +687,12 @@ export_error_codes! {
     /// [`crate::ffmpeg::probe::PROBE_TIMEOUT`] and was killed. A stalled re-probe holds the
     /// single export slot, so it is bounded rather than waited on.
     FfprobeTimedOut => "ffprobeTimedOut",
+    /// Produced by `commands::export::run_export_job_with`: preparation did not end within
+    /// `commands::export::PREPARATION_TIMEOUT`. A step of preparation that waits in the file
+    /// system, such as the discovery of ffmpeg on a share that stopped answering, cannot be
+    /// interrupted, so the export thread stops waiting for it and releases the slot. The detail
+    /// names the stage of preparation that was running.
+    PreparationTimedOut => "preparationTimedOut",
     /// Produced by [`plan::build_plan`]: the request carried zero segments.
     NoSegments => "noSegments",
     /// Produced by [`plan::build_plan`]: the request carried more than
@@ -811,8 +817,8 @@ export_error_codes! {
     /// [`crate::ffmpeg::probe::PROBE_TIMEOUT`], so a cancel there ends the run rather than
     /// letting it work through every remaining step and then start `ffmpeg`.
     Canceled => "canceled",
-    /// Produced by `commands::export::start_export` when the blocking task running the
-    /// preparation failed to execute, and by `commands::export::run_export_worker` when the
+    /// Produced by `commands::export::run_export_job_with` when preparation panicked or its
+    /// helper thread could not be started, and by `commands::export::run_export_worker` when the
     /// worker panicked or its thread could not be started, mirroring
     /// `ImportMediaErrorCode::CommandExecutionFailed`.
     CommandExecutionFailed => "commandExecutionFailed",
@@ -873,6 +879,7 @@ mod tests {
                 "outputReadOnly",
                 "outputRenameFailed",
                 "outputStreamsMismatch",
+                "preparationTimedOut",
                 "sourceAudioRateUnknown",
                 "sourceFrameRateUnknown",
                 "sourceHasNoAudio",

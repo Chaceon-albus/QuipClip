@@ -1050,6 +1050,8 @@ export const en = {
     ffprobeParseFailed: "QuipClip could not parse the ffprobe output.",
     ffprobeTimedOut:
       "ffprobe did not answer in time. The file might be on a drive or a share that stopped responding.",
+    preparationTimedOut:
+      "QuipClip could not prepare the export in time. A drive or a network share might not be answering.",
     noSegments: "No segments are marked for export.",
     tooManySegments: "Too many segments are marked for export (maximum is 100).",
     invalidSegment: "One or more export segments have invalid In or Out points.",

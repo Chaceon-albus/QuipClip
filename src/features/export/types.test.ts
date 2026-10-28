@@ -196,6 +196,7 @@ describe("Export Types & Wire Constants", () => {
         "ffprobeProcessFailed",
         "ffprobeParseFailed",
         "ffprobeTimedOut",
+        "preparationTimedOut",
         "noSegments",
         "tooManySegments",
         "invalidSegment",

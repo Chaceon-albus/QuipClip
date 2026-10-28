@@ -810,6 +810,8 @@ export const zhCN: TranslationCatalog = {
     ffprobeParseFailed: "无法解析 ffprobe 输出。",
     ffprobeTimedOut:
       "ffprobe 未在限定时间内响应。该文件可能位于已停止响应的驱动器或共享位置上。",
+    preparationTimedOut:
+      "无法在限定时间内完成导出准备。某个驱动器或共享位置可能没有响应。",
     noSegments: "没有标记用于导出的片段。",
     tooManySegments: "标记用于导出的片段过多（最多 100 个）。",
     invalidSegment: "一个或多个导出片段的入点或出点无效。",

@@ -35,6 +35,10 @@ pub(crate) const SETTINGS_WINDOW_LABEL: &str = commands::settings_window::SETTIN
 /// temporary file. Five seconds is far above that sum and short enough that a quit still feels
 /// like a quit.
 ///
+/// A run whose preparation is blocked in the file system frees the slot after
+/// `commands::export::PREPARATION_CANCEL_GRACE` and one `PREPARATION_POLL`, which a test below
+/// holds below this budget.
+///
 /// It is a bound and not a wait for the slot: an exit that could be delayed indefinitely is
 /// worse than an orphaned process, because only the user can end it. Whatever has not
 /// finished by then is left to the operating system, exactly as it was before this handler
@@ -264,8 +268,10 @@ fn stop_preview_windows(handle: &tauri::AppHandle) {
 /// This runs on the event loop thread and blocks it. The export never needs that thread to
 /// stop: the worker is a thread of its own, it kills and reaps `ffmpeg` and deletes the
 /// reserved file with plain system calls, and its progress events only queue a message for
-/// the event loop, which does not wait for an answer. A run that is still preparing runs on
-/// the export thread too, and drops its slot there.
+/// the event loop, which does not wait for an answer. A run that is still preparing runs on a
+/// helper thread that the export thread watches. The export thread reports the cancel within
+/// `commands::export::PREPARATION_CANCEL_GRACE`, also when the helper is blocked, and drops its
+/// slot there.
 ///
 /// Every call shares the deadline of [`EXIT_WAIT`], which the first call sets to
 /// `EXIT_CANCEL_BUDGET` from then. A second call therefore returns at once when the slot is
@@ -455,6 +461,21 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "the wait must not exceed its budget by much, took {elapsed:?}"
+        );
+    }
+
+    /// A quit during a preparation that a share holds: the export thread sees the cancel within
+    /// a poll, waits the grace for the helper thread, reports, and releases the slot. That must
+    /// fit in the budget of the exit with a margin for the report, or the quit gives up on a
+    /// slot that was about to go free.
+    #[test]
+    fn a_quit_during_a_blocked_preparation_finds_the_slot_free_within_the_budget() {
+        const REPORT_MARGIN: Duration = Duration::from_millis(500);
+        assert!(
+            commands::export::PREPARATION_CANCEL_GRACE
+                + commands::export::PREPARATION_POLL
+                + REPORT_MARGIN
+                < EXIT_CANCEL_BUDGET
         );
     }
 
