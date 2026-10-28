@@ -96,6 +96,8 @@ import {
   presentAudioBitrateSelect,
   presentAudioBitrateValue,
   presentAudioChannelsSelect,
+  presentAudioGainField,
+  presentAudioGainInput,
   presentAudioSampleRateSelect,
   presentAudioSampleRateValue,
   presentContainer,
@@ -311,6 +313,7 @@ function PresetEditor({
     numberFormatter,
   );
   const channelsSelect = presentAudioChannelsSelect();
+  const gainInput = presentAudioGainInput(draft.audioGainTenthsDb);
   const resolutionSelect = presentResolutionSelect();
   const frameRateSelect = presentFrameRateSelect(numberFormatter);
   // While the custom field is open, it holds the name, and the list gets no option for the
@@ -370,6 +373,10 @@ function PresetEditor({
     audioSampleRate: `${idBase}-audio-sample-rate`,
     audioSampleRateError: `${idBase}-audio-sample-rate-error`,
     audioChannels: `${idBase}-audio-channels`,
+    audioGain: `${idBase}-audio-gain`,
+    audioGainUnit: `${idBase}-audio-gain-unit`,
+    audioGainHint: `${idBase}-audio-gain-hint`,
+    audioGainError: `${idBase}-audio-gain-error`,
     qualityKind: `${idBase}-quality-kind`,
     qualityValue: `${idBase}-quality-value`,
     qualityValueUnit: `${idBase}-quality-value-unit`,
@@ -402,6 +409,7 @@ function PresetEditor({
   const audioEncoderInvalid = issueGroups.audioEncoder.length > 0;
   const audioBitrateInvalid = issueGroups.audioBitrate.length > 0;
   const audioSampleRateInvalid = issueGroups.audioSampleRate.length > 0;
+  const audioGainInvalid = issueGroups.audioGainTenthsDb.length > 0;
   const qualityInvalid = issueGroups.quality.length > 0;
   const pixelFormatInvalid = issueGroups.pixelFormat.length > 0;
 
@@ -985,6 +993,33 @@ function PresetEditor({
             ))}
           </SelectContent>
         </Select>
+
+        {/* Audio Gain (ADR 054): decibels in the field, tenths of a decibel in the preset. */}
+        <FieldLabel htmlFor={ids.audioGain}>
+          {t("settings.preset.audioGainLabel")}
+        </FieldLabel>
+        <NumberInput
+          id={ids.audioGain}
+          field={gainInput}
+          unit={gainInput.unitKey ? translate(gainInput.unitKey) : undefined}
+          unitId={ids.audioGainUnit}
+          aria-invalid={audioGainInvalid}
+          aria-describedby={joinDescribedBy(
+            audioGainInvalid && ids.audioGainError,
+            gainInput.unitKey !== undefined && ids.audioGainUnit,
+            ids.audioGainHint,
+          )}
+          value={presentAudioGainField(draft.audioGainTenthsDb)}
+          onChange={(e) => controller.updateAudioGain(e.target.value)}
+        />
+        <FieldError
+          id={ids.audioGainError}
+          messages={issueGroups.audioGainTenthsDb}
+          translate={translate}
+        />
+        <p id={ids.audioGainHint} className="col-start-2 text-xs text-muted-foreground">
+          {translate(gainInput.hintKey)}
+        </p>
       </FormGroup>
 
       <FormGroup legend={t("settings.preset.groupOptions")}>

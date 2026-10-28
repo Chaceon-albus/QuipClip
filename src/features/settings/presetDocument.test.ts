@@ -28,6 +28,7 @@ function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
     audioBitrate: 320,
     audioSampleRate: "source",
     audioChannels: "source",
+    audioGainTenthsDb: 0,
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -51,7 +52,7 @@ const TEST_REVISION = 7;
 
 function createSettings(overrides: Partial<Settings> = {}): Settings {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: TEST_REVISION,
     presets: [],
     ...overrides,
@@ -86,6 +87,7 @@ describe("createPresetDraft", () => {
       audioBitrate: 320,
       audioSampleRate: "source",
       audioChannels: "source",
+      audioGainTenthsDb: 0,
       quality: { kind: "crf", value: 20 },
       resolution: "source",
       frameRate: "source",
@@ -464,10 +466,10 @@ describe("schemaVersion", () => {
       activePresetId: "a",
     });
 
-    expect(addPreset(settings, createPreset("b")).schemaVersion).toBe(2);
-    expect(updatePreset(settings, createPreset("a")).schemaVersion).toBe(2);
-    expect(deletePreset(settings, "a").schemaVersion).toBe(2);
-    expect(setActivePreset(settings, null).schemaVersion).toBe(2);
+    expect(addPreset(settings, createPreset("b")).schemaVersion).toBe(3);
+    expect(updatePreset(settings, createPreset("a")).schemaVersion).toBe(3);
+    expect(deletePreset(settings, "a").schemaVersion).toBe(3);
+    expect(setActivePreset(settings, null).schemaVersion).toBe(3);
   });
 });
 

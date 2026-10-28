@@ -69,6 +69,18 @@ export const MIN_AUDIO_SAMPLE_RATE = 8000;
 export const MAX_AUDIO_SAMPLE_RATE = 192000;
 
 /**
+ * Minimum audio gain in tenths of a decibel: -20.0 dB (ADR 054).
+ * Authoritative source: src-tauri/src/settings/mod.rs (MIN_AUDIO_GAIN_TENTHS_DB).
+ */
+export const MIN_AUDIO_GAIN_TENTHS_DB = -200;
+
+/**
+ * Maximum audio gain in tenths of a decibel: +20.0 dB (ADR 054).
+ * Authoritative source: src-tauri/src/settings/mod.rs (MAX_AUDIO_GAIN_TENTHS_DB).
+ */
+export const MAX_AUDIO_GAIN_TENTHS_DB = 200;
+
+/**
  * Regular expression validating encoder name character set and start pattern.
  * Encoder names must start with an alphanumeric character and contain only [0-9A-Za-z_.-].
  * Authoritative source: src-tauri/src/settings/mod.rs (is_valid_encoder_name).
@@ -477,6 +489,7 @@ export type PresetFieldName =
   | "audioEncoder"
   | "audioBitrate"
   | "audioSampleRate"
+  | "audioGainTenthsDb"
   | "quality"
   | "resolution"
   | "frameRate"
@@ -490,6 +503,7 @@ export type PresetFieldIssueCode =
   | "charset"
   | "outOfRange"
   | "notInteger"
+  | "oneDecimal"
   | "positive"
   | "containerMismatch"
   | "pixelFormat"
@@ -569,8 +583,8 @@ function optionListIssue(
 /**
  * Validates the fields of an individual export preset, returning issues in fixed field order.
  *
- * Order: name, videoEncoder, audioEncoder, audioBitrate, audioSampleRate, quality, resolution,
- * frameRate, pixelFormat, videoOptions, audioOptions.
+ * Order: name, videoEncoder, audioEncoder, audioBitrate, audioSampleRate, audioGainTenthsDb,
+ * quality, resolution, frameRate, pixelFormat, videoOptions, audioOptions.
  * Reports at most one issue per field. Returns [] when all fields are valid.
  * Authoritative source: src-tauri/src/settings/mod.rs (validate_settings). Note that the
  * container-audio encoder compatibility rule exists only here (ADR 023); Rust does not repeat
@@ -652,7 +666,27 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
     }
   }
 
-  // 6. quality: not safe integer -> notInteger; outside range -> outOfRange
+  // 6. audioGainTenthsDb: not an integer -> oneDecimal (the editor shows decibels, and a
+  // value with more than one decimal place is the fraction it stores); outside bounds ->
+  // outOfRange, with the bounds in decibels. The bounds lie inside the safe integer range, so a
+  // whole number too large for it is out of range, not a decimal problem.
+  if (!Number.isInteger(preset.audioGainTenthsDb)) {
+    issues.push({ field: "audioGainTenthsDb", code: "oneDecimal" });
+  } else if (
+    preset.audioGainTenthsDb < MIN_AUDIO_GAIN_TENTHS_DB ||
+    preset.audioGainTenthsDb > MAX_AUDIO_GAIN_TENTHS_DB
+  ) {
+    issues.push({
+      field: "audioGainTenthsDb",
+      code: "outOfRange",
+      values: {
+        min: MIN_AUDIO_GAIN_TENTHS_DB / 10,
+        max: MAX_AUDIO_GAIN_TENTHS_DB / 10,
+      },
+    });
+  }
+
+  // 7. quality: not safe integer -> notInteger; outside range -> outOfRange
   if (!Number.isSafeInteger(preset.quality.value)) {
     issues.push({ field: "quality", code: "notInteger" });
   } else {
@@ -670,7 +704,7 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
     }
   }
 
-  // 7. resolution: skip "source"; { w, h }: not safe integer -> notInteger; outside bounds -> outOfRange
+  // 8. resolution: skip "source"; { w, h }: not safe integer -> notInteger; outside bounds -> outOfRange
   if (preset.resolution !== "source") {
     if (
       !Number.isSafeInteger(preset.resolution.w) ||
@@ -694,7 +728,7 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
     }
   }
 
-  // 8. frameRate: skip "source"; { n, d }: not safe integer -> notInteger; n <= 0 || d <= 0 -> positive
+  // 9. frameRate: skip "source"; { n, d }: not safe integer -> notInteger; n <= 0 || d <= 0 -> positive
   if (preset.frameRate !== "source") {
     if (
       !Number.isSafeInteger(preset.frameRate.n) ||
@@ -706,7 +740,7 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
     }
   }
 
-  // 9. pixelFormat: blank -> required; outside PIXEL_FORMAT_PATTERN -> pixelFormat
+  // 10. pixelFormat: blank -> required; outside PIXEL_FORMAT_PATTERN -> pixelFormat
   if (preset.pixelFormat.trim().length === 0) {
     issues.push({ field: "pixelFormat", code: "required" });
   } else if (!isValidPixelFormat(preset.pixelFormat)) {
@@ -717,7 +751,7 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
     });
   }
 
-  // 10, 11. videoOptions and audioOptions: the first issue of each list; then the byte limit
+  // 11, 12. videoOptions and audioOptions: the first issue of each list; then the byte limit
   // of both lists together, on the list that passes it, unless that list has an issue already.
   const videoIssue = optionListIssue("videoOptions", preset.videoOptions);
   const audioIssue = optionListIssue("audioOptions", preset.audioOptions);

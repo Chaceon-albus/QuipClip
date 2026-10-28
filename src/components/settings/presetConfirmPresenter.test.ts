@@ -33,6 +33,7 @@ function createPreset(id: string, name: string): Preset {
     audioBitrate: 320,
     audioSampleRate: "source",
     audioChannels: "source",
+    audioGainTenthsDb: 0,
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -110,7 +111,7 @@ describe("presentDeletePresetConfirm", () => {
     for (const active of presets) {
       const view = presentDeletePresetConfirm(presets, active.id, active.id);
       const settings: Settings = {
-        schemaVersion: 2,
+        schemaVersion: 3,
         revision: 0,
         presets,
         activePresetId: active.id,

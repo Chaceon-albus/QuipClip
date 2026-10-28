@@ -9,10 +9,11 @@ import type { Rational, Resolution } from "@/types/project";
 /**
  * The canonical schema version for settings.json.
  *
- * Version 2 adds `pixelFormat`, `videoOptions`, and `audioOptions` to each preset. Rust still
- * reads a version-1 file, and returns it as version 2, so this build never sees version 1.
+ * Version 2 adds `pixelFormat`, `videoOptions`, and `audioOptions` to each preset. Version 3
+ * adds `audioGainTenthsDb` (ADR 054). Rust still reads a version-1 or a version-2 file, and
+ * returns it as version 3, so this build never sees an earlier version.
  */
-export const SETTINGS_SCHEMA_VERSION = 2;
+export const SETTINGS_SCHEMA_VERSION = 3;
 
 /**
  * Output container formats supported by export presets.
@@ -114,6 +115,11 @@ export type Preset = {
    * Target audio channel layout setting: "source", "stereo", or "mono".
    */
   audioChannels: PresetAudioChannels;
+  /**
+   * The gain the export applies to the joined audio, in TENTHS OF A DECIBEL: -10 is -1.0 dB.
+   * An integer from -200 to 200. 0 adds no filter (ADR 054).
+   */
+  audioGainTenthsDb: number;
   quality: PresetQuality;
   resolution: PresetResolution;
   frameRate: PresetFrameRate;
@@ -132,12 +138,12 @@ export type Preset = {
 };
 
 /**
- * Application settings document stored at `<app_data>/settings.json` (schema version 2).
+ * Application settings document stored at `<app_data>/settings.json` (schema version 3).
  *
  * `ffmpegPath` and `activePresetId` are absent when unset, never null.
  */
 export type Settings = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   /**
    * The compare-and-swap token Rust uses to refuse a save built on a document another
    * window or another copy of QuipClip has already replaced (ADR 013).

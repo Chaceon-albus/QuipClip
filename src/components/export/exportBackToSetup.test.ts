@@ -436,7 +436,7 @@ function startGuardedOpenStep(revision: Partial<MediaSourceRevisionDescriptor>) 
         answer = resolve;
       }),
   );
-  const settings: Settings = { schemaVersion: 2, revision: 1, presets: [] };
+  const settings: Settings = { schemaVersion: 3, revision: 1, presets: [] };
 
   const step = runExportFlow({
     ...guardOpenStepEffects(isCurrent, { setModalOpen, reportError }),

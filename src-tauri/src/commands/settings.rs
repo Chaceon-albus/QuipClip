@@ -398,6 +398,10 @@ fn map_validation_error(error: SettingsValidationError) -> SettingsCommandError 
             field: Some(format!("presets[{index}].audioSampleRate")),
             ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
         },
+        SettingsValidationError::AudioGainOutOfRange { index, .. } => SettingsCommandError {
+            field: Some(format!("presets[{index}].audioGainTenthsDb")),
+            ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
+        },
         SettingsValidationError::QualityOutOfRange { index, .. } => SettingsCommandError {
             field: Some(format!("presets[{index}].quality.value")),
             ..SettingsCommandError::new(SettingsCommandErrorCode::InvalidSettings)
@@ -483,6 +487,7 @@ mod tests {
             audio_bitrate: None,
             audio_sample_rate: settings::AudioSampleRateSetting::Fixed(48_000),
             audio_channels: settings::AudioChannels::Stereo,
+            audio_gain_tenths_db: 0,
             quality: settings::Quality {
                 kind: settings::QualityKind::Crf,
                 value: 20,
@@ -636,6 +641,17 @@ mod tests {
         );
         assert_eq!(audio_sample_rate.value, None);
 
+        let audio_gain = map_validation_error(SettingsValidationError::AudioGainOutOfRange {
+            index: 4,
+            value: 201,
+        });
+        assert_eq!(audio_gain.code, SettingsCommandErrorCode::InvalidSettings);
+        assert_eq!(
+            audio_gain.field.as_deref(),
+            Some("presets[4].audioGainTenthsDb")
+        );
+        assert_eq!(audio_gain.value, None);
+
         let encoder = map_validation_error(SettingsValidationError::InvalidEncoderName {
             index: 0,
             field: settings::PresetField::VideoEncoder,
@@ -742,8 +758,8 @@ mod tests {
 
     #[test]
     fn save_refuses_an_out_of_range_audio_value_with_its_field_path_on_the_wire() {
-        // The ADR 023 audio ranges, end to end: the frontend matches `code` and `field` in this
-        // exact serialized form, and the file on disk stays as it was.
+        // The ADR 023 and ADR 054 audio ranges, end to end: the frontend matches `code` and
+        // `field` in this exact serialized form, and the file on disk stays as it was.
         let directory = TestDirectory::new();
         let valid = sample_settings(vec![sample_preset("preset-0"), sample_preset("preset-1")]);
         settings::save(&directory.path, &valid).unwrap();
@@ -758,13 +774,22 @@ mod tests {
             serde_json::json!({"code": "invalidSettings", "field": "presets[1].audioBitrate"})
         );
 
-        let mut bad_rate = valid;
+        let mut bad_rate = valid.clone();
         bad_rate.presets[1].audio_sample_rate =
             settings::AudioSampleRateSetting::Fixed(settings::MIN_AUDIO_SAMPLE_RATE - 1);
         let error = save_settings_with(&directory.path, bad_rate).unwrap_err();
         assert_eq!(
             serde_json::to_value(&error).unwrap(),
             serde_json::json!({"code": "invalidSettings", "field": "presets[1].audioSampleRate"})
+        );
+
+        // The gain of ADR 054.
+        let mut bad_gain = valid;
+        bad_gain.presets[1].audio_gain_tenths_db = settings::MAX_AUDIO_GAIN_TENTHS_DB + 1;
+        let error = save_settings_with(&directory.path, bad_gain).unwrap_err();
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            serde_json::json!({"code": "invalidSettings", "field": "presets[1].audioGainTenthsDb"})
         );
 
         assert_eq!(fs::read(&path).unwrap(), before);

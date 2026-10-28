@@ -266,8 +266,9 @@ export function validatePresetTestedPayload(
  *
  * The fields that reach it are the fields `build_test_arguments` reads in Rust: the container,
  * the two encoders, the audio bitrate, the sample rate and the channels, the quality, the pixel
- * format, and the two option lists. The id, the name, the resolution and the frame rate do not,
- * so two presets that differ only in those share a result, as they share a cache entry in Rust.
+ * format, and the two option lists. The id, the name, the audio gain, the resolution and the
+ * frame rate do not, so two presets that differ only in those share a result, as they share a
+ * cache entry in Rust.
  *
  * The type names every field of `Preset`, the optional ones included, so a new field fails the
  * type check until it gets a decision here, and the decision must follow the Rust command.
@@ -283,6 +284,8 @@ const TEST_FIELDS: {
   audioBitrate: (preset) => preset.audioBitrate ?? null,
   audioSampleRate: (preset) => preset.audioSampleRate,
   audioChannels: (preset) => preset.audioChannels,
+  // The test command does not apply the gain yet.
+  audioGainTenthsDb: null,
   quality: (preset) => [preset.quality.kind, preset.quality.value],
   resolution: null,
   frameRate: null,

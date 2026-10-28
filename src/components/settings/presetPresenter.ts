@@ -17,8 +17,10 @@ import type {
   OptionSyntaxNote,
 } from "@/features/settings/ffmpegOptionSyntax";
 import {
+  MAX_AUDIO_GAIN_TENTHS_DB,
   MAX_PRESETS,
   MAX_RESOLUTION_DIMENSION,
+  MIN_AUDIO_GAIN_TENTHS_DB,
   MIN_RESOLUTION_DIMENSION,
   QUALITY_RANGES,
   validatePresetFields,
@@ -89,6 +91,9 @@ export function presentPresetIssue(issue: PresetFieldIssue): MessageView {
       break;
     case "notInteger":
       key = "settings.field.notInteger";
+      break;
+    case "oneDecimal":
+      key = "settings.field.oneDecimal";
       break;
     case "positive":
       key = "settings.field.positive";
@@ -168,6 +173,7 @@ const ISSUE_TARGETS: Record<PresetIssueTarget, true> = {
   audioEncoder: true,
   audioBitrate: true,
   audioSampleRate: true,
+  audioGainTenthsDb: true,
   quality: true,
   resolution: true,
   frameRate: true,
@@ -213,6 +219,7 @@ export function groupIssuesByField(
     audioEncoder: [],
     audioBitrate: [],
     audioSampleRate: [],
+    audioGainTenthsDb: [],
     quality: [],
     resolution: [],
     frameRate: [],
@@ -712,6 +719,42 @@ export function presentPresetRowSummary(
  */
 export function presentNumericField(value: number): string {
   return Number.isNaN(value) ? "" : String(value);
+}
+
+/**
+ * Renders the audio gain of a draft, in tenths of a decibel, as the value of the decibel
+ * `<input type="number">`: the number of decibels, or an empty string for `NaN`.
+ *
+ * The value is a number, not a string, on purpose. React compares the value it is given with
+ * the text of a number input as numbers, so the text "-1.0" or "-0" that the user is typing
+ * equals the value -1 or -0 and stays as it is. A string "-1" or "0" would replace it. Text that
+ * is not yet a number, such as "-" or "1.", reads as an empty value, which equals the `NaN` that
+ * the controller stores for it, so that text stays too.
+ */
+export function presentAudioGainField(tenthsDb: number): number | "" {
+  return Number.isNaN(tenthsDb) ? "" : tenthsDb / 10;
+}
+
+/** The audio gain input: its number attributes, in decibels, and the hint under it. */
+export type AudioGainInputView = NumberInputView & {
+  hintKey: string;
+};
+
+/**
+ * Presents the audio gain input (ADR 054). The range and the step are in decibels. A positive
+ * gain can push a peak above full scale, so its hint warns of clipping.
+ */
+export function presentAudioGainInput(tenthsDb: number): AudioGainInputView {
+  return {
+    min: MIN_AUDIO_GAIN_TENTHS_DB / 10,
+    max: MAX_AUDIO_GAIN_TENTHS_DB / 10,
+    step: 0.1,
+    unitKey: "settings.preset.unitDecibels",
+    hintKey:
+      tenthsDb > 0
+        ? "settings.preset.audioGainBoostHint"
+        : "settings.preset.audioGainHint",
+  };
 }
 
 /** View model for one entry in an audio bitrate `<Select>`. */

@@ -43,10 +43,10 @@ function readRustQualityKinds(): string[] {
 
 describe("Settings Types & Wire Constants", () => {
   describe("Schema Version", () => {
-    it("pins the schema version to 2, the version Rust writes", () => {
-      expect(SETTINGS_SCHEMA_VERSION).toBe(2);
+    it("pins the schema version to 3, the version Rust writes", () => {
+      expect(SETTINGS_SCHEMA_VERSION).toBe(3);
       expect(readRustSettingsSource()).toContain(
-        "pub const CURRENT_SCHEMA_VERSION: u32 = 2;",
+        "pub const CURRENT_SCHEMA_VERSION: u32 = 3;",
       );
     });
   });

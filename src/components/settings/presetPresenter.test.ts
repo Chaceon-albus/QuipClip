@@ -27,6 +27,8 @@ import {
   presentAudioBitrateSelect,
   presentAudioBitrateValue,
   presentAudioChannelsSelect,
+  presentAudioGainField,
+  presentAudioGainInput,
   presentAudioSampleRateSelect,
   presentAudioSampleRateValue,
   presentContainer,
@@ -109,6 +111,7 @@ describe("presetPresenter", () => {
       audioBitrate: 320,
       audioSampleRate: "source",
       audioChannels: "source",
+      audioGainTenthsDb: 0,
       quality: { kind: "crf", value: 20 },
       resolution: "source",
       frameRate: "source",
@@ -214,6 +217,7 @@ describe("presetPresenter", () => {
       audioBitrate: 320,
       audioSampleRate: "source",
       audioChannels: "source",
+      audioGainTenthsDb: 0,
       quality: { kind: "crf", value: 20 },
       resolution: "source",
       frameRate: "source",
@@ -229,6 +233,7 @@ describe("presetPresenter", () => {
       audioEncoder: [],
       audioBitrate: [],
       audioSampleRate: [],
+      audioGainTenthsDb: [],
       quality: [],
       resolution: [],
       frameRate: [],
@@ -537,6 +542,7 @@ describe("presetPresenter", () => {
       audioEncoder: "aac",
       audioSampleRate: "source",
       audioChannels: "source",
+      audioGainTenthsDb: 0,
       quality: { kind: "crf", value: 20 },
       resolution: { w: 1280, h: 720 },
       frameRate: "source",
@@ -596,6 +602,7 @@ describe("presetPresenter", () => {
       audioEncoder: "aac",
       audioSampleRate: "source",
       audioChannels: "source",
+      audioGainTenthsDb: 0,
       quality: { kind: "crf", value: 20 },
       resolution: "source",
       frameRate: { n: 30000, d: 1001 },
@@ -1208,6 +1215,7 @@ describe("presetPresenter", () => {
         audioBitrate: 320,
         audioSampleRate: "source",
         audioChannels: "source",
+        audioGainTenthsDb: 0,
         quality: { kind: "crf", value: 20 },
         resolution: "source",
         frameRate: "source",
@@ -1706,6 +1714,77 @@ describe("presetPresenter", () => {
         ...FRAME_RATE_CHOICES.map((choice) => choice.value),
         OUTPUT_CUSTOM_VALUE,
       ]);
+    });
+  });
+
+  describe("presentAudioGainField", () => {
+    it("renders NaN as an empty string", () => {
+      expect(presentAudioGainField(Number.NaN)).toBe("");
+    });
+
+    it("renders the tenths of a decibel as a number of decibels", () => {
+      expect(presentAudioGainField(0)).toBe(0);
+      expect(presentAudioGainField(-10)).toBe(-1);
+      expect(presentAudioGainField(-15)).toBe(-1.5);
+      expect(presentAudioGainField(200)).toBe(20);
+      // A fraction of a tenth is shown as the user typed it, so the field keeps the text.
+      expect(presentAudioGainField(-12.5)).toBe(-1.25);
+    });
+
+    it("keeps the sign of a negative zero, so the text -0 stays while the user types", () => {
+      expect(Object.is(presentAudioGainField(-0), -0)).toBe(true);
+    });
+  });
+
+  describe("presentAudioGainInput", () => {
+    it("gives the range and the step in decibels, the dB unit, and the plain hint", () => {
+      for (const gain of [-200, -10, 0, Number.NaN]) {
+        expect(presentAudioGainInput(gain)).toEqual({
+          min: -20,
+          max: 20,
+          step: 0.1,
+          unitKey: "settings.preset.unitDecibels",
+          hintKey: "settings.preset.audioGainHint",
+        });
+      }
+    });
+
+    it("warns of clipping for a positive gain", () => {
+      expect(presentAudioGainInput(1).hintKey).toBe(
+        "settings.preset.audioGainBoostHint",
+      );
+      expect(presentAudioGainInput(200).hintKey).toBe(
+        "settings.preset.audioGainBoostHint",
+      );
+    });
+
+    it("names keys that both catalogs hold", () => {
+      for (const key of [
+        "settings.preset.audioGainLabel",
+        "settings.preset.audioGainHint",
+        "settings.preset.audioGainBoostHint",
+        "settings.preset.unitDecibels",
+        presentPresetIssue({ field: "audioGainTenthsDb", code: "oneDecimal" }).key,
+      ]) {
+        for (const catalog of [en, zhCN]) {
+          const value = key
+            .split(".")
+            .reduce<unknown>(
+              (node, part) =>
+                node !== null && typeof node === "object"
+                  ? (node as Record<string, unknown>)[part]
+                  : undefined,
+              catalog,
+            );
+          expect(typeof value, key).toBe("string");
+        }
+      }
+    });
+
+    it("presents oneDecimal with its own message", () => {
+      expect(
+        presentPresetIssue({ field: "audioGainTenthsDb", code: "oneDecimal" }),
+      ).toStrictEqual({ key: "settings.field.oneDecimal" });
     });
   });
 

@@ -24,12 +24,14 @@ import {
   presetOptionBytes,
   renderedOptionBytes,
   MAX_AUDIO_BITRATE_KBPS,
+  MAX_AUDIO_GAIN_TENTHS_DB,
   MAX_AUDIO_SAMPLE_RATE,
   MAX_ENCODER_NAME_CHARS,
   MAX_PRESET_NAME_CHARS,
   MAX_PRESETS,
   MAX_RESOLUTION_DIMENSION,
   MIN_AUDIO_BITRATE_KBPS,
+  MIN_AUDIO_GAIN_TENTHS_DB,
   MIN_AUDIO_SAMPLE_RATE,
   MIN_ENCODER_NAME_CHARS,
   MIN_RESOLUTION_DIMENSION,
@@ -58,10 +60,13 @@ function readRustDeniedOptionNames(): string[] {
   return Array.from(names, (match) => match[1]);
 }
 
-/** Reads the value of a `pub const <name>: usize = <value>;` or `u32` out of the Rust source. */
+/**
+ * Reads the value of a `pub const <name>: usize = <value>;`, `u32` or `i32` out of the Rust
+ * source.
+ */
 function readRustNumber(name: string): number {
   const declaration = new RegExp(
-    `\\npub const ${name}: (?:usize|u32) = ([0-9_]+);\\n`,
+    `\\npub const ${name}: (?:usize|u32|i32) = (-?[0-9_]+);\\n`,
   ).exec(RUST_SETTINGS_SOURCE);
   expect(declaration).not.toBeNull();
   return Number(declaration![1].replaceAll("_", ""));
@@ -81,6 +86,7 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
     audioBitrate: 320,
     audioSampleRate: "source",
     audioChannels: "source",
+    audioGainTenthsDb: 0,
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -104,6 +110,8 @@ describe("limits", () => {
       expect(MAX_AUDIO_BITRATE_KBPS).toBe(1536);
       expect(MIN_AUDIO_SAMPLE_RATE).toBe(8000);
       expect(MAX_AUDIO_SAMPLE_RATE).toBe(192000);
+      expect(MIN_AUDIO_GAIN_TENTHS_DB).toBe(-200);
+      expect(MAX_AUDIO_GAIN_TENTHS_DB).toBe(200);
       expect(ENCODER_NAME_PATTERN.source).toBe("^[0-9A-Za-z][0-9A-Za-z_.-]*$");
       expect(QUALITY_RANGES).toEqual({
         crf: { min: 0, max: 63 },
@@ -119,6 +127,11 @@ describe("limits", () => {
       expect(MAX_OPTION_VALUE_CHARS).toBe(512);
       expect(MAX_PRESET_OPTION_BYTES).toBe(1024);
       expect(OPTION_NAME_PATTERN.source).toBe("^[A-Za-z][A-Za-z0-9_.-]{0,63}$");
+    });
+
+    it("holds the same schema-3 gain bounds as the Rust settings module", () => {
+      expect(readRustNumber("MIN_AUDIO_GAIN_TENTHS_DB")).toBe(MIN_AUDIO_GAIN_TENTHS_DB);
+      expect(readRustNumber("MAX_AUDIO_GAIN_TENTHS_DB")).toBe(MAX_AUDIO_GAIN_TENTHS_DB);
     });
 
     it("holds the same schema-2 bounds as the Rust settings module", () => {
@@ -680,6 +693,48 @@ describe("limits", () => {
     });
   });
 
+  describe("audioGainTenthsDb validation", () => {
+    it("passes the bounds and the values between them", () => {
+      for (const gain of [-200, -15, -10, 0, 5, 200]) {
+        expect(validatePresetFields(createPreset({ audioGainTenthsDb: gain }))).toEqual(
+          [],
+        );
+      }
+    });
+
+    it("fails a value outside the bounds with the bounds in decibels", () => {
+      for (const gain of [-201, 201]) {
+        expect(validatePresetFields(createPreset({ audioGainTenthsDb: gain }))).toEqual(
+          [
+            {
+              field: "audioGainTenthsDb",
+              code: "outOfRange",
+              values: { min: -20, max: 20 },
+            },
+          ],
+        );
+      }
+    });
+
+    it("fails a whole number beyond the safe integer range as out of range", () => {
+      expect(validatePresetFields(createPreset({ audioGainTenthsDb: 1e17 }))).toEqual([
+        {
+          field: "audioGainTenthsDb",
+          code: "outOfRange",
+          values: { min: -20, max: 20 },
+        },
+      ]);
+    });
+
+    it("fails a fraction of a tenth, NaN and infinity with oneDecimal", () => {
+      for (const gain of [-12.5, Number.NaN, Number.NEGATIVE_INFINITY]) {
+        expect(validatePresetFields(createPreset({ audioGainTenthsDb: gain }))).toEqual(
+          [{ field: "audioGainTenthsDb", code: "oneDecimal" }],
+        );
+      }
+    });
+  });
+
   describe("quality validation", () => {
     it("validates crf: 0 passes, 63 passes, 64 fails, -1 fails", () => {
       expect(
@@ -885,6 +940,7 @@ describe("limits", () => {
         audioBitrate: 0,
         audioSampleRate: 5000,
         audioChannels: "source",
+        audioGainTenthsDb: 0,
         quality: { kind: "crf", value: 99 },
         resolution: { w: 0, h: 0 },
         frameRate: { n: 0, d: 1 },
@@ -933,6 +989,7 @@ describe("limits", () => {
         audioBitrate: 0,
         audioSampleRate: 5000,
         audioChannels: "source",
+        audioGainTenthsDb: 0,
         quality: { kind: "crf", value: 20.5 },
         resolution: { w: 0, h: 1080 },
         frameRate: { n: 0, d: 1 },

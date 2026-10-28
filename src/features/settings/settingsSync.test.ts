@@ -8,7 +8,7 @@ import type { Settings } from "./types";
 
 function createSettings(overrides: Partial<Settings> = {}): Settings {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: 4,
     presets: [
       {
@@ -20,6 +20,7 @@ function createSettings(overrides: Partial<Settings> = {}): Settings {
         audioBitrate: 320,
         audioSampleRate: "source",
         audioChannels: "source",
+        audioGainTenthsDb: 0,
         quality: { kind: "crf", value: 20 },
         resolution: "source",
         frameRate: "source",
@@ -79,7 +80,7 @@ describe("validateSettingsChangedPayload", () => {
     ).toBeNull();
     expect(
       validateSettingsChangedPayload({
-        settings: { ...settings, schemaVersion: 3 },
+        settings: { ...settings, schemaVersion: 4 },
         origin: "main",
       }),
     ).toBeNull();

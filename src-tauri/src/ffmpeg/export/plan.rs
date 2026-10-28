@@ -1395,6 +1395,7 @@ mod tests {
             audio_bitrate: None,
             audio_sample_rate: AudioSampleRateSetting::Fixed(48_000),
             audio_channels: AudioChannels::Stereo,
+            audio_gain_tenths_db: 0,
             quality: Quality {
                 kind: QualityKind::Crf,
                 value: 20,

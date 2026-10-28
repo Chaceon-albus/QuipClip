@@ -306,6 +306,7 @@ describe("importOptionsText", () => {
         audioBitrate: 192,
         audioSampleRate: 44100,
         audioChannels: "mono",
+        audioGainTenthsDb: 0,
         pixelFormat: "yuv420p10le",
         quality: { kind: "crf", value: 26 },
         videoOptions: [],
@@ -317,6 +318,7 @@ describe("importOptionsText", () => {
         quality: { kind: "crf", value: 18 },
         audioSampleRate: 48000,
         audioChannels: "stereo",
+        audioGainTenthsDb: 0,
         pixelFormat: "nv12",
       });
     });

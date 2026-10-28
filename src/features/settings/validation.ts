@@ -195,6 +195,7 @@ export function isPreset(value: unknown): value is Preset {
     (p.audioBitrate === undefined || isNonNegativeU32(p.audioBitrate)) &&
     isPresetAudioSampleRate(p.audioSampleRate) &&
     isPresetAudioChannels(p.audioChannels) &&
+    Number.isSafeInteger(p.audioGainTenthsDb) &&
     isPresetQuality(p.quality) &&
     isPresetResolution(p.resolution) &&
     isPresetFrameRate(p.frameRate) &&

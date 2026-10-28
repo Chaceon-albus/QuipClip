@@ -2,9 +2,10 @@
 //!
 //! ADR 013 defines the on-disk shape: `<app_data>/settings.json`, holding an optional ffmpeg
 //! path, a list of export presets, and an optional active preset id. This build writes schema
-//! version 2 and still reads version 1, the version of the first release; see
-//! [`CURRENT_SCHEMA_VERSION`]. The top of this module holds the pure parts of that decision --
-//! the serde types and [`validate_settings`] -- with no file I/O. The bottom half holds
+//! version 3. It still reads version 1, the version of the first release, and version 2, the
+//! version of v0.1.1; see [`CURRENT_SCHEMA_VERSION`]. The top of this module holds the pure
+//! parts of that decision -- the serde types and [`validate_settings`] -- with no file I/O. The
+//! bottom half holds
 //! loading, saving, seeding, restore, reset, the permissive ffmpeg-path accessor, and the
 //! read/write lock that coordinates them.
 
@@ -28,7 +29,10 @@ use std::sync::{Mutex, PoisonError};
 /// version 1 (ADR 023), and its `Preset` refuses an unknown key. A document with the new keys
 /// therefore needs a new version, so that v0.1.0 reports a newer file, writes nothing, and the
 /// document survives a downgrade (ADR 013).
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+///
+/// Version 3 adds [`Preset::audio_gain_tenths_db`] (ADR 054). v0.1.1 writes version 2, and its
+/// `Preset` also refuses an unknown key, so the new key needs a new version for the same reason.
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// The settings schema of the first release, which [`load`] still reads.
 ///
@@ -36,8 +40,16 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// keeps the export of version 1: no encoder options, and the `yuv420p` that the graph wrote
 /// as a constant before [`Preset::pixel_format`] existed. The command line of such a preset
 /// gains `-pix_fmt yuv420p` only, which names the format the graph already ends in. [`load`]
-/// then holds the document as version 2, and the next save writes version 2.
+/// then holds the document at [`CURRENT_SCHEMA_VERSION`], and the next save writes that
+/// version.
 pub const FIRST_RELEASE_SCHEMA_VERSION: u32 = 1;
+
+/// The settings schema of the second release, v0.1.1, which [`load`] still reads.
+///
+/// A version-2 preset holds no [`Preset::audio_gain_tenths_db`] key. The key reads as 0, and a
+/// gain of 0 adds no filter, so the export of such a preset does not change. [`load`] then holds
+/// the document at [`CURRENT_SCHEMA_VERSION`], and the next save writes that version.
+pub const SECOND_RELEASE_SCHEMA_VERSION: u32 = 2;
 
 /// The largest number of presets [`validate_settings`] accepts.
 pub const MAX_PRESETS: usize = 100;
@@ -67,6 +79,14 @@ pub const MIN_AUDIO_SAMPLE_RATE: u32 = 8_000;
 /// The largest [`AudioSampleRateSetting::Fixed`] rate, in hertz, [`validate_settings`]
 /// accepts; see ADR 023.
 pub const MAX_AUDIO_SAMPLE_RATE: u32 = 192_000;
+
+/// The smallest [`Preset::audio_gain_tenths_db`], in tenths of a decibel, [`validate_settings`]
+/// accepts: -20.0 dB; see ADR 054.
+pub const MIN_AUDIO_GAIN_TENTHS_DB: i32 = -200;
+
+/// The largest [`Preset::audio_gain_tenths_db`], in tenths of a decibel, [`validate_settings`]
+/// accepts: +20.0 dB; see ADR 054.
+pub const MAX_AUDIO_GAIN_TENTHS_DB: i32 = 200;
 
 /// The output sample rate a preset takes when its document holds no `audioSampleRate` key.
 ///
@@ -390,7 +410,8 @@ const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 pub struct Settings {
     /// The schema version this document claims. Must equal [`CURRENT_SCHEMA_VERSION`] to
     /// pass [`validate_settings`]. [`load`] reads a document at
-    /// [`FIRST_RELEASE_SCHEMA_VERSION`] and returns it at the current version.
+    /// [`FIRST_RELEASE_SCHEMA_VERSION`] or [`SECOND_RELEASE_SCHEMA_VERSION`] and returns it at
+    /// the current version.
     pub schema_version: u32,
     /// The compare-and-swap token [`save`] uses to refuse a save built on a document another
     /// process has already replaced; see ADR 013.
@@ -432,7 +453,7 @@ pub struct Settings {
     pub active_preset_id: Option<String>,
 }
 
-/// One export preset: an identity, a container, two encoder names, three audio output
+/// One export preset: an identity, a container, two encoder names, four audio output
 /// settings, a quality control, three video output settings, and two lists of encoder
 /// options.
 ///
@@ -444,6 +465,9 @@ pub struct Settings {
 /// The pixel format and the two option lists arrived with schema version 2, after the first
 /// release; see [`CURRENT_SCHEMA_VERSION`]. A version-1 document holds none of them, and each
 /// one reads an absent key as the value that keeps the export of version 1.
+///
+/// The audio gain arrived with schema version 3 (ADR 054). A version-1 or version-2 document does
+/// not hold it, and the absent key reads as 0, which keeps the export of those versions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Preset {
@@ -478,6 +502,17 @@ pub struct Preset {
     /// field existed; see [`AudioChannels`]'s `Default`.
     #[serde(default)]
     pub audio_channels: AudioChannels,
+    /// The gain the export applies to the joined audio, in **tenths of a decibel**: `-10` is
+    /// -1.0 dB. Valid range [`MIN_AUDIO_GAIN_TENTHS_DB`]`..=`[`MAX_AUDIO_GAIN_TENTHS_DB`].
+    ///
+    /// An integer, so that the value and the filter text that the renderer makes from it are
+    /// exact (ADR 002 keeps floats out of the documents). 0 adds no filter, and the command line
+    /// stays the same as without this field. An export that copies the source audio (ADR 048)
+    /// applies no gain, as it applies no other audio setting of the preset (ADR 023).
+    ///
+    /// An absent key reads as 0. A save always writes the key.
+    #[serde(default)]
+    pub audio_gain_tenths_db: i32,
     /// The quality control and its value.
     pub quality: Quality,
     /// The output resolution: the source resolution, or an explicit width and height.
@@ -933,6 +968,10 @@ pub enum SettingsValidationError {
         index: usize,
         value: u32,
     },
+    AudioGainOutOfRange {
+        index: usize,
+        value: i32,
+    },
     QualityOutOfRange {
         index: usize,
         kind: QualityKind,
@@ -1033,6 +1072,10 @@ impl fmt::Display for SettingsValidationError {
                 formatter,
                 "presets[{index}].audioSampleRate {value} is out of range {MIN_AUDIO_SAMPLE_RATE}..={MAX_AUDIO_SAMPLE_RATE}"
             ),
+            Self::AudioGainOutOfRange { index, value } => write!(
+                formatter,
+                "presets[{index}].audioGainTenthsDb {value} is out of range {MIN_AUDIO_GAIN_TENTHS_DB}..={MAX_AUDIO_GAIN_TENTHS_DB}"
+            ),
             Self::QualityOutOfRange { index, kind, value } => write!(
                 formatter,
                 "presets[{index}].quality.value {value} is out of range for {kind}"
@@ -1116,7 +1159,7 @@ impl Error for SettingsValidationError {}
 /// and a positive rational denominator -- is already guaranteed by the time a `Settings`
 /// value exists, because deserialization rejects a structurally invalid document before this
 /// function ever runs. This function checks what remains: the schema version, preset id and
-/// name shape, the encoder-name security rule, the audio bitrate and sample rate ranges, the
+/// name shape, the encoder-name security rule, the audio bitrate, sample rate and gain ranges, the
 /// quality and resolution ranges, the safe-integer bounds on a custom frame rate, the pixel
 /// format name, the rules of each encoder option and the limits of the two option lists, and
 /// the two cross-references
@@ -1190,6 +1233,16 @@ pub fn validate_settings(settings: &Settings) -> Result<(), SettingsValidationEr
                     value: rate,
                 });
             }
+        }
+        // The gain bounds are the range ADR 054 sets. They also keep the filter text at most 7
+        // bytes (`-20.0dB`) for the command-line budget of ADR 014.
+        if !(MIN_AUDIO_GAIN_TENTHS_DB..=MAX_AUDIO_GAIN_TENTHS_DB)
+            .contains(&preset.audio_gain_tenths_db)
+        {
+            return Err(SettingsValidationError::AudioGainOutOfRange {
+                index,
+                value: preset.audio_gain_tenths_db,
+            });
         }
 
         if !is_valid_quality(preset.quality) {
@@ -1605,8 +1658,9 @@ pub struct LoadedSettings {
 /// read before the full document deserializes, exactly as `project::load` does, so a document
 /// from a later build is reported by its version rather than as an opaque JSON error.
 ///
-/// A document at [`FIRST_RELEASE_SCHEMA_VERSION`] is returned at [`CURRENT_SCHEMA_VERSION`],
-/// with the defaults of the keys version 2 added. The file stays as it is until a save.
+/// A document at [`FIRST_RELEASE_SCHEMA_VERSION`] or [`SECOND_RELEASE_SCHEMA_VERSION`] is
+/// returned at [`CURRENT_SCHEMA_VERSION`], with the defaults of the keys the later versions
+/// added. The file stays as it is until a save.
 ///
 /// This takes no lock; see [`SETTINGS_LOCK`] for why.
 pub fn load(app_data_directory: &Path) -> Result<LoadedSettings, SettingsFileError> {
@@ -1631,11 +1685,14 @@ pub fn load(app_data_directory: &Path) -> Result<LoadedSettings, SettingsFileErr
     }
 
     let mut settings: Settings = serde_json::from_slice(&bytes)?;
-    // A document of the first release reads as the current version. Its presets have none of
-    // the keys that version 2 added, and the defaults of those keys keep the export of version
-    // 1 (see `FIRST_RELEASE_SCHEMA_VERSION`). Nothing is written here: the next save writes
-    // version 2.
-    if settings.schema_version == FIRST_RELEASE_SCHEMA_VERSION {
+    // A document of an earlier release reads as the current version. Its presets have none of
+    // the keys that the later versions added, and the defaults of those keys keep the export of
+    // its own version (see `FIRST_RELEASE_SCHEMA_VERSION` and `SECOND_RELEASE_SCHEMA_VERSION`).
+    // Nothing is written here: the next save writes the current version.
+    if matches!(
+        settings.schema_version,
+        FIRST_RELEASE_SCHEMA_VERSION | SECOND_RELEASE_SCHEMA_VERSION
+    ) {
         settings.schema_version = CURRENT_SCHEMA_VERSION;
     }
     validate_settings(&settings)?;
@@ -1848,8 +1905,8 @@ pub fn reset(app_data_directory: &Path) -> Result<Settings, SettingsFileError> {
 /// check mirrors [`validate_settings`]'s own [`SettingsValidationError::InvalidFfmpegPath`]
 /// rule, so this permissive probe never reports a path the strict [`load`] would reject.
 ///
-/// Every version up to the current one is read, so a version-1 file that no save has upgraded
-/// yet still gives its path. The key has the same meaning in both versions.
+/// Every version up to the current one is read, so a version-1 or version-2 file that no save
+/// has upgraded yet still gives its path. The key has the same meaning in every version.
 ///
 /// This exists so that ffmpeg discovery survives a damaged preset. Without it, one malformed
 /// preset entry anywhere in `presets` would fail strict deserialization of the whole
@@ -1875,6 +1932,52 @@ pub fn configured_ffmpeg_path(app_data_directory: &Path) -> Option<PathBuf> {
     }
     Some(PathBuf::from(ffmpeg_path))
 }
+
+/// A settings file in the shape v0.1.1 writes: schema version 2, a configured ffmpeg path, a
+/// preset with the id of a seed, and one preset of the user's own with encoder options. Each
+/// preset holds the three version-2 keys and no gain.
+#[cfg(test)]
+pub(crate) const VERSION_2_FIXTURE: &str = r#"{
+  "schemaVersion": 2,
+  "revision": 12,
+  "ffmpegPath": "/usr/local/bin/ffmpeg",
+  "presets": [
+    {
+      "id": "default-h264-mp4",
+      "name": "H.264 MP4",
+      "container": "mp4",
+      "videoEncoder": "libx264",
+      "audioEncoder": "aac",
+      "audioBitrate": 320,
+      "audioSampleRate": "source",
+      "audioChannels": "source",
+      "quality": { "kind": "crf", "value": 20 },
+      "resolution": "source",
+      "frameRate": "source",
+      "pixelFormat": "yuv420p",
+      "videoOptions": [],
+      "audioOptions": []
+    },
+    {
+      "id": "user-hevc-10bit",
+      "name": "HEVC 10-bit",
+      "container": "mkv",
+      "videoEncoder": "libx265",
+      "audioEncoder": "libopus",
+      "audioBitrate": 160,
+      "audioSampleRate": 48000,
+      "audioChannels": "stereo",
+      "quality": { "kind": "crf", "value": 22 },
+      "resolution": "source",
+      "frameRate": "source",
+      "pixelFormat": "yuv420p10le",
+      "videoOptions": [{ "name": "preset", "value": "slow" }],
+      "audioOptions": [{ "name": "application", "value": "audio" }]
+    }
+  ],
+  "activePresetId": "user-hevc-10bit"
+}
+"#;
 
 /// A settings file as the first release, v0.1.0, writes it on macOS: schema version 1, its
 /// three seeds, one preset of the user's own, and a configured ffmpeg path. Tests here and in
@@ -1955,6 +2058,7 @@ mod tests {
             audio_bitrate: None,
             audio_sample_rate: AudioSampleRateSetting::Fixed(48_000),
             audio_channels: AudioChannels::Stereo,
+            audio_gain_tenths_db: 0,
             quality: Quality {
                 kind: QualityKind::Crf,
                 value: 20,
@@ -2017,7 +2121,7 @@ mod tests {
         };
 
         let value = serde_json::to_value(&settings).unwrap();
-        assert_eq!(value["schemaVersion"], serde_json::json!(2));
+        assert_eq!(value["schemaVersion"], serde_json::json!(3));
         assert_eq!(value["revision"], serde_json::json!(7));
         assert_eq!(
             value["presets"][0]["videoEncoder"],
@@ -2494,12 +2598,51 @@ mod tests {
     }
 
     #[test]
+    fn enforces_the_audio_gain_bounds() {
+        for gain in [
+            MIN_AUDIO_GAIN_TENTHS_DB,
+            -10,
+            0,
+            5,
+            MAX_AUDIO_GAIN_TENTHS_DB,
+        ] {
+            let mut preset = sample_preset("preset-1");
+            preset.audio_gain_tenths_db = gain;
+            assert!(
+                validate_settings(&sample_settings(vec![preset])).is_ok(),
+                "rejected {gain}"
+            );
+        }
+
+        for gain in [
+            i32::MIN,
+            MIN_AUDIO_GAIN_TENTHS_DB - 1,
+            MAX_AUDIO_GAIN_TENTHS_DB + 1,
+            i32::MAX,
+        ] {
+            let mut preset = sample_preset("preset-1");
+            preset.audio_gain_tenths_db = gain;
+            let other = sample_preset("preset-0");
+            assert_eq!(
+                validate_settings(&sample_settings(vec![other, preset])),
+                Err(SettingsValidationError::AudioGainOutOfRange {
+                    index: 1,
+                    value: gain
+                })
+            );
+        }
+    }
+
+    #[test]
     fn the_audio_ranges_are_the_ones_adr_023_states() {
         // The frontend holds its own copy of these bounds (ADR 023), so both sides pin them.
         assert_eq!(MIN_AUDIO_BITRATE_KBPS, 8);
         assert_eq!(MAX_AUDIO_BITRATE_KBPS, 1536);
         assert_eq!(MIN_AUDIO_SAMPLE_RATE, 8_000);
         assert_eq!(MAX_AUDIO_SAMPLE_RATE, 192_000);
+        // ADR 054 adds the gain, in tenths of a decibel.
+        assert_eq!(MIN_AUDIO_GAIN_TENTHS_DB, -200);
+        assert_eq!(MAX_AUDIO_GAIN_TENTHS_DB, 200);
     }
 
     #[test]
@@ -2766,18 +2909,19 @@ mod tests {
 
     #[test]
     fn rejects_a_schema_version_other_than_the_current_one() {
-        // Version 1 too: `load` upgrades a version-1 document before it validates, so only a
-        // caller that sends version 1 reaches this check with it, and a save never writes it.
-        for found in [0, 1, 3] {
+        // Versions 1 and 2 too: `load` upgrades such a document before it validates, so only a
+        // caller that sends one of them reaches this check with it, and a save never writes it.
+        for found in [0, 1, 2, 4] {
             let mut settings = sample_settings(vec![]);
             settings.schema_version = found;
             assert_eq!(
                 validate_settings(&settings),
-                Err(SettingsValidationError::SchemaVersion { found, expected: 2 })
+                Err(SettingsValidationError::SchemaVersion { found, expected: 3 })
             );
         }
-        assert_eq!(CURRENT_SCHEMA_VERSION, 2);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 3);
         assert_eq!(FIRST_RELEASE_SCHEMA_VERSION, 1);
+        assert_eq!(SECOND_RELEASE_SCHEMA_VERSION, 2);
     }
 
     #[test]
@@ -2827,6 +2971,38 @@ mod tests {
         assert_eq!(DEFAULT_PIXEL_FORMAT, "yuv420p");
         assert!(preset.video_options.is_empty());
         assert!(preset.audio_options.is_empty());
+    }
+
+    // -- The schema-3 preset field: the audio gain (ADR 054). --
+
+    #[test]
+    fn a_preset_without_the_gain_key_reads_as_no_gain() {
+        let preset: Preset = serde_json::from_value(pre_adr_023_preset_json()).unwrap();
+        assert_eq!(preset.audio_gain_tenths_db, 0);
+    }
+
+    #[test]
+    fn a_saved_preset_always_writes_the_gain() {
+        let mut preset = sample_preset("preset-1");
+        let value = serde_json::to_value(&preset).unwrap();
+        assert_eq!(value["audioGainTenthsDb"], serde_json::json!(0));
+
+        preset.audio_gain_tenths_db = -15;
+        let value = serde_json::to_value(&preset).unwrap();
+        assert_eq!(value["audioGainTenthsDb"], serde_json::json!(-15));
+        assert_eq!(serde_json::from_value::<Preset>(value).unwrap(), preset);
+    }
+
+    #[test]
+    fn the_gain_refuses_a_fraction_and_a_string() {
+        for gain in [serde_json::json!(-1.5), serde_json::json!("-15")] {
+            let mut value = pre_adr_023_preset_json();
+            value["audioGainTenthsDb"] = gain.clone();
+            assert!(
+                serde_json::from_value::<Preset>(value).is_err(),
+                "accepted {gain}"
+            );
+        }
     }
 
     #[test]
@@ -3611,13 +3787,13 @@ mod tests {
         let settings = sample_settings(vec![]);
         let mut value = serde_json::to_value(&settings).unwrap();
 
-        value["schemaVersion"] = serde_json::json!(3);
+        value["schemaVersion"] = serde_json::json!(4);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(matches!(
             load(&directory.path),
             Err(SettingsFileError::FutureSchemaVersion {
-                found: 3,
-                supported: 2
+                found: 4,
+                supported: 3
             })
         ));
 
@@ -3628,7 +3804,7 @@ mod tests {
             Err(SettingsFileError::Validation(
                 SettingsValidationError::SchemaVersion {
                     found: 0,
-                    expected: 2
+                    expected: 3
                 }
             ))
         ));
@@ -3637,7 +3813,7 @@ mod tests {
     // -- The read of a version-1 file. --
 
     #[test]
-    fn a_version_1_file_loads_as_version_2_with_the_defaults_and_writes_nothing() {
+    fn a_version_1_file_loads_as_version_3_with_the_defaults_and_writes_nothing() {
         let directory = TestDirectory::new();
         let path = directory.path.join(SETTINGS_FILE_NAME);
         fs::write(&path, VERSION_1_FIXTURE).unwrap();
@@ -3654,6 +3830,7 @@ mod tests {
             assert_eq!(preset.pixel_format, "yuv420p", "{}", preset.id);
             assert!(preset.video_options.is_empty(), "{}", preset.id);
             assert!(preset.audio_options.is_empty(), "{}", preset.id);
+            assert_eq!(preset.audio_gain_tenths_db, 0, "{}", preset.id);
         }
         // Every version-1 value survives the read as it was.
         let prores = &settings.presets[3];
@@ -3678,23 +3855,24 @@ mod tests {
     }
 
     #[test]
-    fn a_save_over_a_version_1_file_writes_version_2_at_the_next_revision() {
+    fn a_save_over_a_version_1_file_writes_version_3_at_the_next_revision() {
         let directory = TestDirectory::new();
         let path = directory.path.join(SETTINGS_FILE_NAME);
         fs::write(&path, VERSION_1_FIXTURE).unwrap();
 
         let loaded = load(&directory.path).unwrap().settings;
         let saved = save(&directory.path, &loaded).unwrap();
-        assert_eq!(saved.schema_version, 2);
+        assert_eq!(saved.schema_version, 3);
         assert_eq!(saved.revision, 8);
 
         let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(on_disk["schemaVersion"], serde_json::json!(2));
+        assert_eq!(on_disk["schemaVersion"], serde_json::json!(3));
         assert_eq!(on_disk["revision"], serde_json::json!(8));
         for preset in on_disk["presets"].as_array().unwrap() {
             assert_eq!(preset["pixelFormat"], serde_json::json!("yuv420p"));
             assert_eq!(preset["videoOptions"], serde_json::json!([]));
             assert_eq!(preset["audioOptions"], serde_json::json!([]));
+            assert_eq!(preset["audioGainTenthsDb"], serde_json::json!(0));
         }
         assert_eq!(load(&directory.path).unwrap().settings, saved);
 
@@ -3711,7 +3889,7 @@ mod tests {
 
     #[test]
     fn a_save_refuses_a_document_that_claims_version_1() {
-        // The interface sends the document it loaded, which is at version 2. A document that
+        // The interface sends the document it loaded, which is at version 3. A document that
         // still claims version 1 did not come from this build, and the file stays as it was.
         let directory = TestDirectory::new();
         let path = directory.path.join(SETTINGS_FILE_NAME);
@@ -3724,14 +3902,89 @@ mod tests {
             error,
             SettingsFileError::Validation(SettingsValidationError::SchemaVersion {
                 found: 1,
-                expected: 2
+                expected: 3
             })
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), VERSION_1_FIXTURE);
     }
 
+    // -- The read of a version-2 file. --
+
     #[test]
-    fn configured_ffmpeg_path_reads_a_version_1_and_a_version_2_file() {
+    fn a_version_2_file_loads_as_version_3_with_no_gain_and_writes_nothing() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        fs::write(&path, VERSION_2_FIXTURE).unwrap();
+
+        let loaded = load(&directory.path).unwrap();
+        assert!(!loaded.seeded);
+        let settings = loaded.settings;
+        assert_eq!(settings.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(settings.revision, 12);
+        assert_eq!(
+            settings.ffmpeg_path.as_deref(),
+            Some("/usr/local/bin/ffmpeg")
+        );
+        assert_eq!(
+            settings.active_preset_id.as_deref(),
+            Some("user-hevc-10bit")
+        );
+        assert_eq!(settings.presets.len(), 2);
+        for preset in &settings.presets {
+            assert_eq!(preset.audio_gain_tenths_db, 0, "{}", preset.id);
+        }
+        // Every version-2 value survives the read as it was.
+        let hevc = &settings.presets[1];
+        assert_eq!(hevc.pixel_format, "yuv420p10le");
+        assert_eq!(hevc.video_options, vec![option("preset", "slow")]);
+        assert_eq!(hevc.audio_options, vec![option("application", "audio")]);
+        assert_eq!(hevc.audio_bitrate, Some(160));
+
+        // The read wrote nothing.
+        assert_eq!(fs::read_to_string(&path).unwrap(), VERSION_2_FIXTURE);
+        assert_eq!(fs::read_dir(&directory.path).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_save_over_a_version_2_file_writes_version_3_with_the_gain_key() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        fs::write(&path, VERSION_2_FIXTURE).unwrap();
+
+        let loaded = load(&directory.path).unwrap().settings;
+        let saved = save(&directory.path, &loaded).unwrap();
+        assert_eq!(saved.schema_version, 3);
+        assert_eq!(saved.revision, 13);
+
+        let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["schemaVersion"], serde_json::json!(3));
+        for preset in on_disk["presets"].as_array().unwrap() {
+            assert_eq!(preset["audioGainTenthsDb"], serde_json::json!(0));
+        }
+        assert_eq!(load(&directory.path).unwrap().settings, saved);
+    }
+
+    #[test]
+    fn a_save_refuses_a_document_that_claims_version_2() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join(SETTINGS_FILE_NAME);
+        fs::write(&path, VERSION_2_FIXTURE).unwrap();
+        let mut stale = load(&directory.path).unwrap().settings;
+        stale.schema_version = SECOND_RELEASE_SCHEMA_VERSION;
+
+        let error = save(&directory.path, &stale).unwrap_err();
+        assert!(matches!(
+            error,
+            SettingsFileError::Validation(SettingsValidationError::SchemaVersion {
+                found: 2,
+                expected: 3
+            })
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), VERSION_2_FIXTURE);
+    }
+
+    #[test]
+    fn configured_ffmpeg_path_reads_a_file_of_every_version() {
         let directory = TestDirectory::new();
         let path = directory.path.join(SETTINGS_FILE_NAME);
         fs::write(&path, VERSION_1_FIXTURE).unwrap();
@@ -3741,10 +3994,16 @@ mod tests {
         );
 
         let saved = save(&directory.path, &load(&directory.path).unwrap().settings).unwrap();
-        assert_eq!(saved.schema_version, 2);
+        assert_eq!(saved.schema_version, 3);
         assert_eq!(
             configured_ffmpeg_path(&directory.path),
             Some(PathBuf::from("/opt/homebrew/bin"))
+        );
+
+        fs::write(&path, VERSION_2_FIXTURE).unwrap();
+        assert_eq!(
+            configured_ffmpeg_path(&directory.path),
+            Some(PathBuf::from("/usr/local/bin/ffmpeg"))
         );
     }
 
@@ -3779,7 +4038,7 @@ mod tests {
         assert_eq!(configured_ffmpeg_path(&directory.path), None);
 
         let future = serde_json::json!({
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "ffmpegPath": "/opt/homebrew/bin/ffmpeg",
             "presets": [],
         });

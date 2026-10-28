@@ -31,6 +31,7 @@ function createValidPreset(overrides: Partial<Preset> = {}): Preset {
     audioBitrate: 320,
     audioSampleRate: "source",
     audioChannels: "source",
+    audioGainTenthsDb: 0,
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -51,7 +52,7 @@ const TEST_REVISION = 7;
 
 function createValidSettings(overrides: Partial<Settings> = {}): Settings {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: TEST_REVISION,
     ffmpegPath: undefined,
     presets: [createValidPreset()],

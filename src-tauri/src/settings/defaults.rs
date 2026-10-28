@@ -121,6 +121,7 @@ fn seed(
         audio_bitrate: Some(SEED_AUDIO_BITRATE_KBPS),
         audio_sample_rate: AudioSampleRateSetting::Source,
         audio_channels: AudioChannels::Source,
+        audio_gain_tenths_db: 0,
         quality,
         resolution: ResolutionSetting::Source,
         frame_rate: FrameRateSetting::Source,
@@ -942,10 +943,10 @@ mod tests {
         )
         .unwrap();
         let before = load(&directory.path).unwrap().settings;
-        assert_eq!(before.schema_version, 2);
+        assert_eq!(before.schema_version, 3);
 
         let restored = restore_default_presets(&directory.path).unwrap();
-        assert_eq!(restored.schema_version, 2);
+        assert_eq!(restored.schema_version, 3);
         assert_eq!(restored.revision, before.revision + 1);
         assert_eq!(restored.ffmpeg_path, before.ffmpeg_path);
         // Restore keeps the active preset, which is the user's own here.

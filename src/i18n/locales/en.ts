@@ -637,6 +637,10 @@ export const en = {
       audioChannelsLabel: "Channels",
       audioChannelsStereo: "Stereo",
       audioChannelsMono: "Mono",
+      audioGainLabel: "Volume",
+      audioGainHint: "Changes the volume of the exported audio. 0 dB makes no change.",
+      audioGainBoostHint:
+        "A value above 0 dB can raise the peaks above full scale. Then the audio can clip.",
       qualityKindLabel: "Quality Type",
       qualityValueLabel: "Quality Value",
       qualityHintCrf: "Lower is higher quality. The scale depends on the encoder.",
@@ -665,6 +669,7 @@ export const en = {
       optionsLabel: "Extra Parameters",
       unitKbps: "kbps",
       unitPixels: "px",
+      unitDecibels: "dB",
       sourceOption: "Same as Source",
       customOption: "Custom…",
     },
@@ -788,6 +793,7 @@ export const en = {
       outOfRange: "Enter a value from {{min}} to {{max}}.",
       positive: "Enter a whole number above zero.",
       notInteger: "Enter a whole number.",
+      oneDecimal: "Enter a number with no more than one decimal place.",
       containerMismatch:
         "{{container}} cannot hold {{encoder}} audio. Choose MP4 or MKV, or another audio encoder.",
       pixelFormat:

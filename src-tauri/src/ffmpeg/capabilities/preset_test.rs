@@ -761,6 +761,7 @@ mod tests {
             audio_bitrate: Some(96),
             audio_sample_rate: AudioSampleRateSetting::Fixed(44_100),
             audio_channels: AudioChannels::Mono,
+            audio_gain_tenths_db: 0,
             quality: Quality {
                 kind: QualityKind::Bitrate,
                 value: 8000,
@@ -963,6 +964,7 @@ mod tests {
             audio_bitrate: Some(128),
             audio_sample_rate: AudioSampleRateSetting::Fixed(48_000),
             audio_channels: AudioChannels::Stereo,
+            audio_gain_tenths_db: 0,
             quality: Quality {
                 kind: QualityKind::QualityScale,
                 value: 40,

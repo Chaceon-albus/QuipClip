@@ -64,6 +64,7 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
     audioBitrate: 320,
     audioSampleRate: "source",
     audioChannels: "source",
+    audioGainTenthsDb: 0,
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -76,7 +77,7 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
 
 function createSettings(presets: Preset[], activePresetId?: string): Settings {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: 1,
     activePresetId,
     presets,
@@ -372,6 +373,7 @@ describe("exportSetupPresenter", () => {
         audioBitrate: 256,
         audioSampleRate: 48000,
         audioChannels: "stereo",
+        audioGainTenthsDb: 0,
         resolution: { w: 1920, h: 1080 },
         frameRate: { n: 30000, d: 1001 },
       });
@@ -1639,6 +1641,7 @@ describe("the preset test row of the setup step", () => {
       audioEncoder: "aac",
       audioSampleRate: "source",
       audioChannels: "source",
+      audioGainTenthsDb: 0,
       quality: { kind: "crf", value: 20 },
       resolution: "source",
       frameRate: "source",

@@ -41,6 +41,7 @@ function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
     audioBitrate: 320,
     audioSampleRate: "source",
     audioChannels: "source",
+    audioGainTenthsDb: 0,
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -63,7 +64,7 @@ const TEST_REVISION = 7;
 
 function createSettings(overrides: Partial<Settings> = {}): Settings {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: TEST_REVISION,
     presets: [],
     ...overrides,
@@ -951,6 +952,7 @@ describe("PresetLibraryController", () => {
         audioEncoder: "flac",
         audioSampleRate: 48000,
         audioChannels: "stereo",
+        audioGainTenthsDb: 0,
         quality: { kind: "bitrate", value: 8000 },
         resolution: { w: 1280, h: 720 },
         frameRate: { n: 30000, d: 1001 },
@@ -2092,6 +2094,100 @@ describe("PresetLibraryController", () => {
       });
 
       controller.setAudioSampleRate(48000);
+      expect(controller.getView().draft).toBeNull();
+    });
+  });
+
+  describe("updateAudioGain", () => {
+    function controllerWithDraft() {
+      const settings = createSettings({ presets: [createPreset("p1")] });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+      controller.select("p1");
+      return controller;
+    }
+
+    it("stores decibels with at most one decimal place as integer tenths", () => {
+      const controller = controllerWithDraft();
+      for (const [raw, tenths] of [
+        ["-1", -10],
+        ["-1.5", -15],
+        ["-1.1", -11],
+        ["0.3", 3],
+        ["20", 200],
+        ["-20.0", -200],
+        ["0", 0],
+      ] as const) {
+        controller.updateAudioGain(raw);
+        const view = controller.getView();
+        expect(view.draft?.audioGainTenthsDb, raw).toBe(tenths);
+        expect(view.issues, raw).toEqual([]);
+      }
+      expect(controller.getView().dirty).toBe(true);
+    });
+
+    it("stores NaN for blank or non-numeric text, and the draft cannot be saved", () => {
+      const controller = controllerWithDraft();
+      for (const raw of ["", "  ", "abc"]) {
+        controller.updateAudioGain(raw);
+        const view = controller.getView();
+        expect(Number.isNaN(view.draft?.audioGainTenthsDb), raw).toBe(true);
+        expect(view.issues, raw).toEqual([
+          { field: "audioGainTenthsDb", code: "oneDecimal" },
+        ]);
+        expect(view.canSave, raw).toBe(false);
+      }
+    });
+
+    it("keeps a value with more decimal places as a fraction, which reports oneDecimal", () => {
+      const controller = controllerWithDraft();
+      controller.updateAudioGain("-1.25");
+      const view = controller.getView();
+      expect(view.draft?.audioGainTenthsDb).toBe(-12.5);
+      expect(view.issues).toEqual([{ field: "audioGainTenthsDb", code: "oneDecimal" }]);
+
+      // The text decides, so a value very close to a tenth is not rounded to it.
+      controller.updateAudioGain("1.000000000001");
+      expect(controller.getView().issues).toEqual([
+        { field: "audioGainTenthsDb", code: "oneDecimal" },
+      ]);
+    });
+
+    it("accepts trailing zeros after the one decimal place", () => {
+      const controller = controllerWithDraft();
+      for (const [raw, tenths] of [
+        ["1.50", 15],
+        ["-2.000", -20],
+        [".5", 5],
+        ["+3", 30],
+      ] as const) {
+        controller.updateAudioGain(raw);
+        const view = controller.getView();
+        expect(view.draft?.audioGainTenthsDb, raw).toBe(tenths);
+        expect(view.issues, raw).toEqual([]);
+      }
+    });
+
+    it("reports a value outside the range in decibels", () => {
+      const controller = controllerWithDraft();
+      controller.updateAudioGain("20.1");
+      expect(controller.getView().issues).toEqual([
+        {
+          field: "audioGainTenthsDb",
+          code: "outOfRange",
+          values: { min: -20, max: 20 },
+        },
+      ]);
+    });
+
+    it("is a no-op when there is no draft", () => {
+      const controller = createPresetLibraryController({
+        getSettings: () => null,
+        saveSettings: vi.fn(),
+      });
+      controller.updateAudioGain("-1");
       expect(controller.getView().draft).toBeNull();
     });
   });

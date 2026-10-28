@@ -36,6 +36,7 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
     audioBitrate: 320,
     audioSampleRate: "source",
     audioChannels: "source",
+    audioGainTenthsDb: 0,
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -291,6 +292,7 @@ describe("the summary of a copy of the audio", () => {
       audioBitrate: 128,
       audioSampleRate: 44100,
       audioChannels: "mono",
+      audioGainTenthsDb: 0,
       audioOptions: [{ name: "vbr", value: "on" }],
     });
     const audio = presentPresetSummary(preset, formatter, createSource(STEREO), "copy")

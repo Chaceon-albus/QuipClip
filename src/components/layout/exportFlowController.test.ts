@@ -91,6 +91,7 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
     audioBitrate: 320,
     audioSampleRate: "source",
     audioChannels: "source",
+    audioGainTenthsDb: 0,
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -106,7 +107,7 @@ function createPreset(overrides: Partial<Preset> = {}): Preset {
  */
 function createSettings(presets: Preset[], activePresetId?: string): Settings {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: 7,
     activePresetId: activePresetId ?? presets[0]?.id,
     presets,

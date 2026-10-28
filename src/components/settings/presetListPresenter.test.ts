@@ -32,6 +32,7 @@ function createPreset(id: string, overrides: Partial<Preset> = {}): Preset {
     audioBitrate: 320,
     audioSampleRate: "source",
     audioChannels: "source",
+    audioGainTenthsDb: 0,
     quality: { kind: "crf", value: 20 },
     resolution: "source",
     frameRate: "source",
@@ -51,7 +52,7 @@ function viewAfter(
   act: (controller: ReturnType<typeof createPresetLibraryController>) => void = () =>
     undefined,
 ): PresetLibraryView {
-  const settings: Settings = { schemaVersion: 2, revision: 7, presets };
+  const settings: Settings = { schemaVersion: 3, revision: 7, presets };
   const controller = createPresetLibraryController({ getSettings: () => settings });
   act(controller);
   return controller.getView();

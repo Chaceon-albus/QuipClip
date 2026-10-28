@@ -2448,6 +2448,7 @@ mod tests {
             audio_bitrate: None,
             audio_sample_rate: AudioSampleRateSetting::Fixed(48_000),
             audio_channels: AudioChannels::Stereo,
+            audio_gain_tenths_db: 0,
             quality: Quality {
                 kind: QualityKind::Crf,
                 value: 20,
@@ -3729,10 +3730,10 @@ mod tests {
     fn a_version_1_settings_file_prepares_the_command_of_version_1_and_saving_it_keeps_the_command()
     {
         // A user upgrades from the first release, and the settings file is still at schema
-        // version 1. Each preset reads with the defaults of the keys version 2 added: the graph
-        // is the graph of version 1, byte for byte, and the arguments add `-pix_fmt yuv420p`
-        // only, which names the format the graph already ends in. After a save writes version
-        // 2, the same export prepares the same command.
+        // version 1. Each preset reads with the defaults of the keys versions 2 and 3 added: the
+        // graph is the graph of version 1, byte for byte, and the arguments add `-pix_fmt yuv420p`
+        // only, which names the format the graph already ends in. After a save writes the current
+        // version, the same export prepares the same command.
         let directory = TestDirectory::new();
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
@@ -3857,7 +3858,7 @@ mod tests {
             &settings::load(&directory.path).unwrap().settings,
         )
         .unwrap();
-        assert_eq!(upgraded.schema_version, 2);
+        assert_eq!(upgraded.schema_version, 3);
         assert_eq!(command(&prepare()), from_version_1);
     }
 
