@@ -7,21 +7,33 @@
  *    and runs the source disk revision check before opening the modal at the setup step.
  * 2. Start step (`confirm`): validates the chosen preset, opens the native save dialog
  *    with the extension of the output, builds the export request with the stream choice of the
- *    setup step (ADR 036), starts export rendering, and updates activePresetId in settings if
- *    the preset changed.
+ *    setup step (ADR 036), submits the export to the queue (ADR 049), and updates
+ *    activePresetId in settings if the preset changed.
+ *
+ * The steps report a failure that comes before a run, and read and reset its state, through
+ * a target: the export store, or the compose store while another export runs or waits
+ * (`openExportFlow`, ADR 049).
  */
 
 import {
   buildExportRequest,
+  createComposeFlowTarget,
+  exportComposeStore,
   exportOutputExtension,
+  exportQueueStore,
   exportStore,
+  hasPendingExportWork,
   isExportRunLive,
   openExportSaveDialog,
   ExportError,
   type ExportAudioMode,
+  type ExportComposeStore,
   type ExportErrorCode,
+  type ExportFlowTarget,
+  type ExportQueueStore,
+  type ExportQueueSubmitResult,
   type ExportRequest,
-  type ExportSubmission,
+  type ExportStore,
   type ExportStreams,
   type ExportRunLiveState,
   type OpenExportSaveDialogOptions,
@@ -166,20 +178,23 @@ export interface ExportFlowControllerOptions {
   loadSettings?: () => Promise<unknown>;
 
   /**
-   * Provider for the status and the `tracking` field of the export store, read together.
+   * Provider for the status and the `tracking` field of the state of the flow target, read
+   * together. The target is the export store, or the compose store (`openExportFlow`).
    * Defaults to the two fields of `exportStore.getState()`. Together they decide whether the
-   * store holds a live run (`isExportRunLive`). One provider gives both, so a caller cannot
+   * target holds a live run (`isExportRunLive`). One provider gives both, so a caller cannot
    * mix an injected status with the tracking of the production store.
    */
   getExportState?: () => ExportRunLiveState;
 
   /**
-   * Starts media export with the assembled request. Defaults to `exportStore.getState().startExport`.
+   * Submits the assembled request to the export queue (ADR 049). Defaults to
+   * `exportQueueStore.getState().submit`.
    */
-  startExport?: (request: ExportRequest) => Promise<ExportSubmission | null>;
+  submit?: (request: ExportRequest) => Promise<ExportQueueSubmitResult>;
 
   /**
-   * Reports an export error to the store. Defaults to `exportStore.getState().reportError`.
+   * Reports an export error to the state of the flow target: the export store, or the compose
+   * store. Defaults to `exportStore.getState().reportError`.
    */
   reportError?: (error: unknown) => void;
 
@@ -189,7 +204,8 @@ export interface ExportFlowControllerOptions {
   buildRequest?: typeof buildExportRequest;
 
   /**
-   * Resets the export store back to idle state. Defaults to `exportStore.getState().reset`.
+   * Resets the state of the flow target, the export store or the compose store, back to idle.
+   * Defaults to `exportStore.getState().reset`.
    */
   reset?: () => void;
 
@@ -221,9 +237,9 @@ export class ExportFlowController {
   private readonly getSettingsFn: () => Settings | null;
   private readonly loadSettingsFn: () => Promise<unknown>;
   private readonly getExportStateFn: () => ExportRunLiveState;
-  private readonly startExportFn: (
+  private readonly submitFn: (
     request: ExportRequest,
-  ) => Promise<ExportSubmission | null>;
+  ) => Promise<ExportQueueSubmitResult>;
   private readonly reportErrorFn: (error: unknown) => void;
   private readonly buildRequestFn: typeof buildExportRequest;
   private readonly resetFn: () => void;
@@ -253,8 +269,8 @@ export class ExportFlowController {
         const { status, tracking } = exportStore.getState();
         return { status, tracking };
       });
-    this.startExportFn =
-      options.startExport ?? ((req) => exportStore.getState().startExport(req));
+    this.submitFn =
+      options.submit ?? ((req) => exportQueueStore.getState().submit(req));
     this.reportErrorFn =
       options.reportError ?? ((err) => exportStore.getState().reportError(err));
     this.buildRequestFn = options.buildRequest ?? buildExportRequest;
@@ -270,7 +286,8 @@ export class ExportFlowController {
    * 1. If the store holds a live run (`isExportRunLive`), re-opens modal immediately on that run
    *    and returns false. A live run is preparing, running, or publishing, or failed while the
    *    store still tracks it: a Stop request failed, and the backend still encodes (ADR 025).
-   * 2. If the export store is in a terminal state (finished, failed, or canceled) with no live run,
+   *    The compose store never holds a run, so this step never fires for it (ADR 049).
+   * 2. If the store is in a terminal state (finished, failed, or canceled) with no live run,
    *    resets it so the dialog can display the setup step.
    * 3. Resolves current settings, awaiting loadSettings if absent.
    * 4. If no media is loaded, reports `sourceNotFound`, opens the modal, and returns false.
@@ -353,10 +370,20 @@ export class ExportFlowController {
    *    the settings change later (ADR 049). The request also carries the revision of the media,
    *    which the segments were marked against, unless `skipSourceRevisionCheck` is set. A null
    *    request reports `noSegments` or `sourceNotFound`.
-   * 6. Calls `setModalOpen(true)` and `startExport(request)` without awaiting it.
+   * 6. Calls `setModalOpen(true)` and awaits `submit(request)`.
+   *    - `refused`: no run exists. Reports the error of the result, for example
+   *      `outputAlreadyQueued`, keeps the modal open, and returns false.
+   *    - A rejection of `submit`: reports it the same way and returns false.
+   *    - `failed`: the backend refused the start, for example with `invalidPreset`. The export
+   *      store holds that failure, so this step reports nothing. Returns false.
+   *    - `superseded`: a reset or an adoption replaced the start in the export store. The
+   *      export store holds the state that replaced it, so this step reports nothing. Returns
+   *      false.
+   *    - `started`: the export store tracks the run, and the run shows there. `queued`: the
+   *      run waits in the queue. Only these two results go on to the steps below.
    * 7. Re-reads settings. When non-null and still containing `presetId` where
    *    `presetId !== settings.activePresetId`, persists the choice via `saveSettings`.
-   *    The save is fire-and-forget; rejections are caught and ignored (ADR 024).
+   *    The save is fire-and-forget. Rejections are caught and ignored (ADR 024).
    * 8. Returns true.
    */
   async confirm(
@@ -433,7 +460,23 @@ export class ExportFlowController {
     }
 
     this.setModalOpen(true);
-    void this.startExportFn(request);
+    let result: ExportQueueSubmitResult;
+    try {
+      result = await this.submitFn(request);
+    } catch (err) {
+      this.reportErrorFn(err);
+      this.setModalOpen(true);
+      return false;
+    }
+    if (result.kind === "refused") {
+      this.reportErrorFn(result.error);
+      this.setModalOpen(true);
+      return false;
+    }
+    if (result.kind === "failed" || result.kind === "superseded") {
+      // The export store holds the outcome, so nothing is reported here.
+      return false;
+    }
 
     const freshSettings = this.getSettingsFn();
     if (
@@ -588,4 +631,97 @@ export function confirmExportFlow(
   audioMode: ExportAudioMode,
 ): Promise<boolean> {
   return new ExportFlowController(options).confirm(presetId, streams, audioMode);
+}
+
+/** The stores that `openExportFlow` reads. Each one defaults to its production store. */
+export interface OpenExportFlowDependencies {
+  /** The export store, which holds the live run. Defaults to `exportStore`. */
+  exportStore?: ExportStore;
+  /** The export queue store, which holds the waiting runs. Defaults to `exportQueueStore`. */
+  queueStore?: ExportQueueStore;
+  /** The compose store. Defaults to `exportComposeStore`. */
+  composeStore?: ExportComposeStore;
+}
+
+/**
+ * The options of `openExportFlow`. The flow chooses the target options itself, so a caller
+ * cannot pass them.
+ */
+export type OpenExportFlowOptions = Omit<
+  ExportFlowControllerOptions,
+  keyof ExportFlowTarget
+>;
+
+/** Binds the three target options of the controller to an export store. */
+function exportStoreFlowTarget(store: ExportStore): ExportFlowTarget {
+  return {
+    getExportState: () => {
+      const { status, tracking } = store.getState();
+      return { status, tracking };
+    },
+    reportError: (error) => {
+      store.getState().reportError(error);
+    },
+    reset: () => {
+      store.getState().reset();
+    },
+  };
+}
+
+/**
+ * Runs the OPEN step of the Export action: the button of the title bar, the Export item of
+ * the File menu, and its keyboard shortcut (ADR 049).
+ *
+ * The flow decides the target of the step when it is called:
+ *
+ * - While the export store holds a live run (`isExportRunLive`), or runs wait in the queue,
+ *   or a submission has no answer yet (`hasPendingExportWork`), a new export joins the queue.
+ *   The step then reads, reports to, and resets the compose store. A failure of the step
+ *   therefore never replaces the live run in the export store. The compose store never holds
+ *   a run, so its state is never live (`isExportRunLive`), and the early return of the OPEN
+ *   step that shows a live run never fires for it. The step runs its checks instead. When
+ *   the step opens the modal, it first calls `enter` of the compose store.
+ * - Otherwise the step uses the export store, as `runExportFlow` does by default. When the
+ *   step opens the modal, it first calls `exit` of the compose store, because no export runs
+ *   or waits and the dialog shows the export store.
+ *
+ * The guard of `runExportFlow` applies. A step that does nothing, or that another step
+ * replaced, does not open the modal, and so it does not change the compose state.
+ *
+ * @returns What `runExportFlow` returns: true when the setup step opened.
+ */
+export function openExportFlow(
+  options: OpenExportFlowOptions,
+  dependencies: OpenExportFlowDependencies = {},
+): Promise<boolean> {
+  const exportStoreApi = dependencies.exportStore ?? exportStore;
+  const queueStoreApi = dependencies.queueStore ?? exportQueueStore;
+  const composeStoreApi = dependencies.composeStore ?? exportComposeStore;
+
+  const composes =
+    isExportRunLive(exportStoreApi.getState()) ||
+    hasPendingExportWork(queueStoreApi.getState());
+
+  if (composes) {
+    return runExportFlow({
+      ...options,
+      ...createComposeFlowTarget(composeStoreApi),
+      setModalOpen: (open) => {
+        if (open) {
+          composeStoreApi.getState().enter();
+        }
+        options.setModalOpen(open);
+      },
+    });
+  }
+  return runExportFlow({
+    ...options,
+    ...exportStoreFlowTarget(exportStoreApi),
+    setModalOpen: (open) => {
+      if (open) {
+        composeStoreApi.getState().exit();
+      }
+      options.setModalOpen(open);
+    },
+  });
 }

@@ -73,7 +73,15 @@ export type ExportQueueState = {
    * store. The cancel answer and the event can come in either order.
    */
   removing: string[];
+  /**
+   * The number of submissions that have no answer yet. Such a submission can still start a
+   * run or add one to the queue. A new batch does not clear it.
+   */
+  submitting: number;
 };
+
+/** The part of the queue state that belongs to one batch. A new batch clears it. */
+type ExportQueueBatch = Omit<ExportQueueState, "submitting">;
 
 /**
  * The result of `submit`.
@@ -142,7 +150,7 @@ const TERMINAL_STATUSES: ReadonlySet<ExportState["status"]> = new Set([
   "canceled",
 ]);
 
-function emptyBatch(): ExportQueueState {
+function emptyBatch(): ExportQueueBatch {
   return { jobs: {}, order: [], waiting: [], ended: [], removing: [] };
 }
 
@@ -465,6 +473,7 @@ export function createExportQueueStore(
 
     return {
       ...emptyBatch(),
+      submitting: 0,
 
       submit: async (request: ExportRequest): Promise<ExportQueueSubmitResult> => {
         if (isOutputTaken(request.outputPath)) {
@@ -479,10 +488,12 @@ export function createExportQueueStore(
           pendingOutputPaths.length === 0;
 
         pendingOutputPaths.push(request.outputPath);
+        set((state) => ({ submitting: state.submitting + 1 }));
         try {
           return startsBatch ? await startDirectly(request) : await enqueue(request);
         } finally {
           pendingOutputPaths.splice(pendingOutputPaths.indexOf(request.outputPath), 1);
+          set((state) => ({ submitting: state.submitting - 1 }));
         }
       },
 
@@ -515,6 +526,20 @@ export function createExportQueueStore(
 }
 
 export type ExportQueueStore = ReturnType<typeof createExportQueueStore>;
+
+/**
+ * True while runs wait in the queue of the backend, or while a submission has no answer yet.
+ * The run that holds the slot is not part of this test: the export store holds it
+ * (`isExportRunLive`).
+ *
+ * The Export action reads this rule with `isExportRunLive`. While either one is true, a new
+ * export joins the queue, so the action sets it up in the compose state (ADR 049).
+ */
+export function hasPendingExportWork(
+  state: Pick<ExportQueueState, "waiting" | "submitting">,
+): boolean {
+  return state.waiting.length > 0 || state.submitting > 0;
+}
 
 /** The phase of a row of the queue list. */
 export type ExportQueueRowPhase = "ended" | "current" | "waiting";

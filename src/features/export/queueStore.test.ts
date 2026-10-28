@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 import type { Pts } from "@/types/project";
-import { createExportQueueStore, selectExportQueueRows } from "./queueStore";
+import {
+  createExportQueueStore,
+  hasPendingExportWork,
+  selectExportQueueRows,
+} from "./queueStore";
 import { createExportStore } from "./store";
 import {
   ExportError,
@@ -754,5 +758,66 @@ describe("export queue store", () => {
 
       expect(rows.map((row) => row.phase)).toEqual(["current"]);
     });
+  });
+});
+
+describe("pending export work", () => {
+  it("counts each submission until its answer, and the runs that wait", async () => {
+    const { queue, fixture } = createFixture();
+    const answer = createDeferred<ExportSubmission>();
+    fixture.answer = () => answer.promise;
+
+    expect(hasPendingExportWork(queue.getState())).toBe(false);
+    const submitting = queue.getState().submit(createRequest("/out/a.mp4"));
+    expect(queue.getState().submitting).toBe(1);
+    expect(hasPendingExportWork(queue.getState())).toBe(true);
+
+    answer.resolve({ runId: "run-1", queued: false });
+    await submitting;
+    expect(queue.getState().submitting).toBe(0);
+    // The run holds the slot, which the export store reports. Nothing waits.
+    expect(hasPendingExportWork(queue.getState())).toBe(false);
+
+    fixture.answer = null;
+    await queue.getState().submit(createRequest("/out/b.mp4"));
+    expect(queue.getState().submitting).toBe(0);
+    expect(hasPendingExportWork(queue.getState())).toBe(true);
+  });
+
+  it("does not count a refused submission", async () => {
+    const { queue } = createFixture();
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+
+    expect(queue.getState().submitting).toBe(0);
+  });
+
+  it("does not count a queued submission that start_export rejected", async () => {
+    const { queue, fixture } = createFixture();
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+    fixture.answer = () =>
+      Promise.reject(new ExportError({ code: "exportQueueClosed" }));
+
+    const result = await queue.getState().submit(createRequest("/out/b.mp4"));
+
+    expect(result.kind).toBe("refused");
+    expect(queue.getState().submitting).toBe(0);
+    expect(hasPendingExportWork(queue.getState())).toBe(false);
+  });
+
+  it("does not count a direct start that a reset superseded", async () => {
+    const { queue, fixture, exportStore } = createFixture();
+    const answer = createDeferred<ExportSubmission>();
+    fixture.answer = () => answer.promise;
+    const submitting = queue.getState().submit(createRequest("/out/a.mp4"));
+    expect(queue.getState().submitting).toBe(1);
+
+    exportStore.getState().reset();
+    answer.resolve({ runId: "run-1", queued: false });
+
+    await expect(submitting).resolves.toEqual({ kind: "superseded" });
+    expect(queue.getState().submitting).toBe(0);
+    expect(hasPendingExportWork(queue.getState())).toBe(false);
   });
 });

@@ -9,6 +9,7 @@ export * from "./events";
 export * from "./store";
 export * from "./queueStore";
 export * from "./panelStore";
+export * from "./composeStore";
 export * from "./output";
 export * from "./outputActionStore";
 export * from "./dialog";

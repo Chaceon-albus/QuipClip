@@ -3,16 +3,20 @@ import {
   confirmExportFlow,
   createExportFlowController,
   ExportFlowController,
+  openExportFlow,
   runExportFlow,
   SOURCE_REVISION_CHECK_TIMEOUT_MS,
   type MediaFlowDescriptor,
 } from "./exportFlowController";
 import {
   cancelExport as clientCancelExport,
+  createExportComposeStore,
+  createExportQueueStore,
   createExportStore,
   ExportError,
   type ExportAudioMode,
   type ExportProgressEvent,
+  type ExportQueueSubmitResult,
   type ExportRequest,
   type ExportSubmission,
   type ExportStatus,
@@ -106,12 +110,15 @@ function createSettings(presets: Preset[], activePresetId?: string): Settings {
   };
 }
 
+/** The answer of a submission that started at once (ADR 049). */
+const STARTED: ExportQueueSubmitResult = { kind: "started", runId: "run-1" };
+
 describe("ExportFlowController", () => {
   describe("run (OPEN step)", () => {
     it("run never calls the save dialog, and it opens the modal on the good path", async () => {
       const setModalOpen = vi.fn();
       const openSaveDialog = vi.fn();
-      const startExport = vi.fn();
+      const submit = vi.fn();
       const reportError = vi.fn();
       const media = createMedia("/media/video.mp4", "video.mp4");
       const preset = createPreset();
@@ -119,7 +126,7 @@ describe("ExportFlowController", () => {
       const controller = createExportFlowController({
         setModalOpen,
         openSaveDialog,
-        startExport,
+        submit,
         reportError,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -136,7 +143,7 @@ describe("ExportFlowController", () => {
       expect(result).toBe(true);
       expect(setModalOpen).toHaveBeenCalledWith(true);
       expect(openSaveDialog).not.toHaveBeenCalled();
-      expect(startExport).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
       expect(reportError).not.toHaveBeenCalled();
     });
 
@@ -276,12 +283,12 @@ describe("ExportFlowController", () => {
       for (const activeStatus of ["preparing", "running", "publishing"] as const) {
         const setModalOpen = vi.fn();
         const openSaveDialog = vi.fn();
-        const startExport = vi.fn();
+        const submit = vi.fn();
 
         const result = await runExportFlow({
           setModalOpen,
           openSaveDialog,
-          startExport,
+          submit,
           getExportState: () => ({ status: activeStatus, tracking: false }),
           filterName: "Video Files",
           audioFilterName: "Audio Files",
@@ -290,7 +297,7 @@ describe("ExportFlowController", () => {
         expect(result).toBe(false);
         expect(setModalOpen).toHaveBeenCalledWith(true);
         expect(openSaveDialog).not.toHaveBeenCalled();
-        expect(startExport).not.toHaveBeenCalled();
+        expect(submit).not.toHaveBeenCalled();
       }
     });
 
@@ -567,7 +574,7 @@ describe("ExportFlowController", () => {
       it("a changed file with nothing marked reports noSegments and never confirms", async () => {
         const setModalOpen = vi.fn();
         const reportError = vi.fn();
-        const startExport = vi.fn();
+        const submit = vi.fn();
         const media = createMedia("/media/source.mp4", "source.mp4");
         const readSourceRevision = vi.fn().mockResolvedValue({
           path: media.path,
@@ -578,7 +585,7 @@ describe("ExportFlowController", () => {
         const result = await runExportFlow({
           setModalOpen,
           reportError,
-          startExport,
+          submit,
           readSourceRevision,
           getExportState: () => ({ status: "idle", tracking: false }),
           getMedia: () => media,
@@ -595,7 +602,7 @@ describe("ExportFlowController", () => {
         expect(reportError).toHaveBeenCalledWith(
           expect.objectContaining({ code: "noSegments" }),
         );
-        expect(startExport).not.toHaveBeenCalled();
+        expect(submit).not.toHaveBeenCalled();
       });
 
       it("segments marked against another source do not raise the confirmation", async () => {
@@ -909,14 +916,14 @@ describe("ExportFlowController", () => {
       const setModalOpen = vi.fn();
       const reportError = vi.fn();
       const openSaveDialog = vi.fn();
-      const startExport = vi.fn();
+      const submit = vi.fn();
       const saveSettings = vi.fn();
 
       const controller = new ExportFlowController({
         setModalOpen,
         reportError,
         openSaveDialog,
-        startExport,
+        submit,
         saveSettings,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -935,13 +942,13 @@ describe("ExportFlowController", () => {
       );
       expect(setModalOpen).toHaveBeenCalledWith(true);
       expect(openSaveDialog).not.toHaveBeenCalled();
-      expect(startExport).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
       expect(saveSettings).not.toHaveBeenCalled();
     });
 
     it("confirm uses the SELECTED preset's container for the extension and default name, not active preset's container", async () => {
       const openSaveDialog = vi.fn().mockResolvedValue("/out/rendered.mov");
-      const startExport = vi.fn().mockResolvedValue(null);
+      const submit = vi.fn().mockResolvedValue(STARTED);
       const media = createMedia("/media/clip.mp4", "clip.mp4");
 
       const activePreset = createPreset({ id: "p-mp4", container: "mp4" });
@@ -951,7 +958,7 @@ describe("ExportFlowController", () => {
       const controller = createExportFlowController({
         setModalOpen: vi.fn(),
         openSaveDialog,
-        startExport,
+        submit,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
         getSettings: () => settings,
@@ -985,7 +992,7 @@ describe("ExportFlowController", () => {
         options.reportError?.(failure);
         return Promise.resolve(null);
       });
-      const startExport = vi.fn();
+      const submit = vi.fn();
       const preset = createPreset({ id: "p1" });
 
       const controller = createExportFlowController({
@@ -993,7 +1000,7 @@ describe("ExportFlowController", () => {
         reportError,
         getExportState: () => ({ status, tracking: false }),
         openSaveDialog,
-        startExport,
+        submit,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
         getSettings: () => createSettings([preset], "p1"),
@@ -1008,7 +1015,7 @@ describe("ExportFlowController", () => {
       expect(reportError).toHaveBeenCalledExactlyOnceWith(failure);
       // The failure reached the injected state, so the modal opens to show it.
       expect(setModalOpen).toHaveBeenCalledExactlyOnceWith(true);
-      expect(startExport).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
     });
 
     describe("the stream choice", () => {
@@ -1020,11 +1027,11 @@ describe("ExportFlowController", () => {
         audioMode: ExportAudioMode = "encode",
       ) {
         const openSaveDialog = vi.fn().mockResolvedValue("/out/chosen.name");
-        const startExport = vi.fn().mockResolvedValue(null);
+        const submit = vi.fn().mockResolvedValue(STARTED);
         const controller = createExportFlowController({
           setModalOpen: vi.fn(),
           openSaveDialog,
-          startExport,
+          submit,
           saveSettings: vi.fn().mockResolvedValue(null),
           filterName: "Video Files",
           audioFilterName: "Audio Files",
@@ -1036,7 +1043,7 @@ describe("ExportFlowController", () => {
         return {
           result: controller.confirm(preset.id, streams, audioMode),
           openSaveDialog,
-          startExport,
+          submit,
         };
       }
 
@@ -1054,7 +1061,7 @@ describe("ExportFlowController", () => {
         "a %s preset with %s names a .%s file with the filter %s",
         async (container, streams, extension, filterName) => {
           const preset = createPreset({ id: "p1", container });
-          const { result, openSaveDialog, startExport } = confirmWith(preset, streams);
+          const { result, openSaveDialog, submit } = confirmWith(preset, streams);
 
           expect(await result).toBe(true);
           expect(openSaveDialog).toHaveBeenCalledWith({
@@ -1063,7 +1070,7 @@ describe("ExportFlowController", () => {
             defaultName: `clip_export.${extension}`,
             reportError: expect.any(Function) as unknown,
           });
-          expect(startExport).toHaveBeenCalledWith(
+          expect(submit).toHaveBeenCalledWith(
             expect.objectContaining({
               outputPath: "/out/chosen.name",
               preset,
@@ -1077,10 +1084,10 @@ describe("ExportFlowController", () => {
         "starts the export with the audio mode %s",
         async (audioMode) => {
           const preset = createPreset({ id: "p1", container: "mp4" });
-          const { result, startExport } = confirmWith(preset, "audioOnly", audioMode);
+          const { result, submit } = confirmWith(preset, "audioOnly", audioMode);
 
           expect(await result).toBe(true);
-          expect(startExport).toHaveBeenCalledWith(
+          expect(submit).toHaveBeenCalledWith(
             expect.objectContaining({ streams: "audioOnly", audioMode }),
           );
         },
@@ -1090,7 +1097,7 @@ describe("ExportFlowController", () => {
     it("confirm with the save dialog cancelled starts nothing and saves nothing", async () => {
       const setModalOpen = vi.fn();
       const reportError = vi.fn();
-      const startExport = vi.fn();
+      const submit = vi.fn();
       const saveSettings = vi.fn();
       const openSaveDialog = vi.fn().mockResolvedValue(null);
       const media = createMedia("/media/clip.mp4", "clip.mp4");
@@ -1103,7 +1110,7 @@ describe("ExportFlowController", () => {
         setModalOpen,
         reportError,
         openSaveDialog,
-        startExport,
+        submit,
         saveSettings,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -1120,21 +1127,21 @@ describe("ExportFlowController", () => {
       expect(openSaveDialog).toHaveBeenCalledOnce();
       expect(setModalOpen).not.toHaveBeenCalled();
       expect(reportError).not.toHaveBeenCalled();
-      expect(startExport).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
       expect(saveSettings).not.toHaveBeenCalled();
     });
 
     it("confirm when save dialog throws reports dialogFailed, keeps modal open, and returns false", async () => {
       const setModalOpen = vi.fn();
       const reportError = vi.fn();
-      const startExport = vi.fn();
+      const submit = vi.fn();
       const openSaveDialog = vi.fn().mockRejectedValue(new Error("dialog crashed"));
 
       const controller = createExportFlowController({
         setModalOpen,
         reportError,
         openSaveDialog,
-        startExport,
+        submit,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
         getSettings: () => createSettings([createPreset({ id: "p1" })]),
@@ -1147,7 +1154,7 @@ describe("ExportFlowController", () => {
         expect.objectContaining({ code: "dialogFailed" }),
       );
       expect(setModalOpen).toHaveBeenCalledWith(true);
-      expect(startExport).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
     });
 
     it("confirm when save dialog leaves status failed opens modal", async () => {
@@ -1175,7 +1182,7 @@ describe("ExportFlowController", () => {
     });
 
     it("confirm passes the whole preset in the request and respects segment array order", async () => {
-      const startExport = vi.fn().mockResolvedValue(null);
+      const submit = vi.fn().mockResolvedValue(STARTED);
       const openSaveDialog = vi.fn().mockResolvedValue("/out/destination.mp4");
       const media = createMedia("/media/source.mp4", "source.mp4");
       const sourceId = "source-clip-1";
@@ -1194,7 +1201,7 @@ describe("ExportFlowController", () => {
       const controller = createExportFlowController({
         setModalOpen,
         openSaveDialog,
-        startExport,
+        submit,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
         getSettings: () => settings,
@@ -1207,11 +1214,11 @@ describe("ExportFlowController", () => {
 
       expect(result).toBe(true);
       expect(setModalOpen).toHaveBeenCalledWith(true);
-      expect(startExport).toHaveBeenCalledOnce();
+      expect(submit).toHaveBeenCalledOnce();
       expect(setModalOpen.mock.invocationCallOrder[0]).toBeLessThan(
-        startExport.mock.invocationCallOrder[0],
+        submit.mock.invocationCallOrder[0],
       );
-      const passedRequest = startExport.mock.calls[0][0] as ExportRequest;
+      const passedRequest = submit.mock.calls[0][0] as ExportRequest;
       // The request carries the stream choice and the audio mode that the setup step passed.
       expect(passedRequest).toStrictEqual({
         sourcePath: "/media/source.mp4",
@@ -1232,13 +1239,13 @@ describe("ExportFlowController", () => {
     it("confirm sends no expected revision after the user accepted a changed source", async () => {
       // "Export anyway" sets the option. The backend must not refuse the file that the user
       // accepted (ADR 024).
-      const startExport = vi.fn().mockResolvedValue(null);
+      const submit = vi.fn().mockResolvedValue(STARTED);
       const preset = createPreset({ id: "p1" });
 
       const controller = createExportFlowController({
         setModalOpen: vi.fn(),
         openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
-        startExport,
+        submit,
         saveSettings: vi.fn().mockResolvedValue(null),
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -1250,7 +1257,7 @@ describe("ExportFlowController", () => {
       });
 
       expect(await controller.confirm("p1", "videoAndAudio", "encode")).toBe(true);
-      const request = startExport.mock.calls[0][0] as ExportRequest;
+      const request = submit.mock.calls[0][0] as ExportRequest;
       expect(request).not.toHaveProperty("expectedSourceRevision");
     });
 
@@ -1265,7 +1272,7 @@ describe("ExportFlowController", () => {
       const controllerDiff = createExportFlowController({
         setModalOpen: vi.fn(),
         openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
-        startExport: vi.fn().mockResolvedValue(null),
+        submit: vi.fn().mockResolvedValue(STARTED),
         saveSettings: saveSettingsDiff,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -1286,7 +1293,7 @@ describe("ExportFlowController", () => {
       const controllerSame = createExportFlowController({
         setModalOpen: vi.fn(),
         openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
-        startExport: vi.fn().mockResolvedValue(null),
+        submit: vi.fn().mockResolvedValue(STARTED),
         saveSettings: saveSettingsSame,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -1306,13 +1313,13 @@ describe("ExportFlowController", () => {
       const settings = createSettings([p1, p2], "p1");
       const media = createMedia("/media/v.mp4", "v.mp4");
 
-      const startExport = vi.fn().mockResolvedValue(null);
+      const submit = vi.fn().mockResolvedValue(STARTED);
       const saveSettings = vi.fn().mockRejectedValue(new Error("conflict"));
 
       const controller = createExportFlowController({
         setModalOpen: vi.fn(),
         openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
-        startExport,
+        submit,
         saveSettings,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -1325,7 +1332,7 @@ describe("ExportFlowController", () => {
       const result = await controller.confirm("p2", "videoAndAudio", "encode");
 
       expect(result).toBe(true);
-      expect(startExport).toHaveBeenCalledOnce();
+      expect(submit).toHaveBeenCalledOnce();
       expect(saveSettings).toHaveBeenCalledOnce();
     });
 
@@ -1348,7 +1355,7 @@ describe("ExportFlowController", () => {
       const controller = createExportFlowController({
         setModalOpen: vi.fn(),
         openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
-        startExport: vi.fn().mockResolvedValue(null),
+        submit: vi.fn().mockResolvedValue(STARTED),
         saveSettings,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -1386,7 +1393,7 @@ describe("ExportFlowController", () => {
       const controller = createExportFlowController({
         setModalOpen: vi.fn(),
         openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
-        startExport: vi.fn().mockResolvedValue(null),
+        submit: vi.fn().mockResolvedValue(STARTED),
         saveSettings,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -1412,12 +1419,12 @@ describe("ExportFlowController", () => {
         .fn()
         .mockReturnValueOnce(createSettings([shown], "p1"))
         .mockReturnValue(createSettings([edited], "p1"));
-      const startExport = vi.fn().mockResolvedValue(null);
+      const submit = vi.fn().mockResolvedValue(STARTED);
 
       const controller = createExportFlowController({
         setModalOpen: vi.fn(),
         openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
-        startExport,
+        submit,
         saveSettings: vi.fn().mockResolvedValue(null),
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -1428,9 +1435,7 @@ describe("ExportFlowController", () => {
       });
 
       expect(await controller.confirm("p1", "videoAndAudio", "encode")).toBe(true);
-      expect(startExport).toHaveBeenCalledWith(
-        expect.objectContaining({ preset: shown }),
-      );
+      expect(submit).toHaveBeenCalledWith(expect.objectContaining({ preset: shown }));
     });
 
     it("confirm skips saving active preset when the fresh document no longer contains the preset", async () => {
@@ -1449,7 +1454,7 @@ describe("ExportFlowController", () => {
       const controller = createExportFlowController({
         setModalOpen: vi.fn(),
         openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
-        startExport: vi.fn().mockResolvedValue(null),
+        submit: vi.fn().mockResolvedValue(STARTED),
         saveSettings,
         filterName: "Video Files",
         audioFilterName: "Audio Files",
@@ -1518,6 +1523,116 @@ describe("ExportFlowController", () => {
       expect(setModalNoSeg).toHaveBeenCalledWith(true);
     });
 
+    describe("the submission to the queue", () => {
+      /**
+       * Confirms preset p2 while p1 is active, so an accepted submission saves p2 as the
+       * active preset. `submit` answers `answer`.
+       */
+      function confirmAnswering(answer: Promise<ExportQueueSubmitResult>) {
+        const setModalOpen = vi.fn();
+        const reportError = vi.fn();
+        const saveSettings = vi.fn().mockResolvedValue(null);
+        const submit = vi.fn(() => answer);
+        const controller = createExportFlowController({
+          setModalOpen,
+          reportError,
+          saveSettings,
+          submit,
+          openSaveDialog: vi.fn().mockResolvedValue("/out/v.mp4"),
+          filterName: "Video Files",
+          audioFilterName: "Audio Files",
+          getExportState: () => ({ status: "idle", tracking: false }),
+          getSettings: () =>
+            createSettings(
+              [createPreset({ id: "p1" }), createPreset({ id: "p2" })],
+              "p1",
+            ),
+          getMedia: () => createMedia("/media/v.mp4", "v.mp4"),
+          getSourceId: () => "s1",
+          getSegments: () => [createSegment("seg1", "s1", "0", "100")],
+        });
+        return {
+          result: controller.confirm("p2", "videoAndAudio", "encode"),
+          setModalOpen,
+          reportError,
+          saveSettings,
+          submit,
+        };
+      }
+
+      it.each([
+        { kind: "started", runId: "run-1" },
+        { kind: "queued", runId: "run-2" },
+      ] as const)(
+        "a $kind submission returns true and saves the preset",
+        async (answer) => {
+          const { result, reportError, saveSettings, submit, setModalOpen } =
+            confirmAnswering(Promise.resolve(answer));
+
+          expect(await result).toBe(true);
+          expect(submit).toHaveBeenCalledOnce();
+          expect(setModalOpen).toHaveBeenCalledWith(true);
+          expect(reportError).not.toHaveBeenCalled();
+          expect(saveSettings).toHaveBeenCalledWith(
+            expect.objectContaining({ activePresetId: "p2" }),
+          );
+        },
+      );
+
+      it.each([{ kind: "failed" }, { kind: "superseded" }] as const)(
+        "a $kind start returns false, reports nothing, and saves nothing, because the export store holds it",
+        async (answer) => {
+          const { result, reportError, saveSettings } = confirmAnswering(
+            Promise.resolve(answer),
+          );
+
+          expect(await result).toBe(false);
+          expect(reportError).not.toHaveBeenCalled();
+          expect(saveSettings).not.toHaveBeenCalled();
+        },
+      );
+
+      it("a refused submission reports its error, keeps the modal open, and saves nothing", async () => {
+        const error = new ExportError({ code: "outputAlreadyQueued" });
+        const { result, reportError, saveSettings, setModalOpen } = confirmAnswering(
+          Promise.resolve({ kind: "refused", error }),
+        );
+
+        expect(await result).toBe(false);
+        expect(reportError).toHaveBeenCalledExactlyOnceWith(error);
+        expect(setModalOpen).toHaveBeenLastCalledWith(true);
+        expect(saveSettings).not.toHaveBeenCalled();
+      });
+
+      it("a rejected submission reports the rejection and saves nothing", async () => {
+        const { result, reportError, saveSettings } = confirmAnswering(
+          Promise.reject(new Error("IPC closed")),
+        );
+
+        expect(await result).toBe(false);
+        expect(reportError).toHaveBeenCalledOnce();
+        expect(saveSettings).not.toHaveBeenCalled();
+      });
+
+      it("waits for the answer of the submission before it saves the preset", async () => {
+        let answer: (result: ExportQueueSubmitResult) => void = () => {};
+        const { result, submit, saveSettings } = confirmAnswering(
+          new Promise<ExportQueueSubmitResult>((resolve) => {
+            answer = resolve;
+          }),
+        );
+        await vi.waitFor(() => {
+          expect(submit).toHaveBeenCalledOnce();
+        });
+        expect(saveSettings).not.toHaveBeenCalled();
+
+        answer({ kind: "queued", runId: "run-2" });
+
+        expect(await result).toBe(true);
+        expect(saveSettings).toHaveBeenCalledOnce();
+      });
+    });
+
     it("confirmExportFlow helper invokes confirm with presetId and the streams", async () => {
       const openSaveDialog = vi.fn().mockResolvedValue(null);
       const preset = createPreset({ id: "p1", container: "mkv" });
@@ -1540,6 +1655,211 @@ describe("ExportFlowController", () => {
       expect(openSaveDialog).toHaveBeenCalledWith(
         expect.objectContaining({ extension: "mka", filterName: "Audio Files" }),
       );
+    });
+  });
+});
+
+describe("openExportFlow", () => {
+  const media = createMedia("/media/video.mp4", "video.mp4");
+
+  /**
+   * Real stores for the flow to read. `live` puts a tracked run in the export store, `waiting`
+   * puts a run in the queue, and `submitting` puts a submission with no answer in flight.
+   */
+  function createStores(
+    work: { live?: boolean; waiting?: boolean; submitting?: boolean } = {},
+  ) {
+    const exportStore = createExportStore();
+    const queueStore = createExportQueueStore({ exportStore });
+    const composeStore = createExportComposeStore();
+    if (work.live) {
+      exportStore.setState({ status: "running", runId: "run-1", tracking: true });
+    }
+    if (work.waiting) {
+      queueStore.setState({ waiting: ["run-2"] });
+    }
+    if (work.submitting) {
+      queueStore.setState({ submitting: 1 });
+    }
+    return { exportStore, queueStore, composeStore };
+  }
+
+  function flowOptions(overrides: { media?: MediaFlowDescriptor | null } = {}) {
+    const current = overrides.media === undefined ? media : overrides.media;
+    return {
+      setModalOpen: vi.fn(),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+      getMedia: () => current,
+      readSourceRevision: createMatchingReader(media),
+      getSourceId: () => "source-1",
+      getSegments: () => [createSegment("s1", "source-1", "0", "100")],
+      getSettings: () => createSettings([createPreset()]),
+    };
+  }
+
+  describe("the compose target", () => {
+    it.each([
+      ["a live run", { live: true }],
+      ["a waiting run", { waiting: true }],
+      ["a submission in flight", { submitting: true }],
+    ] as const)(
+      "with %s, reports a failure of the OPEN step to the compose store",
+      async (_label, work) => {
+        const stores = createStores(work);
+        const before = stores.exportStore.getState();
+        const options = flowOptions({ media: null });
+
+        const result = await openExportFlow(options, stores);
+
+        expect(result).toBe(false);
+        expect(stores.composeStore.getState()).toMatchObject({
+          composing: true,
+          status: "failed",
+          error: expect.objectContaining({ code: "sourceNotFound" }) as unknown,
+        });
+        // The export store keeps what it held: the live run, or idle with no error.
+        expect(stores.exportStore.getState().status).toBe(before.status);
+        expect(stores.exportStore.getState().error).toBeNull();
+        expect(options.setModalOpen).toHaveBeenCalledWith(true);
+      },
+    );
+
+    it("treats a failed run that the export store still tracks as live", async () => {
+      const stores = createStores();
+      stores.exportStore.setState({ status: "failed", runId: "run-1", tracking: true });
+      const options = flowOptions({ media: null });
+
+      await openExportFlow(options, stores);
+
+      expect(stores.composeStore.getState().status).toBe("failed");
+      expect(stores.exportStore.getState()).toMatchObject({
+        status: "failed",
+        runId: "run-1",
+        tracking: true,
+        error: null,
+      });
+    });
+
+    it("does not re-open the live run, and runs the checks of the OPEN step", async () => {
+      const stores = createStores({ live: true });
+      const options = flowOptions();
+
+      const result = await openExportFlow(options, stores);
+
+      expect(result).toBe(true);
+      expect(options.readSourceRevision).toHaveBeenCalledOnce();
+      expect(options.setModalOpen).toHaveBeenCalledExactlyOnceWith(true);
+      expect(stores.composeStore.getState()).toMatchObject({
+        composing: true,
+        status: "idle",
+        error: null,
+      });
+      expect(stores.exportStore.getState()).toMatchObject({
+        status: "running",
+        runId: "run-1",
+        tracking: true,
+      });
+    });
+
+    it("reports a changed source to the compose store as the confirmation", async () => {
+      const stores = createStores({ live: true });
+      const options = {
+        ...flowOptions(),
+        readSourceRevision: vi.fn().mockResolvedValue({
+          path: media.path,
+          size: media.size + 1,
+          mtime: media.mtime,
+        }),
+      };
+
+      expect(await openExportFlow(options, stores)).toBe(false);
+      expect(stores.composeStore.getState().error?.code).toBe("sourceRevisionChanged");
+      expect(stores.exportStore.getState().status).toBe("running");
+    });
+
+    it("clears a failure of an earlier setup before it opens the setup step", async () => {
+      const stores = createStores({ live: true });
+      stores.composeStore
+        .getState()
+        .reportError(new ExportError({ code: "noSegments" }));
+
+      expect(await openExportFlow(flowOptions(), stores)).toBe(true);
+      expect(stores.composeStore.getState()).toMatchObject({
+        composing: true,
+        status: "idle",
+        error: null,
+      });
+    });
+
+    it("enters the compose state only when the modal opens", async () => {
+      const stores = createStores({ live: true });
+      let finishLoad: () => void = () => {};
+      let settings: Settings | null = null;
+      const options = {
+        ...flowOptions(),
+        getSettings: () => settings,
+        loadSettings: vi.fn(
+          () =>
+            new Promise<void>((resolve) => {
+              finishLoad = resolve;
+            }),
+        ),
+      };
+
+      const step = openExportFlow(options, stores);
+      await vi.waitFor(() => {
+        expect(options.loadSettings).toHaveBeenCalled();
+      });
+      expect(stores.composeStore.getState().composing).toBe(false);
+
+      // A second call while the first one waits does nothing, so it does not enter.
+      const second = flowOptions();
+      expect(await openExportFlow(second, stores)).toBe(false);
+      expect(second.setModalOpen).not.toHaveBeenCalled();
+      expect(stores.composeStore.getState().composing).toBe(false);
+
+      settings = createSettings([createPreset()]);
+      finishLoad();
+
+      expect(await step).toBe(true);
+      expect(stores.composeStore.getState().composing).toBe(true);
+    });
+  });
+
+  describe("the default target", () => {
+    it("reports a failure of the OPEN step to the export store", async () => {
+      const stores = createStores();
+      const options = flowOptions({ media: null });
+
+      expect(await openExportFlow(options, stores)).toBe(false);
+      expect(stores.exportStore.getState()).toMatchObject({
+        status: "failed",
+        error: expect.objectContaining({ code: "sourceNotFound" }) as unknown,
+      });
+      expect(stores.composeStore.getState()).toMatchObject({
+        composing: false,
+        status: "idle",
+        error: null,
+      });
+    });
+
+    it("resets a run that ended and opens the setup step on the export store", async () => {
+      const stores = createStores();
+      stores.exportStore.setState({ status: "finished", runId: "run-1" });
+      const options = flowOptions();
+
+      expect(await openExportFlow(options, stores)).toBe(true);
+      expect(stores.exportStore.getState().status).toBe("idle");
+      expect(options.setModalOpen).toHaveBeenCalledWith(true);
+    });
+
+    it("leaves the compose state that an earlier setup left when the modal opens", async () => {
+      const stores = createStores();
+      stores.composeStore.getState().enter();
+
+      expect(await openExportFlow(flowOptions(), stores)).toBe(true);
+      expect(stores.composeStore.getState().composing).toBe(false);
     });
   });
 });
