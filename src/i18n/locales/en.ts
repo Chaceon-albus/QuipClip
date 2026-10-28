@@ -25,13 +25,14 @@ export const en = {
     },
     // The tooltip of the Export button. openVideoFirst and markSegmentFirst are a second,
     // muted line under "Export". {{duration}} is the total duration of the segments, as a
-    // timecode such as "00:01:23:04" or "00:01:23.160".
+    // timecode such as "00:01:23:04" or "00:01:23.160". addToQueue shows while an export
+    // runs, because a click then sets up an export that waits in the queue (ADR 049).
     exportTooltip: {
       openVideoFirst: "Open a video first",
       markSegmentFirst: "Mark at least one segment first",
       exportSegments_one: "Export {{count}} segment ({{duration}})",
       exportSegments_other: "Export {{count}} segments ({{duration}})",
-      showRunningExport: "Show the running export",
+      addToQueue: "Add an export to the queue",
     },
     source: {
       segmentCount_one: "{{count}} segment",
@@ -929,6 +930,9 @@ export const en = {
       estimatedSizeBelowOneKilobyte: "Estimated size: less than 1 kB",
       noPresets: "No export presets exist. Add one in Settings.",
       settingsErrorHint: "Open Settings to repair or reset the settings file.",
+      // A note under the setup step of an export that joins the queue (ADR 049).
+      queueNote:
+        "This export starts when the exports before it in the queue end. It uses the settings shown here, even if the preset changes later.",
     },
     status: {
       preparing: "Preparing export…",
@@ -971,6 +975,11 @@ export const en = {
     },
     action: {
       chooseDestination: "Export…",
+      // The label of chooseDestination while another export runs or waits. The new export
+      // then joins the queue (ADR 049).
+      addToQueue: "Add to Queue…",
+      // The button of the run footer that sets up the next export of the queue.
+      newExport: "New Export…",
       exportAnyway: "Export Anyway",
       reimport: "Re-import…",
       runInBackground: "Run in Background",

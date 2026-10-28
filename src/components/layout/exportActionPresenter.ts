@@ -26,7 +26,7 @@ export type ExportActionReasonKey =
 /** The first line of the tooltip, beside the key chip. */
 export type ExportActionLabel =
   | { readonly key: "titleBar.action.export" }
-  | { readonly key: "titleBar.exportTooltip.showRunningExport" }
+  | { readonly key: "titleBar.exportTooltip.addToQueue" }
   | {
       readonly key: "titleBar.exportTooltip.exportSegments";
       /** The number of segments of the open source. */
@@ -49,6 +49,11 @@ export interface ExportActionInput {
   readonly exportStatus: ExportStatus;
   /** The `tracking` field of the export store. With the status, it decides `busy`. */
   readonly exportTracking: boolean;
+  /**
+   * True while runs wait in the queue or a submission has no answer yet
+   * (`hasPendingExportWork`). The Export action then sets up an export that joins the queue.
+   */
+  readonly pendingExportWork: boolean;
   /** The number of segments of the open source. */
   readonly segmentCount: number;
   /**
@@ -65,10 +70,14 @@ export interface ExportActionInput {
  * Returns what the export action shows. The rules apply in this order:
  *
  * 1. No media: disabled, with the reason "Open a video first".
- * 2. A live run (`isExportRunLive`): preparing, running or publishing, or failed while the
- *    store still tracks the run after a failed Stop request. The icon is a spinner, and the
- *    tooltip says that a click shows the running export. The export flow opens the dialog
- *    on that run (ADR 025). The label of the button stays "Export".
+ * 2. A live run (`isExportRunLive`), or pending work (`hasPendingExportWork`): the tooltip
+ *    says that a click adds an export to the queue. The export flow reads the same two
+ *    conditions and opens the setup step of an export that joins the queue (`openExportFlow`,
+ *    ADR 049), so the tooltip and the click agree. A live run is preparing, running or
+ *    publishing, or failed while the store still tracks the run after a failed Stop request.
+ *    Only a live run makes the icon a spinner. The label of the button stays "Export". With
+ *    no segment of the open source, the reason "Mark at least one segment first" shows too,
+ *    because the dialog then reports `noSegments`.
  * 3. No segment of the open source: available, with the hint "Mark at least one segment
  *    first". A click opens the dialog on the `noSegments` message (ADR 024).
  * 4. Otherwise: the number of segments and their total duration.
@@ -86,12 +95,19 @@ export function presentExportAction(input: ExportActionInput): ExportActionView 
     };
   }
 
-  if (isExportRunLive({ status: input.exportStatus, tracking: input.exportTracking })) {
+  const busy = isExportRunLive({
+    status: input.exportStatus,
+    tracking: input.exportTracking,
+  });
+  const reason =
+    input.segmentCount === 0 ? "titleBar.exportTooltip.markSegmentFirst" : null;
+
+  if (busy || input.pendingExportWork) {
     return {
       disabled: false,
-      busy: true,
-      label: { key: "titleBar.exportTooltip.showRunningExport" },
-      reason: null,
+      busy,
+      label: { key: "titleBar.exportTooltip.addToQueue" },
+      reason,
     };
   }
 
@@ -100,7 +116,7 @@ export function presentExportAction(input: ExportActionInput): ExportActionView 
       disabled: false,
       busy: false,
       label: { key: "titleBar.action.export" },
-      reason: "titleBar.exportTooltip.markSegmentFirst",
+      reason,
     };
   }
 

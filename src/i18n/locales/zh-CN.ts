@@ -31,7 +31,7 @@ export const zhCN: TranslationCatalog = {
       markSegmentFirst: "请先标记至少一个片段",
       // Chinese selects the `other` plural category for every count, so it has no `_one` form.
       exportSegments_other: "导出 {{count}} 个片段（{{duration}}）",
-      showRunningExport: "显示正在进行的导出",
+      addToQueue: "将导出加入队列",
     },
     source: {
       // Chinese selects the `other` plural category for every count, so it has no `_one` form.
@@ -719,6 +719,7 @@ export const zhCN: TranslationCatalog = {
       estimatedSizeBelowOneKilobyte: "预计大小：小于 1 kB",
       noPresets: "暂无导出预设。请在设置中添加。",
       settingsErrorHint: "请打开“设置”修复或重置设置文件。",
+      queueNote: "此导出会在排在它前面的导出结束后开始，并使用这里显示的设置。",
     },
     status: {
       preparing: "正在准备导出…",
@@ -752,6 +753,8 @@ export const zhCN: TranslationCatalog = {
     },
     action: {
       chooseDestination: "导出…",
+      addToQueue: "加入队列…",
+      newExport: "新建导出…",
       exportAnyway: "仍然导出",
       reimport: "重新导入…",
       runInBackground: "后台运行",

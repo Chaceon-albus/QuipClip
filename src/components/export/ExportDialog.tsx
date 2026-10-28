@@ -21,10 +21,13 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   confirmExportFlow,
+  openExportFlow,
   runExportFlow,
 } from "@/components/layout/exportFlowController";
 import {
   canCopyAudio,
+  composeFlowTarget,
+  exportComposeStore,
   exportStore,
   isExportRunLive,
   resolveExportAudioMode,
@@ -33,11 +36,13 @@ import {
   selectExportOutputAction,
   selectExportQueueRows,
   sourceHasAudio,
+  useExportComposeStore,
   useExportOutputActionStore,
   useExportQueueStore,
   useExportStore,
   useExportRunTiming,
   useExportStreamChoice,
+  type ExportFlowTarget,
   type ExportOutputActionRunState,
   type ExportRunTiming,
   type ExportState,
@@ -54,8 +59,18 @@ import { ExportSetup } from "./ExportSetup";
 import {
   canGoBackToSetup,
   createOpenStepGeneration,
+  guardOpenStepEffects,
   runOpenStepAgain,
 } from "./exportBackToSetup";
+import {
+  addsToQueue,
+  resolveComposeExit,
+  resolveExportCloseLabelKey,
+  resolveSetupConfirmLabelKey,
+  selectExportDialogTargetState,
+  showsNewExportAction,
+  type ExportComposeExitTrigger,
+} from "./exportDialogCompose";
 import { resolveExportDismissal } from "./exportCancelState";
 import {
   resolveExportDialogFocusOrder,
@@ -126,6 +141,35 @@ function focusFirstAvailable(
 }
 
 /**
+ * Reads the state that the handlers of the dialog act on, at the call: the compose store while
+ * it composes, and else the export store (`selectExportDialogTargetState`).
+ */
+function readTargetState() {
+  return selectExportDialogTargetState(
+    exportComposeStore.getState(),
+    exportStore.getState(),
+  );
+}
+
+/**
+ * The target options of the export flow controller for a step of the dialog: the compose
+ * store while the dialog composes (ADR 049), and else none, so the controller uses its
+ * defaults, the export store.
+ */
+function flowTargetOf(composes: boolean): Partial<ExportFlowTarget> {
+  return composes ? composeFlowTarget : {};
+}
+
+/** The progress fields of the run panel for a failure of the compose state, which has no run. */
+const NO_PROGRESS: ExportProgressFields = {
+  frame: null,
+  expectedFrames: null,
+  fps: null,
+  speed: null,
+  encodeStarted: false,
+};
+
+/**
  * Everything the dialog renders that can change while it closes.
  *
  * The dialog holds the frame that showed when a close started, and renders it until the
@@ -137,6 +181,19 @@ interface ExportDialogFrame extends Pick<
   ExportState,
   "status" | "runId" | "outputPath" | "cancelRequested" | "tracking" | "error"
 > {
+  /**
+   * True while the dialog sets up an export that joins the queue (ADR 049). The status, the
+   * tracking, and the error of the frame then come from the compose store
+   * (`selectExportDialogTargetState`), and the run fields are empty.
+   */
+  composing: boolean;
+  /**
+   * True while the export store holds a live run (`isExportRunLive`). In the compose state the
+   * status of the frame does not say this, and the close control still hides a live run.
+   */
+  exportRunLive: boolean;
+  /** True while an export that the setup step starts joins the queue (`addsToQueue`). */
+  addsToQueue: boolean;
   /** The state of Show for the run of the frame (`selectExportOutputAction`). */
   outputAction: ExportOutputActionRunState;
   /**
@@ -204,6 +261,11 @@ export function ExportDialog({
   // Counts the clicks on Back. The Back button leaves the document with the failed panel, so
   // the effect below gives the focus to the first control of the setup step once per click.
   const [backClicks, setBackClicks] = useState(0);
+  // True while the open step that "New Export…" runs has not answered. The source check can
+  // take up to 3 seconds, so the button shows that it is busy, and a second click does
+  // nothing. The ref answers the second click of a double click before React renders.
+  const [newExportPending, setNewExportPending] = useState(false);
+  const newExportPendingRef = useRef(false);
   const setupFirstControlRef = useRef<HTMLButtonElement>(null);
   // The default button of the setup step, and Cancel of the confirmation. Each takes the
   // focus when its footer shows (`resolveExportDialogFocusOrder`).
@@ -258,6 +320,13 @@ export function ExportDialog({
   const cancelExport = useExportStore((state) => state.cancelExport);
   const reset = useExportStore((state) => state.reset);
 
+  // The setup of an export that joins the queue (ADR 049). While `composing` is true, the
+  // dialog shows the state of the compose store, and the handlers act on it.
+  const composing = useExportComposeStore((state) => state.composing);
+  const composeStatus = useExportComposeStore((state) => state.status);
+  const composeError = useExportComposeStore((state) => state.error);
+  const exportRunLive = isExportRunLive({ status, tracking });
+
   const outputAction = useExportOutputActionStore((state) =>
     selectExportOutputAction(state, runId),
   );
@@ -273,6 +342,9 @@ export function ExportDialog({
   const queueWaiting = useExportQueueStore((state) => state.waiting);
   const queueEnded = useExportQueueStore((state) => state.ended);
   const queueRemoving = useExportQueueStore((state) => state.removing);
+  // The open submissions. With the waiting runs, they name the confirm button of the setup
+  // step (`addsToQueue`).
+  const queueSubmitting = useExportQueueStore((state) => state.submitting);
   const queueView = useMemo(
     () =>
       presentExportQueue({
@@ -346,26 +418,20 @@ export function ExportDialog({
     };
   }, [stopArmedAt]);
 
-  // The finished panel replaces the footer of the run, so the button that had the focus is
-  // gone. Done takes the focus, as the default button of the result.
-  useEffect(() => {
-    if (open && status === "finished") {
-      doneButtonRef.current?.focus();
-    }
-  }, [open, status]);
-
   // Runs once for each click on Back, after the commit that the click made. That commit holds
   // the reset and any failure that the open step reported before its first await, such as
-  // `sourceNotFound`, so the status read here is the one on the screen. When it is idle, the
-  // setup step rendered in the same commit, and its first control exists. When the open
-  // step failed, the failed panel shows and the focus stays on the dialog. No flag outlives
-  // the click, so a later close or reset never moves the focus. While the settings load,
-  // the step has no control, and the focus stays on the dialog too.
+  // `sourceNotFound`, so the status read here is the one on the screen. The status is the one
+  // of the target of the dialog: the compose store while it composes, and else the export
+  // store (`readTargetState`). When it is idle, the setup step rendered in the same commit,
+  // and its first control exists. When the open step failed, the failed panel shows and the
+  // focus stays on the dialog. No flag outlives the click, so a later close or reset never
+  // moves the focus. While the settings load, the step has no control, and the focus stays on
+  // the dialog too.
   useEffect(() => {
     if (backClicks === 0) {
       return;
     }
-    if (exportStore.getState().status === "idle") {
+    if (readTargetState().status === "idle") {
       setupFirstControlRef.current?.focus();
     }
   }, [backClicks]);
@@ -373,15 +439,29 @@ export function ExportDialog({
   // Everything below renders from `frame`: the live values while the dialog is open, and
   // the held frame while it closes. A closing dialog is inert, so no handler runs on a held
   // frame, and the two are equal whenever a handler can run.
+  //
+  // While the dialog composes, the status, the tracking, and the error come from the compose
+  // store, and the fields of the run of the export store are empty. The pure rules of the
+  // step, the footer, and the title then give the setup step, the confirmation, or the result
+  // of the compose state. The queue list belongs to the run view, so it does not show.
+  const target = selectExportDialogTargetState(
+    { composing, status: composeStatus, error: composeError },
+    { status, tracking, error },
+  );
   const liveFrame: ExportDialogFrame = {
-    status,
-    runId,
-    outputPath,
-    cancelRequested,
-    tracking,
-    error,
+    ...target,
+    composing,
+    exportRunLive,
+    addsToQueue: addsToQueue({
+      exportState: { status, tracking },
+      queue: { waiting: queueWaiting, submitting: queueSubmitting },
+      ownSubmission: choosingDestination,
+    }),
+    runId: composing ? null : runId,
+    outputPath: composing ? null : outputPath,
+    cancelRequested: composing ? false : cancelRequested,
     outputAction,
-    queue: queueView,
+    queue: composing ? null : queueView,
     requestedPresetId,
     choosingDestination,
     backCheckPending,
@@ -391,6 +471,16 @@ export function ExportDialog({
   };
   const frame = selectShownFrame(open, liveFrame, heldFrame);
   const step = resolveExportDialogStep(frame.status);
+
+  // The finished panel replaces the footer of the run, so the button that had the focus is
+  // gone. Done takes the focus, as the default button of the result. The status is the one on
+  // the screen, so a run that finishes behind the compose state moves no focus.
+  const shownStatus = frame.status;
+  useEffect(() => {
+    if (open && shownStatus === "finished") {
+      doneButtonRef.current?.focus();
+    }
+  }, [open, shownStatus]);
 
   const settings = useSettingsStore((state) => state.settings);
   const effectivePresetId = resolveSetupPresetId(settings, frame.requestedPresetId);
@@ -496,8 +586,9 @@ export function ExportDialog({
     armed: frame.stopArmed,
   });
   // The close control hides the dialog while the run is live, and the export continues.
-  // The label says so, because an X usually reads as "close".
-  const closeLabel = hidesOnDismiss ? t("export.action.hide") : t("common.close");
+  // The label says so, because an X usually reads as "close". In the compose state the close
+  // control also hides the dialog, and a live run of the export store continues behind it.
+  const closeLabel = t(resolveExportCloseLabelKey(frame.exportRunLive));
 
   // Holds the frame on the screen before a close changes it. The progress fields are read
   // from the store here, because only the run panel subscribes to them. A close while the
@@ -519,21 +610,51 @@ export function ExportDialog({
     onOpenChange(false);
   };
 
+  // Clears the transient state of the setup step, and makes a Back step or a confirmation
+  // that has not answered stale, so it changes nothing when it answers. The choice of the
+  // preset goes too, so the next setup step shows the active preset (ADR 024).
+  const clearSetupStep = () => {
+    backStep.invalidate();
+    setRequestedPresetId(null);
+    setSourceChangeAccepted(false);
+    setChoosingDestination(false);
+    setBackCheckPending(false);
+  };
+
+  // Leaves the compose state (ADR 049). The export store keeps its state: a live run
+  // continues, and a result stays. `resolveComposeExit` decides whether the dialog closes or
+  // shows the run view of the export store. The store is read at the call.
+  const leaveCompose = (trigger: ExportComposeExitTrigger) => {
+    const exit = resolveComposeExit(trigger, exportStore.getState());
+    if (exit === "closeDialog") {
+      holdFrame();
+    }
+    clearSetupStep();
+    exportComposeStore.getState().exit();
+    if (exit === "closeDialog") {
+      setStopArmedAt(null);
+      onOpenChange(false);
+    }
+  };
+
   // The store is read at the call and not at the render. A live run is never reset here,
   // whatever the caller saw: the reset would drop the only record of a run that the backend
   // still encodes, so the dialog hides instead, the same as a dismissal (ADR 025).
+  //
+  // In the compose state, Cancel and Close leave the compose state and never reset the export
+  // store (`resolveComposeExit`).
   const closeAndReset = () => {
+    if (exportComposeStore.getState().composing) {
+      leaveCompose("cancel");
+      return;
+    }
     if (resolveExportDismissal(exportStore.getState()) === "hide") {
       hideDialog();
       return;
     }
     holdFrame();
-    backStep.invalidate();
     onOpenChange(false);
-    setRequestedPresetId(null);
-    setSourceChangeAccepted(false);
-    setChoosingDestination(false);
-    setBackCheckPending(false);
+    clearSetupStep();
     setStopArmedAt(null);
     // The reset changes the run id, and that change drops the Show state of the runs that
     // the interface no longer lists (`bindOutputActionsToExportRun`).
@@ -570,9 +691,14 @@ export function ExportDialog({
   // A closed dialog has nothing to dismiss. During the exit animation, Escape can still reach
   // the closing layer, and a run that ended since the hide must not reset before the user
   // sees its result. An open dialog renders the live frame, so `hidesOnDismiss` is live
-  // there.
+  // there. In the compose state, a dismissal leaves the compose state and closes the dialog.
+  // A live run continues, and the export store keeps its state (`resolveComposeExit`).
   const dismiss = () => {
     if (!open) {
+      return;
+    }
+    if (exportComposeStore.getState().composing) {
+      leaveCompose("dismiss");
       return;
     }
     if (hidesOnDismiss) {
@@ -616,7 +742,33 @@ export function ExportDialog({
   // The preset choice survives the confirmation, as it survives Back, which can raise the
   // confirmation. `closeAndReset` clears the choice, and the call after it sets the saved value
   // again. React batches the two updates, so the saved value is the one that renders.
+  //
+  // In the compose state, the dialog stays open. The compose store goes back to the setup
+  // step, and the open step runs again on the compose store with the check skipped. The
+  // export store and its live run do not change. A step that answers after the user left the
+  // compose state changes nothing (`backStep`).
   const handleExportAnyway = () => {
+    if (exportComposeStore.getState().composing) {
+      setSourceChangeAccepted(true);
+      setChoosingDestination(false);
+      composeFlowTarget.reset();
+      if (onExportAnyway) {
+        onExportAnyway();
+        return;
+      }
+      const isCurrent = backStep.begin();
+      void runExportFlow({
+        ...composeFlowTarget,
+        ...guardOpenStepEffects(isCurrent, {
+          setModalOpen: onOpenChange,
+          reportError: composeFlowTarget.reportError,
+        }),
+        filterName: t("dialog.videoFilter"),
+        audioFilterName: t("dialog.audioFilter"),
+        skipSourceRevisionCheck: true,
+      });
+      return;
+    }
     const kept = requestedPresetId;
     closeAndReset();
     setRequestedPresetId(kept);
@@ -633,8 +785,14 @@ export function ExportDialog({
     });
   };
 
+  // In the compose state, Re-import leaves the compose state and closes the dialog, so the
+  // user sees the window behind it. A live run continues.
   const handleReimport = () => {
-    closeAndReset();
+    if (exportComposeStore.getState().composing) {
+      leaveCompose("dismiss");
+    } else {
+      closeAndReset();
+    }
     if (onReimport) {
       onReimport();
       return;
@@ -664,26 +822,37 @@ export function ExportDialog({
   // and not at the render. Until the step answers, Export is disabled: the source check
   // reads the file, which on a share that stopped answering can take seconds, and an export
   // must not start before it ends. A close in that time makes the step stale.
+  //
+  // In the compose state, Back reads, resets, and reports to the compose store, and the export
+  // store and its live run do not change. Leaving the compose state makes the step stale.
   const handleBackToSetup = () => {
-    if (!canGoBackToSetup(exportStore.getState())) {
+    const composes = exportComposeStore.getState().composing;
+    if (!canGoBackToSetup(readTargetState())) {
       return;
     }
     setBackClicks((count) => count + 1);
     setSourceChangeAccepted(false);
     setChoosingDestination(false);
     setStopArmedAt(null);
-    reset();
+    if (composes) {
+      composeFlowTarget.reset();
+    } else {
+      reset();
+    }
     void runOpenStepAgain({
       generation: backStep,
       effects: {
         setModalOpen: onOpenChange,
-        reportError: (err) => {
-          exportStore.getState().reportError(err);
-        },
+        reportError: composes
+          ? composeFlowTarget.reportError
+          : (err) => {
+              exportStore.getState().reportError(err);
+            },
       },
       setPending: setBackCheckPending,
       run: (effects) =>
         runExportFlow({
+          ...flowTargetOf(composes),
           ...effects,
           filterName: t("dialog.videoFilter"),
           audioFilterName: t("dialog.audioFilter"),
@@ -691,14 +860,24 @@ export function ExportDialog({
     });
   };
 
+  // In the compose state, the START step reads, reports to, and resets the compose store
+  // (ADR 049). When the export joins the queue, or starts because the batch ended meanwhile,
+  // the dialog leaves the compose state and shows the run view with the new run.
+  //
+  // The step begins a generation of `backStep`. When the user leaves the compose state or
+  // closes the dialog during the await, that generation is stale, and the updates after the
+  // await change nothing: they would act on a newer setup step.
   const handleConfirmExport = async () => {
     if (!effectivePresetId || exportDisabled) {
       return;
     }
+    const composes = exportComposeStore.getState().composing;
+    const isCurrent = backStep.begin();
     setChoosingDestination(true);
     try {
       const started = await confirmExportFlow(
         {
+          ...flowTargetOf(composes),
           setModalOpen: onOpenChange,
           filterName: t("dialog.videoFilter"),
           audioFilterName: t("dialog.audioFilter"),
@@ -708,17 +887,48 @@ export function ExportDialog({
         streams,
         audioMode,
       );
-      if (started) {
+      if (started && isCurrent()) {
         // Clear the user's manual selection once the export has started so that a subsequent
         // export setup step defaults to the project's active preset (ADR 024) even if this
         // run completes while the dialog is hidden (ADR 025). The started request already
         // carries the whole preset.
         setRequestedPresetId(null);
         setSourceChangeAccepted(false);
+        if (composes) {
+          clearSetupStep();
+          exportComposeStore.getState().exit();
+        }
       }
     } finally {
-      setChoosingDestination(false);
+      if (isCurrent()) {
+        setChoosingDestination(false);
+      }
     }
+  };
+
+  // Sets up the next export of the queue from the run view. The title bar is behind the
+  // modal, so the run footer offers the Export action of the title bar (`openExportFlow`).
+  // While the export store holds a live run, the flow enters the compose state.
+  //
+  // A confirmation of the setup step before can still wait for its answer, because the run
+  // view shows as soon as the export store starts the run. `clearSetupStep` makes that
+  // confirmation stale, so its updates after the await cannot change the new setup step.
+  const handleNewExport = () => {
+    if (newExportPendingRef.current) {
+      return;
+    }
+    clearSetupStep();
+    setStopArmedAt(null);
+    newExportPendingRef.current = true;
+    setNewExportPending(true);
+    void openExportFlow({
+      setModalOpen: onOpenChange,
+      filterName: t("dialog.videoFilter"),
+      audioFilterName: t("dialog.audioFilter"),
+    }).finally(() => {
+      newExportPendingRef.current = false;
+      setNewExportPending(false);
+    });
   };
 
   // The first click on a long export only arms the button, and the second half of a
@@ -888,6 +1098,11 @@ export function ExportDialog({
             }}
             firstControlRef={setupFirstControlRef}
           />
+          {frame.composing && frame.addsToQueue && (
+            <p className="pt-2 text-xs text-muted-foreground">
+              {t("export.setup.queueNote")}
+            </p>
+          )}
         </StepFade>
       );
     }
@@ -900,7 +1115,9 @@ export function ExportDialog({
           tracking={frame.tracking}
           outputPath={frame.outputPath}
           timing={frame.timing}
-          held={frame.progress}
+          // A failure of the compose state has no run, so it shows no progress of the run
+          // that the export store holds.
+          held={frame.composing ? NO_PROGRESS : frame.progress}
           result={step === "result" ? renderResult() : undefined}
         />
         {/* The runs of the batch, below the run panel. It shows only for a batch of more
@@ -1009,7 +1226,7 @@ export function ExportDialog({
                       className="animate-spin motion-reduce:animate-none"
                     />
                   )}
-                  {t("export.action.chooseDestination")}
+                  {t(resolveSetupConfirmLabelKey(frame.addsToQueue))}
                 </Button>
               }
             />
@@ -1086,6 +1303,28 @@ export function ExportDialog({
                       aria-describedby={stopView.noteKey ? stopNoteId : undefined}
                     >
                       {t(stopView.labelKey)}
+                    </Button>
+                  ),
+                },
+                {
+                  // Sets up an export that joins the queue (ADR 049). It is not the
+                  // default button, so Enter does not reach it by accident. The busy
+                  // button stays enabled, with `aria-busy`, so it keeps the focus.
+                  key: "newExport",
+                  role: "alternative",
+                  node: showsNewExportAction(stopView.noteKey) && (
+                    <Button
+                      variant="outline"
+                      aria-busy={newExportPending || undefined}
+                      onClick={handleNewExport}
+                    >
+                      {newExportPending && (
+                        <Loader2
+                          aria-hidden="true"
+                          className="animate-spin motion-reduce:animate-none"
+                        />
+                      )}
+                      {t("export.action.newExport")}
                     </Button>
                   ),
                 },

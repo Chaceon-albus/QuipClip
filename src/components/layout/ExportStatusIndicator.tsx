@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
+  exportComposeStore,
   selectExportOutputAction,
   useExportOutputActionStore,
   useExportPanelStore,
@@ -115,7 +116,13 @@ const SLOT_CLASS: Record<IndicatorSlot, string> = {
 export function ExportStatusIndicator() {
   const { t } = useTranslation();
   const panelOpen = useExportPanelStore((state) => state.open);
-  const show = useExportPanelStore((state) => state.show);
+  const showPanel = useExportPanelStore((state) => state.show);
+  // The indicator shows the run of the export store, so the dialog opens on the run view. It
+  // never opens on the setup of an export for the queue that the user left (ADR 049).
+  const show = () => {
+    exportComposeStore.getState().exit();
+    showPanel();
+  };
   const reset = useExportStore((state) => state.reset);
   const runId = useExportStore((state) => state.runId);
 

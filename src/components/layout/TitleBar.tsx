@@ -20,7 +20,12 @@ import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipConte
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { ExportDialog } from "@/components/export/ExportDialog";
-import { useExportPanelStore, useExportStore } from "@/features/export";
+import {
+  hasPendingExportWork,
+  useExportPanelStore,
+  useExportQueueStore,
+  useExportStore,
+} from "@/features/export";
 import { useMediaStore } from "@/features/media";
 import { resolveTimecodeDisplay } from "@/features/playback";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
@@ -35,7 +40,7 @@ import { isMacOS } from "@/lib/platform";
 import { TITLE_BAR_MARKER } from "@/lib/titleBar";
 import { cn } from "@/lib/utils";
 import { presentExportAction, type ExportActionLabel } from "./exportActionPresenter";
-import { runExportFlow } from "./exportFlowController";
+import { openExportFlow } from "./exportFlowController";
 import { quitGuard } from "./quitGuardController";
 import { resolveTitleBarPadding } from "./titleBarLayout";
 import { keepsFocusOnPress, presentTitleBarModal } from "./titleBarModal";
@@ -115,6 +120,8 @@ export function TitleBar() {
   const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
   const exportStatus = useExportStore((state) => state.status);
   const exportTracking = useExportStore((state) => state.tracking);
+  // Waiting runs and open submissions. The Export action then adds an export to the queue.
+  const pendingExportWork = useExportQueueStore(hasPendingExportWork);
   const exportDialogOpen = useExportPanelStore((state) => state.open);
   const setExportDialogOpen = useExportPanelStore((state) => state.setOpen);
   const quitPromptOpen = useStore(quitGuard.store, (state) => state.prompt !== null);
@@ -151,6 +158,7 @@ export function TitleBar() {
     hasMedia: media !== null,
     exportStatus,
     exportTracking,
+    pendingExportWork,
     segmentCount,
     segmentTotal,
     display: timecodeDisplay,
@@ -176,8 +184,10 @@ export function TitleBar() {
   });
   const maximizeControl = resolveMaximizeControl(maximized);
 
+  // While an export runs or waits, the flow sets up an export that joins the queue
+  // (`openExportFlow`, ADR 049).
   const handleExport = () => {
-    void runExportFlow({
+    void openExportFlow({
       setModalOpen: setExportDialogOpen,
       // The save dialog of an export with video and the open dialog list the same file
       // kind, so both read the one `dialog.videoFilter` label. A second key with the same

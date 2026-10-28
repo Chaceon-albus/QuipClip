@@ -545,6 +545,7 @@ describe("segment durations and the export total", () => {
             hasMedia: true,
             exportStatus: "idle",
             exportTracking: false,
+            pendingExportWork: false,
             segmentCount: 40,
             segmentTotal: total,
             display,

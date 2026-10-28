@@ -6,7 +6,7 @@ import { playbackStore } from "@/features/playback";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { timelineStore, timelineViewportStore } from "@/features/timeline";
 import { i18n } from "@/i18n";
-import { runExportFlow } from "./exportFlowController";
+import { openExportFlow } from "./exportFlowController";
 import { isPageOverlayOpen } from "./nativeContextMenuState";
 import {
   OPEN_TOOLTIP_SELECTOR,
@@ -114,7 +114,7 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       return;
     case "export":
       // The call of the Export button of the title bar.
-      void runExportFlow({
+      void openExportFlow({
         setModalOpen: exportPanelStore.getState().setOpen,
         filterName: i18n.t("dialog.videoFilter"),
         audioFilterName: i18n.t("dialog.audioFilter"),

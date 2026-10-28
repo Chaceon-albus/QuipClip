@@ -390,7 +390,7 @@ export function createExportQueueStore(
     async function startDirectly(
       request: ExportRequest,
     ): Promise<ExportQueueSubmitResult> {
-      // The batch before has ended, and nothing of it waits. Its rows go.
+      // The export store is idle, and nothing waits. The rows of a batch before go.
       set(emptyBatch());
       // The queue hears the events from here on, for the runs that the user adds later. A
       // failed subscription does not stop this start: the export store has its own, and the
@@ -485,8 +485,15 @@ export function createExportQueueStore(
             error: new ExportError({ code: "outputAlreadyQueued" }),
           };
         }
+        // A new batch starts only from an idle export store. A run that ended and that the
+        // export store still shows keeps its result: the submission goes to the queue of the
+        // backend, which starts it at once when the slot is free. The adoption of its
+        // `preparing` event then keeps the run before as an ended row, with its Show File. A
+        // refusal of that submission answers `refused`, so the caller shows it and the export
+        // store keeps the result. The Export action resets a result that it does not compose
+        // beside, so its submission still starts a new batch (ADR 049).
         const startsBatch =
-          !isExportRunLive(exportStoreApi.getState()) &&
+          exportStoreApi.getState().status === "idle" &&
           get().waiting.length === 0 &&
           pendingOutputPaths.length === 0;
 

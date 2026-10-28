@@ -233,10 +233,11 @@ describe("export queue store", () => {
       await queue.getState().submit(createRequest("/out/a.mp4"));
       finishRun(emit, "run-1", "/out/a.mp4");
 
+      // The export store still shows the result, so the run goes through the queue.
       await expect(
         queue.getState().submit(createRequest("/out/a.mp4")),
       ).resolves.toEqual({
-        kind: "started",
+        kind: "queued",
         runId: "run-2",
       });
     });
@@ -677,14 +678,82 @@ describe("export queue store", () => {
       expect(queue.getState().waiting).toEqual(["run-2"]);
     });
 
-    it("starts a new batch when the run before has ended and nothing waits", async () => {
-      const { queue, emit } = createFixture();
+    it("starts a new batch when the export store is idle and nothing waits", async () => {
+      const { queue, exportStore, emit } = createFixture();
       await queue.getState().submit(createRequest("/out/a.mp4"));
       finishRun(emit, "run-1", "/out/a.mp4");
+      exportStore.getState().reset();
 
-      await queue.getState().submit(createRequest("/out/b.mp4"));
+      await expect(
+        queue.getState().submit(createRequest("/out/b.mp4")),
+      ).resolves.toEqual({ kind: "started", runId: "run-2" });
 
       expect(queue.getState().order).toEqual(["run-2"]);
+    });
+
+    for (const end of ["finished", "failed", "canceled"] as const) {
+      it(`queues a run while the export store shows a ${end} result and nothing waits`, async () => {
+        const { queue, exportStore, emit, start } = createFixture();
+        await queue.getState().submit(createRequest("/out/a.mp4"));
+        if (end === "finished") {
+          finishRun(emit, "run-1", "/out/a.mp4");
+        } else {
+          emit({
+            event: "failed",
+            runId: "run-1",
+            code: end === "canceled" ? "canceled" : "ffmpegProcessFailed",
+          });
+        }
+
+        // The slot is free, so the backend starts the run at once. It still answers through
+        // the queue, and the export store keeps the result until the adoption.
+        const result = await queue.getState().submit(createRequest("/out/b.mp4"));
+
+        expect(result).toEqual({ kind: "queued", runId: "run-2" });
+        expect(start).toHaveBeenCalledTimes(2);
+        expect(exportStore.getState()).toMatchObject({ status: end, runId: "run-1" });
+        expect(queue.getState()).toMatchObject({
+          order: ["run-1", "run-2"],
+          waiting: ["run-2"],
+        });
+
+        emit({ event: "preparing", runId: "run-2" });
+
+        // The run before keeps its row, as an ended run.
+        expect(exportStore.getState()).toMatchObject({
+          status: "preparing",
+          runId: "run-2",
+          tracking: true,
+        });
+        expect(queue.getState().ended).toMatchObject([{ runId: "run-1", status: end }]);
+        expect(
+          selectExportQueueRows(queue.getState(), exportStore.getState()).map((row) => [
+            row.runId,
+            row.phase,
+          ]),
+        ).toEqual([
+          ["run-1", "ended"],
+          ["run-2", "current"],
+        ]);
+      });
+    }
+
+    it("refuses a run that start_export rejects while the export store shows a result", async () => {
+      const { queue, exportStore, emit, fixture } = createFixture();
+      await queue.getState().submit(createRequest("/out/a.mp4"));
+      finishRun(emit, "run-1", "/out/a.mp4");
+      fixture.answer = () => Promise.reject(new ExportError({ code: "invalidPreset" }));
+
+      const result = await queue.getState().submit(createRequest("/out/b.mp4"));
+
+      // The caller shows the refusal. The export store keeps the result of the run before.
+      expect(result.kind === "refused" && result.error.code).toBe("invalidPreset");
+      expect(exportStore.getState()).toMatchObject({
+        status: "finished",
+        runId: "run-1",
+        error: null,
+      });
+      expect(queue.getState().order).toEqual(["run-1"]);
     });
   });
 
