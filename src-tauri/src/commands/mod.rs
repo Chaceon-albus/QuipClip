@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod build_info;
 pub mod capabilities;
 pub mod export;
+pub mod export_journal;
 pub mod export_output;
 pub mod media;
 pub mod preferences;

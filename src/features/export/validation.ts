@@ -36,6 +36,14 @@ function isDurationUs(value: unknown): value is number {
 }
 
 /**
+ * Checks whether an unknown value is a sequence number of an export event: a non-negative safe
+ * integer.
+ */
+function isSequenceNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
  * Checks whether an unknown value is a valid BackendExportErrorCode.
  */
 export function isBackendExportErrorCode(
@@ -92,6 +100,10 @@ export function isExportProgressEvent(value: unknown): value is ExportProgressEv
   }
   const e = value as Record<string, unknown>;
   if (typeof e.event !== "string" || typeof e.runId !== "string") {
+    return false;
+  }
+  // The sequence number of the export journal. An event without one is still valid.
+  if (e.seq !== undefined && !isSequenceNumber(e.seq)) {
     return false;
   }
 

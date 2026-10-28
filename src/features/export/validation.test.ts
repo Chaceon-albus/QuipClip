@@ -149,6 +149,39 @@ describe("Export Validation & Normalization", () => {
     });
   });
 
+  describe("the sequence number of an event", () => {
+    it("accepts an event with a non-negative safe integer seq, and one without seq", () => {
+      expect(
+        isExportProgressEvent({ seq: 7, event: "preparing", runId: "run-1" }),
+      ).toBe(true);
+      expect(
+        isExportProgressEvent({ seq: 0, event: "publishing", runId: "run-1" }),
+      ).toBe(true);
+      expect(
+        isExportProgressEvent({
+          seq: Number.MAX_SAFE_INTEGER,
+          event: "failed",
+          runId: "run-1",
+          code: "canceled",
+        }),
+      ).toBe(true);
+      expect(isExportProgressEvent({ event: "preparing", runId: "run-1" })).toBe(true);
+    });
+
+    it("refuses a seq that is not a non-negative safe integer", () => {
+      for (const seq of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, "7", null]) {
+        expect(isExportProgressEvent({ seq, event: "preparing", runId: "run-1" })).toBe(
+          false,
+        );
+      }
+    });
+
+    it("keeps the seq in the validated event", () => {
+      const event = { seq: 12, event: "publishing", runId: "run-1" };
+      expect(validateExportProgressEvent(event)).toEqual(event);
+    });
+  });
+
   describe("validateExportSubmission", () => {
     it("accepts a valid ExportSubmission payload", () => {
       const submission = createValidSubmission({ runId: "run-1" });

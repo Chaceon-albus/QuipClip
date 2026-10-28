@@ -96,6 +96,9 @@ pub fn run() {
         // The destination of the last published export. The show command reads the path from
         // here, so the web view names a run and never a path.
         .manage(commands::export_output::PublishedExports::default())
+        // The journal of the export runs. Every export event goes through it and gets its
+        // sequence number there.
+        .manage(commands::export_journal::ExportJournal::default())
         // Whether the user confirmed the quit (ADR 027). The exit handler below reads it.
         .manage(commands::quit::QuitGate::default())
         // The request that the page of the Settings window takes when it loads or navigates.

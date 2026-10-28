@@ -322,14 +322,20 @@ export type ExportFailedEvent = {
 
 /**
  * Tagged union of all possible backend events emitted on `export:progress`.
+ *
+ * The backend gives each event a sequence number, `seq`. The numbers start at 1 and go up by 1
+ * in the order in which the events go out. A reader that has a copy of the export journal can
+ * drop each event whose number is not larger than the number of that copy. `seq` is optional
+ * here, so that an event that a test or the frontend builds needs no number.
  */
-export type ExportProgressEvent =
+export type ExportProgressEvent = (
   | ExportPreparingEvent
   | ExportStartedEvent
   | ExportProgressUpdateEvent
   | ExportPublishingEvent
   | ExportFinishedEvent
-  | ExportFailedEvent;
+  | ExportFailedEvent
+) & { seq?: number };
 
 /**
  * Output status states supported by the export store.

@@ -94,6 +94,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
+use super::export_journal::{ExportJournal, RunFacts, SequencedEvent};
 use super::export_output::PublishedExports;
 use super::media::{map_probe_error, ImportMediaErrorCode};
 use super::next_run_id;
@@ -373,6 +374,7 @@ pub async fn start_export(
     app: tauri::AppHandle,
     registry: tauri::State<'_, Arc<ExportRegistry>>,
     preview_windows: tauri::State<'_, Arc<PreviewWindows>>,
+    journal: tauri::State<'_, ExportJournal>,
     request: ExportRequestWire,
 ) -> Result<ExportSubmission, ExportCommandError> {
     // Checked before the slot is claimed, so a request with an invalid preset is refused at
@@ -385,6 +387,7 @@ pub async fn start_export(
         .map_err(|_| ExportCommandError::new(ExportErrorCode::AppDataUnavailable))?;
 
     let run_id = next_run_id();
+    let facts = run_facts(&request);
     let waiting = Box::new(QueuedExport {
         app,
         run_id: run_id.clone(),
@@ -394,6 +397,9 @@ pub async fn start_export(
             preview_windows: preview_windows.inner().clone(),
         },
     });
+    // Recorded before the submit. A run that starts at once sends `preparing` during the
+    // submit, and the journal must know the run then.
+    journal.record_submission(&run_id, facts);
     // One run holds the slot at a time (ADR 016). A run that comes while another holds it
     // waits, and the registry starts it when the runs before it have released the slot.
     match registry.submit(&run_id, waiting) {
@@ -405,7 +411,20 @@ pub async fn start_export(
             run_id,
             queued: true,
         }),
-        Submission::Closed => Err(ExportCommandError::new(ExportErrorCode::ExportQueueClosed)),
+        Submission::Closed => {
+            journal.forget(&run_id);
+            Err(ExportCommandError::new(ExportErrorCode::ExportQueueClosed))
+        }
+    }
+}
+
+/// The facts of a request that the export journal keeps for the run.
+fn run_facts(request: &ExportRequestWire) -> RunFacts {
+    RunFacts {
+        output_path: request.output_path.clone(),
+        preset_name: request.preset.name.clone(),
+        segment_count: u32::try_from(request.segments.len()).unwrap_or(u32::MAX),
+        streams: request.streams,
     }
 }
 
@@ -2130,13 +2149,28 @@ fn failed_event(run_id: &str, error: ExportCommandError) -> ExportEvent {
     }
 }
 
+/// Send `event` through the export journal, which gives it its sequence number and applies it to
+/// its run (`commands::export_journal`). Every export event goes out here.
+///
+/// The journal calls `app.emit` while it holds its lock. This is safe because no export event
+/// comes from the main thread: see [`ExportJournal`].
 fn emit_event(app: &tauri::AppHandle, event: ExportEvent) {
     // A failed emit means nobody is listening, for example because the window closed during
     // the encode. It must never propagate: this is called from the progress callback, which
     // runs inside `run_export_process`'s supervision loop, and a panic there unwinds straight
     // out of that function and loses the whole outcome -- no status, no stderr, no frame
     // count -- leaving the caller with nothing to report but the panic.
-    let _ = app.emit(EVENT_NAME, event);
+    match app.try_state::<ExportJournal>() {
+        Some(journal) => journal.emit(event, |seq, event| {
+            let _ = app.emit(EVENT_NAME, SequencedEvent { seq, event });
+        }),
+        None => {
+            // `lib.rs` manages the journal, so this is a fault of the program. The event still
+            // goes out, without a number, so that the interface does not wait for it forever.
+            debug_assert!(false, "the export journal is not managed state");
+            let _ = app.emit(EVENT_NAME, event);
+        }
+    }
 }
 
 fn path_to_string(path: &Path) -> String {
