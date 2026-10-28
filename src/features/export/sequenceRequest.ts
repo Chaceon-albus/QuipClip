@@ -14,31 +14,115 @@ import {
   type SequenceSources,
 } from "@/features/timeline/sequence";
 import type { Clip, SequenceSegment } from "@/types/project";
-import type {
-  ExportAudioMode,
-  ExportPiece,
-  ExportRequest,
-  ExportSource,
-  ExportSourceRevision,
-  ExportStreams,
+import {
+  ExportError,
+  type ExportAudioMode,
+  type ExportPiece,
+  type ExportRequest,
+  type ExportSource,
+  type ExportSourceRevision,
+  type ExportStreams,
 } from "./types";
 import type { Preset } from "@/features/settings/types";
+import { ptsToBigInt } from "@/lib/time";
 
 /**
- * The largest sum of the pieces and the sources of one export. It is a copy of
- * `EXPORT_PIECE_BUDGET` in `src-tauri/src/ffmpeg/export/mod.rs`, and the two values must stay
- * equal.
+ * The most pieces that one export joins (ADR 055). It is a copy of `MAX_EXPORT_PIECES` in
+ * `src-tauri/src/ffmpeg/export/mod.rs`, which is the source of truth, and `types.test.ts` reads
+ * that file and asserts that the two values are equal. The backend refuses more pieces with
+ * `tooManySegments`. The OPEN step refuses them first, so the user learns it before naming an
+ * output file.
  */
-export const EXPORT_PIECE_BUDGET = 92;
+export const MAX_EXPORT_PIECES = 256;
 
 /**
- * The most pieces that one export of `sourceCount` sources joins: `EXPORT_PIECE_BUDGET` less the
- * count of sources, as `max_export_pieces` in `src-tauri/src/ffmpeg/export/mod.rs` computes it.
- * The backend refuses more pieces with `tooManySegments`. The OPEN step refuses them first, so
- * the user learns it before naming an output file (ADR 053).
+ * The most inputs that one export process opens, and so the most sources of one export and the
+ * most runs of its pieces (ADR 055). It is a copy of `MAX_EXPORT_INPUTS` in
+ * `src-tauri/src/ffmpeg/export/inputs.rs`, which is the source of truth, and `types.test.ts`
+ * reads that file and asserts that the two values are equal.
  */
-export function maxExportPieces(sourceCount: number): number {
-  return Math.max(0, EXPORT_PIECE_BUDGET - Math.max(1, sourceCount));
+export const MAX_EXPORT_INPUTS = 85;
+
+/** A piece as the count of runs reads it: its source and its In and Out points. */
+export type RunPiece = Pick<ExportPiece, "sourceId" | "inPts" | "outPts">;
+
+/**
+ * The count of runs of `pieces`, by the rule of `source_runs` in
+ * `src-tauri/src/ffmpeg/export/inputs.rs` (ADR 055).
+ *
+ * The pieces are taken in export order. Each piece joins the run of its own source whose last
+ * piece has the latest Out point at or before the In point of the piece. When two such runs end at
+ * the same Out point, the piece joins the one that opened first. When no run of its source ends at
+ * or before its In point, the piece opens a new run. The Out point is exclusive (ADR 002), so a
+ * piece whose In point equals the Out point of a run joins that run.
+ *
+ * The PTS are compared exactly, as `bigint`, and only within one source, never across two
+ * (ADR 002). `inputRunCases.json` holds the cases that this function and the Rust function both
+ * run.
+ */
+export function countInputRuns(pieces: readonly RunPiece[]): number {
+  // The runs in the order they opened, with the source and the Out point of the last piece.
+  const runs: { sourceId: string; lastOut: bigint }[] = [];
+  for (const piece of pieces) {
+    const inPts = ptsToBigInt(piece.inPts);
+    let best: { sourceId: string; lastOut: bigint } | null = null;
+    for (const run of runs) {
+      // A later run with an equal Out point does not replace the earlier one.
+      if (
+        run.sourceId === piece.sourceId &&
+        run.lastOut <= inPts &&
+        (best === null || run.lastOut > best.lastOut)
+      ) {
+        best = run;
+      }
+    }
+    const outPts = ptsToBigInt(piece.outPts);
+    if (best === null) {
+      runs.push({ sourceId: piece.sourceId, lastOut: outPts });
+    } else {
+      best.lastOut = outPts;
+    }
+  }
+  return runs.length;
+}
+
+/**
+ * The refusal of the limits of ADR 055 for the export of `pieces` from `sourceCount` sources, or
+ * null when the export is within them. The checks run in the order of the backend, and each
+ * refusal names its limit:
+ *
+ * 1. More pieces than `MAX_EXPORT_PIECES` -- `tooManySegments`, with `pieceLimit`.
+ * 2. More sources than `MAX_EXPORT_INPUTS` -- `tooManySources`, with `sourceLimit`.
+ * 3. More pieces than `MAX_EXPORT_INPUTS`, which need more runs than `MAX_EXPORT_INPUTS`
+ *    (`countInputRuns`) -- `piecesOutOfOrder`, with `inputLimit`.
+ */
+export function exportLimitError(
+  pieces: readonly RunPiece[],
+  sourceCount: number,
+): ExportError | null {
+  if (pieces.length > MAX_EXPORT_PIECES) {
+    return new ExportError({ code: "tooManySegments", pieceLimit: MAX_EXPORT_PIECES });
+  }
+  if (sourceCount > MAX_EXPORT_INPUTS) {
+    return new ExportError({ code: "tooManySources", sourceLimit: MAX_EXPORT_INPUTS });
+  }
+  if (pieces.length > MAX_EXPORT_INPUTS) {
+    let runs: number;
+    try {
+      runs = countInputRuns(pieces);
+    } catch {
+      // A PTS that is not a decimal integer. The store validates each PTS, so this only reports
+      // what the backend would refuse anyway, instead of rejecting the OPEN step without a word.
+      return new ExportError({ code: "invalidSegment" });
+    }
+    if (runs > MAX_EXPORT_INPUTS) {
+      return new ExportError({
+        code: "piecesOutOfOrder",
+        inputLimit: MAX_EXPORT_INPUTS,
+      });
+    }
+  }
+  return null;
 }
 
 /** The inputs of `buildSequenceExportRequest`. */

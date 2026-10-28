@@ -112,9 +112,10 @@ use crate::settings::AudioChannels;
 /// input through `split`, with and
 /// without `scale`. `the_pixel_format_chain_is_the_first_chain_of_every_graph` pins the position.
 ///
-/// The reason for one filter is the command-line budget, not the graph. A filter in each chain
-/// costs its bytes once for each segment, and at [`super::MAX_EXPORT_SEGMENTS`] the widest
-/// command the settings permit had 130 bytes of slack left on Windows. `,format=yuv420p` took
+/// The reason for one filter was the command-line budget, not the graph. Before ADR 055 moved the
+/// graph into a file, a filter in each chain cost its bytes once for each segment, and at the
+/// limit of pieces of ADR 014 the widest command the settings permit had 130 bytes of slack left
+/// on Windows. `,format=yuv420p` took
 /// 1500 bytes at the cap, and a 10-bit name such as `yuv420p10le` would take 400 more. As one
 /// chain, the filter and its label cost 23 bytes at `yuv420p`, whatever the segment count.
 fn video_output_format(pixel_format: &str) -> String {
@@ -903,7 +904,7 @@ fn audio_timestamp_reset(in_tick: i64) -> String {
 /// segment of 575 s after the end of 48000 Hz 5.1 audio peaked at 42 MiB, against 45 MiB for a
 /// source whose audio covers it. The padding of `concat` is not streamed: the same segment with
 /// another one behind it took 900 MiB. A pad in every chain of a graph with video removes that
-/// cost too. The one command of ADR 014 had no room for it at [`super::MAX_EXPORT_SEGMENTS`], and
+/// cost too. The one command of ADR 014 had no room for it at its limit of pieces, and
 /// the audio process of ADR 043 has: every chain of [`build_audio_graph`] carries it, cut to the
 /// length ([`audio_exact_end`]).
 ///
@@ -1009,8 +1010,8 @@ enum ChainEnd {
 ///
 /// The reset and the fill add 33 bytes to each chain with a 12-digit tick at 192000 Hz. The
 /// short names of [`audio_output_format`] take 34 bytes from a chain with a channel layout and
-/// 21 from one without, and 11 from each input pin, so the widest command stays inside the
-/// Windows budget at [`super::MAX_EXPORT_SEGMENTS`]; see `arguments.rs`.
+/// 21 from one without, and 11 from each input pin. They kept the widest command inside the
+/// Windows budget at the limit of pieces of ADR 014, before ADR 055 moved the graph into a file.
 fn audio_chain(
     audio: &PlannedAudio,
     stream: &SourceAudio,

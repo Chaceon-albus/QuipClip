@@ -203,7 +203,7 @@ pub fn encoder_graph(plan: &ExportPlan, inputs: &InputAssignment) -> String {
 /// UTF-16 code units, and no character encodes to fewer UTF-8 bytes than it does UTF-16 units,
 /// so a non-ASCII path can only make this estimate larger than the real command line, never
 /// smaller.
-fn command_line_length(arguments: &[String]) -> usize {
+pub(crate) fn command_line_length(arguments: &[String]) -> usize {
     arguments
         .iter()
         .map(|argument| argument.len() + ARGUMENT_OVERHEAD_BYTES)
@@ -830,11 +830,11 @@ mod tests {
     use crate::ffmpeg::export::graph_file::{
         GraphFileOption, AUDIO_GRAPH_FILE, ENCODER_GRAPH_FILE,
     };
-    use crate::ffmpeg::export::inputs::{assign_inputs, MAX_EXPORT_INPUTS};
+    use crate::ffmpeg::export::inputs::{assign_inputs, check_runs, MAX_EXPORT_INPUTS};
     use crate::ffmpeg::export::plan::SegmentBoundary;
     use crate::ffmpeg::export::{
-        max_export_pieces, OutputTiming, PlannedAudio, PlannedSegment, PlannedSource, PlannedVideo,
-        SourceAudio, VideoFit, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
+        OutputTiming, PlannedAudio, PlannedSegment, PlannedSource, PlannedVideo, SourceAudio,
+        VideoFit, MAX_AUDIO_PREFIXES, MAX_EXPORT_PIECES,
     };
     use crate::project::Resolution;
     use crate::settings::{
@@ -2582,13 +2582,13 @@ mod tests {
         // `-cq 63 -b:v 0` is four arguments, against two for each other kind, so it is the
         // widest even beside `-b:v 200000k`. Each kind at the top of its range is measured.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
-        let widest = widest_plan(MAX_EXPORT_SEGMENTS);
+        let widest = widest_plan(MAX_EXPORT_PIECES);
         for (kind, value) in [
             (QualityKind::Crf, 63),
             (QualityKind::Bitrate, 200_000),
             (QualityKind::QualityScale, 100),
         ] {
-            let mut plan = widest_plan(MAX_EXPORT_SEGMENTS);
+            let mut plan = widest_plan(MAX_EXPORT_PIECES);
             video_mut(&mut plan).quality = Quality { kind, value };
             for shape in [Inputs::PerPiece, Inputs::PerSource] {
                 assert!(
@@ -3003,17 +3003,17 @@ mod tests {
 
     #[test]
     fn a_full_length_plan_on_a_long_windows_path_fits_the_windows_command_line() {
-        // A realistic plan at the limit of one source: a 106-character path, ordinary encoder
+        // A realistic plan at the limit of pieces: a 106-character path, ordinary encoder
         // names, no encoder options, and a 4K fit step in every chain. Its pieces are in source
         // order, about 45 s apart, so production reads them through runs cut at their gaps, up to
         // `MAX_EXPORT_INPUTS` inputs (ADR 055). The widest commands are measured below.
-        let plan = windows_plan(MAX_EXPORT_SEGMENTS);
+        let plan = windows_plan(MAX_EXPORT_PIECES);
         let inputs = production_inputs(&plan);
         assert_eq!(inputs.inputs().len(), MAX_EXPORT_INPUTS);
         let length = measured_length(&plan, &inputs, WINDOWS_OUTPUT);
         assert!(
             length <= WINDOWS_COMMAND_LINE_BUDGET,
-            "{MAX_EXPORT_SEGMENTS} segments need {length} bytes, over the \
+            "{MAX_EXPORT_PIECES} segments need {length} bytes, over the \
              {WINDOWS_COMMAND_LINE_BUDGET}-byte budget of Windows' {WINDOWS_COMMAND_LINE_LIMIT}"
         );
         // The audio process opens the inputs of the pieces whose chains read audio, and has a
@@ -3022,7 +3022,7 @@ mod tests {
         let length = measured_audio_length(&plan, &inputs);
         assert!(
             length <= WINDOWS_COMMAND_LINE_BUDGET,
-            "the audio process at {MAX_EXPORT_SEGMENTS} segments needs {length} bytes"
+            "the audio process at {MAX_EXPORT_PIECES} segments needs {length} bytes"
         );
     }
 
@@ -3271,19 +3271,37 @@ mod tests {
         plan
     }
 
+    /// The counts of pieces of the first source that the budget sweep skews toward, for `sources`
+    /// sources at `count` pieces: every count from 1 to `count - sources + 1` would make the sweep
+    /// at [`MAX_EXPORT_PIECES`] pieces and up to [`MAX_EXPORT_INPUTS`] sources last minutes, so it
+    /// takes the smallest counts, the counts around [`MAX_EXPORT_INPUTS`], where the rules of
+    /// `inputs` change, every 16th count, and the largest counts.
+    fn sampled_skews(count: usize, sources: usize) -> Vec<usize> {
+        let most = count - sources + 1;
+        let mut skews: Vec<usize> = [1, 2, 3, most - 1, most]
+            .into_iter()
+            .chain(MAX_EXPORT_INPUTS - 1..=MAX_EXPORT_INPUTS + 1)
+            .chain((16..most).step_by(16))
+            .filter(|first_pieces| (1..=most).contains(first_pieces))
+            .collect();
+        skews.sort_unstable();
+        skews.dedup();
+        skews
+    }
+
     /// Every plan the budget sweep measures for `sources` sources at `count` pieces, with a name
     /// for a report. The shapes are the round robin of [`widest_plan_of_sources`] and, with two
-    /// sources or more, every skew of [`skewed_plan`] toward the first source, with one piece for
-    /// each other source or all `count` pieces. Each shape comes with every piece reading audio
-    /// and [`silenced`], with video and [`without_video`], and with and without an FLV input on
-    /// every source (ADR 055).
+    /// sources or more, the skews of [`skewed_plan`] toward the first source that
+    /// [`sampled_skews`] names, with one piece for each other source or all `count` pieces. Each
+    /// shape comes with every piece reading audio and [`silenced`], with video and
+    /// [`without_video`], and with and without an FLV input on every source (ADR 055).
     fn budget_sweep(count: usize, sources: usize) -> Vec<(String, ExportPlan)> {
         let mut shapes = vec![(
             format!("{sources} sources in turn"),
             widest_plan_of_sources(count, sources),
         )];
         if sources > 1 {
-            for first_pieces in 1..=count - sources + 1 {
+            for first_pieces in sampled_skews(count, sources) {
                 // The other sources hold one piece each, or share every piece that is left.
                 for total in [first_pieces + sources - 1, count] {
                     shapes.push((
@@ -3316,15 +3334,6 @@ mod tests {
             }
         }
         plans
-    }
-
-    /// The most sources of one export: each source holds a piece, and [`max_export_pieces`] lowers
-    /// the limit by one for each source.
-    fn max_export_sources() -> usize {
-        (1..)
-            .take_while(|sources| max_export_pieces(*sources) >= *sources)
-            .last()
-            .expect("one source holds a piece")
     }
 
     /// The length of the command of the encoder of `plan` and of its audio process, with the
@@ -3387,15 +3396,13 @@ mod tests {
     #[test]
     fn the_widest_plan_with_an_flv_input_still_fits_at_the_segment_cap() {
         // Every source of the plan has an FLV input, and each command of the plan, with the
-        // inputs production chooses, still fits at the limit of its count of sources, with the
+        // inputs production chooses, still fits at the limit of pieces, with the
         // largest numbers a file can have. A long path of the application data does not count:
         // each command names its heads by their file names.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
-        for sources in [1, 2, 7, max_export_sources()] {
-            let plan = with_flv_inputs_everywhere(widest_plan_of_sources(
-                max_export_pieces(sources),
-                sources,
-            ));
+        for sources in [1, 2, 7, MAX_EXPORT_INPUTS] {
+            let plan =
+                with_flv_inputs_everywhere(widest_plan_of_sources(MAX_EXPORT_PIECES, sources));
             assert!(fits_windows(&plan, &reservation), "{sources} sources");
         }
     }
@@ -3506,7 +3513,7 @@ mod tests {
         // to the limit: production reads them through one input for each piece, and past
         // `MAX_EXPORT_INPUTS` through runs cut at their gaps, up to that many inputs.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
-        for count in 1..=MAX_EXPORT_SEGMENTS {
+        for count in 1..=MAX_EXPORT_PIECES {
             for plan in [
                 widest_plan(count),
                 with_flv_input(widest_plan(count), u64::MAX),
@@ -3520,28 +3527,85 @@ mod tests {
         }
     }
 
+    /// The count of the inputs of the sources that `command` opens: each `-i` but the one of the
+    /// pipe of the encoder.
+    fn source_input_count(command: &[String]) -> usize {
+        command
+            .windows(2)
+            .filter(|pair| pair[0] == "-i" && pair[1] != "pipe:0")
+            .count()
+    }
+
     #[test]
     fn the_widest_plan_the_settings_permit_fits_with_any_number_of_sources() {
-        // For every count of sources up to the most of one export, every plan of `budget_sweep` of
-        // the most pieces of one export must fit every command, with the inputs that production
-        // chooses: the pieces in turn or skewed toward the FLV source, every piece reading audio
-        // or every piece generating silence ([`silenced`]), with and without video, and with and
-        // without an FLV input. The sweep also holds the plans of fewer pieces in which each
-        // source but the first holds one piece. The count of pieces is the limit of one source,
-        // past the limit of more sources, because the inputs, not that limit, keep the command
-        // inside the budget (ADR 055).
+        // ADR 055: for every count of sources up to `MAX_EXPORT_INPUTS`, every plan of
+        // `budget_sweep` at `MAX_EXPORT_PIECES` pieces must fit both commands, with the inputs that
+        // `assign_inputs` chooses: the pieces in turn or skewed toward the first source, every
+        // piece reading audio or every piece generating silence ([`silenced`]), with and without
+        // video, and with and without an FLV input on every source. The sweep also holds the plans
+        // of fewer pieces in which each source but the first holds one piece. A plan that
+        // `check_runs` refuses never reaches a command, so it is skipped, but each count of sources
+        // keeps at least one plan.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
-        for sources in 1..=max_export_sources() {
-            for (name, plan) in budget_sweep(MAX_EXPORT_SEGMENTS, sources) {
-                assert!(
-                    fits_windows(&plan, &reservation),
-                    "{name} does not fit: {:?}",
-                    chosen_lengths(&plan, &reservation)
+        let time_bases = vec![fixture_time_base(); MAX_EXPORT_INPUTS];
+        let mut widest_encoder = (0, String::new());
+        let mut widest_audio = (0, String::new());
+        for sources in 1..=MAX_EXPORT_INPUTS {
+            let mut measured = 0;
+            for (name, plan) in budget_sweep(MAX_EXPORT_PIECES, sources) {
+                let pieces: Vec<SegmentBoundary> = plan
+                    .segments
+                    .iter()
+                    .map(|segment| SegmentBoundary {
+                        source: segment.source,
+                        in_pts: segment.in_pts,
+                        out_pts: segment.out_pts,
+                    })
+                    .collect();
+                if check_runs(&pieces).is_err() {
+                    continue;
+                }
+                measured += 1;
+                let inputs = assign_inputs(&pieces, &time_bases[..plan.sources.len()])
+                    .expect("check_runs accepted the pieces");
+                assert!(inputs.inputs().len() <= MAX_EXPORT_INPUTS, "{name}");
+                let encoder = super::build_arguments(
+                    &plan,
+                    &inputs,
+                    MEASURED_ENCODER_GRAPH,
+                    Path::new(&reservation),
                 );
+                let length = command_line_length(&encoder);
+                assert!(
+                    length <= WINDOWS_COMMAND_LINE_BUDGET,
+                    "the encoder of {name} needs {length} bytes"
+                );
+                assert!(source_input_count(&encoder) <= MAX_EXPORT_INPUTS, "{name}");
+                if length > widest_encoder.0 {
+                    widest_encoder = (length, name.clone());
+                }
+                if plan.separate_audio_process() {
+                    let audio = super::build_audio_arguments(&plan, &inputs, MEASURED_AUDIO_GRAPH);
+                    let length = command_line_length(&audio);
+                    assert!(
+                        length <= WINDOWS_COMMAND_LINE_BUDGET,
+                        "the audio process of {name} needs {length} bytes"
+                    );
+                    assert!(source_input_count(&audio) <= MAX_EXPORT_INPUTS, "{name}");
+                    if length > widest_audio.0 {
+                        widest_audio = (length, name);
+                    }
+                }
             }
+            assert!(measured > 0, "{sources} sources: no plan was measured");
         }
+        // `cargo test -- --nocapture` prints the widest commands of the sweep.
+        println!(
+            "widest encoder: {} bytes, {}; widest audio process: {} bytes, {}",
+            widest_encoder.0, widest_encoder.1, widest_audio.0, widest_audio.1
+        );
         // The sweep holds both kinds of plan.
-        let plan = widest_plan_of_sources(max_export_pieces(3), 3);
+        let plan = widest_plan_of_sources(MAX_EXPORT_PIECES, 3);
         assert!(silenced(plan.clone()).audio.is_some());
         assert!(!silenced(plan.clone()).separate_audio_process());
         assert!(plan.separate_audio_process());
@@ -3553,18 +3617,18 @@ mod tests {
         // a file since ADR 055, so only the command that names it is measured here. The sweep
         // above holds the plans without video of several sources.
         let reservation = longest_windows_path(".m4a.tmp-13724-0");
-        let plan = widest_audio_only_plan(MAX_EXPORT_SEGMENTS);
+        let plan = widest_audio_only_plan(MAX_EXPORT_PIECES);
         let inputs = production_inputs(&plan);
         let graph = super::build_filter_graph(&plan, &inputs);
         assert_eq!(
             graph.matches("apad=whole_len=").count(),
-            MAX_EXPORT_SEGMENTS,
+            MAX_EXPORT_PIECES,
             "every chain of a graph without video ends in the pad"
         );
         let length = measured_length(&plan, &inputs, &reservation);
         assert!(
             length <= WINDOWS_COMMAND_LINE_BUDGET,
-            "the widest plan without video at {MAX_EXPORT_SEGMENTS} segments needs {length} \
+            "the widest plan without video at {MAX_EXPORT_PIECES} segments needs {length} \
              bytes, over the {WINDOWS_COMMAND_LINE_BUDGET}-byte budget"
         );
     }
@@ -3576,7 +3640,7 @@ mod tests {
         // This sweeps every other audio choice at the cap to prove none spells a longer command
         // with either layout of the inputs, and then asks the budget question for the widest one directly.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
-        let widest = widest_plan(MAX_EXPORT_SEGMENTS);
+        let widest = widest_plan(MAX_EXPORT_PIECES);
         let widest_length =
             |inputs: &InputAssignment| -> usize { measured_length(&widest, inputs, &reservation) };
 
@@ -3594,7 +3658,7 @@ mod tests {
                     Some(320),
                     Some(MAX_AUDIO_BITRATE_KBPS),
                 ] {
-                    let mut plan = widest_plan(MAX_EXPORT_SEGMENTS);
+                    let mut plan = widest_plan(MAX_EXPORT_PIECES);
                     plan.audio = Some(PlannedAudio {
                         output_sample_rate,
                         output_channels,
@@ -3625,7 +3689,7 @@ mod tests {
         // bytes plus the per-argument overhead of each. The closing `aformat` filters are in the
         // graph, which is in a file since ADR 055, so they contribute nothing to the difference.
         let inputs = production_inputs(&widest);
-        let mut legacy = widest_plan(MAX_EXPORT_SEGMENTS);
+        let mut legacy = widest_plan(MAX_EXPORT_PIECES);
         legacy.audio = Some(PlannedAudio {
             output_sample_rate: 48_000,
             output_channels: AudioChannels::Stereo,
@@ -3641,13 +3705,13 @@ mod tests {
         let length = widest_length(&inputs);
         assert!(
             length <= WINDOWS_COMMAND_LINE_BUDGET,
-            "the widest audio format at {MAX_EXPORT_SEGMENTS} segments needs {length} bytes, \
+            "the widest audio format at {MAX_EXPORT_PIECES} segments needs {length} bytes, \
              over the {WINDOWS_COMMAND_LINE_BUDGET}-byte budget"
         );
         let audio_length = measured_audio_length(&widest, &inputs);
         assert!(
             audio_length <= WINDOWS_COMMAND_LINE_BUDGET,
-            "the audio process of the widest audio format at {MAX_EXPORT_SEGMENTS} segments \
+            "the audio process of the widest audio format at {MAX_EXPORT_PIECES} segments \
              needs {audio_length} bytes, over the budget"
         );
     }

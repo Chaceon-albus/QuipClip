@@ -19,6 +19,7 @@ import {
   type ExportState,
   type ExportStoreState,
 } from "./types";
+import { MAX_EXPORT_INPUTS, MAX_EXPORT_PIECES } from "./sequenceRequest";
 
 declare global {
   interface ObjectConstructor {
@@ -137,6 +138,21 @@ describe("Export Types & Wire Constants", () => {
       }
     });
 
+    it("copies the Rust limits of pieces and of inputs (ADR 055)", () => {
+      const read = (path: string): string =>
+        readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+      const pieces = /\npub const MAX_EXPORT_PIECES: usize = (\d+);\n/.exec(
+        read("../../../src-tauri/src/ffmpeg/export/mod.rs"),
+      );
+      const inputs = /\npub const MAX_EXPORT_INPUTS: usize = (\d+);\n/.exec(
+        read("../../../src-tauri/src/ffmpeg/export/inputs.rs"),
+      );
+      expect(pieces).not.toBeNull();
+      expect(inputs).not.toBeNull();
+      expect(MAX_EXPORT_PIECES).toBe(Number(pieces![1]));
+      expect(MAX_EXPORT_INPUTS).toBe(Number(inputs![1]));
+    });
+
     it("names exactly the codes the Rust export vocabulary emits", () => {
       const rustCodes = readRustExportErrorCodes();
 
@@ -229,6 +245,7 @@ describe("Export Types & Wire Constants", () => {
         "workDirectoryUnavailable",
         "graphFileUnsupported",
         "piecesOutOfOrder",
+        "tooManySources",
       ]);
     });
 

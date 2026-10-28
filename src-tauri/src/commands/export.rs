@@ -80,12 +80,12 @@ use crate::ffmpeg::export::inputs::check_runs;
 use crate::ffmpeg::export::work_directory::{remove_stale_work_directories, ExportWorkDirectory};
 use crate::ffmpeg::export::{
     assign_inputs, build_arguments, build_audio_arguments, build_audio_graph, build_copy_arguments,
-    build_plan, check_command_line, encoder_graph, inspect_path, max_export_pieces,
-    run_export_process, verify_audio_output, verify_copied_audio_output, verify_copy_streams,
-    AudioOutputMismatch, CopyOutput, ExportAudioMode, ExportErrorCode, ExportPlan,
-    ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot,
-    ExportStreams, InputAssignment, PendingOutput, PlanRequest, PlanSource, ProgressSnapshot,
-    SegmentBoundary, Submission, WaitingRun, AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS,
+    build_plan, check_command_line, encoder_graph, inspect_path, run_export_process,
+    verify_audio_output, verify_copied_audio_output, verify_copy_streams, AudioOutputMismatch,
+    CopyOutput, ExportAudioMode, ExportErrorCode, ExportPlan, ExportProcessOutcome,
+    ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot, ExportStreams,
+    InputAssignment, PendingOutput, PlanRequest, PlanSource, ProgressSnapshot, SegmentBoundary,
+    Submission, WaitingRun, AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_INPUTS, MAX_EXPORT_PIECES,
     SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::preview::PreviewWindows;
@@ -221,19 +221,20 @@ impl ResolvedRequest<'_> {
 /// The checks run in this order, and the first failure wins:
 ///
 /// 1. No piece -- `noSegments`.
-/// 2. More pieces than [`max_export_pieces`] allows for the count of sources -- `tooManySegments`
-///    (ADR 053: the limit counts pieces, and each source lowers it by one).
+/// 2. More pieces than [`MAX_EXPORT_PIECES`] -- `tooManySegments` (ADR 053: the limit counts
+///    pieces; ADR 055 sets it).
 /// 3. No source, an empty id, an id that appears twice, a piece that names an id the list does
 ///    not hold, or a source that no piece names -- `invalidSources`, with the fault and the id in
 ///    the detail (ADR 011: a diagnostic, not a sentence for the user).
-/// 4. A `segmentCount` of 0, or larger than the number of pieces -- `invalidSegmentCount`.
-/// 5. A piece whose In point is not before its Out point -- `invalidSegment`.
-/// 6. Pieces that need more runs in source order than
-///    [`MAX_EXPORT_INPUTS`](crate::ffmpeg::export::MAX_EXPORT_INPUTS) -- `piecesOutOfOrder`
+/// 4. More sources than [`MAX_EXPORT_INPUTS`] -- `tooManySources` (ADR 055: each source needs one
+///    input).
+/// 5. A `segmentCount` of 0, or larger than the number of pieces -- `invalidSegmentCount`.
+/// 6. A piece whose In point is not before its Out point -- `invalidSegment`.
+/// 7. Pieces that need more runs in source order than [`MAX_EXPORT_INPUTS`] -- `piecesOutOfOrder`
 ///    ([`check_runs`], ADR 055). The count of runs needs valid source ids and In points before Out
 ///    points, so it comes last.
 ///
-/// [`build_plan`] checks 1, 2, 5 and 6 again for any other caller. The order of the sources is the
+/// [`build_plan`] checks 1 to 4, 6 and 7 again for any other caller. The order of the sources is the
 /// order of their first piece, so preparation runs once for each source in that order, and the
 /// plan breaks a tie of the canvas in favour of the earlier piece (ADR 053).
 fn resolve_request(request: &ExportRequestWire) -> Result<ResolvedRequest<'_>, ExportCommandError> {
@@ -246,7 +247,7 @@ fn resolve_request(request: &ExportRequestWire) -> Result<ResolvedRequest<'_>, E
     if request.pieces.is_empty() {
         return Err(ExportCommandError::new(ExportErrorCode::NoSegments));
     }
-    if request.pieces.len() > max_export_pieces(request.sources.len()) {
+    if request.pieces.len() > MAX_EXPORT_PIECES {
         return Err(ExportCommandError::new(ExportErrorCode::TooManySegments));
     }
     if request.sources.is_empty() {
@@ -292,6 +293,9 @@ fn resolve_request(request: &ExportRequestWire) -> Result<ResolvedRequest<'_>, E
         .find(|source| !sources.iter().any(|used| used.id == source.id))
     {
         return invalid(format!("unused source id: {}", unused.id));
+    }
+    if sources.len() > MAX_EXPORT_INPUTS {
+        return Err(ExportCommandError::new(ExportErrorCode::TooManySources));
     }
     let segment_count = usize::try_from(request.segment_count).unwrap_or(usize::MAX);
     if segment_count == 0 || segment_count > pieces.len() {
@@ -1109,7 +1113,7 @@ where
 /// The read runs when the export writes audio from a stream that holds packets and has a sample
 /// rate. Otherwise no chain reads the stream, or the plan refuses the audio, and the answer is
 /// empty. The answer is empty as well when the plan refuses the segments: none, more than
-/// [`MAX_EXPORT_SEGMENTS`], a boundary that is not a time, or an In point that is not before its
+/// [`MAX_EXPORT_PIECES`], a boundary that is not a time, or an In point that is not before its
 /// Out point. The ranges of the read are the segments, in seconds on the timeline of the
 /// container, which is the timeline of `-copyts`.
 ///
@@ -1142,7 +1146,7 @@ where
     else {
         return Ok(AudioFrames::default());
     };
-    if pieces.is_empty() || pieces.len() > MAX_EXPORT_SEGMENTS {
+    if pieces.is_empty() || pieces.len() > MAX_EXPORT_PIECES {
         return Ok(AudioFrames::default());
     }
     let ranges: Option<Vec<(Rational, Rational)>> = pieces
@@ -1207,7 +1211,7 @@ fn flv_input_for(
     // be wasted.
     if !probe.format_names.iter().any(|name| name == "flv")
         || pieces.is_empty()
-        || pieces.len() > MAX_EXPORT_SEGMENTS
+        || pieces.len() > MAX_EXPORT_PIECES
     {
         return Ok(None);
     }
@@ -5608,7 +5612,7 @@ mod tests {
         for (segments, code) in [
             (Vec::new(), ExportErrorCode::NoSegments),
             (
-                vec![(0, 1); MAX_EXPORT_SEGMENTS + 1],
+                vec![(0, 1); MAX_EXPORT_PIECES + 1],
                 ExportErrorCode::TooManySegments,
             ),
         ] {
@@ -9179,31 +9183,27 @@ mod tests {
             refused(request_of(&[("a", a)], &[])).code,
             ExportErrorCode::NoSegments
         );
-        let many: Vec<(&str, i64, i64)> = (0..=MAX_EXPORT_SEGMENTS)
-            .map(|_| ("a", 0, 90_000))
-            .collect();
+        let many: Vec<(&str, i64, i64)> =
+            (0..=MAX_EXPORT_PIECES).map(|_| ("a", 0, 90_000)).collect();
         assert_eq!(
             refused(request_of(&[("a", a)], &many)).code,
             ExportErrorCode::TooManySegments
         );
-        // Each further source lowers the limit by one (ADR 053): the pieces that one source may
-        // hold are too many for two.
-        // The pieces are in source order, so their runs fit (ADR 055).
-        let two: Vec<(&str, i64, i64)> = (0..max_export_pieces(1))
+        // The limit of pieces does not depend on the count of sources (ADR 055). The pieces are in
+        // source order, so their runs fit.
+        let two: Vec<(&str, i64, i64)> = (0..MAX_EXPORT_PIECES)
             .map(|index| {
                 let start = i64::try_from(index).unwrap() * 90_000;
                 (["a", "b"][index % 2], start, start + 90_000)
             })
             .collect();
+        assert!(resolve_request(&request_of(&[("a", a), ("b", b)], &two)).is_ok());
+        let mut two_too_many = two.clone();
+        two_too_many.push(("a", 0, 90_000));
         assert_eq!(
-            refused(request_of(&[("a", a), ("b", b)], &two)).code,
+            refused(request_of(&[("a", a), ("b", b)], &two_too_many)).code,
             ExportErrorCode::TooManySegments
         );
-        assert!(resolve_request(&request_of(
-            &[("a", a), ("b", b)],
-            &two[..max_export_pieces(2)]
-        ))
-        .is_ok());
         assert_eq!(
             refused(request_of(&[], &[("a", 0, 1)])),
             invalid("no source")
@@ -9272,7 +9272,7 @@ mod tests {
             refused(request_of(&[("a", a)], &unknown)),
             invalid("unknown source id: c")
         );
-        let too_many: Vec<(&str, i64, i64)> = (0..=MAX_EXPORT_SEGMENTS)
+        let too_many: Vec<(&str, i64, i64)> = (0..=MAX_EXPORT_PIECES)
             .rev()
             .map(|index| {
                 let start = i64::try_from(index).unwrap() * 90_000;
@@ -9283,6 +9283,66 @@ mod tests {
             refused(request_of(&[("a", a)], &too_many)).code,
             ExportErrorCode::TooManySegments
         );
+    }
+
+    /// The request of `count` sources, each with one piece, at the paths `/media/s<k>.mp4`.
+    fn request_of_sources(count: usize) -> ExportRequestWire {
+        let ids: Vec<String> = (0..count).map(|index| format!("s{index}")).collect();
+        let paths: Vec<PathBuf> = (0..count)
+            .map(|index| PathBuf::from(format!("/media/s{index}.mp4")))
+            .collect();
+        let sources: Vec<(&str, &Path)> = ids
+            .iter()
+            .zip(&paths)
+            .map(|(id, path)| (id.as_str(), path.as_path()))
+            .collect();
+        let pieces: Vec<(&str, i64, i64)> = ids.iter().map(|id| (id.as_str(), 0, 90_000)).collect();
+        request_of(&sources, &pieces)
+    }
+
+    #[test]
+    fn a_request_of_more_sources_than_inputs_is_refused_in_the_order_of_adr_055() {
+        let refused = |request: ExportRequestWire| resolve_request(&request).unwrap_err().code;
+        // Each source needs one input, so an export uses at most `MAX_EXPORT_INPUTS` sources.
+        assert!(resolve_request(&request_of_sources(MAX_EXPORT_INPUTS)).is_ok());
+        assert_eq!(
+            refused(request_of_sources(MAX_EXPORT_INPUTS + 1)),
+            ExportErrorCode::TooManySources
+        );
+
+        // The order: `tooManySegments` and `invalidSources` come before `tooManySources`.
+        let mut many_pieces = request_of_sources(MAX_EXPORT_INPUTS + 1);
+        while many_pieces.pieces.len() <= MAX_EXPORT_PIECES {
+            many_pieces.pieces.push(piece("s0", 0, 90_000));
+        }
+        assert_eq!(refused(many_pieces), ExportErrorCode::TooManySegments);
+        let mut unknown = request_of_sources(MAX_EXPORT_INPUTS + 1);
+        unknown.pieces[5] = piece("c", 0, 90_000);
+        assert_eq!(refused(unknown), ExportErrorCode::InvalidSources);
+        let mut unused = request_of_sources(MAX_EXPORT_INPUTS + 1);
+        unused.pieces.pop();
+        unused.sources.push(ExportSourceWire {
+            id: "unused".to_owned(),
+            path: "/media/unused.mp4".to_owned(),
+            expected_revision: None,
+        });
+        assert_eq!(refused(unused), ExportErrorCode::InvalidSources);
+
+        // `tooManySources` comes before `invalidSegmentCount`, `invalidSegment` and
+        // `piecesOutOfOrder`.
+        let mut count = request_of_sources(MAX_EXPORT_INPUTS + 1);
+        count.segment_count = 0;
+        assert_eq!(refused(count), ExportErrorCode::TooManySources);
+        let mut empty = request_of_sources(MAX_EXPORT_INPUTS + 1);
+        empty.pieces[3] = piece("s3", 7, 7);
+        assert_eq!(refused(empty), ExportErrorCode::TooManySources);
+        let mut reversed = request_of_sources(MAX_EXPORT_INPUTS + 1);
+        for index in (1..=MAX_EXPORT_INPUTS as i64).rev() {
+            reversed
+                .pieces
+                .push(piece("s0", index * 90_000, (index + 1) * 90_000));
+        }
+        assert_eq!(refused(reversed), ExportErrorCode::TooManySources);
     }
 
     #[test]

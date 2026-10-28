@@ -79,18 +79,40 @@ describe("presentExportError", () => {
 
   it("names the limit that the OPEN step computed for tooManySegments", () => {
     const view = presentExportError(
-      new ExportError({ code: "tooManySegments", pieceLimit: 90 }),
+      new ExportError({ code: "tooManySegments", pieceLimit: 256 }),
     );
 
     expect(view).toStrictEqual({
       key: "exportError.tooManySegmentsLimit",
-      values: { limit: 90 },
+      values: { limit: 256 },
     });
     for (const catalog of [en, zhCN]) {
       expect(resolveCatalogKey(catalog, view!.key)).toEqual(
         expect.stringContaining("{{limit}}"),
       );
     }
+  });
+
+  it("names the limit of sources for tooManySources when the frontend sets one", () => {
+    const view = presentExportError(
+      new ExportError({ code: "tooManySources", sourceLimit: 85 }),
+    );
+
+    expect(view).toStrictEqual({
+      key: "exportError.tooManySourcesLimit",
+      values: { limit: 85 },
+    });
+    for (const catalog of [en, zhCN]) {
+      expect(resolveCatalogKey(catalog, view!.key)).toEqual(
+        expect.stringContaining("{{limit}}"),
+      );
+    }
+    // The backend sends no limit, and its refusal takes the message of its code.
+    expect(
+      presentExportError(new ExportError({ code: "tooManySources" })),
+    ).toStrictEqual({
+      key: "exportError.tooManySources",
+    });
   });
 
   it("names the limit of runs for piecesOutOfOrder when the frontend sets one", () => {
@@ -380,6 +402,7 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   tooManySegments: null,
   // The segments must come nearer to the order of their source on the timeline.
   piecesOutOfOrder: null,
+  tooManySources: null,
   invalidSources: null,
   invalidSegmentCount: null,
   invalidSegment: null,

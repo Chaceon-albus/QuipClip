@@ -1078,8 +1078,10 @@ export const en = {
       "QuipClip could not prepare the export in time. A drive or a network share might not be answering.",
     noSegments: "No segments are marked for export.",
     tooManySegments: "Too many segments are marked for export.",
+    // {{limit}} is the largest number of parts that one export joins. A segment that crosses
+    // the end of a clip gives one part for each clip.
     tooManySegmentsLimit:
-      "Too many segments are marked for export. With the current sources, an export joins at most {{limit}} parts.",
+      "Too many segments are marked for export. One export joins at most {{limit}} parts. Export the segments in two or more exports.",
     invalidSources: "The export request does not match its source files.",
     invalidSegmentCount: "The export request gives a wrong number of segments.",
     invalidSegment: "One or more export segments have invalid In or Out points.",
@@ -1124,8 +1126,14 @@ export const en = {
     graphFileUnsupported:
       "This FFmpeg build cannot read a filter graph from a file. Install another FFmpeg build.",
     piecesOutOfOrder: "The segments are too far out of the order of their source.",
+    // {{limit}} is the largest number of groups of parts that one export reads. In a group, each
+    // part comes after the part before it in the same source file.
     piecesOutOfOrderLimit:
-      "The segments are too far out of the order of their source. One export can read at most {{limit}} groups of parts that follow the order of their source.",
+      "The segments are too far out of the order of their source. One export can read at most {{limit}} groups of parts that follow the order of their source. Put the segments closer to the order of their source, or export them in two or more exports.",
+    tooManySources: "This export uses too many source files.",
+    // {{limit}} is the largest number of source files that one export uses.
+    tooManySourcesLimit:
+      "This export uses too many source files. One export can use at most {{limit}} source files. Export the segments in two or more exports.",
     dialogFailed: "QuipClip could not open the export save dialog.",
     sourceRevisionChanged:
       "The video file on disk changed after it was opened. The marked segments may no longer name the same frames.",

@@ -832,7 +832,7 @@ export const zhCN: TranslationCatalog = {
     noSegments: "没有标记用于导出的片段。",
     tooManySegments: "标记用于导出的片段过多。",
     tooManySegmentsLimit:
-      "标记用于导出的片段过多。按当前的源数量，一次导出最多拼接 {{limit}} 个部分。",
+      "标记用于导出的片段过多。一次导出最多拼接 {{limit}} 个部分。请将片段分成两次或更多次导出。",
     invalidSources: "导出请求与其源文件不一致。",
     invalidSegmentCount: "导出请求给出的片段数量有误。",
     invalidSegment: "一个或多个导出片段的入点或出点无效。",
@@ -866,7 +866,10 @@ export const zhCN: TranslationCatalog = {
       "此 FFmpeg 版本无法从文件读取滤镜图。请安装其他 FFmpeg 版本。",
     piecesOutOfOrder: "片段与其在源中的顺序相差太大。",
     piecesOutOfOrderLimit:
-      "片段与其在源中的顺序相差太大。一次导出最多读取 {{limit}} 组按源内顺序排列的部分。",
+      "片段与其在源中的顺序相差太大。一次导出最多读取 {{limit}} 组按源内顺序排列的部分。请让片段更接近源内的顺序，或分成两次或更多次导出。",
+    tooManySources: "此导出使用的源文件过多。",
+    tooManySourcesLimit:
+      "此导出使用的源文件过多。一次导出最多使用 {{limit}} 个源文件。请将片段分成两次或更多次导出。",
     dialogFailed: "无法打开导出保存对话框。",
     sourceRevisionChanged:
       "打开之后，磁盘上的视频文件已更改。已标记的片段可能不再指向相同的帧。",

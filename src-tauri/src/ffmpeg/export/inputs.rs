@@ -55,6 +55,10 @@ use std::cmp::Reverse;
 ///
 /// The pipe of the encoder is not counted: it is not an input of a source, and the measure
 /// includes it.
+///
+/// It is also the limit of sources of an export, because each source needs one input.
+/// `MAX_EXPORT_INPUTS` in `src/features/export/sequenceRequest.ts` mirrors this value, and
+/// `src/features/export/types.test.ts` reads it from this file.
 pub const MAX_EXPORT_INPUTS: usize = 85;
 
 /// The shortest gap inside a run, in seconds, at which [`cut_runs`] divides the run (ADR 055).
@@ -770,5 +774,59 @@ mod tests {
                 pieces: vec![1],
             },
         ]);
+    }
+
+    /// The cases of `src/features/export/inputRunCases.json`, which the vitest of
+    /// `countInputRuns` in `src/features/export/sequenceRequest.test.ts` runs too: the two counts of
+    /// runs must agree, because the OPEN step refuses with that count before the backend does
+    /// (ADR 055).
+    #[test]
+    fn the_runs_agree_with_the_shared_cases_of_the_frontend() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../src/features/export/inputRunCases.json"
+        ))
+        .expect("the shared cases are JSON");
+        let cases = table["cases"].as_array().expect("the cases are a list");
+        assert!(cases.len() >= 10, "the shared cases were read");
+        for case in cases {
+            let name = case["name"].as_str().expect("each case has a name");
+            let mut sources: Vec<&str> = Vec::new();
+            let pieces: Vec<SegmentBoundary> = case["pieces"]
+                .as_array()
+                .expect("each case has pieces")
+                .iter()
+                .map(|piece| {
+                    let id = piece["sourceId"].as_str().expect("a source id");
+                    let source = sources
+                        .iter()
+                        .position(|known| *known == id)
+                        .unwrap_or_else(|| {
+                            sources.push(id);
+                            sources.len() - 1
+                        });
+                    let pts = |field: &str| {
+                        Pts::new(
+                            piece[field]
+                                .as_str()
+                                .and_then(|text| text.parse::<i64>().ok())
+                                .expect("a PTS is an i64 in a string"),
+                        )
+                    };
+                    SegmentBoundary {
+                        source,
+                        in_pts: pts("inPts"),
+                        out_pts: pts("outPts"),
+                    }
+                })
+                .collect();
+            let runs = case["runs"]
+                .as_u64()
+                .expect("each case has a count of runs");
+            assert_eq!(
+                u64::try_from(source_runs(&pieces).len()).unwrap(),
+                runs,
+                "{name}"
+            );
+        }
     }
 }

@@ -1321,20 +1321,7 @@ pub fn probe_audio_gaps(
         stderr: Vec::new(),
     })?;
     let stream = read.stream_index.to_string();
-    let arguments = [
-        OsStr::new("-v"),
-        OsStr::new("error"),
-        OsStr::new("-select_streams"),
-        OsStr::new(&stream),
-        OsStr::new("-show_entries"),
-        OsStr::new("frame=pts_time,nb_samples"),
-        OsStr::new("-read_intervals"),
-        OsStr::new(&intervals),
-        OsStr::new("-of"),
-        OsStr::new("csv=p=0"),
-        OsStr::new("-i"),
-        media_path.as_os_str(),
-    ];
+    let arguments = audio_gap_arguments(&stream, &intervals, media_path.as_os_str());
     let run = run_probe_process(
         ffprobe_path,
         &arguments,
@@ -1348,6 +1335,34 @@ pub fn probe_audio_gaps(
     })
 }
 
+/// The arguments of one read of the audio gaps: the stream `stream`, the intervals `intervals` of
+/// `-read_intervals`, and the input `input`.
+///
+/// The intervals grow with the pieces of the source: [`read_intervals_argument`] writes one
+/// interval for each range that touches no other: about 27 bytes for each piece of an ordinary
+/// source (ADR 055), and at most 56 with bounds of the widest `i64`. The test `the_gap_read_of_the_most_pieces_fits_the_windows_budget` holds the command at
+/// [`crate::ffmpeg::export::MAX_EXPORT_PIECES`] pieces inside the Windows budget.
+fn audio_gap_arguments<'a>(
+    stream: &'a str,
+    intervals: &'a str,
+    input: &'a OsStr,
+) -> [&'a OsStr; 12] {
+    [
+        OsStr::new("-v"),
+        OsStr::new("error"),
+        OsStr::new("-select_streams"),
+        OsStr::new(stream),
+        OsStr::new("-show_entries"),
+        OsStr::new("frame=pts_time,nb_samples"),
+        OsStr::new("-read_intervals"),
+        OsStr::new(intervals),
+        OsStr::new("-of"),
+        OsStr::new("csv=p=0"),
+        OsStr::new("-i"),
+        input,
+    ]
+}
+
 /// [`probe_audio_gaps`] for an FLV source (ADR 046). FFmpeg cannot seek in an FLV without a
 /// keyframe index, so each interval of `-read_intervals` would read the file from its start. The
 /// read therefore opens one slice for each group of ranges that overlap or touch: the head and
@@ -1356,6 +1371,13 @@ pub fn probe_audio_gaps(
 /// keep their timestamps, so the answers join in order of time and parse as one. All the runs
 /// share one [`PROBE_TIMEOUT`]. The head is named by its full path in `work_directory`, the work
 /// directory of the export, so the read keeps the working directory of this process.
+///
+/// An export can join up to [`crate::ffmpeg::export::MAX_EXPORT_PIECES`] pieces, so one source
+/// can give 256 groups. One process for each group, one after another, could then spend the whole
+/// [`PROBE_TIMEOUT`] on the start of the processes alone, which takes about 100 ms on Windows. So
+/// at most [`SLICE_READ_WORKERS`] runs work at the same time. Each run reads the same bytes as
+/// before, and the answers still join in the order of the groups. After a failure or a cancel, no
+/// new run starts, and the first failure in the order of the groups is the answer.
 fn probe_audio_gaps_in_slices(
     ffprobe_path: &Path,
     media_path: &Path,
@@ -1375,32 +1397,22 @@ fn probe_audio_gaps_in_slices(
             "the path of the head holds the concat separator",
         ));
     }
-    let groups = slice_groups(read.ranges, &flv.segment_offsets);
     let microsecond = Rational::new(1, 1_000_000).expect("1/1000000 is a valid Rational");
+    // The interval and the input of each group, in the order of the groups.
+    let runs = slice_groups(read.ranges, &flv.segment_offsets)
+        .into_iter()
+        .map(|(end, offset)| {
+            let end = end
+                .add(microsecond)
+                .and_then(|end| format_seconds(end, 6))
+                .ok_or_else(|| parse_error("a range cannot be written in microseconds"))?;
+            Ok((format!("%{end}"), flv.url(&head, offset, media_path)))
+        })
+        .collect::<Result<Vec<(String, String)>, ProbeError>>()?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
     let stream = read.stream_index.to_string();
-    let mut csv = Vec::new();
-    for (end, offset) in groups {
-        let end = end
-            .add(microsecond)
-            .and_then(|end| format_seconds(end, 6))
-            .ok_or_else(|| parse_error("a range cannot be written in microseconds"))?;
-        let interval = format!("%{end}");
-        let input = flv.url(&head, offset, media_path);
-        let arguments = [
-            OsStr::new("-v"),
-            OsStr::new("error"),
-            OsStr::new("-select_streams"),
-            OsStr::new(&stream),
-            OsStr::new("-show_entries"),
-            OsStr::new("frame=pts_time,nb_samples"),
-            OsStr::new("-read_intervals"),
-            OsStr::new(&interval),
-            OsStr::new("-of"),
-            OsStr::new("csv=p=0"),
-            OsStr::new("-i"),
-            OsStr::new(&input),
-        ];
+    let read_one = |(interval, input): &(String, String)| -> Result<Vec<u8>, ProbeError> {
+        let arguments = audio_gap_arguments(&stream, interval, OsStr::new(input));
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(ProbeError::TimedOut {
@@ -1416,18 +1428,121 @@ fn probe_audio_gaps_in_slices(
             Some(cancel),
         )
         .map_err(|source| ProbeError::Spawn { source })?;
-        let answer = finish_probe_run_with(run, remaining, |bytes| Ok(bytes.to_vec()))?;
-        csv.extend_from_slice(&answer);
-        if !csv.ends_with(b"\n") {
-            csv.push(b'\n');
-        }
+        finish_probe_run_with(run, remaining, |bytes| Ok(bytes.to_vec()))
+    };
+    let answers = run_in_order(&runs, SLICE_READ_WORKERS, cancel, read_one);
+    // A Stop wins over every other answer: with runs at the same time, an earlier run can fail
+    // in the same poll in which a later one sees the flag, and a failure of the read is not fatal
+    // to its caller, a Stop is.
+    if cancel.load(Ordering::SeqCst) {
+        return Err(ProbeError::Canceled);
     }
+    let csv = join_slice_answers(answers)?;
     parse_audio_frames_csv(&csv, read.sample_rate, read.min_gap).map_err(|source| {
         ProbeError::Parse {
             source,
             stderr: Vec::new(),
         }
     })
+}
+
+/// The most runs of [`probe_audio_gaps_in_slices`] that work at the same time.
+///
+/// Each run reads the audio of one short slice, so its time is mostly the start of the process.
+/// With 256 groups, eight runs at a time need about 32 rounds, which is a few seconds even where a
+/// start takes 300 ms, far inside [`PROBE_TIMEOUT`]. The count is chosen for the start of the
+/// processes, not for the reads: on a network share, eight reads at a time can each be slower,
+/// but they read the same bytes within the same deadline.
+const SLICE_READ_WORKERS: usize = 8;
+
+/// Join the answers of the runs of [`probe_audio_gaps_in_slices`] in the order of the groups, each
+/// answer on lines of its own.
+///
+/// A run that never started stopped for a failure of another run or for a cancel. The first
+/// failure in the order of the groups wins over it, so a run skipped before a failure does not
+/// hide that failure. Skipped runs with no failure mean a cancel.
+fn join_slice_answers(
+    answers: Vec<Option<Result<Vec<u8>, ProbeError>>>,
+) -> Result<Vec<u8>, ProbeError> {
+    let mut csv = Vec::new();
+    let mut skipped = false;
+    for answer in answers {
+        match answer {
+            Some(Ok(answer)) => {
+                csv.extend_from_slice(&answer);
+                if !csv.ends_with(b"\n") {
+                    csv.push(b'\n');
+                }
+            }
+            Some(Err(error)) => return Err(error),
+            None => skipped = true,
+        }
+    }
+    if skipped {
+        return Err(ProbeError::Canceled);
+    }
+    Ok(csv)
+}
+
+/// Sets its flag when the thread that holds it unwinds, so a run that panics stops the others as
+/// a failure does.
+struct FailOnPanic<'a>(&'a AtomicBool);
+
+impl Drop for FailOnPanic<'_> {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Run `run` on each of `jobs` with at most `workers` runs at the same time, and return the answers
+/// in the order of `jobs`.
+///
+/// After an `Err`, a panic of a run or a set `cancel`, no new run starts, and each job that did not
+/// start answers `None`. A run that works already ends as `run` decides: a probe run reads
+/// `cancel` too. A panic of a run reaches the caller when every worker has stopped.
+fn run_in_order<J: Sync, T: Send, E: Send>(
+    jobs: &[J],
+    workers: usize,
+    cancel: &AtomicBool,
+    run: impl Fn(&J) -> Result<T, E> + Sync,
+) -> Vec<Option<Result<T, E>>> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let answers: Vec<std::sync::Mutex<Option<Result<T, E>>>> =
+        jobs.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    thread::scope(|scope| {
+        for _ in 0..workers.clamp(1, jobs.len().max(1)) {
+            scope.spawn(|| {
+                let _guard = FailOnPanic(&failed);
+                loop {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(job) = jobs.get(index) else {
+                        break;
+                    };
+                    if failed.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let answer = run(job);
+                    if answer.is_err() {
+                        failed.store(true, Ordering::SeqCst);
+                    }
+                    *answers[index]
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+                }
+            });
+        }
+    });
+    answers
+        .into_iter()
+        .map(|answer| {
+            answer
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        })
+        .collect()
 }
 
 /// One audio frame that [`probe_slice_start`] decoded.
@@ -4064,6 +4179,97 @@ mod tests {
         );
     }
 
+    /// The length of the command of a read of the audio gaps, as the export measures a command
+    /// line.
+    fn gap_read_length(intervals: &str, input: &str) -> usize {
+        let arguments: Vec<String> = audio_gap_arguments("99", intervals, OsStr::new(input))
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        crate::ffmpeg::export::arguments::command_line_length(&arguments)
+    }
+
+    /// A path of 259 characters, the longest that Windows accepts without the extended-length
+    /// prefix, ending in `suffix`.
+    fn longest_windows_path(suffix: &str) -> String {
+        let head = r"C:\Users\alexandra.whitfield\Videos\Captures\";
+        format!(
+            "{head}{}{suffix}",
+            "a".repeat(259 - head.len() - suffix.len())
+        )
+    }
+
+    #[test]
+    fn the_gap_read_of_the_most_pieces_fits_the_windows_budget() {
+        use crate::ffmpeg::export::arguments::WINDOWS_COMMAND_LINE_BUDGET;
+        use crate::ffmpeg::export::flv_input::{head_name, FlvInput};
+        use crate::ffmpeg::export::MAX_EXPORT_PIECES;
+
+        // ADR 055: the intervals of `-read_intervals` grow with the pieces of one source. The
+        // widest that the code writes: every piece touches no other, so each one is an interval of
+        // its own, and each bound has thirteen integer digits, a sign and six decimals. A bound
+        // with more integer digits does not survive the move of 1 microsecond in an `i64`
+        // rational, so the code does not write it.
+        let count = i64::try_from(MAX_EXPORT_PIECES).unwrap();
+        let ranges: Vec<(Rational, Rational)> = (0..count)
+            .map(|index| {
+                let start = -9_200_000_000_000_000_000 + index * 10_000_000_000_000 + 1;
+                (
+                    Rational::new(start, 1_000_000).unwrap(),
+                    Rational::new(start + 1_000_000_000, 1_000_000).unwrap(),
+                )
+            })
+            .collect();
+        let intervals = read_intervals_argument(&ranges).unwrap();
+        assert_eq!(intervals.split(',').count(), MAX_EXPORT_PIECES);
+        assert!(intervals
+            .split(['%', ','])
+            .all(|bound| bound.len() == "-9200000000000.000000".len()));
+        let fourteen_digits = Rational::new(-20_000_000_000_001, 2).unwrap();
+        assert_eq!(
+            read_intervals_argument(&[(
+                fourteen_digits,
+                fourteen_digits.add(Rational::new(1, 1).unwrap()).unwrap()
+            )]),
+            None
+        );
+        // No bound is longer than an `i64` of seconds with six decimals, which is 27 characters,
+        // so the budget is also measured at that width, whatever the rational.
+        let widest_bound = format!("-{}.000000", i64::MAX);
+        let bound = |_| format!("{widest_bound}%{widest_bound}");
+        let upper: Vec<String> = (0..MAX_EXPORT_PIECES).map(bound).collect();
+        let upper = upper.join(",");
+        assert!(intervals.len() < upper.len());
+
+        let source = longest_windows_path(".mkv");
+        let written = gap_read_length(&intervals, &source);
+        let length = gap_read_length(&upper, &source);
+        // `cargo test -- --nocapture` prints the lengths.
+        println!(
+            "gap read at {MAX_EXPORT_PIECES} pieces: {written} bytes as written, {length} bytes \
+             at the bound of an i64"
+        );
+        assert!(
+            length <= WINDOWS_COMMAND_LINE_BUDGET,
+            "the gap read at {MAX_EXPORT_PIECES} pieces needs {length} bytes"
+        );
+
+        // The read of an FLV source runs one command for each group of pieces, with one interval
+        // and the slice of the group: the widest head in a work directory of 259 characters, the
+        // widest offsets and the widest source.
+        let flv = FlvInput {
+            head_name: head_name(99),
+            source_size: u64::MAX,
+            segment_offsets: vec![u64::MAX - 1],
+            first_frame_offset: 13,
+        };
+        let head = longest_windows_path(&format!("\\{}", head_name(99)));
+        let url = flv.url(&head, u64::MAX - 1, Path::new(&source));
+        let length = gap_read_length(&format!("%{widest_bound}"), &url);
+        println!("FLV gap read: {length} bytes");
+        assert!(length <= WINDOWS_COMMAND_LINE_BUDGET, "{length} bytes");
+    }
+
     #[test]
     fn the_slices_of_an_flv_gap_read_join_the_ranges_that_overlap_or_touch() {
         // In concat order, as the segments are. Each group reads from the earliest slice of its
@@ -5139,5 +5345,106 @@ mod tests {
                 "duration": "10.02"
             }
         })
+    }
+
+    #[test]
+    fn runs_in_order_answer_in_the_order_of_the_jobs_and_run_as_many_as_the_workers() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Barrier;
+        let jobs: Vec<usize> = (0..64).collect();
+        let working = AtomicUsize::new(0);
+        let most = AtomicUsize::new(0);
+        // The first eight jobs wait for each other, so they can only finish when eight run at
+        // the same time. The bound below then shows that no more than eight ever do.
+        let first_eight = Barrier::new(8);
+        let answers = run_in_order(&jobs, 8, &AtomicBool::new(false), |job| {
+            let now = working.fetch_add(1, Ordering::SeqCst) + 1;
+            most.fetch_max(now, Ordering::SeqCst);
+            if *job < 8 {
+                first_eight.wait();
+            }
+            working.fetch_sub(1, Ordering::SeqCst);
+            Ok::<usize, ()>(job * 10)
+        });
+        let answers: Vec<usize> = answers.into_iter().map(|a| a.unwrap().unwrap()).collect();
+        assert_eq!(answers, (0..64).map(|job| job * 10).collect::<Vec<_>>());
+        assert_eq!(most.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn runs_in_order_start_nothing_new_after_a_failure_or_a_cancel() {
+        use std::sync::atomic::AtomicUsize;
+        let jobs: Vec<usize> = (0..200).collect();
+        let started = AtomicUsize::new(0);
+        let answers = run_in_order(&jobs, 1, &AtomicBool::new(false), |job| {
+            started.fetch_add(1, Ordering::SeqCst);
+            if *job == 3 {
+                Err("failed")
+            } else {
+                Ok(*job)
+            }
+        });
+        assert_eq!(started.load(Ordering::SeqCst), 4);
+        assert_eq!(answers[3], Some(Err("failed")));
+        assert!(answers[4..].iter().all(Option::is_none));
+
+        let canceled = AtomicBool::new(true);
+        let answers = run_in_order(&jobs, 8, &canceled, |job| Ok::<usize, ()>(*job));
+        assert!(answers.iter().all(Option::is_none));
+
+        let none: Vec<usize> = Vec::new();
+        assert!(
+            run_in_order(&none, 8, &AtomicBool::new(false), |job| Ok::<usize, ()>(
+                *job
+            ))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_run_that_panics_stops_the_others_and_reaches_the_caller() {
+        use std::sync::atomic::AtomicUsize;
+        let jobs: Vec<usize> = (0..200).collect();
+        let started = AtomicUsize::new(0);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_in_order(&jobs, 1, &AtomicBool::new(false), |job| {
+                started.fetch_add(1, Ordering::SeqCst);
+                assert!(*job != 2, "the operating system refused a thread");
+                Ok::<usize, ()>(*job)
+            })
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(started.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn the_answers_of_the_slices_join_in_order_and_the_first_failure_wins() {
+        let ok = |text: &str| Some(Ok(text.as_bytes().to_vec()));
+        let failed = || {
+            Some(Err(ProbeError::ProcessFailed {
+                code: Some(1),
+                stderr: Vec::new(),
+            }))
+        };
+        // An answer that ends its line, or holds nothing, adds no empty line.
+        assert_eq!(
+            join_slice_answers(vec![ok("1,2"), ok("3,4\n"), ok("")]).unwrap(),
+            b"1,2\n3,4\n"
+        );
+        // A run skipped before the failure does not hide it.
+        assert!(matches!(
+            join_slice_answers(vec![ok("1,2"), None, failed(), None]),
+            Err(ProbeError::ProcessFailed { .. })
+        ));
+        assert!(matches!(
+            join_slice_answers(vec![failed(), ok("1,2")]),
+            Err(ProbeError::ProcessFailed { .. })
+        ));
+        // Skipped runs and no failure: only a cancel skips a run then.
+        assert!(matches!(
+            join_slice_answers(vec![ok("1,2"), None]),
+            Err(ProbeError::Canceled)
+        ));
+        assert_eq!(join_slice_answers(Vec::new()).unwrap(), b"");
     }
 }

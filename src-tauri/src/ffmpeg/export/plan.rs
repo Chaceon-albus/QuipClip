@@ -11,10 +11,10 @@
 
 use super::copy::{self, CopyQuestion};
 use super::{
-    max_export_pieces, ExportAudioMode, ExportErrorCode, ExportPlan, ExportStreams, OutputTiming,
-    PlannedAudio, PlannedSegment, PlannedSource, PlannedVideo, SourceAudio, VideoFit,
-    AUDIO_PREFIX_MARGIN_MILLISECONDS, MAX_AUDIO_PREFIXES, MAX_HELD_AUDIO_SILENCE_SECONDS,
-    SEEK_MARGIN_SECONDS,
+    ExportAudioMode, ExportErrorCode, ExportPlan, ExportStreams, OutputTiming, PlannedAudio,
+    PlannedSegment, PlannedSource, PlannedVideo, SourceAudio, VideoFit,
+    AUDIO_PREFIX_MARGIN_MILLISECONDS, MAX_AUDIO_PREFIXES, MAX_EXPORT_PIECES,
+    MAX_HELD_AUDIO_SILENCE_SECONDS, SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::probe::{AudioFrames, AudioGap, AudioProbe, MediaProbe};
 use crate::project::Resolution;
@@ -173,14 +173,16 @@ pub enum PathFacts {
 /// Checks run in this order; the first failure wins:
 ///
 /// 1. `segments` is empty -- [`ExportErrorCode::NoSegments`].
-/// 2. `segments` holds more than [`max_export_pieces`] of the count of `sources` --
+/// 2. `segments` holds more than [`MAX_EXPORT_PIECES`] pieces --
 ///    [`ExportErrorCode::TooManySegments`].
-/// 3. Any segment has `in_pts >= out_pts` -- [`ExportErrorCode::InvalidSegment`]. Then
-///    `sources` is empty, a piece names a source index out of range, or a source has no piece --
-///    [`ExportErrorCode::InvalidSources`]. Then the pieces need more runs in source order than
-///    [`super::inputs::MAX_EXPORT_INPUTS`] -- [`ExportErrorCode::PiecesOutOfOrder`]
-///    ([`super::inputs::check_runs`], ADR 055). `commands::export` refuses such a request before
-///    the plan; these checks hold the precondition for any other caller.
+/// 3. `sources` is empty, a piece names a source index out of range, or a source has no piece --
+///    [`ExportErrorCode::InvalidSources`]. Then `sources` holds more than
+///    [`super::inputs::MAX_EXPORT_INPUTS`] sources -- [`ExportErrorCode::TooManySources`]. Then
+///    any segment has `in_pts >= out_pts` -- [`ExportErrorCode::InvalidSegment`]. Then the pieces
+///    need more runs in source order than [`super::inputs::MAX_EXPORT_INPUTS`] --
+///    [`ExportErrorCode::PiecesOutOfOrder`] ([`super::inputs::check_runs`], ADR 055). This is the
+///    order of `commands::export`, which refuses such a request before the plan; these checks
+///    hold the precondition for any other caller.
 /// 4. A source path is empty, contains a NUL byte, or is not absolute --
 ///    [`ExportErrorCode::SourcePathInvalid`]. Checks 4 to 6 run for each source in turn.
 /// 5. A source does not exist -- [`ExportErrorCode::SourceNotFound`].
@@ -285,14 +287,8 @@ pub fn build_plan(
     if segments.is_empty() {
         return Err(ExportErrorCode::NoSegments);
     }
-    if segments.len() > max_export_pieces(request.sources.len()) {
+    if segments.len() > MAX_EXPORT_PIECES {
         return Err(ExportErrorCode::TooManySegments);
-    }
-    if segments
-        .iter()
-        .any(|segment| segment.in_pts >= segment.out_pts)
-    {
-        return Err(ExportErrorCode::InvalidSegment);
     }
     let sources = request.sources;
     if sources.is_empty()
@@ -302,6 +298,15 @@ pub fn build_plan(
         || (0..sources.len()).any(|index| !segments.iter().any(|segment| segment.source == index))
     {
         return Err(ExportErrorCode::InvalidSources);
+    }
+    if sources.len() > super::inputs::MAX_EXPORT_INPUTS {
+        return Err(ExportErrorCode::TooManySources);
+    }
+    if segments
+        .iter()
+        .any(|segment| segment.in_pts >= segment.out_pts)
+    {
+        return Err(ExportErrorCode::InvalidSegment);
     }
     super::inputs::check_runs(segments)?;
 
@@ -1261,7 +1266,7 @@ fn round_rational_to_i128(value: Rational) -> Option<i128> {
 mod tests {
     use super::*;
     use crate::ffmpeg::export::copy::CopyRefusal;
-    use crate::ffmpeg::export::{CopiedAudio, MAX_EXPORT_INPUTS, MAX_EXPORT_SEGMENTS};
+    use crate::ffmpeg::export::{CopiedAudio, MAX_EXPORT_INPUTS};
     use crate::ffmpeg::probe::AudioProbe;
     use crate::project::Resolution;
     use crate::settings::{AudioChannels, Container, Quality, QualityKind};
@@ -1566,7 +1571,7 @@ mod tests {
 
     #[test]
     fn more_than_the_maximum_segment_count_is_rejected_with_too_many_segments() {
-        let segments: Vec<SegmentBoundary> = (0..=MAX_EXPORT_SEGMENTS as i64)
+        let segments: Vec<SegmentBoundary> = (0..=MAX_EXPORT_PIECES as i64)
             .map(|index| boundary(index * 10, index * 10 + 5))
             .collect();
         let error = plan_with(
@@ -1581,7 +1586,7 @@ mod tests {
 
     #[test]
     fn exactly_the_maximum_segment_count_is_accepted() {
-        let segments: Vec<SegmentBoundary> = (0..MAX_EXPORT_SEGMENTS as i64)
+        let segments: Vec<SegmentBoundary> = (0..MAX_EXPORT_PIECES as i64)
             .map(|index| boundary(index * 10, index * 10 + 5))
             .collect();
         let plan = plan_with(
@@ -1591,7 +1596,7 @@ mod tests {
             valid_path_facts(),
         )
         .unwrap();
-        assert_eq!(plan.segments.len(), MAX_EXPORT_SEGMENTS);
+        assert_eq!(plan.segments.len(), MAX_EXPORT_PIECES);
     }
 
     #[test]
@@ -5031,17 +5036,16 @@ mod tests {
     }
 
     #[test]
-    fn the_limit_counts_pieces_and_lowers_with_each_source() {
-        // Two sources may hold one piece less than one source.
+    fn the_limit_counts_pieces_whatever_the_count_of_sources() {
+        // ADR 055: the limit of pieces no longer lowers with each source.
         let probes = [sample_probe(), sample_probe()];
         // The pieces are in source order, so their runs fit (ADR 055).
-        let pieces: Vec<SegmentBoundary> = (0..MAX_EXPORT_SEGMENTS)
+        let pieces: Vec<SegmentBoundary> = (0..=MAX_EXPORT_PIECES)
             .map(|index| {
                 let start = i64::try_from(index).unwrap() * 90_000;
                 piece(index % 2, start, start + 90_000)
             })
             .collect();
-        assert_eq!(max_export_pieces(2), MAX_EXPORT_SEGMENTS - 1);
         assert_eq!(
             plan_sources(ExportStreams::VideoOnly, &probes, &pieces, &sample_preset()).unwrap_err(),
             ExportErrorCode::TooManySegments
@@ -5049,10 +5053,94 @@ mod tests {
         assert!(plan_sources(
             ExportStreams::VideoOnly,
             &probes,
-            &pieces[..max_export_pieces(2)],
+            &pieces[..MAX_EXPORT_PIECES],
             &sample_preset()
         )
         .is_ok());
+    }
+
+    /// The plan of `pieces` over `count` sources, all at the path of the first of [`SOURCES`],
+    /// with the probe of [`sample_probe`].
+    fn plan_of_many_sources(
+        count: usize,
+        pieces: &[SegmentBoundary],
+    ) -> Result<ExportPlan, ExportErrorCode> {
+        let frames = AudioFrames::default();
+        let probe = sample_probe();
+        let sources: Vec<PlanSource<'_>> = (0..count)
+            .map(|_| PlanSource {
+                path: Path::new(SOURCES[0]),
+                probe: &probe,
+                audio_frames: &frames,
+            })
+            .collect();
+        build_plan(
+            &PlanRequest {
+                sources: &sources,
+                destination: Path::new(DESTINATION),
+                segments: pieces,
+                preset: &sample_preset(),
+                streams: ExportStreams::VideoOnly,
+                audio_mode: ExportAudioMode::Encode,
+            },
+            inspect_from(several_path_facts()),
+        )
+    }
+
+    #[test]
+    fn more_sources_than_inputs_are_refused_in_the_order_of_adr_055() {
+        // Each source needs one input, so an export uses at most `MAX_EXPORT_INPUTS` sources.
+        let one_each = |count: usize| -> Vec<SegmentBoundary> {
+            (0..count).map(|source| piece(source, 0, 90_000)).collect()
+        };
+        assert!(plan_of_many_sources(MAX_EXPORT_INPUTS, &one_each(MAX_EXPORT_INPUTS)).is_ok());
+        let over = MAX_EXPORT_INPUTS + 1;
+        assert_eq!(
+            plan_of_many_sources(over, &one_each(over)).unwrap_err(),
+            ExportErrorCode::TooManySources
+        );
+
+        // `noSegments`, `tooManySegments` and `invalidSources` come first.
+        assert_eq!(
+            plan_of_many_sources(over, &[]).unwrap_err(),
+            ExportErrorCode::NoSegments
+        );
+        let mut many = one_each(over);
+        many.resize(MAX_EXPORT_PIECES + 1, piece(0, 0, 90_000));
+        assert_eq!(
+            plan_of_many_sources(over, &many).unwrap_err(),
+            ExportErrorCode::TooManySegments
+        );
+        let mut unknown = one_each(over);
+        unknown[4].source = over;
+        assert_eq!(
+            plan_of_many_sources(over, &unknown).unwrap_err(),
+            ExportErrorCode::InvalidSources
+        );
+        // `invalidSources` also comes before `invalidSegment`.
+        let mut both = one_each(over);
+        both[4].source = over;
+        both[2].out_pts = both[2].in_pts;
+        assert_eq!(
+            plan_of_many_sources(over, &both).unwrap_err(),
+            ExportErrorCode::InvalidSources
+        );
+
+        // `invalidSegment` and `piecesOutOfOrder` come after.
+        let mut empty = one_each(over);
+        empty[2].out_pts = empty[2].in_pts;
+        assert_eq!(
+            plan_of_many_sources(over, &empty).unwrap_err(),
+            ExportErrorCode::TooManySources
+        );
+        let mut reversed = one_each(over);
+        for index in (1..=MAX_EXPORT_INPUTS as i64).rev() {
+            reversed.push(piece(0, index * 90_000, (index + 1) * 90_000));
+        }
+        assert_eq!(
+            plan_of_many_sources(over, &reversed).unwrap_err(),
+            ExportErrorCode::TooManySources
+        );
     }
 
     #[test]

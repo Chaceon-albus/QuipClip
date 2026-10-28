@@ -1,0 +1,407 @@
+{
+  "description": "Shared cases of the count of input runs (ADR 055). The vitest of countInputRuns in sequenceRequest.test.ts and the test of source_runs in src-tauri/src/ffmpeg/export/inputs.rs run every case.",
+  "cases": [
+    {
+      "name": "no piece",
+      "pieces": [],
+      "runs": 0
+    },
+    {
+      "name": "one piece",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        }
+      ],
+      "runs": 1
+    },
+    {
+      "name": "pieces in source order with gaps",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "20",
+          "outPts": "30"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "100",
+          "outPts": "200"
+        }
+      ],
+      "runs": 1
+    },
+    {
+      "name": "abutting pieces: an In point at the Out point before it",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "10",
+          "outPts": "20"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "20",
+          "outPts": "30"
+        }
+      ],
+      "runs": 1
+    },
+    {
+      "name": "overlapping pieces",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "5",
+          "outPts": "15"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "15",
+          "outPts": "25"
+        }
+      ],
+      "runs": 2
+    },
+    {
+      "name": "one range repeated three times",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        }
+      ],
+      "runs": 3
+    },
+    {
+      "name": "four pieces in reverse order",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "30",
+          "outPts": "40"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "20",
+          "outPts": "30"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "10",
+          "outPts": "20"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        }
+      ],
+      "runs": 4
+    },
+    {
+      "name": "two sources interleaved in order",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "b",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "10",
+          "outPts": "20"
+        },
+        {
+          "sourceId": "b",
+          "inPts": "10",
+          "outPts": "20"
+        }
+      ],
+      "runs": 2
+    },
+    {
+      "name": "two sources never share a run, whatever their PTS",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "100",
+          "outPts": "200"
+        },
+        {
+          "sourceId": "b",
+          "inPts": "0",
+          "outPts": "50"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "50"
+        },
+        {
+          "sourceId": "b",
+          "inPts": "300",
+          "outPts": "400"
+        }
+      ],
+      "runs": 3
+    },
+    {
+      "name": "ties: two runs end at one Out point",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "10",
+          "outPts": "20"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "10",
+          "outPts": "15"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "20",
+          "outPts": "30"
+        }
+      ],
+      "runs": 2
+    },
+    {
+      "name": "the run with the latest Out point at or before the In point takes the piece",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "5"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "10",
+          "outPts": "20"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "5",
+          "outPts": "8"
+        }
+      ],
+      "runs": 2
+    },
+    {
+      "name": "a piece that fits no run opens one, and later pieces fill the earlier runs",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "50",
+          "outPts": "60"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "60",
+          "outPts": "70"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "10",
+          "outPts": "20"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "5",
+          "outPts": "6"
+        }
+      ],
+      "runs": 3
+    },
+    {
+      "name": "negative PTS",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "-100",
+          "outPts": "-50"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "-50",
+          "outPts": "0"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "-200",
+          "outPts": "-150"
+        }
+      ],
+      "runs": 2
+    },
+    {
+      "name": "PTS past 2^53 compare exactly",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "9007199254740993"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "9007199254740992",
+          "outPts": "9007199254740994"
+        }
+      ],
+      "runs": 2
+    },
+    {
+      "name": "PTS past 2^53 that abut",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "9007199254740992",
+          "outPts": "9007199254740993"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "9007199254740993",
+          "outPts": "9007199254740995"
+        }
+      ],
+      "runs": 1
+    },
+    {
+      "name": "the widest i64 PTS",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "-9223372036854775808",
+          "outPts": "9223372036854775807"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "9223372036854775806",
+          "outPts": "9223372036854775807"
+        }
+      ],
+      "runs": 2
+    },
+    {
+      "name": "three sources, one out of order",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "b",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "c",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "10",
+          "outPts": "20"
+        },
+        {
+          "sourceId": "b",
+          "inPts": "5",
+          "outPts": "15"
+        },
+        {
+          "sourceId": "c",
+          "inPts": "10",
+          "outPts": "20"
+        },
+        {
+          "sourceId": "b",
+          "inPts": "15",
+          "outPts": "25"
+        }
+      ],
+      "runs": 4
+    },
+    {
+      "name": "a piece joins the run with the latest Out, not the first run that fits",
+      "pieces": [
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "5"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "0",
+          "outPts": "10"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "10",
+          "outPts": "20"
+        },
+        {
+          "sourceId": "a",
+          "inPts": "5",
+          "outPts": "8"
+        }
+      ],
+      "runs": 2
+    }
+  ]
+}

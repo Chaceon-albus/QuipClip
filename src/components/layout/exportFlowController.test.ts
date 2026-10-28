@@ -208,7 +208,7 @@ describe("ExportFlowController", () => {
       expect(openSaveDialog).not.toHaveBeenCalled();
     });
 
-    it("run reports tooManySegments for more segments than an export of one source joins", async () => {
+    it("run reports tooManySegments for more segments than an export joins", async () => {
       const reportError = vi.fn();
       const media = createMedia("/media/sample.mp4", "sample.mp4");
       const readSourceRevision = createMatchingReader(media);
@@ -224,7 +224,9 @@ describe("ExportFlowController", () => {
         readSourceRevision,
         getSourceId: () => "source-1",
         getSegments: () =>
-          Array.from({ length: 92 }, (_, index) =>
+          // The segments repeat one range, so they are also out of order: the limit of pieces
+          // comes first (ADR 055).
+          Array.from({ length: 257 }, (_, index) =>
             createSegment(`s${index}`, "source-1", "0", "100"),
           ),
         getSettings: () => createSettings([createPreset()]),
@@ -233,11 +235,46 @@ describe("ExportFlowController", () => {
       expect(result).toBe(false);
       expect(readSourceRevision).not.toHaveBeenCalled();
       expect(reportError).toHaveBeenCalledWith(
-        expect.objectContaining({ code: "tooManySegments", pieceLimit: 91 }),
+        expect.objectContaining({ code: "tooManySegments", pieceLimit: 256 }),
       );
     });
 
-    it("run accepts exactly as many segments as an export of one source joins", async () => {
+    it("run reports piecesOutOfOrder for segments too far out of the order of the source", async () => {
+      const reportError = vi.fn();
+      const media = createMedia("/media/sample.mp4", "sample.mp4");
+      const readSourceRevision = createMatchingReader(media);
+
+      const result = await runExportFlow({
+        setModalOpen: vi.fn(),
+        openSaveDialog: vi.fn(),
+        reportError,
+        filterName: "Video Files",
+        audioFilterName: "Audio Files",
+        getExportState: () => ({ status: "idle", tracking: false }),
+        getMedia: () => media,
+        readSourceRevision,
+        getSourceId: () => "source-1",
+        // 86 segments in reverse order need 86 runs, one more than an export reads.
+        getSegments: () =>
+          Array.from({ length: 86 }, (_, index) =>
+            createSegment(
+              `s${index}`,
+              "source-1",
+              String((86 - index) * 100),
+              String((86 - index) * 100 + 50),
+            ),
+          ),
+        getSettings: () => createSettings([createPreset()]),
+      });
+
+      expect(result).toBe(false);
+      expect(readSourceRevision).not.toHaveBeenCalled();
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "piecesOutOfOrder", inputLimit: 85 }),
+      );
+    });
+
+    it("run accepts exactly as many segments as an export joins", async () => {
       const reportError = vi.fn();
       const media = createMedia("/media/sample.mp4", "sample.mp4");
 
@@ -251,9 +288,15 @@ describe("ExportFlowController", () => {
         getMedia: () => media,
         readSourceRevision: createMatchingReader(media),
         getSourceId: () => "source-1",
+        // In the order of the source, so one input reads them through runs (ADR 055).
         getSegments: () =>
-          Array.from({ length: 91 }, (_, index) =>
-            createSegment(`s${index}`, "source-1", "0", "100"),
+          Array.from({ length: 256 }, (_, index) =>
+            createSegment(
+              `s${index}`,
+              "source-1",
+              String(index * 100),
+              String(index * 100 + 50),
+            ),
           ),
         getSettings: () => createSettings([createPreset()]),
       });
@@ -2019,13 +2062,13 @@ describe("ExportFlowController with several clips (ADR 052, ADR 053)", () => {
     expect(setModalOpen).toHaveBeenCalledWith(true);
   });
 
-  it("run reports tooManySegments for more pieces than an export of two sources joins", async () => {
-    // Each segment from a1 into b1 gives two pieces: 91 pieces in all. One source may hold 91
-    // pieces, and two sources one less.
+  it("run reports tooManySegments for more pieces than an export joins", async () => {
+    // Each segment from a1 into b1 gives two pieces: 258 pieces in all, two more than an export
+    // joins. They repeat one range, so the limit of pieces comes before the order (ADR 055).
     loadSequence(
-      Array.from({ length: 45 }, (_, index) =>
+      Array.from({ length: 129 }, (_, index) =>
         anchored(`s${index}`, "a1", "100", "b1", "1000"),
-      ).concat(anchored("last", "a1", "100", "a1", "200")),
+      ),
     );
     const reportError = vi.fn();
     const readSourceRevision = readerOf({});
@@ -2047,17 +2090,120 @@ describe("ExportFlowController with several clips (ADR 052, ADR 053)", () => {
     expect(result).toBe(false);
     expect(readSourceRevision).not.toHaveBeenCalled();
     expect(reportError).toHaveBeenCalledWith(
-      expect.objectContaining({ code: "tooManySegments", pieceLimit: 90 }),
+      expect.objectContaining({ code: "tooManySegments", pieceLimit: 256 }),
     );
   });
 
-  it("run accepts exactly as many pieces as an export of two sources joins", async () => {
-    // 44 segments of two pieces and two of one piece: 90 pieces.
-    loadSequence([
-      ...Array.from({ length: 44 }, (_, index) =>
+  it("run reports piecesOutOfOrder for pieces that need more runs than an export reads", async () => {
+    // 43 segments from a1 into b1 repeat two ranges: 86 pieces that need 86 runs.
+    loadSequence(
+      Array.from({ length: 43 }, (_, index) =>
         anchored(`s${index}`, "a1", "100", "b1", "1000"),
       ),
-      anchored("last", "a1", "100", "a1", "200"),
+    );
+    const reportError = vi.fn();
+    const readSourceRevision = readerOf({});
+
+    const result = await runExportFlow({
+      setModalOpen: vi.fn(),
+      reportError,
+      openSaveDialog: vi.fn(),
+      readSourceRevision,
+      getExportState: () => ({ status: "idle", tracking: false }),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+      getSettings: () => createSettings([createPreset()]),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+    });
+
+    expect(result).toBe(false);
+    expect(readSourceRevision).not.toHaveBeenCalled();
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "piecesOutOfOrder", inputLimit: 85 }),
+    );
+  });
+
+  /** A sequence of `count` clips, each of its own source with one segment. */
+  function loadManySources(count: number): void {
+    const ids = Array.from({ length: count }, (_, index) => `S${index}`);
+    timelineStore.setState({
+      clips: ids.map((id) => ({ id: `c${id}`, sourceId: id })),
+      sequenceSources: Object.fromEntries(ids.map((id) => [id, facts(id, "10000")])),
+      sequenceSegments: ids.map((id) =>
+        anchored(`s${id}`, `c${id}`, "100", `c${id}`, "200"),
+      ),
+    });
+    mediaStore.setState({
+      sources: Object.fromEntries(
+        ids.map((id, index) => [id, imported(`/${id}.mp4`, 10, index)]),
+      ),
+    });
+  }
+
+  it("run reports tooManySources for more sources than an export uses", async () => {
+    // 86 sources of one piece each: 86 pieces in 86 runs too, and the limit of sources comes
+    // first (ADR 055).
+    loadManySources(86);
+    const reportError = vi.fn();
+    const readSourceRevision = readerOf({});
+
+    const result = await runExportFlow({
+      setModalOpen: vi.fn(),
+      reportError,
+      openSaveDialog: vi.fn(),
+      readSourceRevision,
+      getExportState: () => ({ status: "idle", tracking: false }),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+      getSettings: () => createSettings([createPreset()]),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+    });
+
+    expect(result).toBe(false);
+    expect(readSourceRevision).not.toHaveBeenCalled();
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "tooManySources", sourceLimit: 85 }),
+    );
+  });
+
+  it("run accepts exactly as many sources as an export uses", async () => {
+    loadManySources(85);
+    const reportError = vi.fn();
+    const revisions = Object.fromEntries(
+      Array.from({ length: 85 }, (_, index) => [
+        `/S${index}.mp4`,
+        { size: 10, mtime: index },
+      ]),
+    );
+
+    const result = await runExportFlow({
+      setModalOpen: vi.fn(),
+      reportError,
+      openSaveDialog: vi.fn(),
+      readSourceRevision: readerOf(revisions),
+      getExportState: () => ({ status: "idle", tracking: false }),
+      getMedia: () => media,
+      getSourceId: () => "sequence:1",
+      getSegments: () => [],
+      getSettings: () => createSettings([createPreset()]),
+      filterName: "Video Files",
+      audioFilterName: "Audio Files",
+    });
+
+    expect(result).toBe(true);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("run accepts exactly as many pieces as an export joins", async () => {
+    // 255 segments of a1 in the order of A and one of b1: 256 pieces in two runs (ADR 055).
+    loadSequence([
+      ...Array.from({ length: 255 }, (_, index) =>
+        anchored(`s${index}`, "a1", String(index * 30), "a1", String(index * 30 + 20)),
+      ),
       anchored("only", "b1", "100", "b1", "200"),
     ]);
     const reportError = vi.fn();

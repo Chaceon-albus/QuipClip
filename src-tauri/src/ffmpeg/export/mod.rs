@@ -176,45 +176,23 @@ pub enum ExportAudioMode {
     Copy,
 }
 
-/// The largest sum of the pieces and the sources of one export request. An export of `n` sources
-/// joins at most `EXPORT_PIECE_BUDGET - n` pieces ([`max_export_pieces`]).
+/// The most pieces of one export request (ADR 055, "The limits and their order").
 ///
-/// ADR 053 makes the limit of ADR 014 count pieces: each piece is one chain, and up to
-/// [`inputs::MAX_EXPORT_INPUTS`] pieces each piece is one input. A segment across clips gives one piece for each
-/// clip, so the limit can stop an export of fewer segments than pieces.
+/// A segment that crosses a junction counts one piece for each of its clips (ADR 053), so the
+/// limit can stop an export of fewer segments than pieces. The frontend checks the same limit in
+/// the OPEN step and names it in the message of [`ExportErrorCode::TooManySegments`];
+/// `MAX_EXPORT_PIECES` in `src/features/export/sequenceRequest.ts` mirrors this value, and
+/// `src/features/export/types.test.ts` reads it from this file.
 ///
-/// This was a command-line budget, not a sanity bound. Until ADR 055 the filter graph rode inline
-/// as the value of `-filter_complex`, and it competed with the arguments for the one command-line
-/// budget Windows allows. ADR 014 measurement 15 measured what that cost: the graph grows by about
-/// the same amount for each added piece, whether each piece had an input of its own or the pieces
-/// of a source shared one through `split`. The value was the
-/// largest at which the widest command the settings permit fit the Windows budget, for the
-/// encoder and for the audio process of ADR 043, for every count of sources at the longest
-/// Windows path. The frontend states the same rule in the message of
-/// [`ExportErrorCode::TooManySegments`].
-///
-/// Since ADR 055 the graph is in a file of the work directory, read through `-/filter_complex
-/// <file>` on FFmpeg 7.0 and later or `-filter_complex_script <file>` on older builds
-/// ([`graph_file`]). A command line now holds the fixed arguments and the inputs, and [`inputs`]
-/// chooses the inputs from the pieces so that no command opens more than
-/// [`inputs::MAX_EXPORT_INPUTS`]. The tests of `arguments.rs` prove that every command fits at
-/// that count, so this value no longer protects the command line. A later unit of ADR 055
-/// replaces this rule with the limits of that record.
-///
-/// ffmpeg itself is not the constraint here: measurement 14 found that many inputs of one
-/// file do not cause a failure.
-pub const EXPORT_PIECE_BUDGET: usize = 92;
-
-/// The largest number of pieces [`plan::build_plan`] accepts in one export request of `sources`
-/// sources: [`EXPORT_PIECE_BUDGET`] less the count of sources. A request without a source counts
-/// as one source, and the checks of the sources refuse it later.
-pub const fn max_export_pieces(sources: usize) -> usize {
-    let sources = if sources == 0 { 1 } else { sources };
-    EXPORT_PIECE_BUDGET.saturating_sub(sources)
-}
-
-/// The largest number of pieces of any export request: the limit of an export of one source.
-pub const MAX_EXPORT_SEGMENTS: usize = max_export_pieces(1);
+/// Since ADR 055 the filter graph is in a file of the work directory ([`graph_file`]), so a
+/// command line holds the fixed arguments and the inputs, and [`inputs`] opens at most
+/// [`inputs::MAX_EXPORT_INPUTS`] inputs in one process. A piece therefore costs no bytes of the
+/// command of the encoder or of the audio process. The one command that still grows with the
+/// pieces is the read of the audio gaps (ADR 014 measurement 28), about 27 bytes for each piece of
+/// one source. The tests of `arguments.rs` and `probe.rs` prove that every command fits the
+/// Windows budget at this count. The value bounds the memory and the run time of one export; it
+/// is a judgement of ADR 055, not a measured maximum.
+pub const MAX_EXPORT_PIECES: usize = 256;
 
 /// The longest silence, in whole seconds, that the segments of an export may need FFmpeg to
 /// hold in memory, all together: in front of the first sample of the source audio stream, and in
@@ -266,10 +244,10 @@ pub const AUDIO_PREFIX_MARGIN_MILLISECONDS: i64 = 250;
 
 /// The most segments of one export that get a silence prefix ([`PlannedSegment::audio_prefix`]).
 ///
-/// A prefix costs about 120 bytes of the command line of its process, and the command at
-/// [`MAX_EXPORT_SEGMENTS`] has not that much for every segment. The segments with the longest
-/// silence in front of the first sample get the prefixes. Any other segment fills its silence
-/// in memory, and that counts toward [`MAX_HELD_AUDIO_SILENCE_SECONDS`].
+/// A prefix costs about 120 bytes of the filter graph of its process. Before ADR 055 moved the
+/// graph into a file, the widest command line had not that much for every segment. The segments
+/// with the longest silence in front of the first sample get the prefixes. Any other segment fills
+/// its silence in memory, and that counts toward [`MAX_HELD_AUDIO_SILENCE_SECONDS`].
 pub const MAX_AUDIO_PREFIXES: usize = 16;
 
 /// The seek margin ADR 014 selects, in whole seconds.
@@ -851,8 +829,8 @@ export_error_codes! {
     /// carried zero pieces.
     NoSegments => "noSegments",
     /// Produced by [`plan::build_plan`] and `commands::export::resolve_request`: the request
-    /// carried more than [`max_export_pieces`] pieces for its count of sources (ADR 053: the limit
-    /// counts pieces).
+    /// carried more than [`MAX_EXPORT_PIECES`] pieces (ADR 053: the limit counts pieces; ADR 055
+    /// sets it).
     TooManySegments => "tooManySegments",
     /// Produced by `commands::export::resolve_request`: the list of sources of the request does
     /// not match its pieces. The list is empty, an id is empty or appears twice, a piece names an
@@ -1006,6 +984,11 @@ export_error_codes! {
     /// a piece that waits. The check comes after the checks of the sources and the segments,
     /// because the count of runs needs valid source ids and In points before Out points.
     PiecesOutOfOrder => "piecesOutOfOrder",
+    /// Produced by `commands::export::resolve_request` and [`plan::build_plan`]: the request
+    /// carried more sources than [`inputs::MAX_EXPORT_INPUTS`], because each source needs one
+    /// input (ADR 055). The check comes after the check of the list of sources, so the count is
+    /// the count of valid sources that the pieces name.
+    TooManySources => "tooManySources",
 }
 
 #[cfg(test)]
@@ -1076,6 +1059,7 @@ mod tests {
                 "sourcePathInvalid",
                 "sourceRevisionMismatch",
                 "tooManySegments",
+                "tooManySources",
                 "workDirectoryUnavailable",
             ]
         );

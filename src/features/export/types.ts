@@ -169,6 +169,7 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "workDirectoryUnavailable",
   "graphFileUnsupported",
   "piecesOutOfOrder",
+  "tooManySources",
 ] as const;
 
 export type BackendExportErrorCode = (typeof BACKEND_EXPORT_ERROR_CODES)[number];
@@ -224,6 +225,7 @@ export type ExportErrorOptions = {
   measuredDurationUs?: number;
   expectedDurationUs?: number;
   pieceLimit?: number;
+  sourceLimit?: number;
   inputLimit?: number;
 };
 
@@ -247,13 +249,19 @@ export class ExportError extends Error {
   /** For `audioDurationMismatch`: the duration that the plan expected, in whole microseconds. */
   declare readonly expectedDurationUs?: number;
   /**
-   * For `tooManySegments`: the most pieces that an export of the sources of the request joins
-   * (`maxExportPieces`). The OPEN step of the export sets it. The backend sends no limit.
+   * For `tooManySegments`: the most pieces that one export joins (`MAX_EXPORT_PIECES`, ADR 055).
+   * The OPEN step of the export sets it. The backend sends no limit.
    */
   declare readonly pieceLimit?: number;
   /**
+   * For `tooManySources`: the most sources that one export uses (`MAX_EXPORT_INPUTS`, ADR 055).
+   * The OPEN step of the export sets it. The backend sends no limit.
+   */
+  declare readonly sourceLimit?: number;
+  /**
    * For `piecesOutOfOrder`: the most runs of pieces in source order that one export reads
-   * (ADR 055). Only a check of the frontend sets it. The backend sends no limit.
+   * (`MAX_EXPORT_INPUTS`, ADR 055). The OPEN step of the export sets it. The backend sends no
+   * limit.
    */
   declare readonly inputLimit?: number;
 
@@ -278,6 +286,9 @@ export class ExportError extends Error {
     }
     if (options.pieceLimit !== undefined) {
       this.pieceLimit = options.pieceLimit;
+    }
+    if (options.sourceLimit !== undefined) {
+      this.sourceLimit = options.sourceLimit;
     }
     if (options.inputLimit !== undefined) {
       this.inputLimit = options.inputLimit;

@@ -50,7 +50,7 @@ import type { Settings } from "@/features/settings/types";
 import { attachedMediaStore } from "@/features/sequence/attachedMedia";
 import {
   buildSequenceExportRequest,
-  maxExportPieces,
+  exportLimitError,
   sequenceExportPieces,
 } from "@/features/export/sequenceRequest";
 import { timelineStore } from "@/features/timeline";
@@ -301,11 +301,15 @@ export class ExportFlowController {
    *    This check runs ahead of the setup step and save dialog.
    * 6. Stats the source file and compares its revision against the one segments were marked against.
    *    On a mismatch, reports `sourceRevisionChanged` confirmation, opens the modal, and returns false.
-   *    More segments than `maxExportPieces(1)` report `tooManySegments` before the check. A
-   *    sequence of several clips does steps 5 and 6 on the pieces of its segments instead: no
-   *    piece reports `noSegments`, more pieces than `maxExportPieces` allows for the count of
-   *    their sources report `tooManySegments`, a source of a piece without imported media
-   *    reports `sourceNotFound`, and each source of a piece gets the revision check (ADR 053).
+   *    Before the check, the limits of ADR 055 apply to the segments of the active source, one
+   *    piece each (`exportLimitError`): more pieces than `MAX_EXPORT_PIECES` report
+   *    `tooManySegments`, and pieces that need more runs than `MAX_EXPORT_INPUTS` report
+   *    `piecesOutOfOrder`. A sequence of several clips does steps 5 and 6 on the pieces of its
+   *    segments instead: no piece reports `noSegments`, the limits of ADR 055 report
+   *    `tooManySegments`, `tooManySources` and `piecesOutOfOrder` in that order, a source of a
+   *    piece without imported media reports `sourceNotFound`, and each source of a piece gets the
+   *    revision check (ADR 053). Each limit refusal names its limit, and all come before the
+   *    save dialog.
    * 7. On good path: calls `setModalOpen(true)` with the store at `idle` and returns true.
    *    It must NOT open the save dialog.
    */
@@ -348,9 +352,9 @@ export class ExportFlowController {
         this.setModalOpen(true);
         return false;
       }
-      const pieceLimit = maxExportPieces(sourceIds.length);
-      if (pieces.length > pieceLimit) {
-        this.reportErrorFn(new ExportError({ code: "tooManySegments", pieceLimit }));
+      const limitError = exportLimitError(pieces, sourceIds.length);
+      if (limitError !== null) {
+        this.reportErrorFn(limitError);
         this.setModalOpen(true);
         return false;
       }
@@ -380,13 +384,20 @@ export class ExportFlowController {
       this.setModalOpen(true);
       return false;
     }
-    // With one clip, each segment is one piece of the one source.
-    const pieceLimit = maxExportPieces(1);
-    if (
-      segments.filter((segment) => segment.sourceId === activeSourceId).length >
-      pieceLimit
-    ) {
-      this.reportErrorFn(new ExportError({ code: "tooManySegments", pieceLimit }));
+    // With one clip, each segment is one piece of the one source, in array order, as
+    // buildExportRequest sends it.
+    const limitError = exportLimitError(
+      segments
+        .filter((segment) => segment.sourceId === activeSourceId)
+        .map((segment) => ({
+          sourceId: activeSourceId,
+          inPts: segment.inPts,
+          outPts: segment.outPts,
+        })),
+      1,
+    );
+    if (limitError !== null) {
+      this.reportErrorFn(limitError);
       this.setModalOpen(true);
       return false;
     }

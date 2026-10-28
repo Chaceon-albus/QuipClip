@@ -5,9 +5,14 @@ import type { Preset } from "@/features/settings/types";
 import type { Clip, Pts, SequenceSegment } from "@/types/project";
 import {
   buildSequenceExportRequest,
-  maxExportPieces,
+  countInputRuns,
+  exportLimitError,
+  MAX_EXPORT_INPUTS,
+  MAX_EXPORT_PIECES,
   sequenceExportPieces,
+  type RunPiece,
 } from "./sequenceRequest";
+import inputRunCases from "./inputRunCases.json";
 
 const pts = (value: string) => value as Pts;
 
@@ -47,12 +52,63 @@ function segment(
 const preset = {} as Preset;
 
 describe("sequence export request (ADR 052, ADR 053)", () => {
-  it("lowers the limit of pieces by one for each source", () => {
-    expect(maxExportPieces(1)).toBe(91);
-    expect(maxExportPieces(2)).toBe(90);
-    expect(maxExportPieces(46)).toBe(46);
-    // A request without a source counts as one source.
-    expect(maxExportPieces(0)).toBe(91);
+  it("counts the runs of every shared case as the backend does (ADR 055)", () => {
+    // `src-tauri/src/ffmpeg/export/inputs.rs` runs the same cases against `source_runs`.
+    expect(inputRunCases.cases.length).toBeGreaterThanOrEqual(10);
+    for (const testCase of inputRunCases.cases) {
+      const pieces: RunPiece[] = testCase.pieces.map((piece) => ({
+        sourceId: piece.sourceId,
+        inPts: pts(piece.inPts),
+        outPts: pts(piece.outPts),
+      }));
+      expect(countInputRuns(pieces), testCase.name).toBe(testCase.runs);
+    }
+  });
+
+  /** `count` pieces of the source `sourceId`, each 10 ticks long, in source order. */
+  function inOrder(count: number, sourceId = "A"): RunPiece[] {
+    return Array.from({ length: count }, (_, index) => ({
+      sourceId,
+      inPts: pts(String(index * 10)),
+      outPts: pts(String(index * 10 + 10)),
+    }));
+  }
+
+  it("refuses the limits of ADR 055 in the order of the backend, each with its limit", () => {
+    expect(MAX_EXPORT_PIECES).toBe(256);
+    expect(MAX_EXPORT_INPUTS).toBe(85);
+    expect(exportLimitError(inOrder(MAX_EXPORT_PIECES), 1)).toBeNull();
+    expect(exportLimitError(inOrder(MAX_EXPORT_PIECES + 1), 1)).toMatchObject({
+      code: "tooManySegments",
+      pieceLimit: MAX_EXPORT_PIECES,
+    });
+    expect(exportLimitError(inOrder(1), MAX_EXPORT_INPUTS)).toBeNull();
+    expect(exportLimitError(inOrder(1), MAX_EXPORT_INPUTS + 1)).toMatchObject({
+      code: "tooManySources",
+      sourceLimit: MAX_EXPORT_INPUTS,
+    });
+    const reversed = inOrder(MAX_EXPORT_INPUTS + 1).reverse();
+    expect(exportLimitError(reversed, 1)).toMatchObject({
+      code: "piecesOutOfOrder",
+      inputLimit: MAX_EXPORT_INPUTS,
+    });
+    // Up to `MAX_EXPORT_INPUTS` pieces, each piece has an input of its own, in any order.
+    expect(exportLimitError(reversed.slice(1), 1)).toBeNull();
+
+    // The earlier check wins.
+    const tooManyReversed = inOrder(MAX_EXPORT_PIECES + 1).reverse();
+    expect(exportLimitError(tooManyReversed, MAX_EXPORT_INPUTS + 1)?.code).toBe(
+      "tooManySegments",
+    );
+    expect(exportLimitError(reversed, MAX_EXPORT_INPUTS + 1)?.code).toBe(
+      "tooManySources",
+    );
+  });
+
+  it("reports a PTS that is not a decimal integer as an invalid segment, not a silent failure", () => {
+    const pieces: RunPiece[] = inOrder(MAX_EXPORT_INPUTS + 1);
+    pieces[3] = { ...pieces[3], inPts: pts("1.5") };
+    expect(exportLimitError(pieces, 1)).toMatchObject({ code: "invalidSegment" });
   });
 
   it("expands each segment in array order and names each source once", () => {
