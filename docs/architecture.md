@@ -570,6 +570,13 @@ that altered no frame timing is possible and only the user knows. A read that fa
 mismatch: a deleted file, a path that is no longer a regular file, and a share that stopped
 answering are each already reported by the export preflight with their own codes.
 
+The export request also carries that revision. Preparation compares it with the file once
+more, just before the re-probe, and refuses a file whose size or whole-second modification
+time differs with `sourceRevisionMismatch`. This catches a file that was replaced while the
+export waited in a queue. It does not catch a replacement of the same size inside the same
+second, a copy that keeps the modification time, or a change after that read. After "Export
+anyway", the request carries no revision, and the backend checks nothing (ADR 024).
+
 The frontend explicitly projects each runtime `Source` into `PersistedSource`. The
 projection lists each persisted field. It does not use object spread as a serialization
 filter.

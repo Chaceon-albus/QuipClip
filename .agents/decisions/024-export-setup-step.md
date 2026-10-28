@@ -49,6 +49,25 @@ user saw, also when the user edits or deletes the preset while the export waits.
 - The settings file still gives the configured path of ffmpeg. The run reads it when it
   starts, because the path belongs to the machine and not to the export.
 
+(Changed on 2026-10-27.) Step 4 also sends the revision of the source that the segments were
+marked against: the size and the modification time that the import read. An export can wait
+in a queue, and the file can change while it waits.
+
+- Preparation reads the file again, in the same way as the import, just before the re-probe.
+  When the size or the whole-second modification time differs, the export fails with
+  `sourceRevisionMismatch`, and the failed panel offers Back. Back runs step 1 again, and its
+  check then raises the `sourceRevisionChanged` confirmation.
+- The comparison has the limits of the revision of ADR 010. It does not see a replacement of
+  the same size inside the same second, a copy that keeps the modification time, or a change
+  after that one read.
+- A read that fails is not a mismatch, as in step 1. The re-probe and the plan report a file
+  that is gone, or that is no longer a regular file, with codes of their own.
+- Step 1 stops its read after 3 seconds, and the backend read has no time limit. On a share
+  that answers more slowly than that, Back does not raise the confirmation, and the export
+  fails again. The user can then open the file again.
+- After "Export anyway", step 4 sends no revision, and the backend checks nothing. A close,
+  Back, or a started export ends that acceptance.
+
 A cancel in the save dialog returns the user to the setup step. The export store stays
 `idle`, so a second attempt needs no new check.
 
