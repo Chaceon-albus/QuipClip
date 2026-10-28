@@ -64,7 +64,9 @@ store. A reset store could not learn the run identifier, so the run became an or
 held the export slot. A hidden dialog does not reset the store. The store keeps the start in
 flight, learns the run identifier when `start_export` answers, and tracks the run to its end.
 No orphan is possible, so the dismissal has no reason to cancel. The Cancel button still
-cancels by slot in `preparing` with no run identifier.
+cancels by slot in `preparing` with no run identifier. (Changed on 2026-10-27: the Cancel button
+waits for the run identifier, which `start_export` now gives before the run prepares, and then
+cancels by run identifier.)
 
 ### The store holds the cancel request
 
@@ -130,6 +132,11 @@ A Stop request that the IPC layer rejects does not end the tracking, in both of 
 - `cancel_export` rejects. The store keeps the run that it knows by its identifier.
 - `cancel_active_export` rejects while the start waits for its run identifier. The store
   keeps the start. It takes the later `start_export` answer and tracks the run to its end.
+
+(Changed on 2026-10-27.) `cancel_active_export` is removed. `start_export` answers with the run
+identifier before the run prepares (ADR 016), and a Stop that comes before that answer waits
+for it and then names the run. Only the first form remains, and Stop is always tried again by
+run identifier.
 
 In both forms the store reports `failed` with `tracking` true. The error is the failure of
 the request, not a failure of the run, and each failure gets its own error object. A failure

@@ -275,8 +275,9 @@ only the segments, so the user can watch what the export will contain.
 See ADR 004 and ADR 014.
 
 ADR 004 gives the semantic steps. ADR 014 selects the command shape from measurements on
-ffmpeg 9.0.1. ADR 016 adds the orchestration. The renderer is written, and `start_export`,
-`cancel_export`, and `cancel_active_export` are registered commands. After a run finishes,
+ffmpeg 9.0.1. ADR 016 adds the orchestration. The renderer is written, and `start_export` and
+`cancel_export` are registered commands. `start_export` answers with the run id before the run
+prepares, and a failure of preparation is a `failed` event of the run. After a run finishes,
 `reveal_export_output` shows the file that the run wrote in the file manager. It takes the
 run identifier, never a path (ADR 029).
 

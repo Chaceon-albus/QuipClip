@@ -95,7 +95,8 @@ the application against the capability of the window that calls it. Before this 
 manifest existed, so every page could call every command.
 
 - The main window may call `start_capability_probe`, `start_export`, `cancel_export`,
-  `cancel_active_export`, `reveal_export_output`, `import_media`, `read_source_revision`,
+  `cancel_active_export` (removed on 2026-10-27, ADR 016), `reveal_export_output`,
+  `import_media`, `read_source_revision`,
   `confirm_quit`, `load_settings`, `save_settings` and `open_settings_window`, and (added on
 2026-10-02) `set_window_border_theme` of ADR 020. It keeps
   `core:default` and its window, dialog and progress permissions.

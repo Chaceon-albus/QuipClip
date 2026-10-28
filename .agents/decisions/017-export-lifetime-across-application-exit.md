@@ -75,7 +75,8 @@ which would need a second path to resume the exit.
   that wait. A later unit can report it; this record does not require one.
 - The cancel flag is read by the export supervisor between two polls, and by the command
   between preparation and the worker. An export still in preparation therefore stops at the
-  first of those reads.
+  first of those reads. (Changed on 2026-10-27: preparation runs on the export thread, which
+  reads the flag between its steps and once more before the run starts (ADR 016).)
 - The handler covers the event that Tauri raises when the last window closes. Whether the macOS
   application menu Quit item and `Cmd+Q` raise the same event is not established by reading, and
   `tauri.conf.json` configures no menu, so Tauri builds the default macOS menu whose Quit item

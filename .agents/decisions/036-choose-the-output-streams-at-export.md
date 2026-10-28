@@ -28,8 +28,9 @@ is not correct under `-copyts`, so the progress cannot measure time either.
 
 `ExportRequestWire` holds a required field `streams`: `videoAndAudio`, `videoOnly` or
 `audioOnly`. It has no default, and an unknown value is refused, as for every field of the
-request. `ExportStart` echoes the value. The TypeScript types hold the same three values, and a
-test compares them with the Rust names.
+request. `ExportStart` echoes the value. (Changed on 2026-10-27: `start_export` answers with
+the run identifier only, and no report of the run repeats the value.) The TypeScript types hold
+the same three values, and a test compares them with the Rust names.
 
 (Added on 2026-10-23.) The request also holds a required field `audioMode`, `encode` or `copy`
 (ADR 048). `ExportStart` does not echo it, because the plan decides the mode that the run uses.

@@ -195,6 +195,21 @@ asks the run to stop first, so leaving is an escape rather than the orphan.
 
 (Changed on 2026-10-02.) The export registry also counts the exports that began, so the test of a preset (ADR 041) can tell that an export started and ended while it ran, and then does not store its result.
 
+(Changed on 2026-10-27.) `start_export` answers with the run id as soon as it claims the slot,
+before the run prepares. Preparation runs on the export thread, which then runs the export. The
+coming export queue starts a run long after its command answered, so a failure of preparation
+cannot reach the interface as a rejection.
+
+- A failure of preparation is a `failed` event on the run, as every later failure is. The
+  command rejects only an invalid preset, a missing application data directory, a second
+  export, and an export thread that the operating system refused.
+- The interface holds the run id for the whole run, so `cancel_export` names the run during
+  preparation too. `cancel_active_export` and `ExportRegistry::cancel_active` are removed. A
+  Stop that comes before the answer waits for it, and then names the run.
+- A dismissal hides the dialog and does not cancel (ADR 025).
+- The thread reports a failure of preparation before it releases the slot. A free slot
+  therefore still means that the guards of the run have finished (ADR 017).
+
 ## Consequences
 
 - The four steps of the product work end to end: import, preview, mark and export.

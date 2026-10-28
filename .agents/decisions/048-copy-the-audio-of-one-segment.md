@@ -140,8 +140,9 @@ MOV preset with FLAC must therefore stay blocked, or that export fails after the
 ### The request
 
 The request carries `audioMode`, `encode` or `copy`. The field is required and has no default,
-as `streams` is. `ExportStart` does not echo it, because the value is a request. The plan
-decides the mode that the run uses.
+as `streams` is. `ExportStart` does not echo it, because the value is a request. (Changed on
+2026-10-27: `start_export` answers with the run identifier only.) The plan decides the mode that
+the run uses.
 
 ### The decision of the plan
 
@@ -237,7 +238,8 @@ start twice. The tolerance of +0.50 s covers that.
   interface does not report the mode that the run used.
 - The export reads the sample rate of an MPEG-TS stream that the import probe missed. The plan
   could copy such audio, but the switch does not show for it.
-- `ExportStart` echoes `streams` (ADR 036) but not `audioMode`.
+- `ExportStart` echoes `streams` (ADR 036) but not `audioMode`. (Changed on 2026-10-27: no
+  report of the run repeats either value.)
 - The setup step shows no size estimate while the copy is on.
 - The copy does not check for a change of the codec configuration inside the segment, such as a
   new sample rate after a reconnect of a live recording. An MP4 holds one configuration.
