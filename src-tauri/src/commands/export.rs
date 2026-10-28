@@ -820,33 +820,25 @@ where
         // the reads of the export, the read of the audio gaps included, do not read it from its
         // start. The head goes into the work directory as `h<index>.flv`, where `index` is the
         // index of the source in the order of its first piece, which is its index in the plan.
-        // One source of an export at most opens its inputs so (ADR 053); a later FLV source keeps
-        // the input seek, which reads more and is correct.
+        // Each FLV source has its own head, so each one gets this input (ADR 055).
         stage.enter_for(PreparationStage::FlvInput, Some(index));
-        let flv_input = if flv_inputs.iter().any(Option::is_some) {
-            if source_probe.format_names.iter().any(|name| name == "flv") {
-                eprintln!("export: a second FLV source keeps the input seek");
-            }
-            None
-        } else {
-            flv_input_for(
-                &executables.ffprobe,
-                source,
-                source_probe,
-                SourcePieces {
-                    pieces: &pieces,
-                    inputs: &input_ordinals(&inputs, &resolved.pieces, index),
-                },
-                request.streams,
-                FlvPlace {
-                    app_data_directory,
-                    work_directory: &work,
-                    source_index: index,
-                },
-                preview_windows,
-                cancel,
-            )?
-        };
+        let flv_input = flv_input_for(
+            &executables.ffprobe,
+            source,
+            source_probe,
+            SourcePieces {
+                pieces: &pieces,
+                inputs: &input_ordinals(&inputs, &resolved.pieces, index),
+            },
+            request.streams,
+            FlvPlace {
+                app_data_directory,
+                work_directory: &work,
+                source_index: index,
+            },
+            preview_windows,
+            cancel,
+        )?;
         stage.enter(PreparationStage::AudioReads);
         let audio_frames = read_audio_gaps(
             &executables.ffprobe,
@@ -2855,6 +2847,11 @@ mod tests {
     /// Write an FLV of 4 s of H.264 at `size`, with a keyframe each second, and AAC at `rate`,
     /// made by ffmpeg.
     fn write_real_flv(ffmpeg: &Path, path: &Path, size: &str, rate: u32) {
+        write_real_flv_of(ffmpeg, path, size, rate, 4);
+    }
+
+    /// [`write_real_flv`] of `seconds` seconds.
+    fn write_real_flv_of(ffmpeg: &Path, path: &Path, size: &str, rate: u32, seconds: u32) {
         let status = crate::procutil::command_without_console(ffmpeg)
             .args([
                 "-hide_banner",
@@ -2868,9 +2865,8 @@ mod tests {
             .arg(format!("testsrc2=size={size}:rate=30"))
             .args(["-f", "lavfi", "-i"])
             .arg(format!("sine=frequency=440:sample_rate={rate}"))
+            .args(["-t", &seconds.to_string()])
             .args([
-                "-t",
-                "4",
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -8791,6 +8787,138 @@ mod tests {
             "the pillarbox is not black: {:?}",
             column.stdout.iter().max()
         );
+    }
+
+    #[test]
+    fn each_real_flv_source_of_an_export_reads_its_slices_through_its_own_head() {
+        // ADR 055: each FLV source has its own head in the work directory, so a second FLV source
+        // no longer falls back to the input seek. Both are 10 s long with a keyframe each second.
+        // Each piece starts more than `SEEK_MARGIN_SECONDS` in, so its seek lands on a keyframe
+        // after the first frame, and each input opens a later slice that the check decodes.
+        let Some(tools) = real_tools() else {
+            return;
+        };
+        let (ffmpeg, ffprobe) = &tools;
+        let directory = TestDirectory::new();
+        let first = directory.path.join("first.flv");
+        let second = directory.path.join("second.flv");
+        write_real_flv_of(ffmpeg, &first, "160x90", 48_000, 10);
+        write_real_flv_of(ffmpeg, &second, "160x90", 44_100, 10);
+        let at = |source: &Path, millis: i64| {
+            let tb = ffmpeg::probe_media(ffprobe, source)
+                .unwrap()
+                .video_time_base;
+            let ticks = Rational::new(millis, 1000)
+                .and_then(|seconds| seconds.div(tb))
+                .unwrap();
+            assert_eq!(ticks.den(), 1, "{millis} ms is a whole number of ticks");
+            Pts::new(ticks.num())
+        };
+        let piece = |id: &str, source: &Path, from: i64, to: i64| ExportPieceWire {
+            source_id: id.to_owned(),
+            in_pts: at(source, from),
+            out_pts: at(source, to),
+        };
+        let request = ExportRequestWire {
+            sources: vec![
+                ExportSourceWire {
+                    id: "first".to_owned(),
+                    path: first.to_string_lossy().into_owned(),
+                    expected_revision: None,
+                },
+                ExportSourceWire {
+                    id: "second".to_owned(),
+                    path: second.to_string_lossy().into_owned(),
+                    expected_revision: None,
+                },
+            ],
+            pieces: vec![
+                piece("first", &first, 7_500, 8_000),
+                piece("second", &second, 6_500, 7_000),
+                piece("first", &first, 8_200, 8_600),
+            ],
+            segment_count: 1,
+            output_path: directory
+                .path
+                .join("two.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            preset: sample_preset("active"),
+            streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
+            new_batch: false,
+        };
+        let prepared = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path.join("app"),
+                cache_directory: &directory.path.join("cache"),
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
+                graph_file: &probe_graph_file_option,
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: ffmpeg.clone(),
+                    ffprobe: ffprobe.clone(),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            ffmpeg::probe_media_until_canceled,
+            ffmpeg::probe_first_audio_packet,
+            ffmpeg::probe_audio_sample_rate_at,
+            ffmpeg::probe_audio_gaps,
+        )
+        .unwrap();
+        // Under the rule of ADR 053, the second source would have used this seek with `-ss`.
+        assert!(prepared.plan.segments[1].seek_seconds.is_some());
+        for (index, name, path) in [(0, "h0.flv", &first), (1, "h1.flv", &second)] {
+            let input = prepared.plan.sources[index]
+                .flv_input
+                .as_ref()
+                .unwrap_or_else(|| panic!("source {index} keeps its FLV input"));
+            assert_eq!(input.head_name, name);
+            assert!(prepared.work.file_path(name).is_file(), "{name}");
+            for command in [Some(&prepared.arguments), prepared.audio_arguments.as_ref()] {
+                let command = command.expect("an export with video and audio has two processes");
+                let slices: Vec<&String> = command
+                    .iter()
+                    .filter(|argument| argument.starts_with(&format!("concat:{name}|subfile,")))
+                    .collect();
+                assert!(!slices.is_empty(), "{name} in {command:?}");
+                for slice in slices {
+                    // A later slice of this very source, not the start of the file.
+                    assert!(
+                        slice.ends_with(&format!(":{}", path.to_string_lossy())),
+                        "{slice}"
+                    );
+                    let start = slice
+                        .split(",start,")
+                        .nth(1)
+                        .and_then(|rest| rest.split(',').next())
+                        .and_then(|start| start.parse::<u64>().ok())
+                        .expect("the slice names its start");
+                    assert_ne!(start, input.first_frame_offset, "{slice}");
+                }
+            }
+        }
+        assert!(!prepared.arguments.iter().any(|argument| argument == "-ss"));
+        drop(prepared);
+
+        // The same request exports, and the frame count of the run matches the plan.
+        let output = directory.path.join("two-run.mp4");
+        let (expected, frames) = real_export_of_pieces(
+            &tools,
+            &directory,
+            &[first.as_path(), second.as_path()],
+            &[(0, 7_500, 8_000), (1, 6_500, 7_000), (0, 8_200, 8_600)],
+            sample_preset("active"),
+            ExportStreams::VideoAndAudio,
+            &output,
+        );
+        assert_eq!(expected, Some(frames));
+        assert_eq!(frames, 42);
     }
 
     #[test]

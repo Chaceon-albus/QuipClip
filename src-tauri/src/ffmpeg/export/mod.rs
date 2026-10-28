@@ -552,10 +552,10 @@ pub struct PlannedSource {
     pub audio: Option<SourceAudio>,
     /// The FLV input of ADR 046, which opens each input of this source as the head of the source
     /// and a slice of it from a keyframe in place of an input seek, or `None` for the input seek
-    /// of ADR 014. [`plan::build_plan`] leaves it `None`. `commands::export` sets it for an FLV
-    /// source, with one offset for each piece of this source, and for one source at most
-    /// (ADR 053). FFmpeg runs in the work directory of the export, which holds the head, and the
-    /// command names the head by its file name (ADR 055).
+    /// of ADR 014. [`plan::build_plan`] leaves it `None`. `commands::export` sets it for each FLV
+    /// source, with one offset for each piece of this source. FFmpeg runs in the work directory of
+    /// the export, which holds the head of each such source as `h<k>.flv`, and the command names
+    /// each head by its file name (ADR 055).
     pub flv_input: Option<flv_input::FlvInput>,
 }
 

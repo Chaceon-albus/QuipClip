@@ -3250,9 +3250,9 @@ mod tests {
     /// first `first_pieces` pieces, the second source the next one, and the other sources the
     /// rest in turn, or the second source all of them when there are two, and the one source all
     /// of them when there is one. Every source holds a
-    /// piece, so `count` is at least `first_pieces + sources - 1`. The first source is the one
-    /// that [`with_flv_input`] gives the FLV input, so this skews the pieces toward the FLV source,
-    /// whose inputs are the longest.
+    /// piece, so `count` is at least `first_pieces + sources - 1`. Skewed toward the first source,
+    /// with an FLV input on every source or on none, this covers how the inputs fall among the
+    /// sources.
     fn skewed_plan(count: usize, sources: usize, first_pieces: usize) -> ExportPlan {
         assert!(count >= first_pieces + sources - 1);
         let mut plan = widest_plan(count);
@@ -3276,7 +3276,7 @@ mod tests {
     /// sources or more, every skew of [`skewed_plan`] toward the first source, with one piece for
     /// each other source or all `count` pieces. Each shape comes with every piece reading audio
     /// and [`silenced`], with video and [`without_video`], and with and without an FLV input on
-    /// the first source.
+    /// every source (ADR 055).
     fn budget_sweep(count: usize, sources: usize) -> Vec<(String, ExportPlan)> {
         let mut shapes = vec![(
             format!("{sources} sources in turn"),
@@ -3311,7 +3311,7 @@ mod tests {
                         if video { "" } else { ", no video" }
                     );
                     plans.push((name.clone(), plan.clone()));
-                    plans.push((format!("{name}, FLV"), with_flv_input(plan, u64::MAX)));
+                    plans.push((format!("{name}, FLV"), with_flv_inputs_everywhere(plan)));
                 }
             }
         }
@@ -3371,8 +3371,7 @@ mod tests {
     }
 
     /// `plan` with the FLV input of [`widest_flv_input`] on every source, at the largest size a
-    /// file can have. ADR 053 still gives one source of an export at most an FLV input; the
-    /// measure of [`MAX_EXPORT_INPUTS`] does not rely on that rule.
+    /// file can have: each FLV source of an export gets its own head (ADR 055).
     fn with_flv_inputs_everywhere(mut plan: ExportPlan) -> ExportPlan {
         for index in 0..plan.sources.len() {
             let count = plan
@@ -3387,16 +3386,16 @@ mod tests {
 
     #[test]
     fn the_widest_plan_with_an_flv_input_still_fits_at_the_segment_cap() {
-        // One source of an export at most has an FLV input, and each command of the plan, with
-        // the inputs production chooses, still fits at the limit of its count of sources, with the
+        // Every source of the plan has an FLV input, and each command of the plan, with the
+        // inputs production chooses, still fits at the limit of its count of sources, with the
         // largest numbers a file can have. A long path of the application data does not count:
-        // the command names the head by its file name.
+        // each command names its heads by their file names.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
         for sources in [1, 2, 7, max_export_sources()] {
-            let plan = with_flv_input(
-                widest_plan_of_sources(max_export_pieces(sources), sources),
-                u64::MAX,
-            );
+            let plan = with_flv_inputs_everywhere(widest_plan_of_sources(
+                max_export_pieces(sources),
+                sources,
+            ));
             assert!(fits_windows(&plan, &reservation), "{sources} sources");
         }
     }
