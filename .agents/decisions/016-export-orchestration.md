@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 036, ADR 041, ADR 043, ADR 048, ADR 049, ADR 050
+- Amended by: ADR 036, ADR 041, ADR 043, ADR 048, ADR 049, ADR 050, ADR 051
 
 ## Context
 
@@ -134,6 +134,10 @@ a tagged union, and every variant carries the `runId` that the command returned.
 
 This mirrors ADR 006. One event name gives the interface one subscription, one validator and one
 order of arrival.
+
+(Changed on 2026-10-28.) Every variant also carries `seq`, the number that the export journal
+gives each event in the order in which the events go out. A page that loaded again ignores each
+event that the snapshot of the journal already holds (ADR 051).
 
 ### The frame count decides success, not the exit status
 

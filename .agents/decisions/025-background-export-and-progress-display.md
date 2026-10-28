@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-22
 - Deciders: capric98
-- Amended by: ADR 036, ADR 049
+- Amended by: ADR 036, ADR 049, ADR 051
 
 ## Context
 
@@ -69,6 +69,10 @@ button can change while the pointer is on it. Two more rules protect the next ru
 
 An ignored click gives no feedback, as the ignored second half of a double-click gives none.
 A deliberate click so soon after a start is unlikely.
+
+(Changed on 2026-10-28.) A page that loaded again during a run restores the run (ADR 051). It
+sets the start of the run timing to the current time minus the time that the backend reports
+for the run. So a run that ran 30 seconds or more before the reload still needs two clicks.
 
 **This replaces the last section of ADR 016, "Dismissing the dialog during preparation now
 cancels".** That section cancelled by slot on a dismissal because the dismissal reset the
@@ -305,11 +309,13 @@ The frontend calls `setProgressBar` on the main window. The capability file gran
 The error state stays until the store resets, the same as the status bar result.
 
 The frontend sends the state once at start, and then only when the state or the whole percent
-changes. The start call clears a bar that a reloaded web view left behind. One call is in flight
-at a time. When a call settles, the frontend sends the latest state if it differs from the state
-of that call. `set_progress_bar` is an asynchronous command, so two calls that are sent together
-can arrive in the wrong order. A `publishing` state and a `finished` state arrive about one
-millisecond apart, and the wrong order leaves a full bar after the export.
+changes. The start call clears a bar that a reloaded web view left behind. (Changed on
+2026-10-28: a page that loaded again and restores a live run then sends the state of that run
+again, ADR 051.) One call is in flight at a time. When a call settles, the frontend sends the
+latest state if it differs from the state of that call. `set_progress_bar` is an
+asynchronous command, so two calls that are sent together can arrive in the wrong order. A
+`publishing` state and a `finished` state arrive about one millisecond apart, and the wrong order
+leaves a full bar after the export.
 
 On macOS, Tauri draws the bar on the Dock icon. The Dock bar does not move in the indeterminate
 state. It also keeps its last value when a state arrives with no value. On macOS the

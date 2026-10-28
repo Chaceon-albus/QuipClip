@@ -4,6 +4,7 @@
 - Date: 2026-10-27
 - Deciders: capric98
 - Amends: ADR 016, ADR 017, ADR 020, ADR 024, ADR 025, ADR 027, ADR 029, ADR 031, ADR 041
+- Amended by: ADR 050, ADR 051
 
 ## Context
 
@@ -48,6 +49,9 @@ The backend is the authority. The web view keeps a copy of the list for display,
 builds from the answers of `start_export` and from the events, by run id. It only submits,
 removes and shows. A web view that the system suspends does not stop the queue. When the web
 view runs again, it reads the events that waited, in their order.
+
+(Changed on 2026-10-28.) The backend also keeps a journal of the runs of the batch. A page that
+loaded again reads it with `export_queue_snapshot` and builds its copy from it (ADR 051).
 
 ### A run is fixed when the user submits it
 
@@ -115,6 +119,8 @@ start the next run during the exit. A request after the close fails with `export
   the list of the dialog catches up when the web view runs again.
 - A reload of the page, or a crash of the web view, loses the list in the interface. The
   backend queue goes on. A command that lists the queue for a new page is separate work.
+  (Changed on 2026-10-28: `export_queue_snapshot` lists the batch, and a page that loaded
+  again restores it while a run of the batch has not ended, ADR 051.)
 - The command refuses a preset test (ADR 041) for the whole batch, because an export holds the
   slot until the list is empty.
 - A run that hangs in a step of preparation without a time limit, such as the discovery of

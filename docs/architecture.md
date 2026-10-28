@@ -71,6 +71,7 @@ document summarizes them and shows how the parts fit together.
 | [`048-copy-the-audio-of-one-segment.md`](../.agents/decisions/048-copy-the-audio-of-one-segment.md)                                         | An export of one segment can copy the packets of the source audio          |
 | [`049-queue-exports-in-the-backend.md`](../.agents/decisions/049-queue-exports-in-the-backend.md)                                           | Exports wait in a backend queue and start one after another                |
 | [`050-bound-the-preparation-of-an-export.md`](../.agents/decisions/050-bound-the-preparation-of-an-export.md)                               | Preparation of an export ends after a time limit or a Stop                 |
+| [`051-list-the-export-queue-for-a-new-page.md`](../.agents/decisions/051-list-the-export-queue-for-a-new-page.md)                           | A page that loaded again restores the export queue from the backend        |
 
 ## Shape
 
@@ -350,10 +351,12 @@ The request carries the whole selected preset, and the run reads no preset from 
 file (ADR 024).
 
 One export runs at a time. A second request waits in the queue of `ExportRegistry`, and the
-registry starts it when the exports before it end (ADR 049). A cancel that arrives during the
-encode kills the child at the next poll. A cancel is also tested twice where it decides
-publication: once before `ffmpeg` starts, and once after the process exits and before the
-rename. See ADR 016.
+registry starts it when the exports before it end (ADR 049). An export journal gives each export
+event a sequence number. A page that loaded again reads the batch with `export_queue_snapshot`,
+and it restores the batch while a run of the batch has not ended (ADR 051). A cancel that
+arrives during the encode kills the child at the next poll. A cancel is also tested twice where
+it decides publication: once before `ffmpeg` starts, and once after the process exits and
+before the rename. See ADR 016.
 
 An application exit cancels a running export and waits a bounded time for it to end, so a quit
 does not leave `ffmpeg` encoding into a temporary file that nothing will remove. See ADR 017.
