@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 036, ADR 041, ADR 043, ADR 048
+- Amended by: ADR 036, ADR 041, ADR 043, ADR 048, ADR 049
 
 ## Context
 
@@ -47,9 +47,17 @@ This is a refusal, not a replacement. ADR 006 lets a second capability probe sup
 because a probe only reads. An export writes a file the user named, so a second export must not
 start and quietly take the first one's place.
 
+(Changed on 2026-10-27.) A second export is no longer refused. It waits in the queue of the
+registry, and the registry starts it when the exports before it have released the slot (ADR
+049). One export still runs at a time, and a second export still never replaces the first. The
+code `exportAlreadyRunning` no longer exists. The command refuses a second export only after the
+exit began, with `exportQueueClosed`.
+
 The command claims the slot before it answers the interface, and then moves the slot to the worker
 thread. `ExportSlot` owns an `Arc<ExportRegistry>` for that reason: Tauri lends managed state for
-the length of the command, and the run outlives the command.
+the length of the command, and the run outlives the command. (Changed on 2026-10-27: the command
+hands the run to the registry. The registry gives the run its slot when the run starts, at once
+or from the queue, and the run moves the slot to its export thread.)
 
 ### The cancel is tested twice
 
@@ -180,7 +188,8 @@ inside one, and a test cannot shorten a step that has already started. So the sl
 next test, which can be as late as the end of the current step: up to `PROBE_TIMEOUT` for the
 re-probe, and unbounded while executable discovery walks a `PATH` entry on a share that stopped
 answering. A retry inside that window is still refused with `exportAlreadyRunning`. This
-decision accepts that. Bounding discovery is separate work.
+decision accepts that. Bounding discovery is separate work. (Changed on 2026-10-27: a retry
+inside that window waits in the queue behind the run, ADR 049.)
 
 (Changed on 2026-10-02.) An export that writes audio can run up to two more reads of FFprobe after
 the re-probe (ADR 014 measurements 24 and 25). Each read has `PROBE_TIMEOUT` and polls the flag
@@ -195,14 +204,14 @@ asks the run to stop first, so leaving is an escape rather than the orphan.
 
 (Changed on 2026-10-02.) The export registry also counts the exports that began, so the test of a preset (ADR 041) can tell that an export started and ended while it ran, and then does not store its result.
 
-(Changed on 2026-10-27.) `start_export` answers with the run id as soon as it claims the slot,
-before the run prepares. Preparation runs on the export thread, which then runs the export. The
-coming export queue starts a run long after its command answered, so a failure of preparation
-cannot reach the interface as a rejection.
+(Changed on 2026-10-27.) `start_export` answers with the run id at once, before the run
+prepares. Preparation runs on the export thread, which then runs the export. The export queue
+of ADR 049 starts a run long after its command answered, so a failure of preparation cannot
+reach the interface as a rejection.
 
-- A failure of preparation is a `failed` event on the run, as every later failure is. The
-  command rejects only an invalid preset, a missing application data directory, a second
-  export, and an export thread that the operating system refused.
+- A failure of preparation is a `failed` event on the run, as every later failure is. So is an
+  export thread that the operating system refused. The command rejects only an invalid preset,
+  a missing application data directory, and a request after the exit began (ADR 049).
 - The interface holds the run id for the whole run, so `cancel_export` names the run during
   preparation too. `cancel_active_export` and `ExportRegistry::cancel_active` are removed. A
   Stop that comes before the answer waits for it, and then names the run.
@@ -214,7 +223,8 @@ cannot reach the interface as a rejection.
 
 - The four steps of the product work end to end: import, preview, mark and export.
 - A second export is refused while one runs. The interface must show that state rather than let
-  the user press the button twice.
+  the user press the button twice. (Changed on 2026-10-27: a second export waits in a queue, ADR
+  049.)
 - A cancel during the last seconds of the publication still writes the file. The interface must
   not promise that a cancel always prevents an output.
 - An export waits up to 30 seconds before it reports a failed publication. A user whose media

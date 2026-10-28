@@ -69,6 +69,7 @@ document summarizes them and shows how the parts fit together.
 | [`046-preview-through-mediasource-windows.md`](../.agents/decisions/046-preview-through-mediasource-windows.md)                             | A container the web view cannot open plays from fMP4 windows               |
 | [`047-show-the-source-of-each-build.md`](../.agents/decisions/047-show-the-source-of-each-build.md)                                         | The version shows with the commit and the branch of the build              |
 | [`048-copy-the-audio-of-one-segment.md`](../.agents/decisions/048-copy-the-audio-of-one-segment.md)                                         | An export of one segment can copy the packets of the source audio          |
+| [`049-queue-exports-in-the-backend.md`](../.agents/decisions/049-queue-exports-in-the-backend.md)                                           | Exports wait in a backend queue and start one after another                |
 
 ## Shape
 
@@ -345,13 +346,16 @@ active saves that preset as the active preset, and a failed save does not stop t
 The request carries the whole selected preset, and the run reads no preset from the settings
 file (ADR 024).
 
-One export runs at a time, and a second request is refused. A cancel that arrives during the
+One export runs at a time. A second request waits in the queue of `ExportRegistry`, and the
+registry starts it when the exports before it end (ADR 049). A cancel that arrives during the
 encode kills the child at the next poll. A cancel is also tested twice where it decides
 publication: once before `ffmpeg` starts, and once after the process exits and before the
 rename. See ADR 016.
 
 An application exit cancels a running export and waits a bounded time for it to end, so a quit
 does not leave `ffmpeg` encoding into a temporary file that nothing will remove. See ADR 017.
+Before that, the exit closes the export queue: it refuses every later export and drops the
+exports that wait, so no export starts during the wait (ADR 049).
 
 A close or a quit that would lose work asks first (ADR 027). The window close and the
 custom macOS Quit item both reach one frontend decision. It asks when segments, a pending In

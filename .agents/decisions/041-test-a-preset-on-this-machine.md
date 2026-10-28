@@ -4,6 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 006, ADR 016, ADR 038
+- Amended by: ADR 049
 
 ## Context
 
@@ -36,7 +37,10 @@ and it deletes the file on every path. It runs at `-loglevel level+warning`.
 - The test holds the lock of the smoke tests of ADR 006 while FFmpeg runs, so it never runs at the
   same time as a smoke test.
 - It does not start while an export runs. A counter of the exports that began lets the command
-  see an export that started and ended during the test. Such a result is not stored.
+  see an export that started and ended during the test. Such a result is not stored. (Changed
+  on 2026-10-27: exports can wait in a queue, ADR 049. An export that starts from the queue
+  counts as one that began, and an export holds the slot until the queue is empty, so the
+  command refuses a test for the whole batch.)
 - The timeout is 10 s, twice the timeout of a smoke test. On this Mac a cold test took at most
   0.25 s, but a cold disk, a hardware encoder that starts slowly, or a first scan of the
   executable by an antivirus program can take seconds, and a false time-out would be stored.

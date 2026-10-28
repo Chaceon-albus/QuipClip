@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 027, ADR 043, ADR 046
+- Amended by: ADR 027, ADR 043, ADR 046, ADR 049
 
 ## Context
 
@@ -66,6 +66,11 @@ which would need a second path to resume the exit.
 
 (Added on 2026-10-17.) The same handler kills each FFmpeg process of a preview remux window
 (ADR 046). A remux window writes no file, so the handler gives it no part of the budget above.
+
+(Added on 2026-10-27.) Exports can wait in a queue (ADR 049). The handler first closes the
+queue: it refuses every later export and drops the exports that wait, with no event. Then it
+cancels the running export and waits for its slot, as above. Without the close, the release of
+the slot would start the next export, and the wait would watch an export that had just started.
 
 ## Consequences
 
