@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-04
 - Deciders: capric98
-- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046, ADR 048, ADR 053, ADR 054
+- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046, ADR 048, ADR 053, ADR 054, ADR 055
 
 ## Context
 
@@ -65,6 +65,9 @@ These measurements come from ffmpeg 9.0.1. They use six fixtures:
 13. `-filter_complex_script` does not exist in version 9.0.1. The replacement is
     `-/filter_complex`. FFmpeg added that syntax in version 7.1. No single spelling works on
     each version that a user can have.
+    (Changed on 2026-10-28.) FFmpeg added `-/filter_complex` in version 7.0, not 7.1. Each build
+    from 2.0 until its removal reads `-filter_complex_script`. So two spellings cover every
+    supported build. ADR 055 uses the spelling that the installed `ffmpeg` reads.
 14. Many inputs of one file do not cause a failure. Runs with 8, 32, and 64 segments gave
     exactly 200, 800, and 1600 frames. The largest run used 20 MB of memory.
 15. Both graph shapes grow with the segment count, by roughly the same amount for each
@@ -583,6 +586,10 @@ its encoder needs 31,880 bytes, and 31,938 bytes with an FLV input. So the limit
 without a new measurement. A change that makes the command longer fails the first test, and then
 the budget must go down. `choose_shape` never gets a plan that no shape fits.
 
+(Changed on 2026-10-28.) ADR 055 ends the rule 92 − S. The graph is in a file, so only the
+fixed arguments and the inputs use the budget. An export joins at most 256 pieces and at most
+`MAX_EXPORT_INPUTS` sources. A dated note of ADR 055 gives the measurement.
+
 ### The boundary mechanism
 
 The renderer cuts with `trim` and `atrim`. It gives the boundaries as integer ticks in
@@ -806,6 +813,10 @@ the audio index for the same reason.
 muxer from the name. `mkv` selects the muxer `matroska`.
 
 ### The graph shape
+
+(Changed on 2026-10-28.) ADR 055 moves the graph into a file in the work directory of the export.
+It also chooses the inputs from the pieces, not from the length of the command. This section
+records the inline graph and the two shapes that came before.
 
 Measurement 13 removes the filter-graph file, so the renderer writes the graph inline.
 Windows limits a command line to 32767 bytes. The graph therefore competes with the
@@ -1072,7 +1083,9 @@ copies.
   to do with the audio, so a second input does not help. On a 1280x720 source with libx264,
   [60, 70) then [0, 50) took 2078 MiB, against 156 MiB in source order. Only the second shape has this cost,
   and Windows uses it only when the first shape does not fit, at about 75 segments or more on a
-  path of 106 characters. This cost is older than measurement 20.
+  path of 106 characters. This cost is older than measurement 20. (Changed on 2026-10-28.)
+  ADR 055 gives one input only to pieces in source order, so no piece waits. Pieces too far out
+  of order fail with `piecesOutOfOrder`.
 - (Added on 2026-10-02.) A last or only segment that lies wholly before the first audio sample
   gets no audio, because `concat` pads only a segment that another segment follows. When it is
   the only segment, an export with video fails in FFmpeg (measurement 21). (Changed on

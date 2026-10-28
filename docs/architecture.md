@@ -75,6 +75,7 @@ document summarizes them and shows how the parts fit together.
 | [`052-several-sources-on-one-sequence.md`](../.agents/decisions/052-several-sources-on-one-sequence.md)                                     | Clips place sources on one sequence, and edit points name a clip            |
 | [`053-conform-several-sources-at-export.md`](../.agents/decisions/053-conform-several-sources-at-export.md)                                 | One canvas, the highest frame rate and one audio format for several sources |
 | [`054-give-each-preset-an-audio-gain.md`](../.agents/decisions/054-give-each-preset-an-audio-gain.md)                                       | A preset can change the level of the exported audio by a gain in dB         |
+| [`055-run-an-export-in-a-work-directory.md`](../.agents/decisions/055-run-an-export-in-a-work-directory.md)                                 | Each export runs in a work directory and reads its filter graph from a file |
 
 ## Shape
 
@@ -294,8 +295,9 @@ sources and the pieces, and preparation runs once for each source. With the pres
 `source`, the plan picks one canvas, the display size with the largest area, and fits each
 other piece into it with Lanczos and black bars. It also picks the highest frame rate, the
 highest sample rate and the layout with the most channels. A piece without audio gets silence.
-An export of S sources joins at most 92 − S pieces, so one source can have 91. In the
-command-line budget, each source takes the place of one piece (ADR 014).
+Each export runs in its own work directory, and `ffmpeg` reads the filter graph from a file
+there (ADR 055). An export joins at most 256 pieces and at most `MAX_EXPORT_INPUTS`
+sources. Pieces too far out of source order fail before the save dialog.
 
 One export writes one output. One `-copyts`, placed once before the first input,
 keeps the raw source PTS visible to the filter graph on every input. The renderer seeks each

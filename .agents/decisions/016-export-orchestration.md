@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 036, ADR 041, ADR 043, ADR 048, ADR 049, ADR 050, ADR 051
+- Amended by: ADR 036, ADR 041, ADR 043, ADR 048, ADR 049, ADR 050, ADR 051, ADR 055
 
 ## Context
 
@@ -35,6 +35,11 @@ This decision adds that caller, so it closes all three gaps.
 One more constraint comes from the interface. `src/features/export/types.ts` is committed. Its
 tests pin 26 error codes in a fixed order, and they pin the event union. The command must produce
 exactly those codes and those payloads.
+
+(Changed on 2026-10-28.) ADR 055 adds four codes at the end of that order: `tooManySources`,
+`piecesOutOfOrder`, `workDirectoryUnavailable` and `graphFileUnsupported`. Preparation also
+runs the option probe of ADR 055. It is the only `ffmpeg` process before the export that reads
+no source.
 
 ## Decision
 

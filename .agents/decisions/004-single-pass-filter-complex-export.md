@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 053
+- Amended by: ADR 053, ADR 055
 
 ## Context
 
@@ -58,6 +58,10 @@ The future renderer must also:
 - pass `-nostdin`
 - write a temporary output in the destination directory and rename it on success
 - use a filter-graph file when the platform command-line limit requires one
+
+(Changed on 2026-10-28.) ADR 055 meets the last requirement. Each export writes its graph to a
+file in its own work directory, and `ffmpeg` reads it with `-/filter_complex` or
+`-filter_complex_script`.
 
 ## Consequences
 

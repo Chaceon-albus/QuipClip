@@ -4,6 +4,7 @@
 - Date: 2026-10-28
 - Deciders: capric98
 - Amends: ADR 013, ADR 014, ADR 023, ADR 040, ADR 041
+- Amended by: ADR 055
 
 ## Context
 
@@ -58,6 +59,9 @@ These measurements used FFmpeg 9.0.2 (Homebrew) on macOS.
    an export without video of 36 sources, whose FLV source has 6 of 56 pieces. The longest audio
    process that production chooses grows from 31,733 to 31,736 bytes: 32 sources, whose FLV
    source has 17 of 48 pieces. Both fit in 31,743.
+
+   (Changed on 2026-10-28.) ADR 055 moves the graph into a file. The gain chain then costs no
+   bytes of the command line.
 
 The sign depends on the expression parser of FFmpeg. It must read `-1.0dB` as 10^(-1/20), and
 not as the negative of 10^(1/20), which would raise the level and invert the samples. Measurement

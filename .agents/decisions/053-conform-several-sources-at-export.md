@@ -4,6 +4,7 @@
 - Date: 2026-10-28
 - Deciders: capric98
 - Amends: ADR 004, ADR 014, ADR 023, ADR 024, ADR 043, ADR 048, ADR 049, ADR 050
+- Amended by: ADR 055
 
 ## Context
 
@@ -72,6 +73,9 @@ are more pieces than the limit of that number of sources. The message names that
 clip, it counts the segments against the limit of one source. From 11 sources on, one to three more
 pieces fit than the rule allows. ADR 014 gives the reason to keep the simple rule.
 
+(Changed again on 2026-10-28.) ADR 055 replaces the rule 92 − S. An export joins at most 256
+pieces and at most `MAX_EXPORT_INPUTS` sources. The OPEN step also counts the runs of ADR 055.
+
 Preparation runs once for each source that a piece names: the revision check, the probe, the
 audio correction, the FLV input and the gap read of ADR 014, ADR 046 and ADR 049. The plan then
 times each piece with the probe of its own source: its video time base, its format start time,
@@ -83,6 +87,9 @@ first FLV source in the order of the first pieces. `ffmpeg` runs in the director
 file and names the head by its file name, so one command can name only one head. A later FLV
 source keeps the input seek. Its output is the same, but `ffmpeg` reads more of the file.
 
+(Changed again on 2026-10-28.) ADR 055 ends this rule. Each FLV source gets its own head in the
+work directory of the export, so each FLV source gets the FLV input.
+
 ### The command line
 
 The fit step below makes each chain longer, and each extra source adds one input. The budget of
@@ -93,7 +100,8 @@ process of ADR 043, on the platform with the smallest command-line limit.
 - When 100 pieces no longer fit, the unit lowers the limit of pieces to the largest count that
   fits. It records the measurement and the new limit in a dated note of ADR 014.
 - A graph file is not the answer. ADR 014 found no form of a graph file that every supported
-  `ffmpeg` reads (measurement 13).
+  `ffmpeg` reads (measurement 13). (Changed on 2026-10-28.) Two spellings cover every supported
+  build, and ADR 055 moves the graph into a file.
 - Today `choose_shape` returns the last shape when no shape fits, and no error exists for that
   case. With the measured limit, that case must not occur. A test must show this for the widest
   preset at the limit.

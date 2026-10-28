@@ -4,7 +4,7 @@
 - Date: 2026-10-23
 - Deciders: capric98
 - Amends: ADR 014, ADR 016, ADR 023, ADR 024, ADR 036, ADR 043, ADR 046
-- Amended by: ADR 052, ADR 053
+- Amended by: ADR 052, ADR 053, ADR 055
 
 ## Context
 
@@ -105,6 +105,9 @@ two processes. The encoder used `libx264 -preset ultrafast`.
     20 ms.
 
 ## Decision
+
+(Changed on 2026-10-28.) The copy process runs in the work directory of ADR 055. Its command
+carries no graph. So an export that only copies the audio does not run the option probe.
 
 (Changed on 2026-10-28.) The condition "an export of one segment" now reads "an export of one
 piece" (ADR 053). A segment that crosses a junction has two or more pieces, so its audio is

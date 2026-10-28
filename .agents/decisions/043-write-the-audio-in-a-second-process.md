@@ -4,7 +4,7 @@
 - Date: 2026-10-03
 - Deciders: capric98
 - Amends: ADR 014, ADR 016, ADR 017, ADR 018, ADR 036
-- Amended by: ADR 046, ADR 048, ADR 053
+- Amended by: ADR 046, ADR 048, ADR 053, ADR 055
 
 ## Context
 
@@ -147,6 +147,10 @@ ffmpeg -nostdin -hide_banner -loglevel error -nostats -copyts \
 It has no `-progress`, because its stdout carries the audio, and no `-y`, because it writes no file.
 The `null` muxer opens no file. The stand-in video must go to that output and not to `nullsink`
 (measurement 3).
+
+(Changed on 2026-10-28.) Both processes run in the work directory of ADR 055. Each one reads its
+graph from a file there: `encoder.graph` and `audio.graph`. Each process chooses its inputs
+from the pieces that it reads, by the rules of ADR 055.
 
 (Changed on 2026-10-17.) An FLV input of both processes opens a `concat` of `head.flv` and a
 `subfile` slice in place of `[-ss <seek>] -i <source>` (ADR 046). Both processes run in the

@@ -4,7 +4,7 @@
 - Date: 2026-10-27
 - Deciders: capric98
 - Amends: ADR 016, ADR 017, ADR 049
-- Amended by: ADR 053
+- Amended by: ADR 053, ADR 055
 
 ## Context
 
@@ -60,6 +60,9 @@ was already running stops at its next poll, unless the system cannot end it.
   receives. A temporary file that it reserved late is deleted on the helper thread.
 - It does not write the head of an FLV source into the cache after its stop. It can still save
   the keyframe table of the source, which is only a cache.
+- (Added on 2026-10-28.) Its late answer removes the work directory of ADR 055 when the helper
+  drops it. A write into that directory after the removal fails, because a write never creates
+  the directory.
 
 ### No shorter limit for discovery
 

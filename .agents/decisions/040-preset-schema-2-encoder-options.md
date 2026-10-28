@@ -4,7 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 013, ADR 014, ADR 023
-- Amended by: ADR 054
+- Amended by: ADR 054, ADR 055
 
 ## Context
 
@@ -49,7 +49,8 @@ source and compares the lists and the limits.
 
 - The name starts with an ASCII letter and holds only ASCII letters, digits, `_`, `.` and `-`,
   1 to 64 characters. The rule refuses `:`, which would change the stream specifier, and `/`,
-  because FFmpeg 7.1 and later read the value of `-/<name>` from a file.
+  because FFmpeg 7.1 and later read the value of `-/<name>` from a file. (Changed on
+  2026-10-28: FFmpeg 7.0 added that syntax, ADR 055.)
 - The name is not in `DENIED_OPTION_NAMES`, a list of 198 names in two parts:
   - Every option of the fftools tables that takes no argument, in the tags from n7.1 to n9.0.2:
     each boolean option and its `no` form, each function option with no argument, and each

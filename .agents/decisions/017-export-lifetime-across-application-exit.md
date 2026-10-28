@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 027, ADR 043, ADR 046, ADR 049, ADR 050
+- Amended by: ADR 027, ADR 043, ADR 046, ADR 049, ADR 050, ADR 055
 
 ## Context
 
@@ -60,6 +60,9 @@ without the handler.
 The wait watches the slot, not the run identifier it cancelled. `ExportSlot` drops after both
 the child guard and the reservation guard, so a free slot is the signal that the worker ran its
 guards to completion.
+
+(Changed on 2026-10-28.) The work directory of ADR 055 is also removed before the slot drops. On
+Windows, its removal waits at most 511 ms in total, so it fits in the 5 seconds of the exit.
 
 The handler blocks the event loop thread inline. It therefore does not call `prevent_exit`,
 which would need a second path to resume the exit.

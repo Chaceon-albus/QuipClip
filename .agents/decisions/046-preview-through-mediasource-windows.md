@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 014, ADR 017, ADR 019, ADR 022, ADR 026, ADR 028, ADR 039,
   ADR 043
-- Amended by: ADR 048
+- Amended by: ADR 048, ADR 055
 
 ## Context
 
@@ -724,6 +724,11 @@ export share one head: the head of the earliest slice. FFmpeg runs in the direct
 and the command names the head by its file name, so the path of the application data does not
 make each input longer. The single input of ADR 014 opens the earliest slice.
 
+(Changed on 2026-10-28.) ADR 055 writes the head of each FLV source into the work directory of
+the export, as `h<k>.flv`. `ffmpeg` runs in that directory. So each FLV source of an export gets
+its FLV input, and the check decodes only the slices that start an input. The cache keeps the
+keyframe table.
+
 Then ffprobe decodes the start of each slice in one run: the first 64 packets of both streams, or
 the first 8 video packets when the check leaves out the audio. All these runs share one
 `PROBE_TIMEOUT` of 30 s. The check looks for a config change that no read has seen,
@@ -799,7 +804,9 @@ the runs share one `PROBE_TIMEOUT`.
 ## Consequences
 
 - An FLV on a share opens without a full read. The preview reads each window once and writes
-  only `head.flv` and the keyframe sidecar.
+  only `head.flv` and the keyframe sidecar. (Changed on 2026-10-28.) The preview writes only the
+  keyframe sidecar. It builds each head in memory. Only the export wrote `head.flv`, and after
+  ADR 055 it writes its heads into its work directory.
 - The backend has a new module, `src-tauri/src/flv/`, that reads FLV tags. A window runs one or
   two FFmpeg processes.
 - Precise editing works on these sources, and the calibration does not depend on the first frame.
