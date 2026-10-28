@@ -873,6 +873,9 @@ mod tests {
             avg_frame_rate: Some(Rational::new(30, 1).unwrap()),
             r_frame_rate: Some(Rational::new(30, 1).unwrap()),
             reported_frame_count: None,
+            sample_aspect_ratio: None,
+            rotation: 0,
+            video_end_pts: None,
             audio: Some(AudioProbe {
                 index: 1,
                 codec: Some("aac".to_owned()),

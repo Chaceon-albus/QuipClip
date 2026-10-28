@@ -259,6 +259,9 @@ mod tests {
             avg_frame_rate: None,
             r_frame_rate: None,
             reported_frame_count: None,
+            sample_aspect_ratio: None,
+            rotation: 0,
+            video_end_pts: None,
             audio: audio.map(|index| AudioProbe {
                 index,
                 codec: Some("aac".to_owned()),

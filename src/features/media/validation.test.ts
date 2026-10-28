@@ -48,6 +48,9 @@ function createValidProbe(): ImportMediaResult["probe"] {
     avgFrameRate: { n: 30000, d: 1001 },
     rFrameRate: { n: 30000, d: 1001 },
     reportedFrameCount: "300" as FrameCount,
+    sampleAspectRatio: { n: 1, d: 1 },
+    rotation: 90,
+    videoEndPts: "900000" as Pts,
     audio: {
       index: 0,
       codec: "aac",
@@ -431,6 +434,64 @@ describe("Media Validation & Normalization", () => {
       const withoutStartTime: Record<string, unknown> = { ...createValidProbe() };
       delete withoutStartTime.formatStartTime;
       expect(isMediaProbe(withoutStartTime)).toBe(false);
+    });
+
+    it("accepts a positive sampleAspectRatio or null, and rejects anything else", () => {
+      const withRatio = (sampleAspectRatio: unknown) =>
+        isMediaProbe({ ...createValidProbe(), sampleAspectRatio });
+      expect(withRatio({ n: 64, d: 45 })).toBe(true);
+      expect(withRatio({ n: 1, d: 1 })).toBe(true);
+      expect(withRatio(null)).toBe(true);
+      expect(withRatio({ n: 0, d: 1 })).toBe(false);
+      expect(withRatio({ n: -4, d: 3 })).toBe(false);
+      expect(withRatio({ n: 4, d: 0 })).toBe(false);
+      expect(withRatio({ n: 1.5, d: 1 })).toBe(false);
+      expect(withRatio("64:45")).toBe(false);
+      expect(withRatio(undefined)).toBe(false);
+    });
+
+    it("accepts only the quarter turns 0, 90, 180 and 270 as rotation", () => {
+      const withRotation = (rotation: unknown) =>
+        isMediaProbe({ ...createValidProbe(), rotation });
+      for (const rotation of [0, 90, 180, 270]) {
+        expect(withRotation(rotation)).toBe(true);
+      }
+      for (const rotation of [-90, 45, 360, 90.5, NaN, "90", null, undefined]) {
+        expect(withRotation(rotation)).toBe(false);
+      }
+    });
+
+    it("accepts a canonical PTS string or null as videoEndPts", () => {
+      const withEnd = (videoEndPts: unknown) =>
+        isMediaProbe({ ...createValidProbe(), videoEndPts });
+      expect(withEnd("30720")).toBe(true);
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          videoStartPts: "-1024",
+          videoEndPts: "-512",
+        }),
+      ).toBe(true);
+      expect(withEnd(null)).toBe(true);
+      for (const videoEndPts of ["-0", "007", "1.5", "", 30720, undefined]) {
+        expect(withEnd(videoEndPts)).toBe(false);
+      }
+    });
+
+    it("rejects a videoEndPts that is not after videoStartPts", () => {
+      const withRange = (videoStartPts: string | null, videoEndPts: string | null) =>
+        isMediaProbe({ ...createValidProbe(), videoStartPts, videoEndPts });
+      expect(withRange("0", "1")).toBe(true);
+      expect(withRange("-1800", "0")).toBe(true);
+      expect(withRange(null, "-5")).toBe(true);
+      expect(withRange("100", null)).toBe(true);
+      expect(withRange("100", "100")).toBe(false);
+      expect(withRange("100", "99")).toBe(false);
+      expect(withRange("0", "-1800")).toBe(false);
+      // Values past 2^53 compare exactly.
+      expect(withRange("9007199254740993", "9007199254740994")).toBe(true);
+      expect(withRange("9007199254740993", "9007199254740992")).toBe(false);
+      expect(withRange("9223372036854775806", "9223372036854775807")).toBe(true);
     });
 
     it("returns false for non-objects or malformed structures", () => {

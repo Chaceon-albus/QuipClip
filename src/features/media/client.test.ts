@@ -38,6 +38,9 @@ function createValidImportResult(): ImportMediaResult {
       avgFrameRate: { n: 30000, d: 1001 },
       rFrameRate: { n: 30000, d: 1001 },
       reportedFrameCount: "300" as FrameCount,
+      sampleAspectRatio: null,
+      rotation: 0,
+      videoEndPts: null,
       audio: {
         index: 0,
         codec: "aac",

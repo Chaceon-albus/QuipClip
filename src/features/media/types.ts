@@ -92,6 +92,12 @@ export type AudioProbe = {
   channels: number | null;
 };
 
+/** The quarter turns that `MediaProbe.rotation` can hold. */
+export const VIDEO_ROTATIONS = [0, 90, 180, 270] as const;
+
+/** A clockwise quarter turn in degrees. */
+export type VideoRotation = (typeof VIDEO_ROTATIONS)[number];
+
 /**
  * Normalized container and stream metadata extracted by ffprobe.
  */
@@ -134,6 +140,22 @@ export type MediaProbe = {
   rFrameRate: Rational | null;
   /** Total reported frame count from stream metadata, or null if unstated. */
   reportedFrameCount: FrameCount | null;
+  /**
+   * The shape of one stored pixel as an exact positive rational (64:45 is `{ n: 64, d: 45 }`),
+   * or null when the source does not state one. Null reads as square pixels.
+   */
+  sampleAspectRatio: Rational | null;
+  /**
+   * The clockwise turn in degrees that a player applies to show the stored picture upright,
+   * from the display matrix of the stream or its legacy `rotate` tag. 0 when neither exists.
+   */
+  rotation: VideoRotation;
+  /**
+   * The exclusive end of the video: the PTS that follows the last presented frame, in the
+   * video time base (ADR 052), or null when the probe could not read it. It is always greater
+   * than `videoStartPts`.
+   */
+  videoEndPts: Pts | null;
   /** Audio stream metadata, or null if the media file has no audio. */
   audio: AudioProbe | null;
 };

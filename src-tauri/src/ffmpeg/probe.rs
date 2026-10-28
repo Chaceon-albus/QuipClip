@@ -95,6 +95,21 @@ pub struct MediaProbe {
     pub avg_frame_rate: Option<Rational>,
     pub r_frame_rate: Option<Rational>,
     pub reported_frame_count: Option<FrameCount>,
+    /// The shape of one stored pixel, from the stream's `sample_aspect_ratio` (`64:45` gives
+    /// 64/45), or `None` when ffprobe reports none, `N/A`, `0:1` or a part that is not positive.
+    /// `None` reads as square pixels.
+    pub sample_aspect_ratio: Option<Rational>,
+    /// The clockwise turn, 0, 90, 180 or 270 degrees, that a player applies to show the stored
+    /// picture upright. See [`display_rotation`].
+    pub rotation: u16,
+    /// The exclusive end of the video: the PTS that follows the last presented frame, in
+    /// `video_time_base` (ADR 052). Only the probe of an import reads it ([`probe_media`]), from
+    /// the tags of an FLV ([`flv_video_end`]) or from the last packets of any other file
+    /// ([`probe_video_end`]). `None` when that read failed. The re-probe of an export
+    /// ([`probe_media_until_canceled`]) leaves it `None` for every file, FLV included, so no
+    /// export code reads an end that only some files carry; the export takes the end from the
+    /// project.
+    pub video_end_pts: Option<Pts>,
     pub audio: Option<AudioProbe>,
 }
 
@@ -404,9 +419,21 @@ impl From<ProbeDataError> for ProbeParseError {
 }
 
 /// Run the resolved ffprobe executable and normalize its JSON output, within
-/// [`PROBE_TIMEOUT`].
+/// [`PROBE_TIMEOUT`], and read the end of the video. The import uses this form.
+///
+/// The end of an FLV whose tags the reader can read comes from its tags already
+/// ([`correct_flv_probe`]). Any other file, and an FLV that the tags gave no end, takes it from a
+/// second run that reads the last packets of the video ([`probe_video_end`]). A failure of that
+/// run leaves the end `None` and does not fail the import, as a failed read of an audio start
+/// does not fail an export (ADR 014).
 pub fn probe_media(ffprobe_path: &Path, media_path: &Path) -> Result<MediaProbe, ProbeError> {
-    probe_media_within(ffprobe_path, media_path, PROBE_TIMEOUT)
+    let (mut probe, extent) =
+        probe_media_and_flv_extent(ffprobe_path, media_path, PROBE_TIMEOUT, None)?;
+    probe.video_end_pts = extent
+        .and_then(|extent| extent.last_video_pts)
+        .and_then(|last_ms| flv_video_end(&probe, last_ms))
+        .or_else(|| probe_video_end(ffprobe_path, media_path, &probe));
+    Ok(probe)
 }
 
 /// [`probe_media`] under a cancel flag: a set flag kills ffprobe at its next poll and returns
@@ -436,13 +463,25 @@ pub fn probe_media_within(
     probe_media_with(ffprobe_path, media_path, timeout, None)
 }
 
-/// The body of [`probe_media_within`] and [`probe_media_until_canceled`].
+/// The body of [`probe_media_within`] and [`probe_media_until_canceled`]. These forms read no
+/// end of the video, so `video_end_pts` is `None` for every file.
 fn probe_media_with(
     ffprobe_path: &Path,
     media_path: &Path,
     timeout: Duration,
     cancel: Option<&AtomicBool>,
 ) -> Result<MediaProbe, ProbeError> {
+    probe_media_and_flv_extent(ffprobe_path, media_path, timeout, cancel).map(|(probe, _)| probe)
+}
+
+/// The first run of every probe of a source, with the extent that the tags of an FLV gave, when
+/// the file is an FLV that the reader can read.
+fn probe_media_and_flv_extent(
+    ffprobe_path: &Path,
+    media_path: &Path,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+) -> Result<(MediaProbe, Option<crate::flv::locate::Extent>), ProbeError> {
     let arguments = [
         OsStr::new("-v"),
         OsStr::new("error"),
@@ -463,8 +502,8 @@ fn probe_media_with(
     .map_err(|source| ProbeError::Spawn { source })?;
     let mut probe = finish_probe_run(run, timeout)?;
     // The tags give the length of an FLV better than ffprobe does.
-    correct_flv_file(&mut probe, media_path);
-    Ok(probe)
+    let extent = correct_flv_file(&mut probe, media_path);
+    Ok((probe, extent))
 }
 
 /// How one `ffprobe` run ended, and everything it wrote.
@@ -791,6 +830,302 @@ struct RawPacket {
 struct RawPacketStream {
     id: Option<String>,
     time_base: Option<String>,
+}
+
+/// How far in front of the approximate end of the video [`probe_video_end`] starts its read, in
+/// seconds.
+///
+/// The approximate duration is a float of the container's or the stream's own account, and ffprobe
+/// seeks to the keyframe at or before the start of the interval. 10 s covers an approximate
+/// duration that is a few seconds long, and the frames that a decoder reorders past the last
+/// keyframe, and it costs a few hundred packets of JSON.
+const VIDEO_TAIL_MARGIN_SECONDS: i64 = 10;
+
+/// The deadline of one run of [`probe_video_end`].
+///
+/// Shorter than [`PROBE_TIMEOUT`]: the import waits for this run after the first one, and it
+/// reads a fact that the import does not need. A file whose read goes back far, as a very long
+/// GOP or the second read from the start makes it, or a file on a slow share, gives up its end
+/// rather than hold the import for another 30 s.
+const VIDEO_TAIL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run the resolved ffprobe executable to read the exclusive end of the video of `media_path`
+/// (ADR 052), each run within [`VIDEO_TAIL_TIMEOUT`]. `probe` is the answer of the first run.
+///
+/// The first run reports no end that is exact: `duration_ts` is absent from Matroska, MPEG-TS
+/// and FLV, and the durations are floats. This run reads the packets of the video stream from
+/// [`VIDEO_TAIL_MARGIN_SECONDS`] before the approximate end, and decodes none of them;
+/// [`parse_video_tail_json`] takes the end from them.
+///
+/// An answer without a keyframe is not the whole tail. An MP4 or a Matroska file that is asked
+/// for a start past its end goes back to its last keyframe, but MPEG-TS and MPEG-PS resync on
+/// the next packet: a TS of 29.9 s asked for 40 s listed one packet, not the one with the largest
+/// `pts`, and a program stream listed packets whose `pts` was their `dts`. An approximate
+/// duration more than 10 s long, as a duration from the bitrate gives it, starts the read there.
+/// So such an answer reads the file again once, from the start of the video
+/// ([`video_tail_restart`]), and an answer from there without a keyframe is no end.
+///
+/// `None` when the approximate duration is unknown, so the run has no place to start, and when
+/// a run fails in any way: an end that cannot be read is an unknown end, not a failed import.
+/// The import has no cancel, as the first run has none.
+pub fn probe_video_end(ffprobe_path: &Path, media_path: &Path, probe: &MediaProbe) -> Option<Pts> {
+    let video_start = video_start_seconds(probe);
+    let first = video_tail_start(
+        probe.format_start_time,
+        video_start,
+        probe.approximate_duration_seconds,
+    )?;
+    match read_video_tail(ffprobe_path, media_path, probe, first)? {
+        VideoTail::Read(end) => end,
+        VideoTail::WithoutKeyframe => {
+            let restart = video_tail_restart(probe.format_start_time, video_start)?;
+            if restart >= first {
+                return None;
+            }
+            match read_video_tail(ffprobe_path, media_path, probe, restart)? {
+                VideoTail::Read(end) => end,
+                VideoTail::WithoutKeyframe => None,
+            }
+        }
+    }
+}
+
+/// One run of [`probe_video_end`] from `start` seconds. `None` when the run fails.
+fn read_video_tail(
+    ffprobe_path: &Path,
+    media_path: &Path,
+    probe: &MediaProbe,
+    start: Rational,
+) -> Option<VideoTail> {
+    let interval = format!("{}%", format_seconds(start, 6)?);
+    let stream = probe.video_stream_index.to_string();
+    let arguments = [
+        OsStr::new("-v"),
+        OsStr::new("error"),
+        OsStr::new("-select_streams"),
+        OsStr::new(&stream),
+        OsStr::new("-show_entries"),
+        OsStr::new("packet=pts,duration,flags"),
+        // From the keyframe at or before `start` to the end of the file.
+        OsStr::new("-read_intervals"),
+        OsStr::new(&interval),
+        OsStr::new("-of"),
+        OsStr::new("json"),
+        OsStr::new("-i"),
+        media_path.as_os_str(),
+    ];
+    let run = run_probe_process(
+        ffprobe_path,
+        &arguments,
+        VIDEO_TAIL_TIMEOUT,
+        PROBE_POLL_INTERVAL,
+        None,
+    )
+    .ok()?;
+    finish_probe_run_with(run, VIDEO_TAIL_TIMEOUT, |json| {
+        parse_video_tail_json(json, probe)
+    })
+    .ok()
+}
+
+/// The exact time of the first video frame of `probe` in seconds, or `None` when the probe gives
+/// no start or the time base cannot carry it.
+fn video_start_seconds(probe: &MediaProbe) -> Option<Rational> {
+    probe
+        .video_start_pts
+        .and_then(|pts| pts_seconds(pts, probe.video_time_base))
+}
+
+/// The start of the first read of [`probe_video_end`], in seconds on the timeline that
+/// `-read_intervals` seeks on: the start of the file plus the whole seconds of the approximate
+/// duration, less [`VIDEO_TAIL_MARGIN_SECONDS`], and not below 0.
+///
+/// The start of the file is the container start, else the exact start of the video, else 0. A
+/// TS that starts at 1000 s and reports no container start would otherwise read from its first
+/// packet. This is a seek target, not a timestamp of the edit, so the float of the approximate
+/// duration may decide it: only its whole seconds enter, and the rest of the arithmetic is exact.
+/// `None` when the approximate duration is unknown.
+fn video_tail_start(
+    format_start_time: Option<Rational>,
+    video_start: Option<Rational>,
+    approximate_duration_seconds: Option<f64>,
+) -> Option<Rational> {
+    let duration =
+        approximate_duration_seconds.filter(|value| value.is_finite() && *value >= 0.0)?;
+    // `as` saturates a float that is too large, and the checked arithmetic below then refuses it.
+    let whole_seconds = Rational::new(duration.floor() as i64, 1)?;
+    let margin = Rational::new(VIDEO_TAIL_MARGIN_SECONDS, 1)?;
+    let start = format_start_time
+        .or(video_start)
+        .unwrap_or(Rational::new(0, 1)?)
+        .add(whole_seconds)?
+        .sub(margin)?;
+    non_negative(start)
+}
+
+/// The start of the second read of [`probe_video_end`]: the container start, else the exact
+/// start of the video, else 0, and not below 0.
+fn video_tail_restart(
+    format_start_time: Option<Rational>,
+    video_start: Option<Rational>,
+) -> Option<Rational> {
+    non_negative(
+        format_start_time
+            .or(video_start)
+            .unwrap_or(Rational::new(0, 1)?),
+    )
+}
+
+fn non_negative(value: Rational) -> Option<Rational> {
+    if value.num() < 0 {
+        Rational::new(0, 1)
+    } else {
+        Some(value)
+    }
+}
+
+/// What one answer of [`probe_video_end`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoTail {
+    /// The answer holds a keyframe, so it holds every frame from that keyframe to the end of the
+    /// file: the end, or `None` when the packets give none.
+    Read(Option<Pts>),
+    /// The answer holds no keyframe, so it may be only a part of the tail.
+    WithoutKeyframe,
+}
+
+/// Read the answer of [`probe_video_end`] for the video that `probe` describes.
+///
+/// Malformed JSON fails. An answer without a packet flagged `K` is
+/// [`VideoTail::WithoutKeyframe`]: the frame with the largest `pts` comes after the last keyframe
+/// in decode order, so only a read that starts at a keyframe is sure to hold it. Otherwise the
+/// end is [`video_end_from_packets`] of the packets that are presented, with the nominal frame
+/// interval of `probe` as the duration of a packet that gives none.
+///
+/// A packet whose `flags` hold `D` is not presented, so it gives no end. ffprobe 9 prints such
+/// flags as `_D_` and `KD_`. It flags them so in an MP4 whose edit list ends before the media
+/// of its track: a track of 2 s at 30 fps whose edit was cut to 1.5 s listed every packet of
+/// the last 0.5 s with its own `pts` and `duration` and the flag `D`, and the last presented
+/// frame was the last packet without it. The pre-roll in front of an edit list that starts
+/// after the first keyframe carries the same flag. A stream copy with `-t` writes no tail edit:
+/// it ends the track at a packet, and every packet that it writes is presented.
+///
+/// A presented packet without a usable `pts` makes the end `None`. That packet is a frame whose
+/// time the read does not know, and it can be the last one: an MPEG-2 program stream with
+/// B-frames listed its last two packets in decode order with `pts` `N/A`, and the largest `pts`
+/// of the others ended two frames early. Such files list `N/A` throughout, so an MPEG-PS source
+/// and an AVI with B-frames always get no end, and their clips keep an approximate extent
+/// (ADR 052).
+pub fn parse_video_tail_json(
+    json: &[u8],
+    probe: &MediaProbe,
+) -> Result<VideoTail, ProbeParseError> {
+    let raw: RawVideoTail = serde_json::from_slice(json)?;
+    let flagged = |packet: &RawTailPacket, flag: char| {
+        packet
+            .flags
+            .as_deref()
+            .is_some_and(|flags| flags.contains(flag))
+    };
+    if !raw.packets.iter().any(|packet| flagged(packet, 'K')) {
+        return Ok(VideoTail::WithoutKeyframe);
+    }
+    let packets: Option<Vec<TailPacket>> = raw
+        .packets
+        .iter()
+        .filter(|packet| !flagged(packet, 'D'))
+        .map(|packet| {
+            let pts = parse_optional_i64_value(packet.pts.as_ref(), "packets.pts")
+                .ok()
+                .flatten()?;
+            let duration = parse_optional_i64_value(packet.duration.as_ref(), "packets.duration")
+                .ok()
+                .flatten();
+            Some(TailPacket { pts, duration })
+        })
+        .collect();
+    let Some(packets) = packets else {
+        return Ok(VideoTail::Read(None));
+    };
+    let interval = nominal_interval_ticks(
+        probe.avg_frame_rate.or(probe.r_frame_rate),
+        probe.video_time_base,
+    )
+    .map(ceil_to_ticks);
+    Ok(VideoTail::Read(video_end_from_packets(
+        &packets,
+        interval,
+        probe.video_start_pts,
+    )))
+}
+
+/// One presented packet of the read of [`probe_video_end`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TailPacket {
+    pub pts: i64,
+    pub duration: Option<i64>,
+}
+
+/// The exclusive end of the video from its last packets (ADR 052): the largest `pts + duration`
+/// over `packets`.
+///
+/// The packets come in decode order, so the packet with the largest `pts` is not the last one
+/// when the stream reorders its frames. A packet without a duration or with a duration that is
+/// not positive lasts `interval` ticks, the nominal frame interval rounded up to a whole tick;
+/// when such a packet exists and there is no interval, the end is `None`. `None` as well when
+/// `packets` is empty, when a sum overflows, and when the end is not after `start`, the PTS of
+/// the first frame.
+pub fn video_end_from_packets(
+    packets: &[TailPacket],
+    interval: Option<i64>,
+    start: Option<Pts>,
+) -> Option<Pts> {
+    let end = packets
+        .iter()
+        .map(|packet| {
+            let duration = packet
+                .duration
+                .filter(|duration| *duration > 0)
+                .or(interval)?;
+            packet.pts.checked_add(duration)
+        })
+        .collect::<Option<Vec<i64>>>()?
+        .into_iter()
+        .max()?;
+    match start {
+        Some(start) if end <= start.value() => None,
+        _ => Some(Pts::new(end)),
+    }
+}
+
+/// The nominal interval of one frame at `rate`, in ticks of `time_base`, exact: `1 / (rate *
+/// time_base)`. `None` without a positive rate.
+fn nominal_interval_ticks(rate: Option<Rational>, time_base: Rational) -> Option<Rational> {
+    let rate = rate.filter(|rate| rate.num() > 0)?;
+    rate.mul(time_base)?
+        .recip()
+        .filter(|interval| interval.num() > 0)
+}
+
+/// A number of ticks rounded up to a whole tick. A positive value, such as a frame interval,
+/// gives at least 1.
+fn ceil_to_ticks(value: Rational) -> i64 {
+    // The denominator of a `Rational` is positive, so the Euclidean quotient is the floor, and
+    // the floor of `i64::MAX` leaves no remainder to add.
+    value.num().div_euclid(value.den()) + i64::from(value.num().rem_euclid(value.den()) != 0)
+}
+
+#[derive(Deserialize)]
+struct RawVideoTail {
+    #[serde(default)]
+    packets: Vec<RawTailPacket>,
+}
+
+#[derive(Deserialize)]
+struct RawTailPacket {
+    pts: Option<Value>,
+    duration: Option<Value>,
+    flags: Option<String>,
 }
 
 /// Run the resolved ffprobe executable to read the sample rate of the stream with the id
@@ -1593,6 +1928,10 @@ struct RawStream {
     channels: Option<Value>,
     channel_layout: Option<String>,
     start_time: Option<String>,
+    sample_aspect_ratio: Option<String>,
+    /// The side data of the stream. Only the display matrix is read ([`display_rotation`]). A
+    /// `Value`, so an entry of a form this code does not know never fails the probe.
+    side_data_list: Option<Value>,
     #[serde(default)]
     disposition: RawDisposition,
     #[serde(default)]
@@ -1604,6 +1943,9 @@ struct RawStreamTags {
     /// The stream length the `matroska` muxer writes, as `HH:MM:SS.nnnnnnnnn`.
     #[serde(rename = "DURATION")]
     duration: Option<String>,
+    /// The clockwise rotation that FFmpeg before version 5 reported for an MP4 with a display
+    /// matrix, in degrees.
+    rotate: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -1716,6 +2058,10 @@ fn normalize(raw: RawProbe) -> Result<MediaProbe, ProbeDataError> {
             "streams.video.nb_frames",
         )?
         .and_then(FrameCount::new),
+        sample_aspect_ratio: parse_sample_aspect_ratio(video.sample_aspect_ratio.as_deref()),
+        rotation: display_rotation(video),
+        // The first run reads no packet at the end. `probe_media` and the FLV correction set it.
+        video_end_pts: None,
         audio: audio.map(normalize_audio).transpose()?,
     })
 }
@@ -1990,6 +2336,80 @@ fn optional_positive_rational(value: Option<&str>) -> Option<Rational> {
         .filter(|value| value.num() > 0)
 }
 
+/// Parse a `sample_aspect_ratio` as ffprobe writes it, `64:45`. ffprobe writes `0:1` and `N/A`
+/// for a stream that does not say, and both read as `None`, as any part that is not a positive
+/// integer does.
+fn parse_sample_aspect_ratio(value: Option<&str>) -> Option<Rational> {
+    let (numerator, denominator) = value?.trim().split_once(':')?;
+    let numerator: i64 = numerator.trim().parse().ok()?;
+    let denominator: i64 = denominator.trim().parse().ok()?;
+    if numerator <= 0 || denominator <= 0 {
+        return None;
+    }
+    Rational::new(numerator, denominator)
+}
+
+/// The clockwise turn that shows the picture of `video` upright: 0, 90, 180 or 270.
+///
+/// The display matrix comes first. ffprobe prints its `rotation` as the counter-clockwise angle
+/// of `av_display_rotation_get`, so the clockwise turn is its negative: ffprobe 9 prints `-90`
+/// for the matrix of a phone that recorded upright, a picture that turns 90 degrees clockwise,
+/// and `90` for a file remuxed with `-display_rotation 90`. The legacy `rotate` tag is already
+/// clockwise. An FFmpeg before version 5 printed it beside the matrix; FFmpeg 9 writes neither
+/// for `-metadata:s:v rotate=90`, so only an ffprobe of another build is expected to report the
+/// tag alone. An angle within 1 degree of a quarter turn takes that turn, any other angle reads
+/// as 0 ([`quarter_turn`]), and a stream without either reads as 0.
+fn display_rotation(video: &RawStream) -> u16 {
+    let matrix = video
+        .side_data_list
+        .as_ref()
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find_map(|entry| {
+                if entry.get("side_data_type").and_then(Value::as_str) != Some("Display Matrix") {
+                    return None;
+                }
+                json_degrees(entry.get("rotation")?).map(|counter_clockwise| -counter_clockwise)
+            })
+        });
+    let legacy = video
+        .tags
+        .rotate
+        .as_deref()
+        .and_then(|text| text.trim().parse::<f64>().ok())
+        .filter(|degrees| degrees.is_finite());
+    matrix.or(legacy).map(quarter_turn).unwrap_or(0)
+}
+
+/// An angle in degrees as a JSON number or numeric text, when it is finite.
+fn json_degrees(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+    .filter(|degrees: &f64| degrees.is_finite())
+}
+
+/// The quarter turn in [0, 360) that a clockwise angle in degrees is exactly, or 0 when it is no
+/// quarter turn.
+///
+/// ffprobe prints the rotation of a display matrix as a whole number, and FFmpeg's autorotation
+/// transposes the picture only for an angle that is a quarter turn. Measured with ffmpeg 9.0.2 and
+/// `-display_rotation`: 90 turns a 320x240 frame to 240x320, while 89.4, 90.6 and 91 keep 320x240
+/// and rotate inside the frame. So any other angle reads as 0 here, and the canvas keeps its width
+/// and height as the exported picture does. An angle between 90.5 and 91 still prints as 90; only
+/// the raw matrix tells it apart, and the files of real cameras and phones use exact angles.
+fn quarter_turn(clockwise: f64) -> u16 {
+    if clockwise % 90.0 != 0.0 {
+        return 0;
+    }
+    // A finite f64 divided by 90 and rounded fits an i64 after the remainder, which `as`
+    // saturates in any case; `rem_euclid` brings a negative turn into 0..4.
+    let quarters = ((clockwise / 90.0).round() % 4.0) as i64;
+    (quarters.rem_euclid(4) * 90) as u16
+}
+
 /// Parse `format.start_time` exactly, treating anything but a fixed-point decimal as unknown.
 ///
 /// ADR 014 measurement 8 needs this value for an exact seek computation, so it goes through
@@ -2118,18 +2538,42 @@ pub fn correct_flv_probe(probe: &mut MediaProbe, extent: Option<crate::flv::loca
     }
 }
 
+/// The exclusive end of the video of an FLV whose latest video frame shows at `last_ms`
+/// milliseconds (ADR 052): that time plus the nominal frame interval, in ticks of the video time
+/// base and rounded up to a whole tick.
+///
+/// The tags of an FLV carry no duration of a frame, so the nominal interval stands in for the
+/// duration of the last frame, as it does for a packet without one in [`video_end_from_packets`].
+/// ffprobe gives an FLV the time base 1/1000, so the time of the tag is already a whole number of
+/// ticks; the exact arithmetic serves any other time base as well. `None` without a rate, and when
+/// the end is not after the video start.
+fn flv_video_end(probe: &MediaProbe, last_ms: i64) -> Option<Pts> {
+    let interval = nominal_interval_ticks(
+        probe.avg_frame_rate.or(probe.r_frame_rate),
+        probe.video_time_base,
+    )?;
+    let last = Rational::new(last_ms, 1000)?.div(probe.video_time_base)?;
+    let end = ceil_to_ticks(last.add(interval)?);
+    match probe.video_start_pts {
+        Some(start) if end <= start.value() => None,
+        _ => Some(Pts::new(end)),
+    }
+}
+
 /// Correct the probe of the FLV at `path` with its tags, when it is an FLV that the reader can
-/// read. Any other file keeps the probe as ffprobe gave it.
-fn correct_flv_file(probe: &mut MediaProbe, path: &Path) {
+/// read, and return the extent that the tags gave. Any other file keeps the probe as ffprobe gave
+/// it and gives no extent.
+fn correct_flv_file(probe: &mut MediaProbe, path: &Path) -> Option<crate::flv::locate::Extent> {
     if !probe.format_names.iter().any(|name| name == "flv")
         || !crate::flv::has_signature(path).unwrap_or(false)
     {
-        return;
+        return None;
     }
     let extent = crate::flv::FlvSource::open(path, None)
         .and_then(|source| source.extent())
         .ok();
     correct_flv_probe(probe, extent);
+    extent
 }
 
 #[cfg(test)]
@@ -2363,7 +2807,7 @@ mod tests {
         std::fs::write(&path, &recording.bytes).unwrap();
         let mut probe = flv_probe();
         probe.video_start_pts = Some(Pts::new(67));
-        correct_flv_file(&mut probe, &path);
+        let extent = correct_flv_file(&mut probe, &path);
         let last = recording.frames.iter().map(|f| f.2).max().unwrap();
         let expected = (last as f64 + 1000.0 / 30.0 - 67.0) / 1000.0;
         let length = probe.approximate_duration_seconds.unwrap();
@@ -2371,6 +2815,12 @@ mod tests {
             (length - expected).abs() < 1e-9,
             "{length} against {expected}"
         );
+        // 30 fps in the 1/1000 of an FLV is 33.33 ticks, rounded up to 34. The correction gives
+        // the extent and reads no end of its own; the import takes it from the extent.
+        assert_eq!(probe.video_end_pts, None);
+        let extent = extent.unwrap();
+        assert_eq!(extent.last_video_pts, Some(last));
+        assert_eq!(flv_video_end(&probe, last), Some(Pts::new(last + 34)));
         // A file with another signature keeps the probe.
         let other = dir.path.join("other.flv");
         std::fs::write(&other, b"not an flv").unwrap();
@@ -4080,6 +4530,574 @@ mod tests {
             finish_probe_run_with(run, PROBE_TIMEOUT, parse_output_audio_json),
             Err(ProbeError::ProcessFailed { code: Some(1), .. })
         ));
+    }
+
+    // -- the shape of the picture and the end of the video -------------------------------------
+
+    fn sample_aspect_ratio_of(value: Option<&str>) -> Option<Rational> {
+        let mut raw = base_probe();
+        if let Some(value) = value {
+            raw["streams"][0]["sample_aspect_ratio"] = serde_json::json!(value);
+        }
+        parse_value(raw).unwrap().sample_aspect_ratio
+    }
+
+    #[test]
+    fn the_sample_aspect_ratio_is_a_positive_ratio_or_none() {
+        assert_eq!(sample_aspect_ratio_of(Some("1:1")), Rational::new(1, 1));
+        assert_eq!(sample_aspect_ratio_of(Some("64:45")), Rational::new(64, 45));
+        assert_eq!(sample_aspect_ratio_of(Some("32:30")), Rational::new(16, 15));
+        assert_eq!(sample_aspect_ratio_of(Some("0:1")), None);
+        assert_eq!(sample_aspect_ratio_of(Some("1:0")), None);
+        assert_eq!(sample_aspect_ratio_of(Some("-4:3")), None);
+        assert_eq!(sample_aspect_ratio_of(Some("N/A")), None);
+        assert_eq!(sample_aspect_ratio_of(Some("4/3")), None);
+        assert_eq!(sample_aspect_ratio_of(Some("")), None);
+        assert_eq!(sample_aspect_ratio_of(None), None);
+        let value = serde_json::to_value(parse_value(base_probe()).unwrap()).unwrap();
+        assert_eq!(value["sampleAspectRatio"], Value::Null);
+    }
+
+    fn rotation_of(side_data: Option<Value>, rotate_tag: Option<&str>) -> u16 {
+        let mut raw = base_probe();
+        if let Some(side_data) = side_data {
+            raw["streams"][0]["side_data_list"] = side_data;
+        }
+        if let Some(rotate) = rotate_tag {
+            raw["streams"][0]["tags"] = serde_json::json!({ "rotate": rotate });
+        }
+        parse_value(raw).unwrap().rotation
+    }
+
+    fn display_matrix(rotation: Value) -> Value {
+        serde_json::json!([{
+            "side_data_type": "Display Matrix",
+            "displaymatrix": "\n00000000:            0       65536           0\n",
+            "rotation": rotation
+        }])
+    }
+
+    #[test]
+    fn the_rotation_is_the_clockwise_quarter_turn_of_the_display_matrix_or_the_rotate_tag() {
+        // ffprobe prints the counter-clockwise angle of the matrix.
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-90))), None),
+            90
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(90))), None),
+            270
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(180))), None),
+            180
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-180))), None),
+            180
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(0))), None),
+            0
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-90.0))), None),
+            90
+        );
+        // Only an exact quarter turn counts; any other angle reads as 0, as FFmpeg transposes
+        // only a quarter turn and otherwise keeps the size of the frame.
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-89.5))), None),
+            0
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-91))), None),
+            0
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(179.2))), None),
+            0
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(0.5))), None),
+            0
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-88.5))), None),
+            0
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-30))), None),
+            0
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-50))), None),
+            0
+        );
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-135.5))), None),
+            0
+        );
+        assert_eq!(rotation_of(None, Some("45")), 0);
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-450))), None),
+            90
+        );
+        // The legacy tag is clockwise already, and the matrix comes first.
+        assert_eq!(rotation_of(None, Some("90")), 90);
+        assert_eq!(rotation_of(None, Some("270")), 270);
+        assert_eq!(rotation_of(None, Some("-90")), 270);
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!(-180))), Some("90")),
+            180
+        );
+        // A matrix without a usable angle leaves the tag, and nothing reads as 0.
+        assert_eq!(
+            rotation_of(Some(display_matrix(serde_json::json!("x"))), Some("90")),
+            90
+        );
+        assert_eq!(rotation_of(None, None), 0);
+        assert_eq!(rotation_of(None, Some("N/A")), 0);
+        // Other side data and a list of an unknown form never fail the probe.
+        assert_eq!(
+            rotation_of(
+                Some(serde_json::json!([{"side_data_type": "CPB properties"}])),
+                None
+            ),
+            0
+        );
+        assert_eq!(rotation_of(Some(serde_json::json!("odd")), None), 0);
+        let value = serde_json::to_value(parse_value(base_probe()).unwrap()).unwrap();
+        assert_eq!(value["rotation"], 0);
+    }
+
+    fn tail_probe() -> MediaProbe {
+        let mut raw = base_probe();
+        raw["streams"][0]["time_base"] = serde_json::json!("1/15360");
+        raw["streams"][0]["start_pts"] = serde_json::json!(0);
+        raw["streams"][0]["avg_frame_rate"] = serde_json::json!("30/1");
+        parse_value(raw).unwrap()
+    }
+
+    fn tail_answer(probe: &MediaProbe, packets: Value) -> VideoTail {
+        let json = serde_json::to_vec(&serde_json::json!({ "packets": packets })).unwrap();
+        parse_video_tail_json(&json, probe).unwrap()
+    }
+
+    /// The end that `packets` give, as the answer of a read that starts at a keyframe: the first
+    /// packet takes the flags `K__` when it has no flags of its own.
+    fn tail_end(probe: &MediaProbe, mut packets: Value) -> Option<Pts> {
+        if let Some(first) = packets.get_mut(0).and_then(Value::as_object_mut) {
+            first
+                .entry("flags")
+                .or_insert_with(|| serde_json::json!("K__"));
+        }
+        match tail_answer(probe, packets) {
+            VideoTail::Read(end) => end,
+            VideoTail::WithoutKeyframe => panic!("the answer has a keyframe"),
+        }
+    }
+
+    #[test]
+    fn the_end_of_the_video_is_the_largest_pts_plus_duration_of_the_presented_packets() {
+        let probe = tail_probe();
+        // The last packets of a 2 s H.264 file at 30 fps, in decode order: the packet with the
+        // largest pts is not the last one.
+        let packets = serde_json::json!([
+            {"pts": 26624, "duration": 512, "flags": "K__"},
+            {"pts": 28160, "duration": 512, "flags": "___"},
+            {"pts": 28672, "duration": 512, "flags": "___"},
+            {"pts": 30208, "duration": 512, "flags": "___"},
+            {"pts": 29184, "duration": 512, "flags": "___"},
+            {"pts": 29696, "duration": 512, "flags": "___"}
+        ]);
+        assert_eq!(tail_end(&probe, packets), Some(Pts::new(30720)));
+        // A packet flagged as discarded is not presented, whatever its time.
+        let packets = serde_json::json!([
+            {"pts": 22016, "duration": 512, "flags": "K__"},
+            {"pts": 23552, "duration": 512, "flags": "_D_"},
+            {"pts": 22528, "duration": 512, "flags": "___"},
+            {"pts": 23040, "duration": 512, "flags": "KD_"}
+        ]);
+        assert_eq!(tail_end(&probe, packets), Some(Pts::new(23040)));
+        // A pts and a duration as text count.
+        let packets = serde_json::json!([{"pts": "1024", "duration": "512"}]);
+        assert_eq!(tail_end(&probe, packets), Some(Pts::new(1536)));
+    }
+
+    #[test]
+    fn a_presented_packet_without_a_pts_makes_the_end_unknown() {
+        let probe = tail_probe();
+        // An MPEG-2 program stream with B-frames lists its last packets in decode order with
+        // `pts` `N/A`; the largest pts of the others ends early, so there is no end.
+        let packets = serde_json::json!([
+            {"pts": 1024, "duration": 512, "flags": "K__"},
+            {"pts": 2048, "duration": 512, "flags": "___"},
+            {"pts": "N/A", "duration": 512, "flags": "___"},
+            {"duration": 512, "flags": "___"}
+        ]);
+        assert_eq!(tail_end(&probe, packets), None);
+        let packets = serde_json::json!([
+            {"pts": 1024, "duration": 512, "flags": "K__"},
+            {"pts": "x", "duration": 512}
+        ]);
+        assert_eq!(tail_end(&probe, packets), None);
+        // A discarded packet without a pts is not presented, so it does not count.
+        let packets = serde_json::json!([
+            {"pts": 1024, "duration": 512, "flags": "K__"},
+            {"pts": "N/A", "duration": 512, "flags": "_D_"}
+        ]);
+        assert_eq!(tail_end(&probe, packets), Some(Pts::new(1536)));
+    }
+
+    #[test]
+    fn an_answer_without_a_keyframe_is_not_a_tail() {
+        let probe = tail_probe();
+        // A TS asked for a start past its end lists one packet, not the one with the largest
+        // pts.
+        let packets = serde_json::json!([{"pts": 2_817_000, "duration": 3000, "flags": "___"}]);
+        assert_eq!(tail_answer(&probe, packets), VideoTail::WithoutKeyframe);
+        let packets = serde_json::json!([{"pts": 512, "duration": 512}]);
+        assert_eq!(tail_answer(&probe, packets), VideoTail::WithoutKeyframe);
+        assert_eq!(
+            tail_answer(&probe, serde_json::json!([])),
+            VideoTail::WithoutKeyframe
+        );
+        assert_eq!(
+            parse_video_tail_json(b"{}", &probe).unwrap(),
+            VideoTail::WithoutKeyframe
+        );
+        // A discarded keyframe still shows that the read started at a keyframe.
+        let packets = serde_json::json!([
+            {"pts": 0, "duration": 512, "flags": "KD_"},
+            {"pts": 512, "duration": 512, "flags": "___"}
+        ]);
+        assert_eq!(
+            tail_answer(&probe, packets),
+            VideoTail::Read(Some(Pts::new(1024)))
+        );
+    }
+
+    #[test]
+    fn a_packet_without_a_duration_lasts_the_nominal_interval_rounded_up() {
+        let mut probe = tail_probe();
+        // 30 fps in 1/15360 is 512 ticks exactly.
+        let packets = serde_json::json!([
+            {"pts": 1024, "duration": 512},
+            {"pts": 1536}
+        ]);
+        assert_eq!(tail_end(&probe, packets.clone()), Some(Pts::new(2048)));
+        let zero =
+            serde_json::json!([{"pts": 1024, "duration": 512}, {"pts": 1536, "duration": 0}]);
+        assert_eq!(tail_end(&probe, zero), Some(Pts::new(2048)));
+        // Every packet without a duration takes the interval, not only the last one.
+        let packets_in_front = serde_json::json!([
+            {"pts": 0, "duration": 100},
+            {"pts": 1536},
+            {"pts": 1600, "duration": 100}
+        ]);
+        assert_eq!(
+            tail_end(&probe, packets_in_front.clone()),
+            Some(Pts::new(2048))
+        );
+        // 30000/1001 in 1/90000 is 3003 ticks; 29.97 in 1/1000 is 33.36 ticks, so 34.
+        probe.video_time_base = Rational::new(1, 1000).unwrap();
+        probe.avg_frame_rate = Rational::new(30000, 1001);
+        assert_eq!(tail_end(&probe, packets.clone()), Some(Pts::new(1570)));
+        probe.video_time_base = Rational::new(1, 90000).unwrap();
+        assert_eq!(tail_end(&probe, packets.clone()), Some(Pts::new(4539)));
+        // `r_frame_rate` stands in for a missing average rate.
+        probe.avg_frame_rate = None;
+        probe.r_frame_rate = Rational::new(25, 1);
+        assert_eq!(
+            tail_end(&probe, packets.clone()),
+            Some(Pts::new(1536 + 3600))
+        );
+        // An interval below one tick is one tick.
+        probe.r_frame_rate = Rational::new(1_000_000, 1);
+        assert_eq!(tail_end(&probe, packets.clone()), Some(Pts::new(1537)));
+        // Without a rate, any packet that needs the interval makes the end unknown, the last
+        // one or one in front of it.
+        probe.r_frame_rate = None;
+        assert_eq!(tail_end(&probe, packets), None);
+        assert_eq!(tail_end(&probe, packets_in_front), None);
+        // Packets that all have a duration need no rate, and a packet in front of the one with
+        // the largest pts that ends later still decides the end.
+        let packets =
+            serde_json::json!([{"pts": 0, "duration": 9000}, {"pts": 1536, "duration": 512}]);
+        assert_eq!(tail_end(&probe, packets), Some(Pts::new(9000)));
+    }
+
+    #[test]
+    fn a_tail_without_a_presented_packet_or_with_an_end_not_after_the_start_has_no_end() {
+        let mut probe = tail_probe();
+        let discarded = serde_json::json!([{"pts": 512, "duration": 512, "flags": "KD_"}]);
+        assert_eq!(tail_end(&probe, discarded), None);
+        assert!(parse_video_tail_json(b"{", &probe).is_err());
+
+        probe.video_start_pts = Some(Pts::new(1024));
+        let packets =
+            serde_json::json!([{"pts": 0, "duration": 512}, {"pts": 512, "duration": 512}]);
+        assert_eq!(tail_end(&probe, packets), None);
+        let packets = serde_json::json!([{"pts": 512, "duration": 513}]);
+        assert_eq!(tail_end(&probe, packets), Some(Pts::new(1025)));
+        // A sum past the range of a PTS is no end.
+        let packets = serde_json::json!([{"pts": i64::MAX, "duration": 1}]);
+        assert_eq!(tail_end(&probe, packets), None);
+        // The end is a PTS string on the wire.
+        probe.video_end_pts = Some(Pts::new(30720));
+        let value = serde_json::to_value(&probe).unwrap();
+        assert_eq!(value["videoEndPts"], "30720");
+        probe.video_end_pts = None;
+        let value = serde_json::to_value(&probe).unwrap();
+        assert_eq!(value["videoEndPts"], Value::Null);
+    }
+
+    #[test]
+    fn the_tail_read_starts_ten_seconds_before_the_approximate_end_and_not_before_zero() {
+        let decimal = |text: Option<&str>| text.and_then(Rational::from_decimal_str);
+        let start = |format: Option<&str>, video: Option<&str>, duration: Option<f64>| {
+            video_tail_start(decimal(format), decimal(video), duration)
+        };
+        assert_eq!(
+            start(Some("1.5"), None, Some(60.9)),
+            Rational::from_decimal_str("51.5")
+        );
+        assert_eq!(start(None, None, Some(60.9)), Rational::new(50, 1));
+        // Without a container start, the exact start of the video stands in.
+        assert_eq!(
+            start(None, Some("1000.04"), Some(60.9)),
+            Rational::from_decimal_str("1050.04")
+        );
+        assert_eq!(
+            start(Some("1.5"), Some("1000"), Some(60.9)),
+            Rational::from_decimal_str("51.5")
+        );
+        assert_eq!(start(Some("1.5"), None, Some(2.0)), Rational::new(0, 1));
+        assert_eq!(start(Some("-5"), None, Some(12.0)), Rational::new(0, 1));
+        assert_eq!(start(Some("1.5"), None, None), None);
+        assert_eq!(start(Some("1.5"), None, Some(f64::NAN)), None);
+        assert_eq!(start(Some("1.5"), None, Some(-1.0)), None);
+
+        let restart = |format: Option<&str>, video: Option<&str>| {
+            video_tail_restart(decimal(format), decimal(video))
+        };
+        assert_eq!(
+            restart(Some("1001.4"), Some("1002")),
+            Rational::from_decimal_str("1001.4")
+        );
+        assert_eq!(restart(None, Some("1002")), Rational::new(1002, 1));
+        assert_eq!(restart(None, None), Rational::new(0, 1));
+        assert_eq!(restart(Some("-1.4"), None), Rational::new(0, 1));
+
+        let mut probe = tail_probe();
+        probe.video_start_pts = Some(Pts::new(15360 * 3));
+        assert_eq!(video_start_seconds(&probe), Rational::new(3, 1));
+        probe.video_start_pts = None;
+        assert_eq!(video_start_seconds(&probe), None);
+    }
+
+    #[test]
+    fn the_end_of_an_flv_is_its_last_frame_plus_the_nominal_interval_rounded_up() {
+        // 30 fps in 1/1000 is 33.33 ticks, so 34.
+        let probe = flv_probe();
+        assert_eq!(flv_video_end(&probe, 1_354_555), Some(Pts::new(1_354_589)));
+        // A rate of 25 fps lasts 40 ticks exactly.
+        let mut probe = flv_probe();
+        probe.avg_frame_rate = Rational::new(25, 1);
+        assert_eq!(flv_video_end(&probe, 1_354_555), Some(Pts::new(1_354_595)));
+        // Another time base takes the exact time of the tag.
+        let mut probe = flv_probe();
+        probe.video_time_base = Rational::new(1, 90000).unwrap();
+        probe.video_start_pts = Some(Pts::new(0));
+        probe.avg_frame_rate = Rational::new(30, 1);
+        assert_eq!(flv_video_end(&probe, 1000), Some(Pts::new(93_000)));
+        // Without a rate, and with an end not after the start: no end.
+        let mut probe = flv_probe();
+        probe.avg_frame_rate = None;
+        probe.r_frame_rate = None;
+        assert_eq!(flv_video_end(&probe, 1_354_555), None);
+        assert_eq!(flv_video_end(&flv_probe(), 1_234_500), None);
+        // The correction of the length and the probe of the stream read no end of their own.
+        let mut probe = flv_probe();
+        correct_flv_probe(
+            &mut probe,
+            Some(crate::flv::locate::Extent {
+                first_video_pts: Some(1_234_588),
+                last_video_pts: Some(1_354_555),
+            }),
+        );
+        assert_eq!(probe.video_end_pts, None);
+        assert_eq!(flv_probe().video_end_pts, None);
+    }
+
+    /// Write `script` as an executable fake ffprobe in a new directory, and return the directory
+    /// and the program.
+    #[cfg(unix)]
+    fn fake_ffprobe(script: &str) -> (crate::flv::test_support::TestDirectory, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = crate::flv::test_support::TestDirectory::new();
+        let program = directory.path.join("fake-ffprobe");
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (directory, program)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_tail_read_leaves_the_import_probe_without_an_end() {
+        let answer = serde_json::to_string(&base_probe()).unwrap();
+        let (directory, program) = fake_ffprobe(&format!(
+            "#!/bin/sh\nfor argument in \"$@\"; do\n  if [ \"$argument\" = -read_intervals ]; then\n    echo 'read failed' >&2\n    exit 1\n  fi\ndone\ncat <<'JSON'\n{answer}\nJSON\n"
+        ));
+        let media = directory.path.join("source.mp4");
+        let probe = probe_media(&program, &media).unwrap();
+        assert_eq!(probe.video_end_pts, None);
+        assert_eq!(probe.video_codec, "h264");
+        assert_eq!(probe, parse_value(base_probe()).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_without_a_keyframe_reads_the_tail_again_from_the_start_once() {
+        // The first read, from 40 s, answers one packet without a keyframe, as a TS asked for a
+        // start past its end does. The read from 0 s answers the whole tail.
+        let mut probe = tail_probe();
+        probe.format_start_time = Rational::new(0, 1);
+        probe.approximate_duration_seconds = Some(50.0);
+        let script = "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = -read_intervals ]; then\n    shift\n    if [ \"$1\" = 0.000000% ]; then\n      echo '{\"packets\":[{\"pts\":0,\"duration\":512,\"flags\":\"K__\"},{\"pts\":1024,\"duration\":512,\"flags\":\"___\"},{\"pts\":512,\"duration\":512,\"flags\":\"___\"}]}'\n    else\n      echo '{\"packets\":[{\"pts\":512,\"duration\":512,\"flags\":\"___\"}]}'\n    fi\n    exit 0\n  fi\n  shift\ndone\nexit 1\n";
+        let (directory, program) = fake_ffprobe(script);
+        let media = directory.path.join("source.ts");
+        assert_eq!(
+            probe_video_end(&program, &media, &probe),
+            Some(Pts::new(1536))
+        );
+        // A read that starts at the start already is not repeated, and gives no end.
+        probe.approximate_duration_seconds = Some(5.0);
+        let (directory, program) = fake_ffprobe(
+            "#!/bin/sh\necho '{\"packets\":[{\"pts\":512,\"duration\":512,\"flags\":\"___\"}]}'\n",
+        );
+        let media = directory.path.join("source.ts");
+        assert_eq!(probe_video_end(&program, &media, &probe), None);
+        // A second answer without a keyframe gives no end.
+        probe.approximate_duration_seconds = Some(50.0);
+        assert_eq!(probe_video_end(&program, &media, &probe), None);
+    }
+
+    /// The `ffmpeg` and the `ffprobe` that this machine has, as `real_tools` in
+    /// `commands::export` finds them, or `None`, and the test that needs them passes without a
+    /// check.
+    fn real_tools() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        let mut directories: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default();
+        directories.push(std::path::PathBuf::from("/opt/homebrew/bin"));
+        directories.push(std::path::PathBuf::from("/usr/local/bin"));
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
+        directories.into_iter().find_map(|directory| {
+            let ffmpeg = directory.join(format!("ffmpeg{suffix}"));
+            let ffprobe = directory.join(format!("ffprobe{suffix}"));
+            (ffmpeg.is_file() && ffprobe.is_file()).then_some((ffmpeg, ffprobe))
+        })
+    }
+
+    /// Run the real `ffmpeg` with `arguments` and then the output `path`.
+    fn run_real_ffmpeg(ffmpeg: &Path, arguments: &[&str], path: &Path) {
+        let status = crate::procutil::command_without_console(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args(arguments)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn the_import_probe_reads_the_exact_end_of_a_real_constant_rate_mp4() {
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let dir = crate::flv::test_support::TestDirectory::new();
+        let path = dir.path.join("cfr.mp4");
+        run_real_ffmpeg(
+            &ffmpeg,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=320x240:r=30:d=2",
+                "-c:v",
+                "libx264",
+                "-g",
+                "30",
+                "-video_track_timescale",
+                "15360",
+            ],
+            &path,
+        );
+        let probe = probe_media(&ffprobe, &path).unwrap();
+        assert_eq!(probe.video_time_base, Rational::new(1, 15360).unwrap());
+        assert_eq!(probe.rotation, 0);
+        assert_eq!(probe.sample_aspect_ratio, Rational::new(1, 1));
+        let start = probe.video_start_pts.unwrap().value();
+        let end = probe.video_end_pts.unwrap().value();
+        assert_eq!(end - start, 2 * 15360);
+        // The re-probe of an export reads no end.
+        let cancel = AtomicBool::new(false);
+        let reprobe = probe_media_until_canceled(&ffprobe, &path, &cancel).unwrap();
+        assert_eq!(reprobe.video_end_pts, None);
+    }
+
+    #[test]
+    fn the_import_probe_seeks_to_the_tail_of_a_real_transport_stream_with_an_offset() {
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        // 32 s at 25 fps with B-frames, from 1000 s: 800 frames of 3600 ticks of 1/90000. The
+        // read starts at about 1023 s, so it runs the seek, the container start and the margin.
+        let dir = crate::flv::test_support::TestDirectory::new();
+        let path = dir.path.join("offset.ts");
+        run_real_ffmpeg(
+            &ffmpeg,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=160x120:r=25:d=32",
+                "-c:v",
+                "libx264",
+                "-bf",
+                "3",
+                "-g",
+                "50",
+                "-output_ts_offset",
+                "1000",
+                "-f",
+                "mpegts",
+            ],
+            &path,
+        );
+        let probe = probe_media(&ffprobe, &path).unwrap();
+        assert_eq!(probe.video_time_base, Rational::new(1, 90000).unwrap());
+        let start = probe.video_start_pts.unwrap().value();
+        assert!(start > 1000 * 90000, "{start}");
+        let end = probe.video_end_pts.unwrap().value();
+        assert_eq!(end - start, 800 * 3600);
+
+        // An approximate duration 40 s too long starts the read past the end, where the TS
+        // answers a part of the tail without a keyframe. The read from the start gives the
+        // same end.
+        let mut long = probe.clone();
+        long.approximate_duration_seconds = probe.approximate_duration_seconds.map(|d| d + 40.0);
+        assert_eq!(probe_video_end(&ffprobe, &path, &long), Some(Pts::new(end)));
+        // Without a container start, the exact start of the video places the read.
+        let mut without_start = probe.clone();
+        without_start.format_start_time = None;
+        assert_eq!(
+            probe_video_end(&ffprobe, &path, &without_start),
+            Some(Pts::new(end))
+        );
     }
 
     fn parse_value(value: Value) -> Result<MediaProbe, ProbeParseError> {

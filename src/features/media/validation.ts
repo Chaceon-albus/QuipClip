@@ -15,11 +15,13 @@ import {
   BACKEND_IMPORT_MEDIA_ERROR_CODES,
   IMPORT_MEDIA_ERROR_CODES,
   ImportMediaError,
+  VIDEO_ROTATIONS,
   type AudioProbe,
   type BackendImportMediaErrorCode,
   type ImportMediaErrorCode,
   type ImportMediaResult,
   type MediaProbe,
+  type VideoRotation,
 } from "./types";
 
 /**
@@ -179,6 +181,15 @@ export function isAudioProbe(value: unknown): value is AudioProbe {
 }
 
 /**
+ * Validates whether a value is one of the clockwise quarter turns 0, 90, 180 and 270.
+ */
+export function isVideoRotation(value: unknown): value is VideoRotation {
+  return (
+    typeof value === "number" && (VIDEO_ROTATIONS as readonly number[]).includes(value)
+  );
+}
+
+/**
  * Validates a MediaProbe object boundary representation against source PTS contracts.
  */
 export function isMediaProbe(value: unknown): value is MediaProbe {
@@ -239,6 +250,25 @@ export function isMediaProbe(value: unknown): value is MediaProbe {
     return false;
   }
   if (p.reportedFrameCount !== null && !isFrameCountString(p.reportedFrameCount)) {
+    return false;
+  }
+  if (p.sampleAspectRatio !== null && !isPositiveRational(p.sampleAspectRatio)) {
+    return false;
+  }
+  if (!isVideoRotation(p.rotation)) {
+    return false;
+  }
+  if (p.videoEndPts !== null && !isPtsString(p.videoEndPts)) {
+    return false;
+  }
+  // The end is exclusive and follows the first frame (ADR 052). The probe never sends an end at
+  // or before the start, and a project with one does not save, so the import refuses it too. The
+  // values are i64, so they compare as BigInt and never through a Number.
+  if (
+    p.videoStartPts !== null &&
+    p.videoEndPts !== null &&
+    BigInt(p.videoEndPts) <= BigInt(p.videoStartPts)
+  ) {
     return false;
   }
   if (p.audio !== null && !isAudioProbe(p.audio)) {

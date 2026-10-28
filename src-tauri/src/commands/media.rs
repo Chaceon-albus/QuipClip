@@ -846,6 +846,9 @@ mod tests {
             avg_frame_rate: Some(Rational::new(30, 1).unwrap()),
             r_frame_rate: Some(Rational::new(30, 1).unwrap()),
             reported_frame_count: Some(FrameCount::new(300).unwrap()),
+            sample_aspect_ratio: None,
+            rotation: 0,
+            video_end_pts: None,
             audio: None,
         }
     }

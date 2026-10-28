@@ -30,6 +30,9 @@ function createMedia(fileName: string): ImportMediaResult {
       avgFrameRate: { n: 30, d: 1 },
       rFrameRate: { n: 30, d: 1 },
       reportedFrameCount: "300" as FrameCount,
+      sampleAspectRatio: null,
+      rotation: 0,
+      videoEndPts: null,
       audio: null,
     },
   };
