@@ -141,6 +141,22 @@ encodes, so `failed` alone does not mean that the run ended. The store also expo
 - A polite live region in the status bar announces the result while the dialog is hidden.
   It announces no progress.
 
+(Changed on 2026-10-27.) Exports can wait in a queue (ADR 049). The rules above now apply to a
+batch of runs, not to each run:
+
+- The status bar shows the number of waiting runs next to the active run. Between two runs it
+  shows that the next export prepares, and no result.
+- The request for attention, the result of the status bar and its announcement come once, when
+  the batch ends. A batch of more than one run adds a summary, such as "2 of 3 exports
+  finished".
+- The Dock and the task bar show no error between two runs. When the batch ends, they show an
+  error if any run of the batch failed. The status bar then shows the failed result, also when
+  the last run finished, with Show File for the last run when it finished.
+- A batch that ended only with runs that the user stopped or removed asks for no attention.
+- The user can close the result of a run while runs wait. The status bar then shows the end of
+  the batch as a result, but only when a run ended after that close. That result offers no Show
+  File. Its dismissal drops the list of the batch.
+
 A Stop request that the IPC layer rejects does not end the tracking, in both of its forms:
 
 - `cancel_export` rejects. The store keeps the run that it knows by its identifier.
