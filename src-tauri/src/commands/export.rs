@@ -71,6 +71,7 @@
 use crate::ffmpeg::export::flv_input::{
     locate_flv_input, FlvInput, FlvInputFallback, FlvInputRequest,
 };
+use crate::ffmpeg::export::work_directory::{remove_stale_work_directories, ExportWorkDirectory};
 use crate::ffmpeg::export::{
     build_arguments, build_audio_arguments, build_audio_graph, build_copy_arguments, build_plan,
     choose_audio_graph_shape, choose_graph_shape, encoder_graph, inspect_path, max_export_pieces,
@@ -487,6 +488,10 @@ struct PreparedExport {
     /// The reserved temporary output. Holding it here keeps the reservation alive for the
     /// whole run: dropping it deletes the file ffmpeg is writing.
     pending: PendingOutput,
+    /// The work directory of the export, where both processes run (ADR 055).
+    /// [`run_export_with`] removes it when the processes have ended, and on every other path it
+    /// removes itself when it drops.
+    work: ExportWorkDirectory,
 }
 
 /// Start one export, or put it in the queue, and report it through [`EVENT_NAME`].
@@ -523,6 +528,10 @@ pub async fn start_export(
         .path()
         .app_data_dir()
         .map_err(|_| ExportCommandError::new(ExportErrorCode::AppDataUnavailable))?;
+    let cache_directory = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| ExportCommandError::new(ExportErrorCode::WorkDirectoryUnavailable))?;
 
     let run_id = next_run_id();
     let facts = run_facts(&request);
@@ -532,6 +541,7 @@ pub async fn start_export(
         job: ExportJob {
             request,
             app_data_directory,
+            cache_directory,
             preview_windows: preview_windows.inner().clone(),
         },
     });
@@ -607,6 +617,8 @@ struct PrepareRequest<'a> {
     request: &'a ExportRequestWire,
     /// The directory of the settings file and of the discovery of the executables.
     app_data_directory: &'a Path,
+    /// The cache directory of the application, which holds the work directories (ADR 055).
+    cache_directory: &'a Path,
     /// The stop flag of preparation, read between the steps. In a run this is the flag of the
     /// helper thread of [`run_export_job_with`]. It starts as the cancel flag of the run, and the
     /// watchdog sets it on a later cancel of the run and at [`PREPARATION_TIMEOUT`].
@@ -658,6 +670,7 @@ where
     let PrepareRequest {
         request,
         app_data_directory,
+        cache_directory,
         cancel,
         preview_windows,
         stage,
@@ -688,6 +701,24 @@ where
     // here, so an edit of the preset after the command accepted the run changes nothing.
     let preset = &request.preset;
     let destination = PathBuf::from(&request.output_path);
+
+    // ADR 055: the work directory, before the first source, whose FLV head it receives. The
+    // sweep first removes what earlier exports left. The guard removes the directory when it
+    // drops, so a `?` below, a panic, and an abandoned preparation all remove it.
+    //
+    // Discovery can block on a share for many seconds (ADR 050). An abandoned helper must stop at
+    // its next check, so it neither sweeps nor creates a directory after a Stop.
+    if canceled() {
+        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+    }
+    stage.enter(PreparationStage::WorkDirectory);
+    remove_stale_work_directories(cache_directory);
+    let work = ExportWorkDirectory::create(cache_directory).map_err(|error| {
+        ExportCommandError::with_detail(
+            ExportErrorCode::WorkDirectoryUnavailable,
+            error.to_string(),
+        )
+    })?;
 
     // The bounded steps run once for each source, in the order of its first piece (ADR 053):
     // the revision check, the re-probe, the correction of the audio, the FLV input and the read
@@ -743,9 +774,10 @@ where
         }
         // ADR 046: an FLV source opens each input as its head and a slice from a keyframe, so
         // the reads of the export, the read of the audio gaps included, do not read it from its
-        // start. FFmpeg runs in the directory of the head and names it by its file name, so one
-        // source of an export at most opens its inputs so; a later FLV source keeps the input
-        // seek, which reads more and is correct.
+        // start. The head goes into the work directory as `h<index>.flv`, where `index` is the
+        // index of the source in the order of its first piece, which is its index in the plan.
+        // One source of an export at most opens its inputs so (ADR 053); a later FLV source keeps
+        // the input seek, which reads more and is correct.
         stage.enter(PreparationStage::FlvInput);
         let flv_input = if flv_inputs.iter().any(Option::is_some) {
             if source_probe.format_names.iter().any(|name| name == "flv") {
@@ -759,7 +791,11 @@ where
                 &source_probe,
                 &pieces,
                 request.streams,
-                app_data_directory,
+                FlvPlace {
+                    app_data_directory,
+                    work_directory: &work,
+                    source_index: index,
+                },
                 preview_windows,
                 cancel,
             )?
@@ -771,7 +807,7 @@ where
             &source_probe,
             &pieces,
             request.streams,
-            flv_input.as_ref(),
+            flv_input.as_ref().map(|flv| (flv, work.path())),
             cancel,
             &mut audio_gaps,
         )?;
@@ -883,6 +919,7 @@ where
         arguments,
         audio_arguments,
         pending,
+        work,
     })
 }
 
@@ -1007,7 +1044,7 @@ fn read_audio_gaps<Gaps>(
     probe: &MediaProbe,
     pieces: &[SegmentBoundary],
     streams: ExportStreams,
-    flv: Option<&FlvInput>,
+    flv: Option<(&FlvInput, &Path)>,
     cancel: &AtomicBool,
     audio_gaps: Gaps,
 ) -> Result<AudioFrames, ExportCommandError>
@@ -1074,7 +1111,7 @@ fn flv_input_for(
     probe: &MediaProbe,
     pieces: &[SegmentBoundary],
     streams: ExportStreams,
-    app_data_directory: &Path,
+    place: FlvPlace<'_>,
     preview_windows: &PreviewWindows,
     cancel: &AtomicBool,
 ) -> Result<Option<FlvInput>, ExportCommandError> {
@@ -1114,7 +1151,9 @@ fn flv_input_for(
             source,
             probe,
             seek_positions: &positions,
-            app_data: app_data_directory,
+            app_data: place.app_data_directory,
+            work_directory: place.work_directory,
+            source_index: place.source_index,
             windows: preview_windows,
             cancel: Some(reader_cancel.clone()),
         })
@@ -1140,7 +1179,15 @@ fn flv_input_for(
             .audio
             .as_ref()
             .is_some_and(|audio| !audio.holds_no_packets);
-    match check_slices(ffprobe, &input, source, probe, check_audio, cancel) {
+    match check_slices(
+        ffprobe,
+        &input,
+        place.work_directory.path(),
+        source,
+        probe,
+        check_audio,
+        cancel,
+    ) {
         Ok(()) => Ok(Some(input)),
         Err(SliceCheck::Canceled) => Err(ExportCommandError::new(ExportErrorCode::Canceled)),
         Err(SliceCheck::Refused(reason)) => {
@@ -1148,6 +1195,19 @@ fn flv_input_for(
             Ok(None)
         }
     }
+}
+
+/// Where the FLV input of a source keeps its files: the reader keeps its keyframe table in the
+/// application data directory (ADR 046), and the export writes the head into its work directory
+/// (ADR 055).
+#[derive(Clone, Copy)]
+struct FlvPlace<'a> {
+    /// The application data directory, which holds the cache of the FLV reader.
+    app_data_directory: &'a Path,
+    /// The work directory of the export, which receives the head.
+    work_directory: &'a ExportWorkDirectory,
+    /// The index of the source in the plan, which names its head.
+    source_index: usize,
 }
 
 /// Sets its flag when it drops, also during the unwind of a panic.
@@ -1203,15 +1263,19 @@ const AUDIO_TIMING_TOLERANCE_SECONDS: f64 = 0.003;
 /// input seek, which reads more and is correct. The slice from the first frame of the file needs
 /// no check: the head holds the configurations of the start of the file, and the first frame of
 /// a recording that starts in the middle of a GOP does not decode on its own.
+///
+/// ffprobe keeps the working directory of this process, so the inputs name the head by its full
+/// path in `work_directory`, the work directory of the export.
 fn check_slices(
     ffprobe: &Path,
     input: &FlvInput,
+    work_directory: &Path,
     source: &Path,
     probe: &MediaProbe,
     check_audio: bool,
     cancel: &AtomicBool,
 ) -> Result<(), SliceCheck> {
-    let head = input.head_path();
+    let head = input.head_path(work_directory);
     let head = head.to_string_lossy();
     if head.contains('|') {
         return Err(SliceCheck::Refused(
@@ -1401,6 +1465,8 @@ struct ExportJob {
     request: ExportRequestWire,
     /// The directory of the settings file and of the discovery of the executables.
     app_data_directory: PathBuf,
+    /// The cache directory of the application, which holds the work directories (ADR 055).
+    cache_directory: PathBuf,
     /// The open FLV sources, which the FLV input shares with the preview (ADR 046).
     preview_windows: Arc<PreviewWindows>,
 }
@@ -1565,11 +1631,14 @@ enum PreparationStage {
     Reservation = 6,
     /// The graphs and the argument lists.
     Arguments = 7,
+    /// The sweep of the work directories that earlier exports left, and the creation of the
+    /// work directory of this export (ADR 055).
+    WorkDirectory = 8,
 }
 
 impl PreparationStage {
     /// Every stage, in the order of its number.
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Discovery,
         Self::RevisionCheck,
         Self::ReProbe,
@@ -1578,6 +1647,7 @@ impl PreparationStage {
         Self::Plan,
         Self::Reservation,
         Self::Arguments,
+        Self::WorkDirectory,
     ];
 
     /// The name of the stage in the detail of `preparationTimedOut`. It is a diagnostic for a
@@ -1592,6 +1662,7 @@ impl PreparationStage {
             Self::Plan => "plan",
             Self::Reservation => "reservation",
             Self::Arguments => "arguments",
+            Self::WorkDirectory => "workDirectory",
         }
     }
 }
@@ -1702,6 +1773,7 @@ fn run_export_job(app: &tauri::AppHandle, slot: ExportSlot, job: ExportJob) {
                 PrepareRequest {
                     request: &job.request,
                     app_data_directory: &job.app_data_directory,
+                    cache_directory: &job.cache_directory,
                     cancel,
                     preview_windows: &job.preview_windows,
                     stage,
@@ -1747,13 +1819,13 @@ fn run_export_job(app: &tauri::AppHandle, slot: ExportSlot, job: ExportJob) {
 ///   that came during that grace wins, and the run reports `canceled`.
 /// - A helper that does not answer in the grace is abandoned. When its blocked call returns, it
 ///   reads its stop flag at the next step, and its send fails because this thread dropped the
-///   receiver. Its answer then drops on the helper thread, and the reservation guard of a late
-///   prepared export deletes the temporary file there.
+///   receiver. Its answer then drops on the helper thread, and the guards of a late prepared
+///   export delete the temporary file and remove the work directory there (ADR 055).
 /// - A helper thread that the operating system refuses is reported as `commandExecutionFailed`
 ///   with the error of the system.
 /// - The cancel flag is read once more after preparation passed its own checks. A cancel there
-///   drops the prepared export, whose reservation guard deletes the temporary file, and then
-///   reports `canceled`.
+///   drops the prepared export, whose guards delete the temporary file and remove the work
+///   directory, and then reports `canceled`.
 /// - Every report comes before the slot is released, because the slot is dropped when this
 ///   function returns. A free slot therefore means that the guards of the run have finished,
 ///   which the wait at an application quit relies on (ADR 017). An abandoned helper is the
@@ -1936,8 +2008,9 @@ fn run_export_worker(
     // operating system refuses a thread.
     //
     // Every guard has already run by the time the panic arm below is reached. The unwind
-    // passes `ChildGuard`, which kills and reaps ffmpeg, and `PendingOutput`, which deletes
-    // the reservation, and `slot` is released by the drop at the end of this function. So this
+    // passes `ChildGuard`, which kills and reaps ffmpeg, `PendingOutput`, which deletes the
+    // reservation, and `ExportWorkDirectory`, which removes the work directory of ADR 055. `slot`
+    // is released by the drop at the end of this function. So this
     // arm cleans nothing up. It only supplies the report that would otherwise never come.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_export(app, &slot, prepared, &run_id)
@@ -2032,6 +2105,7 @@ where
         arguments,
         audio_arguments,
         pending,
+        work,
         ..
     } = prepared;
     let expected_frames = plan.expected_frames();
@@ -2042,8 +2116,9 @@ where
             ffmpeg: &ffmpeg,
             arguments: &arguments,
             audio_arguments: audio_arguments.as_deref(),
-            // The inputs of an FLV source name the head by its file name (ADR 046).
-            working_directory: plan.working_directory(),
+            // Every export runs in its work directory, whose files its commands name by their
+            // names alone (ADR 055).
+            working_directory: Some(work.path()),
             cancel: cancel.as_ref(),
             poll: PROGRESS_POLL_INTERVAL,
         },
@@ -2052,8 +2127,12 @@ where
                 emit(event);
             }
         },
-    )
-    .map_err(|error| {
+    );
+    // Both processes have ended and are reaped, so nothing holds the directory any more. It is
+    // removed before the checks and the rename (ADR 055). A process that did not start leaves
+    // it too.
+    work.remove();
+    let outcome = outcome.map_err(|error| {
         ExportCommandError::with_detail(ExportErrorCode::FfmpegSpawnFailed, error.to_string())
     })?;
 
@@ -2647,14 +2726,15 @@ mod tests {
         assert!(status.success());
     }
 
-    /// The input of the slice of `source` from its keyframe at 2 s, with the head of `head_of`,
-    /// written to the directory `name` of `directory`.
+    /// The input of the slice of `source` from its keyframe at 2 s, with the head of `head_of`
+    /// written to the directory `name` of `directory`, which stands for the work directory, and
+    /// the path of that directory.
     fn real_input(
         directory: &TestDirectory,
         name: &str,
         source: &Path,
         head_of: &Path,
-    ) -> FlvInput {
+    ) -> (FlvInput, PathBuf) {
         let reader = crate::flv::FlvSource::open(source, None).unwrap();
         let offset = reader.locate(2_000, None).unwrap().0.keyframe.offset;
         let head = crate::flv::FlvSource::open(head_of, None).unwrap();
@@ -2663,19 +2743,20 @@ mod tests {
         } else {
             head.head().first_frame_offset
         };
-        let working_directory = directory.path.join(name);
-        fs::create_dir_all(&working_directory).unwrap();
-        fs::write(
-            working_directory.join(crate::ffmpeg::export::flv_input::HEAD_NAME),
-            head.head_bytes_at(head_offset),
-        )
-        .unwrap();
-        FlvInput {
-            working_directory,
+        let work_directory = directory.path.join(name);
+        fs::create_dir_all(&work_directory).unwrap();
+        let input = FlvInput {
+            head_name: crate::ffmpeg::export::flv_input::head_name(0),
             source_size: fs::metadata(source).unwrap().len(),
             segment_offsets: vec![offset, offset],
             first_frame_offset: reader.head().first_frame_offset,
-        }
+        };
+        fs::write(
+            input.head_path(&work_directory),
+            head.head_bytes_at(head_offset),
+        )
+        .unwrap();
+        (input, work_directory)
     }
 
     #[test]
@@ -2692,20 +2773,28 @@ mod tests {
         assert!(probe.audio.is_some());
         let cancel = AtomicBool::new(false);
 
-        let own = real_input(&directory, "own", &small, &small);
-        assert!(check_slices(&ffprobe, &own, &small, &probe, true, &cancel).is_ok());
+        let (own, own_work) = real_input(&directory, "own", &small, &small);
+        assert!(check_slices(&ffprobe, &own, &own_work, &small, &probe, true, &cancel).is_ok());
 
         // The head of another recording holds the decoder configuration of another picture
         // size, as the head of a file holds before a reconnect that no read has seen.
-        let foreign = real_input(&directory, "foreign", &small, &wide);
+        let (foreign, foreign_work) = real_input(&directory, "foreign", &small, &wide);
         assert!(matches!(
-            check_slices(&ffprobe, &foreign, &small, &probe, true, &cancel),
+            check_slices(
+                &ffprobe,
+                &foreign,
+                &foreign_work,
+                &small,
+                &probe,
+                true,
+                &cancel
+            ),
             Err(SliceCheck::Refused(_))
         ));
 
         cancel.store(true, Ordering::SeqCst);
         assert!(matches!(
-            check_slices(&ffprobe, &own, &small, &probe, true, &cancel),
+            check_slices(&ffprobe, &own, &own_work, &small, &probe, true, &cancel),
             Err(SliceCheck::Canceled)
         ));
     }
@@ -2727,19 +2816,34 @@ mod tests {
         write_real_flv(&ffmpeg, &high, "160x90", 48_000);
         let cancel = AtomicBool::new(false);
         let high_probe = ffmpeg::probe_media(&ffprobe, &high).unwrap();
-        let own = real_input(&directory, "own", &high, &high);
-        assert!(check_slices(&ffprobe, &own, &high, &high_probe, true, &cancel).is_ok());
+        let (own, own_work) = real_input(&directory, "own", &high, &high);
+        assert!(check_slices(&ffprobe, &own, &own_work, &high, &high_probe, true, &cancel).is_ok());
         let low_probe = ffmpeg::probe_media(&ffprobe, &low).unwrap();
-        let foreign = real_input(&directory, "foreign", &high, &low);
-        let Err(SliceCheck::Refused(reason)) =
-            check_slices(&ffprobe, &foreign, &high, &low_probe, true, &cancel)
-        else {
+        let (foreign, foreign_work) = real_input(&directory, "foreign", &high, &low);
+        let Err(SliceCheck::Refused(reason)) = check_slices(
+            &ffprobe,
+            &foreign,
+            &foreign_work,
+            &high,
+            &low_probe,
+            true,
+            &cancel,
+        ) else {
             panic!("the slice with the head of another rate was not refused");
         };
         // The picture decodes cleanly, so the timing of the audio refused the slice.
         assert!(reason.contains("picture true, audio false"), "{reason}");
         // An export without audio does not check it.
-        assert!(check_slices(&ffprobe, &foreign, &high, &low_probe, false, &cancel).is_ok());
+        assert!(check_slices(
+            &ffprobe,
+            &foreign,
+            &foreign_work,
+            &high,
+            &low_probe,
+            false,
+            &cancel
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2750,12 +2854,12 @@ mod tests {
         let directory = TestDirectory::new();
         let source = directory.path.join("source.flv");
         write_real_flv(&ffmpeg, &source, "160x90", 48_000);
-        let input = real_input(&directory, "own", &source, &source);
+        let (input, work_directory) = real_input(&directory, "own", &source, &source);
         let ranges = [
             (Rational::new(5, 2).unwrap(), Rational::new(3, 1).unwrap()),
             (Rational::new(2, 1).unwrap(), Rational::new(5, 2).unwrap()),
         ];
-        let read = |flv: Option<&FlvInput>| {
+        let read = |flv: Option<(&FlvInput, &Path)>| {
             ffmpeg::probe_audio_gaps(
                 &ffprobe,
                 &source,
@@ -2782,7 +2886,7 @@ mod tests {
                 })
                 .collect()
         };
-        let by_slices = read(Some(&input));
+        let by_slices = read(Some((&input, &work_directory)));
         assert!(!by_slices.gaps.is_empty(), "the read found the first frame");
         // The read stops at the first packet at or after the end of the last range, 3 s.
         assert!(by_slices
@@ -2834,6 +2938,7 @@ mod tests {
             new_batch: false,
         };
         let app_data = directory.path.join("app");
+        let work = ExportWorkDirectory::create(&directory.path.join("cache")).unwrap();
         let windows = PreviewWindows::default();
         let pieces = resolve_request(&request).unwrap().pieces;
         let run = |probe: &MediaProbe, cancel: &AtomicBool| {
@@ -2843,7 +2948,11 @@ mod tests {
                 probe,
                 &pieces,
                 request.streams,
-                &app_data,
+                FlvPlace {
+                    app_data_directory: &app_data,
+                    work_directory: &work,
+                    source_index: 2,
+                },
                 &windows,
                 cancel,
             )
@@ -2856,7 +2965,8 @@ mod tests {
             .segment_offsets
             .iter()
             .all(|offset| *offset == input.first_frame_offset));
-        assert!(input.head_path().is_file());
+        assert_eq!(input.head_name, "h2.flv");
+        assert!(work.file_path("h2.flv").is_file());
 
         let mut not_flv = probe.clone();
         not_flv.format_names = vec!["mov".to_owned()];
@@ -2879,7 +2989,7 @@ mod tests {
         // process for that slice, so even a missing ffprobe passes.
         let directory = TestDirectory::new();
         let input = FlvInput {
-            working_directory: directory.path.clone(),
+            head_name: crate::ffmpeg::export::flv_input::head_name(0),
             source_size: 1_000,
             segment_offsets: vec![13, 13],
             first_frame_offset: 13,
@@ -2888,6 +2998,7 @@ mod tests {
         assert!(check_slices(
             &directory.path.join("no-ffprobe"),
             &input,
+            &directory.path,
             Path::new("/media/live.flv"),
             &probe,
             true,
@@ -2902,6 +3013,7 @@ mod tests {
             check_slices(
                 &directory.path.join("no-ffprobe"),
                 &later,
+                &directory.path,
                 Path::new("/media/live.flv"),
                 &probe,
                 true,
@@ -3419,6 +3531,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -3457,6 +3570,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -3687,6 +3801,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -3771,6 +3886,7 @@ mod tests {
                 PrepareRequest {
                     request: &request,
                     app_data_directory: &directory.path,
+                    cache_directory: &directory.path.join("cache"),
                     cancel: &AtomicBool::new(false),
                     preview_windows: &PreviewWindows::default(),
                     stage: &PreparationStageCell::default(),
@@ -3869,6 +3985,7 @@ mod tests {
                 PrepareRequest {
                     request: &request,
                     app_data_directory: &directory.path,
+                    cache_directory: &directory.path.join("cache"),
                     cancel: &AtomicBool::new(false),
                     preview_windows: &PreviewWindows::default(),
                     stage: &PreparationStageCell::default(),
@@ -3998,6 +4115,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -4052,6 +4170,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -4124,6 +4243,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -4220,6 +4340,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(true),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -4282,6 +4403,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -4344,6 +4466,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -4388,6 +4511,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -4441,6 +4565,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -4505,6 +4630,8 @@ mod tests {
             arguments: vec![],
             audio_arguments: None,
             pending,
+            work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
+                .unwrap(),
         };
 
         let start = start_payload("42-7", &prepared);
@@ -4539,6 +4666,8 @@ mod tests {
             arguments: vec![],
             audio_arguments: None,
             pending,
+            work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
+                .unwrap(),
         };
         let registry = Arc::new(ExportRegistry::default());
         let slot = registry.begin("42-7").unwrap();
@@ -4764,6 +4893,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel,
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -5757,6 +5887,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -6363,6 +6494,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &stage,
@@ -6423,6 +6555,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &stage,
@@ -6478,6 +6611,8 @@ mod tests {
             arguments: vec![],
             audio_arguments: None,
             pending,
+            work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
+                .unwrap(),
         };
         (prepared, reserved)
     }
@@ -6909,6 +7044,8 @@ mod tests {
                 arguments: vec![],
                 audio_arguments: None,
                 pending,
+                work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
+                    .unwrap(),
             };
             let registry = Arc::new(ExportRegistry::default());
             let slot = registry.begin("42-7").unwrap();
@@ -6931,6 +7068,190 @@ mod tests {
             assert_eq!(frames, 30, "{streams:?}");
             assert_eq!(fs::read(&destination).unwrap(), b"the finished video");
         }
+    }
+
+    /// A run that the plan of [`sample_plan`] prepares, with its work directory in `directory`.
+    fn prepared_video_run(directory: &TestDirectory) -> (PreparedExport, PathBuf, PathBuf) {
+        let destination = directory.path.join("out.mp4");
+        let pending = PendingOutput::reserve(&destination).unwrap();
+        let reserved = pending.path().to_path_buf();
+        let work = ExportWorkDirectory::create(&directory.path.join("cache")).unwrap();
+        let work_path = work.path().to_path_buf();
+        let prepared = PreparedExport {
+            preset_id: "active".to_owned(),
+            streams: ExportStreams::VideoAndAudio,
+            segment_count: 1,
+            plan: sample_plan(&destination),
+            ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe: PathBuf::from("/usr/bin/ffprobe"),
+            arguments: vec![],
+            audio_arguments: None,
+            pending,
+            work,
+        };
+        (prepared, reserved, work_path)
+    }
+
+    #[test]
+    fn the_processes_run_in_the_work_directory_which_goes_before_the_rename() {
+        // ADR 055: every export runs in its work directory, and the directory is removed when
+        // the processes have ended, before the publication and the rename.
+        let directory = TestDirectory::new();
+        let (prepared, reserved, work_path) = prepared_video_run(&directory);
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+        let removed_at_publishing = RefCell::new(None);
+
+        let frames = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |event| {
+                if matches!(event, ExportEvent::Publishing { .. }) {
+                    *removed_at_publishing.borrow_mut() = Some(!work_path.exists());
+                }
+            },
+            |request, _on_progress| {
+                assert_eq!(request.working_directory, Some(work_path.as_path()));
+                assert!(work_path.is_dir());
+                fs::write(&reserved, b"the finished video").unwrap();
+                Ok(exited_zero(Some(sample_snapshot(Some(30)))))
+            },
+            |_, _, _| unreachable!("a plan that copies no audio is verified by its frame count"),
+        )
+        .unwrap();
+
+        assert_eq!(frames, 30);
+        assert_eq!(*removed_at_publishing.borrow(), Some(true));
+        assert!(!work_path.exists());
+    }
+
+    #[test]
+    fn a_failed_run_and_a_dropped_run_remove_the_work_directory() {
+        let directory = TestDirectory::new();
+        let registry = Arc::new(ExportRegistry::default());
+        let slot = registry.begin("42-7").unwrap();
+
+        // A process that does not start.
+        let (prepared, _, work_path) = prepared_video_run(&directory);
+        let error = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |_event| {},
+            |_request, _on_progress| Err(std::io::Error::other("no ffmpeg")),
+            |_, _, _| unreachable!("the run fails before its check"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::FfmpegSpawnFailed);
+        assert!(!work_path.exists());
+
+        // A process that fails.
+        let (prepared, _, work_path) = prepared_video_run(&directory);
+        let error = run_export_with(
+            &slot,
+            prepared,
+            "42-7",
+            |_event| {},
+            |_request, _on_progress| {
+                Ok(ExportProcessOutcome {
+                    status: ExportProcessStatus::Exited {
+                        code: Some(1),
+                        success: false,
+                    },
+                    ..exited_zero(None)
+                })
+            },
+            |_, _, _| unreachable!("the run fails before its check"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::FfmpegProcessFailed);
+        assert!(!work_path.exists());
+
+        // A cancel after preparation drops the prepared export.
+        let (prepared, _, work_path) = prepared_video_run(&directory);
+        drop(prepared);
+        assert!(!work_path.exists());
+    }
+
+    #[test]
+    fn a_preparation_that_fails_removes_its_work_directory() {
+        // The work directory exists before the first source, and the revision check of the
+        // source refuses it after that. The guard drops with the error.
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let marked = revision_of(&source);
+        fs::write(&source, b"replaced media").unwrap();
+        let request = request_expecting(&source, Some(marked));
+        let cache = directory.path.join("cache");
+        let stage = PreparationStageCell::default();
+
+        let error = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cache_directory: &cache,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &stage,
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_, _, _| unreachable!(),
+            first_packet_unread,
+            sample_rate_not_read,
+            no_audio_gaps,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::SourceRevisionMismatch);
+        assert!(cache.is_dir(), "preparation created the cache directory");
+        assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_cache_directory_that_cannot_hold_a_work_directory_fails_the_preparation() {
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let request = request_expecting(&source, None);
+        // A file where the cache directory should be.
+        let cache = directory.path.join("cache");
+        fs::write(&cache, b"not a directory").unwrap();
+        let stage = PreparationStageCell::default();
+
+        let error = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cache_directory: &cache,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &stage,
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_, _, _| unreachable!("no source is read without a work directory"),
+            first_packet_unread,
+            sample_rate_not_read,
+            no_audio_gaps,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ExportErrorCode::WorkDirectoryUnavailable);
+        assert!(error.detail.is_some());
+        assert_eq!(stage.read(), (PreparationStage::WorkDirectory, None));
     }
 
     // -- the copy of the audio: the commands of a request that asks for it (ADR 048) -------
@@ -6995,6 +7316,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -7161,6 +7483,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path.join("app"),
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -7311,6 +7634,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path.join("app"),
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -7435,6 +7759,8 @@ mod tests {
             arguments: vec![],
             audio_arguments: Some(vec![]),
             pending,
+            work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
+                .unwrap(),
         };
         (prepared, reserved)
     }
@@ -7615,6 +7941,8 @@ mod tests {
             arguments: vec![],
             audio_arguments: None,
             pending,
+            work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
+                .unwrap(),
         };
         let registry = Arc::new(ExportRegistry::default());
         let slot = registry.begin("42-7").unwrap();
@@ -7815,6 +8143,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path.join("app"),
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -8120,6 +8449,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path.join("app"),
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -8332,6 +8662,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
@@ -8398,6 +8729,7 @@ mod tests {
             PrepareRequest {
                 request: &request,
                 app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),

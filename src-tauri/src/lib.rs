@@ -31,9 +31,10 @@ pub(crate) const SETTINGS_WINDOW_LABEL: &str = commands::settings_window::SETTIN
 ///
 /// The wait covers one poll of the cancel flag by the export supervisor
 /// (`commands::export::PROGRESS_POLL_INTERVAL`, a tenth of a second), the kill and reap of the
-/// `ffmpeg` child, the join of its two pipe reader threads, and the deletion of the reserved
-/// temporary file. Five seconds is far above that sum and short enough that a quit still feels
-/// like a quit.
+/// `ffmpeg` child, the join of its two pipe reader threads, the deletion of the reserved
+/// temporary file, and the removal of the work directory (ADR 055), which waits at most
+/// `WORK_DIRECTORY_REMOVAL_BUDGET` on Windows. Five seconds is far above that sum and short
+/// enough that a quit still feels like a quit.
 ///
 /// A run whose preparation is blocked in the file system frees the slot after
 /// `commands::export::PREPARATION_CANCEL_GRACE` and one `PREPARATION_POLL`, which a test below
@@ -478,6 +479,23 @@ mod tests {
         assert!(
             commands::export::PREPARATION_CANCEL_GRACE
                 + commands::export::PREPARATION_POLL
+                + REPORT_MARGIN
+                < EXIT_CANCEL_BUDGET
+        );
+    }
+
+    /// A quit that lands as preparation ends: the export thread waits the grace for the helper
+    /// thread, and the removal of the work directory (ADR 055) then runs on the slot path, in
+    /// the helper or in the drop of the prepared export. On Windows it can wait its whole budget
+    /// for a file that another program holds. All of that must fit in the budget of the exit,
+    /// with a margin for the report.
+    #[test]
+    fn a_quit_that_removes_the_work_directory_finds_the_slot_free_within_the_budget() {
+        const REPORT_MARGIN: Duration = Duration::from_millis(500);
+        assert!(
+            commands::export::PREPARATION_CANCEL_GRACE
+                + commands::export::PREPARATION_POLL
+                + ffmpeg::export::work_directory::WORK_DIRECTORY_REMOVAL_BUDGET
                 + REPORT_MARGIN
                 < EXIT_CANCEL_BUDGET
         );

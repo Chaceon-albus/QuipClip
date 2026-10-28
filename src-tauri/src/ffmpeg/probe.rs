@@ -1275,8 +1275,9 @@ pub struct AudioGapRead<'a> {
     /// join.
     pub min_gap: Rational,
     /// The FLV input of the export (ADR 046), whose slices the read opens in place of the seeks
-    /// of `-read_intervals`, with one offset for each range, or `None`.
-    pub flv: Option<&'a crate::ffmpeg::export::flv_input::FlvInput>,
+    /// of `-read_intervals`, with one offset for each range, and the work directory of the export
+    /// that holds its head (ADR 055), or `None`.
+    pub flv: Option<(&'a crate::ffmpeg::export::flv_input::FlvInput, &'a Path)>,
 }
 
 /// Run the resolved ffprobe executable to find the gaps in the audio stream `read.stream_index` of
@@ -1302,11 +1303,18 @@ pub fn probe_audio_gaps(
     if read.ranges.is_empty() {
         return Ok(AudioFrames::default());
     }
-    if let Some(flv) = read
+    if let Some((flv, work_directory)) = read
         .flv
-        .filter(|flv| flv.segment_offsets.len() == read.ranges.len())
+        .filter(|(flv, _)| flv.segment_offsets.len() == read.ranges.len())
     {
-        return probe_audio_gaps_in_slices(ffprobe_path, media_path, read, flv, cancel);
+        return probe_audio_gaps_in_slices(
+            ffprobe_path,
+            media_path,
+            read,
+            flv,
+            work_directory,
+            cancel,
+        );
     }
     let intervals = read_intervals_argument(read.ranges).ok_or_else(|| ProbeError::Parse {
         source: invalid_frames("a range cannot be written in microseconds"),
@@ -1346,20 +1354,21 @@ pub fn probe_audio_gaps(
 /// the source from the keyframe of the earliest range of the group, which the export opens too.
 /// It reads the slice from its start to the end of the group, `-read_intervals %<end>`. The tags
 /// keep their timestamps, so the answers join in order of time and parse as one. All the runs
-/// share one [`PROBE_TIMEOUT`]. The head is named by its full path, so the read needs no working
-/// directory.
+/// share one [`PROBE_TIMEOUT`]. The head is named by its full path in `work_directory`, the work
+/// directory of the export, so the read keeps the working directory of this process.
 fn probe_audio_gaps_in_slices(
     ffprobe_path: &Path,
     media_path: &Path,
     read: &AudioGapRead<'_>,
     flv: &crate::ffmpeg::export::flv_input::FlvInput,
+    work_directory: &Path,
     cancel: &AtomicBool,
 ) -> Result<AudioFrames, ProbeError> {
     let parse_error = |message: &'static str| ProbeError::Parse {
         source: invalid_frames(message),
         stderr: Vec::new(),
     };
-    let head = flv.head_path();
+    let head = flv.head_path(work_directory);
     let head = head.to_string_lossy();
     if head.contains('|') {
         return Err(parse_error(

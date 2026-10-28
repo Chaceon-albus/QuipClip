@@ -44,7 +44,7 @@
 //! plan's [`Rational`], truncated at ffmpeg's own microsecond resolution; the private
 //! `render_seek` has the rounding rule and its one-sided guarantee.
 
-use super::flv_input::{FlvInput, HEAD_NAME};
+use super::flv_input::FlvInput;
 use super::graph::{
     build_audio_graph, build_filter_graph, build_video_graph, input_layout, GraphInput,
 };
@@ -632,11 +632,11 @@ fn flv_offset<'a>(plan: &'a ExportPlan, input: &GraphInput) -> Option<(&'a FlvIn
 }
 
 /// Append one FLV input of ADR 046: the head and the slice of the source from `offset`, joined
-/// with the concat protocol, and no seek. FFmpeg runs in the directory of the head, so the
-/// command names the head by its file name.
+/// with the concat protocol, and no seek. FFmpeg runs in the work directory of the export, which
+/// holds the head, so the command names the head by its file name (ADR 055).
 fn push_flv_input(arguments: &mut Vec<String>, flv: &FlvInput, offset: u64, source: &Path) {
     arguments.push("-i".to_owned());
-    arguments.push(flv.url(HEAD_NAME, offset, source));
+    arguments.push(flv.url(&flv.head_name, offset, source));
 }
 
 /// Append the encoder arguments of each part a command writes: the video ones when `video` is
@@ -864,6 +864,7 @@ fn render_time(seconds: Rational) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffmpeg::export::flv_input::head_name;
     use crate::ffmpeg::export::{
         max_export_pieces, OutputTiming, PlannedAudio, PlannedSegment, PlannedSource, PlannedVideo,
         SourceAudio, VideoFit, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
@@ -1339,7 +1340,7 @@ mod tests {
         let mut plan = fixture_plan(3);
         plan.sources[0].path = PathBuf::from("/media/live.flv");
         plan.sources[0].flv_input = Some(FlvInput {
-            working_directory: PathBuf::from("/app/flv-cache/0123456789abcdef"),
+            head_name: head_name(0),
             source_size: 212_700_000,
             segment_offsets: vec![9_000_000, 4_000_000, 30_000_000],
             first_frame_offset: 13,
@@ -1349,18 +1350,18 @@ mod tests {
 
     #[test]
     fn an_flv_input_opens_each_slice_with_the_concat_protocol_and_no_seek() {
-        // FFmpeg runs in the directory of the head, so each input names the head by its file
-        // name. The slices start at the keyframes that the reader located, so no input carries
-        // `-ss`, and `-copyts` keeps the timestamps that the `trim` boundaries use.
+        // FFmpeg runs in the work directory, which holds the head, so each input names the head
+        // by its file name. The slices start at the keyframes that the reader located, so no
+        // input carries `-ss`, and `-copyts` keeps the timestamps that the `trim` boundaries use.
         assert_eq!(
             input_arguments(&flv_plan(), GraphShape::InputPerSegment),
             vec![
                 "-i",
-                "concat:head.flv|subfile,,start,9000000,end,212700000,,:/media/live.flv",
+                "concat:h0.flv|subfile,,start,9000000,end,212700000,,:/media/live.flv",
                 "-i",
-                "concat:head.flv|subfile,,start,4000000,end,212700000,,:/media/live.flv",
+                "concat:h0.flv|subfile,,start,4000000,end,212700000,,:/media/live.flv",
                 "-i",
-                "concat:head.flv|subfile,,start,30000000,end,212700000,,:/media/live.flv",
+                "concat:h0.flv|subfile,,start,30000000,end,212700000,,:/media/live.flv",
                 "-f",
                 "wav",
                 "-i",
@@ -1376,7 +1377,7 @@ mod tests {
             input_arguments(&flv_plan(), GraphShape::SingleInput),
             vec![
                 "-i",
-                "concat:head.flv|subfile,,start,4000000,end,212700000,,:/media/live.flv",
+                "concat:h0.flv|subfile,,start,4000000,end,212700000,,:/media/live.flv",
                 "-f",
                 "wav",
                 "-i",
@@ -3205,11 +3206,12 @@ mod tests {
     }
 
     /// `plan` with an FLV input whose numbers have the digits of `size`: a slice for each
-    /// segment, each from an offset just below `size`.
+    /// segment, each from an offset just below `size`. The head has the name of a source with
+    /// a two-digit index, wider than the index of any source that an export can hold.
     fn with_flv_input(mut plan: ExportPlan, size: u64) -> ExportPlan {
         let count = u64::try_from(plan.segments.len()).expect("the count fits in a u64");
         plan.sources[0].flv_input = Some(FlvInput {
-            working_directory: PathBuf::from(longest_windows_path("")),
+            head_name: head_name(99),
             source_size: size,
             segment_offsets: (0..count).map(|index| size - 1 - index).collect(),
             first_frame_offset: 13,
@@ -3871,12 +3873,12 @@ mod tests {
         let mut plan = copy_plan(Container::Mp4);
         plan.sources[0].path = PathBuf::from("/media/live.flv");
         plan.sources[0].flv_input = Some(FlvInput {
-            working_directory: PathBuf::from("/app/flv-cache/0123456789abcdef"),
+            head_name: head_name(0),
             source_size: 212_700_000,
             segment_offsets: vec![9_000_000],
             first_frame_offset: 13,
         });
-        let slice = "concat:head.flv|subfile,,start,9000000,end,212700000,,:/media/live.flv";
+        let slice = "concat:h0.flv|subfile,,start,9000000,end,212700000,,:/media/live.flv";
         assert_eq!(copy_process(&plan)[5..8], ["-copyts", "-i", slice]);
         assert_eq!(
             input_arguments(&plan, GraphShape::InputPerSegment),
@@ -3981,7 +3983,7 @@ mod tests {
         second.audio = None;
         if flv {
             second.flv_input = Some(FlvInput {
-                working_directory: PathBuf::from("/app/flv-cache/0123456789abcdef"),
+                head_name: head_name(1),
                 source_size: 212_700_000,
                 segment_offsets: vec![4_000_000],
                 first_frame_offset: 13,
@@ -4055,10 +4057,10 @@ mod tests {
 
     #[test]
     fn the_flv_input_of_one_source_takes_the_offsets_of_its_own_pieces() {
-        // The second source holds one piece, so its one offset belongs to piece 1, and FFmpeg
-        // runs in the directory of its head.
+        // The second source holds one piece, so its one offset belongs to piece 1, and its head
+        // has the index of the second source.
         let plan = two_source_plan(true);
-        let slice = "concat:head.flv|subfile,,start,4000000,end,212700000,,:/media/second.flv";
+        let slice = "concat:h1.flv|subfile,,start,4000000,end,212700000,,:/media/second.flv";
         assert_eq!(
             input_arguments(&plan, GraphShape::InputPerSegment)[4..6],
             ["-i", slice]
@@ -4067,10 +4069,5 @@ mod tests {
             input_arguments(&plan, GraphShape::SingleInput)[4..6],
             ["-i", slice]
         );
-        assert_eq!(
-            plan.working_directory(),
-            Some(Path::new("/app/flv-cache/0123456789abcdef"))
-        );
-        assert_eq!(fixture_plan(1).working_directory(), None);
     }
 }

@@ -11,7 +11,7 @@
 //! - `head`: the head of the file and of a window.
 //! - `locate`: the keyframe at or before a time, and the extent of the file.
 //! - `table`: the keyframes and configurations that walks found.
-//! - `cache`: `head.flv` and the keyframe sidecar under the application data directory.
+//! - `cache`: the keyframe sidecar under the application data directory.
 
 pub mod amf;
 pub mod cache;

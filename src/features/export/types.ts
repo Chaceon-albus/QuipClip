@@ -166,6 +166,7 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "canceled",
   "commandExecutionFailed",
   "exportQueueClosed",
+  "workDirectoryUnavailable",
 ] as const;
 
 export type BackendExportErrorCode = (typeof BACKEND_EXPORT_ERROR_CODES)[number];

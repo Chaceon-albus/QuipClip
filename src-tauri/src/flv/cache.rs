@@ -1,11 +1,13 @@
-//! The files that the FLV reader keeps for a source: `head.flv` and the keyframe sidecar.
+//! The file that the FLV reader keeps for a source: the keyframe sidecar.
 //!
 //! Each source revision (path, size and modification time) has one directory under
-//! `<app_data>/flv-cache/`. The export reads `head.flv` from there (ADR 046). The sidecar lets a
-//! second session of the same file start with the keyframes and configurations that the first
-//! session found. A sidecar of another revision is ignored, so a file changed in place starts
-//! again from nothing. The cache keeps [`KEEP_SOURCES`] directories and removes the oldest, but
-//! never one that a caller names as in use.
+//! `<app_data>/flv-cache/`. The export writes the head of a source into its own work directory
+//! (ADR 055), not here. A directory of an older build can still hold a `head.flv`, which the
+//! eviction removes with the directory. The sidecar lets a second session of the same file start
+//! with the keyframes and configurations that the first session found. A sidecar of another
+//! revision is ignored, so a file changed in place starts again from nothing. The cache keeps
+//! [`KEEP_SOURCES`] directories and removes the oldest, but never one that a caller names as in
+//! use.
 
 use super::table::{ConfigTag, KeyframeEntry, KeyframeTable};
 use super::tag::{classify, parse_tag_header, TagKind, TagRole, ROLE_PREFIX_LEN};
@@ -20,8 +22,6 @@ use std::sync::Mutex;
 pub const CACHE_DIR_NAME: &str = "flv-cache";
 /// The number of source directories that the cache keeps.
 pub const KEEP_SOURCES: usize = 16;
-/// The file name of the head in the directory of a source.
-pub const HEAD_FILE_NAME: &str = "head.flv";
 const SIDECAR_FILE_NAME: &str = "keyframes.json";
 const SIDECAR_VERSION: u32 = 1;
 
@@ -101,22 +101,6 @@ impl SourceCache {
 
     pub fn key(&self) -> String {
         self.revision.key()
-    }
-
-    /// The path of `head.flv`.
-    pub fn head_path(&self) -> PathBuf {
-        self.dir.join(HEAD_FILE_NAME)
-    }
-
-    /// Write `head.flv` when it is missing or holds other bytes, and return its path.
-    pub fn write_head(&self, bytes: &[u8]) -> io::Result<PathBuf> {
-        let _guard = CACHE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let path = self.head_path();
-        if fs::read(&path).ok().as_deref() != Some(bytes) {
-            fs::create_dir_all(&self.dir)?;
-            write_bytes_atomically(&path, bytes)?;
-        }
-        Ok(path)
     }
 
     /// The table and the decrease flag that the sidecar holds, or `None` when it is missing,
@@ -387,25 +371,13 @@ mod tests {
     }
 
     #[test]
-    fn writes_the_head_once_and_again_when_it_changes() {
-        let dir = TestDirectory::new();
-        let cache = SourceCache::new(&dir.path, revision("/a.flv"));
-        let path = cache.write_head(b"FLV head").unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"FLV head");
-        let modified = fs::metadata(&path).unwrap().modified().unwrap();
-        cache.write_head(b"FLV head").unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
-        cache.write_head(b"FLV head 2").unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"FLV head 2");
-    }
-
-    #[test]
     fn eviction_keeps_the_newest_directories_and_those_in_use() {
         let dir = TestDirectory::new();
         let mut keys = Vec::new();
         for index in 0..5 {
             let cache = SourceCache::new(&dir.path, revision(&format!("/{index}.flv")));
-            cache.write_head(b"FLV").unwrap();
+            fs::create_dir_all(cache.dir()).unwrap();
+            fs::write(cache.dir().join(SIDECAR_FILE_NAME), b"{}").unwrap();
             keys.push(cache.key());
             // Directory times have a coarse resolution on some file systems.
             std::thread::sleep(std::time::Duration::from_millis(20));

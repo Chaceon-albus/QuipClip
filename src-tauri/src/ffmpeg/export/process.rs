@@ -205,9 +205,9 @@ pub struct ExportProcessRequest<'a> {
     /// pipe, and the export then fails with the audio process's error although the encoder may
     /// have written a whole file.
     pub audio_arguments: Option<&'a [String]>,
-    /// The directory both processes run in, or `None` for the directory of this process. An
-    /// export of an FLV source runs in the directory of its head, which its inputs name by the
-    /// file name alone (ADR 046).
+    /// The directory both processes run in, or `None` for the directory of this process. Every
+    /// export runs in its work directory, whose files, such as the head of an FLV source, its
+    /// commands name by the file name alone (ADR 055).
     pub working_directory: Option<&'a Path>,
     /// The cancellation flag, normally [`super::registry::ExportSlot::cancel_flag`].
     ///
@@ -1543,16 +1543,15 @@ mod tests {
     #[cfg(windows)]
     const SLEEP: &str = "Start-Sleep -Seconds 120";
 
-    /// Both processes of an export of an FLV source run in the directory of its head, which
-    /// their inputs name by its file name (ADR 046). Each script writes its directory to a file
-    /// with a relative name, which lands in the working directory only.
+    /// Both processes of an export run in its work directory, whose files their commands name by
+    /// the file name (ADR 055). Each script writes its directory to a file with a relative name,
+    /// which lands in the working directory only.
     #[cfg(unix)]
     #[test]
     fn both_processes_run_in_the_working_directory() {
-        let directory =
-            std::env::temp_dir().join(format!("quipclip-process-directory-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).unwrap();
+        let parent = crate::flv::test_support::TestDirectory::new();
+        let work = super::super::work_directory::ExportWorkDirectory::create(&parent.path).unwrap();
+        let directory = work.path().to_path_buf();
         let pair = pair("pwd > audio.txt", "pwd > encoder.txt; exec cat");
         let outcome = run_export_process(
             ExportProcessRequest {
@@ -1575,7 +1574,6 @@ mod tests {
             let written = std::fs::read_to_string(directory.join(name)).unwrap();
             assert_eq!(std::fs::canonicalize(written.trim()).unwrap(), canonical);
         }
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// Run `pair` with `cancel`, collecting every snapshot delivered.

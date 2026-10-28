@@ -6,24 +6,27 @@
 //! keyframe, joined with the concat protocol:
 //!
 //! ```text
-//! concat:head.flv|subfile,,start,<offset>,end,<size>,,:<source>
+//! concat:h<k>.flv|subfile,,start,<offset>,end,<size>,,:<source>
 //! ```
 //!
 //! The head is the FLV header and the decoder configurations, which the FLV reader of the preview
-//! writes to the application data directory. The slice starts at the keyframe at or before the
+//! reads. The export writes it into its work directory as `h<k>.flv`, where `<k>` is the index of
+//! the source in the plan (ADR 055). The slice starts at the keyframe at or before the
 //! seek position that the input seek would use, the In point less `SEEK_MARGIN_SECONDS`, which
 //! the same reader locates. Under `-copyts` the tags keep their timestamps, so the `trim`
 //! boundaries of the plan apply unchanged. A late segment of a 213 MB file read 30.9 MB this way
 //! and 212.7 MB with the input seek, and the frames were identical (ADR 046).
 //!
-//! FFmpeg runs with the directory of the head as its working directory, and the command names the
-//! head by its file name, so a long application data path does not lengthen each input.
+//! FFmpeg runs with the work directory as its working directory, and the command names the head
+//! by its file name, so a long cache path does not lengthen each input. The reads of preparation
+//! with ffprobe keep their working directory and name the head by its full path.
 //!
 //! A source keeps the input seek when this form is not safe: the path holds the `|` that
 //! separates the parts of the concat protocol, the reader cannot read the file, the timestamps of
 //! the file decrease, the reader knows of a change of the decoder configuration, or the streams of
 //! a slice would take other indices than the probe gave them, which the filter graph addresses.
 
+use super::work_directory::ExportWorkDirectory;
 use crate::ffmpeg::preview::PreviewWindows;
 use crate::ffmpeg::probe::MediaProbe;
 use crate::flv::cache::Revision;
@@ -34,14 +37,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-/// The name of the head in the command, relative to the working directory of FFmpeg.
-pub const HEAD_NAME: &str = crate::flv::cache::HEAD_FILE_NAME;
+/// The name of the head of the source at `index` of the plan in the work directory: `h<k>.flv`.
+#[must_use]
+pub fn head_name(index: usize) -> String {
+    format!("h{index}.flv")
+}
 
 /// The FLV input of an export: one slice for each segment, all with the same head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlvInput {
-    /// The directory of the head, where FFmpeg runs.
-    pub working_directory: PathBuf,
+    /// The file name of the head in the work directory of the export, where FFmpeg runs:
+    /// [`head_name`] of the index of the source in the plan (ADR 055).
+    pub head_name: String,
     /// The size of the source, where every slice ends.
     pub source_size: u64,
     /// For each piece of this source, in concat order, the byte offset of the tag that its slice
@@ -60,8 +67,9 @@ impl FlvInput {
         self.segment_offsets.iter().copied().min()
     }
 
-    /// The input of a slice from `offset` of `source`, with the head named `head`: its file name
-    /// for FFmpeg, which runs in [`Self::working_directory`], or [`Self::head_path`].
+    /// The input of a slice from `offset` of `source`, with the head named `head`: its file name,
+    /// [`Self::head_name`], for FFmpeg, which runs in the work directory, or [`Self::head_path`]
+    /// for a read of preparation.
     #[must_use]
     pub fn url(&self, head: &str, offset: u64, source: &Path) -> String {
         format!(
@@ -71,10 +79,10 @@ impl FlvInput {
         )
     }
 
-    /// The full path of the head.
+    /// The full path of the head in `work_directory`, the work directory of the export.
     #[must_use]
-    pub fn head_path(&self) -> PathBuf {
-        self.working_directory.join(HEAD_NAME)
+    pub fn head_path(&self, work_directory: &Path) -> PathBuf {
+        work_directory.join(&self.head_name)
     }
 }
 
@@ -107,6 +115,10 @@ pub struct FlvInputRequest<'a> {
     /// seek margin, in seconds on the timeline of the source.
     pub seek_positions: &'a [Rational],
     pub app_data: &'a Path,
+    /// The work directory of the export, which receives the head.
+    pub work_directory: &'a ExportWorkDirectory,
+    /// The index of the source in the plan, which names its head ([`head_name`]).
+    pub source_index: usize,
     /// The open FLV sources, which the export shares with the preview: each knows what the
     /// windows of the preview found, and the cache keeps the directory of an open source.
     pub windows: &'a PreviewWindows,
@@ -187,7 +199,8 @@ pub fn locate_flv_input(request: &FlvInputRequest<'_>) -> Result<FlvInput, FlvIn
     }
     // The last read of the flag before the write of the head. An export whose preparation was
     // abandoned while a read above was blocked (`commands::export::run_export_job_with`) sets the
-    // flag, and must not write the head of the cache late, when nothing will use it.
+    // flag, and must not write the head late, when nothing will use it. A write after the
+    // removal of the work directory fails, because a write never creates it (ADR 055).
     if request
         .cancel
         .as_ref()
@@ -195,15 +208,13 @@ pub fn locate_flv_input(request: &FlvInputRequest<'_>) -> Result<FlvInput, FlvIn
     {
         return Err(FlvInputFallback::Canceled);
     }
-    let head = cache
-        .write_head(&source.head_bytes_at(earliest))
+    let head_name = head_name(request.source_index);
+    request
+        .work_directory
+        .write(&head_name, &source.head_bytes_at(earliest))
         .map_err(|error| FlvInputFallback::HeadNotWritten(error.to_string()))?;
-    let working_directory = head
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| FlvInputFallback::HeadNotWritten("the head has no directory".to_owned()))?;
     Ok(FlvInput {
-        working_directory,
+        head_name,
         source_size: media.size,
         segment_offsets,
         first_frame_offset: first_frame,
@@ -292,11 +303,25 @@ mod tests {
         probe: &MediaProbe,
         positions: &[Rational],
     ) -> Result<FlvInput, FlvInputFallback> {
+        let work = ExportWorkDirectory::create(&app_data.join("cache")).unwrap();
+        locate_in(path, app_data, &work, 0, probe, positions)
+    }
+
+    fn locate_in(
+        path: &Path,
+        app_data: &Path,
+        work_directory: &ExportWorkDirectory,
+        source_index: usize,
+        probe: &MediaProbe,
+        positions: &[Rational],
+    ) -> Result<FlvInput, FlvInputFallback> {
         locate_flv_input(&FlvInputRequest {
             source: path,
             probe,
             seek_positions: positions,
             app_data,
+            work_directory,
+            source_index,
             windows: &PreviewWindows::default(),
             cancel: None,
         })
@@ -307,10 +332,13 @@ mod tests {
         let recording = recording(&RecordingOptions::default());
         let (directory, path) = write_source("live.flv", &recording.bytes);
         let app_data = directory.path.join("app");
+        let work = ExportWorkDirectory::create(&directory.path.join("cache")).unwrap();
         let probe = flv_probe(Some(1));
-        let input = locate(
+        let input = locate_in(
             &path,
             &app_data,
+            &work,
+            3,
             &probe,
             &[seconds(10_200), seconds(3_500), seconds(2_067)],
         )
@@ -329,9 +357,45 @@ mod tests {
         );
         assert_eq!(input.single_offset(), Some(key(2_067)));
         assert_eq!(input.source_size, recording.bytes.len() as u64);
-        assert!(input.working_directory.starts_with(&app_data));
-        let head = fs::read(input.head_path()).unwrap();
+        assert_eq!(input.head_name, "h3.flv");
+        assert_eq!(input.head_path(work.path()), work.file_path("h3.flv"));
+        let head = fs::read(work.file_path("h3.flv")).unwrap();
         assert_eq!(&head[..3], b"FLV");
+        // The cache of the reader keeps the keyframe table only (ADR 055).
+        let cached: Vec<PathBuf> = fs::read_dir(app_data.join(crate::flv::cache::CACHE_DIR_NAME))
+            .unwrap()
+            .flatten()
+            .flat_map(|entry| fs::read_dir(entry.path()).unwrap().flatten())
+            .map(|entry| entry.path())
+            .collect();
+        assert!(
+            cached
+                .iter()
+                .all(|path| path.extension() != Some("flv".as_ref())),
+            "{cached:?}"
+        );
+    }
+
+    #[test]
+    fn a_head_that_cannot_be_written_keeps_the_input_seek() {
+        let recording = recording(&RecordingOptions::default());
+        let (directory, path) = write_source("live.flv", &recording.bytes);
+        let work = ExportWorkDirectory::create(&directory.path.join("cache")).unwrap();
+        // Stands for a work directory that is gone, as after an abandoned preparation.
+        fs::remove_dir_all(work.path()).unwrap();
+        let result = locate_in(
+            &path,
+            &directory.path.join("app"),
+            &work,
+            0,
+            &flv_probe(Some(1)),
+            &[seconds(3_500)],
+        );
+        assert!(
+            matches!(result, Err(FlvInputFallback::HeadNotWritten(_))),
+            "{result:?}"
+        );
+        assert!(!work.path().exists(), "a write never creates the directory");
     }
 
     #[test]
@@ -355,14 +419,18 @@ mod tests {
     #[test]
     fn the_input_joins_the_head_and_a_slice_with_the_concat_protocol() {
         let input = FlvInput {
-            working_directory: PathBuf::from("/data/flv-cache/abc"),
+            head_name: head_name(0),
             source_size: 212_906_689,
             segment_offsets: vec![159_993_740],
             first_frame_offset: 13,
         };
         assert_eq!(
-            input.url(HEAD_NAME, 159_993_740, Path::new("/media/live 1.flv")),
-            "concat:head.flv|subfile,,start,159993740,end,212906689,,:/media/live 1.flv"
+            input.url(
+                &input.head_name,
+                159_993_740,
+                Path::new("/media/live 1.flv")
+            ),
+            "concat:h0.flv|subfile,,start,159993740,end,212906689,,:/media/live 1.flv"
         );
         for windows in [
             r"C:\Recordings\live.flv",
@@ -370,11 +438,15 @@ mod tests {
             r"\\?\C:\Recordings\live.flv",
         ] {
             assert_eq!(
-                input.url(HEAD_NAME, 7, Path::new(windows)),
-                format!("concat:head.flv|subfile,,start,7,end,212906689,,:{windows}")
+                input.url(&input.head_name, 7, Path::new(windows)),
+                format!("concat:h0.flv|subfile,,start,7,end,212906689,,:{windows}")
             );
         }
-        assert_eq!(input.head_path(), Path::new("/data/flv-cache/abc/head.flv"));
+        assert_eq!(
+            input.head_path(Path::new("/cache/export-1-0")),
+            Path::new("/cache/export-1-0/h0.flv")
+        );
+        assert_eq!(head_name(12), "h12.flv");
     }
 
     #[test]
@@ -481,11 +553,14 @@ mod tests {
         // the source, so it knows of the change, though its own locate reads no block with it.
         source.locate(10_000, None).unwrap();
         assert!(source.has_config_change());
+        let work = ExportWorkDirectory::create(&directory.path.join("cache")).unwrap();
         let result = locate_flv_input(&FlvInputRequest {
             source: &path,
             probe: &flv_probe(None),
             seek_positions: &[seconds(1_000)],
             app_data: &directory.path,
+            work_directory: &work,
+            source_index: 0,
             windows: &windows,
             cancel: None,
         });

@@ -58,6 +58,10 @@
 //! [`process::ExportProcessStatus::Exited`] for the measured case where `ffmpeg` writes no frames
 //! and still exits zero.
 //!
+//! [`work_directory`] owns the work directory of an export (ADR 055): the `ffmpeg` processes run
+//! in it, it holds the FLV heads, and it is removed when the processes end and on every other exit
+//! path.
+//!
 //! [`verify`] holds the checks that read the finished file back. The frame count cannot verify an
 //! export that writes no video, so [`verify::verify_audio_output`] reads its file back through
 //! ffprobe instead: one audio stream, no video stream, and a duration inside a measured tolerance
@@ -76,6 +80,7 @@ pub mod process;
 pub mod progress;
 pub mod registry;
 pub mod verify;
+pub mod work_directory;
 
 pub use arguments::{
     build_arguments, build_audio_arguments, build_copy_arguments, choose_audio_graph_shape,
@@ -547,8 +552,9 @@ pub struct PlannedSource {
     /// The FLV input of ADR 046, which opens each input of this source as the head of the source
     /// and a slice of it from a keyframe in place of an input seek, or `None` for the input seek
     /// of ADR 014. [`plan::build_plan`] leaves it `None`. `commands::export` sets it for an FLV
-    /// source, with one offset for each piece of this source, and for one source at most:
-    /// FFmpeg runs in the directory of the head, and the command names the head by its file name.
+    /// source, with one offset for each piece of this source, and for one source at most
+    /// (ADR 053). FFmpeg runs in the work directory of the export, which holds the head, and the
+    /// command names the head by its file name (ADR 055).
     pub flv_input: Option<flv_input::FlvInput>,
 }
 
@@ -709,16 +715,6 @@ impl ExportPlan {
                 .as_ref()
                 .map_or(audio.output_sample_rate, |source| source.sample_rate),
         )
-    }
-
-    /// The directory FFmpeg runs in: the directory of the head of the one source with an FLV
-    /// input, or `None` when no source has one (ADR 046).
-    #[must_use]
-    pub fn working_directory(&self) -> Option<&std::path::Path> {
-        self.sources
-            .iter()
-            .find_map(|source| source.flv_input.as_ref())
-            .map(|flv| flv.working_directory.as_path())
     }
 
     /// True when a second `ffmpeg` copies the audio packets of the source into a pipe, and the
@@ -994,6 +990,10 @@ export_error_codes! {
     /// worker panicked or its thread could not be started, mirroring
     /// `ImportMediaErrorCode::CommandExecutionFailed`.
     CommandExecutionFailed => "commandExecutionFailed",
+    /// Produced by `commands::export::start_export`, when the cache directory of the application
+    /// has no path, and by `commands::export::prepare_export_with`, when the work directory of
+    /// the export cannot be created (ADR 055).
+    WorkDirectoryUnavailable => "workDirectoryUnavailable",
 }
 
 #[cfg(test)]
@@ -1062,6 +1062,7 @@ mod tests {
                 "sourcePathInvalid",
                 "sourceRevisionMismatch",
                 "tooManySegments",
+                "workDirectoryUnavailable",
             ]
         );
     }

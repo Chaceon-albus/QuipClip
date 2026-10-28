@@ -634,7 +634,7 @@ const ERROR_USER_MAPPED_FILE: i32 = 1224;
 /// attempt and no further wait. Read [`ERROR_ACCESS_DENIED`] before you rely on "transient":
 /// several permanent conditions raise that code as well.
 #[cfg(windows)]
-fn is_transient_sharing_error(error: &io::Error) -> bool {
+pub(crate) fn is_transient_sharing_error(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),
         Some(
@@ -720,7 +720,7 @@ fn replace_retry_delay(retry_index: u32) -> Duration {
 /// for byte the fixed schedule this module ran before the budget was a parameter, and it is why
 /// the `#[cfg(windows)]` tests that time a held destination still pass unchanged.
 #[cfg(any(windows, test))]
-fn retry_waits(budget: Duration) -> impl Iterator<Item = Duration> {
+pub(crate) fn retry_waits(budget: Duration) -> impl Iterator<Item = Duration> {
     let mut remaining = budget;
     // `saturating_sub`, not `- 1`: a `MAXIMUM_REPLACE_ATTEMPTS` of 0 would underflow a `u32` to
     // `u32::MAX` with overflow checks off, turning the guard rail into the unbounded loop it

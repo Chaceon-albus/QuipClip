@@ -88,9 +88,10 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   // The application quits, so nothing can start the export again.
   exportQueueClosed: null,
 
-  // The fix is outside the export dialog and the settings: the application data directory,
-  // the source file, or the marked segments. A second attempt fails the same way.
+  // The fix is outside the export dialog and the settings: the application data or cache
+  // directory, the source file, or the marked segments. A second attempt fails the same way.
   appDataUnavailable: null,
+  workDirectoryUnavailable: null,
   ffprobeProcessFailed: null,
   ffprobeParseFailed: null,
   noSegments: null,

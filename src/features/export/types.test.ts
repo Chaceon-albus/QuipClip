@@ -226,6 +226,7 @@ describe("Export Types & Wire Constants", () => {
         "canceled",
         "commandExecutionFailed",
         "exportQueueClosed",
+        "workDirectoryUnavailable",
       ]);
     });
 
