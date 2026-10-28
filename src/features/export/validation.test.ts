@@ -11,10 +11,13 @@ import {
   isBackendExportErrorCode,
   isExportErrorCode,
   isExportProgressEvent,
+  isExportQueueSnapshot,
+  isExportQueueSnapshotRun,
   isExportSubmission,
   isExportStreams,
   normalizeExportError,
   validateExportProgressEvent,
+  validateExportQueueSnapshot,
   validateExportSubmission,
 } from "./validation";
 
@@ -179,6 +182,111 @@ describe("Export Validation & Normalization", () => {
     it("keeps the seq in the validated event", () => {
       const event = { seq: 12, event: "publishing", runId: "run-1" };
       expect(validateExportProgressEvent(event)).toEqual(event);
+    });
+  });
+
+  describe("the export queue snapshot", () => {
+    const waiting = {
+      runId: "run-3",
+      outputPath: "/out/c.mp4",
+      presetName: "Fast",
+      segmentCount: 1,
+      streams: "videoOnly",
+      phase: "waiting",
+    };
+    const failed = {
+      runId: "run-1",
+      outputPath: "/out/a.mp4",
+      presetName: "Fast",
+      segmentCount: 2,
+      streams: "videoAndAudio",
+      phase: "failed",
+      error: { code: "ffmpegProcessFailed", detail: "tail", exitCode: 1 },
+      endOrder: 1,
+    };
+    const running = {
+      runId: "run-2",
+      outputPath: "/out/b.mp4",
+      presetName: "Slow",
+      segmentCount: 3,
+      streams: "audioOnly",
+      phase: "running",
+      frame: 12,
+      expectedFrames: 40,
+      elapsedMs: 2500,
+    };
+    const good = { seq: 4, runs: [failed, running, waiting] };
+
+    it("accepts a good snapshot, and an empty one", () => {
+      expect(isExportQueueSnapshot(good)).toBe(true);
+      expect(validateExportQueueSnapshot(good)).toEqual(good);
+      expect(isExportQueueSnapshot({ seq: 0, runs: [] })).toBe(true);
+      for (const phase of ["preparing", "publishing"]) {
+        expect(isExportQueueSnapshotRun({ ...waiting, phase })).toBe(true);
+      }
+      expect(isExportQueueSnapshotRun({ ...failed, phase: "canceled" })).toBe(true);
+      const { error: _error, ...finished } = failed;
+      expect(isExportQueueSnapshotRun({ ...finished, phase: "finished" })).toBe(true);
+    });
+
+    it("refuses an unknown phase and a run without its id", () => {
+      for (const phase of ["queued", "Waiting", "", 3, undefined]) {
+        expect(isExportQueueSnapshotRun({ ...waiting, phase })).toBe(false);
+      }
+      const { runId: _runId, ...withoutId } = waiting;
+      expect(isExportQueueSnapshotRun(withoutId)).toBe(false);
+      expect(isExportQueueSnapshotRun({ ...waiting, runId: "" })).toBe(false);
+      expect(isExportQueueSnapshotRun({ ...waiting, streams: "both" })).toBe(false);
+      expect(isExportQueueSnapshotRun({ ...waiting, presetName: null })).toBe(false);
+      expect(
+        isExportQueueSnapshot({ seq: 1, runs: [{ ...waiting, phase: "queued" }] }),
+      ).toBe(false);
+    });
+
+    it("refuses negative and unsafe numbers", () => {
+      const bad = [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, "5"];
+      for (const value of bad) {
+        expect(isExportQueueSnapshot({ seq: value, runs: [] })).toBe(false);
+        expect(isExportQueueSnapshotRun({ ...running, frame: value })).toBe(false);
+        expect(isExportQueueSnapshotRun({ ...running, expectedFrames: value })).toBe(
+          false,
+        );
+        expect(isExportQueueSnapshotRun({ ...running, elapsedMs: value })).toBe(false);
+        expect(isExportQueueSnapshotRun({ ...failed, endOrder: value })).toBe(false);
+        expect(isExportQueueSnapshotRun({ ...waiting, segmentCount: value })).toBe(
+          false,
+        );
+      }
+      expect(isExportQueueSnapshotRun({ ...failed, endOrder: 0 })).toBe(false);
+    });
+
+    it("refuses a run that breaks the rules of the backend", () => {
+      // Only an ended run has an end order, and it has no elapsed time.
+      expect(isExportQueueSnapshotRun({ ...waiting, endOrder: 1 })).toBe(false);
+      expect(isExportQueueSnapshotRun({ ...failed, elapsedMs: 10 })).toBe(false);
+      const { endOrder: _endOrder, ...withoutOrder } = failed;
+      expect(isExportQueueSnapshotRun(withoutOrder)).toBe(false);
+      // Only a run that failed or was canceled has an error, with a known code.
+      const { error: _error, ...withoutError } = failed;
+      expect(isExportQueueSnapshotRun(withoutError)).toBe(false);
+      expect(isExportQueueSnapshotRun({ ...running, error: failed.error })).toBe(false);
+      expect(isExportQueueSnapshotRun({ ...failed, error: { code: "nope" } })).toBe(
+        false,
+      );
+      expect(
+        isExportQueueSnapshotRun({
+          ...failed,
+          error: { code: "canceled", exitCode: 2 ** 40 },
+        }),
+      ).toBe(false);
+    });
+
+    it("throws a TypeError for a payload that is not a snapshot", () => {
+      expect(() => validateExportQueueSnapshot(null)).toThrow(TypeError);
+      expect(() => validateExportQueueSnapshot({ seq: 1 })).toThrow(TypeError);
+      expect(() => validateExportQueueSnapshot({ seq: 1, runs: [null] })).toThrow(
+        TypeError,
+      );
     });
   });
 

@@ -424,7 +424,11 @@ export function createExportQueueStore(
       // failed subscription does not stop this start: the export store has its own, and the
       // next submission tries again.
       ensureSubscribed().catch(noop);
-      const starting = exportStoreApi.getState().startExport(request);
+      // The backend journal drops the ended runs of the batch before (`newBatch`), so a page
+      // that loads again lists only this batch.
+      const starting = exportStoreApi
+        .getState()
+        .startExport({ ...request, newBatch: true });
       invokeChain = starting.then(noop, noop);
       const submission = await starting;
       if (submission === null) {
@@ -443,11 +447,13 @@ export function createExportQueueStore(
 
     /** Adds a run to the queue of the backend. The export store adopts it when it starts. */
     async function enqueue(request: ExportRequest): Promise<ExportQueueSubmitResult> {
+      // A run of the queue joins the batch, so it never asks the backend to start a new one.
+      const { newBatch: _newBatch, ...queuedRequest } = request;
       const invoke = async (): Promise<ExportSubmission> => {
         await ensureSubscribed();
         awaitingRunId = true;
         try {
-          return await startExportFn(request);
+          return await startExportFn(queuedRequest);
         } finally {
           awaitingRunId = false;
         }

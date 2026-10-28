@@ -21,6 +21,7 @@
     "allow-preset-test-results",
     "allow-start-export",
     "allow-cancel-export",
+    "allow-export-queue-snapshot",
     "allow-reveal-export-output",
     "allow-import-media",
     "allow-read-source-revision",

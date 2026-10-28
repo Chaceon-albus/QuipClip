@@ -161,6 +161,11 @@ pub struct ExportRequestWire {
     /// states what the comparison cannot see. `None` checks nothing.
     #[serde(default)]
     pub expected_source_revision: Option<ExpectedSourceRevisionWire>,
+    /// Whether the interface starts a new batch with this run. The export journal then removes
+    /// the runs of the earlier batch that ended (`commands::export_journal`). Absent means
+    /// `false`: the run joins the batch that the interface shows.
+    #[serde(default)]
+    pub new_batch: bool,
 }
 
 /// The size and the modification time of a source file, in the form of the revision that
@@ -377,6 +382,11 @@ pub async fn start_export(
     journal: tauri::State<'_, ExportJournal>,
     request: ExportRequestWire,
 ) -> Result<ExportSubmission, ExportCommandError> {
+    // First, before any check that can refuse the request: the interface starts its new batch
+    // also when this start is refused, so the journal must drop the ended runs too.
+    if request.new_batch {
+        journal.begin_batch();
+    }
     // Checked before the slot is claimed, so a request with an invalid preset is refused at
     // once and holds no slot.
     validate_request_preset(&request.preset)?;
@@ -2578,6 +2588,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
         let app_data = directory.path.join("app");
         let windows = PreviewWindows::default();
@@ -3002,6 +3013,21 @@ mod tests {
         assert!(serde_json::from_value::<ExportRequestWire>(value).is_err());
     }
 
+    #[test]
+    fn a_request_carries_an_optional_new_batch_flag() {
+        let without: ExportRequestWire =
+            serde_json::from_value(request_json(Some(serde_json::json!("videoAndAudio")))).unwrap();
+        assert!(!without.new_batch);
+
+        let mut value = request_json(Some(serde_json::json!("videoAndAudio")));
+        value["newBatch"] = serde_json::json!(true);
+        let with: ExportRequestWire = serde_json::from_value(value.clone()).unwrap();
+        assert!(with.new_batch);
+
+        value["newBatch"] = serde_json::json!("yes");
+        assert!(serde_json::from_value::<ExportRequestWire>(value).is_err());
+    }
+
     /// A request for `source` that expects `expected` as the revision of the source.
     fn request_expecting(
         source: &Path,
@@ -3021,6 +3047,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: expected,
+            new_batch: false,
         }
     }
 
@@ -3352,6 +3379,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
 
         let prepared = prepare_export_with(
@@ -3430,6 +3458,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
         let prepare = || {
             let request = request();
@@ -3554,6 +3583,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
 
         let error = prepare_export_with(
@@ -3602,6 +3632,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
 
         let error = prepare_export_with(
@@ -3668,6 +3699,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
 
         let result = prepare_export_with(
@@ -3758,6 +3790,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
 
         let error = prepare_export_with(
@@ -3814,6 +3847,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
 
         let error = prepare_export_with(
@@ -3870,6 +3904,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
 
         let error = prepare_export_with(
@@ -3962,6 +3997,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
 
         let error = prepare_export_with(
@@ -4278,6 +4314,7 @@ mod tests {
             streams,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
         prepare_export_with(
             PrepareRequest {
@@ -5229,6 +5266,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             expected_source_revision: None,
+            new_batch: false,
         };
         let error = prepare_export_with(
             PrepareRequest {
@@ -6435,6 +6473,7 @@ mod tests {
             streams,
             audio_mode,
             expected_source_revision: None,
+            new_batch: false,
         };
         prepare_export_with(
             PrepareRequest {
@@ -6595,6 +6634,7 @@ mod tests {
             streams,
             audio_mode: ExportAudioMode::Copy,
             expected_source_revision: None,
+            new_batch: false,
         };
         let prepared = prepare_export_with(
             PrepareRequest {

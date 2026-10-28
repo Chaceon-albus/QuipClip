@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { BACKEND_COMMANDS } from "@/lib/ipc";
 import type { Pts } from "@/types/project";
-import { cancelExport, startExport } from "./client";
+import { cancelExport, exportQueueSnapshot, startExport } from "./client";
 import {
   BACKEND_EXPORT_ERROR_CODES,
   ExportError,
@@ -228,5 +228,59 @@ describe("Media Export Client", () => {
         });
       },
     );
+  });
+});
+
+describe("exportQueueSnapshot", () => {
+  const snapshot = {
+    seq: 9,
+    runs: [
+      {
+        runId: "run-1",
+        outputPath: "/out/a.mp4",
+        presetName: "Fast",
+        segmentCount: 2,
+        streams: "videoAndAudio",
+        phase: "finished",
+        frame: 30,
+        endOrder: 1,
+      },
+      {
+        runId: "run-2",
+        outputPath: "/out/b.mp4",
+        presetName: "Fast",
+        segmentCount: 1,
+        streams: "audioOnly",
+        phase: "preparing",
+        elapsedMs: 1200,
+      },
+    ],
+  };
+
+  it("invokes the backend command without arguments and returns the snapshot", async () => {
+    const mockInvoke = vi.fn().mockResolvedValue(snapshot);
+
+    const result = await exportQueueSnapshot({ invoke: mockInvoke });
+
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith(BACKEND_COMMANDS.EXPORT_QUEUE_SNAPSHOT);
+    expect(BACKEND_COMMANDS.EXPORT_QUEUE_SNAPSHOT).toBe("export_queue_snapshot");
+    expect(result).toEqual(snapshot);
+  });
+
+  it("throws a normalized ExportError for a malformed snapshot", async () => {
+    const mockInvoke = vi.fn().mockResolvedValue({ seq: -1, runs: [] });
+
+    const promise = exportQueueSnapshot({ invoke: mockInvoke });
+    await expect(promise).rejects.toBeInstanceOf(ExportError);
+    await expect(promise).rejects.toMatchObject({ code: "unknown" });
+  });
+
+  it("normalizes a rejection of the backend", async () => {
+    const mockInvoke = vi.fn().mockRejectedValue({ code: "commandExecutionFailed" });
+
+    await expect(exportQueueSnapshot({ invoke: mockInvoke })).rejects.toMatchObject({
+      code: "commandExecutionFailed",
+    });
   });
 });

@@ -3,8 +3,12 @@
  */
 
 import { BACKEND_COMMANDS, invokeCommand, type InvokeFn } from "@/lib/ipc";
-import type { ExportRequest, ExportSubmission } from "./types";
-import { normalizeExportError, validateExportSubmission } from "./validation";
+import type { ExportQueueSnapshot, ExportRequest, ExportSubmission } from "./types";
+import {
+  normalizeExportError,
+  validateExportQueueSnapshot,
+  validateExportSubmission,
+} from "./validation";
 
 /**
  * Options for configuring export client command execution.
@@ -66,6 +70,29 @@ export async function cancelExport(
       throw new TypeError("Invalid cancel export result: expected boolean");
     }
     return rawResult;
+  } catch (error) {
+    throw normalizeExportError(error);
+  }
+}
+
+/**
+ * Invokes the backend `export_queue_snapshot` command, with no arguments.
+ *
+ * The answer lists the runs of the export journal of the backend, with the sequence number of
+ * the last event that it includes. A page that loaded again reads it to show the queue that the
+ * backend still runs. Validates the answer and normalizes any rejection into an `ExportError`.
+ *
+ * @param options Optional client configuration containing custom invoke.
+ * @returns The validated ExportQueueSnapshot.
+ * @throws ExportError if the backend rejects or returns malformed data.
+ */
+export async function exportQueueSnapshot(
+  options: ExportClientOptions = {},
+): Promise<ExportQueueSnapshot> {
+  const invoke = options.invoke ?? invokeCommand;
+  try {
+    const rawResult = await invoke<unknown>(BACKEND_COMMANDS.EXPORT_QUEUE_SNAPSHOT);
+    return validateExportQueueSnapshot(rawResult);
   } catch (error) {
     throw normalizeExportError(error);
   }

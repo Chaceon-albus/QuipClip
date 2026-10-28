@@ -122,6 +122,49 @@ describe("export queue store", () => {
     });
   });
 
+  it("marks only the start of a new batch with newBatch", async () => {
+    const { queue, start } = createFixture();
+
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+    await queue.getState().submit(createRequest("/out/b.mp4"));
+
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(start.mock.calls[0]?.[0]).toEqual({
+      ...createRequest("/out/a.mp4"),
+      newBatch: true,
+    });
+    expect(start.mock.calls[1]?.[0]).toEqual(createRequest("/out/b.mp4"));
+    expect(start.mock.calls[1]?.[0].newBatch).toBeUndefined();
+  });
+
+  it("strips newBatch from a request that goes through the queue", async () => {
+    const { queue, start } = createFixture();
+
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+    await queue.getState().submit({ ...createRequest("/out/b.mp4"), newBatch: true });
+
+    expect(start.mock.calls[1]?.[0]).toEqual(createRequest("/out/b.mp4"));
+    expect(start.mock.calls[1]?.[0]).not.toHaveProperty("newBatch");
+  });
+
+  it("sends a submission beside a finished result through the queue without newBatch", async () => {
+    const { queue, exportStore, start, emit } = createFixture();
+
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+    emit({ event: "preparing", runId: "run-1" });
+    finishRun(emit, "run-1", "/out/a.mp4");
+    expect(exportStore.getState().status).toBe("finished");
+
+    await expect(queue.getState().submit(createRequest("/out/b.mp4"))).resolves.toEqual(
+      {
+        kind: "queued",
+        runId: "run-2",
+      },
+    );
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(start.mock.calls[1]?.[0]).not.toHaveProperty("newBatch");
+  });
+
   it("queues runs while a run is live, in the order of submission", async () => {
     const { queue, exportStore } = createFixture();
     await queue.getState().submit(createRequest("/out/a.mp4"));

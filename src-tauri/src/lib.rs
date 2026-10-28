@@ -181,6 +181,7 @@ pub fn run() {
             commands::preset_test::preset_test_results,
             commands::export::start_export,
             commands::export::cancel_export,
+            commands::export_journal::export_queue_snapshot,
             commands::export_output::reveal_export_output,
             commands::media::import_media,
             commands::media::read_source_revision,
@@ -693,6 +694,8 @@ mod tests {
         "preset_test_results",
         "start_export",
         "cancel_export",
+        // The list of the export queue for a page that loaded again (ADR 049).
+        "export_queue_snapshot",
         "reveal_export_output",
         "import_media",
         "read_source_revision",

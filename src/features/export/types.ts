@@ -69,6 +69,12 @@ export type ExportRequest = {
    * changed file anyway, and the backend then checks nothing (ADR 024).
    */
   expectedSourceRevision?: ExportSourceRevision;
+  /**
+   * True when the queue store starts a new batch with this run. The backend journal then drops
+   * the runs of the earlier batch that ended, so that the list of the queue for a page that
+   * loads again shows only this batch. Absent or false for a run that joins the batch.
+   */
+  newBatch?: boolean;
 };
 
 /** The size and the modification time of a source file, as the import reports them (ADR 010). */
@@ -336,6 +342,73 @@ export type ExportProgressEvent = (
   | ExportFinishedEvent
   | ExportFailedEvent
 ) & { seq?: number };
+
+/**
+ * The phases of a run in the export journal of the backend, as `export_queue_snapshot` spells
+ * them. `canceled` is a run that a cancel ended after it left `waiting`. A run that a cancel
+ * withdrew from the queue is not in the journal.
+ */
+export const EXPORT_QUEUE_RUN_PHASES = [
+  "waiting",
+  "preparing",
+  "running",
+  "publishing",
+  "finished",
+  "failed",
+  "canceled",
+] as const;
+
+export type ExportQueueRunPhase = (typeof EXPORT_QUEUE_RUN_PHASES)[number];
+
+/**
+ * The error of a run in the snapshot: the shape of the rejection of `start_export`, and of the
+ * body of a `failed` event.
+ */
+export type ExportQueueRunError = {
+  code: BackendExportErrorCode;
+  detail?: string;
+  exitCode?: number;
+  encoder?: string;
+  measuredDurationUs?: number;
+  expectedDurationUs?: number;
+};
+
+/** One run of the answer of `export_queue_snapshot`. An absent value is not on the wire. */
+export type ExportQueueSnapshotRun = {
+  runId: string;
+  outputPath: string;
+  presetName: string;
+  segmentCount: number;
+  streams: ExportStreams;
+  phase: ExportQueueRunPhase;
+  /** The last frame that a `progress` event reported, or the frame count of `finished`. */
+  frame?: number;
+  expectedFrames?: number;
+  /** Present for a run that failed or that was canceled. */
+  error?: ExportQueueRunError;
+  /** The milliseconds since the run sent `preparing`. Only a run that did not end has it. */
+  elapsedMs?: number;
+  /**
+   * The position of the run among the ended runs. Only an ended run has it. The counter runs for
+   * the whole process, so the values of one batch have gaps and need not start at 1. Sort by
+   * it, and never use it as an index.
+   */
+  endOrder?: number;
+};
+
+/**
+ * The answer of `export_queue_snapshot`: the runs of the export journal, for a page that loaded
+ * again.
+ *
+ * `seq` is the sequence number of the last event that the snapshot includes. Each event with a
+ * number that is not larger is already in the snapshot. The runs come in this order: the ended
+ * runs by `endOrder`, the run that left `waiting` and did not end, then the waiting runs in the
+ * order of the queue of the backend.
+ */
+export type ExportQueueSnapshot = {
+  seq: number;
+  runs: ExportQueueSnapshotRun[];
+};
 
 /**
  * Output status states supported by the export store.

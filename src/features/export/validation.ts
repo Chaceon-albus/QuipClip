@@ -9,11 +9,16 @@ import { isNonNegativeRational, isPositiveRational } from "@/features/media/vali
 import {
   BACKEND_EXPORT_ERROR_CODES,
   EXPORT_ERROR_CODES,
+  EXPORT_QUEUE_RUN_PHASES,
   EXPORT_STREAMS,
   ExportError,
   type BackendExportErrorCode,
   type ExportErrorCode,
   type ExportProgressEvent,
+  type ExportQueueRunError,
+  type ExportQueueRunPhase,
+  type ExportQueueSnapshot,
+  type ExportQueueSnapshotRun,
   type ExportSubmission,
   type ExportStreams,
 } from "./types";
@@ -156,6 +161,103 @@ export function validateExportProgressEvent(value: unknown): ExportProgressEvent
   if (!isExportProgressEvent(value)) {
     throw new TypeError(
       "Invalid export progress event: payload must match ExportProgressEvent schema",
+    );
+  }
+  return value;
+}
+
+/**
+ * Checks whether an unknown value is one of the `EXPORT_QUEUE_RUN_PHASES` wire strings.
+ */
+export function isExportQueueRunPhase(value: unknown): value is ExportQueueRunPhase {
+  return (
+    typeof value === "string" &&
+    (EXPORT_QUEUE_RUN_PHASES as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Checks whether an unknown value is the error of a run in the snapshot.
+ */
+function isExportQueueRunError(value: unknown): value is ExportQueueRunError {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const e = value as Record<string, unknown>;
+  return (
+    isBackendExportErrorCode(e.code) &&
+    (e.detail === undefined || typeof e.detail === "string") &&
+    (e.exitCode === undefined || isI32(e.exitCode)) &&
+    (e.encoder === undefined || typeof e.encoder === "string") &&
+    (e.measuredDurationUs === undefined || isDurationUs(e.measuredDurationUs)) &&
+    (e.expectedDurationUs === undefined || isDurationUs(e.expectedDurationUs))
+  );
+}
+
+/**
+ * Checks whether an unknown value is one run of the answer of `export_queue_snapshot`.
+ *
+ * Besides the shape, it checks the rules of the backend: only an ended run has `endOrder`, which
+ * starts at 1, only a run that failed or was canceled has `error`, and an ended run has no
+ * `elapsedMs`.
+ */
+export function isExportQueueSnapshotRun(
+  value: unknown,
+): value is ExportQueueSnapshotRun {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const r = value as Record<string, unknown>;
+  if (
+    typeof r.runId !== "string" ||
+    r.runId.length === 0 ||
+    typeof r.outputPath !== "string" ||
+    typeof r.presetName !== "string" ||
+    !isNonNegativeU32(r.segmentCount) ||
+    !isExportStreams(r.streams) ||
+    !isExportQueueRunPhase(r.phase) ||
+    (r.frame !== undefined && !isNonNegativeU32(r.frame)) ||
+    (r.expectedFrames !== undefined && !isNonNegativeU32(r.expectedFrames)) ||
+    (r.elapsedMs !== undefined && !isSequenceNumber(r.elapsedMs))
+  ) {
+    return false;
+  }
+  const ended =
+    r.phase === "finished" || r.phase === "failed" || r.phase === "canceled";
+  const hasError = r.phase === "failed" || r.phase === "canceled";
+  if (ended) {
+    if (!isSequenceNumber(r.endOrder) || r.endOrder < 1 || r.elapsedMs !== undefined) {
+      return false;
+    }
+  } else if (r.endOrder !== undefined) {
+    return false;
+  }
+  return hasError ? isExportQueueRunError(r.error) : r.error === undefined;
+}
+
+/**
+ * Checks whether an unknown value is the answer of `export_queue_snapshot`.
+ */
+export function isExportQueueSnapshot(value: unknown): value is ExportQueueSnapshot {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const s = value as Record<string, unknown>;
+  return (
+    isSequenceNumber(s.seq) &&
+    Array.isArray(s.runs) &&
+    s.runs.every((run) => isExportQueueSnapshotRun(run))
+  );
+}
+
+/**
+ * Validates an unknown payload against the ExportQueueSnapshot schema.
+ * Throws a TypeError if the payload does not conform to the expected shape.
+ */
+export function validateExportQueueSnapshot(value: unknown): ExportQueueSnapshot {
+  if (!isExportQueueSnapshot(value)) {
+    throw new TypeError(
+      "Invalid export queue snapshot: payload must match ExportQueueSnapshot schema",
     );
   }
   return value;

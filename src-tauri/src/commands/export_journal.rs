@@ -16,9 +16,9 @@
 
 use super::export::{ExportCommandError, ExportEvent};
 use super::export_output::PUBLISHED_EXPORT_LIMIT;
-use crate::ffmpeg::export::{ExportErrorCode, ExportStreams};
+use crate::ffmpeg::export::{ExportErrorCode, ExportRegistry, ExportStreams};
 use serde::Serialize;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 /// One export event as it goes on the wire: the event with its sequence number.
@@ -171,6 +171,24 @@ impl ExportJournal {
         });
     }
 
+    /// Remove every ended run, because the interface starts a new batch and the user closed the
+    /// batch that showed them. A run that did not end stays.
+    ///
+    /// `start_export` calls this first for a request with `newBatch`, before any check that can
+    /// refuse the request. So a refused start still moves the boundary of the batch, as the
+    /// interface does. A second call removes nothing more.
+    pub fn begin_batch(&self) {
+        let removed: Vec<JournalRun> = {
+            let mut state = self.lock();
+            let (ended, live) = std::mem::take(&mut state.runs)
+                .into_iter()
+                .partition(|run| run.phase.has_ended());
+            state.runs = live;
+            ended
+        };
+        drop(removed);
+    }
+
     /// Remove the record of a run that the registry refused, because the queue closed. Such a run
     /// sends no event.
     pub fn forget(&self, run_id: &str) {
@@ -235,6 +253,136 @@ impl ExportJournal {
     /// in the numbers, which is harmless.
     fn lock(&self) -> MutexGuard<'_, JournalState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The answer of `export_queue_snapshot`: the runs of the journal, for a page that loaded again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportQueueSnapshot {
+    /// The sequence number of the last event before the copy. The page drops each later event
+    /// whose number is not larger.
+    pub seq: u64,
+    /// The ended runs by their order of end, then the runs that did not end. See
+    /// [`queue_snapshot`] for the order.
+    pub runs: Vec<ExportQueueSnapshotRun>,
+}
+
+/// One run of [`ExportQueueSnapshot`]. An absent value is not on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportQueueSnapshotRun {
+    pub run_id: String,
+    pub output_path: String,
+    pub preset_name: String,
+    pub segment_count: u32,
+    pub streams: ExportStreams,
+    pub phase: RunPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_frames: Option<u64>,
+    /// The error of a run that failed or that was canceled, in the shape of the rejection of
+    /// `start_export`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ExportCommandError>,
+    /// The milliseconds since the run sent `preparing`. Only a run that did not end has it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    /// The position of the run among the ended runs. The counter runs for the whole process, so
+    /// the values of one batch have gaps. A reader sorts by it and never uses it as an index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_order: Option<u64>,
+}
+
+/// List the export runs for a page that loaded again, with the sequence number of the last event
+/// that the list includes.
+///
+/// The command reads the journal in one lock, and then the queue of the registry.
+// Keep the command `async`: Tauri runs a sync command on the main thread, and the journal lock
+// must not be taken there (see `ExportJournal`).
+#[tauri::command]
+pub async fn export_queue_snapshot(
+    journal: tauri::State<'_, ExportJournal>,
+    registry: tauri::State<'_, Arc<ExportRegistry>>,
+) -> Result<ExportQueueSnapshot, ExportCommandError> {
+    let snapshot = journal.snapshot();
+    let queued = registry.queued_run_ids();
+    Ok(queue_snapshot(snapshot, &queued, Instant::now()))
+}
+
+/// Put the runs of `snapshot` in the order of the interface, and convert them to the wire.
+///
+/// The order is:
+///
+/// 1. The ended runs, by their order of end.
+/// 2. The runs that left `waiting` and did not end, in the order of submission. One run at most
+///    holds the slot.
+/// 3. The waiting runs that `queued` lists, in the order of `queued`. That is the order of the
+///    registry. `record_submission` and `ExportRegistry::submit` are two steps, so the order of
+///    submission in the journal can differ from it.
+/// 4. The waiting runs that `queued` does not list, in the order of submission. The registry
+///    started such a run just now, before it sent `preparing`, or `start_export` did not submit
+///    it yet, or the exit dropped it.
+///
+/// `now` gives the elapsed time of each run that did not end.
+#[must_use]
+pub fn queue_snapshot(
+    snapshot: JournalSnapshot,
+    queued: &[String],
+    now: Instant,
+) -> ExportQueueSnapshot {
+    let mut ended = Vec::new();
+    let mut active = Vec::new();
+    let mut waiting = Vec::new();
+    for run in snapshot.runs {
+        match run.phase {
+            phase if phase.has_ended() => ended.push(run),
+            RunPhase::Waiting => waiting.push(run),
+            _ => active.push(run),
+        }
+    }
+    ended.sort_by_key(|run| run.end_order);
+    // A stable sort: the runs that `queued` does not list keep their order, after the others.
+    waiting.sort_by_key(|run| {
+        queued
+            .iter()
+            .position(|id| *id == run.run_id)
+            .unwrap_or(usize::MAX)
+    });
+    let runs = ended
+        .into_iter()
+        .chain(active)
+        .chain(waiting)
+        .map(|run| snapshot_run(run, now))
+        .collect();
+    ExportQueueSnapshot {
+        seq: snapshot.seq,
+        runs,
+    }
+}
+
+fn snapshot_run(run: JournalRun, now: Instant) -> ExportQueueSnapshotRun {
+    let elapsed_ms = if run.phase.has_ended() {
+        None
+    } else {
+        run.prepared_at.map(|prepared_at| {
+            u64::try_from(now.saturating_duration_since(prepared_at).as_millis())
+                .unwrap_or(u64::MAX)
+        })
+    };
+    ExportQueueSnapshotRun {
+        run_id: run.run_id,
+        output_path: run.facts.output_path,
+        preset_name: run.facts.preset_name,
+        segment_count: run.facts.segment_count,
+        streams: run.facts.streams,
+        phase: run.phase,
+        frame: run.frame,
+        expected_frames: run.expected_frames,
+        error: run.error,
+        elapsed_ms,
+        end_order: run.end_order,
     }
 }
 
@@ -361,7 +509,7 @@ fn remove_run(runs: &mut Vec<JournalRun>, run_id: &str) -> Option<JournalRun> {
 mod tests {
     use super::*;
     use crate::time::Rational;
-    use std::sync::Arc;
+    use std::time::Duration;
 
     fn facts(output_path: &str) -> RunFacts {
         RunFacts {
@@ -661,6 +809,176 @@ mod tests {
         assert_eq!(phase(&journal, "running"), Some(RunPhase::Preparing));
         assert_eq!(snapshot.runs[0].run_id, "waiting");
         assert_eq!(snapshot.runs[1].run_id, "running");
+    }
+
+    #[test]
+    fn begin_batch_removes_the_ended_runs_and_keeps_the_live_ones() {
+        let journal = ExportJournal::default();
+        journal.record_submission("ended", facts("/a.mp4"));
+        journal.record_submission("running", facts("/b.mp4"));
+        journal.record_submission("waiting", facts("/c.mp4"));
+        emit(&journal, preparing("ended"));
+        emit(&journal, finished("ended"));
+        emit(&journal, preparing("running"));
+
+        journal.record_submission("next", facts("/d.mp4"));
+        assert!(phase(&journal, "ended").is_some());
+
+        journal.begin_batch();
+        let ids = |journal: &ExportJournal| -> Vec<String> {
+            journal
+                .snapshot()
+                .runs
+                .into_iter()
+                .map(|run| run.run_id)
+                .collect()
+        };
+        assert_eq!(ids(&journal), ["running", "waiting", "next"]);
+        // A second call removes nothing more, and changes no sequence number.
+        journal.begin_batch();
+        assert_eq!(ids(&journal), ["running", "waiting", "next"]);
+        assert_eq!(journal.snapshot().seq, 3);
+    }
+
+    fn snapshot_ids(snapshot: &ExportQueueSnapshot) -> Vec<&str> {
+        snapshot
+            .runs
+            .iter()
+            .map(|run| run.run_id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_snapshot_lists_the_ended_runs_then_the_active_run_then_the_queue_of_the_registry() {
+        let journal = ExportJournal::default();
+        for id in ["a", "b", "c", "d", "e", "f", "g"] {
+            journal.record_submission(id, facts("/x.mp4"));
+        }
+        // `c` ends before `a`.
+        emit(&journal, preparing("c"));
+        emit(&journal, finished("c"));
+        emit(&journal, preparing("a"));
+        emit(&journal, failed("a", ExportErrorCode::FfmpegProcessFailed));
+        emit(&journal, preparing("b"));
+
+        // The registry lists `f` before `d`, and does not list `e` and `g`.
+        let queued = ["f".to_owned(), "d".to_owned()];
+        let snapshot = queue_snapshot(journal.snapshot(), &queued, Instant::now());
+        assert_eq!(snapshot_ids(&snapshot), ["c", "a", "b", "f", "d", "e", "g"]);
+        assert_eq!(snapshot.seq, 5);
+        assert_eq!(snapshot.runs[0].end_order, Some(1));
+        assert_eq!(snapshot.runs[1].end_order, Some(2));
+    }
+
+    #[test]
+    fn the_snapshot_gives_an_elapsed_time_only_to_a_run_that_did_not_end() {
+        let journal = ExportJournal::default();
+        journal.record_submission("ended", facts("/a.mp4"));
+        journal.record_submission("running", facts("/b.mp4"));
+        journal.record_submission("waiting", facts("/c.mp4"));
+        emit(&journal, preparing("ended"));
+        emit(&journal, failed("ended", ExportErrorCode::Canceled));
+        emit(&journal, preparing("running"));
+
+        let now = Instant::now() + Duration::from_millis(1500);
+        let snapshot = queue_snapshot(journal.snapshot(), &["waiting".to_owned()], now);
+        assert_eq!(snapshot.runs[0].elapsed_ms, None);
+        assert!(snapshot.runs[1].elapsed_ms.is_some_and(|ms| ms >= 1500));
+        assert_eq!(snapshot.runs[2].elapsed_ms, None);
+    }
+
+    #[test]
+    fn the_snapshot_goes_on_the_wire_in_camel_case_without_absent_fields() {
+        let journal = ExportJournal::default();
+        journal.record_submission("ended", facts("/a.mp4"));
+        journal.record_submission("running", facts("/b.mp4"));
+        journal.record_submission("waiting", facts("/c.mp4"));
+        emit(&journal, preparing("ended"));
+        emit(
+            &journal,
+            ExportEvent::Failed {
+                run_id: "ended".to_owned(),
+                code: ExportErrorCode::FfmpegProcessFailed,
+                detail: Some("tail".to_owned()),
+                exit_code: Some(1),
+                encoder: None,
+                measured_duration_us: None,
+                expected_duration_us: None,
+            },
+        );
+        emit(&journal, preparing("running"));
+        emit(
+            &journal,
+            ExportEvent::Progress {
+                run_id: "running".to_owned(),
+                frame: 12,
+                expected_frames: Some(40),
+                fps: None,
+                speed: None,
+                total_size: None,
+            },
+        );
+        let snapshot = journal.snapshot();
+        let prepared_at = run(&snapshot, "running").unwrap().prepared_at.unwrap();
+        let now = prepared_at + Duration::from_millis(2500);
+        let value =
+            serde_json::to_value(queue_snapshot(snapshot, &["waiting".to_owned()], now)).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "seq": 4,
+                "runs": [
+                    {
+                        "runId": "ended",
+                        "outputPath": "/a.mp4",
+                        "presetName": "H.264",
+                        "segmentCount": 2,
+                        "streams": "videoAndAudio",
+                        "phase": "failed",
+                        "error": { "code": "ffmpegProcessFailed", "detail": "tail", "exitCode": 1 },
+                        "endOrder": 1,
+                    },
+                    {
+                        "runId": "running",
+                        "outputPath": "/b.mp4",
+                        "presetName": "H.264",
+                        "segmentCount": 2,
+                        "streams": "videoAndAudio",
+                        "phase": "preparing",
+                        "frame": 12,
+                        "expectedFrames": 40,
+                        "elapsedMs": 2500,
+                    },
+                    {
+                        "runId": "waiting",
+                        "outputPath": "/c.mp4",
+                        "presetName": "H.264",
+                        "segmentCount": 2,
+                        "streams": "videoAndAudio",
+                        "phase": "waiting",
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn each_phase_has_its_wire_string() {
+        let phases = [
+            (RunPhase::Waiting, "waiting"),
+            (RunPhase::Preparing, "preparing"),
+            (RunPhase::Running, "running"),
+            (RunPhase::Publishing, "publishing"),
+            (RunPhase::Finished, "finished"),
+            (RunPhase::Failed, "failed"),
+            (RunPhase::Canceled, "canceled"),
+        ];
+        for (phase, name) in phases {
+            assert_eq!(
+                serde_json::to_value(phase).unwrap(),
+                serde_json::json!(name)
+            );
+        }
     }
 
     fn sequenced(event: &ExportEvent) -> serde_json::Value {
