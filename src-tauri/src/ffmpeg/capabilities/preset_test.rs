@@ -897,8 +897,8 @@ mod tests {
     /// stereo audio, planned by `build_plan` and rendered by `build_arguments`.
     fn export_command_of(preset: &Preset) -> Vec<String> {
         use crate::ffmpeg::export::{
-            build_arguments, build_filter_graph, build_plan, ExportStreams, GraphShape, PathFacts,
-            PathIdentity, PlanRequest, PlanSource, SegmentBoundary,
+            build_arguments, build_plan, ExportStreams, GraphShape, PathFacts, PathIdentity,
+            PlanRequest, PlanSource, SegmentBoundary,
         };
         use crate::ffmpeg::{AudioProbe, MediaProbe};
         use crate::time::Pts;
@@ -972,11 +972,14 @@ mod tests {
             },
         )
         .expect("the preset plans");
-        let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
+        let graph = crate::ffmpeg::export::graph_file::GraphFile {
+            option: crate::ffmpeg::export::graph_file::GraphFileOption::Slash,
+            name: "encoder.graph",
+        };
         build_arguments(
             &plan,
             GraphShape::InputPerSegment,
-            &graph,
+            graph,
             Path::new(EXPORT_RESERVATION),
         )
     }

@@ -3,7 +3,8 @@
 //! Each export creates the directory `export-<pid>-<n>` in the cache directory of the
 //! application: `<pid>` is the process ID of QuipClip, and `<n>` a counter of the process. The
 //! `ffmpeg` processes of the export run in it, and their commands name its files by their names
-//! alone. It holds the head of each FLV source of the export, `h<k>.flv` (ADR 046).
+//! alone. It holds the graph files of [`super::graph_file`] and the head of each FLV source of the
+//! export, `h<k>.flv` (ADR 046).
 //!
 //! A write never creates the directory. So a write that an abandoned preparation (ADR 050) makes
 //! after the removal fails, and it leaves nothing.

@@ -862,6 +862,8 @@ export const zhCN: TranslationCatalog = {
     commandExecutionFailed: "无法运行导出命令。",
     exportQueueClosed: "QuipClip 正在退出，因此未开始导出。",
     workDirectoryUnavailable: "无法在应用程序缓存目录中创建导出的工作目录。",
+    graphFileUnsupported:
+      "此 FFmpeg 版本无法从文件读取滤镜图。请安装其他 FFmpeg 版本。",
     dialogFailed: "无法打开导出保存对话框。",
     sourceRevisionChanged:
       "打开之后，磁盘上的视频文件已更改。已标记的片段可能不再指向相同的帧。",

@@ -559,7 +559,7 @@ fn default_pixel_format() -> String {
 ///
 /// - The name holds 1 to [`MAX_OPTION_NAME_CHARS`] characters. It starts with an ASCII letter,
 ///   and then holds only ASCII letters, digits, `_`, `.`, and `-`. The rule refuses a `:`,
-///   which would change the stream specifier, and a `/`, because FFmpeg 7.1 and later read the
+///   which would change the stream specifier, and a `/`, because FFmpeg 7.0 and later read the
 ///   value of `-/<name>` from a file.
 /// - The name is not in [`DENIED_OPTION_NAMES`].
 /// - The value holds 1 to [`MAX_OPTION_VALUE_CHARS`] characters, and no NUL, CR, LF or `"`,

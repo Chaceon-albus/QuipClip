@@ -167,6 +167,7 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "commandExecutionFailed",
   "exportQueueClosed",
   "workDirectoryUnavailable",
+  "graphFileUnsupported",
 ] as const;
 
 export type BackendExportErrorCode = (typeof BACKEND_EXPORT_ERROR_CODES)[number];

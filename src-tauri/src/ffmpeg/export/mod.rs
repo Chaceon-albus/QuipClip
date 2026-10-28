@@ -21,15 +21,21 @@
 //! read a platform identity for it, so a destination that spells the source a second way -- a hard
 //! link, a symlink, a case-insensitive volume -- cannot pass the same-file check.
 //!
-//! [`graph`] renders a finished plan into ADR 014's inline `-filter_complex` string: one
+//! [`graph`] renders a finished plan into ADR 014's `-filter_complex` string: one
 //! `trim`/`atrim` chain for each segment, cut on absolute stream indices at integer
-//! `start_pts`/`end_pts` boundaries, joined by `concat` in plan order, in whichever of the three
+//! `start_pts`/`end_pts` boundaries, joined by `concat` in plan order, in whichever of the
 //! [`GraphShape`] variants the argument builder's command-line budget allows.
 //!
-//! [`arguments`] builds the ffmpeg argument vector from a plan, a rendered graph, and the
-//! reserved output path, in the order ADR 014's "The command" section gives. This module also
-//! holds the command-line budget, because the graph goes on the command line.
-//! [`arguments::choose_graph_shape`] decides whether one input for each segment stays inside
+//! [`graph_file`] holds the graph files of ADR 055: the export writes each graph into a file of
+//! its work directory, and a command names the file with `-/filter_complex` (FFmpeg 7.0 and
+//! later) or `-filter_complex_script` (older builds). Its option probe asks the installed
+//! `ffmpeg` which of the two it reads, and keeps each successful answer for the life of the
+//! process.
+//!
+//! [`arguments`] builds the ffmpeg argument vector from a plan, the name of its graph file, and
+//! the reserved output path, in the order ADR 014's "The command" section gives. This module also
+//! holds the command-line budget, which the inputs of a command spend now that the graph is in a
+//! file. [`arguments::choose_graph_shape`] decides whether one input for each segment stays inside
 //! that budget, and [`graph`] does not. Two of the arguments are mandatory. Without `-f`,
 //! ffmpeg cannot select a muxer for the reserved name, and it stops with an error. Without
 //! `-y`, ffmpeg does not write the reserved file, and it exits with code 0. That second
@@ -74,6 +80,7 @@ pub mod copy;
 pub mod flv_input;
 pub mod fsinspect;
 pub mod graph;
+pub mod graph_file;
 pub mod output;
 pub mod plan;
 pub mod process;
@@ -170,36 +177,23 @@ pub enum ExportAudioMode {
 /// with one input for each piece, one input. A segment across clips gives one piece for each
 /// clip, so the limit can stop an export of fewer segments than pieces.
 ///
-/// This is a command-line budget, not a sanity bound. ADR 014 measurement 13 leaves the
-/// renderer no portable way to move the filter graph off the command line:
-/// `-filter_complex_script` is absent from ffmpeg 9.0.1, and its replacement
-/// `-/filter_complex` is absent before 7.1, so no single spelling works on every build a
-/// user can have. The graph therefore rides inline and competes with the arguments for the
-/// one command-line budget Windows allows.
-///
-/// ADR 014 measurement 15 measures what that costs: the graph grows by about the same
-/// amount for each added piece in *both* [`GraphShape`] variants. The single-input shape
-/// (one seek for each source, then `split`/`asplit`) writes the path of each source once
-/// instead of once for each piece, so it reaches further on a long path, but it does not remove
-/// that growth, and each further source adds an input of its own. An input at the longest
-/// Windows path costs about as many bytes as a chain, so each source takes the place of one
-/// piece.
-///
-/// The value is the largest at which the widest command the settings permit fits the Windows
-/// budget, for the encoder and for the audio process of ADR 043, for every count of sources at
-/// the longest Windows path: with the pieces in turn or skewed toward the source of the FLV
-/// input, with every piece reading audio or every piece generating silence, and with and without
-/// video. One source of 92 pieces does not fit. From 11 sources on, the sum that fits is larger
-/// than this value, up to 95, so the rule refuses a few exports that would fit. The tests of
-/// `arguments.rs` hold the measurement, and the frontend states the same rule in the message of
+/// This was a command-line budget, not a sanity bound. Until ADR 055 the filter graph rode inline
+/// as the value of `-filter_complex`, and it competed with the arguments for the one command-line
+/// budget Windows allows. ADR 014 measurement 15 measured what that cost: the graph grows by about
+/// the same amount for each added piece in *both* [`GraphShape`] variants. The value was the
+/// largest at which the widest command the settings permit fit the Windows budget, for the
+/// encoder and for the audio process of ADR 043, for every count of sources at the longest
+/// Windows path. The frontend states the same rule in the message of
 /// [`ExportErrorCode::TooManySegments`].
 ///
+/// Since ADR 055 the graph is in a file of the work directory, read through `-/filter_complex
+/// <file>` on FFmpeg 7.0 and later or `-filter_complex_script <file>` on older builds
+/// ([`graph_file`]). A command line now holds the fixed arguments and the inputs. The tests of
+/// `arguments.rs` still prove that every command fits at this value. A later unit of ADR 055
+/// replaces this rule with the limits of that record.
+///
 /// ffmpeg itself is not the constraint here: measurement 14 found that many inputs of one
-/// file do not cause a failure. A larger export needs the graph off the command line
-/// instead, through the `-/filter_complex <file>` form that ffmpeg 7.1 and later accept.
-/// The capability probe already reads the version, so a later unit can select that form on
-/// a build that offers it and keep the inline form on an older one. ADR 014 does not
-/// require that work, and this crate does not do it.
+/// file do not cause a failure.
 pub const EXPORT_PIECE_BUDGET: usize = 92;
 
 /// The largest number of pieces [`plan::build_plan`] accepts in one export request of `sources`
@@ -956,9 +950,12 @@ export_error_codes! {
     /// with the diagnostic text from `ffmpeg`.
     EncoderUnavailable => "encoderUnavailable",
     /// Produced by `commands::export::run_export_with`: the `ffmpeg` child process failed
-    /// to start.
+    /// to start. Also produced by [`graph_file::probe_graph_file_option`], when the process of
+    /// the option probe fails to start (ADR 055).
     FfmpegSpawnFailed => "ffmpegSpawnFailed",
-    /// Produced by `commands::export::run_export_with`: `ffmpeg` exited unsuccessfully.
+    /// Produced by `commands::export::run_export_with`: `ffmpeg` exited unsuccessfully. Also
+    /// produced by [`graph_file::probe_graph_file_option`], when the option probe fails for a
+    /// reason other than an unrecognized option, or does not exit in time (ADR 055).
     FfmpegProcessFailed => "ffmpegProcessFailed",
     /// Produced by `commands::export::verified_frame_count`: the final `frame` count
     /// differed from [`ExportPlan::expected_frames`] (ADR 014's frame-count comparison).
@@ -992,8 +989,12 @@ export_error_codes! {
     CommandExecutionFailed => "commandExecutionFailed",
     /// Produced by `commands::export::start_export`, when the cache directory of the application
     /// has no path, and by `commands::export::prepare_export_with`, when the work directory of
-    /// the export cannot be created (ADR 055).
+    /// the export cannot be created or a graph file cannot be written in it (ADR 055).
     WorkDirectoryUnavailable => "workDirectoryUnavailable",
+    /// Produced by [`graph_file::probe_graph_file_option`]: the `ffmpeg` of the export reads a
+    /// filter graph from a file with neither `-/filter_complex` nor `-filter_complex_script`
+    /// (ADR 055). The detail carries the stderr tail of the second run.
+    GraphFileUnsupported => "graphFileUnsupported",
 }
 
 #[cfg(test)]
@@ -1041,6 +1042,7 @@ mod tests {
                 "ffprobeSpawnFailed",
                 "ffprobeTimedOut",
                 "frameCountMismatch",
+                "graphFileUnsupported",
                 "invalidPreset",
                 "invalidSegment",
                 "invalidSegmentCount",

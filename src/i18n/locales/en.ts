@@ -1121,6 +1121,8 @@ export const en = {
     exportQueueClosed: "QuipClip is quitting, so it did not start the export.",
     workDirectoryUnavailable:
       "QuipClip could not create the work folder of the export in the application cache folder.",
+    graphFileUnsupported:
+      "This FFmpeg build cannot read a filter graph from a file. Install another FFmpeg build.",
     dialogFailed: "QuipClip could not open the export save dialog.",
     sourceRevisionChanged:
       "The video file on disk changed after it was opened. The marked segments may no longer name the same frames.",

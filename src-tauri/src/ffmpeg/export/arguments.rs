@@ -1,7 +1,7 @@
 //! Assemble ADR 014's `ffmpeg` command line, and pick the graph shape that fits inside it.
 //!
-//! [`build_arguments`] is pure: it reads a finished [`ExportPlan`], a rendered graph, and the
-//! reserved output path, and it returns the argument vector verbatim. It spawns nothing, opens
+//! [`build_arguments`] is pure: it reads a finished [`ExportPlan`], the name of its graph file, and
+//! the reserved output path, and it returns the argument vector verbatim. It spawns nothing, opens
 //! nothing, and reads no clock, so every rule ADR 014 settled about the command is testable
 //! without ffmpeg installed -- which is what the pinned-vector tests below do, exactly as
 //! [`crate::ffmpeg::capabilities::smoke`]'s tests pin ADR 006's two smoke commands verbatim.
@@ -11,7 +11,7 @@
 //! - **`-copyts` is set once, before the first input.** Measurement 18 found the option
 //!   global: one instance gives raw source PTS on every input, which is the timestamp domain
 //!   the plan's `trim` boundaries live in. A second instance changes nothing except the length
-//!   of the command line, and at the segment cap that length is the whole constraint.
+//!   of the command line.
 //! - **`-y` is mandatory.** [`super::output::PendingOutput`] reserves the output path by
 //!   *creating* the file, so the path exists, and holds zero bytes, before ffmpeg starts.
 //!   Without `-y` ffmpeg prints `File '<path>' already exists. Exiting.` -- and **exits zero**,
@@ -29,25 +29,27 @@
 //!   an input whose [`seek_seconds`](super::PlannedSegment::seek_seconds) is `None` carries no
 //!   `-ss` at all. The output `-ss` of a copy of the audio is not that seek, and it is written at
 //!   zero too ([`build_copy_arguments`], ADR 048).
-//! - **The graph rides inline.** Measurement 13 leaves no portable spelling for a graph file:
-//!   `-filter_complex_script` is gone from ffmpeg 9.0.1, and its replacement `-/filter_complex`
-//!   did not exist before 7.1. The graph is therefore one ordinary argument, and it competes
-//!   with every other argument for one command-line budget.
+//! - **The graph is in a file.** Since ADR 055, the encoder and the audio process read their graphs
+//!   from files in the work directory of the export, and a command carries the option and the
+//!   name of the file: `-/filter_complex encoder.graph` on FFmpeg 7.0 and later, and
+//!   `-filter_complex_script encoder.graph` on older builds. ADR 014 measurement 13 found no single
+//!   spelling that every build reads, so the probe of [`super::graph_file`] chooses one of the two.
+//!   The command line no longer grows with the chains of the graph.
 //!
-//! That last rule is why [`choose_graph_shape`] lives here rather than in [`super::graph`]. Only
-//! this module can measure the assembled command, so only this module can decide which of the two
-//! [`GraphShape`] variants each command of an export can afford. See [`WINDOWS_COMMAND_LINE_LIMIT`]
+//! [`choose_graph_shape`] lives here rather than in [`super::graph`] because only this module can
+//! measure the assembled command, so only this module can decide which of the two [`GraphShape`]
+//! variants each command of an export can afford. Without the graph, the command holds the fixed
+//! arguments and the inputs, and the inputs decide its length. See [`WINDOWS_COMMAND_LINE_LIMIT`]
 //! for the budget, and the tests for the sweep that keeps
-//! [`max_export_pieces`](super::max_export_pieces) and that limit from drifting apart.
+//! [`max_export_pieces`](super::max_export_pieces) inside that limit.
 //!
 //! No step here uses floating point. A seek reaches ffmpeg as an exact decimal expansion of the
 //! plan's [`Rational`], truncated at ffmpeg's own microsecond resolution; the private
 //! `render_seek` has the rounding rule and its one-sided guarantee.
 
 use super::flv_input::FlvInput;
-use super::graph::{
-    build_audio_graph, build_filter_graph, build_video_graph, input_layout, GraphInput,
-};
+use super::graph::{build_filter_graph, build_video_graph, input_layout, GraphInput};
+use super::graph_file::{GraphFile, GraphFileOption, AUDIO_GRAPH_FILE, ENCODER_GRAPH_FILE};
 use super::{CopiedAudio, ExportPlan, GraphShape, PlannedAudio, PlannedVideo};
 use crate::settings::{Container, OptionStream, PresetOption, Quality, QualityKind};
 use crate::time::Rational;
@@ -96,7 +98,7 @@ pub const WINDOWS_COMMAND_LINE_LIMIT: usize = 32_767;
 /// budget would therefore fail with `E2BIG` on macOS.
 ///
 /// Nothing reaches it. [`super::MAX_EXPORT_SEGMENTS`] holds the widest command the settings
-/// permit near 31600 bytes, about 33 times smaller, so this constant is a real platform number
+/// permit below the Windows budget, more than 30 times smaller, so this constant is a real platform number
 /// for the platform rather than a bound the renderer ever tests -- and one consequence is worth
 /// stating plainly: because [`COMMAND_LINE_BUDGET`] is the host's own, [`GraphShape::SingleInput`]
 /// is unreachable on macOS in production. Only a Windows user's export can select the fallback;
@@ -121,7 +123,7 @@ const COMMAND_LINE_HEADROOM_BYTES: usize = 1_024;
 /// The bytes one argument adds to the assembled command line beyond its own content.
 ///
 /// One separating space, and two quotation marks for the arguments that need them -- the
-/// source path, the output path, and the graph all can. Charging every argument for quoting
+/// source path and the output path can. Charging every argument for quoting
 /// it may not need keeps the estimate on the safe side of the real command line, which is the
 /// only side that matters for a budget.
 const ARGUMENT_OVERHEAD_BYTES: usize = 3;
@@ -162,10 +164,9 @@ pub const COMMAND_LINE_BUDGET: usize = UNIX_COMMAND_LINE_BUDGET;
 /// The rule is ADR 014's: prefer one input for each segment, and fall back to one input for
 /// the whole source when the first shape does not fit. `SingleInput` is a fallback, never a
 /// default. What it saves lies outside the graph: it writes the source path and its input
-/// flags once instead of once for each segment. Measurement 15 puts the graphs themselves
-/// close together and on both sides of the line -- `SingleInput` holds the larger graph for
-/// the first seven segments and the smaller one from eight segments upward -- so the graph size
-/// is not what decides between them.
+/// flags once instead of once for each segment. Since ADR 055 the graph is in a file, so its size
+/// does not count at all: the measure holds the inputs, the fixed arguments, and the option and
+/// the name of the graph file ([`MEASURED_ENCODER_GRAPH`]).
 ///
 /// # This function cannot fail
 ///
@@ -180,13 +181,9 @@ pub const COMMAND_LINE_BUDGET: usize = UNIX_COMMAND_LINE_BUDGET;
 ///
 /// # Cost
 ///
-/// This renders the `InputPerSegment` graph to measure it, and the caller then renders the
-/// graph of the shape it returns, so the common case builds a graph string twice. That is the
-/// point. A projected length -- ADR 014 measurement 15's "about 260 bytes for each segment"
-/// turned into a formula -- would be a second, silently drifting copy of everything
-/// [`build_filter_graph`] decides, and measurement 15's own figures have already moved once
-/// since it was written. Measuring the real thing costs about 42 KB of allocation on the
-/// largest plan this crate accepts, against an export that then runs for minutes.
+/// This builds the argument vector of the `InputPerSegment` shape to measure it, and it renders
+/// no graph. A projected length would be a second, silently drifting copy of everything
+/// [`build_arguments`] decides, so the real vector is measured.
 ///
 /// # Two processes, two choices
 ///
@@ -203,8 +200,12 @@ pub fn choose_graph_shape(plan: &ExportPlan, output: &Path) -> GraphShape {
 /// on a host that is not Windows.
 fn choose_graph_shape_within(plan: &ExportPlan, output: &Path, budget: usize) -> GraphShape {
     choose_shape(|shape| {
-        let graph = encoder_graph(plan, shape);
-        command_line_length(&build_arguments(plan, shape, &graph, output)) <= budget
+        command_line_length(&build_arguments(
+            plan,
+            shape,
+            MEASURED_ENCODER_GRAPH,
+            output,
+        )) <= budget
     })
 }
 
@@ -222,10 +223,26 @@ pub fn choose_audio_graph_shape(plan: &ExportPlan) -> GraphShape {
 /// [`choose_audio_graph_shape`] against an explicit budget, as for [`choose_graph_shape_within`].
 fn choose_audio_graph_shape_within(plan: &ExportPlan, budget: usize) -> GraphShape {
     choose_shape(|shape| {
-        let graph = build_audio_graph(plan, shape);
-        command_line_length(&build_audio_arguments(plan, shape, &graph)) <= budget
+        command_line_length(&build_audio_arguments(plan, shape, MEASURED_AUDIO_GRAPH)) <= budget
     })
 }
+
+/// The graph file that [`choose_graph_shape`] measures the command of the encoder with.
+///
+/// The probe of ADR 055 runs after the plan, and the shape does not depend on its answer: the
+/// measure uses the longer of the two flags, `-filter_complex_script`, so a command that fits with
+/// it fits with either.
+const MEASURED_ENCODER_GRAPH: GraphFile<'static> = GraphFile {
+    option: GraphFileOption::Script,
+    name: ENCODER_GRAPH_FILE,
+};
+
+/// The graph file that [`choose_audio_graph_shape`] measures the command of the audio process
+/// with, by the rule of [`MEASURED_ENCODER_GRAPH`].
+const MEASURED_AUDIO_GRAPH: GraphFile<'static> = GraphFile {
+    option: GraphFileOption::Script,
+    name: AUDIO_GRAPH_FILE,
+};
 
 /// The first shape that `fits`, or the last shape when none does.
 fn choose_shape(fits: impl Fn(GraphShape) -> bool) -> GraphShape {
@@ -264,8 +281,9 @@ fn command_line_length(arguments: &[String]) -> usize {
 
 /// Build the complete ffmpeg argument vector for `plan`, in ADR 014's order.
 ///
-/// `graph` is the string [`encoder_graph`] returned for this same `shape`; it is copied
-/// into exactly one argument, unexamined. `output` is the reserved temporary path
+/// `graph` names the file in the work directory that holds the string [`encoder_graph`] returned
+/// for this same `shape` (ADR 055). The command carries the option of the probe and the name of the
+/// file, as two arguments, and never the graph itself. `output` is the reserved temporary path
 /// [`super::output::PendingOutput::path`] returns, **not** [`ExportPlan::destination`]: ffmpeg
 /// writes the reservation, and the rename that publishes the destination happens after this
 /// process has exited.
@@ -275,7 +293,8 @@ fn command_line_length(arguments: &[String]) -> usize {
 ///
 /// # Preconditions
 ///
-/// `plan.segments` must not be empty, and `shape` must be the shape `graph` was rendered in.
+/// `plan.segments` must not be empty, and `shape` must be the shape that the graph in the file
+/// `graph` was rendered in.
 /// [`super::plan::build_plan`] rejects an empty request with
 /// [`ExportErrorCode::NoSegments`](super::ExportErrorCode::NoSegments), so an empty plan cannot
 /// arise from it, and a debug assertion catches a hand-built one: it would produce a command
@@ -331,7 +350,7 @@ fn command_line_length(arguments: &[String]) -> usize {
 pub fn build_arguments(
     plan: &ExportPlan,
     shape: GraphShape,
-    graph: &str,
+    graph: GraphFile<'_>,
     output: &Path,
 ) -> Vec<String> {
     debug_assert!(
@@ -372,7 +391,7 @@ pub fn build_arguments(
         push_pair(&mut arguments, "-i", "pipe:0");
     }
 
-    push_pair(&mut arguments, "-filter_complex", graph);
+    push_pair(&mut arguments, graph.option.flag(), graph.name);
     if plan.video.is_some() {
         push_pair(&mut arguments, "-map", "[v]");
     }
@@ -398,14 +417,14 @@ pub fn build_arguments(
     arguments
 }
 
-/// Build the argument vector of the audio process of `plan` (ADR 043), for the graph
-/// [`build_audio_graph`] rendered in `shape`.
+/// Build the argument vector of the audio process of `plan` (ADR 043). `graph` names the file
+/// that holds the graph [`super::graph::build_audio_graph`] rendered in `shape` (ADR 055).
 ///
 /// The process opens the inputs of the source as the encoder does, maps the `[a]` of its graph,
 /// and writes it to its stdout as 32-bit float PCM in WAV, which the encoder reads as `pipe:0`.
 /// A second output maps the stand-in video `[pv]` to the `null` muxer, which writes nothing and
 /// opens no file, so the stdout carries the WAV stream alone. That output, and not a `nullsink` in
-/// the graph, keeps the audio in step; see [`build_audio_graph`].
+/// the graph, keeps the audio in step; see [`super::graph::build_audio_graph`].
 ///
 /// - The flags differ from [`PROCESS_FLAGS`] on purpose. `-progress pipe:1` would write the
 ///   progress text into the stdout that carries the audio, and only the encoder's progress
@@ -422,7 +441,11 @@ pub fn build_arguments(
 ///   `pipe:0` to the end, which [`super::ExportProcessRequest::audio_arguments`] requires: no
 ///   `-shortest` and no output `-t` here or in the encoder.
 #[must_use]
-pub fn build_audio_arguments(plan: &ExportPlan, shape: GraphShape, graph: &str) -> Vec<String> {
+pub fn build_audio_arguments(
+    plan: &ExportPlan,
+    shape: GraphShape,
+    graph: GraphFile<'_>,
+) -> Vec<String> {
     debug_assert!(
         !plan.segments.is_empty(),
         "an export plan must carry at least one segment"
@@ -433,7 +456,7 @@ pub fn build_audio_arguments(plan: &ExportPlan, shape: GraphShape, graph: &str) 
         .collect();
     arguments.push("-copyts".to_owned());
     push_inputs(&mut arguments, plan, shape, false);
-    push_pair(&mut arguments, "-filter_complex", graph);
+    push_pair(&mut arguments, graph.option.flag(), graph.name);
     push_pair(&mut arguments, "-map", "[a]");
     push_pair(&mut arguments, "-c:a", AUDIO_PIPE_CODEC);
     push_pair(&mut arguments, "-f", AUDIO_PIPE_FORMAT);
@@ -865,6 +888,7 @@ fn render_time(seconds: Rational) -> String {
 mod tests {
     use super::*;
     use crate::ffmpeg::export::flv_input::head_name;
+    use crate::ffmpeg::export::graph::build_audio_graph;
     use crate::ffmpeg::export::{
         max_export_pieces, OutputTiming, PlannedAudio, PlannedSegment, PlannedSource, PlannedVideo,
         SourceAudio, VideoFit, MAX_AUDIO_PREFIXES, MAX_EXPORT_SEGMENTS,
@@ -879,14 +903,21 @@ mod tests {
     use crate::time::Pts;
     use std::path::PathBuf;
 
-    /// A stand-in for a rendered filter graph.
+    /// The graph file of the encoder, as the probe of ADR 055 finds it on FFmpeg 7.0 and later.
     ///
-    /// `build_arguments` copies its `graph` argument into exactly one argument without reading
-    /// it, and `graph.rs` already pins what that string contains for every shape, resolution,
-    /// and timing mode. A sentinel keeps the vectors below about the flags *around* the graph,
-    /// and it still fails loudly for a builder that split the graph across two arguments or
-    /// moved it away from `-filter_complex`. Two tests below pass the real thing instead.
-    const GRAPH: &str = "<graph>";
+    /// `build_arguments` writes the option and the name of the file as two arguments, and never
+    /// reads the graph. `graph.rs` pins what the graph contains for every shape, resolution, and
+    /// timing mode, so the vectors below are about the flags *around* the graph file.
+    const GRAPH: GraphFile<'static> = GraphFile {
+        option: GraphFileOption::Slash,
+        name: ENCODER_GRAPH_FILE,
+    };
+
+    /// The graph file of the audio process of ADR 043, as for [`GRAPH`].
+    const AUDIO_GRAPH: GraphFile<'static> = GraphFile {
+        option: GraphFileOption::Slash,
+        name: AUDIO_GRAPH_FILE,
+    };
 
     /// The source path every fixture plan cuts from.
     const SOURCE: &str = "/media/source.mp4";
@@ -1048,8 +1079,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -1071,11 +1102,102 @@ mod tests {
         );
     }
 
-    /// The input arguments of a command: everything between `-copyts` and `-filter_complex`.
+    #[test]
+    fn the_script_option_names_the_same_file_in_the_same_place() {
+        // The probe of ADR 055 finds `-filter_complex_script` on a build older than 7.0. The
+        // command is the command of `-/filter_complex` with the other flag.
+        let script = |name| GraphFile {
+            option: GraphFileOption::Script,
+            name,
+        };
+        assert_eq!(
+            build_arguments(
+                &fixture_plan(1),
+                GraphShape::InputPerSegment,
+                script(ENCODER_GRAPH_FILE),
+                Path::new(OUTPUT)
+            ),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-y",
+                "-copyts",
+                "-ss",
+                "6.6",
+                "-i",
+                "/media/source.mp4",
+                "-f",
+                "wav",
+                "-i",
+                "pipe:0",
+                "-filter_complex_script",
+                "encoder.graph",
+                "-map",
+                "[v]",
+                "-map",
+                "1:a",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-crf",
+                "20",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "/export/.out.mp4.tmp-4242-0",
+            ]
+        );
+        assert_eq!(
+            build_audio_arguments(
+                &fixture_plan(1),
+                GraphShape::InputPerSegment,
+                script(AUDIO_GRAPH_FILE)
+            ),
+            vec![
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostats",
+                "-copyts",
+                "-ss",
+                "6.6",
+                "-i",
+                "/media/source.mp4",
+                "-filter_complex_script",
+                "audio.graph",
+                "-map",
+                "[a]",
+                "-c:a",
+                "pcm_f32le",
+                "-f",
+                "wav",
+                "pipe:1",
+                "-map",
+                "[pv]",
+                "-c:v",
+                "rawvideo",
+                "-f",
+                "null",
+                "-",
+            ]
+        );
+    }
+
+    /// The input arguments of a command: everything between `-copyts` and the graph file.
     fn input_arguments(plan: &ExportPlan, shape: GraphShape) -> Vec<String> {
         let all = arguments(plan, shape);
         let start = all.iter().position(|a| a == "-copyts").unwrap() + 1;
-        let end = all.iter().position(|a| a == "-filter_complex").unwrap();
+        let end = all.iter().position(|a| a == "-/filter_complex").unwrap();
         all[start..end].to_vec()
     }
 
@@ -1086,8 +1208,8 @@ mod tests {
         // The stand-in video goes to the `null` muxer, which opens no file.
         let plan = fixture_plan(3);
         let tail = [
-            "-filter_complex",
-            "<graph>",
+            "-/filter_complex",
+            "audio.graph",
             "-map",
             "[a]",
             "-c:a",
@@ -1115,11 +1237,11 @@ mod tests {
             "-ss", "6.6", "-i", SOURCE, "-ss", "5", "-i", SOURCE, "-ss", "15", "-i", SOURCE,
         ];
         assert_eq!(
-            build_audio_arguments(&plan, GraphShape::InputPerSegment, GRAPH),
+            build_audio_arguments(&plan, GraphShape::InputPerSegment, AUDIO_GRAPH),
             [&head[..], &per_segment[..], &tail[..]].concat()
         );
         assert_eq!(
-            build_audio_arguments(&plan, GraphShape::SingleInput, GRAPH),
+            build_audio_arguments(&plan, GraphShape::SingleInput, AUDIO_GRAPH),
             [&head[..], &["-ss", "5", "-i", SOURCE][..], &tail[..]].concat()
         );
     }
@@ -1133,7 +1255,7 @@ mod tests {
         let per_segment = arguments(&plan, GraphShape::InputPerSegment);
         let pipe = per_segment.iter().position(|a| a == "pipe:0").unwrap();
         assert_eq!(per_segment[pipe - 3..pipe], ["-f", "wav", "-i"]);
-        assert_eq!(per_segment[pipe + 1], "-filter_complex");
+        assert_eq!(per_segment[pipe + 1], "-/filter_complex");
         let maps: Vec<&str> = per_segment
             .iter()
             .enumerate()
@@ -1187,13 +1309,13 @@ mod tests {
             let plan = fixture_plan(count);
             for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
                 let graph = encoder_graph(&plan, shape);
-                let encoder = build_arguments(&plan, shape, &graph, Path::new(OUTPUT));
+                let encoder = build_arguments(&plan, shape, GRAPH, Path::new(OUTPUT));
                 let sources = input_count(&encoder) - 1;
                 assert_eq!(read(&graph), (0..sources).collect(), "{count} {shape:?}");
                 assert!(encoder.contains(&format!("{sources}:a")), "{encoder:?}");
 
                 let graph = build_audio_graph(&plan, shape);
-                let audio = build_audio_arguments(&plan, shape, &graph);
+                let audio = build_audio_arguments(&plan, shape, AUDIO_GRAPH);
                 assert_eq!(read(&graph), (0..input_count(&audio)).collect());
                 assert_eq!(input_count(&audio), sources, "{count} {shape:?}");
             }
@@ -1261,8 +1383,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -1311,8 +1433,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -1397,8 +1519,7 @@ mod tests {
                 .collect()
         };
         for shape in [GraphShape::InputPerSegment, GraphShape::SingleInput] {
-            let graph = build_audio_graph(&plan, shape);
-            let audio = build_audio_arguments(&plan, shape, &graph);
+            let audio = build_audio_arguments(&plan, shape, AUDIO_GRAPH);
             assert!(!audio.iter().any(|argument| argument == "-ss"), "{audio:?}");
             assert_eq!(
                 inputs(&audio),
@@ -1433,8 +1554,8 @@ mod tests {
                 "6.6",
                 "-i",
                 "/media/source.mp4",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-c:v",
@@ -1475,8 +1596,8 @@ mod tests {
                 "6.6",
                 "-i",
                 "/media/source.mp4",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[a]",
                 "-c:a",
@@ -1537,8 +1658,8 @@ mod tests {
                 "5",
                 "-i",
                 "/media/source.mp4",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[a]",
                 "-c:a",
@@ -1572,8 +1693,8 @@ mod tests {
                 "5",
                 "-i",
                 "/media/source.mp4",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[a]",
                 "-c:a",
@@ -1660,8 +1781,8 @@ mod tests {
                 "5",
                 "-i",
                 "/media/source.mp4",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-c:v",
@@ -1709,8 +1830,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -1757,8 +1878,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -1808,8 +1929,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -1860,8 +1981,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -1914,8 +2035,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -1964,8 +2085,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -2020,8 +2141,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -2136,8 +2257,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -2200,17 +2321,18 @@ mod tests {
     #[test]
     fn an_ntsc_plan_carries_the_exact_rational_frame_rate_and_a_truncated_seek() {
         // The real graph, not the sentinel: an NTSC rate reaches ffmpeg as 30000/1001 (ADR
-        // 002), never as a rounded 29.97, and the whole graph travels as one argument. The
-        // seek is 1/3 s -- 160000/30000 - 5 -- which has no finite decimal, so it renders
-        // truncated at ffmpeg's microsecond resolution and lands marginally early.
+        // 002), never as a rounded 29.97, and the whole graph goes into the graph file that the
+        // command names (ADR 055). The seek is 1/3 s -- 160000/30000 - 5 -- which has no finite
+        // decimal, so it renders truncated at ffmpeg's microsecond resolution and lands
+        // marginally early.
         //
         // The `aformat=sample_rates=48000` at the head of the audio chain is `graph.rs`'s input
         // pin, and this test is the one place in this module that shows it. It exists because
         // of the `-ss` above: ADR 014 measurement 17 found that a seeked input reports the rate
         // the graph negotiates for its *output*, so without the pin `atrim` would read the
         // plan's source-rate ticks in the wrong unit. A 48000 Hz fixture cannot show the fault
-        // -- the two rates agree -- so `graph.rs` owns that test; this one only pins that the
-        // command carries whatever graph it was handed, verbatim.
+        // -- the two rates agree -- so `graph.rs` owns that test; this one only pins the graph beside the command that
+        // names its file.
         let mut plan = fixture_plan(1);
         video_mut(&mut plan).timing = OutputTiming::ConstantFrameRate(
             Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
@@ -2220,14 +2342,20 @@ mod tests {
         video_mut(&mut plan).expected_frames = Some(30);
         plan.total_duration = Rational::new(1_001, 1_000).expect("1.001 is a valid duration");
 
-        let graph = build_filter_graph(&plan, GraphShape::InputPerSegment);
         assert_eq!(
-            build_arguments(
-                &plan,
-                GraphShape::InputPerSegment,
-                &graph,
-                Path::new(OUTPUT)
-            ),
+            build_filter_graph(&plan, GraphShape::InputPerSegment),
+            concat!(
+                "sws_flags=lanczos+accurate_rnd+full_chroma_int;[vc]format=yuv420p[v];",
+                "[0:1]trim=start_pts=160000:end_pts=190030,setpts=PTS-STARTPTS,",
+                "fps=30000/1001[v0];",
+                "[0:2]aformat=r=48000,atrim=start_pts=256000:end_pts=304048,",
+                "asetpts=PTS-256000,aresample=48000:first_pts=0,",
+                "apad=whole_len=48048,asetpts=N,aformat=f=fltp:r=48000:cl=stereo[a0];",
+                "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
+            )
+        );
+        assert_eq!(
+            build_arguments(&plan, GraphShape::InputPerSegment, GRAPH, Path::new(OUTPUT)),
             vec![
                 "-nostdin",
                 "-hide_banner",
@@ -2246,16 +2374,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                concat!(
-                    "sws_flags=lanczos+accurate_rnd+full_chroma_int;[vc]format=yuv420p[v];",
-                    "[0:1]trim=start_pts=160000:end_pts=190030,setpts=PTS-STARTPTS,",
-                    "fps=30000/1001[v0];",
-                    "[0:2]aformat=r=48000,atrim=start_pts=256000:end_pts=304048,",
-                    "asetpts=PTS-256000,aresample=48000:first_pts=0,",
-                    "apad=whole_len=48048,asetpts=N,aformat=f=fltp:r=48000:cl=stereo[a0];",
-                    "[v0][a0]concat=n=1:v=1:a=1[vc][a]",
-                ),
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -2331,8 +2451,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -2578,38 +2698,80 @@ mod tests {
     }
 
     #[test]
-    fn no_command_ever_carries_filter_complex_script_or_a_bare_ss_zero() {
-        // Two rules from ADR 014 that no single pinned vector can guarantee, so they are swept
-        // over the whole matrix instead.
+    fn every_command_with_a_graph_names_one_graph_file_and_never_a_bare_ss_zero() {
+        // Two rules that no single pinned vector can guarantee, so they are swept over the whole
+        // matrix instead, for both options of the probe.
         //
-        // `-filter_complex_script` (measurement 13) is absent from ffmpeg 9.0.1, and its
-        // replacement `-/filter_complex` did not exist before 7.1, so neither spelling is
-        // portable and the graph must ride inline. `-ss 0` (measurement 7) is a workaround for
-        // ffmpeg before 2.1 with no effect on any build a user can install.
-        for (plan, shape) in guard_matrix() {
-            let arguments = arguments(&plan, shape);
-            assert!(
-                !arguments
-                    .iter()
-                    .any(|argument| argument.contains("filter_complex_script")),
-                "{arguments:?}"
-            );
-            assert!(
-                !arguments
-                    .iter()
-                    .any(|argument| argument == "-/filter_complex"),
-                "{arguments:?}"
-            );
-            for (index, argument) in arguments.iter().enumerate() {
-                if argument != "-ss" {
-                    continue;
+        // ADR 055: each command that carries a graph names its file once, with the option that
+        // the probe found, and never carries the graph inline. The process runs in the work
+        // directory, so the name has no path. A copy command has no graph (ADR 048), and names no
+        // file. `-ss 0` (ADR 014 measurement 7) is a workaround for ffmpeg before 2.1 with no
+        // effect on any build a user can install.
+        let is_graph_flag =
+            |argument: &str| argument == "-/filter_complex" || argument == "-filter_complex_script";
+        for option in [GraphFileOption::Slash, GraphFileOption::Script] {
+            for (plan, shape) in guard_matrix() {
+                let encoder = GraphFile {
+                    option,
+                    name: ENCODER_GRAPH_FILE,
+                };
+                let mut commands = vec![(
+                    build_arguments(&plan, shape, encoder, Path::new(OUTPUT)),
+                    ENCODER_GRAPH_FILE,
+                )];
+                if plan.separate_audio_process() {
+                    let audio = GraphFile {
+                        option,
+                        name: AUDIO_GRAPH_FILE,
+                    };
+                    commands.push((build_audio_arguments(&plan, shape, audio), AUDIO_GRAPH_FILE));
                 }
-                let value = &arguments[index + 1];
-                assert_ne!(value, "0", "{arguments:?}");
-                assert_ne!(
-                    value.trim_start_matches('-').trim_matches('0'),
-                    ".",
-                    "{arguments:?}"
+                for (arguments, name) in commands {
+                    assert!(
+                        !arguments
+                            .iter()
+                            .any(|argument| argument == "-filter_complex"),
+                        "{arguments:?}"
+                    );
+                    let flags: Vec<usize> = arguments
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, argument)| is_graph_flag(argument))
+                        .map(|(index, _)| index)
+                        .collect();
+                    assert_eq!(flags.len(), 1, "{arguments:?}");
+                    assert_eq!(arguments[flags[0]], option.flag());
+                    assert_eq!(arguments[flags[0] + 1], name);
+                    assert!(!name.contains(['/', '\\']), "{name}");
+                    for (index, argument) in arguments.iter().enumerate() {
+                        if argument != "-ss" {
+                            continue;
+                        }
+                        let value = &arguments[index + 1];
+                        assert_ne!(value, "0", "{arguments:?}");
+                        assert_ne!(
+                            value.trim_start_matches('-').trim_matches('0'),
+                            ".",
+                            "{arguments:?}"
+                        );
+                    }
+                }
+            }
+        }
+        for container in [Container::Mp4, Container::Mov, Container::Mkv] {
+            for copy in [
+                copy_process(&copy_plan(container)),
+                copy_to_file(&audio_only_copy_plan(container)),
+            ] {
+                assert!(
+                    !copy
+                        .iter()
+                        .any(|argument| argument.contains("filter_complex")),
+                    "{copy:?}"
+                );
+                assert!(
+                    !copy.iter().any(|argument| argument.ends_with(".graph")),
+                    "{copy:?}"
                 );
             }
         }
@@ -2826,14 +2988,17 @@ mod tests {
 
     /// The length of the command line one shape produces for a plan and an output path.
     fn measured_length(plan: &ExportPlan, shape: GraphShape, output: &str) -> usize {
-        let graph = encoder_graph(plan, shape);
-        command_line_length(&build_arguments(plan, shape, &graph, Path::new(output)))
+        command_line_length(&build_arguments(
+            plan,
+            shape,
+            MEASURED_ENCODER_GRAPH,
+            Path::new(output),
+        ))
     }
 
     /// The length of the command of the audio process of `plan` in `shape`.
     fn measured_audio_length(plan: &ExportPlan, shape: GraphShape) -> usize {
-        let graph = build_audio_graph(plan, shape);
-        command_line_length(&build_audio_arguments(plan, shape, &graph))
+        command_line_length(&build_audio_arguments(plan, shape, MEASURED_AUDIO_GRAPH))
     }
 
     #[test]
@@ -2843,9 +3008,8 @@ mod tests {
         // `max_export_pieces` is set by the widest plan the settings permit, with any number of
         // sources: see
         // `the_widest_plan_the_settings_permit_fits_at_the_limit_with_any_number_of_sources`.
-        // At the 91 pieces of one source, this plan takes one input for the source: the encoder
-        // needs 25402 of the 31743 available bytes. One input for each piece fits up to 78
-        // pieces (`an_flv_input_keeps_one_input_for_each_segment_up_to_the_measured_count`).
+        // Since the graph left the command line (ADR 055), the margins are large: this plan keeps
+        // one input for each piece at the limit. A later unit of ADR 055 sets new limits.
         //
         // Note what is asserted: not that the preferred shape fits, but that the shape
         // `choose_graph_shape` *returns* fits. Its length is the real limit of the renderer.
@@ -2861,14 +3025,14 @@ mod tests {
             "{MAX_EXPORT_SEGMENTS} segments as {shape:?} need {length} bytes, over the \
              {WINDOWS_COMMAND_LINE_BUDGET}-byte budget of Windows' {WINDOWS_COMMAND_LINE_LIMIT}"
         );
-        assert_eq!(shape, GraphShape::SingleInput);
+        assert_eq!(shape, GraphShape::InputPerSegment);
     }
 
     #[test]
     fn a_full_length_plan_on_a_long_windows_path_fits_the_command_of_its_audio_process() {
         // The audio process opens the inputs of the pieces whose chains read audio, and has a
-        // graph of its own, so its command meets the same budget on its own (ADR 043). It needs
-        // 24526 bytes here, with one input for the source.
+        // graph file of its own, so its command meets the same budget on its own (ADR 043). Since
+        // the graph left the command line (ADR 055), it keeps one input for each piece here.
         let plan = windows_plan(MAX_EXPORT_SEGMENTS);
         assert!(plan.separate_audio_process());
         let shape = choose_audio_graph_shape_within(&plan, WINDOWS_COMMAND_LINE_BUDGET);
@@ -2877,7 +3041,7 @@ mod tests {
             length <= WINDOWS_COMMAND_LINE_BUDGET,
             "the audio process at {MAX_EXPORT_SEGMENTS} segments as {shape:?} needs {length} bytes"
         );
-        assert_eq!(shape, GraphShape::SingleInput);
+        assert_eq!(shape, GraphShape::InputPerSegment);
     }
 
     /// The longest path Windows accepts without the extended-length prefix, counting the
@@ -3219,53 +3383,6 @@ mod tests {
         plan
     }
 
-    /// The largest segment count at which the first shape of `plan` fits the Windows budget,
-    /// for the encoder and for the audio process.
-    fn largest_count_with_one_input_each(make: impl Fn(usize) -> ExportPlan) -> (usize, usize) {
-        let mut largest = (0, 0);
-        for count in 1..=160 {
-            let plan = make(count);
-            let shape = GraphShape::InputPerSegment;
-            if measured_length(&plan, shape, WINDOWS_OUTPUT) <= WINDOWS_COMMAND_LINE_BUDGET {
-                largest.0 = count;
-            }
-            if measured_audio_length(&plan, shape) <= WINDOWS_COMMAND_LINE_BUDGET {
-                largest.1 = count;
-            }
-        }
-        largest
-    }
-
-    #[test]
-    fn an_flv_input_keeps_one_input_for_each_segment_up_to_the_measured_count() {
-        // An FLV input is 42 bytes longer than a seeked input with numbers of 12 digits, and 58
-        // bytes longer with numbers of 20 digits: the concat spelling and two numbers, less `-ss`
-        // and its value. So the first shape fits fewer segments. ADR 046 records these counts.
-        // Change it with them.
-        //
-        //
-        // The counts are measured up to 160 pieces of one source, past the limit of
-        // `MAX_EXPORT_SEGMENTS`, so they show how far the first shape reaches. Each is below the
-        // limit, so production takes one input for the source past these counts.
-        // The fit step of ADR 053 and the scaler flags of the graph made each video chain longer,
-        // and the widest layout name each audio chain of the audio process.
-        //
-        // The realistic plan: the 106-character path and a source below 1 TB.
-        assert_eq!(largest_count_with_one_input_each(windows_plan), (78, 77));
-        assert_eq!(
-            largest_count_with_one_input_each(|count| {
-                with_flv_input(windows_plan(count), 999_999_999_999)
-            }),
-            (70, 69)
-        );
-        // The widest plan, with the largest numbers a file can have.
-        assert_eq!(largest_count_with_one_input_each(widest_plan), (51, 49));
-        assert_eq!(
-            largest_count_with_one_input_each(|count| with_flv_input(widest_plan(count), u64::MAX)),
-            (46, 45)
-        );
-    }
-
     #[test]
     fn the_widest_plan_with_an_flv_input_still_fits_at_the_segment_cap() {
         // One source of an export at most has an FLV input, and the shape that each command of
@@ -3320,41 +3437,11 @@ mod tests {
         // next test holds the limit against them.
         //
         // The plan has two commands since the audio of an export with video has its own process
-        // (ADR 043), and each must fit on its own. Measured at the time of writing, at the limit
-        // of 91 pieces of one source: the encoder needs 29234 of the 31743 available bytes, and
-        // the audio process 29552 (23 of them for the gain of ADR 054), both with one input for
-        // the source. This plan fits up to 98 pieces.
-        //
-        // ADR 053 changed the widest chain. The fit step
-        // (`scale=<w>:<h>:flags=lanczos+accurate_rnd+full_chroma_int,setsar=1,pad=<W>:<H>:<x>:<y>`)
-        // replaced `scale=<w>:<h>,setsar=1` in every video chain, about 73 more bytes with numbers
-        // of five digits, and the graph of the encoder starts with the scaler flags,
-        // `sws_flags=lanczos+accurate_rnd+full_chroma_int`. The layout that the closing `aformat`
-        // of each audio chain names can be `7.1(wide-side)` with sources of different layouts,
-        // eight bytes longer than `stereo`. At 100 pieces of one source, the encoder needed 31882
-        // bytes and no longer fitted. Each further source adds its own input of `MAX_PATH`, about
-        // 300 bytes, and with as many sources as pieces each piece opens an input of its own in
-        // both shapes. So each source takes the place of one piece (`EXPORT_PIECE_BUDGET`). One
-        // source of 92 pieces that generate silence needs 31880 bytes (the next tests).
-        //
-        // The history below is of the command of one source of the cap of 100 segments. The audio
-        // process needed 31413 bytes, with a silence prefix of twelve digits
-        // (`graph::audio_silence_prefix`, about 121 bytes each) on its last `MAX_AUDIO_PREFIXES`
-        // chains. Before ADR 043, the one command that carried both needed 31547 bytes. The end
-        // pad of the last audio chain (`graph::audio_end_pad`) took 38 bytes, and a pad in every
-        // chain would have taken up to 3800. The audio chain that starts at the In point
-        // (`graph::audio_chain`) gave back 111 bytes: the timestamp reset and the gap fill add 33
-        // bytes to each chain, and the short option names of `aformat` take 34 from each chain and
-        // 11 from the one input pin. Schema 2 of the settings spent 1484 bytes: 1408 for the two
-        // option lists at their limits, 71 for a 32-character pixel format in the graph and in
-        // `-pix_fmt`, and 5 for `-cq 63 -b:v 0` over `-b:v 200000k`. The options are written once,
-        // not once for each piece. One `format` behind `concat` (`graph::video_output_format`)
-        // gave back 1477 bytes, and ADR 023's audio settings cost 115; see
-        // `the_widest_audio_format_is_the_one_the_widest_plan_carries_and_it_fits_at_the_cap`. A
-        // filter added to every chain spends the slack at the cap times its own length. The
-        // assertion is one-sided on purpose: shortening the command is welcome and must not fail a
-        // test, but a filter added to the graph or a settings maximum raised has to bring the cap
-        // down with it, and that is the drift this catches.
+        // (ADR 043), and each must fit on its own. The limit was measured when the graph rode
+        // inline on the command line. Since ADR 055 the graph is in a file, so the margins are
+        // large, and a later unit of ADR 055 replaces the limit. The assertion is one-sided on
+        // purpose: shortening the command is welcome and must not fail a test, but a longer
+        // command or a settings maximum raised has to bring the cap down with it.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
         let largest = (1..=160)
             .take_while(|count| fits_windows(&widest_plan(*count), &reservation))
@@ -3376,25 +3463,9 @@ mod tests {
         // video, and with and without an FLV input. The sweep also holds the plans of fewer
         // pieces in which each source but the first holds one piece.
         //
-        // Measured at the time of writing. When one input for each piece does not fit, production
-        // takes one input for each source, so the margin of the limit is the shorter of the two
-        // shapes in the worst plan:
-        //
-        // - The encoder needs at most 31618 of the 31743 available bytes (125 to spare): one
-        //   source of 91 pieces that generate silence, with an FLV input.
-        // - The audio process needs at most 30491: 44 sources of 48 pieces in turn, with an FLV
-        //   input. The gain of ADR 054 takes 23 of those bytes; it adds nothing to the plans whose
-        //   pieces all generate silence, so the encoder above does not grow.
-        //
-        // The longest command that production chooses is longer, because it takes one input for
-        // each piece while that fits: 31741 bytes for an export without video of 36 sources whose
-        // FLV source holds 6 of 56 pieces, and 31736 for the audio process of 32 sources whose FLV
-        // source holds 17 of 48.
-        //
-        // One input for each source grows about 300 bytes with each source, and about as much
-        // with each piece, so the sum of the pieces and the sources sets the limit. For 1 to 10
-        // sources, the largest count that fits is the limit. From 11 sources on, one to three
-        // pieces more fit.
+        // The limit was measured when the graph rode inline on the command line. Since ADR 055
+        // the graph is in a file, so every plan of the sweep fits with a large margin, and a
+        // later unit of ADR 055 sets new limits.
         let reservation = longest_windows_path(".mp4.tmp-13724-0");
         for sources in 1..=max_export_sources() {
             for (name, plan) in budget_sweep(max_export_pieces(sources), sources) {
@@ -3413,24 +3484,11 @@ mod tests {
     }
 
     #[test]
-    fn the_budget_is_the_largest_that_the_sweep_fits() {
-        // One more piece than one source may hold leaves a plan of the sweep that no shape fits:
-        // one source of 92 pieces that generate silence needs 31880 bytes, and 31938 with an FLV
-        // input. So `EXPORT_PIECE_BUDGET` cannot rise without a shorter command.
-        let reservation = longest_windows_path(".mp4.tmp-13724-0");
-        assert!(budget_sweep(max_export_pieces(1) + 1, 1)
-            .iter()
-            .any(|(_, plan)| !fits_windows(plan, &reservation)));
-    }
-
-    #[test]
     fn the_widest_plan_without_video_still_fits_at_the_segment_cap() {
-        // A graph without video pads every audio chain (`graph::audio_end_pad`), so its growth for
-        // each segment carries the pad too. It has no video chain, so it is still below the
-        // budget: 22226 bytes at the limit of 91 pieces of one source, with one input for the
-        // source and the sixteen silence prefixes of `widest_plan`. The sweep above holds the
-        // plans without video of several sources. The assertion is one-sided for the reason the
-        // tests above give.
+        // A graph without video pads every audio chain (`graph::audio_end_pad`). The graph is in
+        // a file since ADR 055, so only the command that names it is measured here. The sweep
+        // above holds the plans without video of several sources. The assertion is one-sided for
+        // the reason the tests above give.
         let reservation = longest_windows_path(".m4a.tmp-13724-0");
         let output = Path::new(&reservation);
         let plan = widest_audio_only_plan(MAX_EXPORT_SEGMENTS);
@@ -3499,11 +3557,10 @@ mod tests {
             }
         }
 
-        // What ADR 023 costs at the cap, byte for byte. Against the 48000 Hz stereo format ADR
-        // 014 fixed, with no bitrate: one more digit in each closing `aformat` filter at the
-        // limit, and `-b:a 1536k`, which is two arguments of 4 and 5 bytes plus the per-argument
-        // overhead of each. The input pin carries the source rate in both plans,
-        // so it contributes nothing to the difference.
+        // What ADR 023 costs on the command line, byte for byte. Against the 48000 Hz stereo
+        // format ADR 014 fixed, with no bitrate: `-b:a 1536k`, which is two arguments of 4 and 5
+        // bytes plus the per-argument overhead of each. The closing `aformat` filters are in the
+        // graph, which is in a file since ADR 055, so they contribute nothing to the difference.
         let output = Path::new(&reservation);
         let shape = choose_graph_shape_within(&widest, output, WINDOWS_COMMAND_LINE_BUDGET);
         let mut legacy = widest_plan(MAX_EXPORT_SEGMENTS);
@@ -3516,7 +3573,7 @@ mod tests {
         });
         assert_eq!(
             widest_length(shape) - measured_length(&legacy, shape, &reservation),
-            MAX_EXPORT_SEGMENTS + (4 + ARGUMENT_OVERHEAD_BYTES) + (5 + ARGUMENT_OVERHEAD_BYTES)
+            (4 + ARGUMENT_OVERHEAD_BYTES) + (5 + ARGUMENT_OVERHEAD_BYTES)
         );
 
         let length = widest_length(shape);
@@ -3582,11 +3639,9 @@ mod tests {
         //
         // The second assertion holds a separate property: ADR 014 measurement 15 records that
         // the single-input *graph* is the larger of the two for the first seven segments and
-        // the smaller one from eight segments upward, 31033 bytes against 31372 at the limit of one
-        // source. No
-        // decision reads that, because the fallback is never selected for its graph size, but a
-        // reader who expects the graphs to be ordered the other way would mis-predict where the
-        // budget goes.
+        // the smaller one from eight segments upward. No decision reads that: the fallback is
+        // never selected for its graph size, and since ADR 055 the graph is in a file and does
+        // not count against the budget at all.
         let plan = windows_plan(MAX_EXPORT_SEGMENTS);
         assert!(
             measured_length(&plan, GraphShape::SingleInput, WINDOWS_OUTPUT)
@@ -3729,8 +3784,8 @@ mod tests {
                 "nut",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                "<graph>",
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -4043,9 +4098,9 @@ mod tests {
         );
         // The audio process reads no input for the piece of the source without audio.
         let audio = |shape: GraphShape| {
-            let all = build_audio_arguments(&plan, shape, GRAPH);
+            let all = build_audio_arguments(&plan, shape, AUDIO_GRAPH);
             let start = all.iter().position(|a| a == "-copyts").unwrap() + 1;
-            let end = all.iter().position(|a| a == "-filter_complex").unwrap();
+            let end = all.iter().position(|a| a == "-/filter_complex").unwrap();
             all[start..end].to_vec()
         };
         assert_eq!(

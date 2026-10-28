@@ -227,6 +227,7 @@ describe("Export Types & Wire Constants", () => {
         "commandExecutionFailed",
         "exportQueueClosed",
         "workDirectoryUnavailable",
+        "graphFileUnsupported",
       ]);
     });
 

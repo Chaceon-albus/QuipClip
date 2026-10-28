@@ -15,6 +15,7 @@ use crate::procutil::command_without_console;
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -237,7 +238,39 @@ pub fn run_with_timeout(
     poll: Duration,
     stdout: StdoutCapture,
 ) -> io::Result<CommandOutcome> {
-    let mut child = command_without_console(program)
+    run_with_timeout_in(program, args, timeout, poll, stdout, RunPlace::default())
+}
+
+/// Where [`run_with_timeout_in`] runs its process, and what else ends it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunPlace<'a> {
+    /// The current directory of the process. `None` keeps the current directory of this process.
+    pub current_directory: Option<&'a Path>,
+    /// A stop flag, read at each poll. When it is set, the process is killed as at the deadline.
+    pub stop: Option<&'a AtomicBool>,
+}
+
+/// [`run_with_timeout`] in `place`: with a current directory of its own, and a stop flag that
+/// ends the process early.
+///
+/// A process that the stop flag ended reports [`CommandStatus::TimedOut`], as one that reached
+/// the deadline. The caller owns the flag, so it reads the flag to tell the two apart. Everything
+/// else, the drain of the pipes and the kill and reap on each path out of the polling loop, is
+/// the behavior of [`run_with_timeout`].
+pub fn run_with_timeout_in(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    poll: Duration,
+    stdout: StdoutCapture,
+    place: RunPlace<'_>,
+) -> io::Result<CommandOutcome> {
+    let mut command = command_without_console(program);
+    if let Some(directory) = place.current_directory {
+        command.current_dir(directory);
+    }
+    let stopped = || place.stop.is_some_and(|stop| stop.load(Ordering::SeqCst));
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(match stdout {
@@ -272,7 +305,7 @@ pub fn run_with_timeout(
         loop {
             match child.try_wait()? {
                 Some(status) => return Ok(Some(status)),
-                None if Instant::now() >= deadline => return Ok(None),
+                None if Instant::now() >= deadline || stopped() => return Ok(None),
                 None => thread::sleep(poll),
             }
         }
@@ -676,6 +709,52 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "expected the timeout to fire well before the 10-second sleep, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_set_stop_flag_kills_the_process_before_the_deadline() {
+        // The stop flag ends the process as the deadline does, and the run reports it as timed
+        // out. The caller reads its own flag to tell the two apart.
+        let stop = AtomicBool::new(true);
+        let started = Instant::now();
+        let outcome = run_with_timeout_in(
+            Path::new("/bin/sleep"),
+            &["10".to_owned()],
+            Duration::from_secs(10),
+            Duration::from_millis(10),
+            StdoutCapture::Discard,
+            RunPlace {
+                current_directory: None,
+                stop: Some(&stop),
+            },
+        )
+        .expect("the process should spawn and then be killed");
+        assert_eq!(outcome.status, CommandStatus::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_process_runs_in_the_current_directory_of_its_place() {
+        let directory = std::env::temp_dir();
+        let outcome = run_with_timeout_in(
+            Path::new("/bin/pwd"),
+            &[],
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            StdoutCapture::Capture,
+            RunPlace {
+                current_directory: Some(&directory),
+                stop: None,
+            },
+        )
+        .expect("pwd should spawn");
+        let printed = String::from_utf8(outcome.stdout).unwrap();
+        assert_eq!(
+            Path::new(printed.trim()).canonicalize().unwrap(),
+            directory.canonicalize().unwrap()
         );
     }
 

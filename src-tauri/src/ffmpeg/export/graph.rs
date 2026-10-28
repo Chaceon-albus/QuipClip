@@ -1,4 +1,5 @@
-//! Render an [`ExportPlan`] into the inline `-filter_complex` graph ADR 014 specifies.
+//! Render an [`ExportPlan`] into the `-filter_complex` graph ADR 014 specifies. The export writes
+//! the graph into a file of its work directory, and the command names that file (ADR 055).
 //!
 //! [`build_filter_graph`] is pure: it reads a finished plan and returns one string. It runs
 //! no process, touches no file, and reads no clock, so every rule ADR 014 settled about the
@@ -42,8 +43,8 @@
 //! - The two graph shapes exist because one input for each segment repeats the source path,
 //!   and Windows limits a command line to 32767 bytes. [`GraphShape`] names the choice but
 //!   does not make it: only the argument builder knows the assembled command's length, so
-//!   the caller passes the shape in. Neither shape makes that length independent of the
-//!   segment count; see [`GraphShape`] for the measured growth.
+//!   the caller passes the shape in. Since ADR 055 the graph is in a file, so its own growth
+//!   with the segment count no longer reaches the command line; see [`GraphShape`].
 //!
 //! One filter group is conditional for a reason that is not about the command line at all: the
 //! fit step of ADR 053, `scale`, `setsar=1` and `pad`, is emitted only for a source whose frames
@@ -248,22 +249,19 @@ fn scaler_flags_prefix() -> String {
 /// decision in keeps this function pure and keeps the budget arithmetic in the one place
 /// that has the whole command.
 ///
-/// **Neither shape makes the command line independent of the segment count.** ADR 014
-/// measurement 15 has the figures: the graph grows by about the same amount for each added
-/// segment under *both* shapes. The two graphs changed places after measurement 17 added the
-/// input rate pin, which costs one filter for each audio chain under `InputPerSegment` and
-/// exactly one filter in front of `asplit` under `SingleInput`. `SingleInput` therefore holds
-/// the larger graph for the first seven segments, and the smaller graph from eight segments
-/// upward: 27916 bytes against 28289 bytes at the segment cap. The pin decides where the two
-/// cross: since it spells its rate as `r=` (see [`audio_output_format`]), it costs 11 bytes less
-/// in each chain under `InputPerSegment`, and they crossed between three and four segments
-/// before, at 28327 bytes against 29789. (Those were measured after the pixel format moved behind
-/// `concat`, which took the same 1477 bytes from both.) What `SingleInput` saves lies
-/// outside the graph as well -- it writes the source path once instead of once for each
-/// segment -- so it extends the reachable segment count without removing the growth. ADR 014's "graph shape" section draws the conclusion this
-/// module cannot: the segment cap, not the shape, is what keeps an export inside Windows'
-/// 32767-byte limit, and a larger export needs the version-gated `-/filter_complex <file>`
-/// form that measurement 13 rules out for the inline path.
+/// **Neither shape makes the graph independent of the segment count.** ADR 014 measurement 15
+/// has the figures: the graph grows by about the same amount for each added segment under
+/// *both* shapes. The two graphs changed places after measurement 17 added the input rate pin,
+/// which costs one filter for each audio chain under `InputPerSegment` and exactly one filter in
+/// front of `asplit` under `SingleInput`. `SingleInput` therefore holds the larger graph for the
+/// first seven segments, and the smaller graph from eight segments upward.
+///
+/// Until ADR 055 the graph rode inline on the command line, so that growth spent the Windows
+/// budget, and the segment cap of ADR 014 kept an export inside it. Since ADR 055 the graph is
+/// in a file of the work directory, read through `-/filter_complex <file>` on FFmpeg 7.0 and
+/// later or `-filter_complex_script <file>` on older builds, so the size of the graph no longer
+/// counts against the command line. What `SingleInput` saves is outside the graph: it writes the
+/// source path once instead of once for each segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphShape {
     /// One `-i` for each segment: chain `i` reads input `i`, so no splitter is needed.
@@ -291,13 +289,14 @@ impl GraphShape {
     }
 }
 
-/// Render `plan` as the one-line `-filter_complex` argument for the requested shape.
+/// Render `plan` as the one-line `-filter_complex` graph for the requested shape.
 ///
 /// The result is a single line: chains separated by `;`, with no newline and no trailing
-/// separator, so the caller passes it to ffmpeg as one argument unchanged. ADR 014
-/// measurement 13 rules out the alternative of writing the graph to a file --
-/// `-filter_complex_script` does not exist in ffmpeg 9.0.1, its replacement `-/filter_complex`
-/// did not exist before 7.1, and no single spelling works on every version a user can have.
+/// separator. The export writes these exact bytes into a graph file of its work directory, with
+/// no byte order mark and no line end, and the command names the file (ADR 055). ADR 014
+/// measurement 13 found no single spelling of the graph-file option that every build reads:
+/// `-/filter_complex` exists from ffmpeg 7.0, and `-filter_complex_script` does not exist in
+/// ffmpeg 9.0.1. The probe of [`super::graph_file`] chooses one of the two.
 ///
 /// The chains appear in `plan.segments` order, which is concat order, and the `concat` filter
 /// consumes them in that same order. ADR 007 makes the project's array order authoritative

@@ -311,6 +311,7 @@ pub fn seeded_settings() -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffmpeg::export::graph_file::{GraphFile, GraphFileOption};
     use crate::ffmpeg::export::{
         build_arguments, build_audio_arguments, build_audio_graph, build_plan, encoder_graph,
         ExportPlan, ExportStreams, GraphShape, PathFacts, PathIdentity, PlanRequest, PlanSource,
@@ -569,16 +570,21 @@ mod tests {
         }
     }
 
-    /// The command `preset` renders for one segment from 10 s to 12 s of [`probe`].
-    fn command_of(preset: &Preset) -> Vec<String> {
+    /// The command `preset` renders for one segment from 10 s to 12 s of [`probe`], and the graph
+    /// of the encoder, which the command names by its file (ADR 055).
+    fn command_of(preset: &Preset) -> (Vec<String>, String) {
         let plan = plan_of(preset);
-        let graph = encoder_graph(&plan, GraphShape::InputPerSegment);
-        build_arguments(
+        let file = GraphFile {
+            option: GraphFileOption::Slash,
+            name: "encoder.graph",
+        };
+        let arguments = build_arguments(
             &plan,
             GraphShape::InputPerSegment,
-            &graph,
+            file,
             Path::new(RESERVATION),
-        )
+        );
+        (arguments, encoder_graph(&plan, GraphShape::InputPerSegment))
     }
 
     /// The plan of [`command_of`].
@@ -622,8 +628,8 @@ mod tests {
 
     /// Every argument in front of `-c:v`, which only the pixel format of a seed changes: the
     /// process flags, the seek 5 s before the In point, the input, the pipe of the audio process
-    /// (ADR 043), the graph, and the maps.
-    fn head(pixel_format: &str) -> Vec<String> {
+    /// (ADR 043), the graph file, and the maps.
+    fn head() -> Vec<String> {
         [
             "-nostdin",
             "-hide_banner",
@@ -642,13 +648,8 @@ mod tests {
             "wav",
             "-i",
             "pipe:0",
-            "-filter_complex",
-            &format!(
-                "sws_flags=lanczos+accurate_rnd+full_chroma_int;[vc]format={pixel_format}[v];\
-                 [0:0]trim=start_pts=900000:end_pts=1080000,setpts=PTS-STARTPTS,fps=30/1[v0];\
-                 anullsrc=r=48000:cl=mono,atrim=end_sample=96000,aformat=f=fltp:r=48000[pa0];\
-                 [v0][pa0]concat=n=1:v=1:a=1[vc][pa];[pa]anullsink"
-            ),
+            "-/filter_complex",
+            "encoder.graph",
             "-map",
             "[v]",
             "-map",
@@ -678,12 +679,23 @@ mod tests {
         .collect()
     }
 
-    /// The golden command of a seed: [`head`], the video arguments of the seed, and [`tail`].
-    fn golden(pixel_format: &str, video: &[&str]) -> Vec<String> {
-        let mut command = head(pixel_format);
+    /// The graph of the encoder, which only the pixel format of a seed changes.
+    fn golden_graph(pixel_format: &str) -> String {
+        format!(
+            "sws_flags=lanczos+accurate_rnd+full_chroma_int;[vc]format={pixel_format}[v];\
+             [0:0]trim=start_pts=900000:end_pts=1080000,setpts=PTS-STARTPTS,fps=30/1[v0];\
+             anullsrc=r=48000:cl=mono,atrim=end_sample=96000,aformat=f=fltp:r=48000[pa0];\
+             [v0][pa0]concat=n=1:v=1:a=1[vc][pa];[pa]anullsink"
+        )
+    }
+
+    /// The golden command of a seed: [`head`], the video arguments of the seed, and [`tail`], with
+    /// the golden graph of the encoder ([`golden_graph`]).
+    fn golden(pixel_format: &str, video: &[&str]) -> (Vec<String>, String) {
+        let mut command = head();
         command.extend(video.iter().map(|argument| (*argument).to_owned()));
         command.extend(tail());
-        command
+        (command, golden_graph(pixel_format))
     }
 
     #[test]
@@ -702,12 +714,8 @@ mod tests {
             "5",
             "-i",
             SOURCE,
-            "-filter_complex",
-            "color=s=2x2:r=30/1,trim=end_frame=60[pv0];\
-             [0:1]aformat=r=48000,atrim=start_pts=480000:end_pts=576000,\
-             asetpts=PTS-480000,aresample=48000:first_pts=0,apad=whole_len=96000,\
-             atrim=end_sample=96000,asetpts=N,aformat=f=fltp:r=48000[a0];\
-             [pv0][a0]concat=n=1:v=1:a=1[pv][a]",
+            "-/filter_complex",
+            "audio.graph",
             "-map",
             "[a]",
             "-c:a",
@@ -726,12 +734,26 @@ mod tests {
         .iter()
         .map(|argument| (*argument).to_owned())
         .collect();
+        let golden_graph = "color=s=2x2:r=30/1,trim=end_frame=60[pv0];\
+             [0:1]aformat=r=48000,atrim=start_pts=480000:end_pts=576000,\
+             asetpts=PTS-480000,aresample=48000:first_pts=0,apad=whole_len=96000,\
+             atrim=end_sample=96000,asetpts=N,aformat=f=fltp:r=48000[a0];\
+             [pv0][a0]concat=n=1:v=1:a=1[pv][a]";
+        let file = GraphFile {
+            option: GraphFileOption::Slash,
+            name: "audio.graph",
+        };
         for preset in default_presets() {
             let plan = plan_of(&preset);
-            let graph = build_audio_graph(&plan, GraphShape::InputPerSegment);
             assert_eq!(
-                build_audio_arguments(&plan, GraphShape::InputPerSegment, &graph),
+                build_audio_arguments(&plan, GraphShape::InputPerSegment, file),
                 golden,
+                "{}",
+                preset.id
+            );
+            assert_eq!(
+                build_audio_graph(&plan, GraphShape::InputPerSegment),
+                golden_graph,
                 "{}",
                 preset.id
             );

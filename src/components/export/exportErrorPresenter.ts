@@ -55,6 +55,8 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   ffprobeSpawnFailed: OPEN_FFMPEG_SETTINGS,
   ffmpegSpawnFailed: OPEN_FFMPEG_SETTINGS,
   encoderUnavailable: OPEN_FFMPEG_SETTINGS,
+  // The installed FFmpeg reads no filter graph from a file (ADR 055). Another build fixes it.
+  graphFileUnsupported: OPEN_FFMPEG_SETTINGS,
 
   // The destination: another name or another folder can succeed.
   outputPathInvalid: BACK_TO_SETUP,

@@ -385,6 +385,8 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   commandExecutionFailed: BACK,
   exportQueueClosed: null,
   workDirectoryUnavailable: null,
+  // An older FFmpeg must be replaced, in the FFmpeg section.
+  graphFileUnsupported: OPEN_FFMPEG,
   dialogFailed: BACK,
   outputAlreadyQueued: BACK,
   sourceRevisionChanged: null,
@@ -422,6 +424,7 @@ describe("presentExportErrorRecovery", () => {
       "ffprobeSpawnFailed",
       "ffmpegSpawnFailed",
       "encoderUnavailable",
+      "graphFileUnsupported",
     ] as const) {
       expect(presentExportErrorRecovery(new ExportError({ code }))).toStrictEqual(
         OPEN_FFMPEG,

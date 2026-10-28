@@ -167,7 +167,7 @@ export const MAX_PRESET_OPTION_BYTES = 1024;
 /**
  * The character rule of an option name: an ASCII letter, then ASCII letters, digits, `_`, `.`,
  * or `-`, 64 characters at most. It refuses a `:`, which would change the stream specifier,
- * and a `/`, because FFmpeg 7.1 and later read the value of `-/<name>` from a file.
+ * and a `/`, because FFmpeg 7.0 and later read the value of `-/<name>` from a file.
  * Authoritative source: src-tauri/src/settings/mod.rs (is_valid_option_name).
  */
 export const OPTION_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;

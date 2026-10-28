@@ -15,7 +15,8 @@
 //! answers with the run id ([`ExportSubmission`]): the run starts at once, or waits in the queue
 //! of [`ExportRegistry`] until the runs before it end (ADR 049). A run reports `preparing` when it
 //! takes the slot. Preparation runs after that: the discovery of ffmpeg, the revision check, the
-//! re-probe, every preflight check in [`build_plan`], and the output reservation. A failure there
+//! re-probe, every preflight check in [`build_plan`], the option probe of ADR 055, and the output
+//! reservation. A failure there
 //! is a `failed` event on the run, as every later failure is. The frontend therefore holds the
 //! run id for the whole run, and it names the run in every cancel.
 //!
@@ -70,6 +71,10 @@
 
 use crate::ffmpeg::export::flv_input::{
     locate_flv_input, FlvInput, FlvInputFallback, FlvInputRequest,
+};
+use crate::ffmpeg::export::graph_file::{
+    probe_graph_file_option, GraphFile, GraphFileOption, GraphFileProbeError, AUDIO_GRAPH_FILE,
+    ENCODER_GRAPH_FILE,
 };
 use crate::ffmpeg::export::work_directory::{remove_stale_work_directories, ExportWorkDirectory};
 use crate::ffmpeg::export::{
@@ -605,12 +610,19 @@ fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateE
     ffmpeg::discover(configured.as_deref(), app_data_directory)
 }
 
+/// The option probe of ADR 055 as [`prepare_export_with`] runs it: the path of `ffmpeg`, the work
+/// directory, and the stop flag of preparation. Production passes
+/// [`probe_graph_file_option`].
+type GraphFileProbe<'a> = dyn Fn(&Path, &ExportWorkDirectory, &AtomicBool) -> Result<GraphFileOption, GraphFileProbeError>
+    + 'a;
+
 /// The plain data [`prepare_export_with`] needs, grouped apart from the five functions it also
-/// takes.
+/// takes, and the option probe of ADR 055.
 ///
 /// `clippy`'s `too-many-arguments` lint (see `clippy.toml`) counts each injected function as one
 /// argument. `ffmpeg::capabilities::ProbeRequest` gives the reason to group the data rather than
-/// to raise the threshold.
+/// to raise the threshold. The option probe is a sixth function, so it rides here as a reference,
+/// [`Self::graph_file`], rather than as a sixth argument that would trip the lint.
 #[derive(Clone, Copy)]
 struct PrepareRequest<'a> {
     /// The export the interface asked for.
@@ -628,6 +640,9 @@ struct PrepareRequest<'a> {
     /// The stage that runs now. Preparation sets it at the start of each step, and the watchdog
     /// names it in the report of a timeout.
     stage: &'a PreparationStageCell,
+    /// The option probe of ADR 055, which finds how `ffmpeg` reads a graph file. Injected so the
+    /// tests of preparation need no `ffmpeg`.
+    graph_file: &'a GraphFileProbe<'a>,
 }
 
 /// Do every fallible step an export needs before ffmpeg starts, in ADR 016's order.
@@ -636,7 +651,10 @@ struct PrepareRequest<'a> {
 /// discovery, the ffprobe re-probe, the two reads of [`correct_audio_probe`], and the read of
 /// [`read_audio_gaps`]. ADR 014's "Other rules" requires that re-probe -- the
 /// renderer reads the container start time and the selected stream indices from a fresh probe,
-/// never from stale project metadata.
+/// never from stale project metadata. The option probe of ADR 055, which asks `ffmpeg` how it
+/// reads a graph file, rides in [`PrepareRequest::graph_file`]. It runs after the reservation,
+/// only for an export whose commands carry a graph, and each graph is then written into its file
+/// in the work directory.
 ///
 /// See this module's documentation for the five ordering obligations the body below carries.
 ///
@@ -674,6 +692,7 @@ where
         cancel,
         preview_windows,
         stage,
+        graph_file,
     } = prepare;
     // Read the same way `ExportSlot::is_canceled` reads it, so the ordering pairs with
     // `ExportRegistry::cancel`'s store.
@@ -859,6 +878,27 @@ where
         eprintln!("export: the audio is not copied: {refusal:?}");
     }
 
+    // An export without video that copies its audio has no graph: one command copies the packets
+    // into the reservation (ADR 048). Every other export carries a graph, which it reads from a
+    // file, so it first asks `ffmpeg` which option reads one (ADR 055). The probe runs before the
+    // reservation, so a slow probe leaves no empty file in the folder of the user.
+    let copies_audio_only = plan.video.is_none() && plan.copied_audio.is_some();
+    let graph_option = if copies_audio_only {
+        None
+    } else {
+        // Before the probe, which starts a process and can take up to 10 s.
+        if canceled() {
+            return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+        }
+        stage.enter(PreparationStage::GraphFile);
+        let option =
+            graph_file(&executables.ffmpeg, &work, cancel).map_err(|error| match error.detail {
+                Some(detail) => ExportCommandError::with_detail(error.code, detail),
+                None => ExportCommandError::new(error.code),
+            })?;
+        Some(option)
+    };
+
     // Before the reservation, which is the first step here that writes to the user's disk. A
     // cancel read after it would have to delete the file it created; read here, there is
     // nothing to undo.
@@ -883,30 +923,34 @@ where
     stage.enter(PreparationStage::Arguments);
 
     // Obligations 2 and 3: ffmpeg writes the reservation, not the destination, and one shape
-    // decision serves both the graph and the arguments of each process. An export without video
-    // that copies its audio has no graph: one command copies the packets into the reservation
-    // (ADR 048).
-    let copy_to_file = if plan.video.is_none() {
-        build_copy_arguments(&plan, CopyOutput::File(pending.path()))
-    } else {
-        None
+    // decision serves both the graph and the arguments of each process. Each graph goes into its
+    // file in the work directory, and the command names the file (ADR 055).
+    let arguments = match graph_option {
+        None => build_copy_arguments(&plan, CopyOutput::File(pending.path()))
+            .expect("a plan without video that copies its audio has a copy command"),
+        Some(option) => {
+            let shape = choose_graph_shape(&plan, pending.path());
+            write_graph(&work, ENCODER_GRAPH_FILE, &encoder_graph(&plan, shape))?;
+            let file = GraphFile {
+                option,
+                name: ENCODER_GRAPH_FILE,
+            };
+            build_arguments(&plan, shape, file, pending.path())
+        }
     };
-    let arguments = copy_to_file.unwrap_or_else(|| {
-        let shape = choose_graph_shape(&plan, pending.path());
-        let graph = encoder_graph(&plan, shape);
-        build_arguments(&plan, shape, &graph, pending.path())
-    });
-    let audio_arguments = if plan.separate_audio_process() {
-        let shape = choose_audio_graph_shape(&plan);
-        Some(build_audio_arguments(
-            &plan,
-            shape,
-            &build_audio_graph(&plan, shape),
-        ))
-    } else if plan.separate_copy_process() {
-        build_copy_arguments(&plan, CopyOutput::Pipe)
-    } else {
-        None
+    // A plan with an audio process has video, so the probe ran for it.
+    let audio_arguments = match graph_option {
+        Some(option) if plan.separate_audio_process() => {
+            let shape = choose_audio_graph_shape(&plan);
+            write_graph(&work, AUDIO_GRAPH_FILE, &build_audio_graph(&plan, shape))?;
+            let file = GraphFile {
+                option,
+                name: AUDIO_GRAPH_FILE,
+            };
+            Some(build_audio_arguments(&plan, shape, file))
+        }
+        _ if plan.separate_copy_process() => build_copy_arguments(&plan, CopyOutput::Pipe),
+        _ => None,
     };
 
     Ok(PreparedExport {
@@ -920,6 +964,22 @@ where
         audio_arguments,
         pending,
         work,
+    })
+}
+
+/// Write `graph` as the file `name` of the work directory: the exact bytes of the builder, ASCII,
+/// with no byte order mark and no line end (ADR 055). A failed write gives
+/// `workDirectoryUnavailable`, with the error as its detail.
+fn write_graph(
+    work: &ExportWorkDirectory,
+    name: &str,
+    graph: &str,
+) -> Result<(), ExportCommandError> {
+    work.write(name, graph.as_bytes()).map_err(|error| {
+        ExportCommandError::with_detail(
+            ExportErrorCode::WorkDirectoryUnavailable,
+            error.to_string(),
+        )
     })
 }
 
@@ -1553,8 +1613,10 @@ fn spawn_export_job(
 ///
 /// Preparation runs up to three reads of FFprobe that each have
 /// [`crate::ffmpeg::probe::PROBE_TIMEOUT`] (the re-probe and the two reads of the audio, ADR 016),
-/// and the FLV input and the read of the audio gaps add reads of their own. Six times that bound
-/// covers all of them with a margin. The bound is for the steps that have none: a stat, a
+/// and the FLV input and the read of the audio gaps add reads of their own. Once for each export,
+/// the option probe of ADR 055 runs `ffmpeg` up to twice for at most
+/// [`crate::ffmpeg::export::graph_file::PROBE_TIMEOUT`] each. Six times that bound covers all of
+/// them with a margin. The bound is for the steps that have none: a stat, a
 /// canonicalization or a read in the file system that waits on a share that stopped answering.
 /// Such a call cannot be interrupted, so at this deadline the export thread abandons the helper
 /// thread and reports `preparationTimedOut`.
@@ -1634,11 +1696,14 @@ enum PreparationStage {
     /// The sweep of the work directories that earlier exports left, and the creation of the
     /// work directory of this export (ADR 055).
     WorkDirectory = 8,
+    /// The option probe of ADR 055, which finds how `ffmpeg` reads a graph file
+    /// ([`probe_graph_file_option`]).
+    GraphFile = 9,
 }
 
 impl PreparationStage {
     /// Every stage, in the order of its number.
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Discovery,
         Self::RevisionCheck,
         Self::ReProbe,
@@ -1648,6 +1713,7 @@ impl PreparationStage {
         Self::Reservation,
         Self::Arguments,
         Self::WorkDirectory,
+        Self::GraphFile,
     ];
 
     /// The name of the stage in the detail of `preparationTimedOut`. It is a diagnostic for a
@@ -1663,6 +1729,7 @@ impl PreparationStage {
             Self::Reservation => "reservation",
             Self::Arguments => "arguments",
             Self::WorkDirectory => "workDirectory",
+            Self::GraphFile => "graphFile",
         }
     }
 }
@@ -1777,6 +1844,7 @@ fn run_export_job(app: &tauri::AppHandle, slot: ExportSlot, job: ExportJob) {
                     cancel,
                     preview_windows: &job.preview_windows,
                     stage,
+                    graph_file: &probe_graph_file_option,
                 },
                 discover_for_export,
                 ffmpeg::probe_media_until_canceled,
@@ -2598,6 +2666,15 @@ mod tests {
         _: &AtomicBool,
     ) -> Result<AudioFrames, ProbeError> {
         Ok(AudioFrames::default())
+    }
+
+    /// The option probe of ADR 055 on FFmpeg 7.0 and later: `-/filter_complex`.
+    fn slash_graph_file(
+        _: &Path,
+        _: &ExportWorkDirectory,
+        _: &AtomicBool,
+    ) -> Result<GraphFileOption, GraphFileProbeError> {
+        Ok(GraphFileOption::Slash)
     }
 
     /// A read of the sample rate that a test expects never to run.
@@ -3535,6 +3612,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3574,6 +3652,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3805,6 +3884,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -3890,6 +3970,7 @@ mod tests {
                     cancel: &AtomicBool::new(false),
                     preview_windows: &PreviewWindows::default(),
                     stage: &PreparationStageCell::default(),
+                    graph_file: &slash_graph_file,
                 },
                 |_| {
                     Ok(FfmpegPaths {
@@ -3908,12 +3989,7 @@ mod tests {
             // the audio process.
             let mut arguments = prepared.arguments.clone();
             arguments.pop();
-            let audio = prepared.audio_arguments.clone().expect("a second process");
-            let at = audio
-                .iter()
-                .position(|argument| argument == "-filter_complex")
-                .unwrap();
-            (arguments, audio[at + 1].clone())
+            (arguments, audio_graph_of(&prepared))
         };
 
         let (plain_encoder, plain_audio) = prepare(loaded.clone());
@@ -3989,6 +4065,7 @@ mod tests {
                     cancel: &AtomicBool::new(false),
                     preview_windows: &PreviewWindows::default(),
                     stage: &PreparationStageCell::default(),
+                    graph_file: &slash_graph_file,
                 },
                 |_| {
                     Ok(FfmpegPaths {
@@ -4004,17 +4081,27 @@ mod tests {
             )
             .unwrap()
         };
-        // The command without its last argument, the reservation, whose name counts up.
-        let command = |prepared: &PreparedExport| -> Vec<String> {
+        // The command without its last argument, the reservation, whose name counts up, and the
+        // graph that preparation wrote into the work directory (ADR 055).
+        let command = |prepared: &PreparedExport| -> (Vec<String>, String) {
             let mut arguments = prepared.arguments.clone();
             assert_eq!(
                 arguments.pop().as_deref(),
                 Some(path_to_string(prepared.pending.path()).as_str())
             );
-            arguments
+            (arguments, graph_of(prepared))
         };
 
-        let from_version_1 = command(&prepare());
+        let (from_version_1, graph_of_version_1) = command(&prepare());
+        assert_eq!(
+            graph_of_version_1,
+            concat!(
+                "sws_flags=lanczos+accurate_rnd+full_chroma_int;[vc]format=yuv420p[v];",
+                "[0:0]trim=start_pts=0:end_pts=90000,setpts=PTS-STARTPTS,fps=30/1[v0];",
+                "anullsrc=r=48000:cl=mono,atrim=end_sample=48000,aformat=f=fltp:r=48000[pa0];",
+                "[v0][pa0]concat=n=1:v=1:a=1[vc][pa];[pa]anullsink",
+            )
+        );
         let source_argument = path_to_string(&source);
         assert_eq!(
             from_version_1,
@@ -4034,13 +4121,8 @@ mod tests {
                 "wav",
                 "-i",
                 "pipe:0",
-                "-filter_complex",
-                concat!(
-                    "sws_flags=lanczos+accurate_rnd+full_chroma_int;[vc]format=yuv420p[v];",
-                    "[0:0]trim=start_pts=0:end_pts=90000,setpts=PTS-STARTPTS,fps=30/1[v0];",
-                    "anullsrc=r=48000:cl=mono,atrim=end_sample=48000,aformat=f=fltp:r=48000[pa0];",
-                    "[v0][pa0]concat=n=1:v=1:a=1[vc][pa];[pa]anullsink",
-                ),
+                "-/filter_complex",
+                "encoder.graph",
                 "-map",
                 "[v]",
                 "-map",
@@ -4073,7 +4155,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(upgraded.schema_version, 3);
-        assert_eq!(command(&prepare()), from_version_1);
+        assert_eq!(command(&prepare()), (from_version_1, graph_of_version_1));
     }
 
     #[test]
@@ -4119,6 +4201,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -4174,6 +4257,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -4247,6 +4331,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -4344,6 +4429,7 @@ mod tests {
                 cancel: &AtomicBool::new(true),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 *discovered.borrow_mut() = true;
@@ -4407,6 +4493,7 @@ mod tests {
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 cancel.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -4470,6 +4557,7 @@ mod tests {
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -4515,6 +4603,7 @@ mod tests {
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -4569,6 +4658,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| Err(LocateError::NotFound { inspected: vec![] }),
             |_, _, _| unreachable!(),
@@ -4897,6 +4987,7 @@ mod tests {
                 cancel,
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -5143,27 +5234,27 @@ mod tests {
         .unwrap();
     }
 
-    /// The `-filter_complex` argument of the command of the audio process of a prepared export.
-    fn audio_graph_of(prepared: &PreparedExport) -> &str {
+    /// The graph of the audio process of a prepared export, as preparation wrote it into the work
+    /// directory (ADR 055). The command names the file.
+    fn audio_graph_of(prepared: &PreparedExport) -> String {
         let audio = prepared
             .audio_arguments
             .as_ref()
             .expect("the export has an audio process");
-        let at = audio
-            .iter()
-            .position(|argument| argument == "-filter_complex")
-            .unwrap();
-        &audio[at + 1]
+        assert!(audio
+            .windows(2)
+            .any(|pair| pair == ["-/filter_complex", AUDIO_GRAPH_FILE]));
+        fs::read_to_string(prepared.work.file_path(AUDIO_GRAPH_FILE)).unwrap()
     }
 
-    /// The `-filter_complex` argument of a prepared command.
-    fn graph_of(prepared: &PreparedExport) -> &str {
-        let at = prepared
+    /// The graph of the encoder of a prepared export, as preparation wrote it into the work
+    /// directory (ADR 055). The command names the file.
+    fn graph_of(prepared: &PreparedExport) -> String {
+        assert!(prepared
             .arguments
-            .iter()
-            .position(|argument| argument == "-filter_complex")
-            .unwrap();
-        &prepared.arguments[at + 1]
+            .windows(2)
+            .any(|pair| pair == ["-/filter_complex", ENCODER_GRAPH_FILE]));
+        fs::read_to_string(prepared.work.file_path(ENCODER_GRAPH_FILE)).unwrap()
     }
 
     /// The re-probe of a Matroska source of 120 s whose audio track holds no packets, as FFmpeg
@@ -5891,6 +5982,7 @@ mod tests {
                 cancel: &cancel,
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -6498,6 +6590,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &stage,
+                graph_file: &slash_graph_file,
             },
             |_| {
                 seen.borrow_mut().push(stage.current());
@@ -6559,6 +6652,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &stage,
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -7195,6 +7289,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &stage,
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -7234,6 +7329,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &stage,
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -7288,6 +7384,25 @@ mod tests {
         audio_mode: ExportAudioMode,
         frames: AudioFrames,
     ) -> Result<PreparedExport, ExportCommandError> {
+        prepare_audio_mode_with(
+            directory,
+            streams,
+            audio_mode,
+            frames,
+            &PreparationStageCell::default(),
+            &slash_graph_file,
+        )
+    }
+
+    /// [`prepare_audio_mode`] with the stage cell and the option probe of ADR 055 supplied.
+    fn prepare_audio_mode_with(
+        directory: &TestDirectory,
+        streams: ExportStreams,
+        audio_mode: ExportAudioMode,
+        frames: AudioFrames,
+        stage: &PreparationStageCell,
+        graph_file: &GraphFileProbe<'_>,
+    ) -> Result<PreparedExport, ExportCommandError> {
         let source = directory.path.join("source.mp4");
         fs::write(&source, b"media").unwrap();
         let request = ExportRequestWire {
@@ -7319,7 +7434,8 @@ mod tests {
                 cache_directory: &directory.path.join("cache"),
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
-                stage: &PreparationStageCell::default(),
+                stage,
+                graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -7344,6 +7460,198 @@ mod tests {
         &arguments[index + 1]
     }
 
+    /// The bytes of the graph file `name` of a prepared export, after a check that a graph file
+    /// holds ASCII with no byte order mark and no line end (ADR 055).
+    fn graph_file_bytes(prepared: &PreparedExport, name: &str) -> Vec<u8> {
+        let bytes = fs::read(prepared.work.file_path(name)).unwrap();
+        assert!(bytes.is_ascii(), "{name}");
+        assert!(!bytes.starts_with(b"\xEF\xBB\xBF"), "{name}");
+        assert!(!bytes.ends_with(b"\n") && !bytes.ends_with(b"\r"), "{name}");
+        bytes
+    }
+
+    #[test]
+    fn the_encoder_and_the_audio_process_name_their_graph_files_in_the_work_directory() {
+        // ADR 055: each command that carries a graph names its file with the option of the probe,
+        // and the file in the work directory holds the exact output of the builder when
+        // preparation ends. The prepared export holds the directory until its processes end.
+        let directory = TestDirectory::new();
+        let prepared = prepare_audio_mode(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            ExportAudioMode::Encode,
+            frames_covering_10_to_15(),
+        )
+        .unwrap();
+        let plan = &prepared.plan;
+        assert!(plan.separate_audio_process());
+
+        let encoder = &prepared.arguments;
+        assert_eq!(value_of(encoder, "-/filter_complex"), "encoder.graph");
+        assert!(!encoder.iter().any(|argument| argument == "-filter_complex"));
+        let shape = choose_graph_shape(plan, prepared.pending.path());
+        assert_eq!(
+            graph_file_bytes(&prepared, "encoder.graph"),
+            encoder_graph(plan, shape).into_bytes()
+        );
+
+        let audio = prepared.audio_arguments.as_deref().unwrap();
+        assert_eq!(value_of(audio, "-/filter_complex"), "audio.graph");
+        let shape = choose_audio_graph_shape(plan);
+        assert_eq!(
+            graph_file_bytes(&prepared, "audio.graph"),
+            build_audio_graph(plan, shape).into_bytes()
+        );
+    }
+
+    #[test]
+    fn the_option_of_the_probe_names_the_graph_files() {
+        // A build older than 7.0 reads `-filter_complex_script`, and both commands use it.
+        let directory = TestDirectory::new();
+        let prepared = prepare_audio_mode_with(
+            &directory,
+            ExportStreams::VideoAndAudio,
+            ExportAudioMode::Encode,
+            frames_covering_10_to_15(),
+            &PreparationStageCell::default(),
+            &|_, _, _| Ok(GraphFileOption::Script),
+        )
+        .unwrap();
+        assert_eq!(
+            value_of(&prepared.arguments, "-filter_complex_script"),
+            "encoder.graph"
+        );
+        assert_eq!(
+            value_of(
+                prepared.audio_arguments.as_deref().unwrap(),
+                "-filter_complex_script"
+            ),
+            "audio.graph"
+        );
+        assert!(!prepared
+            .arguments
+            .iter()
+            .any(|argument| argument == "-/filter_complex"));
+    }
+
+    #[test]
+    fn the_probe_runs_in_its_own_stage_on_the_ffmpeg_of_the_export() {
+        let directory = TestDirectory::new();
+        let stage = PreparationStageCell::default();
+        let runs = Cell::new(0);
+        prepare_audio_mode_with(
+            &directory,
+            ExportStreams::VideoOnly,
+            ExportAudioMode::Encode,
+            frames_covering_10_to_15(),
+            &stage,
+            &|ffmpeg, work, cancel| {
+                runs.set(runs.get() + 1);
+                assert_eq!(stage.current(), PreparationStage::GraphFile);
+                assert_eq!(ffmpeg, directory.path.join("ffmpeg"));
+                assert!(work.path().is_dir());
+                assert!(!cancel.load(Ordering::SeqCst));
+                Ok(GraphFileOption::Slash)
+            },
+        )
+        .unwrap();
+        assert_eq!(runs.get(), 1);
+        assert_eq!(stage.current(), PreparationStage::Arguments);
+    }
+
+    #[test]
+    fn an_audio_only_copy_runs_no_probe_and_writes_no_graph_file() {
+        // ADR 048: the copy of the audio alone has no graph, so it never asks `ffmpeg` how to read
+        // one (ADR 055).
+        let directory = TestDirectory::new();
+        let prepared = prepare_audio_mode_with(
+            &directory,
+            ExportStreams::AudioOnly,
+            ExportAudioMode::Copy,
+            frames_covering_10_to_15(),
+            &PreparationStageCell::default(),
+            &|_, _, _| unreachable!("a copy without a graph runs no probe"),
+        )
+        .unwrap();
+        assert!(prepared.plan.copied_audio.is_some());
+        let names: Vec<String> = fs::read_dir(prepared.work.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|name| name.ends_with(".graph")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_probe_gives_its_code_at_the_graph_file_stage_and_keeps_no_reservation() {
+        for (code, detail) in [
+            (
+                ExportErrorCode::GraphFileUnsupported,
+                Some("Unrecognized option 'filter_complex_script'."),
+            ),
+            (ExportErrorCode::FfmpegSpawnFailed, Some("no such file")),
+            (
+                ExportErrorCode::FfmpegProcessFailed,
+                Some("the graph file probe timed out after 10 s"),
+            ),
+            (ExportErrorCode::Canceled, None),
+        ] {
+            let directory = TestDirectory::new();
+            let stage = PreparationStageCell::default();
+            let error = prepare_audio_mode_with(
+                &directory,
+                ExportStreams::VideoAndAudio,
+                ExportAudioMode::Encode,
+                frames_covering_10_to_15(),
+                &stage,
+                &|_, _, _| {
+                    Err(GraphFileProbeError {
+                        code,
+                        detail: detail.map(str::to_owned),
+                    })
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(error.detail.as_deref(), detail);
+            assert_eq!(stage.current(), PreparationStage::GraphFile);
+            // The reservation and the work directory went with the failure.
+            let left: Vec<String> = fs::read_dir(&directory.path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.contains(".tmp-"))
+                .collect();
+            assert!(left.is_empty(), "{left:?}");
+            let cache: Vec<_> = fs::read_dir(directory.path.join("cache"))
+                .unwrap()
+                .collect();
+            assert!(cache.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_failed_write_of_a_graph_file_gives_work_directory_unavailable() {
+        // A write never creates the work directory (ADR 055). The probe removes it here, so the
+        // write of the graph of the encoder fails.
+        let directory = TestDirectory::new();
+        let error = prepare_audio_mode_with(
+            &directory,
+            ExportStreams::VideoOnly,
+            ExportAudioMode::Encode,
+            frames_covering_10_to_15(),
+            &PreparationStageCell::default(),
+            &|_, work, _| {
+                fs::remove_dir_all(work.path()).unwrap();
+                Ok(GraphFileOption::Slash)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::WorkDirectoryUnavailable);
+        assert!(error.detail.is_some());
+    }
+
     #[test]
     fn a_copy_with_video_runs_the_copy_process_beside_the_encoder() {
         let directory = TestDirectory::new();
@@ -7362,13 +7670,15 @@ mod tests {
             .windows(4)
             .any(|four| four == ["-f", "nut", "-i", "pipe:0"]));
         assert_eq!(value_of(encoder, "-c:a"), "copy");
-        assert!(encoder.iter().any(|argument| argument == "-filter_complex"));
+        assert_eq!(value_of(encoder, "-/filter_complex"), ENCODER_GRAPH_FILE);
         // The copy process cuts at the In and Out points and writes NUT to its stdout.
         let copy = prepared.audio_arguments.as_deref().unwrap();
         assert_eq!(value_of(copy, "-c:a"), "copy");
         assert_eq!(value_of(copy, "-to"), "15");
         assert_eq!(copy[copy.len() - 3..], ["-f", "nut", "pipe:1"]);
-        assert!(!copy.iter().any(|argument| argument == "-filter_complex"));
+        assert!(!copy
+            .iter()
+            .any(|argument| argument.contains("filter_complex")));
     }
 
     #[test]
@@ -7384,7 +7694,9 @@ mod tests {
         assert!(prepared.plan.copied_audio.is_some());
         assert_eq!(prepared.audio_arguments, None);
         let command = &prepared.arguments;
-        assert!(!command.iter().any(|argument| argument == "-filter_complex"));
+        assert!(!command
+            .iter()
+            .any(|argument| argument.contains("filter_complex")));
         assert_eq!(value_of(command, "-c:a"), "copy");
         assert_eq!(value_of(command, "-to"), "15");
         assert_eq!(value_of(command, "-f"), "mp4");
@@ -7487,6 +7799,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -7638,6 +7951,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &probe_graph_file_option,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -8147,6 +8461,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &probe_graph_file_option,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -8453,6 +8768,8 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                // The real option probe of ADR 055, on the real `ffmpeg`.
+                graph_file: &probe_graph_file_option,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -8470,8 +8787,10 @@ mod tests {
         let mut arguments = prepared.arguments.clone();
         let level = arguments.iter().position(|a| a == "-loglevel").unwrap() + 1;
         arguments[level] = "debug".to_owned();
+        // The command names its graph file by its name alone, so it runs in the work directory.
         let answer = crate::procutil::command_without_console(&ffmpeg_path)
             .args(&arguments)
+            .current_dir(prepared.work.path())
             .output()
             .unwrap();
         assert!(answer.status.success());
@@ -8666,6 +8985,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
@@ -8733,6 +9053,7 @@ mod tests {
                 cancel: &AtomicBool::new(false),
                 preview_windows: &PreviewWindows::default(),
                 stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
             },
             |_| {
                 Ok(FfmpegPaths {
